@@ -1318,7 +1318,8 @@ def gather_release(request, policy):
             sys.dont_write_bytecode = previous_bytecode
             sys.path[:] = previous_path
         # Observation has no lazy module loads. Finish restoration before the
-        # inner operation acquires rollback authority; its return is the handoff.
+        # inner operation acquires rollback authority. Interpreter return and
+        # inlined-call boundaries remain residuals (see the observer contract).
         return observe_release(request, policy)
     except Exception as exc:
         return (

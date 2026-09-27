@@ -45,8 +45,9 @@ path or extraction metadata. Every other PAX/GNU extension, sparse archive,
 alternate numeric encoding, and other
 dialects refuse. USTAR members are validated before materialization; only
 regular files and directories are accepted. Exactly one wrapper is removed.
-All materialized files have mode 0600 and directories mode 0700. Original
-permission bits are inert metadata only.
+All materialized files have mode 0600 and directories access mode 0700;
+inherited directory setgid is permitted. Original permission bits are inert
+metadata only.
 
 Quarantine creation uses atomic mkdir, which is the directory equivalent of
 exclusive creation; O_EXCL is used for every file creation. Existing run or
@@ -55,16 +56,24 @@ with no-follow and nonblocking flags and reread with inode/stamp checks.
 Each run name contains 128 CSPRNG bits and is registered as PENDING before mkdir.
 Cleanup authority requires this invocation's recorded (st_dev, st_ino), captured
 by fstat of the directory opened no-follow after exclusive mkdir, only after
-verifying directory type, effective-uid ownership and mode 0700. A failed check
+verifying directory type, effective-uid ownership and access mode 0700 (an
+inherited directory setgid bit is permitted). A failed check
 leaves no deletion authority, including a foreign entry swapped in before open.
 Removal rechecks that identity against the entry;
 a PENDING name without a recorded identity is never deleted. EEXIST refuses
 without adopting the colliding entry. Creation needs no signal control. An
 asynchronous interruption between creation and identity capture can leak an
 empty run directory; it is never reported VALID and never deleted blindly.
-Finalization and the return handoff stay inside the BaseException handler, with
-no trailing finalizer after disarm: escaping cancellation clears even sealed
-VALID evidence and attempts removal only with recorded ownership.
+The cleanup guarantee covers a first cancellation at an executed observe-path
+statement, including normal teardown and finalization: it clears sealed VALID
+evidence and attempts removal only with recorded ownership. Exhaustive
+asynchronous-exception safety is not achievable in CPython. Interpreter
+trace/profile callbacks, return events and inlined-call/return handoff boundaries
+are residuals: interruption there can retain sealed evidence, a private tree or
+a descriptor before its recipient records ownership. The public handoff relies
+on CPython's inlined Python-call path; alternate frame evaluators can add
+interruption boundaries. Callers must treat any interrupted observation as
+untrusted, including a sealed record retained without a completed public return.
 Cleanup failure refuses with a named cleanup note and no capability or sealed
 success record. OS deletion failure, process death, cancellation during rmtree
 (which can leave a partial tree), and same-privilege interference remain outside
@@ -98,6 +107,7 @@ also establish the monotonic clock domain before comparing persisted records.
 import contextlib
 import datetime
 import encodings.idna  # Eagerly load the hostname codec before public observation.
+import functools
 import hashlib
 import ipaddress
 import os
@@ -304,38 +314,54 @@ def _validate(request, policy):
     )
 
 
-@contextlib.contextmanager
-def _environment():
-    _require(threading.current_thread() is threading.main_thread(),
-             CANNOT_EVALUATE, "environment", "gather requires the main thread")
-    previous = dict(os.environ)
-    clean = {key: previous[key] for key in ("PATH", "HOME") if key in previous}
-    acquired = False
+class _environment:
+    """Main-thread guard; ownership does not depend on storing acquire's result."""
 
-    def restore():
-        if acquired:
+    def __init__(self):
+        self.previous = None
+        self.was_locked = True
+
+    def restore(self):
+        if not self.was_locked:
             try:
                 os.environ.clear()
-                os.environ.update(previous)
+                os.environ.update(self.previous)
             finally:
-                # Main-thread-only, with no yield between release and retry.
                 if _GATHER_LOCK.locked():
                     _GATHER_LOCK.release()
 
-    try:
+    def finish(self, keep):
+        self.restore()
+
+    def __enter__(self):
+        _require(threading.current_thread() is threading.main_thread(),
+                 CANNOT_EVALUATE, "environment", "gather requires the main thread")
+        self.previous = dict(os.environ)
+        clean = {key: self.previous[key] for key in ("PATH", "HOME")
+                 if key in self.previous}
+        # Only the main thread can gather. Snapshot before attempting acquire:
+        # cancellation after its CALL, before any result store, still owns
+        # cleanup. A nested refusal must never release the outer gather's lock.
+        self.was_locked = _GATHER_LOCK.locked()
         try:
-            acquired = _GATHER_LOCK.acquire(blocking=False)
-            _require(acquired, CANNOT_EVALUATE, "environment", "another gather is active")
+            _require(not self.was_locked, CANNOT_EVALUATE, "environment",
+                     "another gather is active")
+            _require(_GATHER_LOCK.acquire(blocking=False), CANNOT_EVALUATE,
+                     "environment", "another gather is active")
             os.environ.clear()
             os.environ.update(clean)
-            yield
-        finally:
-            restore()
-    except BaseException:
-        # A first cancellation can interrupt normal teardown itself. Retry its
-        # idempotent cleanup under the still-live outer cancellation handler.
-        restore()
-        raise
+            return self
+        except BaseException:
+            self.restore()
+            raise
+
+    def __exit__(self, *args):
+        # Keep the first executed statement inside the exception table too:
+        # a separate try-line NOP could be cancelled before cleanup is armed.
+        try: self.restore()
+        except BaseException:
+            self.restore()
+            raise
 
 
 def _client_context():
@@ -633,7 +659,7 @@ def _open_directory(parent, name, fresh=False, owner=None):
             _require(
                 stat.S_ISDIR(opened.st_mode)
                 and opened.st_uid == os.geteuid()
-                and stat.S_IMODE(opened.st_mode) == 0o700,
+                and stat.S_IMODE(opened.st_mode) & ~stat.S_ISGID == 0o700,
                 CANNOT_EVALUATE, "quarantine", "quarantine is not private",
             )
         if created and owner is not None:
@@ -649,6 +675,27 @@ def _open_directory(parent, name, fresh=False, owner=None):
         if fd is not None:
             os.close(fd)
         raise
+
+
+def _with_descriptors(operation):
+    """Own descriptors outside the operation frame, including its teardown.
+
+    Register each acquisition on the same statement. Interpreter callback and
+    call-return registration windows remain the module's disclosed residual.
+    """
+    @functools.wraps(operation)
+    def guarded(*args, **kwargs):
+        stack = contextlib.ExitStack()
+        try:
+            try:
+                return operation(*args, **kwargs, _descriptors=stack)
+            finally:
+                stack.close()
+        except BaseException:
+            # Also handle a first cancellation on the normal close statement.
+            stack.close()
+            raise
+    return guarded
 
 
 class _QuarantineOwner:
@@ -679,51 +726,52 @@ class _QuarantineOwner:
     def created(self):
         self.state = "OWNED"
 
-    def remove(self):
+    @_with_descriptors
+    def remove(self, *, _descriptors):
         if self.identity is not None and self.state in ("PENDING", "OWNED"):
-            parent = store._open_dir_nofollow(self.parent_path)
-            try:
-                opened = os.fstat(parent)
-                _require((opened.st_dev, opened.st_ino) == self.parent_identity,
-                         CANNOT_EVALUATE, "cleanup", "cleanup parent changed")
-                try:
-                    named = os.stat(self.name, dir_fd=parent, follow_symlinks=False)
-                except FileNotFoundError:
-                    self.state = "REMOVED"
-                    return
-                _require(stat.S_ISDIR(named.st_mode),
-                         CANNOT_EVALUATE, "cleanup", "cleanup entry is not a directory")
-                _require((named.st_dev, named.st_ino) == self.identity,
-                         CANNOT_EVALUATE, "cleanup", "cleanup entry identity changed")
-                shutil.rmtree(self.name, dir_fd=parent)
+            parent = None
+            _descriptors.callback(os.close, parent := store._open_dir_nofollow(self.parent_path))
+            opened = os.fstat(parent)
+            _require((opened.st_dev, opened.st_ino) == self.parent_identity,
+                     CANNOT_EVALUATE, "cleanup", "cleanup parent changed")
+            try: named = os.stat(self.name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
                 self.state = "REMOVED"
-            finally:
-                os.close(parent)
+                return
+            _require(stat.S_ISDIR(named.st_mode),
+                     CANNOT_EVALUATE, "cleanup", "cleanup entry is not a directory")
+            _require((named.st_dev, named.st_ino) == self.identity,
+                     CANNOT_EVALUATE, "cleanup", "cleanup entry identity changed")
+            shutil.rmtree(self.name, dir_fd=parent)
+            self.state = "REMOVED"
 
     def finish(self, keep):
         if not keep:
             self.remove()
 
 
+class _DescriptorStack(contextlib.ExitStack):
+    def finish(self, keep):
+        self.close()
+
+
 @contextlib.contextmanager
 def _quarantine(root, owners):
     store._journal.require_containment()
-    with contextlib.ExitStack() as stack:
-        def hold(fd):
-            stack.callback(os.close, fd)
-            return fd
-
-        root_fd = hold(store._open_dir_nofollow(root))
-        working = hold(_open_directory(root_fd, ".working"))
-        adopt = hold(_open_directory(working, "adopt"))
+    stack = _DescriptorStack()
+    owners.append(stack)  # Rollback also closes a generator retained by a traceback.
+    with stack:
+        # Register on the acquisition statement; a Python hold(fd) helper
+        # would add an interruptible statement before callback ownership.
+        stack.callback(os.close, root_fd := store._open_dir_nofollow(root))
+        stack.callback(os.close, working := _open_directory(root_fd, ".working"))
+        stack.callback(os.close, adopt := _open_directory(working, "adopt"))
         # Independent of the public request ID: never infer a capability from it.
         run_name = "observe-" + secrets.token_hex(16)
         owner = _QuarantineOwner(adopt, run_name, root + "/.working/adopt")
         owners.append(owner)
-        run = hold(_open_directory(
-            adopt, run_name, fresh=True, owner=owner,
-        ))
-        quarantine = hold(_open_directory(run, "quarantine", fresh=True))
+        stack.callback(os.close, run := _open_directory(adopt, run_name, fresh=True, owner=owner))
+        stack.callback(os.close, quarantine := _open_directory(run, "quarantine", fresh=True))
         path = root + "/.working/adopt/" + run_name + "/quarantine"
         for entry in list(sys.path) + os.environ.get("PATH", "").split(os.pathsep):
             if not isinstance(entry, str):
@@ -737,61 +785,54 @@ def _quarantine(root, owners):
         yield quarantine, path
 
 
-def _put(parent, name, payload, deadline):
-    fd = os.open(
-        name,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK,
-        0o600, dir_fd=parent,
-    )
-    try:
-        opened = os.fstat(fd)
-        _require(stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1,
-                 CANNOT_EVALUATE, "quarantine", "output is not an exclusive regular file")
-        os.fchmod(fd, 0o600)
-        remaining = memoryview(payload)
-        while remaining:
-            deadline.left()
-            written = os.write(fd, remaining[:65536])
-            _require(written > 0, CANNOT_EVALUATE, "quarantine", "short file write")
-            remaining = remaining[written:]
+@_with_descriptors
+def _put(parent, name, payload, deadline, *, _descriptors):
+    fd = None
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK
+    _descriptors.callback(os.close, fd := os.open(name, flags, 0o600, dir_fd=parent))
+    opened = os.fstat(fd)
+    _require(stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1,
+             CANNOT_EVALUATE, "quarantine", "output is not an exclusive regular file")
+    os.fchmod(fd, 0o600)
+    remaining = memoryview(payload)
+    while remaining:
         deadline.left()
-    finally:
-        os.close(fd)
+        written = os.write(fd, remaining[:65536])
+        _require(written > 0, CANNOT_EVALUATE, "quarantine", "short file write")
+        remaining = remaining[written:]
+    deadline.left()
 
 
-def _read_archive(parent, deadline):
+@_with_descriptors
+def _read_archive(parent, deadline, *, _descriptors):
     before = os.stat("archive.tar.gz", dir_fd=parent, follow_symlinks=False)
-    fd = os.open(
-        "archive.tar.gz", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-        dir_fd=parent,
+    fd = None
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    _descriptors.callback(os.close, fd := os.open("archive.tar.gz", flags, dir_fd=parent))
+    opened = os.fstat(fd)
+    _require(
+        stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1
+        and planning._stamp(before) == planning._stamp(opened)
+        and opened.st_size <= MAX_ARCHIVE_BYTES,
+        CANNOT_EVALUATE, "quarantine", "archive inode or bound changed",
     )
-    try:
-        opened = os.fstat(fd)
-        _require(
-            stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1
-            and planning._stamp(before) == planning._stamp(opened)
-            and opened.st_size <= MAX_ARCHIVE_BYTES,
-            CANNOT_EVALUATE, "quarantine", "archive inode or bound changed",
-        )
-        data = bytearray()
-        while True:
-            deadline.left()
-            block = os.read(fd, min(65536, MAX_ARCHIVE_BYTES - len(data) + 1))
-            if not block:
-                break
-            data.extend(block)
-            _require(len(data) <= MAX_ARCHIVE_BYTES,
-                     CANNOT_EVALUATE, "quarantine", "archive read exceeds bound")
-        _require(
-            planning._stamp(os.fstat(fd)) == planning._stamp(opened)
-            and planning._stamp(os.stat(
-                "archive.tar.gz", dir_fd=parent, follow_symlinks=False,
-            )) == planning._stamp(opened),
-            CANNOT_EVALUATE, "quarantine", "archive changed during read",
-        )
-        return bytes(data)
-    finally:
-        os.close(fd)
+    data = bytearray()
+    while True:
+        deadline.left()
+        block = os.read(fd, min(65536, MAX_ARCHIVE_BYTES - len(data) + 1))
+        if not block:
+            break
+        data.extend(block)
+        _require(len(data) <= MAX_ARCHIVE_BYTES,
+                 CANNOT_EVALUATE, "quarantine", "archive read exceeds bound")
+    _require(
+        planning._stamp(os.fstat(fd)) == planning._stamp(opened)
+        and planning._stamp(os.stat(
+            "archive.tar.gz", dir_fd=parent, follow_symlinks=False,
+        )) == planning._stamp(opened),
+        CANNOT_EVALUATE, "quarantine", "archive changed during read",
+    )
+    return bytes(data)
 
 
 def _inflate(archive, deadline):
@@ -854,7 +895,8 @@ def _member_path(name, directory):
     return name
 
 
-def _unpack(parent, archive, deadline, commit=None):
+@_with_descriptors
+def _unpack(parent, archive, deadline, commit=None, *, _descriptors):
     raw = _inflate(archive, deadline)
     _require(len(raw) % 512 == 0, CANNOT_EVALUATE, "archive",
              "truncated tar block")
@@ -991,36 +1033,35 @@ def _unpack(parent, archive, deadline, commit=None):
 
     _require(terminated and wrapper is not None,
              INVALID, "archive", "archive has no supported wrapped member stream")
-    members_fd = _open_directory(parent, "members", fresh=True)
-    try:
-        for path, kind in sorted(nodes.items(), key=lambda item: (item[0].count("/"), item[0])):
-            if kind != "directory":
-                continue
-            pfd, name = store._journal._open_parent(members_fd, path)
-            try:
-                child = _open_directory(pfd, name, fresh=True)
-                os.close(child)
-            finally:
-                os.close(pfd)
-        result = []
-        budget = [0]
-        for path, mode, payload in files:
-            deadline.left()
-            pfd, name = store._journal._open_parent(members_fd, path)
-            try:
-                _put(pfd, name, payload, deadline)
-                before = os.stat(name, dir_fd=pfd, follow_symlinks=False)
-                reread = planning._read(pfd, name, before, budget)
-                _require(reread == payload, CANNOT_EVALUATE, "quarantine",
-                         "member reread differs from written bytes")
-                _require(stat.S_IMODE(before.st_mode) == 0o600,
-                         CANNOT_EVALUATE, "quarantine", "member is executable or non-private")
-            finally:
-                os.close(pfd)
-            result.append({"path": path, "size": len(payload), "archive_mode": mode})
-        return result
-    finally:
-        os.close(members_fd)
+    members_fd = None
+    _descriptors.callback(os.close, members_fd := _open_directory(parent, "members", fresh=True))
+    for path, kind in sorted(nodes.items(), key=lambda item: (item[0].count("/"), item[0])):
+        if kind != "directory":
+            continue
+        entry = contextlib.ExitStack()
+        _descriptors.callback(entry.close)
+        with entry:
+            entry.callback(os.close, (opened := store._journal._open_parent(members_fd, path))[0])
+            pfd, name = opened
+            entry.callback(os.close, _open_directory(pfd, name, fresh=True))
+    result = []
+    budget = [0]
+    for path, mode, payload in files:
+        deadline.left()
+        entry = contextlib.ExitStack()
+        _descriptors.callback(entry.close)
+        with entry:
+            entry.callback(os.close, (opened := store._journal._open_parent(members_fd, path))[0])
+            pfd, name = opened
+            _put(pfd, name, payload, deadline)
+            before = os.stat(name, dir_fd=pfd, follow_symlinks=False)
+            reread = planning._read(pfd, name, before, budget)
+            _require(reread == payload, CANNOT_EVALUATE, "quarantine",
+                     "member reread differs from written bytes")
+            _require(stat.S_IMODE(before.st_mode) == 0o600,
+                     CANNOT_EVALUATE, "quarantine", "member is executable or non-private")
+        result.append({"path": path, "size": len(payload), "archive_mode": mode})
+    return result
 
 
 def _work(request, policy, observation, notes, deadline, owners):
@@ -1028,7 +1069,9 @@ def _work(request, policy, observation, notes, deadline, owners):
     observation["release_identity"] = {
         "version": request["version"], "commit": request["commit"],
     }
-    with _environment():
+    environment = _environment()
+    owners.append(environment)  # Backstop even if a with-exit is not reached.
+    with environment:
         context = _client_context()
         with _quarantine(
             request["product_root"], owners,
@@ -1109,7 +1152,7 @@ def gather_release(request, policy):
     try:
         _gather_release(request, policy, observation, notes, owners)
         _finish_observation(observation, notes, owners)
-        # The return itself is the disarm; no finally runs after this handoff.
+        # No trailing finalizer; interpreter return callbacks remain a residual.
         return observation, notes
     except BaseException:
         observation.clear()
@@ -1171,9 +1214,13 @@ def _cancellation_self_test():
     production fetch/framing and the resolver worker itself still run.
     Dependency internals, resolver-worker lines, cold module initialization,
     refusal-only branches and a second cancellation during rollback are not
-    enumerated. Real TLS vectors cover the adapted transport effects.
+    enumerated. Interpreter callback/return and inlined-call handoffs remain
+    residuals; after-CALL opcode events are additionally swept for the environment
+    guard. A seal-refusal path covers removal and its descriptor teardown.
+    Real TLS vectors cover the adapted transport effects.
     """
     import builtins
+    import dis
     import gzip
     import inspect
     import textwrap
@@ -1181,7 +1228,7 @@ def _cancellation_self_test():
     from unittest.mock import patch
 
     module = sys.modules[__name__]
-    header = tarfile.TarInfo("wrap/data")
+    header = tarfile.TarInfo("wrap/sub/data")
     header.size = 4
     body = gzip.compress(header.tobuf(format=tarfile.USTAR_FORMAT)
                          + b"data" + b"\0" * 508 + b"\0" * 1024, mtime=0)
@@ -1194,6 +1241,7 @@ def _cancellation_self_test():
     original_path = list(sys.path)
     original_bytecode = sys.dont_write_bytecode
     original_environment = dict(os.environ)
+    original_seal = planning._seal
     events = []
     injected = 0
     started = time.monotonic()
@@ -1296,7 +1344,125 @@ def _cancellation_self_test():
                 present.add(value)
         return present
 
-    def run(target=None, exception=None):
+    def declared_codes():
+        # Independent declaration of production regions, not inferred from
+        # whatever the collector happens to return. Resolve current objects so
+        # deliberate source mutants must satisfy the same coverage contract.
+        functions = (
+            schema.gather_release, gather_release, _gather_release, _work,
+            _quarantine, _open_directory, _fetch, _resolve, _response,
+            _put, _read_archive, _inflate, _unpack, _seal_observation,
+            _finish_observation,
+        )
+        methods = tuple(
+            value for cls in (_environment, _DescriptorStack, _QuarantineOwner, _Wire)
+            for value in vars(cls).values() if inspect.isfunction(value)
+        )
+        return ({inspect.unwrap(fn).__code__ for fn in functions + methods}
+                | {_put.__code__, _read_archive.__code__, _unpack.__code__,
+                   _QuarantineOwner.remove.__code__})
+
+    def check_coverage(seen):
+        # Region/handoff coverage does not detect arbitrary missing events
+        # within a region that the collector did visit.
+        wrapper = schema.gather_release.__code__
+        handoff = {ins.positions.lineno for ins in dis.get_instructions(wrapper)
+                   if ins.argval == "observe_release" and ins.opname.startswith("LOAD_FAST")}
+        if len(handoff) != 1 or not any(
+                code is wrapper and event == "line" and line in handoff
+                for code, event, line, offset in seen):
+            raise AssertionError("cancellation enumeration omitted: public handoff")
+        missing = declared_codes() - {site[0] for site in seen}
+        if missing:
+            raise AssertionError("cancellation enumeration omitted: " +
+                                 ", ".join(sorted(code.co_qualname for code in missing)))
+
+    def fail_seal(*args):
+        raise ValueError("fixture seal refusal")
+
+    after_calls = {}
+
+    def retained_exit(factory):
+        manager = factory()
+        exit_code = type(manager).__exit__.__code__
+        caught = None
+
+        def cancel_exit(frame, event, arg):
+            if frame.f_code is exit_code and event == "line":
+                raise KeyboardInterrupt
+            return cancel_exit
+
+        try:
+            try:
+                with manager:
+                    sys.settrace(cancel_exit)
+            except KeyboardInterrupt as exc:
+                caught = exc
+            finally:
+                sys.settrace(original_trace)
+            return (caught is not None and not _GATHER_LOCK.locked()
+                    and dict(os.environ) == original_environment)
+        finally:
+            # Mutant repair follows the observation, with its traceback alive.
+            if hasattr(manager, "gen"):
+                manager.gen.close()
+
+    @contextlib.contextmanager
+    def suspended_environment():
+        with _environment():
+            yield
+
+    def signal_loop():
+        # Deterministic real signals at the acquired-but-not-stored boundary;
+        # bounded repetition, with the exception kept alive until after checks.
+        previous_handler = signal.getsignal(signal.SIGINT)
+        previous_profile = sys.getprofile()
+        delivered = []
+        if previous_profile is not None or signal.SIGINT in signal.sigpending():
+            raise AssertionError("signal fixture requires an idle profile and SIGINT")
+
+        def interrupt(frame, event, function):
+            if (event == "c_return" and getattr(function, "__self__", None) is _GATHER_LOCK
+                    and getattr(function, "__name__", None) == "acquire"):
+                sys.setprofile(None)
+                delivered.append(True)
+                os.kill(os.getpid(), signal.SIGINT)
+
+        try:
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+            for attempt in range(64):
+                caught = None
+                try:
+                    sys.setprofile(interrupt)
+                    with _environment():
+                        pass
+                except KeyboardInterrupt as exc:
+                    caught = exc
+                finally:
+                    sys.setprofile(previous_profile)
+                if (caught is None or len(delivered) != attempt + 1
+                        or _GATHER_LOCK.locked() or dict(os.environ) != original_environment):
+                    raise AssertionError("real signal retained gather state")
+                run()  # Subsequent public gather, without repairing the lock.
+        finally:
+            sys.setprofile(previous_profile)
+            signal.signal(signal.SIGINT, previous_handler)
+        # Refusing a nested attempt must preserve the outer guard's ownership.
+        with _environment():
+            clean = dict(os.environ)
+            try:
+                with _environment():
+                    raise AssertionError("nested environment accepted")
+            except ObserveError as exc:
+                if exc.detail != "another gather is active":
+                    raise
+            if not _GATHER_LOCK.locked() or dict(os.environ) != clean:
+                raise AssertionError("nested refusal released outer gather state")
+        if _GATHER_LOCK.locked() or dict(os.environ) != original_environment:
+            raise AssertionError("outer environment did not restore")
+        return len(delivered)
+
+    def run(target=None, exception=None, refusal=False, collector=None):
         nonlocal injected
         publications.clear()
         seen = []
@@ -1313,7 +1479,14 @@ def _cancellation_self_test():
                         (code.co_filename == __file__ and id(code) not in fixture_codes))
             if not eligible:
                 return None
-            if event != "line":
+            if code in after_calls:
+                frame.f_trace_opcodes = True
+            if event != "line" and not (
+                    event == "opcode" and frame.f_lasti in after_calls.get(code, ())):
+                return trace
+            if collector == "omit-helper" and code is _open_directory.__code__:
+                return trace
+            if collector == "truncate" and seen:
                 return trace
             if code is gather_release.__code__:
                 value = frame.f_locals.get("observation")
@@ -1322,7 +1495,8 @@ def _cancellation_self_test():
                 value = frame.f_locals.get("owners")
                 if value is not None:
                     owners[:] = [value]
-            site = (code.co_filename.rsplit("/", 1)[-1], code.co_name, frame.f_lineno)
+            site = (code, event, frame.f_lineno,
+                    frame.f_lasti if event == "opcode" else None)
             seen.append(site)
             if target is not None and len(seen) - 1 == target:
                 if seen != events[:target + 1]:
@@ -1334,31 +1508,44 @@ def _cancellation_self_test():
 
         with tempfile.TemporaryDirectory(prefix="opf-cancel-", dir="/dev/shm") as temp:
             request = {"product_root": temp, "version": "1.0.0", "commit": "a" * 40}
-            # Held descriptors are a disclosed cancellation residual. Reclaim
-            # only this fixture's descriptors after observing the invariants.
+            # Assert descriptor ownership before fixture reclamation. The
+            # declared sweep does not inject at interpreter return callbacks.
             before_fds = descriptors()
             try:
                 sys.settrace(trace)
                 try:
-                    received = schema.gather_release(request, policy)
+                    with patch.object(planning, "_seal", fail_seal if refusal else original_seal):
+                        received = schema.gather_release(request, policy)
                 except (KeyboardInterrupt, SystemExit, GeneratorExit) as exc:
-                    escaped = type(exc)
+                    escaped = exc  # Retain the traceback through the leak checks.
                 finally:
                     sys.settrace(original_trace)
-                label = repr(seen[-1]) if seen else "empty"
+                label = ((seen[-1][0].co_qualname, *seen[-1][1:])
+                         if seen else "empty")
+                label = repr(label)
+                if descriptors() - before_fds:
+                    raise AssertionError("cancellation retained descriptor at " + label)
+                if dict(os.environ) != original_environment:
+                    raise AssertionError("cancellation retained scrubbed environment at " + label)
                 if not all(publications):
                     raise AssertionError("cancellation retained resolver slot before result publication at " + label)
                 if target is None:
                     if publications != [True, True]:
                         raise AssertionError("baseline did not publish both resolver results")
-                    if not seen or received is None or received[0].get("status") != VALID:
-                        raise AssertionError("cancellation enumeration was empty or not VALID")
-                    if received[1] or not isinstance(received[0].get("record"), bytes):
-                        raise AssertionError("cancellation baseline lacked sealed evidence")
-                    if (Path(received[0]["quarantine"]) / "members/data").read_bytes() != b"data":
-                        raise AssertionError("cancellation baseline did not populate quarantine")
+                    expected = CANNOT_EVALUATE if refusal else VALID
+                    if not seen or received is None or received[0].get("status") != expected:
+                        raise AssertionError("cancellation enumeration was empty or unexpected")
+                    if refusal:
+                        if ("record" in received[0] or
+                                list((Path(temp) / ".working/adopt").iterdir())):
+                            raise AssertionError("refusal baseline did not remove quarantine")
+                    else:
+                        if received[1] or not isinstance(received[0].get("record"), bytes):
+                            raise AssertionError("cancellation baseline lacked sealed evidence")
+                        if (Path(received[0]["quarantine"]) / "members/sub/data").read_bytes() != b"data":
+                            raise AssertionError("cancellation baseline did not populate quarantine")
                     return seen
-                if not fired or escaped is not exception or received is not None:
+                if not fired or type(escaped) is not exception or received is not None:
                     raise AssertionError("cancellation did not propagate at " + label)
                 if any(value.get("status") == VALID and "record" in value
                        for value in observations):
@@ -1366,6 +1553,8 @@ def _cancellation_self_test():
                 if _GATHER_LOCK.locked():
                     raise AssertionError("cancellation retained gather lock at " + label)
                 for owner in owners[0] if owners else ():
+                    if not isinstance(owner, _QuarantineOwner):
+                        continue
                     path = Path(owner.parent_path) / owner.name
                     if owner.identity is not None:
                         try:
@@ -1406,15 +1595,74 @@ def _cancellation_self_test():
             patch.object(threading, "Thread", FixtureResolver), \
             patch.object(queue, "Queue", FixtureQueue), \
             patch.object(builtins, "__import__", no_lazy_import):
-        def sweep(exceptions=(KeyboardInterrupt, SystemExit, GeneratorExit)):
-            events[:] = run()
-            for target in range(len(events)):
-                for exception in exceptions:
-                    run(target, exception)
+        def sweep(exceptions=(KeyboardInterrupt, SystemExit, GeneratorExit), collector=None):
+            # CPython exposes the instruction *after* each CALL before a result is
+            # stored. Include CALL_KW and future CALL variants, not only CALL.
+            after_calls.clear()
+            for value in vars(_environment).values():
+                if inspect.isfunction(value):
+                    instructions = list(dis.get_instructions(value))
+                    after_calls[value.__code__] = {
+                        after.offset for before, after in zip(instructions, instructions[1:])
+                        if before.opname.startswith("CALL")
+                    }
 
-        sweep()
-        line_events, unique_lines, baseline_injections = len(events), len(set(events)), injected
+            successful = run(collector=collector)
+            refused = run(refusal=True, collector=collector)
+            check_coverage(successful + refused)
+            successful_sites = set(successful)
+            for refusal, baseline in ((False, successful), (True, refused)):
+                events[:] = baseline
+                for target, site in enumerate(events):
+                    # The successful path replays repeated events. On refusal,
+                    # add only sites outside that path, keeping runtime bounded.
+                    if refusal and site in successful_sites:
+                        continue
+                    for exception in exceptions:
+                        run(target, exception, refusal)
+            return successful, refused
+
+        successful, refused = sweep()
+        line_sites = [site for site in successful if site[1] == "line"]
+        line_events, unique_lines = len(line_sites), len(set(line_sites))
+        opcode_events = sum(site[1] == "opcode" for site in successful)
+        baseline_injections = injected
+        signal_interruptions = signal_loop()
         flips = []
+        if not retained_exit(_environment) or retained_exit(suspended_environment):
+            raise AssertionError("retained environment-exit exception did not discriminate")
+        flips.append({"id": "generator-exit-retained-traceback",
+                      "observed": "generator retained gather state; class restored it"})
+        for collector in ("truncate", "omit-helper"):
+            try:
+                sweep(collector=collector)
+            except AssertionError as exc:
+                if not str(exc).startswith("cancellation enumeration omitted: "):
+                    raise
+                flips.append({"id": "collector-" + collector, "observed": str(exc)})
+            else:
+                raise AssertionError("partial cancellation enumeration accepted: " + collector)
+        cleanup = textwrap.dedent(inspect.getsource(_with_descriptors))
+        if cleanup.count("stack.close()") != 2:
+            raise AssertionError("descriptor cleanup mutation sites changed")
+        namespace = {}
+        exec(compile(cleanup.replace("stack.close()", "pass"), __file__, "exec"),
+             module.__dict__, namespace)
+        for owner, function in ((module, _put), (module, _read_archive),
+                                (_QuarantineOwner, _QuarantineOwner.remove),
+                                (module, _unpack)):
+            broken = namespace["_with_descriptors"](inspect.unwrap(function))
+            with patch.object(owner, function.__name__, broken):
+                try:
+                    sweep((KeyboardInterrupt,))
+                except AssertionError as exc:
+                    if not str(exc).startswith("cancellation retained descriptor at "):
+                        raise
+                    flips.append({"id": "descriptor-cleanup-" + function.__name__,
+                                  "observed": str(exc)})
+                else:
+                    raise AssertionError("descriptor leak was accepted: " + function.__name__)
+
         # These reversions use the same enumerator/invariants, with no chosen
         # injection boundary. Each stops only on its named invariant failure.
         wrapper = textwrap.dedent(inspect.getsource(schema.gather_release))
@@ -1427,10 +1675,19 @@ def _cancellation_self_test():
                     "        sys.dont_write_bytecode = previous_bytecode\n"
                     "        sys.path[:] = previous_path\n")
         env = textwrap.dedent(inspect.getsource(_environment))
-        acquisition = "            acquired = _GATHER_LOCK.acquire(blocking=False)\n"
+        acquisition = ('            _require(_GATHER_LOCK.acquire(blocking=False), CANNOT_EVALUATE,\n'
+                       '                     "environment", "another gather is active")\n')
         moved = env.replace(acquisition, "", 1).replace(
-            "    try:\n        try:\n",
-            "    acquired = _GATHER_LOCK.acquire(blocking=False)\n    try:\n        try:\n", 1)
+            "        try:\n            _require(not self.was_locked",
+            "        _GATHER_LOCK.acquire(blocking=False)\n        try:\n            _require(not self.was_locked", 1)
+        # Remove the independent owner-list backstop as well to recreate the
+        # historical acquisition-before-try defect rather than mask it.
+        moved = moved.replace("    def finish(self, keep):\n        self.restore()",
+                              "    def finish(self, keep):\n        pass", 1)
+        stored = env.replace("        if not self.was_locked:",
+                             "        if getattr(self, 'acquired', False):", 1).replace(
+            acquisition,
+            "            self.acquired = _GATHER_LOCK.acquire(blocking=False)\n", 1)
         gather = textwrap.dedent(inspect.getsource(gather_release))
         resolver = textwrap.dedent(inspect.getsource(_resolve))
         publication = ("        finally:\n"
@@ -1447,9 +1704,12 @@ def _cancellation_self_test():
         specifications = (
             ("wrapper-after-disarm", schema, schema.gather_release, wrapper,
              wrapper.replace(restore, early, 1) + trailing, "sealed VALID evidence"),
-            ("lock-before-try", module, _environment, env, moved, "gather lock"),
+            ("lock-before-try-without-backstop", module, _environment, env, moved, "gather lock"),
+            ("lock-result-store", module, _environment, env, stored, "gather lock"),
             ("rollback-disabled", module, gather_release, gather,
-             gather.replace("owner.finish(False)", "pass", 1), "owned directory"),
+             gather.replace("owner.finish(False)",
+                            "None if isinstance(owner, _QuarantineOwner) else owner.finish(False)",
+                            1), "owned directory"),
             ("resolver-publish-before-release", module, _resolve, resolver,
              resolver.replace(publication, premature, 1), "resolver slot before result publication"),
         )
@@ -1457,7 +1717,9 @@ def _cancellation_self_test():
             raise AssertionError("cancellation mutation site is not unique")
         for label, owner, function, source, changed, wanted in specifications:
             namespace = {}
-            exec(compile(changed, inspect.unwrap(function).__code__.co_filename, "exec"),
+            filename = (function.__enter__.__code__.co_filename if inspect.isclass(function)
+                        else inspect.unwrap(function).__code__.co_filename)
+            exec(compile(changed, filename, "exec"),
                  owner.__dict__, namespace)
             try:
                 with patch.object(owner, function.__name__, namespace[function.__name__]):
@@ -1476,6 +1738,9 @@ def _cancellation_self_test():
                     _GATHER_LOCK.release()
     return [{"id": "TG-12/public-cancellation-line-sweep", "test_status": VALID,
              "line_events": line_events, "unique_lines": unique_lines,
+             "opcode_events": opcode_events,
+             "signal_interruptions": signal_interruptions,
+             "declared_regions": sorted(code.co_qualname for code in declared_codes()),
              "injections": baseline_injections, "flips": flips,
              "elapsed_seconds": time.monotonic() - started}]
 
@@ -1628,6 +1893,40 @@ def _ownership_self_test():
                         and (run / "foreign").read_bytes() == b"preserve\n")
             finally:
                 os.close(parent)
+
+    def setgid_parent():
+        with tempfile.TemporaryDirectory(prefix="opf-owner-", dir="/dev/shm") as temp:
+            os.chmod(temp, 0o2700)
+            parent = store._open_dir_nofollow(temp)
+            try:
+                owner = _QuarantineOwner(parent, "run", temp)
+                try:
+                    fd = _open_directory(parent, "run", fresh=True, owner=owner)
+                except ObserveError as exc:
+                    return exc.detail
+                try:
+                    opened = os.fstat(fd)
+                    if (stat.S_IMODE(opened.st_mode) != 0o2700
+                            or owner.identity != (opened.st_dev, opened.st_ino)):
+                        raise AssertionError("setgid fixture did not inherit private mode and identity")
+                finally:
+                    os.close(fd)
+                owner.remove()
+                if list(Path(temp).iterdir()):
+                    raise AssertionError("setgid quarantine was not removed")
+                return VALID
+            finally:
+                os.close(parent)
+
+    baseline = setgid_parent()
+    with patch.object(stat, "S_ISGID", 0):  # Restore the exact-mode comparison.
+        mutant = setgid_parent()
+    rows.append({
+        "id": "unit/ownership/setgid-parent", "guard": "allow-directory-setgid",
+        "expected": VALID, "observed": baseline, "mutant_observed": mutant,
+        "mutation_detected": mutant == "quarantine is not private",
+        "test_status": VALID if baseline == VALID and mutant == "quarantine is not private" else INVALID,
+    })
 
     def skip_privacy(condition, status, phase, detail):
         if detail != "quarantine is not private":
@@ -3164,7 +3463,7 @@ def self_test(vectors_only=False):
                     elif mutation == "peer":
                         patch(module, "_check_peer", lambda sock, selected: None)
                     elif mutation == "environment":
-                        patch(module, "_environment", contextlib.nullcontext)
+                        patch(_environment, "__enter__", lambda self: self)
                     elif mutation in ("anchor-cap", "archive-cap"):
                         old = ('("archive", policy["release_url"], MAX_ARCHIVE_BYTES)'
                                if mutation == "archive-cap" else
