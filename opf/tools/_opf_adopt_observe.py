@@ -52,11 +52,17 @@ Quarantine creation uses atomic mkdir, which is the directory equivalent of
 exclusive creation; O_EXCL is used for every file creation. Existing run or
 quarantine directories are never reused. Files are opened descriptor-relative
 with no-follow and nonblocking flags and reread with inode/stamp checks.
-Each run name contains 128 CSPRNG bits and is registered as PENDING before mkdir;
-cleanup removes a pending or owned directory without following symlinks. EEXIST
-refuses and disclaims ownership of the colliding entry. Creation needs no signal
-control. Rollback stays armed through finalization and the return handoff, so
-escaping cancellation clears evidence and removes the run even after sealing.
+Each run name contains 128 CSPRNG bits and is registered as PENDING before mkdir.
+Cleanup authority requires this invocation's recorded (st_dev, st_ino), captured
+by fstat of the new directory opened no-follow under the parent descriptor after
+successful exclusive mkdir. Removal rechecks that identity against the entry;
+a PENDING name without a recorded identity is never deleted. EEXIST refuses
+without adopting the colliding entry. Creation needs no signal control. An
+asynchronous interruption between creation and identity capture can leak an
+empty run directory; it is never reported VALID and never deleted blindly.
+Finalization and the return handoff stay inside the BaseException handler, with
+no trailing finalizer after disarm: escaping cancellation clears even sealed
+VALID evidence and attempts removal only with recorded ownership.
 Cleanup failure refuses with a named cleanup note and no capability or sealed
 success record. OS deletion failure, process death, cancellation during rmtree
 (which can leave a partial tree), and same-privilege interference remain outside
@@ -581,6 +587,7 @@ def _fetch(url, cap, parent, context):
 
 
 def _open_directory(parent, name, fresh=False, owner=None):
+    created = False
     try:
         os.mkdir(name, 0o700, dir_fd=parent)
     except FileExistsError:
@@ -590,14 +597,18 @@ def _open_directory(parent, name, fresh=False, owner=None):
             raise ObserveError(CANNOT_EVALUATE, "quarantine",
                                "exclusive directory already exists")
     else:
-        if owner is not None:
-            owner.created()
+        created = True
     fd = os.open(
         name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK,
         dir_fd=parent,
     )
     try:
         opened = os.fstat(fd)
+        if created and owner is not None:
+            # Capture authority before any validation or registration callback.
+            # Cancellation before this assignment may leak an empty directory.
+            owner.identity = (opened.st_dev, opened.st_ino)
+            owner.created()
         named = os.stat(name, dir_fd=parent, follow_symlinks=False)
         _require(planning._stamp(opened) == planning._stamp(named),
                  CANNOT_EVALUATE, "quarantine", "directory changed while opening")
@@ -616,9 +627,14 @@ def _open_directory(parent, name, fresh=False, owner=None):
 class _QuarantineOwner:
     """Keep rollback usable after quarantine descriptor teardown.
 
-    The private random name is pending before exclusive creation. Reopen the
-    parent without following any symlink and confirm its identity for removal,
-    so finalization never closes the only rollback handle. OS deletion failure,
+    The private random name is pending before exclusive creation, but only an
+    identity captured from the newly opened directory authorizes removal. A
+    pending name without that identity is never deleted, even after EEXIST.
+    Cancellation before capture can leak an empty, never-VALID run directory.
+    Reopen the parent without following symlinks and confirm both identities
+    before removal, so descriptor teardown does not lose rollback authority.
+    The entry check and rmtree are not atomic against a concurrent writer.
+    OS deletion failure,
     process death, cancellation during rmtree (possibly leaving a partial tree),
     and same-privilege interference remain outside the cleanup guarantee.
     """
@@ -631,12 +647,13 @@ class _QuarantineOwner:
         self.parent_path = parent_path
         self.name = name
         self.state = "PENDING"
+        self.identity = None
 
     def created(self):
         self.state = "OWNED"
 
     def remove(self):
-        if self.state in ("PENDING", "OWNED"):
+        if self.identity is not None and self.state in ("PENDING", "OWNED"):
             parent = store._open_dir_nofollow(self.parent_path)
             try:
                 opened = os.fstat(parent)
@@ -649,6 +666,8 @@ class _QuarantineOwner:
                     return
                 _require(stat.S_ISDIR(named.st_mode),
                          CANNOT_EVALUATE, "cleanup", "cleanup entry is not a directory")
+                _require((named.st_dev, named.st_ino) == self.identity,
+                         CANNOT_EVALUATE, "cleanup", "cleanup entry identity changed")
                 shutil.rmtree(self.name, dir_fd=parent)
                 self.state = "REMOVED"
             finally:
@@ -1040,42 +1059,41 @@ def _seal_observation(observation, notes):
     return planning._seal(document, "observation_digest")
 
 
+def _finish_observation(observation, notes, owners):
+    keep = observation.get("status") == VALID and "record" in observation
+    for owner in owners:
+        try:
+            owner.finish(keep)
+        except Exception as exc:
+            observation.pop("quarantine", None)
+            observation.pop("members", None)
+            observation.pop("record", None)
+            observation["status"] = CANNOT_EVALUATE
+            _note(notes, CANNOT_EVALUATE, "cleanup",
+                  "quarantine cleanup or descriptor close failed; "
+                  "private residue may remain: " + type(exc).__name__)
+
+
 def gather_release(request, policy):
     """Return inert evidence and structured omission notes; never a trust verdict."""
     observation = {}
     notes = []
     owners = []
-    rollback_armed = True
     try:
         _gather_release(request, policy, observation, notes, owners)
-        keep = observation.get("status") == VALID and "record" in observation
-        for owner in owners:
-            try:
-                owner.finish(keep)
-            except Exception as exc:
-                observation.pop("quarantine", None)
-                observation.pop("members", None)
-                observation.pop("record", None)
-                observation["status"] = CANNOT_EVALUATE
-                _note(notes, CANNOT_EVALUATE, "cleanup",
-                      "quarantine cleanup or descriptor close failed; "
-                      "private residue may remain: " + type(exc).__name__)
-        rollback_armed = False
+        _finish_observation(observation, notes, owners)
+        # The return itself is the disarm; no finally runs after this handoff.
         return observation, notes
     except BaseException:
-        # Also rearm if cancellation lands between disarming and RETURN_VALUE.
-        rollback_armed = True
+        observation.clear()
+        for owner in owners:
+            try:
+                owner.finish(False)
+            except Exception as exc:
+                _note(notes, CANNOT_EVALUATE, "cleanup",
+                      "quarantine rollback failed; private residue may remain: "
+                      + type(exc).__name__)
         raise
-    finally:
-        if rollback_armed:
-            observation.clear()
-            for owner in owners:
-                try:
-                    owner.finish(False)
-                except Exception as exc:
-                    _note(notes, CANNOT_EVALUATE, "cleanup",
-                          "quarantine rollback failed; private residue may remain: "
-                          + type(exc).__name__)
 
 
 def _gather_release(request, policy, observation, notes, owners):
@@ -1115,6 +1133,140 @@ def _gather_release(request, policy, observation, notes, owners):
         observation["status"] = CANNOT_EVALUATE
         _note(notes, CANNOT_EVALUATE, "record",
               "observation could not be sealed: " + type(exc).__name__)
+
+
+def _ownership_self_test():
+    """Real directory ownership probes; no transport or mocked mkdir outcome."""
+    import tempfile
+    from unittest.mock import patch
+
+    module = sys.modules[__name__]
+    original_remove = _QuarantineOwner.remove
+    original_require = _require
+    rows = []
+
+    def delete_pending(owner):
+        # Reintroduce name-only deletion authority for the pending-state mutant.
+        if owner.state == "PENDING" and owner.identity is None:
+            parent = store._open_dir_nofollow(owner.parent_path)
+            try:
+                shutil.rmtree(owner.name, dir_fd=parent)
+            finally:
+                os.close(parent)
+        else:
+            original_remove(owner)
+
+    def skip_identity(condition, status, phase, detail):
+        if detail != "cleanup entry identity changed":
+            original_require(condition, status, phase, detail)
+
+    def probe(kind):
+        with tempfile.TemporaryDirectory(prefix="opf-owner-", dir="/dev/shm") as temp:
+            root = Path(temp)
+            run = root / "run"
+            parent = store._open_dir_nofollow(temp)
+            try:
+                owner = _QuarantineOwner(parent, "run", temp)
+                if kind == "identity-mismatch":
+                    fd = _open_directory(parent, "run", fresh=True, owner=owner)
+                    try:
+                        opened = os.fstat(fd)
+                        if owner.identity != (opened.st_dev, opened.st_ino):
+                            raise AssertionError("ownership identity was not captured")
+                    finally:
+                        os.close(fd)
+                    # Retain the original inode, preventing reuse by the replacement.
+                    run.rename(root / "saved")
+                if kind != "before-identity":
+                    run.mkdir(mode=0o700)
+                    (run / "foreign").write_bytes(b"preserve\n")
+                    foreign = run.stat()
+
+                if kind == "eexist":
+                    boundary = []
+                    previous_trace = sys.gettrace()
+
+                    def collide(frame, event, arg):
+                        if frame.f_code is _open_directory.__code__:
+                            if event == "exception" and isinstance(arg[1], FileExistsError):
+                                boundary.append("EEXIST")
+                            elif event == "line" and boundary == ["EEXIST"]:
+                                boundary.append("cancelled")
+                                raise KeyboardInterrupt
+                        return collide
+
+                    try:
+                        sys.settrace(collide)
+                        try:
+                            _open_directory(parent, "run", fresh=True, owner=owner)
+                        except KeyboardInterrupt:
+                            pass
+                    finally:
+                        sys.settrace(previous_trace)
+                    if (boundary != ["EEXIST", "cancelled"]
+                            or owner.state != "PENDING" or owner.identity is not None):
+                        raise AssertionError("fixture missed the pending EEXIST boundary")
+                elif kind == "before-identity":
+                    original_open = os.open
+                    interrupted = []
+
+                    def interrupt_open(name, flags, *args, **kwargs):
+                        if name == "run" and kwargs.get("dir_fd") == parent:
+                            interrupted.append(True)
+                            raise KeyboardInterrupt
+                        return original_open(name, flags, *args, **kwargs)
+
+                    with patch.object(os, "open", interrupt_open):
+                        try:
+                            _open_directory(parent, "run", fresh=True, owner=owner)
+                        except KeyboardInterrupt:
+                            pass
+                    if interrupted != [True] or owner.identity is not None:
+                        raise AssertionError("fixture missed the pre-identity boundary")
+
+                refusal = None
+                try:
+                    owner.remove()
+                except ObserveError as exc:
+                    refusal = (exc.status, exc.phase, exc.detail)
+                try:
+                    current = run.stat()
+                    entries = sorted(path.name for path in run.iterdir())
+                except FileNotFoundError:
+                    return False
+                if kind == "before-identity":
+                    return refusal is None and entries == [] and owner.state == "PENDING"
+                preserved = (
+                    (current.st_dev, current.st_ino) == (foreign.st_dev, foreign.st_ino)
+                    and entries == ["foreign"]
+                    and (run / "foreign").read_bytes() == b"preserve\n"
+                )
+                if kind == "identity-mismatch":
+                    saved = (root / "saved").stat()
+                    return (preserved and (saved.st_dev, saved.st_ino) == owner.identity
+                            and refusal == (CANNOT_EVALUATE, "cleanup",
+                                            "cleanup entry identity changed"))
+                return preserved and refusal is None
+            finally:
+                os.close(parent)
+
+    for kind in ("eexist", "identity-mismatch", "before-identity"):
+        baseline = probe(kind)
+        mutation = ("skip-identity-check" if kind == "identity-mismatch"
+                    else "delete-on-pending")
+        target = (patch.object(module, "_require", skip_identity)
+                  if kind == "identity-mismatch"
+                  else patch.object(_QuarantineOwner, "remove", delete_pending))
+        with target:
+            mutant = probe(kind)
+        rows.append({
+            "id": "unit/ownership/" + kind, "guard": mutation,
+            "expected": VALID, "observed": VALID if baseline else INVALID,
+            "mutant_observed": VALID if mutant else INVALID,
+            "mutation_detected": not mutant,
+            "test_status": VALID if baseline and not mutant else INVALID,
+        })
+    return rows
 
 
 def _guard_self_test():
@@ -1774,6 +1926,10 @@ def self_test(vectors_only=False):
         cancel_finalization="finalize", public_wrapper=True)
     add("TG-12/cancellation-at-return", "CANCELLED", "return-rollback",
         cancel_finalization="return", public_wrapper=True)
+    for exception in (KeyboardInterrupt, SystemExit, GeneratorExit):
+        add("TG-12/finalizer-boundary/" + exception.__name__, "CANCELLED",
+            "finalizer-after-disarm", finalizer_exception=exception,
+            public_wrapper=True)
 
     bad_archives = [
         ("traversal", [root_row, ("wrap/../escape", tarfile.REGTYPE, b"x")]),
@@ -1934,6 +2090,7 @@ def self_test(vectors_only=False):
         cancelled_observations = []
         original_created = _QuarantineOwner.created
         original_gather = _gather_release
+        original_finish = _finish_observation
 
         @contextlib.contextmanager
         def unmasked_helper():
@@ -1973,6 +2130,10 @@ def self_test(vectors_only=False):
                     raise RuntimeError("unmasked signal helper teardown failed")
 
         def cancel_before_registration(owner):
+            # This boundary follows mkdir AND fstat identity capture, but still
+            # precedes the OWNED state transition. Pending alone is insufficient.
+            if owner.identity is None:
+                raise AssertionError("creation fixture has no captured identity")
             cancellation_boundary.append("after-mkdir")
             kind = config.get("creation_signal")
             if kind == "process":
@@ -2022,6 +2183,14 @@ def self_test(vectors_only=False):
             cancellation_boundary.append("after-seal")
             cancelled_observations.append(observed)
             raise KeyboardInterrupt
+
+        def cancel_at_finalizer_boundary(observed, gathered_notes, owners):
+            original_finish(observed, gathered_notes, owners)
+            if observed.get("status") != VALID or type(observed.get("record")) is not bytes:
+                raise AssertionError("finalizer fixture did not reach sealed evidence")
+            cancelled_observations.append(observed)
+            cancellation_boundary.append("finalizer-boundary")
+            raise config["finalizer_exception"]()
 
         def fixture_context():
             environments.append(set(os.environ))
@@ -2177,6 +2346,8 @@ def self_test(vectors_only=False):
                     patch(_QuarantineOwner, "created", cancel_before_registration)
                 if config.get("cancel_after_seal"):
                     patch(module, "_gather_release", cancel_after_sealing)
+                if config.get("finalizer_exception"):
+                    patch(module, "_finish_observation", cancel_at_finalizer_boundary)
                 if config.get("seal_exception"):
                     patch(module, "_seal_observation", fail_seal)
                 if config.get("late_exception"):
@@ -2275,15 +2446,25 @@ def self_test(vectors_only=False):
                               lambda info, global_header=False: policy_check(info))
                     elif mutation in ("creation-signals", "pending-process-sigint",
                                       "pending-real-timer"):
-                        # Keep the original row/mutant name; its replacement
-                        # guard is pending ownership, with no signal masking.
+                        # Keep the row/mutant names: identity is captured, but
+                        # the OWNED state transition has not happened yet.
                         patch(_QuarantineOwner, "remove", source_mutant(
                             original_remove, 'self.state in ("PENDING", "OWNED")',
                             'self.state == "OWNED"',
                         ))
                     elif mutation in ("finalize-rollback", "return-rollback"):
                         patch(module, "gather_release", source_mutant(
-                            original_public_gather, "if rollback_armed:", "if False:",
+                            original_public_gather, "owner.finish(False)", "pass",
+                        ))
+                    elif mutation == "finalizer-after-disarm":
+                        source = textwrap.dedent(inspect.getsource(original_public_gather))
+                        finalizer = "        _finish_observation(observation, notes, owners)\n"
+                        if source.count(finalizer) != 1:
+                            raise AssertionError("finalizer mutation must select one call")
+                        moved = source.replace(finalizer, "", 1)
+                        moved += "    finally:\n" + finalizer
+                        patch(module, "gather_release", source_mutant(
+                            original_public_gather, source, moved,
                         ))
                     elif mutation == "cancelled-retention":
                         patch(module, "gather_release", source_mutant(
@@ -2317,7 +2498,7 @@ def self_test(vectors_only=False):
 
                 if config.get("cancel_finalization"):
                     target = (
-                        'keep = observation.get("status")'
+                        '_finish_observation(observation, notes, owners)'
                         if config["cancel_finalization"] == "finalize"
                         else "return observation, notes"
                     )
@@ -2351,8 +2532,9 @@ def self_test(vectors_only=False):
                         status = observation["status"]
                     except WatchdogExpired:
                         status = "WATCHDOG"
-                    except KeyboardInterrupt:
-                        status = "CANCELLED"
+                    except (KeyboardInterrupt, SystemExit, GeneratorExit) as exc:
+                        expected_exception = config.get("finalizer_exception", KeyboardInterrupt)
+                        status = "CANCELLED" if type(exc) is expected_exception else "ESCAPED"
                     except Exception:
                         status = "ESCAPED"
                 elapsed = time.monotonic() - started
@@ -2373,7 +2555,10 @@ def self_test(vectors_only=False):
                 passed = passed and cancellation_boundary == ["after-seal"]
             if config.get("cancel_finalization"):
                 passed = (passed and cancellation_boundary == [config["cancel_finalization"]])
-            if config.get("cancel_after_seal") or config.get("cancel_finalization"):
+            if config.get("finalizer_exception"):
+                passed = passed and cancellation_boundary == ["finalizer-boundary"]
+            if (config.get("cancel_after_seal") or config.get("cancel_finalization")
+                    or config.get("finalizer_exception")):
                 passed = (passed and len(cancelled_observations) == 1
                           and cancelled_observations[0] == {})
             if status == "CANCELLED":
@@ -2503,7 +2688,7 @@ def self_test(vectors_only=False):
                 print(json.dumps({"opf_adopt_observe_tests": executed}, sort_keys=True))
                 return 1
 
-            guard_rows = _guard_self_test()
+            guard_rows = _guard_self_test() + _ownership_self_test()
             executed.extend(guard_rows)
             for case in cases:
                 passed, status, elapsed = run_case(base, contexts, case, False)
