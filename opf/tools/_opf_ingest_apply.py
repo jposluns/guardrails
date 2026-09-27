@@ -1880,8 +1880,9 @@ def self_test(only=None):
 # guard's own contract.
 # A "guard-execution" row's mutant still returns the right outcome, because an overlapping layer beneath the
 # reverted guard holds it; its RED shows only that the guard executed (its diagnostic, or the probe firing),
-# and a sibling "/isolated" row proves the safety property instead. An isolated row strips the named
-# overlapping layers in the CANDIDATE only (never in this file): its baseline, the stripped source, must PASS
+# and a sibling "/isolated" row proves the safety property instead. An isolated row either tests the guard's
+# unit contract directly, without overlapping callers, or strips the named overlapping layers in the
+# CANDIDATE only (never in this file): its baseline, the stripped source, must PASS
 # with the guard alone, its mutant (the baseline plus the guard's reversal) must go RED, and the full pristine
 # source must still PASS.
 
@@ -2364,6 +2365,9 @@ def _st_home_property(module, base_dir, kind, placements=_ST_HOME_PLACEMENTS, de
                         spelling = str(physical) if placement == "detached-absolute" else rid
                         spellings = [("bare", spelling), ("slash", spelling + "/"),
                                      ("dot", spelling + "/.")]
+                    if physical != canonical:
+                        # Pin the untraversed-home-link residual, including the earlier-chdir placement.
+                        spellings.append(("physical", str(physical)))
                     for label, spelling in spellings:
                         links, visited = _st_route_facts(cwd, spelling, depth)
                         second = any(str(claimant) in visited for claimant in claimants)
@@ -2555,7 +2559,11 @@ def _d_home_cwd_bound(kind, homes):
     """Reclassification of a relative spelling uses the same starting descriptor after ambient chdir."""
     def test(module, base_dir):
         from unittest.mock import patch
-        root, rid, run = _st_staged(base_dir, "cwd-" + kind, kind)
+        root, rid, run = _st_staged(base_dir, "cwd-" + kind, kind, corrupt=False)
+        if homes == 1:
+            legacy = root / _opf_import._import_run_locations(rid, 1)[0]
+            run.rename(legacy)
+            run = legacy
         clean = _st_graded(module, root, rid, homes, run.parent)
         classify, calls = module._classify_run_homes, []
 
@@ -2567,7 +2575,8 @@ def _d_home_cwd_bound(kind, homes):
 
         with patch.object(module, "_classify_run_homes", shifted):
             shifted_result = _st_graded(module, root, rid, homes, run.parent)
-        _revert_check(len(calls) > 1 and shifted_result == clean,
+        _revert_check(all(clean[cid][0] for cid in _ST_TXN)
+                      and len(calls) > 1 and shifted_result == clean,
                       "gate/home-cwd-bound/{}/homes-{}".format(kind, homes))
     return test
 
@@ -2590,9 +2599,15 @@ def _d_home_restore(kind, homes):
     """A component restored after initial detached classification refuses at the next classification."""
     def test(module, base_dir):
         from unittest.mock import patch
-        root, rid, run = _st_staged(base_dir, "restore-" + kind, kind)
+        root, rid, run = _st_staged(base_dir, "restore-" + kind, kind, corrupt=False)
         component = root / _opf_store.STAGING_REL
-        moved = component.with_name("renamed-staging")
+        if homes == 1:
+            legacy = root / _opf_import._import_run_locations(rid, 1)[0]
+            run.rename(legacy)
+            run = legacy
+            component = run.parent
+        clean = _st_graded(module, root, run, homes)
+        moved = component.with_name("renamed-home")
         classify, calls = module._classify_run_homes, []
 
         def renamed(rd):
@@ -2618,7 +2633,8 @@ def _d_home_restore(kind, homes):
         with patch.object(module, "_classify_run_homes", renamed), \
                 patch.object(module, "_spelled_route", first_route):
             result = _st_graded(module, root, run, homes)
-        _revert_check(len(calls) > 1 and all(result[cid] == (False, error) for cid in _ST_TXN),
+        _revert_check(all(clean[cid][0] for cid in _ST_TXN)
+                      and len(calls) > 1 and all(result[cid] == (False, error) for cid in _ST_TXN),
                       "gate/home-restore/{}/homes-{}".format(kind, homes))
     return test
 
@@ -2636,9 +2652,9 @@ def _d_home_speculative(kind):
 
 
 def _d_home_rename_at_lookup(kind):
-    """A run renamed to a sibling (an empty directory at its former name) at the transaction lookup, or before
-    its first classification (a symlink at its bound name), refuses on its own entry. Making that entry's
-    mismatch read as "not here" classifies the second schedule as detached, missing the corrupt record."""
+    """Guard execution: a renamed run refuses on its own entry, both at transaction lookup (an empty
+    directory at its former name) and before first classification (a symlink at its bound name). The route
+    identity check and R1 still refuse the mutant; the /isolated sibling tests this guard's contract."""
     def test(module, base_dir):
         from unittest.mock import patch
         root, rid, staged = _st_staged(base_dir, "rename-lookup-" + kind, kind)
@@ -2669,6 +2685,45 @@ def _d_home_rename_at_lookup(kind):
             moved.rename(staged)
             outcomes.append(all(result[cid] == (False, error) for cid in _ST_TXN))
         _revert_check(all(outcomes), "gate/home-rename-at-lookup/" + kind)
+    return test
+
+
+def _d_home_rename_at_lookup_isolated(kind):
+    """Unit safety: a bound-name mismatch must raise, never return None ("not held"). Call the physical
+    probe directly so route identity, R1 and retained-binding refusals cannot mask an unsafe fallback."""
+    def test(module, base_dir):
+        root, _rid, staged = _st_staged(base_dir, "rename-isolated-" + kind, kind, corrupt=False)
+        rel = str(staged.relative_to(root))
+        moved = staged.parent / "moved"
+        rd = module._RunDir(staged)
+        outcomes = []
+        try:
+            if rd.home_error is not None or rel not in (rd.home_binding or {}):
+                raise RuntimeError("isolated bound-name fixture has no initial staging binding")
+            for replacement in ("directory", "symlink"):
+                staged.rename(moved)
+                if replacement == "directory":
+                    staged.mkdir()
+                else:
+                    staged.symlink_to("moved")
+                fd, refused = None, False
+                try:
+                    try:
+                        fd = module._physical_home(rd, rel)
+                    except module._GateError:
+                        refused = True
+                    outcomes.append(refused)
+                finally:
+                    if fd is not None:
+                        os.close(fd)
+                    if replacement == "directory":
+                        staged.rmdir()
+                    else:
+                        staged.unlink()
+                    moved.rename(staged)
+        finally:
+            rd.close()
+        _revert_check(all(outcomes), "gate/home-rename-at-lookup/" + kind + "/isolated")
     return test
 
 
@@ -3035,7 +3090,8 @@ _GUARD_EXECUTION = frozenset((
     "postlaunch/complete-lost-not-aborted", "postlaunch/foreign-txn-not-escaped", "postlaunch/reread-guarded",
     "postlaunch/helper-failure-not-aborted", "cleanup/root-close-not-aborted", "cleanup/lock-release-not-escaped",
     "cleanup/op-release-not-escaped", "cleanup/diagnostic-call-not-escaped",
-    "cleanup/diagnostic-not-escaped"))
+    "cleanup/diagnostic-not-escaped",
+    "gate/home-rename-at-lookup/import", "gate/home-rename-at-lookup/ingest"))
 
 # (identity, probe, unique old, new). The class width first: every sibling re-exposed by reverting the ONE
 # post-launch guard. Then each decision branch of `_post_launch_result` by its own mutation, including the
@@ -3150,6 +3206,10 @@ _DISCRIMINATORS = tuple(
      "                except FileNotFoundError:\n                    continue\n")
     for kind in ("import", "ingest")) + tuple(
     ("gate/home-rename-at-lookup/" + kind, "gate", _d_home_rename_at_lookup(kind),
+     '                if depth == 0:\n                    raise _GateError("the bound run name',
+     '                if False:\n                    raise _GateError("the bound run name')
+    for kind in ("import", "ingest")) + tuple(
+    ("gate/home-rename-at-lookup/" + kind + "/isolated", "gate", _d_home_rename_at_lookup_isolated(kind),
      '                if depth == 0:\n                    raise _GateError("the bound run name',
      '                if False:\n                    raise _GateError("the bound run name')
     for kind in ("import", "ingest")) + tuple(

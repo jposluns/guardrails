@@ -139,10 +139,11 @@ write access to the run dir) are gate-blind: the gate guards the review-to-promo
 authenticity (the reserved signature seam is the upgrade path). Likewise the Group C journal bind proves the
 record is the one its journal INTENT recorded, not that the journal itself is authentic: a principal with
 write access to the store can author a self-consistent INTENT + record pair. A passing gate proves nothing
-about those. A genuinely detached run (no path match among any generation's registered run homes) still
-reads transaction controls from the three-up parent, without binding that parent to a store: absent
-controls there can pass, and controls there can affect the verdict. This compatibility residual does not
-apply to a registered staging shape graded under a generation that does not admit it; that is refused.
+about those. A genuinely detached run (no registered home physically holds it, and it is named by an
+absolute, symlink-free path) still reads transaction controls from the three-up parent, without binding
+that parent to a store: absent controls there can pass, and controls there can affect the verdict. This
+compatibility residual does not apply to a registered staging shape graded under a generation that does
+not admit it; that is refused.
 
 This repository is not an OPFiles adopter (it has no store to import into), so even though the `opf
 import` verb is now wired (OPF-IMPORT-VERB, opf.py `_cmd_import`) there is no staged import run to check
@@ -1838,6 +1839,9 @@ def _registered_run_store_fd(rd, generation):
       Over-refusal cost: even a genuinely detached copy named relatively is refused, as is a detached
       copy spelled via a symlinked path such as a symlinked /tmp. Name it by an absolute, symlink-free
       path instead. Relative spellings of physically held runs still bind to their physical store.
+    - R2 detects second claimants only among visited directories; a claimant reachable only through an
+      untraversed symlink, including one used by an earlier chdir, is not detected and the held run binds
+      to its physical store.
     - A mount that re-roots the run's ancestry (a bind mount) is classified by the mounted ancestry, which is
       the only ancestry its descriptor has."""
     import _opf_import as imp
@@ -4760,6 +4764,31 @@ def _self_test():
                     with unittest.mock.patch.object(this, "_staged_run_store_fd", side_effect=moving):
                         result = graded_in(root, Path(run.name), homes, cwd=run.parent)
                     os.rename(str(staging.parent / "moved"), str(staging))
+                    outcomes.append(all(result[cid] == (False, changed) for cid in _TRANSACTION_CHECKS))
+                expect("txn-home-unheld-relative-at-lookup-" + kind, all(outcomes))
+
+                # Absolute twin: restore the component only while resolving the supplied route, leaving
+                # the physical probes unheld. R1 admits that route; the retained binding must refuse.
+                changed = located("the run's registered home changed during grading (the run or a store "
+                                  "component was renamed or replaced); fail-closed, never re-read as detached")
+                real_route = _spelled_route
+
+                def restoring_route(rd, visit, depth, staging=staging):
+                    moved = staging.parent / "moved"
+                    if not moved.exists():
+                        return real_route(rd, visit, depth)
+                    moved.rename(staging)
+                    try:
+                        return real_route(rd, visit, depth)
+                    finally:
+                        staging.rename(moved)
+
+                outcomes = []
+                for homes in (1, 2):
+                    with unittest.mock.patch.object(this, "_staged_run_store_fd", side_effect=moving), \
+                            unittest.mock.patch.object(this, "_spelled_route", restoring_route):
+                        result = graded_in(root, run, homes)
+                    (staging.parent / "moved").rename(staging)
                     outcomes.append(all(result[cid] == (False, changed) for cid in _TRANSACTION_CHECKS))
                 expect("txn-home-retained-" + kind, all(outcomes))
 
