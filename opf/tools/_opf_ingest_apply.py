@@ -2520,9 +2520,7 @@ def _d_home_rule(kind, rule):
     return test
 
 
-# Discriminator factories are not lifecycle delegates; reserve the _isolated
-# suffix for self-test bodies reached through an environment wrapper.
-def _d_home_second_claim_clean_store(kind, rule):
+def _d_home_second_claim_isolated(kind, rule):
     """A clean held store isolates second-claim refusal from corrupt-record findings."""
     def test(module, base_dir):
         root, canonical, _physical, aliases, _inside, held, claimants = _st_home_topology(
@@ -2760,7 +2758,7 @@ def _d_home_rename_at_lookup(kind):
     return test
 
 
-def _d_home_rename_at_lookup_unit(kind):
+def _d_home_rename_at_lookup_isolated(kind):
     """Unit safety: a bound-name mismatch must raise, never return None ("not held"). Call the physical
     probe directly so route identity, R1 and retained-binding refusals cannot mask an unsafe fallback."""
     def test(module, base_dir):
@@ -3287,7 +3285,7 @@ _DISCRIMINATORS = tuple(
      '                if depth == 0:\n                    raise _GateError("the bound run name',
      '                if False:\n                    raise _GateError("the bound run name')
     for kind in ("import", "ingest")) + tuple(
-    ("gate/home-rename-at-lookup/" + kind + "/isolated", "gate", _d_home_rename_at_lookup_unit(kind),
+    ("gate/home-rename-at-lookup/" + kind + "/isolated", "gate", _d_home_rename_at_lookup_isolated(kind),
      '                if depth == 0:\n                    raise _GateError("the bound run name',
      '                if False:\n                    raise _GateError("the bound run name')
     for kind in ("import", "ingest")) + tuple(
@@ -3380,7 +3378,7 @@ _DISCRIMINATORS += tuple(
     for kind in ("import", "ingest"))
 
 _DISCRIMINATORS += tuple(
-    ("gate/home-" + rule + "/" + kind + "/isolated", "gate", _d_home_second_claim_clean_store(kind, rule),
+    ("gate/home-" + rule + "/" + kind + "/isolated", "gate", _d_home_second_claim_isolated(kind, rule),
      "        if held and reached:\n",
      _ST_SEEN_SET_REVERTED if rule == "property-holding" else "        if False:  # reverted fail-closed rule\n")
     for kind in ("import", "ingest") for rule in ("property-holding", "second-claim"))

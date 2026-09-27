@@ -686,10 +686,17 @@ def _opf_both_legs():
     ))
     env = dict(os.environ, HOME="/caller-home", XDG_CONFIG_HOME="/caller-xdg",
                GIT_CONFIG_NOSYSTEM="0")
-    child = subprocess.run([sys.executable, "-I", "-B", "-c", code,
-                            str(ROOT / "opf" / "tools")], env=env,
-                           capture_output=True, text=True, timeout=60)
-    check("env/opf-ingest-apply-both-legs", (child.returncode, json.loads(child.stdout)),
+    try:
+        child = subprocess.run([sys.executable, "-I", "-B", "-c", code,
+                                str(ROOT / "opf" / "tools")], env=env,
+                               capture_output=True, text=True, timeout=60)
+        try:
+            got = (child.returncode, json.loads(child.stdout))
+        except ValueError:
+            got = (child.returncode, child.stdout, child.stderr)
+    except (OSError, subprocess.SubprocessError) as exc:
+        got = str(exc)
+    check("env/opf-ingest-apply-both-legs", got,
           (0, [[[True, True, True, True], [True, True, True, True]], True]))
 
 
@@ -1096,18 +1103,152 @@ OPF_LIFECYCLE_EXEMPTIONS = {
 }
 
 
+def _opf_lifecycle_delegates(trees):
+    """Derive wrapper/delegate edges from registered modules, never helper names.
+    Recognize HOME-setting patch.dict and fixture_git_lifecycle contexts, including
+    a shared wrapper that calls its callback argument. Reject references to a
+    discovered delegate outside those edges, naming the bypassing function.
+    Residual: dynamic lookup, import aliases and unregistered modules are outside
+    this syntactic graph; runtime environment and config probes remain necessary.
+    """
+    functions = {(module, node.name): node for module, tree in trees.items()
+                 for node in tree.body if isinstance(node, ast.FunctionDef)}
+
+    def target(module, node):
+        if isinstance(node, ast.Name):
+            key = (module, node.id)
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            key = (node.value.id, node.attr)
+        else:
+            return None
+        return key if key in functions else None
+
+    def body_nodes(node):
+        yield node
+        for child in ast.iter_child_nodes(node):
+            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                      ast.ClassDef, ast.Lambda)):
+                yield from body_nodes(child)
+
+    delegates, callbacks, allowed = {}, {}, set()
+
+    def register(module, entry, callee, reference):
+        key = (module, entry)
+        if key in delegates and delegates[key] != callee:
+            raise ValueError("ambiguous lifecycle delegate: " + module + "." + entry)
+        delegates[key] = callee
+        allowed.add(reference)
+
+    for (module, entry), fn in functions.items():
+        for node in body_nodes(fn):
+            if not isinstance(node, ast.With):
+                continue
+            contexts = [item.context_expr for item in node.items]
+            if not any(isinstance(ctx, ast.Call) and (
+                    ast.unparse(ctx.func).split(".")[-1] == "fixture_git_lifecycle"
+                    or (ast.unparse(ctx.func) == "patch.dict" and ctx.args
+                        and ast.unparse(ctx.args[0]) == "os.environ"
+                        and any(kw.arg == "HOME" for kw in ctx.keywords)))
+                       for ctx in contexts):
+                continue
+            for ret in body_nodes(node):
+                if not isinstance(ret, ast.Return) or not isinstance(ret.value, ast.Call):
+                    continue
+                call = ret.value
+                callee = target(module, call.func)
+                if callee is not None and callee[0] == module:
+                    register(module, entry, callee, call.func)
+                elif isinstance(call.func, ast.Name):
+                    params = [p.arg for p in fn.args.posonlyargs + fn.args.args]
+                    if call.func.id in params:
+                        callbacks[module, entry] = params.index(call.func.id)
+
+    # Follow callback registrations using the helpers derived above, including
+    # cross-module OPF wrappers. No helper spelling is part of the inventory.
+    for (module, entry), fn in functions.items():
+        for node in body_nodes(fn):
+            if not isinstance(node, ast.Return) or not isinstance(node.value, ast.Call):
+                continue
+            call = node.value
+            helper = target(module, call.func)
+            if helper not in callbacks:
+                continue
+            index = callbacks[helper]
+            if index >= len(call.args):
+                raise ValueError("unsupported lifecycle callback: " + module + "." + entry)
+            callee = target(module, call.args[index])
+            if callee is None or callee[0] != module:
+                raise ValueError("unresolved lifecycle callback: " + module + "." + entry)
+            register(module, entry, callee, call.args[index])
+
+    protected = set(delegates.values())
+    for module, tree in trees.items():
+        for owner in tree.body:
+            entry = owner.name if isinstance(owner, ast.FunctionDef) else "<module>"
+            for node in ast.walk(owner):
+                if target(module, node) in protected and node not in allowed:
+                    raise ValueError("lifecycle bypass: {}.{} -> {}".format(
+                        module, entry, ".".join(target(module, node))))
+    return delegates
+
+
+def _opf_lifecycle_graph_checks():
+    """Mutation D uses the real registered route; rename cases guard discovery."""
+    import copy
+    names = denial = None
+    expected_names = "derivable lifecycle graph"
+    expected_denial = "named wrapper bypass"
+    try:
+        relative = "opf/tools/_opf_ingest_apply.py"
+        tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
+        module = Path(relative).stem
+        entry = "self_test"
+        delegates = _opf_lifecycle_delegates({module: tree})
+        delegate = delegates[module, entry][1]
+        route_name = delegates[module, "_self_test_main"][1]
+        renamed = copy.deepcopy(tree)
+        for node in ast.walk(renamed):
+            if isinstance(node, ast.FunctionDef) and node.name == delegate:
+                node.name = "body_without_a_suffix"
+            elif isinstance(node, ast.Name) and node.id == delegate:
+                node.id = "body_without_a_suffix"
+        renamed.body.append(ast.parse("def unrelated_isolated(): pass").body[0])
+        expected_names = dict(delegates)
+        expected_names[module, entry] = (module, "body_without_a_suffix")
+        names = _opf_lifecycle_delegates({module: renamed})
+
+        mutant = copy.deepcopy(tree)
+        route = next(node for node in mutant.body
+                     if isinstance(node, ast.FunctionDef) and node.name == route_name)
+        calls = [node for node in ast.walk(route) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name) and node.func.id == entry]
+        if len(calls) != 1:
+            raise ValueError("cannot uniquely mutate ingest-apply wrapper route")
+        calls[0].func.id = delegate
+        expected_denial = "lifecycle bypass: {}.{} -> {}.{}".format(
+            module, route.name, module, delegate)
+        try:
+            _opf_lifecycle_delegates({module: mutant})
+        except ValueError as exc:
+            denial = str(exc)
+    except (OSError, SyntaxError, ValueError, KeyError, StopIteration) as exc:
+        names = denial = str(exc)
+    check("env/opf-lifecycle-names-independent", names, expected_names)
+    check("env/opf-lifecycle-bypass-denied", denial, expected_denial)
+
+
 def _opf_home_lifecycles(config_results):
     """Account for every registered OPF module and its observed command variants.
     Wrapped entries must isolate before delegation and restore after an exception.
     Explicit non-git exemptions still run under the config observer; its absolute
-    executable/replaced-PATH residual applies. Delegate discovery alone cannot
-    prove every entry route is wrapped; the command runs supply that other layer.
+    executable/replaced-PATH residual applies. The derived graph rejects direct
+    wrapper bypasses; dynamic routes retain the graph helper's disclosed residual.
     """
     code = "\n".join((
         "import importlib, inspect, json, os, sys",
         "sys.path.insert(0, sys.argv[1])",
         "module = importlib.import_module(sys.argv[2])",
-        "entry = sys.argv[3]",
+        "entry, delegate = sys.argv[3:5]",
         "saved = dict(os.environ)",
         "seen = []",
         "class StopProbe(Exception): pass",
@@ -1117,7 +1258,7 @@ def _opf_home_lifecycles(config_results):
         "                 home == os.environ.get('XDG_CONFIG_HOME'), os.path.isdir(home),",
         "                 os.environ.get('GIT_CONFIG_NOSYSTEM') == '1'])",
         "    raise StopProbe()",
-        "setattr(module, entry + '_isolated', stop)",
+        "setattr(module, delegate, stop)",
         "try:",
         "    fn = getattr(module, entry)",
         "    args = [None for p in inspect.signature(fn).parameters.values()",
@@ -1135,30 +1276,44 @@ def _opf_home_lifecycles(config_results):
     for argv in roster:
         if config_results.get(argv) != (0, b"", b"", b""):
             missing.add(_command_identity(argv)[0])
+    problems = []
+    try:
+        trees = {Path(relative).stem: ast.parse(
+            (ROOT / relative).read_text(encoding="utf-8")) for relative in sorted(paths)}
+        registrations = _opf_lifecycle_delegates(trees)
+    except (OSError, SyntaxError, ValueError) as exc:
+        registrations = {}
+        problems.append(str(exc))
     for relative in sorted(paths):
-        tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
-        delegates = [node for node in tree.body
-                     if isinstance(node, ast.FunctionDef) and node.name.endswith("_isolated")]
+        module = Path(relative).stem
+        delegates = {entry: callee[1] for (owner, entry), callee in registrations.items()
+                     if owner == module}
         reason = OPF_LIFECYCLE_EXEMPTIONS.get(relative)
         if not delegates:
             if not reason or not reason.strip():
                 missing.add(relative)
         elif reason is not None:
             missing.add(relative)  # A stale exemption must be reviewed and removed.
-        for node in delegates:
-            module, entry = Path(relative).stem, node.name[:-len("_isolated")]
+        for entry, delegate in sorted(delegates.items()):
             env = dict(os.environ, HOME="/caller-home", XDG_CONFIG_HOME="/caller-xdg",
                        GIT_CONFIG_NOSYSTEM="0")
-            child = subprocess.run(
-                [sys.executable, "-I", "-B", "-c", code, str(ROOT / "opf" / "tools"), module, entry],
-                env=env, capture_output=True, text=True, timeout=60)
             try:
-                got = (child.returncode, json.loads(child.stdout))
-            except ValueError:
-                got = (child.returncode, child.stdout, child.stderr)
+                child = subprocess.run(
+                    [sys.executable, "-I", "-B", "-c", code,
+                     str(ROOT / "opf" / "tools"), module, entry, delegate],
+                    env=env, capture_output=True, text=True, timeout=60)
+                try:
+                    got = (child.returncode, json.loads(child.stdout))
+                except ValueError:
+                    got = (child.returncode, child.stdout, child.stderr)
+            except (OSError, subprocess.SubprocessError) as exc:
+                got = str(exc)
             results[module, entry] = got
-    check("env/registered-opf-lifecycles", bool(paths) and not missing and bool(results) and all(
-        value == (0, [[[True, True, True, True]], True]) for value in results.values()), True)
+    if not paths or not results:
+        problems.append("no registered lifecycle observations")
+    problems.extend("{}.{}: {!r}".format(module, entry, value)
+                    for (module, entry), value in sorted(results.items())
+                    if value != (0, [[[True, True, True, True]], True]))
     for check_id, module, entry in (
             ("env/opf-upgrade-home-lifecycle", "check_opf_upgrade", "_suite"),
             ("env/opf-import-home-lifecycle", "check_opf_import", "_self_test"),
@@ -1166,7 +1321,10 @@ def _opf_home_lifecycles(config_results):
             ("env/opf-ingest-apply-home-lifecycle", "_opf_ingest_apply", "self_test"),
             ("env/opf-tooling-home-lifecycle", "opf", "run_self_tests"),
     ):
+        if (module, entry) not in results:
+            problems.append("{}.{}: missing lifecycle observation".format(module, entry))
         check(check_id, results.get((module, entry)), (0, [[[True, True, True, True]], True]))
+    check("env/registered-opf-lifecycles", (sorted(missing), problems), ([], []))
 
 
 def _build_decoy(base):
@@ -1511,6 +1669,7 @@ def main(report_path=None):
             check(check_id, _archive_reads_use_caller_env(ROOT / member_rel), True)
 
         _roster_checks()
+        _opf_lifecycle_graph_checks()
         _opf_both_legs()
         config_results = _config_injection_lane(base)
         _manifest_setup_failures(base)

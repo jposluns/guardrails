@@ -422,6 +422,8 @@ expected-check-ids = [
   "config/xdg-malformed-control",
   "env/lifecycle-path-removal-red",
   "env/opf-ingest-apply-both-legs",
+  "env/opf-lifecycle-names-independent",
+  "env/opf-lifecycle-bypass-denied",
   "env/registered-opf-lifecycles",
   "roster/dynamic-arguments-refused",
   "roster/launcher-refused",
