@@ -70,7 +70,11 @@ evidence and attempts removal only with recorded ownership. Exhaustive
 asynchronous-exception safety is not achievable in CPython. Interpreter
 trace/profile callbacks, return events and inlined-call/return handoff boundaries
 are residuals: interruption there can retain sealed evidence, a private tree or
-a descriptor before its recipient records ownership. The public handoff relies
+a descriptor before its recipient records ownership. C-call result-store windows
+(for example an os.open result before it is stored or registered) and
+dependency-internal registration/close (contextlib.ExitStack, _opf_store, _journal)
+can retain a private descriptor until process exit; trust and integrity are
+unaffected by that descriptor retention. The public handoff relies
 on CPython's inlined Python-call path; alternate frame evaluators can add
 interruption boundaries. Callers must treat any interrupted observation as
 untrusted, including a sealed record retained without a completed public return.
@@ -356,8 +360,8 @@ class _environment:
             raise
 
     def __exit__(self, *args):
-        # Keep the first executed statement inside the exception table too:
-        # a separate try-line NOP could be cancelled before cleanup is armed.
+        # The owner-list backstop covers cancellation at __exit__ entry.
+        # Keep the restore statement protected without a separate try-line NOP.
         try: self.restore()
         except BaseException:
             self.restore()
@@ -481,17 +485,19 @@ def _check_peer(sock, selected):
 def _tls(context, sock, host, deadline):
     _require(context.check_hostname and context.verify_mode == ssl.CERT_REQUIRED,
              CANNOT_EVALUATE, "tls", "TLS verification is not enabled")
-    wrapped = context.wrap_socket(
-        sock, server_hostname=host, do_handshake_on_connect=False,
-        suppress_ragged_eofs=False,
-    )
+    wrapped = None
     try:
+        wrapped = context.wrap_socket(
+            sock, server_hostname=host, do_handshake_on_connect=False,
+            suppress_ragged_eofs=False,
+        )
         wrapped.settimeout(deadline.left())
         wrapped.do_handshake()
         deadline.left()
         return wrapped
     except BaseException:
-        wrapped.close()
+        if wrapped is not None:
+            wrapped.close()
         raise
 
 
@@ -614,26 +620,29 @@ def _fetch(url, cap, parent, context):
     parsed = urlsplit(url)
     family, address = _resolve(parsed.hostname, connection_deadline)
     endpoint = (address, 443) if family == socket.AF_INET else (address, 443, 0, 0)
-    with contextlib.ExitStack() as stack:
-        raw = stack.enter_context(socket.socket(family, socket.SOCK_STREAM))
-        _connect(raw, endpoint, connection_deadline.left())
-        connection_deadline.left()
-        _check_peer(raw, address)
-        secured = stack.enter_context(
-            _tls(context, raw, parsed.hostname, connection_deadline)
-        )
-        _check_peer(secured, address)
-        secured.settimeout(request_deadline.left(INACTIVITY_SECONDS))
-        request = (
-            "GET {} HTTP/1.1\r\n"
-            "Host: {}\r\n"
-            "Connection: close\r\n"
-            "Accept-Encoding: identity\r\n"
-            "User-Agent: opf-adopt-observe/1\r\n\r\n"
-        ).format(parsed.path, parsed.hostname).encode("ascii")
-        secured.sendall(request)
-        request_deadline.left()
-        return _response(_Wire(secured, request_deadline), cap)
+    stack = contextlib.ExitStack()
+    try:
+        with stack:
+            raw = stack.enter_context(socket.socket(family, socket.SOCK_STREAM))
+            _connect(raw, endpoint, connection_deadline.left())
+            connection_deadline.left()
+            _check_peer(raw, address)
+            secured = stack.enter_context(_tls(context, raw, parsed.hostname, connection_deadline))
+            _check_peer(secured, address)
+            secured.settimeout(request_deadline.left(INACTIVITY_SECONDS))
+            request = (
+                "GET {} HTTP/1.1\r\n"
+                "Host: {}\r\n"
+                "Connection: close\r\n"
+                "Accept-Encoding: identity\r\n"
+                "User-Agent: opf-adopt-observe/1\r\n\r\n"
+            ).format(parsed.path, parsed.hostname).encode("ascii")
+            secured.sendall(request)
+            request_deadline.left()
+            return _response(_Wire(secured, request_deadline), cap)
+    except BaseException:
+        stack.close()
+        raise
 
 
 def _open_directory(parent, name, fresh=False, owner=None):
@@ -681,7 +690,11 @@ def _with_descriptors(operation):
     """Own descriptors outside the operation frame, including its teardown.
 
     Register each acquisition on the same statement. Interpreter callback and
-    call-return registration windows remain the module's disclosed residual.
+    call-return registration windows remain residuals. C-call result-store windows
+    (for example an os.open result before it is stored or registered) and
+    dependency-internal registration/close (contextlib.ExitStack, _opf_store,
+    _journal) can retain a private descriptor until process exit; trust and
+    integrity are unaffected by that descriptor retention.
     """
     @functools.wraps(operation)
     def guarded(*args, **kwargs):
@@ -1208,15 +1221,24 @@ def _gather_release(request, policy, observation, notes, owners):
 def _cancellation_self_test():
     """Replay every observed production line event, including repeated lines.
 
-    Scope: the public wrapper and this module on a successful synthetic-response
-    gather, including normal teardown and the main-thread resolver path.
+    Scope: functions/methods defined in the schema and observer modules reached
+    by successful and seal-refusal synthetic-response gathers, including normal
+    teardown and the main-thread resolver path.
     OS socket/CA/DNS effects and resolver-thread dispatch are adapted;
     production fetch/framing and the resolver worker itself still run.
     Dependency internals, resolver-worker lines, cold module initialization,
-    refusal-only branches and a second cancellation during rollback are not
+    other refusal-only branches and a second cancellation during rollback are not
     enumerated. Interpreter callback/return and inlined-call handoffs remain
-    residuals; after-CALL opcode events are additionally swept for the environment
-    guard. A seal-refusal path covers removal and its descriptor teardown.
+    residuals. C-call result-store windows (for example an os.open result before
+    it is stored or registered) and dependency-internal registration/close
+    (contextlib.ExitStack, _opf_store, _journal) can retain a private descriptor
+    until process exit; trust and integrity are unaffected by that retention.
+    After-CALL opcode events are additionally swept for the environment guard.
+    A seal-refusal path covers removal and its descriptor teardown. An independent
+    call census of both modules is reconciled with their static code inventory;
+    its executed objects, minus the reviewed exemptions below, must equal the
+    line/opcode collector's objects. Unexecuted branches and missing events within
+    an observed object are not proved covered.
     Real TLS vectors cover the adapted transport effects.
     """
     import builtins
@@ -1238,6 +1260,7 @@ def _cancellation_self_test():
               "anchors": [ANCHOR_URL]}
     original_import = builtins.__import__
     original_trace = sys.gettrace()
+    original_profile = sys.getprofile()
     original_path = list(sys.path)
     original_bytecode = sys.dont_write_bytecode
     original_environment = dict(os.environ)
@@ -1272,9 +1295,13 @@ def _cancellation_self_test():
             finally:
                 sys.settrace(previous)
 
+    sockets = []
+
     class FixtureSocket:
-        def __init__(self, *args):
+        def __init__(self, *args, fd=None):
             self.pending = b""
+            self.fd = os.open(os.devnull, os.O_RDONLY) if fd is None else fd
+            sockets.append(self)
 
         def __enter__(self):
             return self
@@ -1283,7 +1310,13 @@ def _cancellation_self_test():
             self.close()
 
         def close(self):
-            pass
+            if self.fd is not None:
+                os.close(self.fd)
+                self.fd = None
+
+        def detach(self):
+            fd, self.fd = self.fd, None
+            return fd
 
         def settimeout(self, timeout):
             pass
@@ -1312,7 +1345,11 @@ def _cancellation_self_test():
         keylog_filename = None
 
         def wrap_socket(self, sock, **kwargs):
-            return sock
+            # SSLSocket owns the descriptor after detaching the raw socket.
+            wrapped = FixtureSocket(fd=sock.detach())
+            if wrapped is sock or sock.fd is not None or wrapped.fd is None:
+                raise AssertionError("TLS fixture did not transfer descriptor ownership")
+            return wrapped
 
     publications = []
 
@@ -1344,27 +1381,68 @@ def _cancellation_self_test():
                 present.add(value)
         return present
 
-    def declared_codes():
-        # Independent declaration of production regions, not inferred from
-        # whatever the collector happens to return. Resolve current objects so
-        # deliberate source mutants must satisfy the same coverage contract.
-        functions = (
-            schema.gather_release, gather_release, _gather_release, _work,
-            _quarantine, _open_directory, _fetch, _resolve, _response,
-            _put, _read_archive, _inflate, _unpack, _seal_observation,
-            _finish_observation,
-        )
-        methods = tuple(
-            value for cls in (_environment, _DescriptorStack, _QuarantineOwner, _Wire)
-            for value in vars(cls).values() if inspect.isfunction(value)
-        )
-        return ({inspect.unwrap(fn).__code__ for fn in functions + methods}
-                | {_put.__code__, _read_archive.__code__, _unpack.__code__,
-                   _QuarantineOwner.remove.__code__})
+    scope_files = {__file__, schema.__file__}
+    exemption_reasons = {
+        "_cancellation_self_test (recursive)": "fixture machinery, not production",
+        "_resolve.<locals>.worker": (
+            "resolver thread is outside caller cancellation; slot publication is probed separately"),
+    }
 
-    def check_coverage(seen):
-        # Region/handoff coverage does not detect arbitrary missing events
-        # within a region that the collector did visit.
+    def static_codes():
+        # Inventory loaded module functions/methods without executing them.
+        # Walk constants for nested functions and __wrapped__ for decorated bodies.
+        # Rebuild for each sweep so source mutants have their own exact identities.
+        inventory = {}
+        visited = set()
+
+        def code_tree(code):
+            if code.co_filename in scope_files and id(code) not in inventory:
+                inventory[id(code)] = code
+                for child in code.co_consts:
+                    if inspect.iscode(child):
+                        code_tree(child)
+
+        def visit(value):
+            if id(value) in visited:
+                return
+            visited.add(id(value))
+            if inspect.isfunction(value):
+                code_tree(value.__code__)
+                if hasattr(value, "__wrapped__"):
+                    visit(value.__wrapped__)
+            elif inspect.isclass(value) and value.__module__ in (module.__name__, schema.__name__):
+                for member in vars(value).values():
+                    visit(member)
+            elif isinstance(value, (staticmethod, classmethod)):
+                visit(value.__func__)
+            elif isinstance(value, property):
+                for member in (value.fget, value.fset, value.fdel):
+                    visit(member)
+
+        for owner in (module, schema):
+            for value in vars(owner).values():
+                visit(value)
+        return inventory
+
+    def region(code):
+        return "{}:{}:{}".format(Path(code.co_filename).name, code.co_firstlineno, code.co_qualname)
+
+    def declared_codes(inventory, executed):
+        # This census comes from call profiling, independently of trace filtering.
+        unknown = executed.keys() - inventory.keys()
+        if unknown:
+            raise AssertionError("cancellation census outside inventory: " +
+                                 ", ".join(sorted(region(executed[key]) for key in unknown)))
+        workers = {key for key, code in inventory.items()
+                   if code.co_filename == __file__
+                   and code.co_qualname == "_resolve.<locals>.worker"}
+        if len(workers) != 1 or not workers <= executed.keys() or not fixture_codes <= inventory.keys():
+            raise AssertionError("cancellation coverage exemptions do not reconcile")
+        exempt = fixture_codes | workers
+        return {key: code for key, code in executed.items() if key not in exempt}
+
+    def check_coverage(seen, declared):
+        # Object/handoff equality does not detect missing events within an object.
         wrapper = schema.gather_release.__code__
         handoff = {ins.positions.lineno for ins in dis.get_instructions(wrapper)
                    if ins.argval == "observe_release" and ins.opname.startswith("LOAD_FAST")}
@@ -1372,10 +1450,15 @@ def _cancellation_self_test():
                 code is wrapper and event == "line" and line in handoff
                 for code, event, line, offset in seen):
             raise AssertionError("cancellation enumeration omitted: public handoff")
-        missing = declared_codes() - {site[0] for site in seen}
+        observed = {id(site[0]): site[0] for site in seen}
+        missing = declared.keys() - observed.keys()
+        extra = observed.keys() - declared.keys()
         if missing:
             raise AssertionError("cancellation enumeration omitted: " +
-                                 ", ".join(sorted(code.co_qualname for code in missing)))
+                                 ", ".join(sorted(region(declared[key]) for key in missing)))
+        if extra:
+            raise AssertionError("cancellation enumeration undeclared: " +
+                                 ", ".join(sorted(region(observed[key]) for key in extra)))
 
     def fail_seal(*args):
         raise ValueError("fixture seal refusal")
@@ -1413,8 +1496,8 @@ def _cancellation_self_test():
             yield
 
     def signal_loop():
-        # Deterministic real signals at the acquired-but-not-stored boundary;
-        # bounded repetition, with the exception kept alive until after checks.
+        # Profiler-triggered SIGINT at acquire's return, before result storage;
+        # not eval-breaker delivery inside __enter__. Retain each traceback.
         previous_handler = signal.getsignal(signal.SIGINT)
         previous_profile = sys.getprofile()
         delivered = []
@@ -1462,9 +1545,10 @@ def _cancellation_self_test():
             raise AssertionError("outer environment did not restore")
         return len(delivered)
 
-    def run(target=None, exception=None, refusal=False, collector=None):
+    def run(target=None, exception=None, refusal=False, collector=None, census=None):
         nonlocal injected
         publications.clear()
+        sockets.clear()
         seen = []
         observations = []
         owners = []
@@ -1472,11 +1556,14 @@ def _cancellation_self_test():
         received = None
         escaped = None
 
+        def profile(frame, event, arg):
+            if event == "call" and frame.f_code.co_filename in scope_files:
+                census[id(frame.f_code)] = frame.f_code
+
         def trace(frame, event, arg):
             nonlocal fired, injected
             code = frame.f_code
-            eligible = (code is schema.gather_release.__code__ or
-                        (code.co_filename == __file__ and id(code) not in fixture_codes))
+            eligible = code.co_filename in scope_files and id(code) not in fixture_codes
             if not eligible:
                 return None
             if code in after_calls:
@@ -1485,6 +1572,10 @@ def _cancellation_self_test():
                     event == "opcode" and frame.f_lasti in after_calls.get(code, ())):
                 return trace
             if collector == "omit-helper" and code is _open_directory.__code__:
+                return trace
+            if collector == "omit-tls" and code is _tls.__code__:
+                return trace
+            if collector == "omit-nested" and code.co_qualname == "_unpack.<locals>.add_node":
                 return trace
             if collector == "truncate" and seen:
                 return trace
@@ -1513,17 +1604,20 @@ def _cancellation_self_test():
             before_fds = descriptors()
             try:
                 sys.settrace(trace)
+                if census is not None:
+                    sys.setprofile(profile)
                 try:
                     with patch.object(planning, "_seal", fail_seal if refusal else original_seal):
                         received = schema.gather_release(request, policy)
                 except (KeyboardInterrupt, SystemExit, GeneratorExit) as exc:
                     escaped = exc  # Retain the traceback through the leak checks.
                 finally:
+                    sys.setprofile(original_profile)
                     sys.settrace(original_trace)
                 label = ((seen[-1][0].co_qualname, *seen[-1][1:])
                          if seen else "empty")
                 label = repr(label)
-                if descriptors() - before_fds:
+                if any(sock.fd is not None for sock in sockets) or descriptors() - before_fds:
                     raise AssertionError("cancellation retained descriptor at " + label)
                 if dict(os.environ) != original_environment:
                     raise AssertionError("cancellation retained scrubbed environment at " + label)
@@ -1575,6 +1669,7 @@ def _cancellation_self_test():
                 if following.get("status") != VALID or notes or _GATHER_LOCK.locked():
                     raise AssertionError("subsequent gather failed after " + label)
             finally:
+                sys.setprofile(original_profile)
                 sys.settrace(original_trace)
                 sys.path[:] = original_path
                 sys.dont_write_bytecode = original_bytecode
@@ -1607,9 +1702,14 @@ def _cancellation_self_test():
                         if before.opname.startswith("CALL")
                     }
 
-            successful = run(collector=collector)
-            refused = run(refusal=True, collector=collector)
-            check_coverage(successful + refused)
+            inventory = static_codes()
+            executed = {}
+            successful = run(collector=collector, census=executed)
+            refused = run(refusal=True, collector=collector, census=executed)
+            if collector == "omit-inventory":
+                del inventory[id(_tls.__code__)]
+            declared = declared_codes(inventory, executed)
+            check_coverage(successful + refused, declared)
             successful_sites = set(successful)
             for refusal, baseline in ((False, successful), (True, refused)):
                 events[:] = baseline
@@ -1620,9 +1720,9 @@ def _cancellation_self_test():
                         continue
                     for exception in exceptions:
                         run(target, exception, refusal)
-            return successful, refused
+            return successful, refused, declared
 
-        successful, refused = sweep()
+        successful, refused, baseline_declared = sweep()
         line_sites = [site for site in successful if site[1] == "line"]
         line_events, unique_lines = len(line_sites), len(set(line_sites))
         opcode_events = sum(site[1] == "opcode" for site in successful)
@@ -1633,15 +1733,32 @@ def _cancellation_self_test():
             raise AssertionError("retained environment-exit exception did not discriminate")
         flips.append({"id": "generator-exit-retained-traceback",
                       "observed": "generator retained gather state; class restored it"})
-        for collector in ("truncate", "omit-helper"):
+        for collector in ("truncate", "omit-helper", "omit-tls", "omit-nested", "omit-inventory"):
             try:
                 sweep(collector=collector)
             except AssertionError as exc:
-                if not str(exc).startswith("cancellation enumeration omitted: "):
+                wanted = ("cancellation census outside inventory: " if collector == "omit-inventory"
+                          else "cancellation enumeration omitted: ")
+                if not str(exc).startswith(wanted):
                     raise
                 flips.append({"id": "collector-" + collector, "observed": str(exc)})
             else:
                 raise AssertionError("partial cancellation enumeration accepted: " + collector)
+        for label, declaration, wanted in (
+            ("undeclared-executed-object",
+             {key: code for key, code in baseline_declared.items() if code is not _tls.__code__},
+             "undeclared"),
+            ("declared-unexecuted-object",
+             {**baseline_declared, id(self_test.__code__): self_test.__code__}, "omitted"),
+        ):
+            try:
+                check_coverage(successful + refused, declaration)
+            except AssertionError as exc:
+                if not str(exc).startswith("cancellation enumeration " + wanted + ": "):
+                    raise
+                flips.append({"id": label, "observed": str(exc)})
+            else:
+                raise AssertionError("inconsistent cancellation declaration accepted: " + label)
         cleanup = textwrap.dedent(inspect.getsource(_with_descriptors))
         if cleanup.count("stack.close()") != 2:
             raise AssertionError("descriptor cleanup mutation sites changed")
@@ -1690,6 +1807,23 @@ def _cancellation_self_test():
             "            self.acquired = _GATHER_LOCK.acquire(blocking=False)\n", 1)
         gather = textwrap.dedent(inspect.getsource(gather_release))
         resolver = textwrap.dedent(inspect.getsource(_resolve))
+        tls = textwrap.dedent(inspect.getsource(_tls))
+        fetch = textwrap.dedent(inspect.getsource(_fetch))
+        registration = "            secured = stack.enter_context(_tls(context, raw, parsed.hostname, connection_deadline))\n"
+        split_registration = ("            secured = stack.enter_context(\n"
+                              "                _tls(context, raw, parsed.hostname, connection_deadline)\n"
+                              "            )\n")
+        if fetch.count(registration) != 1 or fetch.count("        stack.close()\n") != 1:
+            raise AssertionError("TLS registration/teardown mutation site is not unique")
+        wrapping = (
+            "        wrapped = context.wrap_socket(\n"
+            "            sock, server_hostname=host, do_handshake_on_connect=False,\n"
+            "            suppress_ragged_eofs=False,\n"
+            "        )\n")
+        protected_wrap = "    wrapped = None\n    try:\n" + wrapping
+        if tls.count(protected_wrap) != 1:
+            raise AssertionError("TLS ownership mutation site is not unique")
+        unprotected_wrap = textwrap.indent(textwrap.dedent(wrapping), "    ") + "    try:\n"
         publication = ("        finally:\n"
                        "            if acquired:\n"
                        "                _RESOLVER_SLOT.release()\n"
@@ -1702,6 +1836,12 @@ def _cancellation_self_test():
         if resolver.count(publication) != 1:
             raise AssertionError("resolver publication mutation site is not unique")
         specifications = (
+            ("tls-wrap-before-try", module, _tls, tls,
+             tls.replace(protected_wrap, unprotected_wrap, 1), "descriptor"),
+            ("tls-registration-handoff", module, _fetch, fetch,
+             fetch.replace(registration, split_registration, 1), "descriptor"),
+            ("transport-teardown", module, _fetch, fetch,
+             fetch.replace("        stack.close()\n", "        pass\n", 1), "descriptor"),
             ("wrapper-after-disarm", schema, schema.gather_release, wrapper,
              wrapper.replace(restore, early, 1) + trailing, "sealed VALID evidence"),
             ("lock-before-try-without-backstop", module, _environment, env, moved, "gather lock"),
@@ -1740,7 +1880,8 @@ def _cancellation_self_test():
              "line_events": line_events, "unique_lines": unique_lines,
              "opcode_events": opcode_events,
              "signal_interruptions": signal_interruptions,
-             "declared_regions": sorted(code.co_qualname for code in declared_codes()),
+             "declared_regions": sorted(region(code) for code in baseline_declared.values()),
+             "coverage_exemptions": exemption_reasons,
              "injections": baseline_injections, "flips": flips,
              "elapsed_seconds": time.monotonic() - started}]
 
