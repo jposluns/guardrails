@@ -489,7 +489,7 @@ rules = []
 platform = "ci"
 default = "block"
 class = "a"
-residue = "It exercises the OPF core-tooling dispatcher (opf/tools/opf.py --self-test) end to end: it runs every registered helper self-test in order (the store, schema, release, and emitter helpers over synthetic stores) and the aggregator's own fail-closed return-vocabulary guard, under which a helper returning a bool, a float, or an out-of-range int fails the aggregate closed rather than reading as clean, and the worst outcome wins so one degraded helper is never masked by a later clean one. It arguably serves the change-carries-a-check discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here. It asserts representative synthetic scenarios with exact exit-code matches, not each helper's whole input space; it now exercises the render, doctor, upgrade, and import verbs' dispatch and argument handling via the opf-cli routing leg (usage errors fail closed; render --check/--write forwards to the U4 engine over synthetic and non-adopter stores; doctor and upgrade resolve and route over synthetic and non-adopter stores; and import wires scan/plan/review/apply onto the U7 operation layer, an unresolved store failing cannot-evaluate, --scan writing nothing, --plan staging a run, --review capturing acceptance, and the deferred --apply stub failing cannot-evaluate mutating nothing), while the remaining store verbs (migrate, sync) stay recognized names that fail closed as not-yet-implemented until their unit lands; and it runs over synthetic stores rather than a real adopter --root, so it does not verify behaviour against a live product repository."
+residue = "It exercises the OPF core-tooling dispatcher (opf/tools/opf.py --self-test) end to end: it runs every registered helper self-test in order (the store, schema, release, and emitter helpers over synthetic stores) and the aggregator's own fail-closed return-vocabulary guard, under which a helper returning a bool, a float, or an out-of-range int fails the aggregate closed rather than reading as clean, and the worst outcome wins so one degraded helper is never masked by a later clean one. It arguably serves the change-carries-a-check discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here. It asserts representative synthetic scenarios with exact exit-code matches, not each helper's whole input space; it now exercises the render, doctor, upgrade, and import verbs' dispatch and argument handling via the opf-cli routing leg (usage errors fail closed; render --check/--write forwards to the U4 engine over synthetic and non-adopter stores; doctor and upgrade resolve and route over synthetic and non-adopter stores; and import wires scan/plan/review/apply onto the U7 operation layer, an unresolved store failing cannot-evaluate, --scan writing nothing, --plan staging a run, --review capturing acceptance, and the deferred --apply stub failing cannot-evaluate mutating nothing; and record refuses its usage errors before any store resolution, with transition and done-with-receipt failing closed as not-yet-implemented, while the record unit self-test covers the verb's argument grammar, allocation seam, planners, and postcondition), while the remaining store verbs (migrate, sync) stay recognized names that fail closed as not-yet-implemented until their unit lands; and it runs over synthetic stores rather than a real adopter --root, so it does not verify behaviour against a live product repository."
 
 [[gate]]
 id = "opf-drift"
@@ -568,7 +568,7 @@ isolated executable (python3 -I -B opf/tools/opf.py), building fixture bytes ind
 planner from fixed payloads and the legacy record serializers. It asserts the happy path (exact plan
 roster, per-source digests, destinations, and A13 binding) with a fixed clock (deterministic
 generated_at), that the tree and every armed mutation and schema-upgrade seam are untouched
-(_upgrade_run, _upgrade_acquire_lease, _upgrade_replace, and the journal apply/run_transaction/recover
+(_upgrade_run, _opf_write_guard.acquire_lease, _upgrade_replace, and the journal apply/run_transaction/recover
 entries each raise if entered), and the enumerated fail-closed refusals each exit 2 leaving the store
 byte-identical: a symlinked or wrong-type staged member, an unknown staged member, an acceptance
 merge-digest conflict, an unprovable (wrong-type) import-ops member, an oversized member over the
@@ -662,6 +662,51 @@ platform = "ci"
 default = "block"
 class = "c"
 residue = "It runs the OPF store-schema upgrade gate (opf/tools/check_opf_upgrade.py): both the default entry and --self-test run the SAME fixture suite, and there is no live-adopter mutation leg and no root option, so its whole assurance rides the fixture suite. The suite drives opf upgrade through the isolated dispatcher (python3 -I -B opf/tools/opf.py) over BYTE-PINNED, FROZEN-literal genuine 1.0.0 stores built beneath throwaway temporary git repositories, anchored on the frozen baseline manifest and counters (the store an already-shipped 1.0.0 tool would have written); module-enabled and view-omitting variants are the frozen baseline plus exactly the rows a valid 1.0.0 store of that shape carries, derived by canonical string operations and re-asserted canonical in-gate through the emitter (the precondition upgrade itself enforces, so a future emitter change that would invalidate any frozen fixture is caught here rather than in the field). It asserts the store-schema upgrade to the tooling spec_version with exact exit codes, including the 1.1.0 origin (OPF-D2B PR3a, base spec 1.2.0), whose allowed schema delta is the spec_version bump alone (no other manifest field or counter change, no init.toml provenance fabricated); on a fixture whose declared views are current, every other store byte is unchanged, and the 1.0.0 contract and byte snapshots over an ENUMERATED ADOPTER-SHAPE MATRIX: the pristine baseline upgrade lands doctor-VALID with spec_version bumped to the tooling spec_version (1.2.0), decision_support retired, the three baseline type rows and two view rows added, DECISIONS.md widened to its four 1.1.0 sources, the counters extended, and the empty indexes created; idempotence is a byte no-op keyed on the target being doctor-VALID; governance-enabled, decision_support-enabled, and jointly-enabled 1.0.0 origins with empty AND populated module-tier indexes migrate with the now-baseline rows, indexes, and high-waters preserved byte-for-byte (a governance store keeps maintainer_action module-tier; the populated preference_pattern origin carries a ratified assistant pattern at rest, which fails without the creation-snapshot doctor fix); the optional decision_support module key and the optional DECISIONS.md composed view, present and absent, each migrate correctly; and a representative non-migrated module (delivery_assurance) is preserved value-exact. It asserts the fail-closed REFUSAL FIXTURES: a held lease and a malformed lease each refuse without deleting the lease; a dirty store refuses before any mutation with commit-or-move-aside advice and no restore command (the dirt is the owner's), never a whole-tree restore; a pre-declared contribution and a module-inconsistent maintainer_decision each refuse; and the above-tooling, non-canonical, not-adopted, and partial-1.1.0 triage cases refuse or report NOT APPLICABLE. It calls the pure postcondition (opf._upgrade_postcondition) DIRECTLY with hand-mutated new models, so a flipped retained module boolean, a mutated retained type row, a reordered or duplicated view source, and a raised, lowered, or missing counter each refuse while the genuine planner output passes. It runs a SEEDED, BOUNDED MIGRATION PROPERTY invariant over twelve generated genuine-1.0.0 stores (a module subset with the coupled rows, indexes, and counters, zero to two records per migrated type with matching high-waters, DECISIONS.md declared or omitted, the decision_support key present or absent), each of which must upgrade doctor-VALID at the tooling spec_version with every index, counter, worklog, and version byte-preserved. It arguably serves the change-carries-a-check and preserve-compatibility-or-migration disciplines, but the linkage to a single corpus rule is not undeniable, so none is claimed here. Class c: coverage is representative, not exhaustive, so the named gaps are: no live-adopter mutation leg (synthetic isolated fixtures only); synthetic mid-upgrade fault injection raises OSError immediately after manifest replacement and checks planned-scope recovery and owned-lease release, but does not exercise real process crashes between atomic writes or real filesystem I/O or permission failures; concurrent-writer races are exercised by the never-seize fixtures (a lease REPLACED in the acquisition-failure window and in the release window each LEAVES the peer's replacement and refuses; a compound mid-run-failure-plus-replaced-lease release surfaces BOTH the mid-run recovery advice and the never-seize note; an ABSENT-versus-REPLACED release distinguishes the two fail-closed) and the git-status porcelain status-pair vocabulary sweeps, but the disclosed unlink-by-name TOCTOU residual (a genuine kernel-level interleaving between the ownership read and the unlink) is synthetic and representative-only here, not driven by a real concurrent race; the 1.0.0 fixture fidelity established against the merge-base (commit 1c90fbb) doctor at authoring time and re-asserted at run time only by the canonicity round-trip, with module-tier records schema-deferred at 1.0.0 and validated by the actual upgrade-then-doctor leg here; and the section 5.7 sync and divergence axis having no runtime in this build. Missing git, unusable temporary storage, or any harness failure fails closed to 2 rather than a clean skip."
+
+[[gate]]
+id = "opf-record"
+script = "opf/tools/check_opf_record.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "c"
+residue = """
+It runs the OPF record-authoring gate (opf/tools/check_opf_record.py, OPF-RECORD PR1) via its
+--self-test --red-on-revert: there is no live-adopter leg (this repository is not an OPFiles adopter),
+so the whole assurance rides the self-test. Each case copies a doctor-VALID template store built beneath
+the gate's own temporary root (opf init, a commit, opf render --write, a commit) and drives opf record
+create and worklog-append in-process, plus isolated child processes for the crash cases. It asserts that
+a comment-bearing index, counters, or worklog refuses with every byte untouched; that create with links
+and refs publishes canonical bytes that reparse to the planned record, while a lossy emitter is refused
+before any write; that a plan mutating one extra field of an existing record, or the initial status or
+requested title of the new record, or the requested summary of a new worklog entry, refuses; that two
+sequential creates claim BI-1 then BI-2 with monotonic counters and that a counters map missing an
+enabled namespace refuses; that a kill at each of twelve journal steps leaves the killed run's lease,
+which refuses the next run before any recovery write, and that once the operator releases it the next
+run's reconciliation leaves the operands exactly the prestate or exactly the poststate, the poststate
+only when the transaction completed, and no killed run reports an id; that a held lease refuses and is
+never seized, and success is reported only after the lease release; that a store the final doctor
+grades not VALID exits 2 with scoped recovery text, the change left for review and the lease released;
+that worklog-append claims the next WL id with no status qualifier while an id inside a released span
+refuses; that an interrupted journal refuses with every byte untouched while a live peer holds the
+shared lease through the upgrade verb; that an operand edited after the interruption, on the prestate
+or the poststate side, refuses naming the path with every byte untouched and reconciles once the edit
+is undone; and that an unknown or path-like create --type refuses with the enabled-baseline-types
+message before any operand read. Under --red-on-revert each test's flip (the byte-reproduction
+precondition, emit_checked, the allowed-delta postcondition, the known-complete proof, the
+in-transaction counters operand, the release-before-report ordering, the final doctor, the
+released-span check, recovery under the lease, the intervening-edit check, and the --type check before
+the operand read) is applied in turn and must turn its test red with an assertion. The unit leg
+(_opf_record.py, via opf.py --self-test) covers the argument grammar, the allocation seam including the
+homes-2 refusal, the planners, and the postcondition vectors. It arguably serves the
+change-carries-a-check and check-fails-closed-on-unreadable disciplines, but the linkage to a single
+corpus rule is not undeniable, so none is claimed here. Class c: coverage is representative, so it
+asserts these enumerated scenarios over synthetic stores rather than the verb's whole input space;
+transition and done-with-receipt are not implemented in this build and are exercised only as fail-closed
+stubs; the kill points are the journal engine's own injection hooks, not power loss or filesystem I/O
+failures; concurrent writers, cross-branch id collisions, and live adopter state are outside the
+fixtures; and any harness failure fails closed to 2 rather than a clean skip.
+"""
 
 [[gate]]
 id = "opf-import"

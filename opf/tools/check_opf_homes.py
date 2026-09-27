@@ -3,6 +3,8 @@
 
 Checks documented topology against the constructor authority. Text checks protect the planned
 contract, not runtime conformance to homes 2. No store is mutated or required to install a block.
+Residual: wording checks require pinned text to be present; except for the self-test
+reconstruction of section 9.2, they do not detect added contradictory claims that leave the pins intact.
 """
 import re
 import sys
@@ -24,11 +26,78 @@ _CONTRACT = {
             "check roster and residuals are unchanged", "byte-exact",
             "fails closed on a reserved-name match or ambiguity"),
     "4.4": ("MUST NOT be used as a machine subdirectory", "legacy content cannot be re-absorbed"),
-    "9.2": ('spec_version = "2.0.0"', "unknown future generations are refused",
-            "idempotent and journaled", "Every destination is digest-verified before its source is removed",
-            "working tree is clean, including ignored files",
-            "planned schema and render destinations (store and product roots) and the index collision candidates",
-            "full doctor VALID", "standing finding", "multi-root coordinator"),
+    "9.2": (
+        'The homes-generation upgrade targets spec_version = "2.0.0" with required integer '
+        '[opf].homes = 2.',
+        'Absent or 1 denotes legacy homes for migration; unknown future generations are refused.',
+        'The runtime supported version and init format remain unchanged until homes 2 is activated.',
+        'The migration refuses a store resolved outside the product root until a multi-root '
+        'coordinator exists.',
+        'Unproven legacy .archive/ entries remain in place with a standing finding until '
+        'dispositioned.',
+        'A base-schema version bump ships a tested, in-place store-schema upgrade (opf upgrade).',
+        'The upgrade is idempotent.',
+        'A purely schema-level bump is additive, using atomic replacement of existing files, '
+        'create-only writes for new index files, and regeneration of declared views through '
+        'exclusively created temporary files followed by atomic rename.',
+        'These writes are sequential, with recovery scope held in memory, not a durable '
+        'transaction journal.',
+        'A homes-generation bump additionally relocates OPF control areas as a versioned, '
+        'journaled, fail-closed relocation.',
+        'Every destination is digest-verified before its source is removed.',
+        'Both kinds of upgrade run under the store consistency contract and the single-writer lease '
+        '(section 5.7).',
+        'It fails closed on an unresolvable store, a declared spec_version ABOVE the tooling, a '
+        'divergence, a held lease, or any populated state that contradicts its preconditions; it '
+        'never lowers the fail-closed floor.',
+        'Before any write it enforces two fail-closed preconditions: it claims the single-writer '
+        'lease (section 5.7) and holds it across the whole mutation, and it verifies the working '
+        'tree is clean, including ignored files, over the planned schema and render destinations '
+        '(store and product roots) and the index collision candidates, so the committed HEAD is a '
+        'verified restore path for that scope; a held lease or a dirty store refuses, and a dirty '
+        'store is asked to commit its own changes, never restored by the tool.',
+        'After applying the schema delta, it regenerates the declared views and requires a full '
+        "doctor VALID before offering the uncommitted change for the adopter's own "
+        'branch-and-merge.',
+        'It never stages or commits the change.',
+        'The manifest and counters rewrite is a model regeneration through the canonical '
+        'new-document emitter, never a textual round-trip edit, bounded by two guards: a '
+        'precondition that re-emitting the UNCHANGED parsed model reproduces the on-disk bytes '
+        'exactly (proving the file is canonical and comment-free, so nothing can be lost), failing '
+        'closed otherwise; and a postcondition that the model diff equals exactly the allowed '
+        'delta, failing closed otherwise.',
+        'The allowed delta is expressed as ensure-present and ensure-absent over the whole 1.0.0 '
+        'origin family, so a governance-enabled, a decision_support-enabled, a bare, and a '
+        'view-omitting 1.0.0 store all migrate under one rule and the normative text cannot diverge '
+        'from the tooling.',
+        'For the 1.0.0 to 1.1.0 upgrade the allowed delta is: rename the base table [devprocess] to '
+        '[opf] and its standard discovery token from devprocess to opf (the OPFiles rebrand), '
+        'carrying every other base field over unchanged; bump spec_version to 1.1.0; remove the '
+        'retired decision_support module key where present; add each of the [types] rows for '
+        'contribution, maintainer_decision, and preference_pattern not already declared by an '
+        'enabled 1.0.0 module (a governance-enabled store already declares maintainer_decision and '
+        'a decision_support-enabled store preference_pattern; the row moves from module tier to '
+        'baseline unchanged); add the two new view rows (CONTRIBUTIONS.md and the DECISIONS.toml '
+        "projection); widen the existing DECISIONS.md composed view's sources from the two 1.0.0 "
+        'decision sources (pending_decision, autonomous_decision) to the four required at 1.1.0 by '
+        'adding maintainer_decision and preference_pattern where that view is declared (a 1.0.0 '
+        'store that declares no DECISIONS.md gains none and stays valid, since no composed view is '
+        'required); extend counters.toml with the CN/MD/PP zeros while preserving every existing '
+        'high-water; and create each missing empty *.index.toml file for the three baseline types, '
+        'skipping any that already exist (such as a maintainer_decision.index.toml where governance '
+        'was enabled, whose records are preserved byte-for-byte).',
+        'The upgrade weakens nothing: preference_pattern simply moves to always-on, so a populated '
+        'decision-support index is kept as is.',
+        'Base spec 1.2.0 admits one new managed machine-store file, .working/toml/init.toml: the '
+        'bootstrap provenance a coupled opf init records (its format is frozen in OPF-INIT-D2B).',
+        'It is a managed leaf when present and is never required, so a store without it stays '
+        'valid.',
+        'For the 1.1.0 to 1.2.0 upgrade the allowed schema delta is the spec_version bump alone: no '
+        'other manifest field, schema file, or counter changes, and no provenance is created for an '
+        'existing store (none is ever fabricated).',
+        'Declared views are then regenerated, so a stale committed view can change.',
+        'A 1.0.0 store takes the 1.0.0 delta above directly to 1.2.0.',
+    ),
     "12": ("Neither is scanned as the other", "retained indefinitely", "independent re-read",
            "age alone never authorizes deletion"),
     "14.1": (".working/staging/import/<run-id>/", ".working/staging/ingest/<run-id>/",
@@ -1469,6 +1538,36 @@ def self_test():
     for section, body in _sections(text).items():
         if section in _CONTRACT:
             check("spec-flip-" + section, lambda: bool(contract_findings(text.replace(body, "\n", 1))))
+    # Delete the wrapped sentence in place: normalization must not hide a lost requirement.
+    body = _sections(text)["9.2"]
+    mutated, removed = re.subn(r"The upgrade\s+is idempotent\.", "", body)
+    check("spec-flip-9.2-idempotence", lambda: removed == 1 and
+          "spec 9.2 missing contract: The upgrade is idempotent." in
+          contract_findings(text.replace(body, mutated, 1)))
+    # Pin every normative sentence in 9.2 and exercise each deletion independently.
+    normalized = " ".join(body.replace("`", "").split())
+
+    def replace_body(replacement):
+        # Keep the body separate from both its heading and the following section.
+        return text.replace(body, "\n\n" + replacement + "\n\n", 1)
+
+    check("spec-control-9.2-undeleted", lambda:
+          contract_findings(replace_body(normalized)) == [])
+    def pins_cover_section():
+        return " ".join(_CONTRACT["9.2"]) == normalized
+
+    check("spec-control-9.2-pin-coverage", pins_cover_section)
+    # Mutate the registry itself: per-pin deletion tests cannot notice a dropped pin.
+    from unittest.mock import patch
+    with patch.dict(_CONTRACT, {"9.2": tuple(
+            pin for pin in _CONTRACT["9.2"]
+            if pin != "Every destination is digest-verified before its source is removed.")}):
+        check("spec-flip-9.2-dropped-pin", lambda: not pins_cover_section())
+    for fragment in _CONTRACT["9.2"]:
+        mutated = replace_body(normalized.replace(fragment, "", 1))
+        check("spec-flip-9.2-" + fragment, lambda f=fragment, m=mutated:
+              normalized.count(f) == 1 and
+              contract_findings(m) == ["spec 9.2 missing contract: " + f])
     for failure in failures:
         print("FAIL: " + failure)
     print("OPF-HOMES SELF-TEST: {} ({} checks)".format("FAILED" if failures else "OK", checked))

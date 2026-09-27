@@ -290,9 +290,9 @@ def _filter_neutralizing_config(git, store_root, timeout=_GIT_TIMEOUT_S):
     (normal post-add / checkout / clone state) `git status` re-hashes the RAW worktree bytes, which differ
     from the index blob, and reports a genuinely-CLEAN store as DIRTY. This is inherent to driver
     neutralization (the mirror of why a raw --no-filters reimplementation was rejected for its text=auto
-    regression) and is FAIL-CLOSED (it over-refuses the upgrade; it is NEVER a false-clean and NEVER a filter
-    exec). _upgrade_probe_dirty / _upgrade_check_clean surface this to the operator with clear guidance to
-    settle the worktree before upgrading (F-OPF-STATUSFILTER-LFS-FALSEPOS).
+    regression) and is FAIL-CLOSED (it over-refuses the in-place write; it is NEVER a false-clean and NEVER a
+    filter exec). _opf_write_guard.probe_dirty / check_clean surface this to the operator with clear guidance
+    to settle the worktree before re-running the operation (F-OPF-STATUSFILTER-LFS-FALSEPOS).
 
     FAIL-CLOSED (guard-input-soundness, check-fails-closed-on-unreadable): neutralization completeness rests
     entirely on this enumeration, so any state where the exec-able set cannot be proven is a cannot-evaluate
