@@ -94,7 +94,7 @@ LEASE_NAME = "lease.toml"                  # present only while the single-write
 INIT_PROVENANCE_NAME = "init.toml"
 ARCHIVE_DIRNAME = "archive"
 ARCHIVE_MANIFEST_NAME = "archive.toml"
-EVIDENCE_FORMAT = "opf.evidence.inventory/v1"   # homes-2 per-bundle inventory format (spec 4.2)
+EVIDENCE_FORMAT = _opf_store.EVIDENCE_INVENTORY_FORMAT
 INDEX_SUFFIX = ".index.toml"
 
 # The containment walk is bounded by an explicit depth ceiling so a pathologically deep directory chain
@@ -1761,6 +1761,25 @@ def _evidence_claim(bundle, kind, run_id, path):
     raise ValueError("bundle {!r} cannot claim {!r}".format(bundle, path))
 
 
+def _evidence_rows(bundle, kind, run_id, doc):
+    """Shared schema/path validation for doctor and completed-ingest replay; never upgrades old bytes."""
+    if isinstance(doc, dict) and doc.get("format") == "opf.ingest.evidence-inventory/v1":
+        raise ValueError("C-EVIDENCE-LEGACY-INGEST: old-format ingest inventory is unsupported; "
+                         "refused without migration or rewrite")
+    if (not isinstance(doc, dict) or set(doc) != {"format", "file"}
+            or doc["format"] != EVIDENCE_FORMAT or not isinstance(doc["file"], list)):
+        raise ValueError("an inventory holds exactly format {!r} and a file array".format(EVIDENCE_FORMAT))
+    for row in doc["file"]:
+        if not isinstance(row, dict) or set(row) != {"path", "size", "sha256"}:
+            raise ValueError("file rows require exactly path, size and sha256")
+        _evidence_claim(bundle, kind, run_id, row["path"])
+        if type(row["size"]) is not int or row["size"] < 0:
+            raise ValueError("size must be a nonnegative integer")
+        if not isinstance(row["sha256"], str) or not _opf_import._HEX64_RE.fullmatch(row["sha256"]):
+            raise ValueError("sha256 must be 64 lowercase hex digits")
+    return doc["file"]
+
+
 def _check_evidence(root_fd, homes, rep):
     """C-EVIDENCE-ENUM: reconcile the homes-2 evidence homes against their per-bundle inventories.
 
@@ -1814,18 +1833,7 @@ def _check_evidence(root_fd, homes, rep):
             failed[0] = True
             return
         try:
-            if (not isinstance(doc, dict) or set(doc) != {"format", "file"}
-                    or doc["format"] != EVIDENCE_FORMAT or not isinstance(doc["file"], list)):
-                raise ValueError("an inventory holds exactly format {!r} and a file array".format(
-                    EVIDENCE_FORMAT))
-            for row in doc["file"]:
-                if not isinstance(row, dict) or set(row) != {"path", "size", "sha256"}:
-                    raise ValueError("file rows require exactly path, size and sha256")
-                _evidence_claim(bundle, kind, run_id, row["path"])
-                if type(row["size"]) is not int or row["size"] < 0:
-                    raise ValueError("size must be a nonnegative integer")
-                if not isinstance(row["sha256"], str) or not _opf_import._HEX64_RE.fullmatch(row["sha256"]):
-                    raise ValueError("sha256 must be 64 lowercase hex digits")
+            for row in _evidence_rows(bundle, kind, run_id, doc):
                 if row["path"] in expected:
                     raise ValueError("{!r} is claimed more than once".format(row["path"]))
                 expected[row["path"]] = row

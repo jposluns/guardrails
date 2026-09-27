@@ -54,7 +54,7 @@ import _opf_store as store
 
 
 PLAN_FORMAT = "opf.layout-migration.plan/v1"
-EVIDENCE_INVENTORY_FORMAT = "opf.evidence.inventory/v1"
+EVIDENCE_INVENTORY_FORMAT = store.EVIDENCE_INVENTORY_FORMAT
 
 LEGACY_HOMES = (
     imp.IMPORTS_REL,
