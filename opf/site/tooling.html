@@ -76,7 +76,7 @@
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 0 1 12.8-5.3L20 9"/><path d="M20 4v5h-5"/><path d="M19.5 12a7.5 7.5 0 0 1-12.8 5.3L4 15"/><path d="M4 20v-5h5"/></svg></span>
         <h3><code>opf render</code></h3>
-        <p>Regenerates the declared views; <code>--check</code> reports drift read-only, <code>--write</code> writes only on a full store validation before and after.</p>      </div>
+        <p>Regenerates declared views. <code>--check</code> compares bytes read-only. <code>--write</code> gates on source integrity, then checks source integrity and regenerated outputs after writing; other deliverable failures can remain and cause a nonzero exit.</p>      </div>
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="m8.5 12 2.3 2.3 4.7-4.9"/></svg></span>
         <h3><code>opf doctor</code></h3>
@@ -90,7 +90,7 @@
         <h3><code>opf import</code></h3>
         <p>Scans, plans, captures attributed reviews of legacy content, and promotes a reviewed import with <code>--apply</code>.</p>      </div>
       <div class="benefit">
-        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h13"/><path d="m11 7 5 5-5 5"/><path d="M20 5v14"/></svg></span>
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h9l3 3v15H6z"/><path d="M9 10h6M9 14h6M9 18h4"/></svg></span>
         <h3><code>opf absorb</code></h3>
         <p>Drafts changelog entries for human curation or computes a curated entry's freeze digest; outputs to stdout without writing files.</p>      </div>
       <div class="benefit">
@@ -133,10 +133,9 @@
   <div class="wrap">
     <p class="eyebrow">Integrity</p>
     <h2>Trust and integrity</h2>
-    <p>The release digests are published now, independently of artefact delivery, at
-      posluns.dev/hashes.txt, so you can confirm that the tooling you downloaded matches the one we
-      intended to publish. Before applying anything, verify the pack's published digest against the
-      authoritative reference on posluns.dev, and refuse on a mismatch or missing evidence.</p>
+    <p>Before applying a downloaded pack, compare its digest with the independently published reference
+      at posluns.dev/hashes.txt for that release. Refuse on a mismatch or missing evidence; the presence
+      of this instruction does not establish that a reference is currently available.</p>
     <p>Publishing a verifiable signature alongside releases is a roadmap item.</p>
   </div>
 </section>
@@ -145,10 +144,9 @@
   <div class="wrap">
     <p class="eyebrow">Discovery</p>
     <h2>How an assistant finds the standard</h2>
-    <p>The site exposes a machine-readable entry point for AI assistants: an
-      <code>/llms.txt</code> index, a machine-readable <code>/adopt.md</code>, and a plain link on the root
-      page an assistant can follow, so pointing an assistant at the site is enough for it to find
-      and follow the adoption steps.</p>
+    <p>The site provides an <a href="/llms.txt"><code>/llms.txt</code></a> index and
+      <a href="/adopt.md"><code>/adopt.md</code></a> guide, also linked from the root page.
+      Ask your assistant to read them, inspect your project, and propose a plan for review.</p>
   </div>
 </section>
 

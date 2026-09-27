@@ -11,19 +11,17 @@ passing operation. `render` HAS landed (PR-A): the `opf render` CLI requires exa
 `--check | --write` (a bare `render` is a usage error, exit 2); `--check` is the read-only drift check
 (forwarding to the U4 engine) and `--write` (VC-4/PR-C) is the mutating half: it gathers the inert git-derived
 observations caller-side (_opf_observe.gather) and hands them to the U4 engine, which composes the EXISTING U6
-`validate_store` store-integrity gate and permits the write only on a VALID verdict, refusing an INVALID or
-CANNOT-EVALUATE store with exit 2 and writing nothing. `doctor` HAS landed (PR-B): `opf doctor
+`validate_store` store-integrity gate and permits writing when source integrity holds. Post-write validation
+checks source integrity and regenerated outputs; other deliverable failures can remain. `doctor` HAS landed: `opf doctor
 [--root DIR]` RESOLVES the store, gathers the inert git-derived observations (_opf_observe.gather: tracked,
 actual_remote, prior), and runs the U6 `validate_store` store-integrity engine over them, returning that
 engine's 0/1/2 contract (a NOT-ADOPTED root reports NOT APPLICABLE and exits 0). Doctor is read-only; its
 observation gather is the caller-side git seam validate_store itself never touches. `upgrade` HAS landed
-(spec 9.2): `opf upgrade [--root DIR]` is the in-place, additive, idempotent 1.0.0 -> 1.1.0 store-schema
-upgrade. It refuses fail-closed on a store above the tooling spec or on a non-canonical manifest/counters,
-applies exactly the allowed delta as a canonical model regeneration (bump spec_version; retire the
-decision_support module; add the contribution/maintainer_decision/preference_pattern type rows and the two
-new view rows; extend counters with CN/MD/PP preserving existing high-waters; create the three missing empty
-indexes, skipping any that already exist), renders the declared views, and requires a full doctor VALID
-before offering the staged change; it never commits (the adopter reviews and merges). A store already at the
+(spec 9.2): `opf upgrade [--root DIR]` is the in-place, additive, idempotent upgrade from 1.0.0 or 1.1.0
+to 1.2.0. The 1.1.0 path changes only spec_version; the 1.0.0 path also applies the earlier schema delta
+(type and view declarations, counters, and missing indexes). Neither creates init.toml provenance.
+It refuses a store above the tooling spec or non-canonical manifest/counters, renders declared views,
+and requires a full doctor VALID before offering the uncommitted change for review and merge. A store already at the
 tooling spec_version is a byte no-op; a NOT-ADOPTED root reports NOT APPLICABLE and exits 0. `import` HAS
 landed (OPF-IMPORT-VERB): `opf import [--root DIR] (--scan --set FILE | --plan --set FILE | --review
 <run-id> --actor NAME (--decisions FILE | --interactive) | --apply <run-id>)` wires the reserved verb onto

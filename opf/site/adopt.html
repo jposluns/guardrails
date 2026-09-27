@@ -51,7 +51,7 @@
   <p class="eyebrow">Adopt it</p>
   <h1>Adopt OPFiles</h1>
   <p class="lead">There are two ways in. The recommended path is to let your AI development assistant do
-    the adoption; adopting by hand is the fallback for when you cannot. Both reach the same gated store:
+    the adoption; adopting by hand is the fallback for when you cannot. Both paths target the same store format:
     machine-written TOML sources, generated human-readable views, and a drift gate that re-renders the
     views and compares them. This page walks the paths, then documents each <code>opf</code> command
     one by one, then lays out the manual steps.</p>
@@ -74,9 +74,9 @@
     <div class="grid">
       <div class="card">
         <h3>Assistant-driven (recommended)</h3>
-        <p>Point your AI development assistant at this site or the repository and tell it to adopt
-          OPFiles. It reads the standard, inspects your project, proposes a plan, and, on your yes,
-          scaffolds and validates the store for you. This path needs no particular tool.</p>
+        <p>Ask your AI development assistant to read the standard, inspect your project, and propose an
+          adoption plan. Review the plan before authorizing scaffolding and validation. The standard
+          requires no particular assistant or tool.</p>
       </div>
       <div class="card">
         <h3>By hand (fallback)</h3>
@@ -85,16 +85,13 @@
           the reference tooling later without changing it.</p>
       </div>
     </div>
-    <p>On the assistant-driven path, your assistant reads the standard, investigates your project, and
-      presents a short plan: what it will create, import, or retire, and how the pieces wire together.
-      It asks one question, yes, no, or let us discuss. On your yes it carries out the adoption,
-      scaffolds and validates the store, wires the records-first process into your project's assistant
-      instructions, and leaves the <code>.working/</code> store for your review.</p>
-    <p>The machine-readable entry point it follows, an <a href="/llms.txt"><code>/llms.txt</code></a>
-      index, a machine-readable <a href="/adopt.md"><code>/adopt.md</code></a>, and a link on the root
-      page, lets an assistant find and follow the adoption steps. Adopting AIQT this way brings OPFiles
-      with it and migrates your existing operational files into the store; adopting OPFiles alone is
-      also supported.</p>
+    <p>On the assistant-driven path, ask for a plan naming what to create, import, or retire and how the
+      pieces fit together. Authorize the reviewed changes, then inspect the <code>.working/</code> store,
+      validation results, and the records-first instructions added to your project.</p>
+    <p>Provide the machine-readable <a href="/llms.txt"><code>/llms.txt</code></a> index and
+      <a href="/adopt.md"><code>/adopt.md</code></a> guide as starting material. If adopting AIQT,
+      include OPFiles and any existing operational files in the plan; review imports before applying
+      them. You can also adopt OPFiles alone.</p>
   </div>
 </section>
 
@@ -105,7 +102,7 @@
     <p class="lead">OPFiles names a standard command vocabulary; the <code>opf</code> reference CLI is
       one implementation of it. A base adopter can use their own tooling instead, or adopt by hand. The
       standard and the reference suite are both a draft, so this reference documents each command by
-      what it does at source today.</p>
+      what it does at source today, except where marked Planned.</p>
     <p>Every command shares one exit contract, which is what makes it usable as a commit or CI check:
       <b style="color:var(--ink)">0</b> clean, <b style="color:var(--ink)">1</b> a finding or drift, and
       <b style="color:var(--ink)">2</b> cannot-evaluate, a fail-closed "I could not tell" that is never
@@ -120,8 +117,8 @@
       <code>migrate</code>, <code>sync</code>, and <code>absorb</code>.</p>
 
     <h3 id="cmd-init"><code>opf init</code></h3>
-    <p><b style="color:var(--ink)">Purpose.</b> Create a fresh, validated store and its committed
-      pointer in a project that has none, without any git write and without rendering.</p>
+    <p><b style="color:var(--ink)">Purpose.</b> Create validated source documents and a
+      committed-store pointer for a project with no store, without git writes or rendering.</p>
     <p><b style="color:var(--ink)">How it works.</b> A read-only preflight runs first: it inspects the
       target for an existing store, an existing pointer, or foreign content already under
       <code>.working/</code>, and refuses rather than absorbing what it finds. It then builds the machine
@@ -132,7 +129,9 @@
     <p><b style="color:var(--ink)">Result.</b> A scaffolded store, a committed-store pointer, and a
       starter changelog if you had none, all left untracked for your review; <code>init</code> does not
       stage or commit them. See <a href="./core-files">core store files</a> for what the scaffold writes
-      into the manifest.</p>
+      into the manifest. Publication is create-only but not transactional: a later failure can leave
+      partial output for review. The initializer takes no lock or lease and does not serialize
+      concurrent writers; a successful scaffold is not a whole-store validity verdict.</p>
     <p class="refchips"><code>opf init</code> <code>opf init --root .</code></p>
 
     <h3 id="cmd-render"><code>opf render</code></h3>
@@ -145,12 +144,13 @@
       drifted, or cannot be evaluated, and writing nothing. <code>--write</code> gates on source integrity, not
       on the whole-store verdict: it gathers the git-derived observations, and a drifted or missing view is
       its output to regenerate rather than a reason to refuse, so it rewrites the declared views from their
-      sources. Only a source violation (a duplicate id, an untracked store, missing or malformed
-      observations, or an unreadable required input) refuses with exit 2 and writes nothing, printing the
-      source-attributed findings, so a write never reads as a silent no-op.</p>
-    <p><b style="color:var(--ink)">Result.</b> Under <code>--check</code>, a verdict and no change; under
-      <code>--write</code>, the regenerated view files on disk when source integrity holds, or no change
-      and a source-attributed report of why it withheld.</p>
+      sources. A source-integrity violation refuses with exit 2 before writing. Planning errors can
+      also refuse before writing; a later I/O failure can leave partial output and is reported.</p>
+    <p><b style="color:var(--ink)">Result.</b> Under <code>--check</code>, a verdict and no change.
+      Under <code>--write</code>, post-write validation checks source integrity and the regenerated
+      outputs. A disagreement triggers a rollback attempt and exit 2; an incomplete rollback is
+      reported. Other deliverable failures remain visible and can produce a nonzero exit after
+      successful regeneration.</p>
     <p class="refchips"><code>opf render --check</code> <code>opf render --write</code></p>
 
     <h3 id="cmd-doctor"><code>opf doctor</code></h3>
@@ -280,7 +280,7 @@
       hand-maintained files and its own checks. Adopting by hand gives you the records-first discipline
       today, and you can move to the reference tooling later without changing the store format.</p>
     <p>The shape of the manual path is short: create the store (either run <code>opf init</code> to
-      scaffold it, or write the files by hand from the templates below), commit it, run
+      scaffold it, or write the files from the specification and schemas), commit it, run
       <code>opf render --write</code> to generate the views, and then work records-first. Conformance you
       assert by hand is self-asserted, and you should say so wherever you claim it, because no validator
       has checked it for you yet. The steps below fill that in.</p>
@@ -360,10 +360,13 @@
     <h2>Working records-first</h2>
     <p>Treat the store as the source of truth: a decision, finding, or completion that is not
       recorded did not happen. Append a worklog entry per change; keep the backlog, findings, and
-      decisions in their typed files; and regenerate the views rather than editing them. Records
-      carry a typed envelope (an ID, type, status, title, timestamps read from the clock, an actor,
-      links, and captured references), IDs are never reused, and records are corrected before release
-      and frozen after it, superseded by new records that link the old rather than deleted.</p>
+      decisions in their typed files; and regenerate the views rather than editing them. Typed index
+      records carry an ID, type, status, title, timestamps, and an actor; links and captured references
+      are optional envelope fields. An importer may omit an unknown creation timestamp with provenance.
+      Capture references for claims that depend on external sources. IDs are never reused and records
+      are never deleted. Worklog entries may be corrected before their span is released and are frozen
+      afterward; post-release corrections are new linking entries. Other types follow their own
+      lifecycles: completion receipts and autonomous decisions are immutable from creation.</p>
   </div>
 </section>
 
@@ -374,8 +377,8 @@
     <p>At a release, record the release and the worklog span it covers as a <code>[[release]]</code>
       row in <code>version.toml</code>; draft the summary from that span; curate it by hand; publish
       it into <code>CHANGELOG.md</code>; and record the freeze digest for the published entry. Old
-      summaries can be rolled up into range summaries later, because the details always survive in the
-      worklog, so re-rolling or re-wording stays safe.</p>
+      summaries can be replaced by range summaries through the reviewed rollup flow; preserve the
+      underlying worklog entries and publication digests.</p>
   </div>
 </section>
 
@@ -388,8 +391,7 @@
       store is a hard failure, not a warning); that generated views match a fresh render; that worklog
       spans tile the released versions with no gap or overlap; and that the changelog range
       tiles every released version, with published entries unchanged since their recorded digest. These
-      are the checks the integrity layer performs when the tooling runs; asserting them by hand keeps
-      you honest in the meantime.</p>
+      are integrity checks specified by OPFiles. Record the scope and results of your manual checks.</p>
   </div>
 </section>
 

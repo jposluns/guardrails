@@ -131,8 +131,8 @@
       by default an AIQT adopter is an OPFiles adopter. If you arrived from
       <a href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer">aiqt.ai</a>, the store and
       release model described across this site is the same one the pack works.</p>
-    <p>The assistant-driven adoption flow also migrates your existing operational files
-      into the store; reviewed manual import runs through <code>opf import --apply</code>.</p>
+    <p>On the assistant-driven adoption path, include existing operational files in the reviewed
+      import plan; apply accepted manual imports through <code>opf import --apply</code>.</p>
   </div>
 </section>
 
@@ -142,14 +142,12 @@
     <h2>One repository, two entry points</h2>
     <p>A single repository, <code>github.com/jposluns/guardrails</code>, holds both. Its root is AIQT,
       which includes OPFiles, and standalone OPFiles lives at the <code>opf</code> path within it.
-      aiqt.ai maps to the repository root and opfiles.ai maps to the opf path, so the two sites are two
-      views of one source, not two products maintained apart.</p>
-    <p>Adopting OPFiles is what lets the guardrails run on structured records: the TOML carries the
-      input each process declares, which reduces ambiguity and the likelihood of errors, omissions,
-      and hallucinations, and can reduce the inference and token spend that go into reconstructing
-      context; net savings depend on the workflow and should be measured. Adopting AIQT brings the
-      OPFiles store by default; an adopter can instead take just the guardrail rules without the
-      OPFiles store, but that rules-only path misses these capabilities.</p>
+      This site documents the OPFiles subtree; the AIQT site documents the suite.</p>
+    <p>OPFiles provides structured TOML inputs for record-aware checks. The intended benefits include
+      less ambiguity, fewer errors and omissions, and less context reconstruction. This page supplies no
+      observed evaluation of those effects or of hallucination rates or token savings; measure them in
+      your workflow. The AIQT adoption path includes OPFiles by default. Taking only the guardrail
+      rules does not create an OPFiles store or run its record checks.</p>
   </div>
 </section>
 

@@ -82,12 +82,11 @@
       <li><b style="color:var(--ink)">The tracked-store check</b> confirms the store is a tracked git
         repository whose pointer, recorded sync target, and actual remote agree; it does not verify
         that the repository is backed up, accessible, or hosted anywhere in particular.</li>
-      <li><b style="color:var(--ink)">The single-writer lease</b> leaves a propagation window between
-        taking the lease and its reaching the sync target; the store-consistency divergence check is
-        the overlapping control that catches a collision in that window, and the two together, not the
-        lease alone, are the guard. The standard-level limit is that cross-system reconciliation
-        (opf sync) leaves a window in which a second system can begin before it observes the held
-        lease, and the divergence check detects the collision afterward.</li>
+      <li><b style="color:var(--ink)">The single-writer lease</b> has a propagation window in the
+        standard's cross-system contract: a second system may begin before observing the held lease.
+        The contract requires a divergence check to detect that collision afterward. These are
+        specified controls, not complete CLI coverage: <code>opf sync</code> is planned, and
+        <code>opf init</code> takes no lock or lease and does not serialize concurrent writers.</li>
       <li><b style="color:var(--ink)">A base tool</b> enforces only the base standard and the profiles
         it supports; a profile it does not support is recorded as present-but-unevaluated rather than
         failing base validation.</li>
