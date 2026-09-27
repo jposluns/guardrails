@@ -7,7 +7,7 @@ The shipped D2a behavior is identified as `opf.init.source-only/v1` and retains 
 
 Coupled init success (`opf.init.coupled/v1`) emits this exact wording:
 
-> opf init: at the final recorded observation, init-created sources have their validated bytes and modes and exact staged entries; initial views match those sources and remain unstaged; the whole store is VALID. Operation finalization and owned-lock release succeeded. No commit was created.
+> opf init: at the final recorded observation, init-created sources (each created by this operation or verified byte-identical to its recorded plan payload on resume) have their validated bytes and modes and exact staged entries; initial views match those sources and remain unstaged; the whole store is VALID. Operation finalization and owned-lock release succeeded. No commit was created.
 
 Exit 0 requires fresh observations supporting each assertion, including the required checker roster actually executing. Final store validation follows the last store write, including lease removal, while the outer mutex still excludes participating writers.
 
@@ -92,7 +92,7 @@ The plan requires discrete explicit sets for Sources (S), Views (V), Keep decisi
 
 ### Bootstrap Provenance
 
-The ratified managed provenance artifact is `.working/toml/init.toml`. It is a new managed store artifact and therefore rides a base-schema version bump with a tested `opf upgrade` route (OPF-SPEC section 9.2); no provenance is fabricated for existing D2a stores. Its `source_digest` is computed over an enumerated bootstrap source set that EXCLUDES `init.toml` itself; the outer plan digest is computed afterward.
+The ratified managed provenance artifact is `.working/toml/init.toml`. It is a new managed store artifact and therefore rides a base-schema version bump (base spec 1.2.0) with a tested `opf upgrade` route (OPF-SPEC section 9.2: a 1.1.0 store takes the spec_version bump alone); no provenance is fabricated for existing D2a stores. Its `source_digest` is computed over an enumerated bootstrap source set that EXCLUDES `init.toml` itself; the outer plan digest is computed afterward.
 
 ```text
 {

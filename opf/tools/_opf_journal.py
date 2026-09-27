@@ -1,4 +1,5 @@
-"""Capability-bound store journal API. No store writer uses it yet; writers keep their legacy homes.
+"""Capability-bound store journal API. Its first writer is the MIG-PR5 ingest promotion coordinator
+(publication attempts and the ingest writer lock); other writers keep their legacy homes.
 
 Homes-2 store writers must use this API for journal frames and terminal projections. Paths derive from
 kind and run identity; callers cannot choose a destination. Recovery opens existing state
@@ -153,3 +154,110 @@ def recover_transaction(cap, kind, run_id):
         result = _journal.recover(jr_fd, txn_dir, root_fd)
         _project(root_fd, jr_fd, txn_dir, kind, run_id)
         return result
+
+
+# --- publication attempts (MIG-PR5): one logical run, several journal attempts ---------------------------
+
+_ATTEMPT_MAX = 9999
+_ATTEMPT_HEADER_KEYS = frozenset(("kind", "run_id", "attempt", "operation_id"))
+
+
+def attempt_txn(kind, run_id, attempt):
+    """The journal transaction name of one publication attempt of a stable logical run. A retry after a
+    terminal rollback takes a fresh attempt; what the run reserved stays with the run, not the attempt."""
+    _opf_store.txn_record(kind, run_id)  # validate both identity components
+    if type(attempt) is not int or not 1 <= attempt <= _ATTEMPT_MAX:
+        raise _journal.JournalError("attempt must be an int in 1..{}".format(_ATTEMPT_MAX))
+    return "{}.a{:04d}".format(run_id, attempt)
+
+
+def _attempt_of(kind, run_id, name):
+    """The attempt number a journal entry names for this run, None for another run's entry. An entry
+    carrying this run's prefix in any other spelling is refused, never skipped."""
+    if name != run_id and not name.startswith(run_id + "."):
+        return None
+    suffix = name[len(run_id) + 2:] if name.startswith(run_id + ".a") else ""
+    if len(suffix) == 4 and suffix.isdigit() and suffix.isascii():
+        n = int(suffix)
+        if 1 <= n <= _ATTEMPT_MAX and attempt_txn(kind, run_id, n) == name:
+            return n
+    raise _journal.JournalError("journal entry {!r} is not an attempt of run {}".format(name, run_id))
+
+
+def attempt_states(cap, kind, run_id):
+    """{attempt: state} for every recorded publication attempt of a run, classified contained."""
+    with _opened(cap, kind, run_id, create=True) as (_root_fd, jr_fd, txn_dir):
+        states = {}
+        for entry in _journal._journal_txn_dirs(jr_fd, txn_dir.parent):
+            n = _attempt_of(kind, run_id, entry.name)
+            if n is not None:
+                states[n] = _journal.classify_state(jr_fd, entry)
+        return states
+
+
+def attempt_intent(cap, kind, run_id, attempt):
+    """The INTENT of a COMPLETE attempt, bound to its own identity; anything else refuses."""
+    txn = attempt_txn(kind, run_id, attempt)
+    with _opened(cap, kind, run_id, create=False) as (_root_fd, jr_fd, txn_dir):
+        path = txn_dir.parent / txn
+        if _journal.classify_state(jr_fd, path) != "complete":
+            raise _journal.JournalError("attempt {} is not complete".format(txn))
+        frames, _torn, _good = _journal.read_frames(jr_fd, path)
+        intent = _journal._first(frames, _journal.F_INTENT)
+        header = intent.get("header") if isinstance(intent, dict) else None
+        if not (isinstance(header, dict) and set(header) == _ATTEMPT_HEADER_KEYS
+                and intent.get("txn") == txn and header.get("kind") == kind
+                and header.get("run_id") == run_id and header.get("attempt") == attempt
+                and isinstance(header.get("operation_id"), str) and header["operation_id"]):
+            raise _journal.JournalError("attempt journal identity does not match {}".format(txn))
+        return intent
+
+
+def run_attempt_transaction(cap, kind, run_id, attempt, ops, staged_reader):
+    """Run one publication attempt under the held capability. No projection is written: the caller's
+    completion receipt is an operation of the same transaction, bound by its INTENT digest."""
+    txn = attempt_txn(kind, run_id, attempt)
+    _check_ordinary_ops(ops)
+    with _opened(cap, kind, run_id, create=True) as (root_fd, jr_fd, txn_dir):
+        header = dict(kind=kind, run_id=run_id, attempt=attempt, operation_id=cap.op_id)
+        return _journal.run_transaction(root_fd, jr_fd, txn_dir.parent, txn, header,
+                                        ops, staged_reader, cap.holder)
+
+
+def _writer_lock_root(cap, kind):
+    return Path(cap.store_root) / _opf_store.journal_root(kind)
+
+
+def acquire_writer_lock(cap, kind):
+    """Take the kind's _journal writer lock beneath the held capability (lock order: capability, then
+    journal). An existing lock refuses: breaking a stale one is recovery's step, not this call's."""
+    rel = _opf_store.journal_root(kind)
+    if not isinstance(cap, _opf_oplock.OpCapability):
+        raise _journal.JournalError("the journal writer lock requires a held OpCapability")
+    try:
+        _opf_init_substrate._require_live_capability(cap)
+    except _opf_init_substrate.InitSubstrateError as exc:
+        raise _journal.JournalError(str(exc))
+    try:
+        root_fd = _opf_store._open_root_fd(cap.store_root)
+    except (OSError, _opf_store.StoreError) as exc:
+        raise _journal.JournalError("cannot open store journal: {}".format(exc))
+    try:
+        _journal.ensure_journal_dirs(root_fd, rel)
+    finally:
+        _journal._close_fd_quietly(root_fd)
+    _journal.acquire_lock(_writer_lock_root(cap, kind), session_id=cap.holder)
+
+
+def writer_lock_held(cap, kind):
+    """Whether this process owns the kind's _journal writer lock while the capability is live."""
+    try:
+        _opf_init_substrate._require_live_capability(cap)
+        owner = _journal.read_lock_owner(_writer_lock_root(cap, kind))
+    except (_opf_init_substrate.InitSubstrateError, _journal.JournalError):
+        return False
+    return owner is not None and _journal._owner_is_current(owner)
+
+
+def release_writer_lock(cap, kind):
+    _journal.release_lock(_writer_lock_root(cap, kind))

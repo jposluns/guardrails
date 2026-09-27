@@ -91,7 +91,7 @@ Two roots organize every path in this standard:
 
 The homes-2 contract below is for `spec_version = "2.0.0"` and `[opf].homes = 2`.
 The current reference tooling reserves these names and implements their homes-2 boundary checks. It still
-supports `1.1.0` and initializes legacy homes (generation 1, with no `homes` key); writers retain their
+supports `1.2.0` and initializes legacy homes (generation 1, with no `homes` key); writers retain their
 legacy paths until homes 2 is activated, which requires the homes migration (`opf upgrade`) to be
 available. The section 9 manifest example
 continues to describe that legacy format. The homes-2 requirements in sections 4.2, 9.2, 12,
@@ -121,6 +121,7 @@ continues to describe that legacy format. The homes-2 requirements in sections 4
       version.toml                 # version and release ledger (section 6.1)
       worklog.toml                 # durable operational record (section 6.2)
       lease.toml                   # single-writer lease, present only while held (section 5.7)
+      init.toml                    # bootstrap provenance of a coupled init (section 9.2), if present
       backlog_item.index.toml      # typed record files (section 8)
       done.index.toml
       finding.index.toml
@@ -145,6 +146,7 @@ continues to describe that legacy format. The homes-2 requirements in sections 4
     journals/<kind>/               # reserved recovery state, never a view or ordinary op target
       journal/                    # crash-durable frames
       runs/<run-id>/transaction.toml # gate-readable projections
+      allocations/<run-id>.toml    # irrevocable ID reservations (section 8.2)
 ```
 
 When the store has been relocated, the `.working/` tree lives at the store repository root exactly
@@ -299,8 +301,8 @@ is ignored for enforcement and recorded as unevaluated, never treated as a base-
 Source files are lowercase; deliverables are uppercase.
 
 - Every file inside `.working/toml/` is lowercase: `manifest.toml`, `counters.toml`,
-  `version.toml`, `worklog.toml`, `lease.toml`, `<type>.index.toml`, `archive.toml`. The pointer
-  `.opf.toml` and its local override are lowercase machine source on the same terms.
+  `version.toml`, `worklog.toml`, `lease.toml`, `init.toml`, `<type>.index.toml`, `archive.toml`. The
+  pointer `.opf.toml` and its local override are lowercase machine source on the same terms.
 - Every generated deliverable at `.working/` top level, and the public deliverables at the
   product repository root (`CHANGELOG.md`, `VERSION`), is uppercase.
 
@@ -879,7 +881,7 @@ shape (the schema release that follows this specification is normative):
 
 [opf]
 standard = "opf"               # discovery token; exact value required
-spec_version = "1.1.0"         # OPFiles base spec version this store conforms to
+spec_version = "1.2.0"         # OPFiles base spec version this store conforms to
 layout = "inline"              # storage layout: "inline" or "per-record" (was layout_profile)
 posture = "required"           # "off", "warn", or "required" (section 11)
 import_status = "none"         # "none", "partial", or "complete"
@@ -1062,6 +1064,13 @@ high-water; and create each missing empty `*.index.toml` file for the three base
 that already exist (such as a `maintainer_decision.index.toml` where governance was enabled, whose
 records are preserved byte-for-byte). The upgrade weakens nothing: `preference_pattern` simply moves to
 always-on, so a populated decision-support index is kept as is.
+
+Base spec 1.2.0 admits one new managed machine-store file, `.working/toml/init.toml`: the bootstrap
+provenance a coupled `opf init` records (its format is frozen in OPF-INIT-D2B). It is a managed leaf
+when present and is never required, so a store without it stays valid. For the 1.1.0 to 1.2.0 upgrade
+the allowed delta is the `spec_version` bump alone: no provenance is created for an existing store
+(none is ever fabricated), and no other field, file, or counter changes. A 1.0.0 store takes the
+1.0.0 delta above directly to 1.2.0.
 
 ## 10. Views and deliverables
 
@@ -1246,7 +1255,7 @@ section fixes the posture the tooling must honour.
   evidence bundle at `.working/imported/import/<run-id>/`, preserving full bytes, identity, and digests.
   Destination durability and digest verification precede source removal; removal participates in the
   same recoverable transaction as record and view publication. Acceptance binds the removal action,
-  resolved roots, homes generation, plan digest, and inventory digest. A copy-preserving legacy
+  relative scope resolution, homes generation, plan digest, and inventory digest. A copy-preserving legacy
   acceptance never authorizes removal. A source outside the participating roots is a plan-time
   cannot-evaluate naming that source. Both staging and evidence are store-level areas beside the
   machine store, which carries TOML records only.
@@ -1275,6 +1284,59 @@ section fixes the posture the tooling must honour.
   requested operation, so it runs only against a resolved, initialized store; where no store is present
   the tooling reports that the store must be initialized first rather than treating the absence as
   not-applicable.
+
+Ingest review uses `opf.import.acceptance/v2`; ordinary fragment review retains
+`opf.import.acceptance/v1`. The v2 record retains the ordinary actor, timestamp, run, plan,
+inventory, fragment decisions, and reserved null signature, and adds an `ingest` object with
+`format = "opf.ingest.acceptance/v1"`, `binding`, and `units`.
+
+The binding includes the bundle format and digest, a full review-model digest, digests of
+`report.toml` and `IMPORT-REPORT.md`, the bundle's recomputed subordinate bindings, the intended
+homes generation (2), the constructed evidence home, and the source-removal action set.
+Scope resolution is relative to the participating roots; absolute host paths are not identity.
+Relocating a byte-identical store preserves acceptance. Changing a removal, destination, exemption,
+importer, worksheet, draft, proposal, loss entry, staged source, or counter invalidates it.
+The full model contains the frozen bundle, every staged file's recomputed digest, preserved source
+text, typed units, and removal actions. Its canonical bytes are ASCII JSON with sorted keys, compact separators,
+and one trailing newline. The model includes neither acceptance nor its own digest.
+Validation and hashing use the same bounded byte snapshot; the combined staged payload and the
+canonical model must each fit the contained store-read cap. Oversized reviews refuse explicitly.
+
+Each file requires an explicit disposition decision. Each migrate file also requires an explicit
+conversion decision carrying the exact importer, candidate records, proposal rows, and loss entry,
+including defaults and unresolved spans. Identity is the tuple `(kind, scope, source_path)`;
+display labels are not authority. No grouping or implicit accept-all is supported. Zero-result
+and unresolved conversions explicitly retain quarantine; review does not clear
+`migration_incomplete`. Fragment decisions remain independently required.
+
+The frozen bundle format is `opf-ingest-review-bundle-v2`. Each migrate row retains its validated
+`loss` entry. Review checks byte tiling, physical line ranges, proposal/span correspondence,
+and candidate references against staged source bytes without rerunning the importer.
+An older bundle requires a fresh plan from the original inputs; retain the old run as evidence.
+
+`opf import --review RUN --show-review` emits the validated model and an undecided schema-2
+template. Submit the template's object through `--decisions FILE --actor NAME`, after filling
+every decision. Interactive review collects the same decisions and compares the displayed
+binding again at submission. The timestamp is sampled at final composition, after input.
+A complete review containing rejects is successfully recorded and remains non-promotable.
+A reject cannot be relabelled as acceptance in the same run. A stale or malformed acceptance
+requires a fresh run; `--review NEW_RUN --diff-review OLD_RUN` compares recorded authority
+without copying decisions. If the old record is unreadable, the aid reports that limitation.
+
+Ingest acceptance is read and written only at
+`.working/imported/import/<run-id>/acceptance.json`, through the shared evidence-home constructor.
+The reference writer requires a validated homes-2 manifest and a provisioned evidence directory.
+Until layout migration and writer activation support that manifest, capture refuses; it does not
+create a durable home or fall back to staging. A staged acceptance copy remains an unexpected
+ingest artefact. An interrupted acceptance temp file in the durable home fails validation.
+
+A pre-rename failure preserves prior acceptance bytes. A post-rename directory-fsync failure
+reports the new record as installed with uncertain durability. The final verification-to-rename
+window and unsigned same-store writers remain outside the guarantee. Digests establish binding,
+not reviewer authenticity, importer authenticity, or semantic correctness. Review validates the
+frozen snapshot. Live source identity, destination collisions, exemption anchoring, locking,
+recoverable publication, and source removal require independent execution-time checks.
+Ingest apply still refuses before journal or lock creation, regardless of acceptance state.
 
 ### 14.2 Pre-existing files at the store location
 

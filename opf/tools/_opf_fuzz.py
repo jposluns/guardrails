@@ -293,7 +293,7 @@ def _worklog_entry(n, **over):
 
 
 VALID_MANIFEST = {
-    "opf": {"standard": "opf", "spec_version": "1.1.0", "layout": "inline",
+    "opf": {"standard": "opf", "spec_version": "1.2.0", "layout": "inline",
                    "posture": "required", "import_status": "none"},
     "store": {"sync_target": ""},
     "modules": {"governance": True, "operational_policy": True, "concurrent_operation": True},
@@ -305,7 +305,7 @@ VALID_MANIFEST = {
 # profile is ENFORCED (supported_profiles={"aiqt":[1]}), used to prove a malformed supported_profiles
 # never turns that INVALID into VALID.
 WEAKENING_MANIFEST = {
-    "opf": {"standard": "opf", "spec_version": "1.1.0", "layout": "inline",
+    "opf": {"standard": "opf", "spec_version": "1.2.0", "layout": "inline",
                    "posture": "required", "import_status": "none"},
     "store": {"sync_target": ""},
     "modules": {"governance": True, "operational_policy": True, "concurrent_operation": True},

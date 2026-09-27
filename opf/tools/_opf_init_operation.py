@@ -1,0 +1,3814 @@
+#!/usr/bin/env python3
+"""OPF coupled-init operation layer, slices PR3a and PR3b (library milestone VIEWS-READY).
+
+SENSITIVE-TIER, correctness-critical, stdlib-only, fail-closed, Linux/macOS. This module is the
+init operation layer's worktree mutation: it observes the explicit binding, plans the immutable
+operation, persists that plan before any worktree write, creates the store's directories and source
+files through a create-only, preserving journal, resumes an interrupted operation forward under its
+ORIGINAL operation id, deduplicates exact poststates, emits the managed bootstrap provenance
+(`.working/toml/init.toml`), and consumes a PINNED ancestral counters seed (B6) (PR3a); it then
+consumes the verified source state, obtains the initial views' exact bytes through the EXISTING
+read-only renderer planner (_opf_views.plan_views), and publishes them through the SAME preserving
+journal (PR3b). It is a LIBRARY milestone: it adds no CLI verb, stages nothing in the git index
+(PR5; the views remain untracked), and never reports coupled-init success (PR7). The opf init CLI
+retains the shipped base exit-0 store scaffolding; wiring it to init_operation and exposing
+coupled-init CLI milestones are deferred to PR7.
+
+The Architect's rulings it implements (PD-D2B-PR3-SCHEMA, decided 2026-09-24), by site:
+
+  1. Bootstrap capability. The shared mutex is taken first (_opf_oplock.acquire_init_operation, a
+     pre-store InitHolder: no control record, no lease); the plan and the directory journal are
+     persisted under it; the machine directory is created through the journal; only then is the
+     mandatory lease attached (attach_init_lease), minting an ordinary OpCapability. See
+     run_init_operation.
+  2. Resume identity. A retry resumes the original operation through the substrate's
+     resume_operation (an operation-bound handle over the existing record tree); the capability the
+     lease attach mints carries that operation's id from birth. No op id is mutated or fabricated.
+  3. Torn files. Every planned file is staged COMPLETE under its plan-recorded staging name,
+     fsynced, and read back, then published by link(2), which never replaces an existing name. A
+     destination holding anything but the exact planned bytes, mode, type, and single link, a
+     strict prefix included, is REFUSED and preserved, never repaired. A crash during plan or phase
+     publication is handled by the substrate's exact staging sweep and empty-operation discard.
+  4. Evidence layout and finalization. Effect journals and attempt outcomes live in the substrate's
+     sibling homes (opf-init/journals/, opf-init/outcomes/<op_id>/); the ops/<op_id>/ record shape is
+     unchanged. Durable completion is the `views-ready` milestone (PR3b; PR3a's `sources-ready` is
+     now the intermediate source-state milestone the views consume), recorded only after the lease
+     is detached (the last store write) and the final check has passed under the still-held mutex;
+     the mutex is then released. A crash before `views-ready` resumes; a release failure is a
+     finalization failure reported beside, never in place of, the primary outcome.
+  5. Plan and provenance. The provenance source_digest is sha256 over the canonical JSON of the
+     sorted (path, content-digest) roster EXCLUDING init.toml; init.toml is TOML through
+     _opf_emit.emit_checked; the plan_digest is sha256 over the canonical JSON of the plan WITHOUT
+     its plan_digest member. The base spec_version bump, init.toml's C-CONTAINMENT membership, and the
+     `opf upgrade` route live in _opf_store, _opf_check, and opf.py. A completed adoption is
+     re-validated for HEALTH (it may carry legitimate later edits); a partial operation is held to
+     BYTE-EXACT dedupe against its immutable plan.
+  6. Newest ancestral counters. The reader consumes ONE pinned evidence commit, which must lie on
+     the pinned HEAD's FIRST-PARENT line; a namespace the snapshot lacks is UNKNOWN (never zero) and
+     refuses the plan, as does a nonzero module-namespace high-water the new store cannot carry; no
+     maximum over history is taken. Selecting the commit is PR4's authority.
+  7. Activation. Library milestones only; no status here is a CLI exit 0. A completed-adoption
+     rerun takes and releases the lock and changes no adoption file and no index entry. Git
+     staging stays deferred to PR5.
+
+PR3b, the initial views (the plan of record's PR3b scope, under the same rulings):
+
+  - Roster. The plan's V set is the view roster the plan's OWN manifest payload declares (the pinned
+    initial set, every view store-scope at its spec destination `.working/<name>`, so never the root
+    VERSION), each with its mode, its source paths (members of S), and a plan-derived staging name.
+    The plan's versions pin the view generator (name, version, transform vocabulary, projection
+    schema), so a changed generator refuses a partial operation rather than publishing views under
+    its recorded plan. Completed-adoption health permits a well-formed recorded view identity.
+  - Payloads. After the source group has verified every source byte-exact to the plan and the
+    intermediate `sources-ready` milestone is recorded (the source-state check, lease held),
+    plan_init_views renders the views from the on-disk sources through _opf_views.plan_views, never
+    `opf render --write`, and refuses a planned roster other than V and any view whose do-not-edit
+    header does not bind the PLAN's source bytes (source/view correspondence). The exact bytes are a
+    function of the plan's source bytes and its pinned generator; the views journal INTENT binds each
+    view's size and digest durably before the first view is published, and a fresh render that
+    differs from it on resume refuses.
+  - Publication. apply_init_views publishes through the sources' own primitives (staged complete,
+    linked create-only, an exact poststate on resume deduplicated, anything else refused and
+    preserved, nothing overwritten or rolled back). Before the views intent exists every view
+    destination and staging name must be absent (a collision, identical bytes included, is never a
+    dedupe), and a view destination the git index tracks or stages refuses.
+  - Completion. The lease is detached after the view group; the final check re-verifies the sources,
+    the views, the exact .working tree, the provenance, the store resolution, and the counters,
+    re-runs the planner over the on-disk store and requires it to reproduce the published views, and
+    requires every view untracked; only then is `views-ready` (durable completion) recorded.
+
+Exit mapping for a later CLI (decision 7, recorded here so PR7 cannot drift): VIEWS-READY and
+ALREADY-INITIALIZED are library milestones and never map to coupled-init exit 0; exit 1 is reserved
+for a fully evaluated, NON-mutating assessment that reports findings; every REFUSED, FAILED, or
+CANNOT-EVALUATE result maps to exit 2.
+
+DISCLOSED RESIDUALS: the git ignore-eligibility preflight D2a runs is not repeated here (it is a
+staging precondition, PR5); the adoption observer that distinguishes a first adoption from a
+committed deletion is PR4, so this layer refuses an existing store it did not itself record; a
+same-uid writer racing the held mutex can still change a destination between the final check and a
+later reader (the lock is advisory; OS isolation is SYSTEM-HARDENING's); a byte-identical file a
+foreign writer plants after the intent is recorded is accepted as a dedupe (its content is exactly
+the plan's); a renderer change that keeps the pinned generator identity and lands before the views
+intent is recorded is indistinguishable from the pinned generator (the intent binds the bytes from
+then on); the views are rendered after the sources are verified, so a same-uid writer changing a
+source in between is caught by the header correspondence check and the final re-render, not
+prevented; an operation recorded by the PR3a generator (opf.init.d2b-pr3a/1, never CLI-exposed) is
+refused as a changed generator, not migrated; the durability claim is fsync-based and verified only
+against process death, not power loss; rendered views intentionally share MAX_SOURCE_BYTES' 1 MiB
+per-file ceiling, so an aggregate view can refuse even when each source fits (this bootstrap layer
+does not promise arbitrary-size projections); completed-adoption health checks current sources,
+not current views: C-VIEW-DRIFT is excluded, so deleted, edited, or staged views alone do not prevent
+ALREADY-INITIALIZED, which neither repairs views nor certifies their currency; COMPLETE frames
+record poststates, not per-path creation outcomes, so a resumed COMPLETE group reports every path
+(directories, sources, and views) as deduplicated/verified-identical even if an earlier attempt
+created it; this is attempt-local verification, not cumulative creation accounting; everything the
+composed modules disclose applies unchanged.
+
+Run: python3 -I -B opf/tools/_opf_init_operation.py --self-test
+Exit: 0 self-test clean; 1 self-test failure; 2 refused precondition (no git binary or containment
+primitive), never a clean skip.
+"""
+import base64
+import binascii
+import datetime
+import hashlib
+import json
+import os
+import re
+import shutil
+import stat
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _containment        # noqa: E402
+import _journal            # noqa: E402
+import _opf_check          # noqa: E402
+import _opf_emit           # noqa: E402
+import _opf_init           # noqa: E402
+import _opf_init_contract  # noqa: E402
+import _opf_init_substrate  # noqa: E402
+import _opf_init_observe   # noqa: E402
+import _opf_observe        # noqa: E402
+import _opf_oplock         # noqa: E402
+import _opf_store          # noqa: E402
+import _opf_views          # noqa: E402
+from _opf_schema import SUPPORTED_SCHEMA, validate_counters, high_water  # noqa: E402
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    raise SystemExit("error: opf/tools/_opf_init_operation.py requires Python 3.11+ (tomllib)")
+
+# The frozen managed provenance artifact (OPF-INIT-D2B.md "Bootstrap Provenance").
+PROVENANCE_FORMAT = "opf.init.bootstrap/v1"
+PROVENANCE_TOP_KEYS = frozenset((
+    "schema", "format", "spec_version", "operation_id", "binding", "head", "first_adoption",
+    "inventory_digest", "acceptance", "source_set", "source_digest"))
+_SCHEMA = 1
+
+# The store-relative machine home and the provenance file's own path (EXCLUDED from its own source
+# digest; OPF-INIT-D2B.md). Derived from the resolver constants so this module cannot drift from the
+# store layout the validator enforces.
+_MACHINE_HOME = "{}/{}".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
+PROVENANCE_NAME = _opf_check.INIT_PROVENANCE_NAME
+PROVENANCE_RELPATH = "{}/{}".format(_MACHINE_HOME, PROVENANCE_NAME)
+CHANGELOG_RELPATH = "CHANGELOG.md"
+_CHANGELOG_PAYLOAD = b"# Changelog\n"
+LEASE_RELPATH = "{}/{}".format(_MACHINE_HOME, _opf_check.LEASE_NAME)
+
+# The enumerated bootstrap SOURCE roster (store-relative), EXCLUDING init.toml. Derived from the D1
+# builders (_opf_init) and the resolver so the roster cannot drift: the pointer, the four machine
+# ledgers, and one index per non-worklog baseline type (a worklog is a ledger with no index). CHANGELOG.md
+# is a source only when the approved plan creates it (an existing changelog is preserved-existing), so it
+# is NOT a member of the fixed roster; a caller that creates it adds it to the payload set explicitly.
+_MACHINE_LEDGERS = ("manifest.toml", "counters.toml", "version.toml", "worklog.toml")
+_INDEX_TYPES = tuple(sorted(set(_opf_store.BASELINE_TYPES) - {"worklog"}))
+BOOTSTRAP_SOURCE_ROSTER = tuple(sorted(
+    (_opf_store.POINTER_REL,)
+    + tuple("{}/{}".format(_MACHINE_HOME, name) for name in _MACHINE_LEDGERS)
+    + tuple("{}/{}.index.toml".format(_MACHINE_HOME, t) for t in _INDEX_TYPES)))
+COUNTERS_RELPATH = "{}/{}".format(_MACHINE_HOME, _opf_check.COUNTERS_NAME)
+_MANIFEST_RELPATH = "{}/{}".format(_MACHINE_HOME, _opf_store.MANIFEST_NAME)
+
+_OP_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
+_SHA1_RE = re.compile(r"[0-9a-f]{40}\Z")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+_UTC_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
+_UTC_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+_MAX_HIGH_WATER = (1 << 63) - 1   # the TOML integer range a counters ledger can carry
+
+# Validation result statuses (a well-formed-and-matching provenance vs anything else; there is no
+# cannot-evaluate external-context state at this layer, unlike the Keep validator).
+VALID = "VALID"
+INVALID = "INVALID"
+
+# --- the PR3a plan contract (decision 5; the frozen opf.init.plan/v1 top-level shape is kept) --------
+OPERATION = _opf_init_substrate.PLAN_OPERATION
+INIT_GENERATOR = "opf.init.d2b-pr3b/1"
+SOURCE_MODE = 0o644
+VIEW_MODE = 0o644
+DIR_MODE = 0o755
+PERMITTED_DIRECTORIES = (_opf_store.WORKING_DIRNAME, _MACHINE_HOME)
+PLAN_SET_KEYS = frozenset(("S", "V", "K", "E", "C"))
+_S_KEYS = frozenset(("path", "mode", "size", "digest", "payload", "staging"))
+_E_KEYS = frozenset(("path", "mode", "size", "digest"))
+_V_KEYS = frozenset(("path", "view", "kind", "mode", "sources", "staging"))
+# The source-state roster (checked at `sources-ready`) followed by the view legs (at `views-ready`).
+_SOURCE_CHECKS = ("source-poststate", "working-inventory", "provenance", "manifest-resolves",
+                  "counters")
+REQUIRED_CHECKS = _SOURCE_CHECKS + ("view-poststate", "view-correspondence", "views-unstaged")
+PUBLICATION_BOUNDARIES = {"milestone": "VIEWS-READY", "views": "unstaged",
+                          "index": "deferred-pr5", "commit": "never"}
+RECOVERY_POLICY = "resume-forward-preserve"
+ACCEPTANCE_NONE = {"present": False}
+MAX_SOURCE_BYTES = 1 << 20  # Also the intentional per-view ceiling; see DISCLOSED RESIDUALS.
+_STAGE_MARKER = ".opf-init-stage-"
+
+# The closed, ordered milestone vocabulary (plan step 4). Each milestone is recorded AT MOST ONCE and
+# only in this order, so a retry never re-appends a milestone and the 128-record phase bound is never
+# consumed by retries (attempt diagnostics go to the separately bounded outcomes home).
+PHASES = ("plan-recorded", "dirs-intent", "dirs-verified", "sources-intent", "sources-verified",
+          "sources-ready", "views-intent", "views-verified", "views-ready")
+MILESTONE = "VIEWS-READY"
+
+# Result statuses. SOURCES-READY names the intermediate source-state milestone the views consume; it
+# is recorded as the `sources-ready` phase and is never a result status.
+SOURCES_READY = "SOURCES-READY"
+VIEWS_READY = "VIEWS-READY"
+ALREADY_INITIALIZED = "ALREADY-INITIALIZED"
+REFUSED = "REFUSED"
+FAILED = "FAILED"
+CANNOT_EVALUATE = "CANNOT-EVALUATE"
+
+
+class InitOperationError(Exception):
+    """A fail-closed init-operation error. `code` is REFUSED (a precondition or a conflict, nothing
+    mutated by this attempt beyond what is reported), FAILED (a mutation step failed; the evidence is
+    preserved), or CANNOT-EVALUATE (an input could not be read or answered)."""
+
+    def __init__(self, message, code=REFUSED):
+        super().__init__(message)
+        self.code = code
+
+
+class ProvenanceValidation:
+    """status in {VALID, INVALID}; findings an ordered tuple of (code, location, detail); model set
+    only on VALID. Never raised for untrusted `raw` input."""
+    __slots__ = ("status", "findings", "model")
+
+    def __init__(self, status, findings, model):
+        self.status = status
+        self.findings = findings
+        self.model = model
+
+
+class AncestralSeed:
+    """A validated, pinned ancestral counters seed (B6): `counters` is the {namespace: high-water}
+    map of the store roster namespaces the snapshot carries; `unknown` the sorted roster namespaces
+    it LACKS (unknown, never zero); `module_counters` the module-tier namespaces it carries (which a
+    new store with its modules disabled cannot hold); and `evidence` pins the commit oid, the blob
+    oid, the store-relative counters path, and the sha256 content digest of the exact bytes."""
+    __slots__ = ("counters", "unknown", "module_counters", "evidence")
+
+    def __init__(self, counters, unknown, module_counters, evidence):
+        self.counters = counters
+        self.unknown = unknown
+        self.module_counters = module_counters
+        self.evidence = evidence
+
+
+class InitResult:
+    """The structured outcome of one run_init_operation call (never an exit code; see the module
+    docstring for the decision-7 mapping). `status` is one of VIEWS-READY, ALREADY-INITIALIZED,
+    REFUSED, FAILED, CANNOT-EVALUATE. `created` and `deduplicated` name the planned paths this
+    attempt created or found byte-identical to the plan on resume; `conflicts` the preserved
+    destinations that refused; `primary_failure` the first failure (code, detail) or None;
+    `finalization_failures` every later release, outcome, or close failure, kept separately."""
+    __slots__ = ("status", "operation_id", "plan_digest", "milestone", "created", "deduplicated",
+                 "conflicts", "notes", "primary_failure", "finalization_failures", "phases")
+
+    def __init__(self):
+        self.status = CANNOT_EVALUATE
+        self.operation_id = None
+        self.plan_digest = None
+        self.milestone = None
+        self.created = []
+        self.deduplicated = []
+        self.conflicts = []
+        self.notes = []
+        self.primary_failure = None
+        self.finalization_failures = []
+        self.phases = ()
+
+
+# --- the source-digest basis (init.toml excluded) -------------------------------------------------
+
+
+def _oid_ok(oid, object_format):
+    if type(oid) is not str:
+        return False
+    return bool((_SHA1_RE if object_format == "sha1" else _SHA256_RE).match(oid))
+
+
+def _bad_source_path(path):
+    """Reason if `path` is not an acceptable store-relative bootstrap source path (canonical relative,
+    below-root, and NOT the provenance file itself), else None. init.toml is excluded from its own
+    source digest, so it is never a member of the source set."""
+    reason = _opf_init_contract._bad_relpath(path)
+    if reason is not None:
+        return reason
+    if path == PROVENANCE_RELPATH:
+        return "the provenance artifact {!r} is excluded from its own source digest".format(
+            PROVENANCE_RELPATH)
+    return None
+
+
+def compute_bootstrap_source_digest(source_payloads):
+    """Return (source_set, source_digest) over the enumerated bootstrap source set EXCLUDING init.toml.
+
+    `source_payloads` is a mapping {store-relative-path: bytes}. Every path is a canonical below-root
+    relative path and NONE may be the provenance artifact itself (`.working/toml/init.toml`): init.toml
+    is excluded from its own source digest, so passing it is a refusal, not a silent inclusion. The
+    digest basis is a sha256 over the canonical JSON of the sorted (path, content-digest) roster, so it
+    binds each source's exact identity and content; `source_set` is that sorted path roster. Fail-closed:
+    a non-mapping, a non-bytes payload, a malformed path, or the provenance file present each raise
+    InitOperationError (guard-input-soundness; the digest is only as sound as its enumerated input)."""
+    if type(source_payloads) is not dict:
+        raise InitOperationError("source_payloads must be a mapping of store-relative path -> bytes")
+    pairs = []
+    for path in sorted(source_payloads):
+        reason = _bad_source_path(path)
+        if reason is not None:
+            raise InitOperationError("source path {!r}: {}".format(path, reason))
+        payload = source_payloads[path]
+        if type(payload) is not bytes:
+            raise InitOperationError("source payload for {!r} must be bytes".format(path))
+        pairs.append([path, _opf_init_contract._digest(payload)])
+    source_set = [p for p, _dig in pairs]
+    basis = _opf_init_contract.canonical_json_bytes(pairs)
+    return source_set, _opf_init_contract._digest(basis)
+
+
+# --- the managed bootstrap provenance (opf.init.bootstrap/v1) --------------------------------------
+
+
+def _bad_plan_basis(basis):
+    """Reason if `basis` is not a well-formed provenance plan basis, else None. Structural (never merely
+    equal to a trusted context): the scalar identity fields, the Binding, and the HEAD union are each
+    validated through the D2b contract's own validators."""
+    if type(basis) is not dict or set(basis.keys()) != {
+        "spec_version", "operation_id", "binding", "head", "first_adoption",
+        "inventory_digest", "acceptance",
+    }:
+        return "plan basis keys"
+    if type(basis["spec_version"]) is not str \
+            or _opf_init_contract._bad_string(basis["spec_version"],
+                                              _opf_init_contract.MAX_STRING_BYTES) is not None:
+        return "spec_version must be a bounded string"
+    if type(basis["operation_id"]) is not str or not _OP_ID_RE.match(basis["operation_id"]):
+        return "operation_id is not a well-formed operation id"
+    reason = _opf_init_contract._bad_binding(basis["binding"])
+    if reason is not None:
+        return "binding: " + reason
+    reason = _opf_init_contract._bad_head(basis["head"], basis["binding"]["object_format"])
+    if reason is not None:
+        return "head: " + reason
+    if type(basis["first_adoption"]) is not bool:
+        return "first_adoption must be a boolean"
+    dig = basis["inventory_digest"]
+    if type(dig) is not str or not _opf_init_contract._DIGEST_RE.match(dig):
+        return "inventory_digest must be sha256:<64 hex>"
+    if type(basis["acceptance"]) is not dict:
+        return "acceptance must be a table"
+    return None
+
+
+def build_bootstrap_provenance(plan_basis, source_payloads):
+    """Build the frozen `opf.init.bootstrap/v1` managed provenance TOML (`.working/toml/init.toml`).
+
+    `plan_basis` carries the already-observed scalar identity fields, Binding, and HEAD; `source_payloads`
+    is the {store-relative-path: bytes} bootstrap source set (init.toml excluded). The `source_digest` is
+    computed over that source set EXCLUDING init.toml (compute_bootstrap_source_digest); the document is
+    emitted through the staging contract (_opf_emit.emit_checked, which reparses and round-trip-proves the
+    TOML) and then re-validated through validate_bootstrap_provenance, so nothing that does not reparse or
+    does not match its own recomputed digest is ever returned. Fail-closed: a malformed basis or source
+    set raises InitOperationError (never a silent degraded artifact)."""
+    reason = _bad_plan_basis(plan_basis)
+    if reason is not None:
+        raise InitOperationError("provenance plan basis invalid: {}".format(reason))
+    source_set, source_digest = compute_bootstrap_source_digest(source_payloads)
+    document = {
+        "schema": _SCHEMA,
+        "format": PROVENANCE_FORMAT,
+        "spec_version": plan_basis["spec_version"],
+        "operation_id": plan_basis["operation_id"],
+        "binding": plan_basis["binding"],
+        "head": plan_basis["head"],
+        "first_adoption": plan_basis["first_adoption"],
+        "inventory_digest": plan_basis["inventory_digest"],
+        "acceptance": plan_basis["acceptance"],
+        "source_set": source_set,
+        "source_digest": source_digest,
+    }
+    try:
+        text = _opf_emit.emit_checked(document)
+    except _opf_emit.EmitError as exc:
+        raise InitOperationError("provenance did not round-trip through the staging contract "
+                                 "({}); fail-closed".format(exc))
+    check = validate_bootstrap_provenance(text.encode("utf-8"),
+                                          expected_basis=plan_basis,
+                                          expected_source_digest=source_digest,
+                                          expected_source_set=source_set)
+    if check.status != VALID:
+        raise InitOperationError("built provenance failed its own re-validation: {}".format(
+            check.findings))
+    return text
+
+
+def validate_bootstrap_provenance(raw, *, expected_basis=None, expected_source_digest=None,
+                                  expected_source_set=None):
+    """Validate serialized `opf.init.bootstrap/v1` provenance bytes. Pure and NEVER raises for the
+    untrusted `raw`: every malformed input resolves to an INVALID ProvenanceValidation.
+
+    Structural validation covers the exact top-level key set, schema/format markers, the scalar identity
+    fields, the Binding and HEAD unions (through the D2b contract validators), the acceptance table, and
+    the source_set / source_digest grammar (the source set is a sorted, unique roster of below-root
+    relative paths that NEVER contains the provenance file itself). When the operation layer re-supplies
+    the live re-observation (`expected_basis`, `expected_source_digest`, `expected_source_set`), a
+    provenance whose bound identity, source set, or source digest does not match is INVALID: this is how
+    a FORGED or STALE provenance (right shape, wrong bound state) is rejected rather than trusted."""
+    if type(raw) is not bytes:
+        return _pv(INVALID, "TYPE", "raw", "bytes required")
+    if len(raw) > _opf_init_contract.MAX_RAW_BYTES:
+        return _pv(INVALID, "LIMIT", "raw", "exceeds raw bytes limit")
+    try:
+        model = tomllib.loads(raw.decode("utf-8", errors="strict"))
+    except UnicodeDecodeError:
+        return _pv(INVALID, "ENCODING", "raw", "invalid UTF-8")
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+        return _pv(INVALID, "PARSE", "raw", "not TOML ({})".format(exc))
+    if type(model) is not dict:
+        return _pv(INVALID, "TYPE", "root", "must be a table")
+    if set(model.keys()) != set(PROVENANCE_TOP_KEYS):
+        return _pv(INVALID, "SCHEMA", "root", "exact top-level keys required")
+    if type(model["schema"]) is not int or model["schema"] != _SCHEMA:
+        return _pv(INVALID, "SCHEMA", "schema", "must be integer {}".format(_SCHEMA))
+    if model["format"] != PROVENANCE_FORMAT:
+        return _pv(INVALID, "SCHEMA", "format", "must equal {!r}".format(PROVENANCE_FORMAT))
+    if type(model["spec_version"]) is not str \
+            or _opf_init_contract._bad_string(model["spec_version"],
+                                              _opf_init_contract.MAX_STRING_BYTES) is not None:
+        return _pv(INVALID, "SCHEMA", "spec_version", "must be a bounded string")
+    if type(model["operation_id"]) is not str or not _OP_ID_RE.match(model["operation_id"]):
+        return _pv(INVALID, "SCHEMA", "operation_id", "not a well-formed operation id")
+    reason = _opf_init_contract._bad_binding(model["binding"])
+    if reason is not None:
+        return _pv(INVALID, "SCHEMA", "binding", reason)
+    reason = _opf_init_contract._bad_head(model["head"], model["binding"]["object_format"])
+    if reason is not None:
+        return _pv(INVALID, "SCHEMA", "head", reason)
+    if type(model["first_adoption"]) is not bool:
+        return _pv(INVALID, "SCHEMA", "first_adoption", "must be a boolean")
+    if type(model["inventory_digest"]) is not str \
+            or not _opf_init_contract._DIGEST_RE.match(model["inventory_digest"]):
+        return _pv(INVALID, "SCHEMA", "inventory_digest", "must be sha256:<64 hex>")
+    if type(model["acceptance"]) is not dict:
+        return _pv(INVALID, "SCHEMA", "acceptance", "must be a table")
+    src = model["source_set"]
+    if type(src) is not list:
+        return _pv(INVALID, "SCHEMA", "source_set", "must be a list")
+    prev = None
+    for i, path in enumerate(src):
+        loc = "source_set[{}]".format(i)
+        reason = _bad_source_path(path) if type(path) is str else "exact string required"
+        if reason is not None:
+            return _pv(INVALID, "SCHEMA", loc, reason)
+        if prev is not None and path <= prev:
+            return _pv(INVALID, "ORDER", "source_set", "not strictly increasing (sorted, unique)")
+        prev = path
+    if type(model["source_digest"]) is not str \
+            or not _opf_init_contract._DIGEST_RE.match(model["source_digest"]):
+        return _pv(INVALID, "SCHEMA", "source_digest", "must be sha256:<64 hex>")
+
+    # Forged / stale rejection: when the live re-observation is supplied, the provenance's bound state
+    # must match it exactly. A right-shaped provenance with the wrong bound identity, source set, or
+    # source digest is INVALID, never trusted.
+    if expected_basis is not None:
+        if _bad_plan_basis(expected_basis) is not None:
+            return _pv(INVALID, "CONTEXT", "expected_basis", "malformed expected basis")
+        for key in ("spec_version", "operation_id", "binding", "head", "first_adoption",
+                    "inventory_digest", "acceptance"):
+            if model[key] != expected_basis[key]:
+                return _pv(INVALID, "STALE", key, "does not match the observed basis")
+    if expected_source_set is not None and src != list(expected_source_set):
+        return _pv(INVALID, "STALE", "source_set", "does not match the observed source set")
+    if expected_source_digest is not None and model["source_digest"] != expected_source_digest:
+        return _pv(INVALID, "STALE", "source_digest", "does not match the recomputed source digest")
+    return ProvenanceValidation(VALID, (), model)
+
+
+def _pv(status, code, location, detail):
+    return ProvenanceValidation(status, ((code, location, detail),), None)
+
+
+# --- B6: read a PINNED ancestral counters seed through the hardened git surface --------------------
+
+
+def _roster_namespaces():
+    """(baseline, importer, module) namespace sets, derived from the store vocabulary."""
+    baseline = frozenset(_opf_store.BASELINE_TYPES.values())
+    importer = frozenset(_opf_store.IMPORTER_TYPES.values())
+    module = frozenset(ns for ns, _mod in _opf_store.MODULE_TYPES.values())
+    return baseline, importer, module
+
+
+def read_ancestral_counter_seed(store_root, *, pinned_head, evidence_commit, prefix, object_format,
+                                git=None, max_first_parent=10000):
+    """Read and validate the PINNED ancestral counters seed (B6). Returns an AncestralSeed or raises
+    InitOperationError.
+
+    The shared reader refuses a present or unreadable graft entry, suppresses commit-graph
+    reads, and bounds subprocess output while reading. It does not establish adoption qualification.
+
+    Reads `<evidence_commit>:<prefix>/.working/toml/counters.toml` through the hardened, allowlist-
+    scrubbed, no-replace-objects, no-lazy-fetch `_opf_observe._run_git` surface, then:
+      - verifies the exact object identities and types of the supplied full commit OIDs;
+      - verifies the evidence lies on the pinned head's FIRST-PARENT line (decision 6: the newest
+        qualifying copy is chosen on the first-parent main line, so a commit reachable only through a
+        merge's second parent is refused), using bounded raw-parent traversal; a shallow
+        or truncated history that does not reach it cannot prove the ancestry and refuses;
+      - resolves the counters blob's object id at that path and reads exactly that blob;
+      - validates the TOML, schema, and namespace/value constraints (validate_counters), accepting
+        exactly the store roster and module-tier namespaces;
+      - returns the roster high-waters it carries, the roster namespaces it LACKS as `unknown` (never
+        a zero), the module-tier high-waters as `module_counters`, and commit / blob / path /
+        content-digest evidence.
+
+    REFUSES an unavailable, malformed, off-line, or unprovable seed and NEVER falls back to an older
+    readable candidate, to a maximum over history, or to silent zeros. SELECTION of the newest
+    qualifying ancestor is PR4's authority: this consumes the single pinned commit it is given."""
+    if object_format not in ("sha1", "sha256"):
+        raise InitOperationError("object_format must be 'sha1' or 'sha256'")
+    if not _oid_ok(pinned_head, object_format):
+        raise InitOperationError("pinned_head is not a well-formed {} object id".format(object_format))
+    if not _oid_ok(evidence_commit, object_format):
+        raise InitOperationError("evidence_commit is not a well-formed {} object id".format(
+            object_format))
+    if type(prefix) is not str:
+        raise InitOperationError("prefix must be a string ('' for the repository root)")
+    if prefix != "" and _opf_init_contract._bad_relpath(prefix) is not None:
+        raise InitOperationError("prefix is not a canonical below-root relative path")
+    if type(max_first_parent) is not int or max_first_parent < 1:
+        raise InitOperationError("max_first_parent must be a positive integer", CANNOT_EVALUATE)
+    git = git or _opf_observe._git_path()
+    if git is None:
+        raise InitOperationError("git binary not found; the ancestral counters seed cannot be read",
+                                 CANNOT_EVALUATE)
+
+    try:
+        blob, pinned = _opf_init_observe.read_seed_basis(
+            store_root, git=git, pinned_head=pinned_head,
+            evidence_commit=evidence_commit, prefix=prefix,
+            object_format=object_format, max_first_parent=max_first_parent)
+    except _opf_init_observe.ObservationError as exc:
+        code = CANNOT_EVALUATE if exc.code == _opf_init_observe.CANNOT_EVALUATE else REFUSED
+        raise InitOperationError("{}: {}".format(exc.input_name, exc.detail), code) from exc
+    evidence_oid = pinned["commit"]
+    blob_oid = pinned["blob"]
+    counters_path = pinned["path"]
+    content_digest = pinned["content_digest"]
+
+    try:
+        parsed = tomllib.loads(blob.decode("utf-8", errors="strict"))
+    except UnicodeDecodeError:
+        raise InitOperationError("ancestral counters blob is not decodable UTF-8; refusing")
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+        raise InitOperationError("ancestral counters blob is not valid TOML ({}); refusing".format(exc))
+
+    baseline, importer, module = _roster_namespaces()
+    # known_namespaces is EMPTY: no namespace is REQUIRED here, because a namespace the snapshot lacks
+    # is reported as UNKNOWN below rather than as a malformed seed; every namespace outside the roster
+    # and the module tier is still refused, and every value is still type-checked.
+    values, findings = validate_counters(parsed, known_namespaces=frozenset(),
+                                         optional_namespaces=baseline | importer | module)
+    if findings:
+        raise InitOperationError("ancestral counters are malformed ({}); refusing rather than falling "
+                                 "back to zeros or an older candidate".format(findings))
+    oversized = sorted(ns for ns, v in values.items() if v > _MAX_HIGH_WATER)
+    if oversized:
+        raise InitOperationError("ancestral counters {} exceed the TOML 64-bit integer range; "
+                                 "refusing".format(", ".join(oversized)))
+    counters = {ns: v for ns, v in values.items() if ns in baseline | importer}
+    unknown = tuple(sorted((baseline | importer) - set(counters)))
+    module_counters = {ns: v for ns, v in values.items() if ns in module}
+    evidence = {
+        "commit": evidence_oid,
+        "blob": blob_oid,
+        "path": counters_path,
+        "content_digest": content_digest,
+    }
+    return AncestralSeed(counters, unknown, module_counters, evidence)
+
+
+def seed_permanence_refusal(seed):
+    """The reason an ancestral seed cannot support the permanence claim (decision 6), or None: a
+    roster namespace the snapshot lacks is UNKNOWN and never becomes a zero; a NONZERO module-tier
+    high-water would be dropped by a new store whose modules are disabled, so a later re-enable
+    could reallocate its identifiers."""
+    if seed.unknown:
+        return ("the ancestral counters snapshot {} lacks namespace(s) {}; a missing historical "
+                "high-water is UNKNOWN, never zero, so the snapshot cannot support the permanence "
+                "claim".format(seed.evidence["commit"], ", ".join(seed.unknown)))
+    lost = sorted(ns for ns, v in seed.module_counters.items() if v != 0)
+    if lost:
+        return ("the ancestral counters snapshot {} carries nonzero module-tier high-water(s) {} a "
+                "new store with its modules disabled cannot hold; re-adopting would let a later "
+                "re-enable reuse those identifiers".format(
+                    seed.evidence["commit"],
+                    ", ".join("{}={}".format(ns, seed.module_counters[ns]) for ns in lost)))
+    return None
+
+
+# --- observation: the explicit binding, HEAD, and the .working inventory (plan step 1) ---------------
+
+
+def _abs_root(product_root):
+    """The explicit, absolute, NUL-free product root (a control parameter, validated, never coerced,
+    never resolved through a symlink or an ambient working directory)."""
+    if not isinstance(product_root, (str, os.PathLike)):
+        raise InitOperationError("product root must be a path")
+    root = os.fspath(product_root)
+    if type(root) is not str or not root or "\x00" in root or not os.path.isabs(root):
+        raise InitOperationError("product root must be an absolute, NUL-free path, not {!r}".format(
+            root))
+    return os.path.abspath(root)
+
+
+def _git_lines(git, root, args, count):
+    """Run a read-only git observation and return exactly `count` newline-terminated lines, strict
+    UTF-8; anything else is a CANNOT-EVALUATE refusal."""
+    out = _opf_observe._run_git(git, root, args)
+    if not out.completed or out.rc != 0:
+        raise InitOperationError("git {} could not observe {} ({})".format(
+            args[0], root, out.err.strip()), CANNOT_EVALUATE)
+    try:
+        text = out.out.decode("utf-8", "strict")
+    except UnicodeDecodeError:
+        raise InitOperationError("git {} returned undecodable output".format(args[0]),
+                                 CANNOT_EVALUATE)
+    lines = text.split("\n")
+    if len(lines) != count + 1 or lines[-1] != "":
+        raise InitOperationError("git {} returned an unexpected line count".format(args[0]),
+                                 CANNOT_EVALUATE)
+    return lines[:-1]
+
+
+def _location(path, what):
+    """The contract Location {path, identity} of an absolute directory, opened by the no-follow
+    walk (a symlinked component refuses)."""
+    try:
+        fd = _opf_store._open_dir_nofollow(path)
+    except OSError as exc:
+        raise InitOperationError("cannot open {} {} no-follow ({})".format(what, path, exc),
+                                 CANNOT_EVALUATE)
+    try:
+        st = os.fstat(fd)
+    finally:
+        os.close(fd)
+    return {"path": path, "identity": {"device": st.st_dev, "inode": st.st_ino}}
+
+
+def observe_binding(product_root, git=None):
+    """Observe the explicit D2b Binding and HEAD of `product_root` through the hardened git surface
+    (scrubbed environment, no replacement objects, no lazy fetch, an explicit -C binding). Returns
+    (binding, head), each validated by the D2b contract's own validators. Refuses a non-repository,
+    a bare repository, a product root that is not exactly <toplevel>/<prefix> (a symlinked or
+    wrong root), an undecodable answer, a HEAD whose target cannot be resolved except as a proven
+    unborn branch, and anything else it cannot answer (CANNOT-EVALUATE)."""
+    root = _abs_root(product_root)
+    git = git or _opf_observe._git_path()
+    if git is None:
+        raise InitOperationError("git binary not found on PATH", CANNOT_EVALUATE)
+    inside, bare, toplevel, gitdir, common, prefix, fmt = _git_lines(
+        git, root, ["rev-parse", "--is-inside-work-tree", "--is-bare-repository", "--show-toplevel",
+                    "--absolute-git-dir", "--git-common-dir", "--show-prefix",
+                    "--show-object-format"], 7)
+    if inside != "true" or bare != "false":
+        raise InitOperationError("{} is not a non-bare git worktree".format(root))
+    (index_path,) = _git_lines(git, root, ["rev-parse", "--git-path", "index"], 1)
+    if not os.path.isabs(common):
+        common = os.path.join(root, common)
+    if not os.path.isabs(index_path):
+        index_path = os.path.join(root, index_path)
+    prefix = prefix[:-1] if prefix.endswith("/") else prefix
+    if os.path.abspath(os.path.join(toplevel, prefix)) != root:
+        raise InitOperationError("product root {} is not the repository toplevel {} joined with its "
+                                 "prefix {!r} (a symlinked or wrong root)".format(root, toplevel,
+                                                                                prefix))
+    binding = {
+        "product_root": _location(root, "product root"),
+        "repository_root": _location(os.path.abspath(toplevel), "repository root"),
+        "worktree_git_directory": _location(os.path.abspath(gitdir), "worktree git directory"),
+        "common_git_directory": _location(os.path.abspath(common), "common git directory"),
+        "index_path": os.path.abspath(index_path),
+        "product_prefix": prefix,
+        "object_format": fmt,
+    }
+    reason = _opf_init_contract._bad_binding(binding)
+    if reason is not None:
+        raise InitOperationError("observed binding is malformed: {}".format(reason), CANNOT_EVALUATE)
+    head = _observe_head(git, root, fmt)
+    reason = _opf_init_contract._bad_head(head, fmt)
+    if reason is not None:
+        raise InitOperationError("observed HEAD is malformed or unsupported: {}".format(reason))
+    return binding, head
+
+
+def _observe_head(git, root, object_format):
+    """The closed HEAD union. A symbolic HEAD whose target resolves is a commit head; one whose
+    target is PROVEN absent (show-ref and rev-parse both answer "absent" cleanly) is unborn; a
+    detached HEAD must resolve. A failed resolution is never taken as unborn proof."""
+    sym = _opf_observe._run_git(git, root, ["symbolic-ref", "-q", "HEAD"])
+    if not sym.completed or sym.rc not in (0, 1):
+        raise InitOperationError("git could not read HEAD's binding ({})".format(sym.err.strip()),
+                                 CANNOT_EVALUATE)
+    ref = None
+    if sym.rc == 0:
+        try:
+            text = sym.out.decode("utf-8", "strict")
+        except UnicodeDecodeError:
+            raise InitOperationError("HEAD's symbolic ref is undecodable", CANNOT_EVALUATE)
+        if not text.endswith("\n") or "\n" in text[:-1]:
+            raise InitOperationError("HEAD's symbolic ref is malformed", CANNOT_EVALUATE)
+        ref = text[:-1]
+    res = _opf_observe._run_git(git, root, ["rev-parse", "-q", "--verify", "HEAD^{commit}"])
+    if not res.completed or res.rc not in (0, 1):
+        raise InitOperationError("git could not resolve HEAD ({})".format(res.err.strip()),
+                                 CANNOT_EVALUATE)
+    if res.rc == 0:
+        oid = res.out.decode("ascii", "strict").strip()
+        binding = {"kind": "symbolic", "ref": ref} if ref is not None else {"kind": "detached"}
+        return {"kind": "commit", "oid": oid, "binding": binding}
+    if ref is None:
+        raise InitOperationError("a detached HEAD does not resolve to a commit", CANNOT_EVALUATE)
+    show = _opf_observe._run_git(git, root, ["show-ref", "--verify", "-q", ref])
+    direct = _opf_observe._run_git(git, root, ["rev-parse", "-q", "--verify", ref])
+    if not (show.completed and direct.completed and show.rc == 1 and direct.rc == 1
+            and not direct.out and not show.out):
+        raise InitOperationError("HEAD's target {} neither resolves nor is proven absent; a failed "
+                                 "resolution is never unborn proof".format(ref), CANNOT_EVALUATE)
+    return {"kind": "unborn", "symbolic_ref": ref, "target_ref_state": "absent"}
+
+
+def _read_bounded_fd(fd, cap):
+    """Read at most cap + 1 bytes from fd (a read error is CANNOT-EVALUATE)."""
+    data = bytearray()
+    try:
+        while len(data) <= cap:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            data += chunk
+    except OSError as exc:
+        raise InitOperationError("read error ({})".format(exc), CANNOT_EVALUATE)
+    return bytes(data)
+
+
+def observe_inventory(root_fd):
+    """The observed `.working` inventory model {schema: 1, scope: ".working", entries: [...]} beneath
+    the opened product root, walked no-follow and bounded by the D2b contract limits: each directory
+    with its mode, each regular file with its mode, size, and content digest. A symbolic link, a
+    special file, a hard-linked file, an unreadable entry, or an exceeded bound refuses (never an
+    entry that silently disappears from the inventory). An absent `.working` is the empty
+    inventory."""
+    entries = []
+    budget = [0]
+
+    def add(entry):
+        budget[0] += len(entry["path"].encode("utf-8"))
+        if len(entries) >= _opf_init_contract.MAX_INVENTORY_ENTRIES \
+                or budget[0] > _opf_init_contract.MAX_AGGREGATE_PATH_BYTES:
+            raise InitOperationError("the .working inventory exceeds its entry or path-byte bound",
+                                     CANNOT_EVALUATE)
+        entries.append(entry)
+
+    def walk(dfd, rel, depth):
+        try:
+            names = sorted(os.listdir(dfd))
+        except OSError as exc:
+            raise InitOperationError("cannot list {} ({})".format(rel, exc), CANNOT_EVALUATE)
+        for name in names:
+            path = "{}/{}".format(rel, name)
+            if _opf_init_contract._bad_relpath(path) is not None:
+                raise InitOperationError("inventory path {!r} is not canonical".format(path),
+                                         CANNOT_EVALUATE)
+            try:
+                st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+            except OSError as exc:
+                raise InitOperationError("cannot stat {} ({})".format(path, exc), CANNOT_EVALUATE)
+            if stat.S_ISDIR(st.st_mode):
+                add({"path": path, "kind": "directory", "mode": stat.S_IMODE(st.st_mode) & 0o777})
+                if depth + 1 >= _opf_init_contract.MAX_PATH_DEPTH:
+                    raise InitOperationError("the .working inventory exceeds its depth bound",
+                                             CANNOT_EVALUATE)
+                try:
+                    cfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                  dir_fd=dfd)
+                except OSError as exc:
+                    raise InitOperationError("cannot open {} ({})".format(path, exc),
+                                             CANNOT_EVALUATE)
+                try:
+                    walk(cfd, path, depth + 1)
+                finally:
+                    os.close(cfd)
+            elif stat.S_ISREG(st.st_mode):
+                data, fst = _read_regular(dfd, name, path, _opf_init_contract.MAX_RAW_BYTES)
+                add({"path": path, "kind": "file", "mode": stat.S_IMODE(fst.st_mode) & 0o777,
+                     "size": len(data), "digest": _opf_init_contract._digest(data)})
+            else:
+                raise InitOperationError("{} is a symbolic link or special file; the inventory "
+                                         "refuses it".format(path))
+
+    try:
+        wst = os.stat(_opf_store.WORKING_DIRNAME, dir_fd=root_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        wst = None
+    except OSError as exc:
+        raise InitOperationError("cannot stat .working ({})".format(exc), CANNOT_EVALUATE)
+    if wst is not None:
+        if not stat.S_ISDIR(wst.st_mode):
+            raise InitOperationError(".working is not a plain directory")
+        add({"path": _opf_store.WORKING_DIRNAME, "kind": "directory",
+             "mode": stat.S_IMODE(wst.st_mode) & 0o777})
+        try:
+            wfd = os.open(_opf_store.WORKING_DIRNAME,
+                          os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                          dir_fd=root_fd)
+        except OSError as exc:
+            raise InitOperationError("cannot open .working ({})".format(exc), CANNOT_EVALUATE)
+        try:
+            walk(wfd, _opf_store.WORKING_DIRNAME, 1)
+        finally:
+            os.close(wfd)
+    # The contract's inventory scope lists entries BENEATH .working; the .working root itself is
+    # carried separately so an empty .working directory is never read as absent.
+    model = {"schema": 1, "scope": _opf_store.WORKING_DIRNAME,
+             "entries": [e for e in entries if e["path"] != _opf_store.WORKING_DIRNAME]}
+    reason = _opf_init_contract._bad_inventory(model)
+    if reason is not None:
+        raise InitOperationError("observed inventory is malformed: {}".format(reason),
+                                 CANNOT_EVALUATE)
+    return model, wst is not None
+
+
+def _read_regular(dfd, name, label, cap):
+    """Read a regular, singly-linked file beneath dfd, no-follow and non-blocking, bounded by `cap`;
+    returns (bytes, fstat). A link count above one, a non-regular object, or an oversize file
+    refuses (a hard link could make an adopted path track another inode)."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dfd)
+    except OSError as exc:
+        raise InitOperationError("cannot open {} ({})".format(label, exc), CANNOT_EVALUATE)
+    try:
+        try:
+            st = os.fstat(fd)
+        except OSError as exc:
+            raise InitOperationError("cannot fstat {} ({})".format(label, exc), CANNOT_EVALUATE)
+        if not stat.S_ISREG(st.st_mode):
+            raise InitOperationError("{} is not a regular file".format(label))
+        if st.st_nlink != 1:
+            raise InitOperationError("{} has {} links, not exactly one".format(label, st.st_nlink))
+        if st.st_size > cap:
+            raise InitOperationError("{} exceeds the {}-byte bound".format(label, cap))
+        data = _read_bounded_fd(fd, cap)
+        if len(data) > cap or len(data) != st.st_size:
+            raise InitOperationError("{} changed size while it was read".format(label),
+                                     CANNOT_EVALUATE)
+        return data, st
+    finally:
+        os.close(fd)
+
+
+def inventory_digest(model):
+    return _opf_init_contract._digest(_opf_init_contract.canonical_json_bytes(model))
+
+
+def _tracked_destinations(git, root, paths):
+    """The planned destinations the git index already tracks (ls-files over literal pathspecs,
+    beneath the explicit product root); an unanswerable index read is CANNOT-EVALUATE."""
+    if not paths:
+        return []  # No destinations: an empty git pathspec would select the entire index.
+    out = _opf_observe._run_git(git, root, ["--literal-pathspecs", "ls-files", "--cached", "-z",
+                                            "--"] + sorted(paths))
+    if not out.completed or out.rc != 0:
+        raise InitOperationError("git could not read the index ({})".format(out.err.strip()),
+                                 CANNOT_EVALUATE)
+    return sorted(p for p in out.out.decode("utf-8", "replace").split("\x00") if p)
+
+
+# --- the plan: payloads, the immutable envelope, and its deep validation (decision 5) --------------
+
+
+def staging_name(relpath, operation_id):
+    """The plan-recorded staging name of a planned file: a hidden sibling of the destination, bound
+    to the operation (so it is ownership evidence the plan itself authorizes, never a guess)."""
+    return ".{}{}{}".format(relpath.rsplit("/", 1)[-1], _STAGE_MARKER,
+                            operation_id.replace("-", ""))
+
+
+def _effect_order(paths):
+    """The canonical creation order: the machine-store sources (sorted, init.toml last among them,
+    so the provenance names a complete source set on disk before itself), then CHANGELOG.md, then
+    the store pointer LAST (the pointer promises a store, so it appears only once the store exists)."""
+    store = sorted(p for p in paths if p.startswith(_MACHINE_HOME + "/") and p != PROVENANCE_RELPATH)
+    tail = [p for p in (PROVENANCE_RELPATH, CHANGELOG_RELPATH, _opf_store.POINTER_REL) if p in paths]
+    return store + tail
+
+
+def build_source_payloads(*, operation_id, binding, head, first_adoption, inventory_digest_value,
+                          create_changelog, seed=None):
+    """The exact bytes of every planned source {store-relative path: bytes}, init.toml included:
+    the D1 builders' documents (counters seeded from a validated ancestral seed when one is given),
+    the `dir:.` store pointer, CHANGELOG.md when the plan creates it, and the provenance computed
+    over all of them EXCLUDING itself."""
+    counters_seed = None
+    if seed is not None:
+        reason = seed_permanence_refusal(seed)
+        if reason is not None:
+            raise InitOperationError(reason)
+        counters_seed = dict(seed.counters)
+    try:
+        documents = {
+            "manifest.toml": _opf_init.build_manifest(),
+            "counters.toml": _opf_init.build_counters(seed=counters_seed),
+            "version.toml": _opf_init.build_version(),
+            "worklog.toml": _opf_init.build_worklog(),
+        }
+        for tname in _opf_init.INDEX_TYPES:
+            documents[tname + _opf_check.INDEX_SUFFIX] = _opf_init.build_index(tname)
+    except _opf_init.InitError as exc:
+        raise InitOperationError("a bootstrap builder refused: {}".format(exc))
+    payloads = {"{}/{}".format(_MACHINE_HOME, n): t.encode("utf-8") for n, t in documents.items()}
+    payloads[_opf_store.POINTER_REL] = _opf_emit.emit_checked(
+        {"store": {"target": "dir:."}}).encode("utf-8")
+    if create_changelog:
+        payloads[CHANGELOG_RELPATH] = _CHANGELOG_PAYLOAD
+    basis = {
+        "spec_version": _opf_store.SUPPORTED_SPEC_VERSION,
+        "operation_id": operation_id,
+        "binding": binding,
+        "head": head,
+        "first_adoption": first_adoption,
+        "inventory_digest": inventory_digest_value,
+        "acceptance": dict(ACCEPTANCE_NONE),
+    }
+    payloads[PROVENANCE_RELPATH] = build_bootstrap_provenance(basis, dict(payloads)).encode("utf-8")
+    return payloads
+
+
+def views_generator():
+    """The live view generator's identity, pinned in the plan's versions: the generator name and
+    version its do-not-edit header carries, the closed transform vocabulary version, and the
+    projection schema. Resume and publication require this live identity; completed-adoption
+    health accepts a well-formed recorded identity because it publishes no views."""
+    return {"name": _opf_views.GENERATOR_NAME, "version": _opf_views.GENERATOR_VERSION,
+            "transform_vocab": _opf_views.TRANSFORM_VOCAB_VERSION,
+            "projection_schema": _opf_views.PROJECTION_SCHEMA}
+
+
+def _pinned_versions():
+    return {"spec_version": _opf_store.SUPPORTED_SPEC_VERSION, "generator": INIT_GENERATOR,
+            "provenance_format": PROVENANCE_FORMAT, "views_generator": views_generator()}
+
+
+def build_view_roster(operation_id, manifest_payload, source_paths):
+    """The plan's V set, derived from the plan's OWN manifest payload: one entry per declared view,
+    sorted by view name, each {path, view, kind, mode, sources, staging}. The declared set must be
+    exactly the pinned initial view set (_opf_init); each view must resolve in the renderer's closed
+    vocabulary, carry the renderer's kind and required sources, and target its STORE-scope spec
+    destination `.working/<name>` (so the root VERSION deliverable, the one product-scope target,
+    can never enter the roster); and each source path must be a planned source. Raises
+    InitOperationError."""
+    try:
+        manifest = tomllib.loads(manifest_payload.decode("utf-8", "strict"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, AttributeError):
+        raise InitOperationError("the planned manifest payload is not TOML; the view roster cannot "
+                                 "be derived")
+    views = manifest.get("views")
+    if type(views) is not dict or sorted(views) != sorted(_opf_init._INITIAL_VIEW_NAMES):
+        raise InitOperationError("the planned manifest does not declare exactly the pinned initial "
+                                 "view set")
+    roster = []
+    for name in sorted(views):
+        tbl = views[name]
+        try:
+            kind, required, _renderer = _opf_views._resolve_view(name)
+        except _opf_views.ViewsError as exc:
+            raise InitOperationError("initial view {!r}: {}".format(name, exc))
+        scope, dest = _opf_views._spec_destination(name)
+        if type(tbl) is not dict or scope != "store" or tbl.get("kind") != kind \
+                or tbl.get("target") != dest or type(tbl.get("sources")) is not list \
+                or any(type(s) is not str for s in tbl["sources"]) \
+                or sorted(tbl["sources"]) != sorted(required):
+            raise InitOperationError("initial view {!r} is not a store-scope view declared with "
+                                     "its renderer kind, sources, and spec destination; init "
+                                     "never creates a product-root deliverable such as "
+                                     "VERSION".format(name))
+        sources = sorted(_opf_views._source_relpath(_MACHINE_HOME, s) for s in required)
+        missing = sorted(set(sources) - set(source_paths))
+        if missing:
+            raise InitOperationError("initial view {!r} reads {} that the plan does not "
+                                     "create".format(name, missing))
+        roster.append({"path": dest, "view": name, "kind": kind, "mode": VIEW_MODE,
+                       "sources": sources, "staging": staging_name(dest, operation_id)})
+    return roster
+
+
+def compute_plan_digest(plan):
+    """sha256 over the canonical JSON of the plan WITHOUT its plan_digest member (self-excluding)."""
+    body = dict(plan)
+    body.pop("plan_digest", None)
+    return _opf_init_contract._digest(_opf_init_contract.canonical_json_bytes(body))
+
+
+def build_init_plan(*, operation_id, binding, head, inventory_digest_value, application_time,
+                    existing_changelog=None, seed=None):
+    """Produce the immutable opf.init.plan/v1 envelope (a pure producer): returns (plan model, exact
+    canonical bytes). `existing_changelog` is None when CHANGELOG.md is absent (the plan creates it)
+    or its observed {path, mode, size, digest} entry, preserved in E. `seed` is a validated
+    AncestralSeed for a re-adoption (first_adoption false), recorded as the counters source's basis
+    so a retry never searches history again. The result is re-validated by validate_init_plan."""
+    first_adoption = seed is None
+    payloads = build_source_payloads(
+        operation_id=operation_id, binding=binding, head=head, first_adoption=first_adoption,
+        inventory_digest_value=inventory_digest_value,
+        create_changelog=existing_changelog is None, seed=seed)
+    sources = []
+    for path in _effect_order(payloads):
+        data = payloads[path]
+        entry = {"path": path, "mode": SOURCE_MODE, "size": len(data),
+                 "digest": _opf_init_contract._digest(data),
+                 "payload": base64.b64encode(data).decode("ascii"),
+                 "staging": staging_name(path, operation_id)}
+        if path == COUNTERS_RELPATH:
+            entry["basis"] = {"kind": "zero"} if seed is None else dict(
+                kind="ancestral", module_counters=dict(seed.module_counters), **seed.evidence)
+        sources.append(entry)
+    plan = {
+        "schema": 1,
+        "format": _opf_init_substrate.PLAN_FORMAT,
+        "operation": OPERATION,
+        "operation_id": operation_id,
+        "versions": _pinned_versions(),
+        "binding": binding,
+        "head": head,
+        "first_adoption": first_adoption,
+        "inventory_digest": inventory_digest_value,
+        "acceptance": dict(ACCEPTANCE_NONE),
+        "application_time": application_time,
+        "sets": {"S": sources,
+                 "V": build_view_roster(operation_id, payloads[_MANIFEST_RELPATH], set(payloads)),
+                 "K": [],
+                 "E": [] if existing_changelog is None else [dict(existing_changelog)],
+                 "C": [{"path": LEASE_RELPATH, "kind": "lease"}]},
+        "permitted_directories": [{"path": p, "mode": DIR_MODE} for p in PERMITTED_DIRECTORIES],
+        "staging_set": [],
+        "required_checks": list(REQUIRED_CHECKS),
+        "publication_boundaries": dict(PUBLICATION_BOUNDARIES),
+        "recovery_policy": RECOVERY_POLICY,
+    }
+    plan["plan_digest"] = compute_plan_digest(plan)
+    raw = _opf_init_contract.canonical_json_bytes(plan)
+    model = validate_init_plan(raw)
+    return model, raw
+
+
+def _plan_bad(detail):
+    raise InitOperationError("plan invalid: {}".format(detail))
+
+
+def validate_init_plan(raw, *, expected_binding=None, expected_head=None, completed=False):
+    """DEEP validation of plan bytes beyond the substrate's scalar checks (an externally supplied plan
+    is inert data, never a capability): the exact canonical serialization and bounds; the frozen top
+    keys; the pinned versions (completed health alone permits a well-formed historical view
+    identity; resume/render require the live pin, and the other version pins always apply); the
+    Binding and HEAD (and, when given, equality with the live re-observation); the exact nested set
+    schemas, the disjoint S/V/E/C sets, the exact source roster in the canonical effect order, the
+    exact view roster derived from the plan's own manifest payload; each payload's
+    base64, size, digest, mode, and plan-derived staging name; each payload's equality with the D1
+    builders (the counters payload with its recorded basis); the provenance's validity against the
+    plan's own basis and the recomputed source digest; the fixed directory, staging, check,
+    boundary, and recovery members; and the recomputed plan digest. Returns the model; raises
+    InitOperationError."""
+    if type(raw) is not bytes or not raw or len(raw) > _opf_init_contract.MAX_RAW_BYTES:
+        _plan_bad("plan bytes missing or over the {}-byte bound".format(
+            _opf_init_contract.MAX_RAW_BYTES))
+    try:
+        plan = _opf_init_substrate._strict_json_loads(raw, "plan")
+        _opf_init_substrate._validate_plan(raw, plan.get("operation_id"))
+    except _opf_init_substrate.InitSubstrateError as exc:
+        _plan_bad(str(exc))
+    op_id = plan["operation_id"]
+    expected_versions = _pinned_versions()
+    if completed:
+        versions = plan["versions"]
+        recorded = versions.get("views_generator") if type(versions) is dict else None
+        if type(recorded) is not dict or set(recorded) != set(expected_versions["views_generator"]) \
+                or any(type(recorded[k]) is not str or not recorded[k]
+                       for k in ("name", "version", "transform_vocab")) \
+                or type(recorded["projection_schema"]) is not int \
+                or recorded["projection_schema"] < 1:
+            _plan_bad("versions contain a malformed recorded view generator")
+        expected_versions["views_generator"] = recorded
+    if plan["versions"] != expected_versions:
+        _plan_bad("versions are not this generator's pinned versions (init generator, spec version, "
+                  "provenance format, and view generator)")
+    reason = _opf_init_contract._bad_binding(plan["binding"])
+    if reason is not None:
+        _plan_bad("binding: " + reason)
+    fmt = plan["binding"]["object_format"]
+    reason = _opf_init_contract._bad_head(plan["head"], fmt)
+    if reason is not None:
+        _plan_bad("head: " + reason)
+    if expected_binding is not None and plan["binding"] != expected_binding:
+        _plan_bad("binding does not equal the live re-observation (changed root, worktree, or "
+                  "repository)")
+    if expected_head is not None and plan["head"] != expected_head:
+        _plan_bad("HEAD does not equal the live re-observation")
+    if type(plan["first_adoption"]) is not bool:
+        _plan_bad("first_adoption must be a boolean")
+    if type(plan["inventory_digest"]) is not str \
+            or not _opf_init_contract._DIGEST_RE.match(plan["inventory_digest"]):
+        _plan_bad("inventory_digest grammar")
+    if plan["acceptance"] != ACCEPTANCE_NONE:
+        _plan_bad("acceptance must be {present: false} (Keep decisions are PR6)")
+    at = plan["application_time"]
+    try:
+        if type(at) is not str or not _UTC_RE.match(at):
+            raise ValueError
+        datetime.datetime.strptime(at, _UTC_FORMAT)
+    except ValueError:
+        _plan_bad("application_time is not an RFC 3339 UTC timestamp")
+    sets = plan["sets"]
+    if type(sets) is not dict or set(sets) != PLAN_SET_KEYS:
+        _plan_bad("sets must be exactly {S, V, K, E, C}")
+    if sets["K"] != []:
+        _plan_bad("K must be empty (Keep decisions are PR6)")
+    if sets["C"] != [{"path": LEASE_RELPATH, "kind": "lease"}]:
+        _plan_bad("C must be exactly the lease control record")
+    existing = sets["E"]
+    if type(existing) is not list or len(existing) > 1:
+        _plan_bad("E must be a list of at most the one preserved CHANGELOG.md")
+    for e in existing:
+        if type(e) is not dict or set(e) != _E_KEYS or e["path"] != CHANGELOG_RELPATH \
+                or type(e["mode"]) is not int or not 0 <= e["mode"] <= 0o777 \
+                or type(e["size"]) is not int or e["size"] < 0 \
+                or type(e["digest"]) is not str or not _opf_init_contract._DIGEST_RE.match(
+                    e["digest"]):
+            _plan_bad("E entry malformed")
+    sources = sets["S"]
+    if type(sources) is not list:
+        _plan_bad("S must be a list")
+    roster = set(BOOTSTRAP_SOURCE_ROSTER) | {PROVENANCE_RELPATH}
+    if not existing:
+        roster.add(CHANGELOG_RELPATH)
+    paths = [s.get("path") if type(s) is dict else None for s in sources]
+    if set(paths) != roster or len(paths) != len(roster):
+        _plan_bad("S is not exactly the bootstrap source roster")
+    if paths != _effect_order(set(paths)):
+        _plan_bad("S is not in the canonical creation order")
+    payloads = {}
+    counters_basis = None
+    for s in sources:
+        keys = set(s)
+        want = _S_KEYS | ({"basis"} if s["path"] == COUNTERS_RELPATH else set())
+        if keys != want:
+            _plan_bad("S entry {} keys".format(s["path"]))
+        if type(s["mode"]) is not int or s["mode"] != SOURCE_MODE:
+            _plan_bad("S entry {} mode must be {:o}".format(s["path"], SOURCE_MODE))
+        if s["staging"] != staging_name(s["path"], op_id):
+            _plan_bad("S entry {} staging name is not the plan-derived one".format(s["path"]))
+        try:
+            data = base64.b64decode(s["payload"].encode("ascii"), validate=True) \
+                if type(s["payload"]) is str else None
+        except (binascii.Error, UnicodeEncodeError, ValueError):
+            data = None
+        if data is None or type(s["size"]) is not int or len(data) != s["size"] \
+                or len(data) > MAX_SOURCE_BYTES \
+                or base64.b64encode(data).decode("ascii") != s["payload"]:
+            _plan_bad("S entry {} payload is not canonical base64 of its size".format(s["path"]))
+        if s["digest"] != _opf_init_contract._digest(data):
+            _plan_bad("S entry {} digest does not match its payload".format(s["path"]))
+        payloads[s["path"]] = data
+        if s["path"] == COUNTERS_RELPATH:
+            counters_basis = s["basis"]
+    if plan["permitted_directories"] != [{"path": p, "mode": DIR_MODE}
+                                         for p in PERMITTED_DIRECTORIES]:
+        _plan_bad("permitted_directories must be exactly .working and its machine store")
+    if plan["staging_set"] != []:
+        _plan_bad("staging_set must be empty (tool git staging is PR5)")
+    if plan["required_checks"] != list(REQUIRED_CHECKS):
+        _plan_bad("required_checks is not this generator's roster")
+    if plan["publication_boundaries"] != PUBLICATION_BOUNDARIES:
+        _plan_bad("publication_boundaries is not the VIEWS-READY boundary")
+    if plan["recovery_policy"] != RECOVERY_POLICY:
+        _plan_bad("recovery_policy must be {!r}".format(RECOVERY_POLICY))
+    if plan["plan_digest"] != compute_plan_digest(plan):
+        _plan_bad("plan_digest does not match the recomputed digest")
+    _validate_plan_payloads(plan, payloads, counters_basis)
+    views = sets["V"]
+    if type(views) is not list or any(type(v) is not dict or set(v) != _V_KEYS for v in views):
+        _plan_bad("V entries must carry exactly {}".format(sorted(_V_KEYS)))
+    try:
+        roster = build_view_roster(op_id, payloads[_MANIFEST_RELPATH], set(payloads))
+    except InitOperationError as exc:
+        _plan_bad(str(exc))
+    if views != roster:
+        _plan_bad("V is not exactly the initial view roster the planned manifest declares (paths, "
+                  "kinds, modes, sources, and plan-derived staging names, in view-name order)")
+    paths = [e["path"] for key in ("S", "V", "E", "C") for e in sets[key]]
+    if len(paths) != len(set(paths)):
+        _plan_bad("the S, V, E, and C sets overlap")
+    return plan
+
+
+def _validate_plan_payloads(plan, payloads, counters_basis):
+    """Each payload equals what the D1 builders produce (the counters from its recorded basis), and
+    the provenance validates against the plan's own basis and the recomputed source digest."""
+    fixed = {
+        "{}/manifest.toml".format(_MACHINE_HOME): _opf_init.build_manifest(),
+        "{}/version.toml".format(_MACHINE_HOME): _opf_init.build_version(),
+        "{}/worklog.toml".format(_MACHINE_HOME): _opf_init.build_worklog(),
+        _opf_store.POINTER_REL: _opf_emit.emit_checked({"store": {"target": "dir:."}}),
+    }
+    for tname in _opf_init.INDEX_TYPES:
+        fixed["{}/{}{}".format(_MACHINE_HOME, tname, _opf_check.INDEX_SUFFIX)] = \
+            _opf_init.build_index(tname)
+    if CHANGELOG_RELPATH in payloads:
+        fixed[CHANGELOG_RELPATH] = _CHANGELOG_PAYLOAD.decode("ascii")
+    for path, text in fixed.items():
+        if payloads[path] != text.encode("utf-8"):
+            _plan_bad("S entry {} is not this generator's exact bytes".format(path))
+    try:
+        counters = tomllib.loads(payloads[COUNTERS_RELPATH].decode("utf-8", "strict"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError):
+        _plan_bad("the counters payload is not TOML")
+    if type(counters_basis) is not dict:
+        _plan_bad("the counters basis must be a table")
+    kind = counters_basis.get("kind")
+    if kind == "zero":
+        if counters_basis != {"kind": "zero"} or not plan["first_adoption"]:
+            _plan_bad("a zero counters basis belongs to a first adoption only")
+        expected = _opf_init.build_counters()
+    elif kind == "ancestral":
+        if set(counters_basis) != {"kind", "module_counters", "commit", "blob", "path",
+                                   "content_digest"} or plan["first_adoption"]:
+            _plan_bad("an ancestral counters basis belongs to a re-adoption and carries its pinned "
+                      "evidence")
+        fmt = plan["binding"]["object_format"]
+        if not (_oid_ok(counters_basis["commit"], fmt) and _oid_ok(counters_basis["blob"], fmt)
+                and type(counters_basis["content_digest"]) is str
+                and _opf_init_contract._DIGEST_RE.match(counters_basis["content_digest"])
+                and type(counters_basis["path"]) is str
+                and _opf_init_contract._bad_relpath(counters_basis["path"]) is None
+                and type(counters_basis["module_counters"]) is dict
+                and all(v == 0 for v in counters_basis["module_counters"].values())):
+            _plan_bad("the ancestral counters evidence is malformed")
+        try:
+            expected = _opf_init.build_counters(seed=counters.get("counters"))
+        except _opf_init.InitError as exc:
+            _plan_bad("the counters payload is not a complete seeded ledger ({})".format(exc))
+    else:
+        _plan_bad("unknown counters basis kind {!r}".format(kind))
+    if payloads[COUNTERS_RELPATH] != expected.encode("utf-8"):
+        _plan_bad("the counters payload is not the builder's bytes for its basis")
+    basis = {"spec_version": plan["versions"]["spec_version"],
+             "operation_id": plan["operation_id"], "binding": plan["binding"],
+             "head": plan["head"], "first_adoption": plan["first_adoption"],
+             "inventory_digest": plan["inventory_digest"], "acceptance": plan["acceptance"]}
+    others = {p: b for p, b in payloads.items() if p != PROVENANCE_RELPATH}
+    source_set, source_digest = compute_bootstrap_source_digest(others)
+    check = validate_bootstrap_provenance(payloads[PROVENANCE_RELPATH], expected_basis=basis,
+                                          expected_source_digest=source_digest,
+                                          expected_source_set=source_set)
+    if check.status != VALID:
+        _plan_bad("the provenance payload does not validate against the plan ({})".format(
+            check.findings))
+    if payloads[PROVENANCE_RELPATH] != build_bootstrap_provenance(basis, others).encode("utf-8"):
+        _plan_bad("the provenance payload is not the builder's exact bytes")
+
+
+def plan_payloads(plan):
+    """{path: bytes} of a VALIDATED plan's sources, in creation order."""
+    return {s["path"]: base64.b64decode(s["payload"]) for s in plan["sets"]["S"]}
+
+
+# --- the preserving effect journal (decision 3; shared framing, INTENT and COMPLETE only) ------------
+
+_ACCEPTED_FRAMES = ((), (_journal.F_INTENT,), (_journal.F_INTENT, _journal.F_COMPLETE))
+
+
+def _txn_name(operation_id, group):
+    return "{}-{}".format(operation_id, group)
+
+
+def _journal_ensure_txn(jr_fd, txn):
+    """Create the group's journal transaction directory and its frames.log exclusively on first
+    use (each creation fsynced); an existing directory must be a plain directory. Idempotent across
+    a crash between the two creations."""
+    try:
+        st = os.stat(txn, dir_fd=jr_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        st = None
+    except OSError as exc:
+        raise InitOperationError("cannot stat journal {} ({})".format(txn, exc), CANNOT_EVALUATE)
+    try:
+        if st is None:
+            os.mkdir(txn, 0o700, dir_fd=jr_fd)
+            os.fsync(jr_fd)
+        elif stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            raise InitOperationError("journal {} is not a plain directory".format(txn))
+        tfd = os.open(txn, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                      dir_fd=jr_fd)
+        try:
+            try:
+                os.stat("frames.log", dir_fd=tfd, follow_symlinks=False)
+                present = True
+            except FileNotFoundError:
+                present = False
+        finally:
+            os.close(tfd)
+        if not present:
+            _journal._create_frames_excl(jr_fd, txn)
+    except OSError as exc:
+        raise InitOperationError("cannot establish journal {} ({})".format(txn, exc), FAILED)
+    except _journal.JournalError as exc:
+        raise InitOperationError("cannot establish journal {} ({})".format(txn, exc), FAILED)
+
+
+def _journal_frames(jr_fd, txn, notes):
+    """The group's durable frames, validated for the PRESERVING init journal: only [], [INTENT],
+    and [INTENT, COMPLETE], one txn id throughout. A torn tail is truncated before any append (the
+    shared framing's never-written reading; product state is never rolled back, and recover() is
+    never called on an init journal). Any rollback frame, other sequence, or corrupt frame refuses."""
+    try:
+        frames, torn, good = _journal.read_frames(jr_fd, txn)
+        if torn:
+            _journal._truncate_log(jr_fd, txn, good)
+            notes.append("journal {}: a torn tail was truncated (treated as never written)".format(
+                txn))
+    except _journal.JournalError as exc:
+        raise InitOperationError("journal {} is unreadable or corrupt ({})".format(txn, exc),
+                                 CANNOT_EVALUATE)
+    types = tuple(t for t, _obj in frames)
+    if types not in _ACCEPTED_FRAMES:
+        raise InitOperationError("journal {} holds the unsupported frame sequence {} (a preserving "
+                                 "init journal has no rollback frames)".format(txn, list(types)),
+                                 CANNOT_EVALUATE)
+    for _t, obj in frames:
+        if type(obj) is not dict or obj.get("txn") != txn:
+            raise InitOperationError("journal {} holds a frame for another transaction".format(txn),
+                                     CANNOT_EVALUATE)
+    return frames
+
+
+def _journal_publish(jr_fd, txn, ftype, obj):
+    try:
+        _journal.publish(jr_fd, txn, ftype, obj)
+    except (_journal.JournalError, OSError) as exc:
+        raise InitOperationError("cannot publish the {} frame of journal {} ({})".format(
+            ftype, txn, exc), FAILED)
+
+
+# --- directory and source effects (plan steps 5 and 6) --------------------------------------------
+
+
+def _open_parent(root_fd, relpath):
+    try:
+        return _journal._open_parent(root_fd, relpath)
+    except FileNotFoundError:
+        raise InitOperationError("the parent of {} is absent".format(relpath), FAILED)
+    except (_journal.JournalError, OSError) as exc:
+        raise InitOperationError("cannot open the parent of {} no-follow ({})".format(relpath, exc),
+                                 CANNOT_EVALUATE)
+
+
+def _lstat(pfd, name, label):
+    try:
+        return os.stat(name, dir_fd=pfd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise InitOperationError("cannot stat {} ({})".format(label, exc), CANNOT_EVALUATE)
+
+
+def _dir_modes(pfd, st, mode):
+    """The acceptable exact modes of a planned directory: `mode`, plus S_ISGID when mkdir inherited
+    it from a set-group-ID parent whose group it carries (the only special bit creation leaves)."""
+    try:
+        pst = os.fstat(pfd)
+    except OSError as exc:
+        raise InitOperationError("cannot fstat a directory parent ({})".format(exc),
+                                 CANNOT_EVALUATE)
+    if pst.st_mode & stat.S_ISGID and st.st_gid == pst.st_gid:
+        return (mode, mode | stat.S_ISGID)
+    return (mode,)
+
+
+def _set_dir_mode(pfd, name, label, st, mode):
+    """Set a directory's mode EXACTLY (umask-independent), bound to the stat'ed object and never
+    following a link (the lock module's _chmod_bound), preserving an inherited S_ISGID."""
+    target = max(_dir_modes(pfd, st, mode))
+    try:
+        _opf_oplock._chmod_bound(pfd, name, label, st, target)
+    except _opf_oplock.OpLockError as exc:
+        raise InitOperationError(str(exc), FAILED)
+    after = _lstat(pfd, name, label)
+    if after is None or not stat.S_ISDIR(after.st_mode) \
+            or (after.st_dev, after.st_ino) != (st.st_dev, st.st_ino) \
+            or stat.S_IMODE(after.st_mode) not in (target, mode):
+        raise InitOperationError("{} changed, or is not at mode {:o}, after its mode was "
+                                 "set".format(label, mode), FAILED)
+    return after
+
+
+def _fsync_dir_at(pfd, name, label):
+    try:
+        dfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                      dir_fd=pfd)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+        os.fsync(pfd)
+    except OSError as exc:
+        raise InitOperationError("cannot fsync {} and its parent ({})".format(label, exc), FAILED)
+
+
+def _preclassify_dirs(root_fd, plan):
+    """Before directory intent, every planned directory must be absent, including on retry."""
+    for d in plan["permitted_directories"]:
+        path = d["path"]
+        try:
+            present = _journal._lstat_contained(root_fd, path) is not None
+        except (_journal.JournalError, OSError) as exc:
+            raise InitOperationError("cannot observe {} ({})".format(path, exc), CANNOT_EVALUATE)
+        if present:
+            raise InitOperationError("{} appeared before this operation recorded its intent; "
+                                     "preserved and refused".format(path))
+
+
+def _apply_dirs(root_fd, plan, resuming):
+    """Create each permitted directory parent-first, at its EXACT planned mode whatever the umask,
+    each fsynced with its parent. An existing directory is accepted only on RESUME (a prior attempt
+    recorded this group's intent): at its exact mode, or, when it is ours and its mode lies within
+    the planned one (all an interrupted mkdir-then-chmod can leave), after its mode is completed. A
+    symlink, a non-directory, a foreign owner, or any other mode refuses and is preserved. Returns
+    {path: created | verified}."""
+    out = {}
+    for d in plan["permitted_directories"]:
+        path, mode = d["path"], d["mode"]
+        pfd, name = _open_parent(root_fd, path)
+        try:
+            st = _lstat(pfd, name, path)
+            if st is None:
+                try:
+                    os.mkdir(name, mode, dir_fd=pfd)
+                except OSError as exc:
+                    raise InitOperationError("cannot create directory {} ({})".format(path, exc),
+                                             FAILED)
+                st = _lstat(pfd, name, path)
+                if st is None or not stat.S_ISDIR(st.st_mode):
+                    raise InitOperationError("directory {} vanished after creation".format(path),
+                                             FAILED)
+                _set_dir_mode(pfd, name, path, st, mode)
+                out[path] = "created"
+            else:
+                if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+                    raise InitOperationError("{} exists and is not a plain directory; preserved "
+                                             "and refused".format(path))
+                if not resuming:
+                    raise InitOperationError("{} appeared before this operation created it; "
+                                             "preserved and refused".format(path))
+                if st.st_uid != os.getuid():
+                    raise InitOperationError("{} is owned by uid {}, not this operation's; "
+                                             "refused".format(path, st.st_uid))
+                modes = _dir_modes(pfd, st, mode)
+                current = stat.S_IMODE(st.st_mode)
+                if current not in modes:
+                    if current & ~max(modes):
+                        raise InitOperationError("{} has mode {:o}, outside the planned {:o}; "
+                                                 "preserved and refused".format(path, current, mode))
+                    _set_dir_mode(pfd, name, path, st, mode)
+                out[path] = "verified"
+            _fsync_dir_at(pfd, name, path)
+        finally:
+            os.close(pfd)
+    return out
+
+
+def _open_dest(pfd, name, label):
+    """Open a destination ONCE, no-follow and non-blocking (a FIFO never blocks the open), with no
+    prior stat for the open to race: returns the held fd, or None when the name is absent. A name
+    the open itself refuses (a symbolic link, a socket) is lstat'ed only to choose the refusal: a
+    non-regular object is REFUSED, anything else CANNOT-EVALUATE; neither is ever trusted."""
+    try:
+        return os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=pfd)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        err = exc
+    st = _lstat(pfd, name, label)
+    if st is not None and not stat.S_ISREG(st.st_mode):
+        raise InitOperationError("{} exists and is not a regular file; preserved and "
+                                 "refused".format(label))
+    raise InitOperationError("cannot open {} ({})".format(label, err), CANNOT_EVALUATE)
+
+
+def _read_held(fd, pfd, name, label, size):
+    """Read an OPENED destination for an exact-match decision, every fact from the held fd: its
+    type (a non-regular object refuses before any read), its bytes (bounded at size + 1), then its
+    fstat, and only then re-bind the name to that fstat's identity. The held fd pins its inode, so
+    a replacement made during classification can never reuse that inode number and pass as the
+    original: a name no longer bound to the held object (unlinked, renamed over, or recreated, same
+    bytes included) is CANNOT-EVALUATE. Returns (bytes, fstat), the fstat taken after the read."""
+    try:
+        st = os.fstat(fd)
+    except OSError as exc:
+        raise InitOperationError("cannot fstat {} ({})".format(label, exc), CANNOT_EVALUATE)
+    if not stat.S_ISREG(st.st_mode):
+        raise InitOperationError("{} exists and is not a regular file; preserved and "
+                                 "refused".format(label))
+    data = _read_bounded_fd(fd, size)
+    try:
+        fst = os.fstat(fd)
+    except OSError as exc:
+        raise InitOperationError("cannot fstat {} ({})".format(label, exc), CANNOT_EVALUATE)
+    now = _lstat(pfd, name, label)
+    if fst.st_nlink < 1 or now is None or (now.st_dev, now.st_ino) != (fst.st_dev, fst.st_ino):
+        raise InitOperationError("{} was replaced while it was classified; preserved and "
+                                 "refused".format(label), CANNOT_EVALUATE)
+    if len(data) <= size and len(data) != fst.st_size:
+        raise InitOperationError("{} changed size while it was read".format(label),
+                                 CANNOT_EVALUATE)
+    return data, fst
+
+
+def _read_exact(pfd, name, label, size):
+    """Read a destination for an exact-match decision: opened once (_open_dest) and read from the
+    held fd (_read_held). Returns (bytes, fstat); an absent destination is CANNOT-EVALUATE."""
+    fd = _open_dest(pfd, name, label)
+    if fd is None:
+        raise InitOperationError("cannot open {} (it is absent)".format(label), CANNOT_EVALUATE)
+    try:
+        return _read_held(fd, pfd, name, label, size)
+    finally:
+        os.close(fd)
+
+
+def _classify_dest(pfd, name, entry, data):
+    """Three-way (plus refusal) classification of a planned file's destination: "absent"; "exact"
+    (an opened, no-follow, singly-linked regular file whose bytes, size, and mode EXACTLY equal the
+    plan, established by reading ONE held fd whose name still binds it, never inferred from a
+    name, header, or inode); anything else raises a REFUSED conflict (different bytes, a strict
+    prefix included, a wrong mode, type, or link count), and an unreadable or replaced destination
+    raises CANNOT-EVALUATE, never absence."""
+    path = entry["path"]
+    fd = _open_dest(pfd, name, path)
+    if fd is None:
+        return "absent", None
+    try:
+        got, fst = _read_held(fd, pfd, name, path, len(data))
+    finally:
+        os.close(fd)
+    if fst.st_nlink != 1:
+        raise InitOperationError("{} has {} links; preserved and refused".format(
+            path, fst.st_nlink))
+    if got != data:
+        kind = "a strict prefix of" if data.startswith(got) and len(got) < len(data) \
+            else "different from"
+        raise InitOperationError("{} holds bytes {} the planned payload; preserved and refused, "
+                                 "never repaired".format(path, kind))
+    if stat.S_IMODE(fst.st_mode) != entry["mode"]:
+        raise InitOperationError("{} holds the planned bytes at mode {:o}, not {:o}; preserved and "
+                                 "refused".format(path, stat.S_IMODE(fst.st_mode), entry["mode"]))
+    return "exact", fst
+
+
+def _clean_stage(pfd, name, stage, path):
+    """Settle the plan-recorded staging name before a file effect. A staging file this operation
+    left (regular, one link) is garbage and removed; one killed after its link shares its inode
+    with the destination (two links) and is removed so the destination keeps one link; a staging
+    name bound to anything else refuses (manual intervention), preserved."""
+    st = _lstat(pfd, stage, path + " staging")
+    if st is None:
+        return None
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        raise InitOperationError("the staging name of {} is not a regular file; refused".format(
+            path))
+    if st.st_nlink == 2:
+        dst = _lstat(pfd, name, path)
+        if dst is None or (dst.st_dev, dst.st_ino) != (st.st_dev, st.st_ino):
+            raise InitOperationError("the staging name of {} is linked to something other than its "
+                                     "destination; refused".format(path))
+        outcome = "completed-publication"
+    elif st.st_nlink == 1:
+        outcome = "discarded-stage"
+    else:
+        raise InitOperationError("the staging name of {} has {} links; refused".format(
+            path, st.st_nlink))
+    try:
+        os.unlink(stage, dir_fd=pfd)
+        os.fsync(pfd)
+    except OSError as exc:
+        raise InitOperationError("cannot settle the staging name of {} ({})".format(path, exc),
+                                 FAILED)
+    return outcome
+
+
+def _stage_and_publish(pfd, name, entry, data):
+    """Stage the COMPLETE payload under the plan-recorded staging name (exclusive, no-follow, mode
+    set exactly on the descriptor whatever the umask, written in full, fsynced, read back), then
+    publish it by link(2), which never replaces an existing name, retire the staging name, and
+    fsync the parent. Returns ("created", (dev, ino)) or, when the destination appeared meanwhile,
+    the destination's classification ("exact" is a dedupe; anything else refuses)."""
+    stage, path = entry["staging"], entry["path"]
+    try:
+        fd = os.open(stage, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o600, dir_fd=pfd)
+    except OSError as exc:
+        raise InitOperationError("cannot create the staging file of {} ({})".format(path, exc),
+                                 FAILED)
+    try:
+        try:
+            os.fchmod(fd, entry["mode"])
+            _journal._write_all(fd, data)
+            os.fsync(fd)
+            st = os.fstat(fd)
+            back = bytearray()
+            while len(back) < len(data) + 1:
+                chunk = os.pread(fd, len(data) + 1 - len(back), len(back))
+                if not chunk:
+                    break
+                back += chunk
+        except OSError as exc:
+            raise InitOperationError("cannot stage {} ({})".format(path, exc), FAILED)
+        if bytes(back) != data or st.st_size != len(data) \
+                or stat.S_IMODE(st.st_mode) != entry["mode"]:
+            raise InitOperationError("the staged bytes or mode of {} are not the plan's".format(path),
+                                     FAILED)
+        ident = (st.st_dev, st.st_ino)
+    finally:
+        os.close(fd)
+    try:
+        os.link(stage, name, src_dir_fd=pfd, dst_dir_fd=pfd, follow_symlinks=False)
+        linked = True
+    except FileExistsError:
+        linked = False
+    except OSError as exc:
+        raise InitOperationError("cannot publish {} ({}); its staging file is left for the next "
+                                 "attempt to settle".format(path, exc), FAILED)
+    try:
+        os.unlink(stage, dir_fd=pfd)
+        os.fsync(pfd)
+    except OSError as exc:
+        raise InitOperationError("cannot retire the staging name of {} ({})".format(path, exc),
+                                 FAILED)
+    if not linked:
+        state, _st = _classify_dest(pfd, name, entry, data)
+        return state, None
+    return "created", ident
+
+
+def _source_files(plan):
+    """[(entry, bytes)] of a VALIDATED plan's sources, in creation order."""
+    return [(s, base64.b64decode(s["payload"])) for s in plan["sets"]["S"]]
+
+
+def _preclassify_files(root_fd, files, notes, require_absent=False):
+    """Plan step 8's continuation rule, checked BEFORE any effect of the group: every destination
+    must be absent or an EXACT match of its planned payload, and every staging name absent or a
+    plain file this operation left. Any conflict refuses here, so a resume creates nothing when some
+    destination is not what the plan authorizes (the classification is repeated per file during
+    publication, which still catches a race). With `require_absent` (a group whose intent this
+    operation has not yet recorded) every destination AND staging name must be absent: before the
+    intent nothing is this operation's, so an exact match is a collision, never a dedupe (F14)."""
+    for entry, data in files:
+        pfd, name = _open_parent(root_fd, entry["path"])
+        try:
+            if require_absent:
+                if _lstat(pfd, entry["staging"], entry["path"] + " staging") is not None:
+                    raise InitOperationError("{} has its staging name present before this "
+                                             "operation recorded its intent; preserved and "
+                                             "refused".format(entry["path"]))
+                if _classify_dest(pfd, name, entry, data)[0] != "absent":
+                    raise InitOperationError("{} appeared before this operation recorded its intent "
+                                             "(identical bytes included, a collision is never a "
+                                             "dedupe); preserved and refused".format(entry["path"]))
+                continue
+            # Settling this operation's own plan-named staging leftover first is what lets a
+            # destination killed between its link and its staging retire (two links, the staging
+            # name bound to it) classify as the exact single-link file it then is.
+            settled = _clean_stage(pfd, name, entry["staging"], entry["path"])
+            if settled is not None:
+                notes.append("{}: {}".format(entry["path"], settled))
+            _classify_dest(pfd, name, entry, data)
+        finally:
+            os.close(pfd)
+
+
+def _apply_files(root_fd, files, notes, require_absent=False):
+    """Create or dedupe every planned file in plan order (decision 3), after the whole group has
+    been pre-classified. Returns {path: created | deduplicated}. A conflict refuses, preserving the
+    destination and everything created so far (the evidence a retry resumes from); nothing is ever
+    overwritten, rolled back, or removed except this operation's own plan-named staging files."""
+    _preclassify_files(root_fd, files, notes, require_absent)
+    out = {}
+    for entry, data in files:
+        pfd, name = _open_parent(root_fd, entry["path"])
+        try:
+            settled = _clean_stage(pfd, name, entry["staging"], entry["path"])
+            if settled is not None:
+                notes.append("{}: {}".format(entry["path"], settled))
+            state, _st = _classify_dest(pfd, name, entry, data)
+            if state == "exact":
+                out[entry["path"]] = "deduplicated"
+                try:
+                    os.fsync(pfd)
+                except OSError as exc:
+                    raise InitOperationError("cannot fsync the parent of {} ({})".format(
+                        entry["path"], exc), FAILED)
+                continue
+            state, ident = _stage_and_publish(pfd, name, entry, data)
+            if state == "created":
+                got_state, fst = _classify_dest(pfd, name, entry, data)
+                if got_state != "exact" or (fst.st_dev, fst.st_ino) != ident:
+                    raise InitOperationError("{} is not the published inode after its "
+                                             "publication".format(entry["path"]), FAILED)
+            out[entry["path"]] = "created" if state == "created" else "deduplicated"
+        finally:
+            os.close(pfd)
+    return out
+
+
+# --- verification (plan steps 8 and 10) ----------------------------------------------------------
+
+
+def _verify_dirs(root_fd, plan):
+    posts = []
+    for d in plan["permitted_directories"]:
+        pfd, name = _open_parent(root_fd, d["path"])
+        try:
+            st = _lstat(pfd, name, d["path"])
+            if st is None or stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) \
+                    or st.st_uid != os.getuid() \
+                    or stat.S_IMODE(st.st_mode) not in _dir_modes(pfd, st, d["mode"]):
+                raise InitOperationError("directory {} does not verify at mode {:o}".format(
+                    d["path"], d["mode"]))
+            posts.append({"path": d["path"], "kind": "directory",
+                          "mode": stat.S_IMODE(st.st_mode)})
+        finally:
+            os.close(pfd)
+    return posts
+
+
+def _verify_files(root_fd, files):
+    posts = []
+    for entry, data in files:
+        pfd, name = _open_parent(root_fd, entry["path"])
+        try:
+            state, fst = _classify_dest(pfd, name, entry, data)
+            if state != "exact":
+                raise InitOperationError("{} is absent at verification".format(entry["path"]))
+            if _lstat(pfd, entry["staging"], entry["path"] + " staging") is not None:
+                raise InitOperationError("the staging name of {} is still present at "
+                                         "verification".format(entry["path"]))
+            posts.append({"path": entry["path"], "kind": "file", "mode": entry["mode"],
+                          "size": entry["size"], "digest": entry["digest"]})
+        finally:
+            os.close(pfd)
+    return posts
+
+
+def _final_check(root, root_fd, plan, lease_held, views=None, git=None):
+    """A fresh observation of the planned state. Without `views` it is the source-state check behind
+    `sources-ready`: every planned directory and source exact; the .working inventory EXACTLY the
+    planned source tree (plus the lease while it is held); the local pointer absent; a preserved
+    CHANGELOG.md unchanged; the provenance valid against the plan's basis and the source digest
+    recomputed from the ON-DISK sources; the store RESOLVING at the product root to the planned
+    machine store with a VALID manifest; and the counters valid. With `views` (the published
+    [(entry, bytes)], the observation behind VIEWS-READY) it also requires every view exact, the
+    inventory to include exactly them, the renderer planner re-run over the on-disk store to
+    reproduce them byte for byte with headers binding the plan's source bytes, and no view tracked
+    or staged in the index. Returns the names of the checks executed, in roster order."""
+    _verify_dirs(root_fd, plan)
+    _verify_files(root_fd, _source_files(plan))
+    if views is not None:
+        _verify_files(root_fd, views)
+    model, present = observe_inventory(root_fd)
+    expect = {d["path"] for d in plan["permitted_directories"]
+              if d["path"] != _opf_store.WORKING_DIRNAME}
+    expect |= {s["path"] for s in plan["sets"]["S"]
+               if s["path"].startswith(_opf_store.WORKING_DIRNAME + "/")}
+    expect |= {entry["path"] for entry, _data in views or ()}
+    if lease_held:
+        expect.add(LEASE_RELPATH)
+    got = {e["path"] for e in model["entries"]}
+    if not present or got != expect:
+        raise InitOperationError("the .working tree is not exactly the planned tree (unexpected: "
+                                 "{}; missing: {})".format(sorted(got - expect),
+                                                           sorted(expect - got)))
+    if _lstat(root_fd, _opf_store.LOCAL_POINTER_REL, _opf_store.LOCAL_POINTER_REL) is not None:
+        raise InitOperationError("a local store pointer {} appeared; it would override the "
+                                 "store".format(_opf_store.LOCAL_POINTER_REL))
+    for e in plan["sets"]["E"]:
+        data, fst = _read_regular(root_fd, e["path"], e["path"], _opf_init_contract.MAX_RAW_BYTES)
+        if (stat.S_IMODE(fst.st_mode), len(data), _opf_init_contract._digest(data)) \
+                != (e["mode"], e["size"], e["digest"]):
+            raise InitOperationError("the preserved {} changed during the operation".format(
+                e["path"]))
+    on_disk = {}
+    for entry in plan["sets"]["S"]:
+        pfd, name = _open_parent(root_fd, entry["path"])
+        try:
+            on_disk[entry["path"]] = _read_exact(pfd, name, entry["path"], entry["size"])[0]
+        finally:
+            os.close(pfd)
+    others = {p: b for p, b in on_disk.items() if p != PROVENANCE_RELPATH}
+    source_set, source_digest = compute_bootstrap_source_digest(others)
+    basis = {"spec_version": plan["versions"]["spec_version"],
+             "operation_id": plan["operation_id"], "binding": plan["binding"],
+             "head": plan["head"], "first_adoption": plan["first_adoption"],
+             "inventory_digest": plan["inventory_digest"], "acceptance": plan["acceptance"]}
+    check = validate_bootstrap_provenance(on_disk[PROVENANCE_RELPATH], expected_basis=basis,
+                                          expected_source_digest=source_digest,
+                                          expected_source_set=source_set)
+    if check.status != VALID:
+        raise InitOperationError("the on-disk provenance does not validate ({})".format(
+            check.findings))
+    res = _opf_store.resolve_store(root)
+    if res.status != _opf_store.RESOLVED or os.path.abspath(str(res.store_root)) != root \
+            or res.machine_rel != _MACHINE_HOME:
+        raise InitOperationError("the store does not resolve to the planned machine store ({}: "
+                                 "{})".format(res.status, res.detail))
+    manifest = _opf_store.load_manifest(res)
+    if manifest.status != _opf_store.VALID or manifest.findings:
+        raise InitOperationError("the published manifest is not VALID ({})".format(
+            manifest.findings))
+    baseline, importer, _module = _roster_namespaces()
+    counters = tomllib.loads(on_disk[COUNTERS_RELPATH].decode("utf-8"))
+    _hw, findings = validate_counters(counters, known_namespaces=baseline,
+                                      optional_namespaces=importer)
+    if findings:
+        raise InitOperationError("the published counters are not valid ({})".format(findings))
+    if views is None:
+        return list(_SOURCE_CHECKS)
+    # view-correspondence and views-unstaged: plan_init_views re-renders from the ON-DISK sources
+    # (just verified exact), re-checks each header against the plan's source bytes, and refuses a
+    # tracked or staged view; its payloads must equal the published, just-verified views.
+    if plan_init_views(root, root_fd, plan, git) != views:
+        raise InitOperationError("the views re-rendered from the on-disk sources are not the "
+                                 "published views; source/view correspondence refused")
+    return list(REQUIRED_CHECKS)
+
+
+def _health_check(root, root_fd, plan, binding):
+    """Validate immutable bootstrap provenance and CURRENT source health (decision 5).
+
+    The digest is recomputed from the validated plan payloads, never from later edited
+    sources. The plan's binding must still identify this root; its historical HEAD need
+    not equal today's HEAD. Current source validation permits legitimate later edits.
+    """
+    plan = validate_init_plan(_opf_init_contract.canonical_json_bytes(plan),
+                              expected_binding=binding, completed=True)
+    res = _opf_store.resolve_store(root)
+    if res.status != _opf_store.RESOLVED or os.path.abspath(str(res.store_root)) != root \
+            or res.machine_rel != _MACHINE_HOME:
+        raise InitOperationError("the completed adoption's store does not resolve ({}: {})".format(
+            res.status, res.detail))
+    manifest = _opf_store.load_manifest(res)
+    if manifest.status != _opf_store.VALID or manifest.findings:
+        raise InitOperationError("the completed adoption's manifest is not VALID ({})".format(
+            manifest.findings))
+    prov_path = "{}/{}".format(res.machine_rel, PROVENANCE_NAME)
+    pfd, name = _open_parent(root_fd, prov_path)
+    try:
+        raw, _st = _read_regular(pfd, name, prov_path, _opf_init_contract.MAX_RAW_BYTES)
+    finally:
+        os.close(pfd)
+    basis = {"spec_version": plan["versions"]["spec_version"],
+             "operation_id": plan["operation_id"], "binding": plan["binding"],
+             "head": plan["head"], "first_adoption": plan["first_adoption"],
+             "inventory_digest": plan["inventory_digest"], "acceptance": plan["acceptance"]}
+    payloads = {p: b for p, b in plan_payloads(plan).items() if p != PROVENANCE_RELPATH}
+    source_set, source_digest = compute_bootstrap_source_digest(payloads)
+    check = validate_bootstrap_provenance(raw, expected_basis=basis,
+                                          expected_source_digest=source_digest,
+                                          expected_source_set=source_set)
+    if check.status != VALID:
+        raise InitOperationError("the completed adoption's provenance is invalid or names another "
+                                 "operation ({})".format(check.findings))
+    counters_rel = "{}/{}".format(res.machine_rel, _opf_check.COUNTERS_NAME)
+    pfd, name = _open_parent(root_fd, counters_rel)
+    try:
+        raw, _st = _read_regular(pfd, name, counters_rel, _opf_init_contract.MAX_RAW_BYTES)
+    finally:
+        os.close(pfd)
+    baseline, importer, _module = _roster_namespaces()
+    try:
+        counters = tomllib.loads(raw.decode("utf-8", "strict"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError):
+        raise InitOperationError("the completed adoption's counters are not TOML")
+    _hw, findings = validate_counters(counters, known_namespaces=baseline,
+                                      optional_namespaces=importer)
+    if findings:
+        raise InitOperationError("the completed adoption's counters are invalid ({})".format(
+            findings))
+    if _lstat(root_fd, _opf_store.POINTER_REL, _opf_store.POINTER_REL) is None:
+        raise InitOperationError("the completed adoption's store pointer is absent")
+    # This is current-source health for an adoption that already reached VIEWS-READY,
+    # not a new publication milestone or a whole-store/doctor verdict. Current views,
+    # tracking, deliverables and across-time history are outside current-source health.
+    # Subtract from the authoritative roster so future checks fail closed by default.
+    deferred = {"C-TRACKED", "C-HISTORY-APPEND-ONLY", "C-HISTORY-COUNTERS",
+                "C-HISTORY-RESURRECTION"}
+    # C-NO-DELETION reads only current sources (counters against present ids), so it stays
+    # required. A re-adoption's validated plan carries the ancestral seed its counters copied
+    # with no record restored; ids at or below it are not deletions, ids above it still are.
+    floor = None
+    if not plan["first_adoption"]:
+        floor = tomllib.loads(payloads[COUNTERS_RELPATH].decode("utf-8"))["counters"]
+    observations, _notes = _opf_observe.gather(res)
+    health = _opf_check.validate_store(res, observations=observations, ancestral_floor=floor)
+    required = set(_opf_check.source_checks(health)) - deferred
+    bad = sorted(cid for cid in required if health.checks.get(cid) != "PASS")
+    if health.unattributed or health.triage or bad:
+        details = {cid: health.by_check.get(cid, []) for cid in bad}
+        raise InitOperationError("the completed adoption's current sources are unhealthy "
+                                 "(checks {}; details {}; unattributed {}; triage {})".format(
+                                     bad, details, health.unattributed, health.triage))
+
+
+# --- the operation: select, plan or resume, journal, attach, verify, finalize (plan steps 1-10) ----
+
+
+def _utc_now():
+    """RFC 3339 UTC from the clock at the event (timestamp-from-clock)."""
+    return time.strftime(_UTC_FORMAT, time.gmtime())
+
+
+def _phase_names(sub):
+    names = [p for _s, p in _opf_init_substrate.recorded_phases(sub)]
+    if names != list(PHASES[:len(names)]):
+        raise InitOperationError("operation {} recorded the phase sequence {}, which is not a prefix "
+                                 "of the closed milestone order {}".format(sub.op_id, names,
+                                                                           list(PHASES)),
+                                 CANNOT_EVALUATE)
+    return names
+
+
+class _Run:
+    """The mutable state of one attempt (never shared across attempts)."""
+    __slots__ = ("root", "root_fd", "holder", "cap", "back", "sub", "plan", "result", "phases",
+                 "checks")
+
+    def __init__(self, root, result):
+        self.root = root
+        self.root_fd = None
+        self.holder = self.cap = self.back = self.sub = self.plan = None
+        self.result = result
+        self.phases = []
+        self.checks = []
+
+    def writer(self):
+        """The live writer bound to this attempt's operation: the capability while the lease is
+        attached, otherwise the pre-store holder or the holder the lease detach returned."""
+        for w in (self.cap, self.back, self.holder):
+            if w is not None and not w._released and not getattr(w, "_spent", False):
+                return w
+        return None
+
+    def record(self, phase):
+        if phase in self.phases:
+            return
+        expected = PHASES[len(self.phases)]
+        if phase != expected:
+            raise InitOperationError("milestone {} recorded out of order (next is {})".format(
+                phase, expected), FAILED)
+        try:
+            _opf_init_substrate.record_phase(self.sub, self.writer(), phase)
+        except _opf_init_substrate.InitSubstrateError as exc:
+            raise InitOperationError("cannot record milestone {} ({})".format(phase, exc), FAILED)
+        self.phases.append(phase)
+
+
+def _run_group(run, group, effects, apply_fn, verify_fn, *, pre_intent):
+    """One journaled effect group (decision 3): the journal INTENT (the exact effects, derived from
+    the immutable plan) is published durably BEFORE any effect and must equal the plan's on resume;
+    the `<group>-intent` milestone follows; the effects are applied (idempotent create-or-dedupe)
+    unless the journal is COMPLETE, in which case the disk is re-verified and a contradiction
+    refuses; the fresh poststate is verified and the COMPLETE frame published; the
+    `<group>-verified` milestone follows. A milestone the journal contradicts (an intent milestone
+    with no journaled intent) refuses. With no frames, the read-only pre_intent callback must pass
+    BEFORE publishing INTENT: a collision refusal must never authorize dedupe on the next retry."""
+    writer = run.writer()
+    txn = _txn_name(run.plan["operation_id"], group)
+    intent = {"txn": txn, "operation_id": run.plan["operation_id"],
+              "plan_digest": run.plan["plan_digest"], "group": group, "effects": effects}
+    try:
+        jr_fd = _opf_init_substrate.open_journal_home(writer)
+    except _opf_init_substrate.InitSubstrateError as exc:
+        raise InitOperationError("cannot open the init journal home ({})".format(exc), FAILED)
+    try:
+        _journal_ensure_txn(jr_fd, txn)
+        frames = _journal_frames(jr_fd, txn, run.result.notes)
+        resuming = bool(frames)
+        if not frames:
+            if group + "-intent" in run.phases:
+                raise InitOperationError("milestone {}-intent is recorded but the journal holds no "
+                                         "intent; contradictory evidence is preserved and "
+                                         "refused".format(group), CANNOT_EVALUATE)
+            pre_intent()
+            _journal_publish(jr_fd, txn, _journal.F_INTENT, intent)
+        elif frames[0][1] != intent:
+            raise InitOperationError("journal {} records an intent that is not this plan's; "
+                                     "changed evidence is preserved and refused".format(txn),
+                                     CANNOT_EVALUATE)
+        if group + "-verified" in run.phases and len(frames) != 2:
+            raise InitOperationError("milestone {}-verified is recorded but journal {} is not "
+                                     "COMPLETE; contradictory evidence is preserved and "
+                                     "refused".format(group, txn), CANNOT_EVALUATE)
+        run.record(group + "-intent")
+        if len(frames) == 2:
+            posts = verify_fn()
+            if frames[1][1].get("poststates") != posts:
+                raise InitOperationError("journal {} is COMPLETE but the disk contradicts its "
+                                         "recorded poststates; preserved and refused".format(txn))
+            for p in posts:
+                run.result.deduplicated.append(p["path"])
+        else:
+            outcomes = apply_fn(resuming)
+            posts = verify_fn()
+            for path in sorted(outcomes):
+                (run.result.created if outcomes[path] == "created"
+                 else run.result.deduplicated).append(path)
+            _journal_publish(jr_fd, txn, _journal.F_COMPLETE, {"txn": txn, "poststates": posts})
+        run.record(group + "-verified")
+    finally:
+        os.close(jr_fd)
+
+
+def _dir_effects(plan):
+    return [{"kind": "mkdir", "path": d["path"], "mode": d["mode"]}
+            for d in plan["permitted_directories"]]
+
+
+def _file_effects(files):
+    return [{"kind": "create", "path": e["path"], "mode": e["mode"], "size": e["size"],
+             "digest": e["digest"], "staging": e["staging"]} for e, _data in files]
+
+
+# --- the initial views (PR3b): plan from the verified sources, publish through the journal --------
+
+
+def plan_init_views(root, root_fd, plan, git):
+    """The initial views' exact payloads, bound to the immutable plan (read-only: a planner is a
+    preview). Returns [(entry, bytes)] in plan V order, each entry the plan's V entry plus the
+    rendered size and digest. The views are rendered from the ON-DISK sources, which the caller has
+    verified byte-exact to the plan, through the EXISTING read-only renderer planner
+    (_opf_views.plan_views, the planner opf render and C-VIEW-DRIFT use; never opf render --write).
+    Refuses: a live view generator other than the plan's pinned one; a destination the git index
+    tracks or stages; a planned roster other than exactly V (a missing, extra, rebound, or
+    product-scope view, the root VERSION included); a view whose do-not-edit header does not bind
+    the PLAN's source bytes (source/view correspondence); and an oversize payload. A planner
+    refusal is CANNOT-EVALUATE."""
+    pinned = plan["versions"]["views_generator"]
+    if pinned != views_generator():
+        raise InitOperationError("the live view generator {} is not the plan's pinned {}; a "
+                                 "changed generator is refused, never rendered under a recorded "
+                                 "plan".format(views_generator(), pinned))
+    roster = plan["sets"]["V"]
+    tracked = _tracked_destinations(git, root, [v["path"] for v in roster])
+    if tracked:
+        raise InitOperationError("{} is tracked or staged in the git index (all: {}); preserved "
+                                 "and refused (init never stages or overwrites a view)".format(
+                                     tracked[0], tracked))
+    try:
+        planned = _opf_views.plan_views(root_fd, _MACHINE_HOME)
+    except _opf_views.ViewsError as exc:
+        raise InitOperationError("the renderer planner cannot render the verified sources "
+                                 "({})".format(exc), CANNOT_EVALUATE)
+    got = sorted((name, scope, dest) for name, scope, dest, _text in planned)
+    want = [(v["view"], "store", v["path"]) for v in roster]
+    if got != want:
+        raise InitOperationError("the renderer planned {}, not the plan's view roster {} (a "
+                                 "missing, extra, rebound, or product-root view such as VERSION "
+                                 "refuses)".format(got, want))
+    texts = {name: text for name, _scope, _dest, text in planned}
+    payloads = plan_payloads(plan)
+    out = []
+    for v in roster:
+        data = texts[v["view"]].encode("utf-8")
+        blobs = {rel: payloads[rel] for rel in v["sources"]}
+        header = _opf_views._toml_header(blobs) if v["kind"] == "projection" \
+            else _opf_views._header(blobs)
+        if not data.startswith((header + "\n").encode("utf-8")):
+            raise InitOperationError("{} was rendered from source bytes other than the plan's (its "
+                                     "header does not bind the planned sources {}); source/view "
+                                     "correspondence refused".format(v["path"], v["sources"]))
+        if len(data) > MAX_SOURCE_BYTES:
+            raise InitOperationError("{} renders over the {}-byte bound".format(
+                v["path"], MAX_SOURCE_BYTES))
+        out.append((dict(v, size=len(data), digest=_opf_init_contract._digest(data)), data))
+    return out
+
+
+def apply_init_views(run, views):
+    """Publish the planned initial views through the SAME preserving journal and primitives as the
+    sources (decision 3), as the `views` effect group: the group INTENT binds each view's exact size
+    and digest durably before the first view is published and must equal the fresh render on resume
+    (a renderer that changed after the intent refuses); each view is staged complete under its
+    plan-recorded name and linked create-only; an exact poststate on resume is a dedupe; anything
+    else is refused and preserved, never overwritten or rolled back. Before the views intent exists
+    every view destination and staging name must be absent (F14). Nothing is staged in the index."""
+    _run_group(run, "views", _file_effects(views),
+               lambda resuming: _apply_files(run.root_fd, views, run.result.notes,
+                                             require_absent=not resuming),
+               lambda: _verify_files(run.root_fd, views),
+               pre_intent=lambda: _preclassify_files(run.root_fd, views, run.result.notes,
+                                                      require_absent=True))
+
+
+def _select(run, binding):
+    """Select the operation under the held mutex (plan step 2): settle every recorded operation (the
+    exact staging sweep; an operation left empty authorized nothing and is discarded, reported),
+    then classify. Any CANNOT-EVALUATE operation refuses (preserved unevaluable evidence); more
+    than one partial operation, or a partial beside a completed one, refuses (never chosen by
+    timestamp or directory order); exactly one partial resumes; exactly one completed is a
+    completed adoption; none is a fresh adoption."""
+    try:
+        survey = _opf_init_substrate.classify_init_operations(run.root)
+        if survey.status == _opf_init_substrate.OPERATIONS:
+            for rep in survey.operations:
+                if not _OP_ID_RE.match(rep.op_id):
+                    continue
+                swept, discarded = _opf_init_substrate.settle_operation(run.holder, rep.op_id)
+                for name in swept:
+                    run.result.notes.append("ops/{}: swept staging leftover {}".format(
+                        rep.op_id, name))
+                if discarded:
+                    run.result.notes.append("ops/{}: discarded an empty operation directory (its "
+                                            "plan was never published)".format(rep.op_id))
+            survey = _opf_init_substrate.classify_init_operations(run.root)
+    except _opf_init_substrate.InitSubstrateError as exc:
+        raise InitOperationError("the init substrate cannot be classified ({})".format(exc),
+                                 CANNOT_EVALUATE)
+    ops = survey.operations if survey.status == _opf_init_substrate.OPERATIONS else ()
+    bad = [r for r in ops if r.status != _opf_init_substrate.INTACT]
+    if bad:
+        raise InitOperationError("recorded init operation(s) cannot be evaluated and are preserved: "
+                                 "{}".format("; ".join("{}: {}".format(r.op_id, r.detail)
+                                                       for r in bad)), CANNOT_EVALUATE)
+    completed, partial = [], []
+    for rep in ops:
+        names = [p for _s, p in rep.phases]
+        if names != list(PHASES[:len(names)]):
+            raise InitOperationError("operation {} recorded an unsupported phase sequence {}".format(
+                rep.op_id, names), CANNOT_EVALUATE)
+        (completed if names and names[-1] == PHASES[-1] else partial).append(rep)
+    if len(partial) > 1 or (partial and completed) or len(completed) > 1:
+        raise InitOperationError("ambiguous init history ({} partial, {} completed operations); "
+                                 "never chosen by timestamp or directory order".format(
+                                     len(partial), len(completed)))
+    if partial:
+        return "resume", partial[0]
+    if completed:
+        return "completed", completed[0]
+    return "fresh", None
+
+
+def _fresh_plan(run, binding, head, ancestral, git):
+    """Preflight a FRESH adoption under the mutex and produce its immutable plan: no pointer, no
+    resolvable or partial store, no .working at all, every destination and staging name absent, no
+    destination already tracked, and CHANGELOG.md either absent (created) or a plain file (preserved
+    in E). With `ancestral` (a pinned evidence commit, PR4's selection) the counters are seeded
+    from the validated snapshot and the plan records it."""
+    import uuid
+    root, root_fd = run.root, run.root_fd
+    for pointer in (_opf_store.POINTER_REL, _opf_store.LOCAL_POINTER_REL):
+        if _lstat(root_fd, pointer, pointer) is not None:
+            raise InitOperationError("an existing store pointer {} is present".format(pointer))
+    model, present = observe_inventory(root_fd)
+    if present:
+        raise InitOperationError("a .working directory already exists ({} entries); foreign content "
+                                 "is never adopted by a fresh init".format(len(model["entries"])))
+    res = _opf_store.resolve_store(root)
+    if res.status == _opf_store.RESOLVED:
+        raise InitOperationError("an existing store resolves at {} ({}); this layer adopts only an "
+                                 "unadopted root (completed-adoption and committed-deletion "
+                                 "classification is PR4)".format(root, res.detail))
+    if res.status != _opf_store.NOT_ADOPTED:
+        raise InitOperationError("store resolution refused: {}".format(res.detail),
+                                 CANNOT_EVALUATE)
+    op_id = str(uuid.uuid4())
+    changelog = None
+    st = _lstat(root_fd, CHANGELOG_RELPATH, CHANGELOG_RELPATH)
+    if st is not None:
+        data, fst = _read_regular(root_fd, CHANGELOG_RELPATH, CHANGELOG_RELPATH,
+                                  _opf_init_contract.MAX_RAW_BYTES)
+        changelog = {"path": CHANGELOG_RELPATH, "mode": stat.S_IMODE(fst.st_mode) & 0o777,
+                     "size": len(data), "digest": _opf_init_contract._digest(data)}
+    seed = None
+    if ancestral is not None:
+        if head["kind"] != "commit":
+            raise InitOperationError("an ancestral seed needs a commit HEAD to pin its ancestry")
+        seed = read_ancestral_counter_seed(
+            root, pinned_head=head["oid"], evidence_commit=ancestral,
+            prefix=binding["product_prefix"], object_format=binding["object_format"], git=git)
+    plan, raw = build_init_plan(operation_id=op_id, binding=binding, head=head,
+                                inventory_digest_value=inventory_digest(model),
+                                application_time=_utc_now(), existing_changelog=changelog,
+                                seed=seed)
+    destinations = [s["path"] for s in plan["sets"]["S"]] + list(PERMITTED_DIRECTORIES)
+    for s in plan["sets"]["S"]:
+        for rel in (s["path"], "{}/{}".format(s["path"].rsplit("/", 1)[0], s["staging"])
+                    if "/" in s["path"] else s["staging"]):
+            try:
+                present_now = _journal._lstat_contained(root_fd, rel) is not None
+            except (_journal.JournalError, OSError) as exc:
+                raise InitOperationError("cannot observe {} ({})".format(rel, exc), CANNOT_EVALUATE)
+            if present_now:
+                raise InitOperationError("planned destination {} already exists".format(rel))
+    tracked = _tracked_destinations(git, root, destinations + [_opf_store.LOCAL_POINTER_REL])
+    if tracked:
+        raise InitOperationError("planned destination(s) already tracked by git: {}; a deletion "
+                                 "present only in the worktree or index is never re-initialized "
+                                 "over".format(tracked))
+    return plan, raw
+
+
+def _outcome(run, primary):
+    """The frozen opf.init.outcome/v1 envelope for this attempt (the fields PR3a observes; the index
+    and git-object observations are the deferred PR5 legs, recorded empty, never invented)."""
+    r = run.result
+    return {
+        "schema": 1, "format": _opf_init_substrate.OUTCOME_FORMAT, "operation": OPERATION,
+        "operation_id": run.plan["operation_id"], "binding": run.plan["binding"],
+        "head": run.plan["head"], "plan": run.plan["plan_digest"],
+        "last_attempted_phase": run.phases[-1] if run.phases else None,
+        "primary_failure": primary,
+        "finalization_failures": list(r.finalization_failures),
+        "path_observations": [{"path": p, "state": "created"} for p in r.created]
+        + [{"path": p, "state": "verified-identical"} for p in r.deduplicated]
+        + [{"path": p, "state": "conflict"} for p in r.conflicts],
+        "source_index_observations": [],
+        "creation_evidence": sorted(r.created),
+        "git_object_observations": [],
+        "checks_executed": list(run.checks),
+        "controls": {"lease": "detached" if run.back is not None else "held-or-released"},
+        "durability": {"files": "fsync", "directories": "fsync", "power_loss": "unverified"},
+        "completed_phases": list(run.phases),
+        "rollback": "none",
+    }
+
+
+def _record_outcome(run, primary):
+    writer = run.writer()
+    if run.sub is None or run.plan is None or writer is None:
+        if run.sub is not None:
+            run.result.finalization_failures.append(
+                "the attempt outcome was not persisted: no live writer remained to record it")
+        return
+    try:
+        payload = _opf_init_contract.canonical_json_bytes(_outcome(run, primary))
+        _opf_init_substrate.record_outcome(run.sub, writer, payload)
+    except (_opf_init_substrate.InitSubstrateError, ValueError, TypeError) as exc:
+        run.result.finalization_failures.append("the attempt outcome was not persisted: {}".format(
+            exc))
+
+
+def _release_all(run):
+    """Release what this attempt still holds, in reverse lock order, each failure collected as a
+    finalization failure (never masking the primary outcome)."""
+    fails = run.result.finalization_failures
+    if run.sub is not None:
+        try:
+            _opf_init_substrate.close_operation(run.sub)
+        except _opf_init_substrate.InitSubstrateError as exc:
+            fails.append("closing the operation handle: {}".format(exc))
+        run.sub = None
+    if run.cap is not None and not run.cap._released:
+        try:
+            _opf_oplock.release_operation(run.cap)
+        except _opf_oplock.OpLockError as exc:
+            fails.append("releasing the capability: {}".format(exc))
+    for h in (run.back, run.holder):
+        if h is not None and not h._released and not h._spent:
+            try:
+                _opf_oplock.release_init_holder(h)
+            except _opf_oplock.OpLockError as exc:
+                fails.append("releasing the init holder: {}".format(exc))
+    if run.root_fd is not None:
+        try:
+            os.close(run.root_fd)
+        except OSError as exc:
+            fails.append("closing the product root: {}".format(exc))
+        run.root_fd = None
+
+
+def run_init_operation(product_root, *, ancestral=None, recover=False):
+    """Run (or resume) the PR3a/PR3b init operation on the EXPLICIT absolute product root and return
+    an InitResult; never raises for an expected outcome. Takes the shared mutex before any write
+    (pre-store holder), re-observes the binding and HEAD under it (a pre-lock observation never
+    authorizes), selects the operation, and then: a completed adoption is health-validated and the
+    lock released with no adoption file or index entry changed (ALREADY-INITIALIZED); a fresh
+    adoption's plan is persisted (plan-recorded) BEFORE any worktree write; the directory group runs
+    under the holder; the mandatory lease is attached; the source group runs under the capability;
+    the source-state check passes and `sources-ready` is recorded; the views are planned from the
+    verified sources and the view group runs under the capability; the lease is detached (the last
+    store write), the final check runs under the still-held mutex, and only then is `views-ready`
+    (durable completion) recorded, the attempt outcome recorded, and the mutex released. Any failure
+    preserves the worktree and the evidence and is reported with its code; release failures are
+    reported separately. `ancestral` is a pinned evidence commit for a re-adoption's counters seed
+    (PR4 selects it); `recover` is passed to the lock's explicit, confirmed-dead recovery."""
+    result = InitResult()
+    try:
+        root = _abs_root(product_root)
+        _journal.require_containment()
+        if not _containment.probe():
+            raise InitOperationError("race-free containment primitive absent", CANNOT_EVALUATE)
+        git = _opf_observe._git_path()
+        if git is None:
+            raise InitOperationError("git binary not found on PATH", CANNOT_EVALUATE)
+        pre_binding, pre_head = observe_binding(root, git)
+    except (InitOperationError, _journal.JournalError) as exc:
+        result.status = getattr(exc, "code", CANNOT_EVALUATE)
+        result.primary_failure = {"code": result.status, "detail": str(exc)}
+        return result
+    run = _Run(root, result)
+    primary = None
+    try:
+        try:
+            run.holder = _opf_oplock.acquire_init_operation(root, OPERATION, recover=recover)
+        except _opf_oplock.OpLockError as exc:
+            raise InitOperationError("cannot take the operation mutex ({})".format(exc))
+        binding, head = observe_binding(root, git)
+        if (binding, head) != (pre_binding, pre_head):
+            raise InitOperationError("the binding or HEAD changed while the mutex was taken; "
+                                     "re-run against a settled repository")
+        try:
+            run.root_fd = _opf_store._open_dir_nofollow(root)
+        except OSError as exc:
+            raise InitOperationError("cannot open the product root ({})".format(exc),
+                                     CANNOT_EVALUATE)
+        rst = os.fstat(run.root_fd)
+        if (rst.st_dev, rst.st_ino) != (binding["product_root"]["identity"]["device"],
+                                        binding["product_root"]["identity"]["inode"]):
+            raise InitOperationError("the product root changed identity after it was observed")
+        kind, rep = _select(run, binding)
+        if kind == "completed":
+            _health_check(root, run.root_fd, rep.plan, binding)
+            result.status = ALREADY_INITIALIZED
+            result.operation_id = rep.op_id
+            result.plan_digest = rep.plan["plan_digest"]
+            result.phases = tuple(p for _s, p in rep.phases)
+            return result
+        if kind == "fresh":
+            plan, raw = _fresh_plan(run, binding, head, ancestral, git)
+            try:
+                run.sub = _opf_init_substrate.begin_operation(run.holder, raw)
+            except _opf_init_substrate.InitSubstrateError as exc:
+                raise InitOperationError("cannot persist the plan ({})".format(exc), FAILED)
+            run.plan = plan
+            run.record("plan-recorded")
+        else:
+            try:
+                run.sub = _opf_init_substrate.resume_operation(run.holder, rep.op_id,
+                                                               rep.plan["plan_digest"])
+            except _opf_init_substrate.InitSubstrateError as exc:
+                raise InitOperationError("cannot resume operation {} ({})".format(rep.op_id, exc),
+                                         CANNOT_EVALUATE)
+            run.plan = validate_init_plan(run.sub._plan_bytes, expected_binding=binding,
+                                          expected_head=head)
+            run.phases = _phase_names(run.sub)
+            if not run.phases:
+                run.record("plan-recorded")
+            result.notes.append("resumed operation {} after milestone {}".format(
+                rep.op_id, run.phases[-1]))
+        result.operation_id = run.plan["operation_id"]
+        result.plan_digest = run.plan["plan_digest"]
+        _run_group(run, "dirs", _dir_effects(run.plan),
+                   lambda resuming: _apply_dirs(run.root_fd, run.plan, resuming),
+                   lambda: _verify_dirs(run.root_fd, run.plan),
+                   pre_intent=lambda: _preclassify_dirs(run.root_fd, run.plan))
+        try:
+            run.cap = _opf_oplock.attach_init_lease(run.holder, run.plan["operation_id"])
+        except _opf_oplock.OpLockError as exc:
+            raise InitOperationError("cannot attach the mandatory lease ({})".format(exc), FAILED)
+        sources = _source_files(run.plan)
+        _run_group(run, "sources", _file_effects(sources),
+                   lambda resuming: _apply_files(run.root_fd, sources, result.notes,
+                                                 require_absent=not resuming),
+                   lambda: _verify_files(run.root_fd, sources),
+                   pre_intent=lambda: _preclassify_files(run.root_fd, sources, result.notes,
+                                                          require_absent=True))
+        # The source group has just re-verified every source byte-exact (on resume too), so the
+        # views always consume a verified source state; the source-state milestone is recorded once.
+        if "sources-ready" not in run.phases:
+            _final_check(root, run.root_fd, run.plan, lease_held=True)
+            run.record("sources-ready")
+        views = plan_init_views(root, run.root_fd, run.plan, git)
+        apply_init_views(run, views)
+        try:
+            run.back = _opf_oplock.detach_init_lease(run.cap)
+        except _opf_oplock.OpLockError as exc:
+            raise InitOperationError("the lease detach failed ({}); completion is not recorded, so "
+                                     "a retry resumes".format(exc), FAILED)
+        run.checks = _final_check(root, run.root_fd, run.plan, lease_held=False, views=views,
+                                  git=git)
+        run.record("views-ready")
+        result.status = VIEWS_READY
+        result.milestone = MILESTONE
+    except InitOperationError as exc:
+        primary = {"code": exc.code, "detail": str(exc)}
+        if "preserved and refused" in str(exc):
+            result.conflicts.append(str(exc).split(" ", 1)[0])
+    except (_opf_oplock.OpLockError, _opf_init_substrate.InitSubstrateError,
+            _journal.JournalError, OSError, ValueError) as exc:
+        primary = {"code": CANNOT_EVALUATE, "detail": "{}: {}".format(type(exc).__name__, exc)}
+    finally:
+        if primary is not None:
+            result.primary_failure = primary
+            result.status = FAILED if run.sub is not None and primary["code"] == FAILED \
+                else primary["code"]
+        if run.plan is not None:
+            _record_outcome(run, primary)
+        result.phases = tuple(run.phases) or result.phases
+        _release_all(run)
+    return result
+
+
+def init_operation(product_root, *, ancestral=None, recover=False):
+    """Public CLI seam; preserve the library result and decision-7 milestone boundary."""
+    return run_init_operation(product_root, ancestral=ancestral, recover=recover)
+
+
+# --- self-test ------------------------------------------------------------------------------------
+#
+# The physical tests drive the REAL operation in child processes: `--selftest-child ROOT KILL [SEED]`
+# runs run_init_operation in a fresh interpreter, optionally SIGKILLing itself at a named point through
+# hooks the child entry installs (production code carries no kill hooks), and prints the result as
+# JSON. Each retry is a fresh process, as a real restart would be. Process-kill tests establish
+# process-crash behaviour only; power-loss durability is NOT verified here.
+
+
+def _mk_binding():
+    ident = {"device": 1, "inode": 2}
+    return {
+        "product_root": {"path": "/a", "identity": ident},
+        "repository_root": {"path": "/a", "identity": ident},
+        "worktree_git_directory": {"path": "/a/.git", "identity": {"device": 1, "inode": 3}},
+        "common_git_directory": {"path": "/a/.git", "identity": {"device": 1, "inode": 3}},
+        "index_path": "/a/.git/index",
+        "product_prefix": "",
+        "object_format": "sha1",
+    }
+
+
+def _mk_head():
+    return {"kind": "commit", "oid": "a" * 40,
+            "binding": {"kind": "symbolic", "ref": "refs/heads/main"}}
+
+
+def _mk_basis(**over):
+    basis = {
+        "spec_version": _opf_store.SUPPORTED_SPEC_VERSION,
+        "operation_id": "12345678-1234-1234-1234-1234567890ab",
+        "binding": _mk_binding(),
+        "head": _mk_head(),
+        "first_adoption": True,
+        "inventory_digest": "sha256:" + "0" * 64,
+        "acceptance": {"present": False},
+    }
+    basis.update(over)
+    return basis
+
+
+def _mk_payloads(extra=None):
+    payloads = {p: (p + "\n").encode("utf-8") for p in BOOTSTRAP_SOURCE_ROSTER}
+    if extra:
+        payloads.update(extra)
+    return payloads
+
+
+def _mk_plan(**over):
+    args = dict(operation_id="12345678-1234-4234-8234-1234567890ab", binding=_mk_binding(),
+                head=_mk_head(), inventory_digest_value="sha256:" + "0" * 64,
+                application_time="2026-01-02T03:04:05Z")
+    args.update(over)
+    return build_init_plan(**args)
+
+
+def _st_git_env(base):
+    env = dict((k, v) for k, v in os.environ.items() if not k.startswith("GIT_"))
+    env["HOME"] = base
+    env["XDG_CONFIG_HOME"] = os.path.join(base, "xdg")
+    env["GIT_CONFIG_GLOBAL"] = os.path.join(base, "gitconfig-global")
+    env["GIT_CONFIG_SYSTEM"] = os.path.join(base, "gitconfig-system")
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_AUTHOR_NAME"] = "Test"
+    env["GIT_AUTHOR_EMAIL"] = "test@example.invalid"
+    env["GIT_COMMITTER_NAME"] = "Test"
+    env["GIT_COMMITTER_EMAIL"] = "test@example.invalid"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["LC_ALL"] = "C"
+    os.makedirs(env["XDG_CONFIG_HOME"], exist_ok=True)
+    return env
+
+
+def _git(args, cwd, env, allow_fail=False, input_bytes=None):
+    import subprocess
+    proc = subprocess.run(["git", "-C", cwd] + args, env=env, input=input_bytes,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    if proc.returncode != 0 and not allow_fail:
+        raise RuntimeError("git {} failed: {}".format(args, proc.stderr.decode("utf-8", "replace")))
+    return proc
+
+
+def _write(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(data)
+
+
+def _counters_toml(values):
+    """A canonical counters.toml body for a fixture: schema marker plus the given {ns: int}."""
+    lines = ["schema = {}".format(SUPPORTED_SCHEMA), "", "[counters]"]
+    for ns in sorted(values):
+        lines.append("{} = {}".format(ns, values[ns]))
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _head(repo, env):
+    return _git(["rev-parse", "HEAD"], repo, env).stdout.decode().strip()
+
+
+def _seed_repo(root, env, values, prefix=""):
+    """A git repo with a committed counters.toml under `prefix`: (repo, HEAD oid, bytes)."""
+    os.makedirs(root, exist_ok=True)
+    _git(["init", "-q", "-b", "main", "."], root, env)
+    rel = os.path.join(prefix, ".working", "toml", "counters.toml") if prefix \
+        else os.path.join(".working", "toml", "counters.toml")
+    body = _counters_toml(values)
+    _write(os.path.join(root, rel), body)
+    _git(["add", "-A"], root, env)
+    _git(["commit", "-q", "-m", "seed"], root, env)
+    return root, _head(root, env), body
+
+
+def _plain_repo(root, env):
+    os.makedirs(root, exist_ok=True)
+    _git(["init", "-q", "-b", "main", "."], root, env)
+    _write(os.path.join(root, "README"), b"fixture\n")
+    _git(["add", "-A"], root, env)
+    _git(["commit", "-q", "-m", "fixture"], root, env)
+    return root
+
+
+def _tree_snapshot(root):
+    """{relpath: (kind, mode, bytes or link target)} of every entry beneath root except .git."""
+    snap = {}
+    for base, dirs, files in os.walk(root):
+        if os.path.relpath(base, root).split(os.sep)[0] == ".git":
+            continue
+        dirs[:] = [d for d in dirs if not (base == root and d == ".git")]
+        for name in dirs + files:
+            p = os.path.join(base, name)
+            st = os.lstat(p)
+            rel = os.path.relpath(p, root)
+            if stat.S_ISLNK(st.st_mode):
+                snap[rel] = ("link", 0, os.readlink(p))
+            elif stat.S_ISDIR(st.st_mode):
+                snap[rel] = ("dir", stat.S_IMODE(st.st_mode), None)
+            elif stat.S_ISREG(st.st_mode):
+                with open(p, "rb") as fh:
+                    snap[rel] = ("file", stat.S_IMODE(st.st_mode), fh.read())
+            else:
+                snap[rel] = ("special", stat.S_IMODE(st.st_mode), None)
+    return snap
+
+
+def _child(root, env, kill="none", seed=None, recover=True, umask=None):
+    """Run run_init_operation in a FRESH interpreter; returns (exit status, result dict or None)."""
+    import subprocess
+    argv = [sys.executable, "-I", "-B", os.path.abspath(__file__), "--selftest-child", root, kill,
+            seed or "-", "1" if recover else "0", "-" if umask is None else "{:o}".format(umask)]
+    proc = subprocess.run(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          timeout=300)
+    out = proc.stdout.decode("utf-8", "replace").strip().splitlines()
+    doc = None
+    if out and out[-1].startswith("{"):
+        doc = json.loads(out[-1])
+    return proc.returncode, doc, proc.stderr.decode("utf-8", "replace")
+
+
+def _child_main(argv):
+    """The --selftest-child entry: install the named kill hook, run once, print the result."""
+    import signal
+    root, kill, seed, recover, umask = argv
+    if umask != "-":
+        os.umask(int(umask, 8))
+    this = sys.modules[__name__]
+
+    def die():
+        sys.stdout.flush()
+        os.kill(os.getpid(), signal.SIGKILL)
+
+    counter = {"n": 0}
+    name, _sep, arg = kill.partition(":")
+    if name in ("dirs-intent", "sources-intent", "sources-complete", "dirs-complete",
+                "views-intent", "views-complete"):
+        real_publish = _journal.publish
+        group, what = name.split("-")
+        ftype = _journal.F_INTENT if what == "intent" else _journal.F_COMPLETE
+
+        def publish(jr_fd, txn, t, obj):
+            real_publish(jr_fd, txn, t, obj)
+            if t == ftype and txn.endswith("-" + group):
+                die()
+        _journal.publish = publish
+    elif name == "dirs-applied":
+        real_dirs = this._apply_dirs
+
+        def apply_dirs(*a):
+            out = real_dirs(*a)
+            die()
+            return out
+        this._apply_dirs = apply_dirs
+    elif name in ("attached", "detached"):
+        target = "attach_init_lease" if name == "attached" else "detach_init_lease"
+        real = getattr(_opf_oplock, target)
+
+        def wrapped(*a):
+            out = real(*a)
+            die()
+            return out
+        setattr(_opf_oplock, target, wrapped)
+    elif name == "source":
+        real_stage = this._stage_and_publish
+
+        def stage(*a):
+            out = real_stage(*a)
+            counter["n"] += 1
+            if counter["n"] == int(arg):
+                die()
+            return out
+        this._stage_and_publish = stage
+    elif name in ("prelink", "postlink", "planlink"):
+        real_link = os.link
+
+        def link(src, dst, *a, **k):
+            is_plan = dst == _opf_init_substrate.PLAN_NAME
+            if name == "planlink":
+                if is_plan:
+                    die()
+                return real_link(src, dst, *a, **k)
+            if _STAGE_MARKER not in src:
+                return real_link(src, dst, *a, **k)
+            counter["n"] += 1
+            if counter["n"] == int(arg) and name == "prelink":
+                die()
+            real_link(src, dst, *a, **k)
+            if counter["n"] == int(arg) and name == "postlink":
+                die()
+        os.link = link
+    elif name == "view":
+        real_stage = this._stage_and_publish
+
+        def stage(*a):
+            out = real_stage(*a)
+            if "view" in a[2]:
+                counter["n"] += 1
+                if counter["n"] == int(arg):
+                    die()
+            return out
+        this._stage_and_publish = stage
+    elif name in ("ready", "phase"):
+        real_record = _opf_init_substrate.record_phase
+        target_phase = PHASES[-1] if name == "ready" else arg
+
+        def record(sub, writer, phase):
+            out = real_record(sub, writer, phase)
+            if phase == target_phase:
+                die()
+            return out
+        _opf_init_substrate.record_phase = record
+    elif name == "generator":
+        _opf_views.GENERATOR_VERSION = _opf_views.GENERATOR_VERSION + "-changed"
+    elif name == "renderer":
+        kind, sources, render = _opf_views.NAMED_VIEWS["TODO.md"]
+        _opf_views.NAMED_VIEWS["TODO.md"] = (kind, sources,
+                                             lambda src, _r=render: _r(src) + "changed\n")
+    elif name == "noreseed":
+        def refuse(*_a, **_k):
+            raise AssertionError("the ancestral history was read again on resume")
+        this.read_ancestral_counter_seed = refuse
+    elif name == "norecover":
+        def refuse(*_a, **_k):
+            raise AssertionError("a rollback path was invoked on an init journal")
+        _journal.recover = _journal._restore_preimage = _journal.reconcile_and_claim_stale = refuse
+    elif name != "none":
+        raise SystemExit("unknown kill point {!r}".format(kill))
+    res = run_init_operation(root, ancestral=None if seed == "-" else seed, recover=recover == "1")
+    print(json.dumps({s: getattr(res, s) for s in InitResult.__slots__}, sort_keys=True))
+    return 0
+
+
+def _ops_dir(root):
+    return os.path.join(root, ".git", _opf_init_substrate.SUBSTRATE_DIRNAME,
+                        _opf_init_substrate.OPS_DIRNAME)
+
+
+def _read_plan(root):
+    ops = sorted(os.listdir(_ops_dir(root)))
+    with open(os.path.join(_ops_dir(root), ops[0], _opf_init_substrate.PLAN_NAME), "rb") as fh:
+        return ops, fh.read()
+
+
+def _run_self_test():
+    import signal
+    import tempfile
+    import traceback
+
+    if shutil.which("git") is None:
+        print("REFUSED: git binary not found; the init operation self-test requires real git stores "
+              "(fail-closed, non-zero)")
+        return 2
+    if not _containment.probe():
+        print("REFUSED: race-free containment primitive absent (fail-closed, non-zero)")
+        return 2
+
+    checks = []
+
+    def ok(label, condition, detail=""):
+        checks.append((label, bool(condition), detail))
+
+    def refuses(label, thunk, needle=None):
+        try:
+            thunk()
+        except InitOperationError as exc:
+            ok(label, needle is None or needle in str(exc),
+               "message {!r} lacks {!r}".format(str(exc), needle) if needle else "")
+            return
+        except Exception as exc:  # a refusal must be the DECLARED type, never a raw error
+            ok(label, False, "raised {} not InitOperationError: {}".format(type(exc).__name__, exc))
+            return
+        ok(label, False, "did not refuse")
+
+    # --- pure: source-digest basis (init.toml excluded) -------------------------------------------
+    payloads = _mk_payloads()
+    source_set, source_digest = compute_bootstrap_source_digest(payloads)
+    ok("D-roster-excludes-init", PROVENANCE_RELPATH not in source_set)
+    ok("D-roster-sorted-unique", source_set == sorted(set(source_set)) == sorted(source_set))
+    ok("D-digest-grammar", bool(_opf_init_contract._DIGEST_RE.match(source_digest)))
+    refuses("D-init-excluded",
+            lambda: compute_bootstrap_source_digest(_mk_payloads(
+                extra={PROVENANCE_RELPATH: b"forged"})), needle="init.toml")
+    changed = dict(payloads)
+    changed[".opf.toml"] = b"different\n"
+    ok("D-digest-content-bound", compute_bootstrap_source_digest(changed)[1] != source_digest)
+    refuses("D-nonbytes-payload",
+            lambda: compute_bootstrap_source_digest({".opf.toml": "str"}), needle="bytes")
+    refuses("D-badpath-payload",
+            lambda: compute_bootstrap_source_digest({"../escape": b"x"}), needle="source path")
+    # Pinned independent fixture for the digest basis (sha256 over canonical JSON of the sorted
+    # [path, digest] roster): computed by hand here, never through the function under test.
+    pairs = [[p, "sha256:" + hashlib.sha256(payloads[p]).hexdigest()] for p in sorted(payloads)]
+    manual = "sha256:" + hashlib.sha256((json.dumps(pairs, separators=(",", ":"))
+                                         + "\n").encode("ascii")).hexdigest()
+    ok("D-basis-independent-fixture", manual == source_digest)
+
+    # --- pure: provenance build + validate --------------------------------------------------------
+    text = build_bootstrap_provenance(_mk_basis(), payloads)
+    v = validate_bootstrap_provenance(text.encode("utf-8"))
+    ok("P-build-validates", v.status == VALID, str(v.findings))
+    ok("P-build-roundtrip", build_bootstrap_provenance(_mk_basis(), payloads) == text)
+    ok("P-is-toml", tomllib.loads(text)["format"] == PROVENANCE_FORMAT)
+    ok("P-init-not-in-source-set", PROVENANCE_RELPATH not in v.model["source_set"])
+    ok("P-stale-op-id", validate_bootstrap_provenance(text.encode("utf-8"), expected_basis=_mk_basis(
+        operation_id="ffffffff-ffff-ffff-ffff-ffffffffffff")).status == INVALID)
+    ok("P-stale-source-digest", validate_bootstrap_provenance(
+        text.encode("utf-8"), expected_source_digest="sha256:" + "9" * 64).status == INVALID)
+    ok("P-matches-live", validate_bootstrap_provenance(
+        text.encode("utf-8"), expected_basis=_mk_basis(), expected_source_digest=source_digest,
+        expected_source_set=source_set).status == VALID)
+    ok("P-not-bytes", validate_bootstrap_provenance("str").status == INVALID)
+    ok("P-not-toml", validate_bootstrap_provenance(b"= = =").status == INVALID)
+    good = tomllib.loads(text)
+    ok("P-bad-schema", validate_bootstrap_provenance(
+        _opf_emit.emit_checked(dict(good, schema=2)).encode("utf-8")).status == INVALID)
+    with_init = json.loads(json.dumps(good))
+    with_init["source_set"] = sorted(with_init["source_set"] + [PROVENANCE_RELPATH])
+    ok("P-source-set-has-init", validate_bootstrap_provenance(
+        _opf_emit.emit_checked(with_init).encode("utf-8")).status == INVALID)
+    refuses("P-build-bad-basis",
+            lambda: build_bootstrap_provenance(_mk_basis(first_adoption="yes"), payloads),
+            needle="first_adoption")
+
+    # --- pure: the plan (decision 5) ---------------------------------------------------------------
+    plan, raw = _mk_plan()
+    ok("L-plan-canonical", raw == _opf_init_contract.canonical_json_bytes(plan))
+    ok("L-plan-repeat-bytes", _mk_plan()[1] == raw)
+    ok("L-plan-digest-self-excluding", plan["plan_digest"] == compute_plan_digest(plan))
+    body = dict(plan)
+    del body["plan_digest"]
+    ok("L-plan-digest-independent", plan["plan_digest"] == "sha256:" + hashlib.sha256(
+        (json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+         + "\n").encode("ascii")).hexdigest())
+    ok("L-roster", [s["path"] for s in plan["sets"]["S"]][-3:] == [
+        PROVENANCE_RELPATH, CHANGELOG_RELPATH, _opf_store.POINTER_REL])
+    ok("L-staging-bound", all(s["staging"].endswith(plan["operation_id"].replace("-", ""))
+                              for s in plan["sets"]["V"] + plan["sets"]["S"]))
+    # The V roster is the pinned initial set (independent literal, not _opf_init's tuple), every view
+    # store-scope under .working, never the root VERSION, reading only planned sources.
+    views_v = plan["sets"]["V"]
+    ok("L-view-roster", [v["view"] for v in views_v] == sorted((
+        "TODO.md", "BACKLOG.md", "PIPELINE.md", "DONE.md", "FINDINGS.md", "DECISIONS.md",
+        "BLOCKS.md", "HANDOFF.md", "REFERENCES.md", "CONTRIBUTIONS.md", "WORKLOG.md",
+        "VERSION.md", "DECISIONS.toml")), str([v["view"] for v in views_v]))
+    ok("L-view-destinations", all(v["path"] == ".working/" + v["view"] and v["mode"] == 0o644
+                                  for v in views_v)
+       and "VERSION" not in [v["path"] for v in views_v])
+    ok("L-view-sources-planned", all(set(v["sources"]) <= set(plan_payloads(plan))
+                                     for v in views_v))
+    ok("L-view-generator-pinned", plan["versions"]["views_generator"] == {
+        "name": "opf-views", "version": _opf_views.GENERATOR_VERSION,
+        "transform_vocab": _opf_views.TRANSFORM_VOCAB_VERSION,
+        "projection_schema": _opf_views.PROJECTION_SCHEMA})
+    prov = plan_payloads(plan)[PROVENANCE_RELPATH]
+    others = {p: b for p, b in plan_payloads(plan).items() if p != PROVENANCE_RELPATH}
+    ok("L-provenance-excludes-itself", tomllib.loads(prov.decode())["source_digest"]
+       == compute_bootstrap_source_digest(others)[1])
+    ok("L-changelog-existing-in-E", _mk_plan(existing_changelog={
+        "path": CHANGELOG_RELPATH, "mode": 0o644, "size": 3, "digest": "sha256:" + "1" * 64})[0][
+        "sets"]["E"][0]["path"] == CHANGELOG_RELPATH)
+
+    def tampered(mutate):
+        doc = json.loads(raw)
+        mutate(doc)
+        if "plan_digest" in doc:
+            doc["plan_digest"] = compute_plan_digest(doc)
+        return _opf_init_contract.canonical_json_bytes(doc)
+
+    def s_entry(doc, path):
+        return [s for s in doc["sets"]["S"] if s["path"] == path][0]
+
+    def set_payload(doc, path, data):
+        e = s_entry(doc, path)
+        e["payload"] = base64.b64encode(data).decode("ascii")
+        e["size"] = len(data)
+        e["digest"] = _opf_init_contract._digest(data)
+
+    for label, mutate, needle in (
+            ("generator", lambda d: d["versions"].update(generator="other/1"), "versions"),
+            ("spec-version", lambda d: d["versions"].update(spec_version="1.0.0"), "versions"),
+            ("views-malformed", lambda d: d["sets"].update(V=[{"path": "x"}]), "V entries"),
+            ("views-dropped", lambda d: d["sets"]["V"].pop(0), "view roster"),
+            ("views-reordered", lambda d: d["sets"]["V"].reverse(), "view roster"),
+            ("views-staging", lambda d: d["sets"]["V"][0].update(staging=".x"), "view roster"),
+            ("views-mode", lambda d: d["sets"]["V"][0].update(mode=0o600), "view roster"),
+            ("views-sources", lambda d: d["sets"]["V"][0].update(sources=[]), "view roster"),
+            ("views-extra-key", lambda d: d["sets"]["V"][0].update(size=1), "V entries"),
+            ("views-root-version", lambda d: d["sets"]["V"].append({
+                "path": "VERSION", "view": "VERSION", "kind": "deterministic", "mode": VIEW_MODE,
+                "sources": ["{}/version.toml".format(_MACHINE_HOME)],
+                "staging": staging_name("VERSION", d["operation_id"])}), "view roster"),
+            ("views-generator", lambda d: d["versions"]["views_generator"].update(version="1"),
+             "versions"),
+            ("keep-nonempty", lambda d: d["sets"].update(K=[{"path": "x"}]), "K must"),
+            ("staging-set", lambda d: d.update(staging_set=["x"]), "staging_set"),
+            ("bad-staging", lambda d: d["sets"]["S"][0].update(staging=".x"), "staging name"),
+            ("bad-mode", lambda d: d["sets"]["S"][0].update(mode=0o600), "mode"),
+            ("digest-mismatch", lambda d: d["sets"]["S"][0].update(digest="sha256:" + "0" * 64),
+             "digest"),
+            ("order", lambda d: d["sets"]["S"].reverse(), "order"),
+            ("dropped-source", lambda d: d["sets"]["S"].pop(0), "roster"),
+            ("forged-manifest", lambda d: set_payload(d, "{}/manifest.toml".format(_MACHINE_HOME),
+                                                      b"[opf]\n"), "exact bytes"),
+            ("forged-provenance", lambda d: set_payload(d, PROVENANCE_RELPATH, b"x = 1\n"),
+             "provenance"),
+            ("zero-basis-readoption", lambda d: d.update(first_adoption=False), "first adoption"),
+            ("changelog-both", lambda d: d["sets"].update(E=[{
+                "path": CHANGELOG_RELPATH, "mode": 0o644, "size": 1,
+                "digest": "sha256:" + "1" * 64}]), "roster"),
+            ("bad-time", lambda d: d.update(application_time="2026-13-40T00:00:00Z"),
+             "application_time"),
+            ("acceptance", lambda d: d.update(acceptance={"present": True}), "acceptance"),
+            ("dirs", lambda d: d["permitted_directories"].pop(), "permitted_directories"),
+            ("control", lambda d: d["sets"].update(C=[]), "C must")):
+        refuses("L-tamper-" + label, lambda m=mutate: validate_init_plan(tampered(m)), needle)
+    refuses("L-tamper-plan-digest", lambda: validate_init_plan(
+        _opf_init_contract.canonical_json_bytes(dict(json.loads(raw),
+                                                     plan_digest="sha256:" + "2" * 64))),
+            needle="plan_digest")
+    refuses("L-noncanonical", lambda: validate_init_plan(raw + b"\n"), needle="canonical")
+    refuses("L-expected-head", lambda: validate_init_plan(raw, expected_head=dict(
+        _mk_head(), oid="b" * 40)), needle="HEAD")
+    refuses("L-expected-binding", lambda: validate_init_plan(raw, expected_binding=dict(
+        _mk_binding(), product_prefix="x")), needle="binding")
+    ok("L-validates", validate_init_plan(raw, expected_binding=_mk_binding(),
+                                         expected_head=_mk_head())["plan_digest"]
+       == plan["plan_digest"])
+
+    base = os.path.realpath(tempfile.mkdtemp(prefix="opf-init-op-selftest-"))
+    env = _st_git_env(base)
+    saved = {}
+    for k in ("HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+              "GIT_CONFIG_NOSYSTEM"):
+        saved[k] = os.environ.get(k)
+        os.environ[k] = env[k]
+    tests_run = []
+    try:
+        _b6_tests(base, env, ok, refuses)
+        tests_run.append("b6")
+        _physical_tests(base, env, ok, signal)
+        tests_run.append("physical")
+        _view_tests(base, env, ok, signal)
+        tests_run.append("views")
+        import check_opf_init_qa
+        ok("PR3a-QA-regressions", check_opf_init_qa.self_test() == 0)
+    except Exception:
+        ok("self-test-harness", False, traceback.format_exc())
+    finally:
+        for k, val in saved.items():
+            if val is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = val
+        shutil.rmtree(base, ignore_errors=True)
+
+    failed = [(lbl, why) for (lbl, good_, why) in checks if not good_]
+    for lbl, why in failed:
+        sys.stderr.write("SELF-TEST FAIL {}: {}\n".format(lbl, why))
+    print("filesystem under test: {} (TMPDIR={})".format(base, os.environ.get("TMPDIR", "")))
+    if failed or tests_run != ["b6", "physical", "views"]:
+        sys.stderr.write("_opf_init_operation SELF-TEST: FAIL ({} of {})\n".format(
+            len(failed), len(checks)))
+        return 1
+    print("_opf_init_operation SELF-TEST: PASS ({} checks)".format(len(checks)))
+    return 0
+
+
+
+def _b6_tests(base, env, ok, refuses):
+    """B6 (decision 6) over real git stores: the pinned snapshot's high-waters, its unknown and
+    module-tier namespaces, first-parent membership, and every refusal (never an older candidate,
+    never a zero, never a maximum over history)."""
+    import subprocess
+    values = {ns: 0 for ns in _opf_store.BASELINE_TYPES.values()}
+    values.update({"WL": 7, "BI": 3, "FN": 2, "LF": 5})
+    repo, head, body = _seed_repo(os.path.join(base, "r1"), env, values)
+    seed = read_ancestral_counter_seed(repo, pinned_head=head, evidence_commit=head, prefix="",
+                                       object_format="sha1")
+    ok("B1-nonzero-counters", high_water(seed.counters, "WL") == 7
+       and high_water(seed.counters, "BI") == 3 and seed.unknown == ())
+    ok("B1-content-digest", seed.evidence["content_digest"]
+       == "sha256:" + hashlib.sha256(body).hexdigest())
+    counters = tomllib.loads(_opf_init.build_counters(seed=seed.counters))
+    ok("B2-wl-next-allocation", high_water(counters["counters"], "WL") + 1 == 8)
+    # B3: a snapshot that predates LF: LF is UNKNOWN (never zero) and the plan refuses it.
+    pre = {ns: 1 for ns in _opf_store.BASELINE_TYPES.values()}
+    r3, h3, _b = _seed_repo(os.path.join(base, "r3"), env, pre)
+    s3 = read_ancestral_counter_seed(r3, pinned_head=h3, evidence_commit=h3, prefix="",
+                                     object_format="sha1")
+    ok("B3-missing-is-unknown", s3.unknown == ("LF",) and "LF" not in s3.counters)
+    refuses("B3-unknown-refuses-plan", lambda: _mk_plan(seed=s3), needle="UNKNOWN")
+    refuses("B3-unknown-refuses-builder", lambda: build_source_payloads(
+        operation_id="12345678-1234-4234-8234-1234567890ab", binding=_mk_binding(),
+        head=_mk_head(), first_adoption=False, inventory_digest_value="sha256:" + "0" * 64,
+        create_changelog=True, seed=s3), needle="never zero")
+    # B4: module-tier namespaces: a zero is carried as evidence; a nonzero refuses (it would be lost).
+    r4, h4, _b = _seed_repo(os.path.join(base, "r4"), env, dict(values, MA=0))
+    s4 = read_ancestral_counter_seed(r4, pinned_head=h4, evidence_commit=h4, prefix="",
+                                     object_format="sha1")
+    ok("B4-module-zero-carried", s4.module_counters == {"MA": 0} and s4.unknown == ())
+    ok("B4-module-zero-plans", _mk_plan(seed=s4)[0]["first_adoption"] is False)
+    r4b, h4b, _b = _seed_repo(os.path.join(base, "r4b"), env, dict(values, MA=4))
+    s4b = read_ancestral_counter_seed(r4b, pinned_head=h4b, evidence_commit=h4b, prefix="",
+                                      object_format="sha1")
+    refuses("B4-module-nonzero-refuses", lambda: _mk_plan(seed=s4b), needle="module-tier")
+    # B5: malformed values and blobs refuse.
+    for label, blob, needle in (
+            ("bool", _counters_toml(values).replace(b"WL = 7", b"WL = true"), "malformed"),
+            ("negative", _counters_toml(values).replace(b"WL = 7", b"WL = -1"), "malformed"),
+            ("oversize", _counters_toml(values).replace(b"WL = 7", b"WL = 99999999999999999999"),
+             "64-bit"),
+            ("foreign-ns", _counters_toml(dict(values, ZZ=1)), "malformed"),
+            ("not-toml", b"not = = toml", "TOML")):
+        rb = os.path.join(base, "r5-" + label)
+        os.makedirs(rb)
+        _git(["init", "-q", "-b", "main", "."], rb, env)
+        _write(os.path.join(rb, ".working", "toml", "counters.toml"), blob)
+        _git(["add", "-A"], rb, env)
+        _git(["commit", "-q", "-m", "bad"], rb, env)
+        hb = _head(rb, env)
+        refuses("B5-" + label, lambda r=rb, h=hb: read_ancestral_counter_seed(
+            r, pinned_head=h, evidence_commit=h, prefix="", object_format="sha1"), needle=needle)
+    # B6: a missing blob, an absent object, a changed prefix, a sibling commit all refuse.
+    r6 = _plain_repo(os.path.join(base, "r6"), env)
+    h6 = _head(r6, env)
+    refuses("B6-missing-blob", lambda: read_ancestral_counter_seed(
+        r6, pinned_head=h6, evidence_commit=h6, prefix="", object_format="sha1"),
+        needle="does not resolve")
+    refuses("B6-absent-object", lambda: read_ancestral_counter_seed(
+        repo, pinned_head=head, evidence_commit="0" * 40, prefix="", object_format="sha1"),
+        needle="does not resolve")
+    refuses("B6-changed-prefix", lambda: read_ancestral_counter_seed(
+        repo, pinned_head=head, evidence_commit=head, prefix="sub", object_format="sha1"),
+        needle="does not resolve")
+    r7, h7, _b = _seed_repo(os.path.join(base, "r7"), env, values, prefix="sub")
+    s7 = read_ancestral_counter_seed(r7, pinned_head=h7, evidence_commit=h7, prefix="sub",
+                                     object_format="sha1")
+    ok("B7-nested-prefix", s7.evidence["path"] == "sub/.working/toml/counters.toml")
+    # B8: the FIRST-PARENT rule. A side-branch commit merged in (reachable only through the merge's
+    # second parent) refuses, although it IS an ancestor; the main-line commit before the merge is
+    # accepted. A plain ancestor check would accept both (the flip of this witness).
+    r8, h8, _b = _seed_repo(os.path.join(base, "r8"), env, dict(values, WL=1))
+    _git(["checkout", "-q", "-b", "side"], r8, env)
+    _write(os.path.join(r8, ".working", "toml", "counters.toml"), _counters_toml(dict(values,
+                                                                                      WL=50)))
+    _git(["commit", "-q", "-am", "side"], r8, env)
+    side = _head(r8, env)
+    _git(["checkout", "-q", "main"], r8, env)
+    _write(os.path.join(r8, "main.txt"), b"m\n")
+    _git(["add", "-A"], r8, env)
+    _git(["commit", "-q", "-m", "main"], r8, env)
+    _git(["merge", "-q", "--no-ff", "-s", "ours", "-m", "merge", "side"], r8, env)
+    merged = _head(r8, env)
+    anc = _git(["merge-base", "--is-ancestor", side, merged], r8, env, allow_fail=True)
+    ok("B8-side-is-ancestor", anc.returncode == 0)
+    refuses("B8-second-parent-refused", lambda: read_ancestral_counter_seed(
+        r8, pinned_head=merged, evidence_commit=side, prefix="", object_format="sha1"),
+        needle="first-parent")
+    ok("B8-first-parent-accepted", high_water(read_ancestral_counter_seed(
+        r8, pinned_head=merged, evidence_commit=h8, prefix="", object_format="sha1").counters,
+        "WL") == 1)
+    # B9: replacement objects never substitute the read bytes.
+    forged = subprocess.run(["git", "-C", repo, "hash-object", "-w", "--stdin"],
+                            input=_counters_toml(dict(values, WL=999)), env=env,
+                            stdout=subprocess.PIPE).stdout.decode().strip()
+    real = _git(["rev-parse", "HEAD:.working/toml/counters.toml"], repo, env).stdout.decode().strip()
+    _git(["replace", real, forged], repo, env, allow_fail=True)
+    ok("B9-no-replace-objects", high_water(read_ancestral_counter_seed(
+        repo, pinned_head=head, evidence_commit=head, prefix="",
+        object_format="sha1").counters, "WL") == 7)
+    # B10: a shallow clone whose history does not reach the evidence refuses.
+    r10, h10a, _b = _seed_repo(os.path.join(base, "r10"), env, values)
+    for n in range(3):
+        _write(os.path.join(r10, "f{}".format(n)), b"x\n")
+        _git(["add", "-A"], r10, env)
+        _git(["commit", "-q", "-m", "c{}".format(n)], r10, env)
+    shallow = os.path.join(base, "r10-shallow")
+    _git(["clone", "-q", "--depth", "1", "file://" + r10, shallow], base, env)
+    h10 = _head(shallow, env)
+    refuses("B10-shallow-refuses", lambda: read_ancestral_counter_seed(
+        shallow, pinned_head=h10, evidence_commit=h10a, prefix="", object_format="sha1"))
+    refuses("B10-bad-oid", lambda: read_ancestral_counter_seed(
+        repo, pinned_head="xyz", evidence_commit=head, prefix="", object_format="sha1"),
+        needle="well-formed")
+
+
+def _expected_views(root):
+    """{dest relpath: bytes} the renderer planner produces over the store at root (read-only)."""
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        return {dest: text.encode("utf-8")
+                for _n, _s, dest, text in _opf_views.plan_views(fd, _MACHINE_HOME)}
+    finally:
+        os.close(fd)
+
+
+def _read_or_none(path):
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def _worktree_without_lease(root):
+    """The worktree snapshot minus the lease control record (which an explicit recover=True clears
+    from a confirmed-dead attempt, a control effect, never an adoption file)."""
+    snap = _tree_snapshot(root)
+    snap.pop(LEASE_RELPATH, None)
+    return snap
+
+
+def _snapshot_all(root):
+    """The worktree snapshot plus the index bytes (the git index must never change)."""
+    with open(os.path.join(root, ".git", "index"), "rb") as fh:
+        index = fh.read()
+    return _tree_snapshot(root), index
+
+
+def _physical_tests(base, env, ok, signal):
+    """The real-filesystem tests (the filesystem is the one TMPDIR names): fresh bootstrap, exact
+    modes under differing umasks, completed rerun, kill and fresh-process retry at every named
+    boundary, conflict preservation, journal safety, changed HEAD, B6 end to end, and topology."""
+    all_sources = all_views = None
+
+    # R1 fresh bootstrap under two umasks: exact modes, VIEWS-READY, nothing staged in the index.
+    for umask in (0o022, 0o077):
+        root = _plain_repo(os.path.join(base, "fresh-{:o}".format(umask)), env)
+        _snap, index_before = _snapshot_all(root)
+        rc, res, err = _child(root, env, umask=umask)
+        ok("R1-{:o}-ready".format(umask), rc == 0 and res and res["status"] == VIEWS_READY,
+           "{} {} {}".format(rc, res, err[-800:]))
+        if not res or res["status"] != VIEWS_READY:
+            continue
+        ops, raw = _read_plan(root)
+        plan = validate_init_plan(raw)
+        all_sources = [s["path"] for s in plan["sets"]["S"]]
+        all_views = [v["path"] for v in plan["sets"]["V"]]
+        ok("R1-{:o}-created-all".format(umask), sorted(res["created"]) == sorted(
+            all_sources + all_views + [_opf_store.WORKING_DIRNAME, _MACHINE_HOME]),
+           str(res["created"]))
+        expected = _expected_views(root)
+        ok("R1-{:o}-views-exact".format(umask), sorted(expected) == sorted(all_views) and all(
+            _read_or_none(os.path.join(root, p)) == expected[p] for p in all_views))
+        ok("R1-{:o}-view-modes".format(umask), {stat.S_IMODE(os.lstat(os.path.join(
+            root, p)).st_mode) for p in all_views} == {VIEW_MODE})
+        ok("R1-{:o}-no-root-version".format(umask), not os.path.lexists(os.path.join(root,
+                                                                                "VERSION")))
+        # Independent correspondence witness: the TODO.md header's source-set digest recomputed by
+        # hand (sha256 over path NUL length NUL bytes, sorted) from the PLAN's source payloads.
+        pl = plan_payloads(plan)
+        hasher = hashlib.sha256()
+        for rel in sorted(("{}/backlog_item.index.toml".format(_MACHINE_HOME),
+                           "{}/block.index.toml".format(_MACHINE_HOME))):
+            hasher.update(rel.encode() + b"\0" + str(len(pl[rel])).encode() + b"\0" + pl[rel])
+        ok("R1-{:o}-header-binds-plan-sources".format(umask), (
+            "source-set-digest: sha256:" + hasher.hexdigest()).encode() in _read_or_none(
+                os.path.join(root, ".working", "TODO.md")))
+        cached = _git(["ls-files", "--cached", "-z", "--", ".working"], root, env).stdout
+        porcelain = _git(["--no-optional-locks", "status", "--porcelain", "--untracked-files=all"],
+                         root, env).stdout.decode().splitlines()
+        ok("R1-{:o}-views-unstaged".format(umask), cached == b"" and all(
+            "?? " + p in porcelain for p in all_views), "{} {}".format(cached, porcelain))
+        drift = _opf_check.validate_store(_opf_store.resolve_store(root))
+        ok("R1-{:o}-view-drift-pass".format(umask), drift.checks.get("C-VIEW-DRIFT") == "PASS",
+           str(drift.by_check.get("C-VIEW-DRIFT")))
+        modes = {p: stat.S_IMODE(os.lstat(os.path.join(root, p)).st_mode) for p in all_sources}
+        ok("R1-{:o}-file-modes".format(umask), set(modes.values()) == {SOURCE_MODE}, str(modes))
+        ok("R1-{:o}-dir-modes".format(umask), stat.S_IMODE(os.lstat(os.path.join(
+            root, _MACHINE_HOME)).st_mode) == DIR_MODE)
+        with open(os.path.join(root, ".git", "index"), "rb") as fh:
+            ok("R1-{:o}-index-untouched".format(umask), fh.read() == index_before)
+        ok("R1-{:o}-no-lease".format(umask), not os.path.exists(os.path.join(root, LEASE_RELPATH)))
+        ok("R1-{:o}-phases".format(umask), res["phases"] == list(PHASES), str(res["phases"]))
+        outcomes = _opf_init_substrate.read_outcomes(root, ops[0])
+        ok("R1-{:o}-outcome".format(umask), len(outcomes) == 1
+           and outcomes[0]["completed_phases"] == list(PHASES)
+           and outcomes[0]["checks_executed"] == list(REQUIRED_CHECKS))
+        res_store = _opf_store.resolve_store(root)
+        ok("R1-{:o}-resolves".format(umask), res_store.status == _opf_store.RESOLVED)
+        manifest_model = tomllib.loads(open(os.path.join(root, _MACHINE_HOME, "manifest.toml"),
+                                            encoding="utf-8").read())
+        contained = _opf_check.classify_containment(manifest_model, _MACHINE_HOME)
+        ok("R1-{:o}-init-toml-contained".format(umask), contained.managed_file(PROVENANCE_RELPATH)
+           and not contained.managed_file("{}/stray.toml".format(_MACHINE_HOME)))
+        with open(os.path.join(root, CHANGELOG_RELPATH), "rb") as fh:
+            ok("R1-{:o}-changelog-created".format(umask), fh.read() == _CHANGELOG_PAYLOAD)
+
+    # R2 a completed rerun changes NOTHING in the worktree or the index; the lock is released.
+    root = os.path.join(base, "fresh-22")
+    before = _snapshot_all(root)
+    rc, res, err = _child(root, env)
+    ok("R2-already-initialized", res and res["status"] == ALREADY_INITIALIZED, str(res) + err[-400:])
+    ok("R2-nothing-changed", _snapshot_all(root) == before)
+    rc, res, _err = _child(root, env)
+    ok("R2-repeatable", res and res["status"] == ALREADY_INITIALIZED)
+
+    # R2b a completed adoption with LEGITIMATE later edits (a record and its counter) is health-
+    # validated, never held to its plan's bytes (decision 5): ALREADY-INITIALIZED, the edit untouched.
+    root = os.path.join(base, "fresh-77")
+    counters_path = os.path.join(root, COUNTERS_RELPATH)
+    edited = open(counters_path, "rb").read().replace(b"BI = 0", b"BI = 1")
+    _write(counters_path, edited)
+    record = {"id": "BI-1", "type": "backlog_item", "status": "open", "title": "later",
+              "created_at": "2026-06-01T00:00:00Z", "updated_at": "2026-06-01T00:00:00Z",
+              "actor": {"kind": "maintainer"}}
+    _write(os.path.join(root, _MACHINE_HOME, "backlog_item.index.toml"),
+           _opf_emit.emit_checked({"schema": 1, "record": [record]}).encode("utf-8"))
+    before = _snapshot_all(root)
+    rc, res, err = _child(root, env)
+    ok("R2b-edited-completed-is-healthy", res and res["status"] == ALREADY_INITIALIZED
+       and _snapshot_all(root) == before, str(res) + err[-400:])
+
+    # R3 an existing CHANGELOG.md is preserved byte for byte, recorded in E, never created.
+    root = _plain_repo(os.path.join(base, "changelog"), env)
+    _write(os.path.join(root, CHANGELOG_RELPATH), b"# Mine\n\nkeep me\n")
+    _git(["add", "-A"], root, env)
+    _git(["commit", "-q", "-m", "cl"], root, env)
+    rc, res, err = _child(root, env)
+    with open(os.path.join(root, CHANGELOG_RELPATH), "rb") as fh:
+        ok("R3-changelog-preserved", res and res["status"] == VIEWS_READY
+           and fh.read() == b"# Mine\n\nkeep me\n" and CHANGELOG_RELPATH not in res["created"],
+           str(res) + err[-400:])
+
+    # R4 kill at every registered boundary, then retry in a FRESH process until complete: the same
+    # operation id and plan bytes, byte-identical sources, no second allocation, correct created
+    # versus verified reporting, and a repeated retry that is a no-op.
+    n_sources = len(all_sources or []) or 19
+    n_views = len(all_views or []) or 13
+    points = ["dirs-intent", "dirs-applied", "dirs-complete", "attached", "sources-intent",
+              "source:1", "source:5", "source:{}".format(n_sources), "prelink:3", "postlink:3",
+              "sources-complete", "phase:sources-ready", "views-intent", "view:1", "view:7",
+              "view:{}".format(n_views), "prelink:{}".format(n_sources + 2),
+              "postlink:{}".format(n_sources + 2), "views-complete", "detached", "ready"]
+    for point in points:
+        root = _plain_repo(os.path.join(base, "kill-" + point.replace(":", "-")), env)
+        rc, res, err = _child(root, env, kill=point)
+        ok("R4-{}-killed".format(point), rc == -signal.SIGKILL, "rc {} {}".format(rc, err[-600:]))
+        if point == "dirs-intent":
+            ok("R4-dirs-intent-no-worktree-write", not os.path.lexists(os.path.join(
+                root, _opf_store.WORKING_DIRNAME)))
+        ops, raw = _read_plan(root)
+        present = set(p for p in (all_sources or []) + (all_views or [])
+                      if os.path.lexists(os.path.join(root, p)))
+        rc, res, err = _child(root, env)
+        want = ALREADY_INITIALIZED if point == "ready" else VIEWS_READY
+        ok("R4-{}-retry".format(point), res and res["status"] == want,
+           "{} {}".format(res, err[-800:]))
+        if not res:
+            continue
+        ops2, raw2 = _read_plan(root)
+        ok("R4-{}-same-operation".format(point), ops2 == ops and raw2 == raw
+           and res["operation_id"] == ops[0], "{} {}".format(ops, ops2))
+        plan = validate_init_plan(raw2)
+        payload = plan_payloads(plan)
+        exact = all(_read_or_none(os.path.join(root, p)) == b for p, b in payload.items())
+        ok("R4-{}-exact-sources".format(point), exact)
+        expected = _expected_views(root)
+        ok("R4-{}-exact-views".format(point), sorted(expected) == sorted(
+            v["path"] for v in plan["sets"]["V"]) and all(
+                _read_or_none(os.path.join(root, p)) == b for p, b in expected.items()))
+        if want == VIEWS_READY:
+            ok("R4-{}-no-recreation".format(point), not (set(res["created"]) & present),
+               "created {} present-before {}".format(res["created"], sorted(present)))
+            ok("R4-{}-all-accounted".format(point), set(res["created"]) | set(res["deduplicated"])
+               >= set(payload) | set(expected), str(res))
+        rc, res2, _err = _child(root, env)
+        ok("R4-{}-rerun-noop".format(point), res2 and res2["status"] == ALREADY_INITIALIZED)
+        ok("R4-{}-single-operation".format(point), len(os.listdir(_ops_dir(root))) == 1)
+
+    # R5 conflict preservation on RESUME: a planted object at a not-yet-created destination is
+    # refused and preserved, never repaired or overwritten; nothing else changes.
+    target = "{}/version.toml".format(_MACHINE_HOME)
+    for label in ("wrong-bytes", "strict-prefix", "wrong-mode", "symlink", "dangling", "hardlink",
+                  "fifo", "directory"):
+        root = _plain_repo(os.path.join(base, "conflict-" + label), env)
+        rc, _res, _err = _child(root, env, kill="source:1")
+        ops, raw = _read_plan(root)
+        plan = validate_init_plan(raw)
+        data = plan_payloads(plan)[target]
+        dest = os.path.join(root, target)
+        ok("R5-{}-setup".format(label), not os.path.lexists(dest))
+        if label == "wrong-bytes":
+            _write(dest, b"x" + data)
+            os.chmod(dest, 0o644)
+        elif label == "strict-prefix":
+            _write(dest, data[:len(data) // 2])
+            os.chmod(dest, 0o644)
+        elif label == "wrong-mode":
+            _write(dest, data)
+            os.chmod(dest, 0o600)
+        elif label == "symlink":
+            _write(os.path.join(root, "elsewhere"), data)
+            os.symlink(os.path.join(root, "elsewhere"), dest)
+        elif label == "dangling":
+            os.symlink(os.path.join(root, "nowhere"), dest)
+        elif label == "hardlink":
+            _write(os.path.join(root, "other"), data)
+            os.chmod(os.path.join(root, "other"), 0o644)
+            os.link(os.path.join(root, "other"), dest)
+        elif label == "fifo":
+            os.mkfifo(dest)
+        else:
+            os.mkdir(dest)
+        before = _worktree_without_lease(root)
+        rc, res, err = _child(root, env)
+        ok("R5-{}-refused".format(label), res and res["status"] == REFUSED
+           and "preserved" in (res["primary_failure"] or {}).get("detail", ""),
+           "{} {}".format(res, err[-400:]))
+        after = _worktree_without_lease(root)
+        ok("R5-{}-preserved".format(label), after.get(target) == before.get(target)
+           and after == before, "diff {}".format(sorted(set(after.items()) ^ set(before.items()),
+                                                        key=str)[:4]))
+
+    # R6 fresh-adoption refusals: a pre-existing destination (identical bytes included, the F14
+    # collision rule), foreign .working content, and a tracked-but-deleted destination.
+    root = _plain_repo(os.path.join(base, "collide"), env)
+    _write(os.path.join(root, ".opf.toml"), _opf_emit.emit_checked(
+        {"store": {"target": "dir:."}}).encode("utf-8"))
+    before = _tree_snapshot(root)
+    rc, res, _err = _child(root, env)
+    ok("R6-identical-collision-refused", res and res["status"] == REFUSED
+       and _tree_snapshot(root) == before, str(res))
+    root = _plain_repo(os.path.join(base, "foreign"), env)
+    _write(os.path.join(root, ".working", "notes.md"), b"mine\n")
+    before = _tree_snapshot(root)
+    rc, res, _err = _child(root, env)
+    ok("R6-foreign-working-refused", res and res["status"] == REFUSED
+       and _tree_snapshot(root) == before, str(res))
+    root = _plain_repo(os.path.join(base, "tracked"), env)
+    _write(os.path.join(root, "CHANGELOG.md"), b"x\n")
+    _git(["add", "-A"], root, env)
+    _git(["commit", "-q", "-m", "cl"], root, env)
+    os.unlink(os.path.join(root, "CHANGELOG.md"))
+    rc, res, _err = _child(root, env)
+    ok("R6-tracked-deletion-refused", res and res["status"] == REFUSED
+       and "tracked" in res["primary_failure"]["detail"], str(res))
+
+    # R7 journal safety: a torn journal tail is truncated and resumed; a rollback frame is never
+    # accepted (preserved, CANNOT-EVALUATE); and no rollback path is ever invoked for init.
+    root = _plain_repo(os.path.join(base, "torn"), env)
+    rc, _res, _err = _child(root, env, kill="dirs-complete")
+    ops, _raw = _read_plan(root)
+    jdir = os.path.join(root, ".git", _opf_init_substrate.SUBSTRATE_DIRNAME,
+                        _opf_init_substrate.JOURNALS_DIRNAME, _txn_name(ops[0], "sources"))
+    os.makedirs(jdir, exist_ok=True)
+    with open(os.path.join(jdir, "frames.log"), "ab") as fh:
+        fh.write(_journal.MAGIC + b" INTENT 999 " + b"0" * 64 + b"\n{\"txn\"")
+    rc, res, err = _child(root, env, kill="norecover")
+    ok("R7-torn-tail-resumed", res and res["status"] == VIEWS_READY
+       and any("torn tail" in n for n in res["notes"]), "{} {}".format(res, err[-400:]))
+    root = _plain_repo(os.path.join(base, "rollback-frame"), env)
+    rc, _res, _err = _child(root, env, kill="sources-intent")
+    ops, _raw = _read_plan(root)
+    jr = os.path.join(root, ".git", _opf_init_substrate.SUBSTRATE_DIRNAME,
+                      _opf_init_substrate.JOURNALS_DIRNAME)
+    jfd = os.open(jr, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        _journal.publish(jfd, _txn_name(ops[0], "sources"), _journal.F_RIP,
+                         {"txn": _txn_name(ops[0], "sources")})
+    finally:
+        os.close(jfd)
+    before = _worktree_without_lease(root)
+    rc, res, _err = _child(root, env, kill="norecover")
+    ok("R7-rollback-frame-refused", res and res["status"] == CANNOT_EVALUATE
+       and _worktree_without_lease(root) == before, str(res))
+
+    # R8 a kill during the PLAN's publication leaves an empty operation directory that the retry
+    # discards (reported) before a fresh operation proceeds.
+    root = _plain_repo(os.path.join(base, "planlink"), env)
+    rc, _res, _err = _child(root, env, kill="planlink")
+    ok("R8-killed", rc == -signal.SIGKILL)
+    ok("R8-no-worktree-write-before-plan", not os.path.lexists(os.path.join(
+        root, _opf_store.WORKING_DIRNAME)) and not os.path.lexists(os.path.join(
+            root, _opf_store.POINTER_REL)))
+    leftover = os.listdir(_ops_dir(root))
+    rc, res, err = _child(root, env)
+    ok("R8-discarded-and-ready", res and res["status"] == VIEWS_READY
+       and any("discarded an empty operation" in n for n in res["notes"])
+       and res["operation_id"] not in leftover, "{} {}".format(res, err[-400:]))
+
+    # R9 a HEAD that moves between the crash and the retry refuses the resume (preserved).
+    root = _plain_repo(os.path.join(base, "moved-head"), env)
+    rc, _res, _err = _child(root, env, kill="source:2")
+    _write(os.path.join(root, "later.txt"), b"l\n")
+    _git(["add", "later.txt"], root, env)
+    _git(["commit", "-q", "-m", "later"], root, env)
+    before = _worktree_without_lease(root)
+    rc, res, _err = _child(root, env)
+    ok("R9-moved-head-refused", res and res["status"] == REFUSED and "HEAD" in
+       res["primary_failure"]["detail"] and _worktree_without_lease(root) == before, str(res))
+
+    # R10 B6 end to end: a committed adoption later deleted in a commit; re-adoption seeds the
+    # counters from the pinned snapshot (WL next allocation 8), records the evidence in the plan,
+    # and a retry after a kill never reads the history again.
+    root = _plain_repo(os.path.join(base, "readopt"), env)
+    values = {ns: 0 for ns in _opf_store.BASELINE_TYPES.values()}
+    values.update({"WL": 7, "BI": 3, "LF": 2})
+    _write(os.path.join(root, ".working", "toml", "counters.toml"), _counters_toml(values))
+    _git(["add", "-A"], root, env)
+    _git(["commit", "-q", "-m", "adopted"], root, env)
+    evidence = _head(root, env)
+    _git(["rm", "-q", "-r", ".working"], root, env)
+    _git(["commit", "-q", "-m", "deleted"], root, env)
+    rc, _res, _err = _child(root, env, kill="source:3", seed=evidence)
+    rc, res, err = _child(root, env, kill="noreseed")
+    ok("R10-readopted", res and res["status"] == VIEWS_READY, "{} {}".format(res, err[-600:]))
+    with open(os.path.join(root, COUNTERS_RELPATH), "rb") as fh:
+        c = tomllib.loads(fh.read().decode())["counters"]
+    ok("R10-wl-next-is-8", high_water(c, "WL") + 1 == 8 and c["BI"] == 3 and c["LF"] == 2)
+    _ops, raw = _read_plan(root)
+    plan = validate_init_plan(raw)
+    basis = [s for s in plan["sets"]["S"] if s["path"] == COUNTERS_RELPATH][0]["basis"]
+    ok("R10-evidence-recorded", basis["kind"] == "ancestral" and basis["commit"] == evidence
+       and plan["first_adoption"] is False)
+
+    # R11 topology: a nested product prefix and a linked worktree both bind correctly; a symlinked
+    # product root and a concurrent holder refuse.
+    # A NESTED product prefix (no .git at the product root) binds through the lock module's shared
+    # control-root resolution: the enclosing repository's common git dir keys a per-store home, so
+    # the init records under, and shares the anchor of, the SAME home a later acquire_operation on
+    # the resolved store opens; nothing is rooted at the product root itself.
+    repo = _plain_repo(os.path.join(base, "nested"), env)
+    sub = os.path.join(repo, "prod")
+    os.mkdir(sub)
+    rc, res, err = _child(sub, env)
+    nested_home = _opf_oplock._st_nested_home(repo, "prod")
+    ok("R11-nested-prefix-initialized", res and res["status"] == VIEWS_READY
+       and os.path.isdir(os.path.join(nested_home, _opf_init_substrate.SUBSTRATE_DIRNAME,
+                                      _opf_init_substrate.OPS_DIRNAME))
+       and not os.path.exists(os.path.join(sub, _opf_init_substrate.SUBSTRATE_DIRNAME))
+       and not os.path.exists(os.path.join(sub, _opf_oplock.CONTROL_DIRNAME)),
+       str(res) + err[-400:])
+    ok("R11-nested-binding-observed", observe_binding(sub)[0]["product_prefix"] == "prod")
+    main = _plain_repo(os.path.join(base, "wt-main"), env)
+    wt = os.path.join(base, "wt-linked")
+    _git(["worktree", "add", "-q", "--detach", wt], main, env)
+    rc, res, err = _child(wt, env)
+    ok("R11-linked-worktree", res and res["status"] == VIEWS_READY
+       and os.path.isdir(_ops_dir(main)) and not os.path.exists(os.path.join(wt, ".git",
+                                                                                "opf-init")),
+       str(res) + err[-400:])
+    plain_dir = os.path.join(base, "not-a-repo")
+    os.mkdir(plain_dir)
+    rc, res, _err = _child(plain_dir, env)
+    ok("R11-nonrepository-refused", res and res["status"] in (REFUSED, CANNOT_EVALUATE)
+       and os.listdir(plain_dir) == [], str(res))
+    bare = os.path.join(base, "bare.git")
+    _git(["init", "-q", "--bare", bare], base, env)
+    rc, res, _err = _child(bare, env)
+    ok("R11-bare-refused", res and res["status"] in (REFUSED, CANNOT_EVALUATE)
+       and not os.path.exists(os.path.join(bare, _opf_store.WORKING_DIRNAME)), str(res))
+    root = _plain_repo(os.path.join(base, "local-pointer"), env)
+    _write(os.path.join(root, _opf_store.LOCAL_POINTER_REL), b'[store]\ntarget = "dir:."\n')
+    before = _tree_snapshot(root)
+    rc, res, _err = _child(root, env)
+    ok("R11-local-pointer-refused", res and res["status"] == REFUSED
+       and _tree_snapshot(root) == before, str(res))
+    link = os.path.join(base, "symlinked-root")
+    os.symlink(_plain_repo(os.path.join(base, "real-root"), env), link)
+    rc, res, _err = _child(link, env)
+    ok("R11-symlinked-root-refused", res and res["status"] in (REFUSED, CANNOT_EVALUATE), str(res))
+    # R12 a failed fsync (in process, EIO injected) during source publication is FAILED, preserves
+    # everything, never reaches a rollback path, and a fresh-process retry completes the SAME operation.
+    for which in ("file", "parent"):
+        root = _plain_repo(os.path.join(base, "fsync-" + which), env)
+        real_fsync = os.fsync
+        real_publish = _journal.publish
+        state = {"armed": False, "fired": False}
+
+        def publish_arm(jr_fd, txn, t, obj):
+            real_publish(jr_fd, txn, t, obj)
+            if t == _journal.F_INTENT and txn.endswith("-sources"):
+                state["armed"] = True
+
+        def fsync_fail(fd, which=which):
+            if state["armed"] and not state["fired"]:
+                is_dir = stat.S_ISDIR(os.fstat(fd).st_mode)
+                if is_dir == (which == "parent"):
+                    state["fired"] = True
+                    raise OSError(5, "injected EIO")
+            return real_fsync(fd)
+
+        def refuse(*_a, **_k):
+            raise AssertionError("a rollback path was invoked on an init journal")
+        saved = (_journal.recover, _journal._restore_preimage, _journal.reconcile_and_claim_stale)
+        os.fsync = fsync_fail
+        _journal.publish = publish_arm
+        _journal.recover = _journal._restore_preimage = _journal.reconcile_and_claim_stale = refuse
+        try:
+            res = run_init_operation(root)
+        finally:
+            os.fsync = real_fsync
+            _journal.publish = real_publish
+            _journal.recover, _journal._restore_preimage, _journal.reconcile_and_claim_stale = saved
+        ok("R12-{}-fsync-failed".format(which), state["fired"] and res.status == FAILED
+           and "EIO" in res.primary_failure["detail"], "{} {}".format(res.status,
+                                                                      res.primary_failure))
+        ok("R12-{}-released".format(which), not os.path.exists(os.path.join(root, LEASE_RELPATH))
+           and not res.finalization_failures, str(res.finalization_failures))
+        ops, _raw = _read_plan(root)
+        rc, res2, err = _child(root, env)
+        ok("R12-{}-retry-completes".format(which), res2 and res2["status"] == VIEWS_READY
+           and res2["operation_id"] == ops[0], "{} {}".format(res2, err[-400:]))
+
+    # R13 a destination REPLACED while it is classified (after its open, before its name is re-bound
+    # to the held fd) is never trusted: the identity check refuses it CANNOT-EVALUATE (a same-bytes
+    # replacement included), and the held fd pins its inode so the replacement cannot reuse it.
+    root = _plain_repo(os.path.join(base, "swap"), env)
+    rc, _res, _err = _child(root, env, kill="source:2")
+    ops, raw = _read_plan(root)
+    plan = validate_init_plan(raw)
+    entry = plan["sets"]["S"][0]
+    data = plan_payloads(plan)[entry["path"]]
+    this = sys.modules[__name__]
+    real_read = this._read_held
+
+    def swapping_read(held, pfd, name, label, size):
+        os.unlink(name, dir_fd=pfd)
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644, dir_fd=pfd)
+        os.write(fd, data)
+        os.fchmod(fd, 0o644)
+        os.close(fd)
+        return real_read(held, pfd, name, label, size)
+    this._read_held = swapping_read
+    try:
+        rfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        pfd, name = _journal._open_parent(rfd, entry["path"])
+        try:
+            _classify_dest(pfd, name, entry, data)
+            ok("R13-replaced-refused", False, "a replaced destination was trusted")
+        except InitOperationError as exc:
+            ok("R13-replaced-refused", exc.code == CANNOT_EVALUATE and "replaced" in str(exc),
+               str(exc))
+        finally:
+            os.close(pfd)
+            os.close(rfd)
+    finally:
+        this._read_held = real_read
+
+    # R15 publication never replaces and never publishes unverified bytes: _stage_and_publish over an
+    # existing destination refuses and preserves it (link, never rename or overwrite), and a staged
+    # file whose read-back differs from the payload (a doubled write) is never linked.
+    root = _plain_repo(os.path.join(base, "publish-unit"), env)
+    plan, _raw = _mk_plan()
+    entry = [e for e in plan["sets"]["S"] if e["path"] == CHANGELOG_RELPATH][0]
+    data = plan_payloads(plan)[CHANGELOG_RELPATH]
+    rfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        _write(os.path.join(root, CHANGELOG_RELPATH), b"theirs\n")
+        try:
+            _stage_and_publish(rfd, CHANGELOG_RELPATH, entry, data)
+            ok("R15-no-replace", False, "an existing destination was replaced")
+        except InitOperationError as exc:
+            ok("R15-no-replace", open(os.path.join(root, CHANGELOG_RELPATH), "rb").read()
+               == b"theirs\n" and not os.path.exists(os.path.join(root, entry["staging"])),
+               str(exc))
+        os.unlink(os.path.join(root, CHANGELOG_RELPATH))
+        real_write = _journal._write_all
+
+        def doubled(fd, payload):
+            real_write(fd, payload)
+            real_write(fd, payload)
+        _journal._write_all = doubled
+        try:
+            _stage_and_publish(rfd, CHANGELOG_RELPATH, entry, data)
+            ok("R15-readback", False, "a doubled staged write was published")
+        except InitOperationError as exc:
+            ok("R15-readback", exc.code == FAILED and "staged" in str(exc)
+               and not os.path.lexists(os.path.join(root, CHANGELOG_RELPATH)), str(exc))
+        finally:
+            _journal._write_all = real_write
+        ok("R15-readback-leftover-settled", _clean_stage(rfd, CHANGELOG_RELPATH, entry["staging"],
+                                                         CHANGELOG_RELPATH) == "discarded-stage")
+        # A same-length corruption passes the size check, so only the read-back can refuse it.
+
+        def corrupted(fd, payload):
+            real_write(fd, bytes(reversed(payload)))
+        _journal._write_all = corrupted
+        try:
+            _stage_and_publish(rfd, CHANGELOG_RELPATH, entry, data)
+            ok("R15-readback-same-size", False, "a corrupted staged write was published")
+        except InitOperationError as exc:
+            ok("R15-readback-same-size", exc.code == FAILED and "staged" in str(exc)
+               and not os.path.lexists(os.path.join(root, CHANGELOG_RELPATH)), str(exc))
+        finally:
+            _journal._write_all = real_write
+    finally:
+        os.close(rfd)
+
+    # R16 a `dirs-verified` milestone whose journal is NOT complete (the COMPLETE frame lost) is
+    # contradictory evidence: CANNOT-EVALUATE, preserved, never re-applied over.
+    root = _plain_repo(os.path.join(base, "contradiction"), env)
+    rc, _res, _err = _child(root, env, kill="sources-intent")
+    ops, _raw = _read_plan(root)
+    log = os.path.join(root, ".git", _opf_init_substrate.SUBSTRATE_DIRNAME,
+                       _opf_init_substrate.JOURNALS_DIRNAME, _txn_name(ops[0], "dirs"), "frames.log")
+    body = open(log, "rb").read()
+    second = body.index(b"\n" + _journal.MAGIC + b" " + _journal.F_COMPLETE.encode())
+    with open(log, "wb") as fh:
+        fh.write(body[:second + 1])
+    before = _worktree_without_lease(root)
+    rc, res, _err = _child(root, env)
+    ok("R16-verified-without-complete-refused", res and res["status"] == CANNOT_EVALUATE
+       and "not COMPLETE" in res["primary_failure"]["detail"]
+       and _worktree_without_lease(root) == before, str(res))
+
+    # R14 a foreign entry inside the operation's control records is preserved unevaluable evidence:
+    # the retry refuses CANNOT-EVALUATE and never starts a replacement operation.
+    root = _plain_repo(os.path.join(base, "foreign-control"), env)
+    rc, _res, _err = _child(root, env, kill="source:2")
+    ops, _raw = _read_plan(root)
+    _write(os.path.join(_ops_dir(root), ops[0], "notes.txt"), b"x\n")
+    rc, res, _err = _child(root, env)
+    ok("R14-foreign-control-refused", res and res["status"] == CANNOT_EVALUATE
+       and os.path.exists(os.path.join(_ops_dir(root), ops[0], "notes.txt"))
+       and sorted(os.listdir(_ops_dir(root))) == ops, str(res))
+
+    root = _plain_repo(os.path.join(base, "contended"), env)
+    holder = _opf_oplock.acquire_init_operation(root, "opf-init")
+    try:
+        rc, res, _err = _child(root, env)
+        ok("R11-contention-refused", res and res["status"] == REFUSED
+           and "contention" in res["primary_failure"]["detail"]
+           and not os.path.exists(os.path.join(root, ".working")), str(res))
+    finally:
+        _opf_oplock.release_init_holder(holder)
+
+
+def _view_state(root, views):
+    """The worktree without the lease, the index bytes, and which planned views exist."""
+    with open(os.path.join(root, ".git", "index"), "rb") as fh:
+        index = fh.read()
+    return (_worktree_without_lease(root), index,
+            [p for p in views if os.path.lexists(os.path.join(root, p))])
+
+
+def _view_tests(base, env, ok, signal):
+    """PR3b over real git repositories, each scenario interrupted after the source-state milestone
+    (or the views intent) and resumed: source/view correspondence, a source changed before the views,
+    the pinned view generator, a renderer changed after the views intent, staged and divergent views
+    refused and preserved, the pre-intent collision rule (F14), the intermediate source-state check,
+    and the roster's refusal of a product-root VERSION."""
+    views = [v["path"] for v in _mk_plan()[0]["sets"]["V"]]
+    backlog = os.path.join(_MACHINE_HOME, "backlog_item.index.toml")
+    record = {"id": "BI-1", "type": "backlog_item", "status": "open", "title": "later",
+              "created_at": "2026-06-01T00:00:00Z", "updated_at": "2026-06-01T00:00:00Z",
+              "actor": {"kind": "maintainer"}}
+    swapped = _opf_emit.emit_checked({"schema": 1, "record": [record]}).encode("utf-8")
+    real_plan = _opf_views.plan_views
+
+    def at_sources_ready(label):
+        root = _plain_repo(os.path.join(base, "v-" + label), env)
+        rc, _res, err = _child(root, env, kill="phase:sources-ready")
+        ok("V-{}-killed-at-sources-ready".format(label), rc == -signal.SIGKILL
+           and not any(os.path.lexists(os.path.join(root, p)) for p in views), err[-400:])
+        return root
+
+    # V1 source/view correspondence: a source that changes between its verification and the render
+    # (a same-uid writer racing the advisory lock) is caught by the header binding, BEFORE any view.
+    root = at_sources_ready("correspond")
+
+    def swapping(fd, machine_rel):
+        _write(os.path.join(root, backlog), swapped)
+        return real_plan(fd, machine_rel)
+    _opf_views.plan_views = swapping
+    try:
+        res = run_init_operation(root, recover=True)
+    finally:
+        _opf_views.plan_views = real_plan
+    ok("V1-correspondence-refused", res.status == REFUSED
+       and "correspondence" in (res.primary_failure or {}).get("detail", "")
+       and _view_state(root, views)[2] == []
+       and _read_or_none(os.path.join(root, backlog)) == swapped,
+       "{} {}".format(res.status, res.primary_failure))
+
+    # V2 a source changed after `sources-ready` refuses the resume (the source group re-verifies every
+    # source; a recorded milestone is never trusted in place of the bytes), preserved, no view.
+    root = at_sources_ready("changed-source")
+    block = os.path.join(root, _MACHINE_HOME, "block.index.toml")
+    _write(block, _read_or_none(block) + b"# edited\n")
+    before = _view_state(root, views)
+    rc, res, err = _child(root, env)
+    ok("V2-changed-source-refused", res and res["status"] == REFUSED
+       and "preserved" in res["primary_failure"]["detail"] and _view_state(root, views) == before,
+       "{} {}".format(res, err[-400:]))
+
+    # V3 the pinned view generator: a changed generator refuses the recorded plan and renders
+    # nothing; with the generator restored the SAME operation resumes to VIEWS-READY.
+    root = at_sources_ready("generator")
+    ops, raw = _read_plan(root)
+    before = _view_state(root, views)
+    rc, res, err = _child(root, env, kill="generator")
+    ok("V3-changed-generator-refused", res and res["status"] == REFUSED
+       and "versions" in res["primary_failure"]["detail"] and _view_state(root, views) == before,
+       "{} {}".format(res, err[-400:]))
+    rc, res, err = _child(root, env)
+    ok("V3-restored-generator-resumes", res and res["status"] == VIEWS_READY
+       and res["operation_id"] == ops[0] and _read_plan(root) == (ops, raw), str(res))
+
+    # V4 a renderer whose output changed after the views intent was recorded: the fresh render no
+    # longer equals the journaled intent, so the resume refuses and publishes nothing.
+    root = _plain_repo(os.path.join(base, "v-renderer"), env)
+    rc, _res, _err = _child(root, env, kill="views-intent")
+    before = _view_state(root, views)
+    rc, res, err = _child(root, env, kill="renderer")
+    ok("V4-changed-render-after-intent-refused", res and res["status"] == CANNOT_EVALUATE
+       and "intent" in res["primary_failure"]["detail"] and _view_state(root, views) == before,
+       "{} {}".format(res, err[-400:]))
+    rc, res, err = _child(root, env)
+    ok("V4-unchanged-render-resumes", res and res["status"] == VIEWS_READY, str(res))
+
+    # V5 a staged view (present, or staged and then deleted from the worktree) refuses: init never
+    # stages, overwrites, or re-creates over an index entry; worktree and index preserved.
+    todo = os.path.join(".working", "TODO.md")
+    for label in ("staged-present", "staged-only"):
+        root = at_sources_ready(label)
+        _write(os.path.join(root, todo), b"mine\n")
+        _git(["add", "--", todo], root, env)
+        if label == "staged-only":
+            os.unlink(os.path.join(root, todo))
+        before = _view_state(root, views)
+        rc, res, err = _child(root, env)
+        ok("V5-{}-refused".format(label), res and res["status"] == REFUSED
+           and "tracked or staged" in res["primary_failure"]["detail"]
+           and todo in res["conflicts"] and _view_state(root, views) == before,
+           "{} {}".format(res, err[-400:]))
+
+    # V6 a divergent view planted on RESUME (after the views intent, between view creations) is
+    # refused and preserved, never repaired; nothing else changes.
+    for label in ("wrong-bytes", "strict-prefix"):
+        root = _plain_repo(os.path.join(base, "v-divergent-" + label), env)
+        rc, _res, _err = _child(root, env, kill="view:3")
+        last = views[-1]
+        data = _expected_views(root)[last]
+        _write(os.path.join(root, last), b"x" + data if label == "wrong-bytes"
+               else data[:len(data) // 2])
+        os.chmod(os.path.join(root, last), 0o644)
+        before = _view_state(root, views)
+        rc, res, err = _child(root, env)
+        ok("V6-{}-refused".format(label), res and res["status"] == REFUSED
+           and "preserved" in res["primary_failure"]["detail"]
+           and _view_state(root, views) == before, "{} {}".format(res, err[-400:]))
+
+    # V7 F14: a pre-intent collision must refuse AGAIN on a plain retry. Neither an exact
+    # destination nor a foreign single-link staging file may acquire ownership from the refusal.
+    first = views[0]
+    for collision in ("destination", "staging"):
+        root = at_sources_ready("preintent-" + collision)
+        ops, raw = _read_plan(root)
+        plan = json.loads(raw)
+        target = os.path.join(root, first) if collision == "destination" else os.path.join(
+            root, os.path.dirname(first), plan["sets"]["V"][0]["staging"])
+        data = _expected_views(root)[first] if collision == "destination" else b"foreign stage\n"
+        _write(target, data)
+        os.chmod(target, 0o644)
+        before = _view_state(root, views)
+        identity = os.lstat(target)
+        journal = os.path.join(root, ".git", _opf_init_substrate.SUBSTRATE_DIRNAME,
+                               _opf_init_substrate.JOURNALS_DIRNAME,
+                               _txn_name(ops[0], "views"), "frames.log")
+        for attempt in (1, 2):
+            rc, res, err = _child(root, env)
+            label = "V7-preintent-{}-attempt-{}".format(collision, attempt)
+            ok(label + "-refused", rc == 0 and res and res["status"] == REFUSED
+               and "before this operation recorded its intent" in res["primary_failure"]["detail"]
+               and _view_state(root, views) == before, "{} {}".format(res, err[-400:]))
+            ok(label + "-no-intent", _read_or_none(journal) == b""
+               and res and "views-intent" not in res["phases"] and _read_plan(root) == (ops, raw))
+            current = os.lstat(target) if os.path.lexists(target) else None
+            ok(label + "-preserved", current is not None and current.st_nlink == 1
+               and (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino)
+               and _read_or_none(target) == data)
+    root = _plain_repo(os.path.join(base, "v-postintent"), env)
+    rc, _res, _err = _child(root, env, kill="views-intent")
+    _write(os.path.join(root, first), _expected_views(root)[first])
+    os.chmod(os.path.join(root, first), 0o644)
+    rc, res, err = _child(root, env)
+    ok("V7-postintent-identical-deduplicated", res and res["status"] == VIEWS_READY
+       and first in res["deduplicated"] and first not in res["created"], str(res))
+
+    # V8 the intermediate source-state check: a foreign .working entry that appears before
+    # `sources-ready` refuses the resume BEFORE any view is rendered.
+    root = _plain_repo(os.path.join(base, "v-foreign"), env)
+    rc, _res, _err = _child(root, env, kill="sources-complete")
+    _write(os.path.join(root, ".working", "notes.md"), b"mine\n")
+    before = _view_state(root, views)
+    rc, res, err = _child(root, env)
+    ok("V8-foreign-before-sources-ready-refused", res and res["status"] == REFUSED
+       and "planned tree" in res["primary_failure"]["detail"]
+       and _view_state(root, views) == before, "{} {}".format(res, err[-400:]))
+
+    # V9 a planner that yields a product-root deliverable (the root VERSION) is refused by the roster
+    # check; no root VERSION and no view is written.
+    root = at_sources_ready("root-version")
+
+    def with_version(fd, machine_rel):
+        return real_plan(fd, machine_rel) + [("VERSION", "product", "VERSION", "0.0.0\n")]
+    _opf_views.plan_views = with_version
+    try:
+        res = run_init_operation(root, recover=True)
+    finally:
+        _opf_views.plan_views = real_plan
+    ok("V9-product-root-view-refused", res.status == REFUSED
+       and "roster" in (res.primary_failure or {}).get("detail", "")
+       and not os.path.lexists(os.path.join(root, "VERSION"))
+       and _view_state(root, views)[2] == [],
+       "{} {}".format(res.status, res.primary_failure))
+
+    # V10 the final check's view legs: a view staged after its publication (before the final
+    # observation) is refused by the fresh re-render and unstaged check, so VIEWS-READY is never
+    # recorded over a staged view; the operation stays partial and everything is preserved.
+    root = at_sources_ready("staged-late")
+    this = sys.modules[__name__]
+    real_apply = this.apply_init_views
+
+    def apply_then_stage(run, planned):
+        real_apply(run, planned)
+        _git(["add", "--", views[0]], root, env)
+    this.apply_init_views = apply_then_stage
+    try:
+        res = run_init_operation(root, recover=True)
+    finally:
+        this.apply_init_views = real_apply
+    ok("V10-late-staged-view-refused", res.status == REFUSED
+       and "tracked or staged" in (res.primary_failure or {}).get("detail", "")
+       and "views-ready" not in res.phases and _view_state(root, views)[2] == views,
+       "{} {} {}".format(res.status, res.primary_failure, res.phases))
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] in ("--self-test", "--selftest"):
+        sys.exit(_run_self_test())
+    if len(sys.argv) == 7 and sys.argv[1] == "--selftest-child":
+        sys.exit(_child_main(sys.argv[2:]))
+    sys.stderr.write("usage: python3 -I -B _opf_init_operation.py --self-test "
+                     "(a library module; no live mode)\n")
+    sys.exit(2)

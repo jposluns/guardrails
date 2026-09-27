@@ -2097,7 +2097,7 @@ def self_test():
     manifest = "\n".join([
         "[opf]",
         'standard = "opf"',
-        'spec_version = "1.1.0"',
+        'spec_version = "1.2.0"',
         'layout = "inline"',
         'posture = "required"',
         'import_status = "none"',
@@ -3462,7 +3462,7 @@ def self_test():
         version_only_manifest = "\n".join([
             "[opf]",
             'standard = "opf"',
-            'spec_version = "1.1.0"',
+            'spec_version = "1.2.0"',
             'layout = "inline"',
             'posture = "required"',
             'import_status = "none"',
@@ -3821,7 +3821,7 @@ def self_test():
                 ("pending_decision", "PD"), ("handoff", "HO"), ("reference", "RF"),
                 ("autonomous_decision", "AD"), ("block", "BL"),
                 ("contribution", "CN"), ("maintainer_decision", "MD"), ("preference_pattern", "PP"))}
-            man = {"opf": {"standard": "opf", "spec_version": "1.1.0", "layout": "inline",
+            man = {"opf": {"standard": "opf", "spec_version": "1.2.0", "layout": "inline",
                                   "posture": "required", "import_status": "none"},
                    "store": {"sync_target": ""}, "types": types, "vendors": {"registered": []},
                    "archive": {"period": "year"}, "views": views}
