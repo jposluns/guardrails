@@ -164,6 +164,7 @@ def _staged_root_self_test(check):
     Root depth, custom-machine, pointer and decoy cases are controls: they already pass on
     the predecessor. The detached homes-2 binding case discriminates the new refusal.
     """
+    import errno
     import os
     import shutil
     from unittest.mock import patch
@@ -238,8 +239,34 @@ def _staged_root_self_test(check):
             record.unlink()
             clean = grade(run)
             check("staged-root-no-transaction-" + kind, lambda:
-                  all(clean[cid] == (True, "no transaction record (run not yet applied)")
+                  clean["staged-run-structure"] == (True, "")
+                  and all(clean[cid] == (
+                      True, "no legacy transaction record (publication attempts are not graded by this gate)")
                       for cid in gate._TRANSACTION_CHECKS))
+            # Inject only after binding: the real constructor has already classified both homes.
+            real_bind, real_stage = gate._staged_run_store_fd, store.stage_run
+            for error in (gate._BindingRefusal, RuntimeError):
+                opened = []
+                def bind_then_arm(rd, generation):
+                    fd = real_bind(rd, generation)
+                    opened.append(fd)
+                    return fd
+                def fail_kind(*args):
+                    if opened:
+                        raise error("kind-check sentinel")
+                    return real_stage(*args)
+                with patch.object(gate, "_staged_run_store_fd", side_effect=bind_then_arm), \
+                        patch.object(store, "stage_run", side_effect=fail_kind):
+                    observed = grade(run)
+                closed = False
+                if opened:
+                    try:
+                        os.fstat(opened[0])
+                    except OSError as exc:
+                        closed = exc.errno == errno.EBADF
+                check("staged-root-kind-exception-{}-{}".format(error.__name__, kind), lambda:
+                      bool(opened) and closed and refused(observed, "kind-check sentinel"))
+
             # Attempts belong to the coordinator, including open and rolled-back journals.
             # These real frames pin the standalone gate's deliberately narrower transaction scope.
             if kind == "ingest":
@@ -261,6 +288,14 @@ def _staged_root_self_test(check):
                         check("staged-root-attempt-" + state, lambda:
                               _journal.classify_state(jfd, attempt) == state
                               and grade(run) == clean)
+                    _journal.publish(jfd, attempt, _journal.F_INTENT, {"txn": attempt.name})
+                    malformed = False
+                    try:
+                        _journal.classify_state(jfd, attempt)
+                    except _journal.JournalError:
+                        malformed = True
+                    check("staged-root-attempt-malformed", lambda:
+                          malformed and grade(run) == clean)
                 finally:
                     os.close(jfd)
                 shutil.rmtree(attempt)

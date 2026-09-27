@@ -2563,8 +2563,9 @@ def _check_staged_run(rd, homes=None):
     # --- Group C: the per-run transaction record (apply-promotion, PR-C) --------------------------------
     # The record lives OUTSIDE .working/ at the store-root `.aiqt/import/<run-id>/transaction.toml` (D2/D3:
     # it survives the terminal run-dir deletion and never enters the store containment walk). It is
-    # CONDITIONALLY PRESENT (mirroring acceptance.json): absent = "run not yet applied", recorded as a PASS
-    # for both Group C checks; present = validated for schema and state-machine consistency. The store root
+    # CONDITIONALLY PRESENT (mirroring acceptance.json): absent legacy record is a PASS for both Group C
+    # checks, but at generation 2 says nothing about publication attempts; present = validated for schema
+    # and state-machine consistency. The store root
     # is located through the validated generation's run homes and descriptor-bound identity, with the legacy
     # three-up fallback only for a run no generation's registered home holds (bound to no store).
     # Round-4 F3: the store root is opened from THE SUPPLIED RUN-DIR DESCRIPTOR using parent components
@@ -2589,12 +2590,20 @@ def _check_staged_run(rd, homes=None):
                 kind = "ingest" if ingest_is_run else "import"
                 other = "import" if ingest_is_run else "ingest"
                 if imp._opf_store.stage_run(other, run_dir.name) in rd.home_binding:
-                    record("staged-run-structure", False,
-                           "staging kind does not match {} run content".format(kind))
+                    ok, detail = results["staged-run-structure"]
+                    record("staged-run-structure", False, "; ".join(
+                        ["staging kind does not match {} run content".format(kind)]
+                        + ([detail] if not ok and detail else [])))
         except _BindingRefusal as exc:
+            if store_fd is not None:
+                os.close(store_fd)
+                store_fd = None
             for cid in _TRANSACTION_CHECKS:
                 record(cid, False, "cannot evaluate: store binding refused ({})".format(exc))
         except Exception as exc:  # noqa: BLE001 - fail-closed, as the acceptance locator above
+            if store_fd is not None:
+                os.close(store_fd)
+                store_fd = None
             for cid in _TRANSACTION_CHECKS:
                 record(cid, False, "cannot evaluate: cannot open the store root beneath the run dir "
                                    "no-follow ({})".format(exc))
@@ -2633,9 +2642,10 @@ def _check_staged_run(rd, homes=None):
                 # It proves neither "not applied" nor absence of an outstanding attempt.
                 # _opf_ingest_apply._apply_locked owns attempt classification and refuses
                 # open attempts before invoking this gate; standalone callers get no such check.
-                record("transaction-schema", True, "no transaction record (run not yet applied)")
-                record("transaction-consistency", not ctl_problems,
-                       "; ".join(ctl_problems) or "no transaction record (run not yet applied)")
+                detail = ("no legacy transaction record (publication attempts are not graded by this gate)"
+                          if gen == 2 else "no transaction record (run not yet applied)")
+                record("transaction-schema", True, detail)
+                record("transaction-consistency", not ctl_problems, "; ".join(ctl_problems) or detail)
             else:
                 try:
                     txn = _parse_toml_bytes(txn_bytes, txn_rel)
@@ -2690,7 +2700,7 @@ def _check_staged_run(rd, homes=None):
 
 def _self_test_gate_generation_sites(expect):
     """Structural pins over the staged-run gate's source; each checks only what is stated here.
-    gate-generation-read-sites: every ast.Name node (any context) of the fifteen listed names sits on one of these
+    gate-generation-read-sites: every ast.Name node (any context) of the listed names sits on one of these
     statements, so a new read or plain assignment of a listed name fails until the statement is deliberately added.
     gate-generation-branch-bindings: in the body (never the else branch) of an if or while statement whose test
     names gen, homes, gen_error or legacy_generation, every ast.Name with Store context and every except-handler
@@ -2754,6 +2764,7 @@ def _self_test_gate_generation_sites(expect):
         ('gen', 'if gen is None:'),
         ('gen', 'if gen is None:'),
         ('gen', 'if gen is None:'),
+        ('gen', 'if gen == 2 else "no transaction record (run not yet applied)")'),
         ('gen', 'if gen is not None and ingest_is_run:'),
         ('gen', 'if gen is not None and marker is None:'),
         ('gen', 'if ingest_is_run and gen is None:'),
@@ -2789,7 +2800,7 @@ def _self_test_gate_generation_sites(expect):
         ('ingest_is_run', 'kind = "ingest" if ingest_is_run else "import"'),
         ('ingest_is_run', 'other = "import" if ingest_is_run else "ingest"'),
         ('kind', 'kind = "ingest" if ingest_is_run else "import"'),
-        ('kind', '"staging kind does not match {} run content".format(kind))'),
+        ('kind', '["staging kind does not match {} run content".format(kind)]'),
         ('other', 'other = "import" if ingest_is_run else "ingest"'),
         ('other', 'if imp._opf_store.stage_run(other, run_dir.name) in rd.home_binding:'),
         ('ingest_load_detail', 'ingest_load_detail = ""'),
@@ -2813,6 +2824,7 @@ def _self_test_gate_generation_sites(expect):
         ('marker', 'marker = "durable import evidence"'),
         ('marker', 'marker = imp.ACCEPTANCE_NAME'),
         ('marker', 'marker = next((name for name in imp._INGEST_RUN_MARKERS if rd.kind(name) is not None), None)'),
+        ('results', 'ok, detail = results["staged-run-structure"]'),
         ('results', 'ok, detail = results[cid]'),
         ('results', 'if cid not in results:'),
         ('results', 'results = {}'),
@@ -3204,8 +3216,9 @@ def _self_test_gate_generation_applied(expect, label, run_dir, swept=None, inges
     the staged acceptance ids route by generation, and generation 2 keeps
     every result except the two ingest-acceptance ids, which grade the durable home, and the staged acceptance ids,
     which must then report that grading (a completeness id the completeness result, every other the binding
-    result). Transaction checks keep their results at both generations in a registered legacy home
-    without typed transaction evidence; detached generation-2 copies refuse the missing binding. Each legacy
+    result). Transaction checks keep their verdicts at both generations in a registered legacy home
+    without typed transaction evidence; generation 2 qualifies the absent-record detail to exclude attempts,
+    and detached generation-2 copies refuse the missing binding. Each legacy
     fixture is also graded at both depth-4 homes: cross-kind placement additionally fails staged-run-structure
     once the run can be parsed and bound; the other results keep their generation-2 values. Appends (label, generation-1
     results, generation-2 results, credit) to `swept` and returns the generation-1 results; `credit` is the (id,
@@ -3219,6 +3232,10 @@ def _self_test_gate_generation_applied(expect, label, run_dir, swept=None, inges
     with patch.object(_opf_store, "SUPPORTED_HOMES", 2):
         baseline = check_staged_run(run_dir, homes=1)
         expected_second = dict(baseline)
+        for cid in _TRANSACTION_CHECKS:
+            if baseline[cid] == (True, "no transaction record (run not yet applied)"):
+                expected_second[cid] = (
+                    True, "no legacy transaction record (publication attempts are not graded by this gate)")
         # A detached copy retains legacy transaction grading only at generation 1.
         # Core-read failures return before transaction grading and keep their prerequisite error.
         if not all(value == baseline["staged-run-structure"] for value in baseline.values()):
@@ -3278,8 +3295,10 @@ def _self_test_gate_generation_applied(expect, label, run_dir, swept=None, inges
                             and not second["transaction-schema"][1].startswith(
                                 "cannot evaluate: cannot open the store root")
                             and not all(value == second["staged-run-structure"] for value in second.values())):
-                        expected_staging["staged-run-structure"] = (
-                            False, "staging kind does not match {} run content".format(content_kind))
+                        ok, detail = second["staged-run-structure"]
+                        expected_staging["staged-run-structure"] = (False, "; ".join(
+                            ["staging kind does not match {} run content".format(content_kind)]
+                            + ([detail] if not ok and detail else [])))
                     expect("gate-generation-staging-{}-{}".format(label, kind), current == expected_staging)
                 finally:
                     staged_run.rename(run)
@@ -5260,8 +5279,11 @@ def _self_test():
                    and (all(second[cid] == value for cid, value in expected.items()) if expected else
                         all(not second[cid][0] and "not a JSON object" in second[cid][1]
                             for cid in _INGEST_ACCEPTANCE_CHECKS))
+                   and all(second[cid] == (
+                       True, "no legacy transaction record (publication attempts are not graded by this gate)")
+                       for cid in _TRANSACTION_CHECKS)
                    and all(second[cid] == first[cid] for cid in first
-                           if cid not in _INGEST_ACCEPTANCE_CHECKS + staged_ids))
+                           if cid not in _INGEST_ACCEPTANCE_CHECKS + staged_ids + _TRANSACTION_CHECKS))
         # Coverage: every registered id is credited by a swept fixture under _self_test_gate_generation_coverage (it
         # passes staged-run-structure and the id's prerequisites, and fails the id with its own located detail).
         coverage = _self_test_gate_generation_coverage(swept, EXPECTED_CHECKS)
