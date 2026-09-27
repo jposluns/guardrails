@@ -31,6 +31,14 @@ class WorklogError(_opf_store.StoreError):
     """An unreadable, ambiguous, or malformed worklog intake; fail closed."""
 
 
+class ManifestReadError(WorklogError):
+    """Preserve the manifest reader's text and identify its input for doctor."""
+
+    def __init__(self, relpath, cause):
+        super().__init__(str(cause))
+        self.relpath = relpath
+
+
 def _valid_wl_ref(value):
     """Return (positive number, suffix or None), or None. WL-only extension."""
     if not isinstance(value, str):
@@ -131,8 +139,13 @@ def load_worklog_at(root_fd, machine_rel, *, required=True, with_raw=False, read
     This callback cannot change source selection or permit a generation-2 conflict.
     """
     try:
-        manifest = _opf_store._read_toml_contained(
-            root_fd, machine_rel + "/" + _opf_store.MANIFEST_NAME)
+        manifest_rel = machine_rel + "/" + _opf_store.MANIFEST_NAME
+        try:
+            manifest = _opf_store._read_toml_contained(root_fd, manifest_rel)
+        except _opf_store.StoreError as exc:
+            # The contained reader already names the failed manifest. Preserve
+            # that diagnostic; failure never licenses a legacy-source fallback.
+            raise ManifestReadError(manifest_rel, exc) from exc
         gen = generation(manifest)
         rel = source_relpath(machine_rel, manifest)
         other = machine_rel + "/" + (LEGACY_NAME if gen == 2 else DIRECTORY_NAME)

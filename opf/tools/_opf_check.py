@@ -1147,6 +1147,10 @@ def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine
             data = _opf_worklog.load_worklog_at(
                 root_fd, machine_rel, required=False, on_legacy_conflict=_worklog_legacy_conflict)
         st = "absent" if data is None else "present"
+    except _opf_worklog.ManifestReadError as exc:
+        # Match _read_toml's manifest diagnostic, not the worklog ledger's path.
+        rep.cant("cannot read {}: {}".format(exc.relpath, exc))
+        return None
     except _opf_worklog.WorklogError as exc:
         rep.cant(str(exc))
         return None

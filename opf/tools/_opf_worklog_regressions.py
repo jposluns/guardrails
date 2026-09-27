@@ -136,6 +136,65 @@ def _readers(fx):
     }
 
 
+def _manifest_read_regressions(check):
+    """Fail the loader's manifest read after a validated generation-1 resolution.
+
+    Import reads the manifest before entering the loader, so arm the fault only
+    at loader entry. A blanket manifest fault would pass there even with the
+    loader's old wrapper restored and would not discriminate this regression.
+    """
+    import _opf_init
+
+    # Literal diagnostics from 32fcfbc2dba710eab3d03e53ad77fa754461fe50:
+    # _opf_store.py:550-563; _opf_changelog.py:469-478 (also absorb);
+    # _opf_views.py:157-195,1582-1583; _opf_import.py:486-497,933-934;
+    # _opf_check.py:469-477,2436-2437. These are manifest diagnostics:
+    # the baseline worklog-only helpers did not themselves read the manifest.
+    expected = {
+        "loader": "cannot read m/manifest.toml (fixture unreadable)",
+        "changelog": "cannot read m/manifest.toml (fixture unreadable)",
+        "absorb": "cannot read m/manifest.toml (fixture unreadable)",
+        "views": "cannot read m/manifest.toml (fixture unreadable)",
+        "import": "cannot read m/manifest.toml (fixture unreadable)",
+        "doctor": ["cannot read m/manifest.toml: cannot read m/manifest.toml (fixture unreadable)"],
+    }
+    for caller, baseline in expected.items():
+        label = "F1-baseline-manifest-unreadable-" + caller
+        with _Fixture() as fx:
+            manifest_rel = M + "/" + _opf_store.MANIFEST_NAME
+            fx.files[manifest_rel] = _opf_init.build_manifest().encode("utf-8")
+            observed = _opf_store._read_toml_contained(fx.fd, manifest_rel)
+            check(label + "-validated",
+                  fx.res.status == _opf_store.RESOLVED
+                  and _opf_store.validate_manifest(observed).status == _opf_store.VALID
+                  and wl.generation(observed) == 1
+                  and "worklog" not in observed["opf"])
+            armed, attempted = False, []
+            original_load = wl.load_worklog_at
+
+            def fail_read(fd, rel, **kwargs):
+                path = fx.path(fd, rel)
+                if armed:
+                    attempted.append(path)
+                    if path == manifest_rel:
+                        raise PermissionError("fixture unreadable")
+                return fx.read(fd, rel, **kwargs)
+
+            def load_after_resolution(*args, **kwargs):
+                nonlocal armed
+                armed = True
+                return original_load(*args, **kwargs)
+
+            readers = _readers(fx)
+            readers["doctor"] = lambda: _doctor(fx)
+            with patch.object(_journal, "_read_contained", side_effect=fail_read), \
+                    patch.object(wl, "load_worklog_at",
+                                 side_effect=load_after_resolution) as intake:
+                actual = readers[caller]()
+            check(label, actual == baseline and intake.call_count == 1
+                  and attempted == [manifest_rel])
+
+
 def _upgrade_preflight_regressions(check, fence):
     """Exercise both upgrade origins through the CLI, with real git/store bytes.
 
@@ -305,6 +364,8 @@ def self_test():
                 check("F1-baseline-" + label + "-loader", readers["loader"]() == expected["changelog"])
             else:
                 check("F1-optional-loader-missing", wl.load_worklog_at(fx.fd, M, required=False) is None)
+
+    _manifest_read_regressions(check)
 
     archive_parse = ("cannot parse m/archive/2026/worklog.toml "
                      "(Expected '=' after a key in a key/value pair (at line 1, column 5))")
