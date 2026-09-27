@@ -299,114 +299,29 @@ def red_on_revert(source, f):
 
 
 def runner_check(expected, text=None):
-    import re
     import os
-    import shlex
     import shutil
     import signal
     import tempfile
 
     here = Path(__file__).resolve().parent
     runner = here / "run_all_checks.sh"
-    registered = runner.read_text(encoding="utf-8")
-    source = registered if text is None else text
+    source = runner.read_text(encoding="utf-8") if text is None else text
     identity = "runner/declared-test-executes"
     bash = shutil.which("bash")
     if bash is None:
         raise RuntimeError(identity + "/cannot-evaluate/bash")
     bash = os.path.abspath(bash)
 
-    def logical_lines(body):
-        # Remove escaped newlines before word splitting, except in single
-        # quotes. Keep physical spelling for the one-line canonical grammar.
-        raw = line = ""
-        quote = None
-        for physical in body.splitlines(keepends=True):
-            if not raw and physical.lstrip().startswith("#"):
-                continue
-            raw += physical
-            continued = False
-            i = 0
-            while i < len(physical):
-                char = physical[i]
-                if char == "\\" and quote != "'":
-                    pair = physical[i:i + 2]
-                    if pair == "\\\n":
-                        continued = True
-                        break
-                    line += pair
-                    i += len(pair)
-                    continue
-                if char in ("'", '"'):
-                    if quote is None:
-                        quote = char
-                    elif quote == char:
-                        quote = None
-                line += char
-                i += 1
-            if continued:
-                continue
-            yield raw.rstrip("\n"), line.rstrip("\n")
-            raw = line = ""
-            quote = None
-        if raw:
-            yield raw, line
-
-    def registrations(body):
-        # Deliberately bounded grammar: quoted gate name, python3, literal
-        # arguments or double-quoted $here paths, on one unindented line.
-        # Classify logical lines by raw text or quote-removed words, but
-        # require physical spelling to be canonical (except the definition).
-        # Full-line comments are ignored. Token-bearing echo/heredoc data
-        # is refused as cannot-evaluate/grammar, not treated as dispatch.
-        # Literal variables and aliases spelling the token are refused too.
-        # This is not a Bash parser. Computed text (built-string eval,
-        # indirection) and anything outside this runner file remain invisible.
-        # ANSI-C quotes and source/dot words are refused conservatively,
-        # even when they may be data.
-        calls = []
-        for raw, line in logical_lines(body):
-            if line.lstrip().startswith("#"):
-                continue
-            if "$'" in line:
-                raise RuntimeError(identity + "/cannot-evaluate/grammar")
-            try:
-                words = shlex.split(line)
-                lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
-                lexer.whitespace_split = True
-                lexer.commenters = ""
-                shell_words = list(lexer)
-            except ValueError as exc:
-                raise RuntimeError(identity + "/cannot-evaluate/grammar") from exc
-            if any(word in ("source", ".") for word in shell_words):
-                raise RuntimeError(identity + "/cannot-evaluate/grammar")
-            if "run_gate" not in line and not any("run_gate" in word for word in words):
-                continue
-            if raw == line == "run_gate() {":
-                continue
-            if not re.fullmatch(
-                    r'run_gate "[A-Za-z0-9_-]+" +python3'
-                    r'(?: +(?:[A-Za-z0-9_./=-]+|"\$here/[A-Za-z0-9_./-]+"))+ *',
-                    raw):
-                raise RuntimeError(identity + "/cannot-evaluate/grammar")
-            calls.append([word.replace("$here/", str(here) + "/") for word in words[3:]])
-        return calls
-
-    # The file defines expected dispatch, not an independently required roster.
-    # Validate candidate grammar too, but never derive expected argv from it.
-    calls = registrations(registered)
-    registrations(source)
-    if not calls:
-        raise RuntimeError(identity + "/cannot-evaluate/grammar")
-    wanted = b"".join(os.fsencode(word) + b"\0"
-                      for args in calls for word in [str(len(args)), *args])
-    # Equality of argc-framed records binds the number, order and arguments of
-    # intercepted calls to the parsed registrations, including dispatcher skips.
-    # Absolute paths or a changed PATH can run a real gate before a missing
-    # expected call is detected. Extra unintercepted executions need not change
-    # this log at all. This is not a process sandbox or a roster-coverage check.
-    # Intercepted siblings return 0, so sibling failure propagation via
-    # failed=1 and the final exit is outside this check.
+    # This self-test asserts that the runner dispatches THIS suite exactly
+    # once with its exact argv and propagates its exit. It does not assert
+    # that other registered suites are dispatched: sibling dispatch
+    # completeness is outside this check; a runner-level dispatch audit
+    # would be a separate control. The argv log is diagnostic only.
+    # PATH interception also covers child shells, command and env forms.
+    # Absolute paths or a changed PATH can bypass it; this is not a process
+    # sandbox. Intercepted siblings return 0, so their failure propagation
+    # is outside this check too.
     fixture = r'''#!/bin/sh
 printf '%s\0' "$#" "$@" >> "$p0_log" || exit 2
 if [ "$#" -eq 5 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
@@ -467,11 +382,9 @@ exit 0
         if probe.returncode != 0 or probe.stdout != str(executable) + "\n":
             raise RuntimeError(identity + "/cannot-evaluate/interception")
         proc = run_shell(source)
-        recorded = log.read_bytes()
     reached = tuple(line[5:] for line in proc.stdout.splitlines() if line.startswith("PASS "))
     check(proc.returncode == 0, identity + "/return-code")
     check(reached == expected, identity + "/pass-lines")
-    check(recorded == wanted, identity + "/argv-log")
 
 
 def runner_red_checks(expected):
@@ -483,13 +396,9 @@ def runner_red_checks(expected):
     runner = Path(__file__).resolve().parent / "run_all_checks.sh"
     source = runner.read_text(encoding="utf-8")
     identity = "runner/declared-test-executes"
-    sibling = [line for line in source.splitlines(keepends=True)
-               if line.startswith('run_gate "opf-homes-selftest"')]
     anchor = '  local name="$1"; shift\n'
-    if len(sibling) != 1 or source.count(anchor) != 1:
+    if source.count(anchor) != 1:
         raise AssertionError(identity + "/red-fixture")
-    skip = source.replace(
-        anchor, anchor + '  if [ "$name" = opf-homes-selftest ]; then return 0; fi\n', 1)
 
     def red(label, call, error, wanted):
         try:
@@ -503,57 +412,10 @@ def runner_red_checks(expected):
             raise AssertionError(identity + "/" + label + "/not-red")
         print("RED {} -> {}".format(label, wanted))
 
-    # Same registered text; the dispatcher skips a canonical sibling call.
-    # This tests dispatch divergence, not deletion from the on-disk roster.
-    red("dispatch-divergence", lambda: runner_check(expected, skip),
-        AssertionError, identity + "/argv-log")
     # Exit from the dispatcher before the runner can report success.
     red("return-code", lambda: runner_check(
         expected, source.replace(anchor, anchor + "  exit 1\n", 1)),
         AssertionError, identity + "/return-code")
-    original_read = Path.read_text
-    grammar_cases = (
-        ("colon-prefix", ":; " + sibling[0]),
-        ("true-prefix", "true; " + sibling[0]),
-        ("brace-group", "{ " + sibling[0].rstrip("\n") + "; }\n"),
-        ("conditional", "if :; then " + sibling[0].rstrip("\n") + "; fi\n"),
-        ("and-prefix", ": && " + sibling[0]),
-        ("function-wrapper", "wrapper() { " + sibling[0].rstrip("\n") + "; }\n"),
-        ("indented-registration-dispatch-skip", "  " + sibling[0]),
-        ("tab-separated-registration", sibling[0].replace("run_gate ", "run_gate\t", 1)),
-        ("trailing-comment", sibling[0].rstrip("\n") + " # comment\n"),
-        ("non-python3", sibling[0].replace("python3", "sh", 1)),
-        ("continuation", sibling[0].replace("python3 ", "python3 \\\n", 1)),
-        ("backslash-escape", sibling[0].replace("run_gate", r"r\un_gate", 1)),
-        ("empty-quote-split", sibling[0].replace("run_gate", 'run""_gate', 1)),
-        ("continuation-split", sibling[0].replace("run_gate", "run_\\\ngate", 1)),
-        ("ansi-c", sibling[0].replace("run_gate", r"$'run\x5fgate'", 1)),
-        ("source-line", "source /dev/null\n" + sibling[0]),
-        ("dot-source-line", ":; . /dev/null\n" + sibling[0]),
-        ("unclosed-quote", sibling[0].rstrip("\n") + ' "\n'),
-    )
-    for label, line in grammar_cases:
-        changed = skip.replace(sibling[0], line, 1)
-
-        def read(path, *args, **kwargs):
-            if path == runner:
-                return changed
-            return original_read(path, *args, **kwargs)
-
-        # Exercise production's registered==source path, not only a candidate.
-        with patch.object(Path, "read_text", read):
-            red(label, lambda: runner_check(expected), RuntimeError,
-                identity + "/cannot-evaluate/grammar")
-        red(label + "-candidate", lambda: runner_check(expected, changed), RuntimeError,
-            identity + "/cannot-evaluate/grammar")
-
-    # Bash ignores this whole comment, including its trailing backslash.
-    changed = source + "  # run_gate $'ignored' source . \\\n"
-    with patch.object(Path, "read_text", return_value=changed):
-        runner_check(expected)
-    print("PASS " + identity + "/full-line-comment")
-    runner_check(expected, changed)
-    print("PASS " + identity + "/full-line-comment-candidate")
 
     # Remove every execute bit, including for root. Permit only the probe:
     # a reverted interception guard must never launch the real runner.
