@@ -1611,16 +1611,16 @@ def _cmd_upgrade(rest):
     atomically and holds across the mutation, render, and final doctor (spec 5.7). It NEVER commits: the
     adopter reviews and merges. A store already at {to} returns without those migration preconditions:
     doctor-VALID yields a byte no-op (exit 0), otherwise it exits 2 without writing. A NOT-ADOPTED root is
-    NOT APPLICABLE
-    (exit 0), any other non-resolved status a located cannot-evaluate (exit 2). Two disclosed residuals: a
-    killed run leaves the lease, which is spec-conformant (present only while held; a leftover is released
-    through operator reconciliation, spec 5.7) and is what the EEXIST refusal covers; and the lease is not
-    made observable at a sync target before writes (spec 5.7) because this build has no sync runtime, so the
-    guarantee is single-host single-writer. A third disclosed residual: this build has no pre-doctor for a
-    1.0.0 or 1.1.0 origin, so an older store invalid in a way the origin preconditions do not inspect fails
-    only AFTER mutation (at the render or the final doctor), recovering through the step-3 subtree-scoped
-    restore; the committed HEAD provides recovery for the paths the cleanliness check covers, while ignored
-    files are excluded from that check and may not be recoverable from HEAD.""".format(
+    NOT APPLICABLE (exit 0), any other non-resolved status a located cannot-evaluate (exit 2). Two
+    disclosed residuals: a killed run leaves the lease, which is spec-conformant (present only while held;
+    a leftover is released through operator reconciliation, spec 5.7) and is what the EEXIST refusal
+    covers; and the lease is not made observable at a sync target before writes (spec 5.7) because this
+    build has no sync runtime, so the guarantee is single-host single-writer. A third disclosed residual:
+    this build has no pre-doctor for a 1.0.0 or 1.1.0 origin, so an older store invalid in a way the
+    origin preconditions do not inspect fails only AFTER mutation (at the render or the final doctor),
+    recovering through the step-3 subtree-scoped restore; the committed HEAD provides recovery for the
+    paths the cleanliness check covers, while ignored files are excluded from that check and may not be
+    recoverable from HEAD.""".format(
         to=_UPGRADE_TO)
     root = None
     homes_plan = False
