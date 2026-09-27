@@ -305,10 +305,11 @@ store's path inside its toplevel must appear verbatim in its parent's directory 
 opened no-follow, to the store root's own identity, so a store addressed by any spelling but the
 stored one refuses and no spelling makes one store key two homes (a directory between the
 toplevel and a nested store that cannot be listed refuses too); a mount-level alias can give one
-store two lock identities: two keyed homes inside one work tree, the store root when the alias lies
-outside any repository while the native path uses a keyed home, or another repository's home when
-the alias lies inside a different work tree. Two concurrent holders are possible through such an
-alias, a disclosed residual; a store root that is ITSELF a repository is
+store two lock identities: two keyed homes in one repository's common git dir (an alias at a
+different relative path in any of its worktrees), the store root and a keyed home (one path outside
+any repository, the other inside one, in either direction), or another repository's home. Two
+concurrent holders are possible through such an alias, a disclosed residual; a store root that is
+ITSELF a repository is
 resolved only when git's --show-toplevel there names it, so such a store whose .git sets
 core.bare=true (git answers no toplevel) or core.worktree to another directory (git names that
 directory) refuses, where it once anchored on --git-common-dir alone; git's answers for a
@@ -6412,8 +6413,9 @@ def _st_named(*names):
 def _st_assert_named_calls(source):
     """Close the CURRENT source's literal _st_named rosters over its top-level definitions.
     Class.method names must also name a method defined directly in that class. Dynamic arguments
-    refuse rather than silently escaping the source check; fail-before copies use _st_named's
-    runtime tolerance without applying this current-source assertion to the older definitions."""
+    refuse rather than silently escaping the source check, as do indirect references outside
+    _st_named's own definition. T-named is expected to fail on a combined fail-before copy
+    with older definitions; the self-test loop continues, so it does not mask other tests."""
     import ast
 
     tree = ast.parse(source)
@@ -6423,6 +6425,11 @@ def _st_assert_named_calls(source):
         if isinstance(node, ast.ClassDef):
             names.update(node.name + "." + child.name for child in node.body
                          if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)))
+    nodes = [child for node in tree.body
+             if not (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                     and node.name == "_st_named")
+             for child in ast.walk(node)]
+    checked = set()
     for call in ast.walk(tree):
         if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
                 and call.func.id == "_st_named"):
@@ -6432,10 +6439,15 @@ def _st_assert_named_calls(source):
             assert isinstance(arg, ast.Constant) and isinstance(arg.value, str), (
                 "_st_named nonliteral name at line {}".format(arg.lineno))
             assert arg.value in names, "_st_named unresolved name: {!r}".format(arg.value)
+        checked.add(call.func)
+    for node in nodes:
+        if ((isinstance(node, ast.Name) and node.id == "_st_named")
+                or (isinstance(node, ast.Attribute) and node.attr == "_st_named")):
+            assert node in checked, "_st_named indirect reference at line {}".format(node.lineno)
 
 
 def _t_named_roster(d, env):
-    """Every current roster resolves; inserting a bogus name fails at that exact name."""
+    """Every current roster resolves; bogus names and indirect references fail precisely."""
     with open(__file__, encoding="utf-8") as source_file:
         source = source_file.read()
     _st_assert_named_calls(source)
@@ -6447,6 +6459,18 @@ def _t_named_roster(d, env):
         assert str(exc) == "_st_named unresolved name: {!r}".format(bogus), str(exc)
     else:
         raise AssertionError("the _st_named bogus-name discriminator did not fail")
+    for indirect in ('alias = _st_named; alias("bogus")',
+                     '_st_named.__call__("bogus")',
+                     'module._st_named("bogus")'):
+        mutant = source + "\n" + indirect + "\n"
+        line = source.count("\n") + 2
+        try:
+            _st_assert_named_calls(mutant)
+        except AssertionError as exc:
+            assert str(exc) == "_st_named indirect reference at line {}".format(line), str(exc)
+        else:
+            raise AssertionError("the _st_named indirect-reference discriminator did not fail: "
+                                 + indirect)
 
 
 def _st_section_codes():
@@ -9132,7 +9156,8 @@ def _t_i5_holder_identity_bound(d, env):
 
 
 def self_test():
-    """Regression roster (plan section (e)): the PR2 T-c/T-crit/T-med/T-low roster PLUS the PR2
+    """Regression roster (plan section (e)): the resolving-roster check T-named,
+    the PR2 T-c/T-crit/T-med/T-low roster PLUS the PR2
     round-3 recovery-liveness witnesses (T-r3-live-recover-refuses, T-r3-dead-recover-proceeds,
     T-r3-crosshost-refuses), the LOW-4 coverage tests (T-c2-dirperms, T-c3-companion, T-h4-quote,
     T-c6-diffinode), the LOW-1 torn-write witness (T-low1-torn), and the recovery-hardening
