@@ -5030,7 +5030,7 @@ canonical-text = "The harness initializes executable lookup and configuration fr
 source-digest = "31b92986866523123d59c2c77bab7cfb7c33fe0474790a4fd0393e0e9cb6a2cf"
 
 [[clause]]
-clause-id = "tsthrm.18"
+clause-id = "tsthrm.12"
 corpus-id = "tsthrm"
 source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
 start-line = 40
@@ -5048,7 +5048,7 @@ canonical-text = "Where those routes are confined to declared inputs and fixture
 source-digest = "31b92986866523123d59c2c77bab7cfb7c33fe0474790a4fd0393e0e9cb6a2cf"
 
 [[clause]]
-clause-id = "tsthrm.20"
+clause-id = "tsthrm.13"
 corpus-id = "tsthrm"
 source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
 start-line = 45
@@ -5057,7 +5057,7 @@ canonical-text = "Placing a fixture first on the executable\nsearch path does no
 source-digest = "31b92986866523123d59c2c77bab7cfb7c33fe0474790a4fd0393e0e9cb6a2cf"
 
 [[clause]]
-clause-id = "tsthrm.21"
+clause-id = "tsthrm.14"
 corpus-id = "tsthrm"
 source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
 start-line = 48

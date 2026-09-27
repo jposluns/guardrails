@@ -2983,34 +2983,5 @@ id = "tsthrm.17"
 born-release = "1.1.0"
 
 [[born]]
-id = "tsthrm.18"
-born-release = "1.1.0"
-
-[[born]]
 id = "tsthrm.19"
 born-release = "1.1.0"
-
-[[born]]
-id = "tsthrm.20"
-born-release = "1.1.0"
-
-[[born]]
-id = "tsthrm.21"
-born-release = "1.1.0"
-
-# tsthrm.12 splits into controlled initialization (.17) and conditional isolation (.18);
-# .19 records the new confined-route exception. The successor names the isolation obligation.
-[[successor]]
-id = "tsthrm.12"
-retired-release = "1.1.0"
-successor-id = "tsthrm.18"
-
-[[successor]]
-id = "tsthrm.13"
-retired-release = "1.1.0"
-successor-id = "tsthrm.20"
-
-[[successor]]
-id = "tsthrm.14"
-retired-release = "1.1.0"
-successor-id = "tsthrm.21"

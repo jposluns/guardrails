@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "7d7dd216acfc8af504cde845ac27f02df043ac8c483f3803ce3da9545eff5a21"
+tree-sha256 = "3dffd9fa781eb5b5fdf815ba5c9c902f9ec0e136c08f78b11fe6cdfc8875e058"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -32,7 +32,7 @@ sha256 = "536d77d58ab934ca38d1e0685e94deffb6c0796b0b4e839b676658410fea78fe"
 [[sources]]
 path = ".aiqt/core/clauses.toml"
 bytes = 289485
-sha256 = "fbd55c0c258f6f26d0d1c715ec1fbacab09021ed6b84c30b4ac177e15854f3d0"
+sha256 = "1f2c4ca48776ff3aa21f7fedf581cebd4f4ef9d52e028c1f4958ee6e7d240009"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -81,8 +81,8 @@ sha256 = "3588274f3532e89b94b167cd99e9855733d93c25152c21011a510a750123f8c5"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
-bytes = 36983
-sha256 = "5b9d6f8aab8f609f6c4b458c54e678bb6af8203e7001d5acf7c8d70f92abaf53"
+bytes = 36395
+sha256 = "481925ff632ea4a031f13247f86e979d0fc9c502e23bef397dc69fbcfb2fd118"
 
 [[sources]]
 path = ".aiqt/core/migration/crosswalk-schema.toml"
