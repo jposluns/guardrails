@@ -139,11 +139,19 @@ def _readers(fx):
     }
 
 
+def _manifest_readers(fx):
+    # plan_views has its own manifest boundary; it need not load a worklog.
+    return dict(_readers(fx),
+                plan_views=lambda: _error(lambda: _opf_views.plan_views(fx.fd, M)),
+                doctor=lambda: _doctor(fx))
+
+
 def _manifest_read_regressions(check):
     """Fail the loader's manifest read after a validated generation-1 resolution.
 
     Import reads the manifest before entering the loader, so arm the fault only
-    at loader entry. A blanket manifest fault would pass there even with the
+    at loader entry (at planner entry for plan_views). A blanket manifest
+    fault would pass there even with the
     loader's old wrapper restored and would not discriminate this regression.
     """
     import _opf_init
@@ -158,6 +166,7 @@ def _manifest_read_regressions(check):
         "changelog": "cannot read m/manifest.toml (fixture unreadable)",
         "absorb": "cannot read m/manifest.toml (fixture unreadable)",
         "views": "cannot read m/manifest.toml (fixture unreadable)",
+        "plan_views": "cannot read m/manifest.toml (fixture unreadable)",
         "import": "cannot read m/manifest.toml (fixture unreadable)",
         "doctor": ["cannot read m/manifest.toml: cannot read m/manifest.toml (fixture unreadable)"],
     }
@@ -172,7 +181,7 @@ def _manifest_read_regressions(check):
                   and _opf_store.validate_manifest(observed).status == _opf_store.VALID
                   and wl.generation(observed) == 1
                   and "worklog" not in observed["opf"])
-            armed, attempted = False, []
+            armed, attempted = caller == "plan_views", []
             original_load = wl.load_worklog_at
 
             def fail_read(fd, rel, **kwargs):
@@ -188,13 +197,13 @@ def _manifest_read_regressions(check):
                 armed = True
                 return original_load(*args, **kwargs)
 
-            readers = _readers(fx)
-            readers["doctor"] = lambda: _doctor(fx)
+            readers = _manifest_readers(fx)
             with patch.object(_journal, "_read_contained", side_effect=fail_read), \
                     patch.object(wl, "load_worklog_at",
                                  side_effect=load_after_resolution) as intake:
                 actual = readers[caller]()
-            check(label, actual == baseline and intake.call_count == 1
+            check(label, actual == baseline
+                  and intake.call_count == (0 if caller == "plan_views" else 1)
                   and attempted == [manifest_rel])
 
 
@@ -224,6 +233,7 @@ def _manifest_diagnostics(data, validation):
             "an `inline`-layout store (spec 9), so a non-inline layout is fail-closed (never a "
             "partial inline read that would miss per-record ids or admit a phantom target)".format(layout))
     expected["absorb"] = expected["changelog"]
+    expected["plan_views"] = expected["views"]
     return expected
 
 
@@ -238,6 +248,12 @@ def _manifest_intake_regressions(check):
     store manifest oracle. Non-table parser results are defensive seam tests.
     Views had no single-link or 1-MiB store cap: those cases deliberately keep
     U1's fail-closed refusal, NOT a claim of baseline diagnostic parity.
+    Intentional multi-fault divergence from 32fcfbc: a manifest failure now
+    outranks an absent or unreadable worklog ledger. Baseline read that ledger
+    first; reproducing its precedence would violate the absolute prohibition on
+    probing a worklog source after manifest failure. Version absence still wins
+    over manifest absence/schema failure using the version already read; manifest
+    read/parse failures retain their baseline priority over version absence.
     Primitive faults model the reader's branches; this is not a filesystem
     race/hardlink enforcement test. Production parsing and translation run,
     except for defensive non-table and deterministic parser-limit seams.
@@ -308,7 +324,10 @@ def _manifest_intake_regressions(check):
                        ("block-device", stat.S_IFBLK), ("char-device", stat.S_IFCHR)):
         cases.append((mode, "stat", SimpleNamespace(st_mode=bits, st_size=0), exotic))
 
-    from _opf_manifest_regressions import manifest_cases
+    from _opf_manifest_regressions import MANIFEST_CALLERS, manifest_cases
+    with _Fixture() as fx:
+        check("F1-manifest-caller-columns",
+              set(_manifest_readers(fx)) == set(MANIFEST_CALLERS))
     for name, data, validation, control in manifest_cases(check):
         cases.append(("generated-" + name, "validation", (data, control), "; ".join(validation.findings)))
 
@@ -337,6 +356,14 @@ def _manifest_intake_regressions(check):
         elif mode == "parse-recursion":
             expected["views"] = "cannot parse m/manifest.toml (fixture nesting limit)"
 
+        expected["plan_views"] = expected["views"]
+        check("F1-manifest-{}-caller-columns".format(mode),
+              set(expected) == set(MANIFEST_CALLERS))
+        version_first = (mode == "absent" or phase == "validation"
+                         or mode in ("top-level-type", "opf-absent", "opf-not-table",
+                                     "opf-empty", "standard-absent", "standard-wrong",
+                                     "standard-wrong-type"))
+
         for caller, baseline in expected.items():
             label = "F1-manifest-{}-{}".format(mode, caller)
             with _Fixture() as fx:
@@ -346,7 +373,7 @@ def _manifest_intake_regressions(check):
                       fx.res.status == _opf_store.RESOLVED
                       and _opf_store.validate_manifest(observed).status == _opf_store.VALID
                       and wl.generation(observed) == 1 and "worklog" not in observed["opf"])
-                armed, attempted = False, []
+                armed, attempted = caller == "plan_views", []
                 original_load = wl.load_worklog_at
                 original_parse = _opf_store.tomllib.loads
                 original_validate = _opf_store.validate_manifest
@@ -377,6 +404,8 @@ def _manifest_intake_regressions(check):
 
                 def read(fd, rel, **kwargs):
                     if probe(fd, rel):
+                        if mode == "hardlink" and not kwargs.get("require_single_link"):
+                            return fx.read(fd, rel, **kwargs)
                         if phase == "read":
                             return result(value), fx.lstat(fd, rel)
                         if phase == "validation" and isinstance(value[0], dict):
@@ -393,15 +422,40 @@ def _manifest_intake_regressions(check):
                     armed = True
                     return original_load(*args, **kwargs)
 
-                readers = _readers(fx)
-                readers["doctor"] = lambda: _doctor(fx)
+                readers = _manifest_readers(fx)
                 with patch.object(_journal, "_lstat_contained", side_effect=lstat), \
                         patch.object(_journal, "_read_contained", side_effect=read), \
                         patch.object(_opf_store.tomllib, "loads", side_effect=parse), \
                         patch.object(_opf_store, "validate_manifest", side_effect=validate), \
                         patch.object(wl, "load_worklog_at", side_effect=load_after_resolution) as intake:
                     actual = readers[caller]()
-                check(label, actual == baseline and intake.call_count == 1
+                    # Keep the single-fault observation before the multi-fault runs.
+                    single_attempted = list(attempted)
+                    single_intake = intake.call_count
+                    if caller in ("changelog", "absorb"):
+                        for secondary in ("version-absent", "worklog-absent",
+                                          "worklog-unreadable"):
+                            path = M + "/version.toml" if secondary == "version-absent" else LEGACY
+                            saved = fx.files.pop(path)
+                            if secondary == "worklog-unreadable":
+                                fx.files[path] = PermissionError("fixture ledger unreadable")
+                            attempted.clear()
+                            armed = False
+                            intake.reset_mock()
+                            try:
+                                multi = readers[caller]()
+                            finally:
+                                fx.files[path] = saved
+                            wanted = (
+                                "version.toml is absent from the resolved store (a required "
+                                "input; fail-closed, spec 6.1)"
+                                if secondary == "version-absent" and version_first else baseline)
+                            check(label + "-" + secondary,
+                                  multi == wanted and intake.call_count == 1
+                                  and bool(attempted) and set(attempted) == {p})
+                    attempted = single_attempted
+                check(label, actual == baseline
+                      and single_intake == (0 if caller == "plan_views" else 1)
                       and bool(attempted) and set(attempted) == {p})
                 check(label + "-diagnostic", actual == baseline)
                 check(label + "-manifest-only",

@@ -4,7 +4,9 @@
 Base cases use the production validator unchanged. Profile/control cases supply
 the real validator's optional control at the test seam: production intake is
 base-only, but must transport any validator finding without probing a source.
-This covers finding classes, not every possible malformed value.
+This covers finding classes, not every possible malformed value. The generated
+rows run against MANIFEST_CALLERS in _manifest_intake_regressions; plan_views
+enters directly, before any declared source is read.
 """
 import ast
 import copy
@@ -13,6 +15,10 @@ import sys
 
 import _opf_init
 import _opf_store
+
+
+MANIFEST_CALLERS = ("loader", "views", "plan_views", "import",
+                    "changelog", "absorb", "doctor")
 
 
 def manifest_cases(check):

@@ -228,18 +228,10 @@ def _load_records(store_root_fd, relpath, type_name, registered_vendors, registe
     return raw, out
 
 
-def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds, *,
-                  on_legacy_conflict=None):
-    """Load and validate worklog.toml (spec 6.2); return (raw_bytes, [entry, ...]) in file order.
-    Disclosed divergence (disclose-guard-residuals): unlike the index schema marker, which
-    _load_records pins MANDATORY and exact, the ledger schema marker follows U3 optional-marker
-    contract: _opf_release.validate_worklog type-pins a PRESENT marker (a non-integer or unsupported
-    version is refused) but PERMITS an absent one. A schema-less ledger authored for another schema
-    version is not caught here; grading an unsupported-schema-version ledger is U3/U6 remit (F2)."""
+def _with_worklog_diagnostics(read):
+    """Keep U4 manifest diagnostics at both planner and worklog intake."""
     try:
-        got = _opf_worklog.load_worklog_at(
-            store_root_fd, relpath.rsplit("/", 1)[0], required=False, with_raw=True,
-            read_legacy=_read_raw_and_parsed, on_legacy_conflict=on_legacy_conflict)
+        return read()
     except _opf_worklog.ManifestShapeError as exc:
         raise ViewsError(str(exc) if exc.missing else "manifest is not valid: {}".format(exc))
     except _opf_worklog.ManifestValidationError as exc:
@@ -259,6 +251,19 @@ def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds, 
         raise ViewsError(message) from exc
     except _opf_worklog.WorklogError as exc:
         raise ViewsError(str(exc))
+
+
+def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds, *,
+                  on_legacy_conflict=None):
+    """Load and validate worklog.toml (spec 6.2); return (raw_bytes, [entry, ...]) in file order.
+    Disclosed divergence (disclose-guard-residuals): unlike the index schema marker, which
+    _load_records pins MANDATORY and exact, the ledger schema marker follows U3 optional-marker
+    contract: _opf_release.validate_worklog type-pins a PRESENT marker (a non-integer or unsupported
+    version is refused) but PERMITS an absent one. A schema-less ledger authored for another schema
+    version is not caught here; grading an unsupported-schema-version ledger is U3/U6 remit (F2)."""
+    got = _with_worklog_diagnostics(lambda: _opf_worklog.load_worklog_at(
+        store_root_fd, relpath.rsplit("/", 1)[0], required=False, with_raw=True,
+        read_legacy=_read_raw_and_parsed, on_legacy_conflict=on_legacy_conflict))
     if got is None:
         raise ViewsError("declared source {} is missing (the worklog ledger must exist)".format(relpath))
     raw, data = got
@@ -1603,14 +1608,8 @@ def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None):
     on an unreadable manifest or source, a `per-record` store (deferred, F7), a view/kind/target mismatch,
     or a byte-canon-invalid render, exactly as the render path does; _render_resolved calls it and performs
     the writes. It makes no state-changing or outbound side effect (a planner is a preview)."""
-    manifest_rel = "{}/{}".format(machine_rel, _opf_store.MANIFEST_NAME)
-    got = _read_raw_and_parsed(store_root_fd, manifest_rel)
-    if got is None:
-        raise ViewsError("{} vanished after discovery".format(manifest_rel))
-    manifest = got[1]
-    mv = _opf_store.validate_manifest(manifest)
-    if mv.status != _opf_store.VALID:
-        raise ViewsError("manifest is not valid: {}".format("; ".join(mv.findings) or mv.status))
+    manifest = _with_worklog_diagnostics(
+        lambda: _opf_worklog.read_manifest_at(store_root_fd, machine_rel))
 
     # U4 renders the `inline` layout only. A `per-record` store is a CLEAR cannot-evaluate (deferred),
     # detected here from the manifest rather than mis-reported as a downstream malformed-record error and
