@@ -108,7 +108,8 @@
       what it does at source today, except where marked Planned.</p>
     <p><code>doctor</code> distinguishes <b style="color:var(--ink)">0</b> clean,
       <b style="color:var(--ink)">1</b> a finding, and <b style="color:var(--ink)">2</b> cannot-evaluate.
-      <code>render --check</code> uses exit 1 for drift. Mutating commands can also exit 2 on a refusal
+      <code>render --check</code> uses exit 1 for drift; <code>render --write</code> and
+      <code>import</code> can also exit 1 on a finding. Mutating commands can also exit 2 on a refusal
       or an unsuccessful operation: <code>render --write</code> requires passing source-integrity
       checks, with no internal or unattributed faults; otherwise it exits 2 and writes nothing.
       <code>upgrade</code> exits 2 when its doctor result is not VALID; after a schema rewrite,
@@ -220,17 +221,21 @@
     <p><b style="color:var(--ink)">How it works.</b> The upgrade is additive and idempotent. It resolves
       the store and refuses a store above the tooling's spec version. A store already at the target
       version returns a byte no-op if doctor is VALID, or exits 2 without writing otherwise.
-      When migrating a 1.0.0 or 1.1.0 store, it requires canonical manifest and counters files,
-      clean write paths, and acquisition of its single-writer lease. Comment-bearing controls or a
-      held lease prevent that migration. It holds the lease across the change, applies the allowed
+      When migrating a 1.0.0 or 1.1.0 store, its preconditions include readable, canonical manifest
+      and counters files matching a recognised origin shape, a clean <code>.working</code> subtree
+      and declared product-scope render targets, and acquisition of its single-writer lease.
+      An untracked lease is handled separately by the lease-acquisition check. A manifest or counters
+      file with noncanonical formatting or comments, or a held lease, prevents that migration.
+      It holds the lease across the change, applies the allowed
       schema delta as a canonical model regeneration, renders the declared views, and requires a full
       doctor-valid before offering the change. It never commits: you review and merge.</p>
     <p><b style="color:var(--ink)">Result.</b> A successful migration leaves the upgraded store
       uncommitted in your working tree for review and merge. A preflight refusal, including a
       newer-than-supported store or an older store failing the migration preconditions above, stops
-      before writing the schema delta. A failure after the additive rewrite begins, at render or the
-      final doctor, exits 2 and leaves the changes in place for the recorded recovery against the
-      committed HEAD, scoped to the affected store and product paths.</p>
+      before writing the schema delta. A failure after the additive rewrite begins exits 2 and
+      leaves changes already made in place. When render returns nonzero or the final doctor reports
+      a result other than VALID, upgrade prints recovery commands using the committed HEAD,
+      scoped to the affected store and product paths.</p>
     <p class="refchips"><code>opf upgrade</code> <code>opf upgrade --root .</code></p>
 
     <h3 id="cmd-absorb"><code>opf absorb</code></h3>

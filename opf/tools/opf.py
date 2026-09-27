@@ -23,8 +23,10 @@ upgrade from 1.0.0 or 1.1.0 to 1.2.0. The 1.1.0 path changes only spec_version; 
 applies the earlier schema delta
 (base-table and discovery-token rename, decision_support retirement, type and view declarations,
 DECISIONS.md source widening, counters, and missing indexes). Neither creates init.toml provenance.
-It refuses a store above the tooling spec. When migrating an older store, it requires canonical
-manifest/counters, clean write paths, and acquisition of its lease, then applies the schema delta,
+It refuses a store above the tooling spec. When migrating a 1.0.0 or 1.1.0 store, its preconditions
+include readable, canonical manifest/counters matching a recognised origin shape, a clean .working
+subtree and declared product-scope render targets, and acquisition of its lease. An untracked lease
+is handled separately by the lease-acquisition check. It then applies the schema delta,
 renders declared views, and requires a full doctor VALID before offering the uncommitted change for
 review and merge. A store already at the
 tooling spec_version is a byte no-op when doctor-VALID and exits 2 otherwise; a NOT-ADOPTED root reports
@@ -1590,9 +1592,11 @@ def _cmd_upgrade(rest):
     spec_version {to} (spec 9.2). Two origins are supported: a 1.1.0 store takes the 1.1.0 -> {to} delta,
     the spec_version bump alone (no init.toml provenance is fabricated, nothing else changes); a 1.0.0
     store takes the full delta below, straight to {to}.
-    It RESOLVES the store at --root and refuses a store above the tooling spec. When migrating an older
-    store, it requires canonical manifest/counters, clean write paths, and acquisition of its lease,
-    then applies EXACTLY the allowed delta as
+    It RESOLVES the store at --root and refuses a store above the tooling spec. When migrating a 1.0.0
+    or 1.1.0 store, its preconditions include readable, canonical manifest/counters matching a recognised
+    origin shape, a clean .working subtree and declared product-scope render targets, and acquisition of
+    its lease. An untracked lease is handled separately by the lease-acquisition check.
+    It then applies EXACTLY the allowed delta as
     a model regeneration through the canonical new-document emitter (bump spec_version; drop the retired
     decision_support module WHERE PRESENT; add each contribution/maintainer_decision/preference_pattern type
     row NOT already declared by an enabled 1.0.0 module; add the two new view rows; WIDEN the DECISIONS.md
@@ -1601,7 +1605,8 @@ def _cmd_upgrade(rest):
     requires a full doctor VALID before offering the staged change. It is ORIGIN-AWARE: a governance- or
     decision_support-enabled 1.0.0 store, and a store that omits the optional decision_support key or the
     DECISIONS.md view, each migrate correctly (spec 9.2, G1-G4). Before ANY write it enforces two fail-closed
-    preconditions: STORE-PATH CLEANLINESS over exactly the paths it writes (HEAD is a verified restore path,
+    preconditions: STORE-PATH CLEANLINESS over the .working subtree and declared product-scope render
+    targets, with an untracked lease handled separately (HEAD is a verified restore path,
     SECA-verified-restore-path) and a SINGLE-WRITER LEASE it claims atomically and holds across the mutation,
     render, and final doctor (spec 5.7). It NEVER commits: the adopter reviews and merges. A store already at
     {to} returns without those migration preconditions: doctor-VALID yields a byte no-op (exit 0),
@@ -1610,9 +1615,10 @@ def _cmd_upgrade(rest):
     killed run leaves the lease, which is spec-conformant (present only while held; a leftover is released
     through operator reconciliation, spec 5.7) and is what the EEXIST refusal covers; and the lease is not
     made observable at a sync target before writes (spec 5.7) because this build has no sync runtime, so the
-    guarantee is single-host single-writer. A third disclosed residual: this build has no 1.0.0 pre-doctor,
-    so a 1.0.0 store invalid in a way the origin preconditions do not inspect fails only AFTER mutation (at
-    the render or the final doctor), recovering through the step-3 subtree-scoped restore; the committed HEAD
+    guarantee is single-host single-writer. A third disclosed residual: this build has no pre-doctor for a
+    1.0.0 or 1.1.0 origin, so an older store invalid in a way the origin preconditions do not inspect fails
+    only AFTER mutation (at the render or the final doctor), recovering through the step-3 subtree-scoped
+    restore; the committed HEAD
     stays a verified restore path for the whole blast radius, so no owner work is lost.""".format(
         to=_UPGRADE_TO)
     root = None
