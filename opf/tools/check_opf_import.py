@@ -3501,6 +3501,12 @@ def _self_test_gate_generation(expect):
                        and not any(p.called for p in (locate, acceptance, validate, bundle)))
 
 
+def _self_test_generation_detail(expect):
+    expect("F-OPF-GEN2-DETAIL-UNPINNED",
+           _HOMES2_NO_LEGACY_TRANSACTION_DETAIL ==
+           "no legacy transaction record (publication attempts are not graded by this gate)")
+
+
 def _self_test():
     """Build synthetic staged runs and assert every registered check PASSes on a clean run and FINDINGs on
     its own discriminator (a single deliberate mutation), plus the scan-layer checks. Returns 0 clean, 1 on
@@ -3521,6 +3527,7 @@ def _self_test():
         if not cond:
             failures.append(label)
 
+    _self_test_generation_detail(expect)
     _self_test_gate_generation(expect)
     _self_test_gate_generation_sites(expect)
 
