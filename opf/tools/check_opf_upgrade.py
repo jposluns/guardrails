@@ -713,8 +713,8 @@ def _suite():
             mach1 = build_store(s1)
             rc, out = upgrade(s1)
             check("U1 upgrade exits 0", rc == EXIT_OK)
-            check("U1 reports staged not committed",
-                  "staged, NOT committed" in out and '"event": "upgraded"' in out)
+            check("U1 reports uncommitted, not staged or committed",
+                  "uncommitted, NOT staged or committed" in out and '"event": "upgraded"' in out)
             man1 = man_of(mach1)
             check("U1 base table renamed to [opf]", "opf" in man1 and "devprocess" not in man1)
             check("U1 discovery token renamed to opf", man1["opf"].get("standard") == "opf")
@@ -1563,7 +1563,7 @@ def _suite():
             # committed/tracked-lease anomaly and is REFUSED fail-closed here, never silently excluded (a
             # silent drop of a " D" committed-then-deleted lease is exactly the M3 fail-open this closes: it
             # would let step 4's O_EXCL acquire succeed on the now-absent file and sweep the deletion into the
-            # staged change set). Every emittable tracked status on the lease path must refuse.
+            # uncommitted change set). Every emittable tracked status on the lease path must refuse.
             _exok, _ = _grammar_ok(b"?? " + _lease_rel.encode("utf-8") + b"\x00", prefix="", lease=_lease_rel)
             check("U18/R6 well-formed UNTRACKED lease record still excluded (step-4 never-seize)", _exok == [])
             _ignored, _ierr = _grammar_ok(b"!! sub/" + _lease_rel.encode("utf-8") + b"\x00",
@@ -1827,7 +1827,7 @@ def _suite():
                 opf._upgrade_release_lease = _orig_rel
             check("U25 a release failure surfaces exit 2", rc25 == EXIT_ERROR)
             check("U25 no success is reported when release fails (released-before-success)",
-                  "staged, NOT committed" not in out25 and '"event": "upgraded"' not in out25)
+                  "uncommitted, NOT staged or committed" not in out25 and '"event": "upgraded"' not in out25)
 
             check("U25 doctor-VALID release failure offers reconciliation without rollback commands",
                   "reached doctor-VALID before lease release" in out25
@@ -1974,7 +1974,7 @@ def _suite():
                   _want27 in out27b and _bad27 not in out27b and "restore --staged" not in out27b)
 
             # U28) FIX1 compound-failure surfaces BOTH: a mid-run failure (the view render RAISES after the
-            # manifest+counters mutation) is already propagating with its own "staged change is left for
+            # manifest+counters mutation) is already propagating with its own "uncommitted change is left for
             # review" recovery advice WHEN the finally's lease release ALSO fails (a peer replaced the lease
             # -> the release's never-seize _UpgradeError). The release error must NOT displace the propagating
             # render failure: _cmd_upgrade surfaces BOTH on stderr (the render recovery advice AND the
@@ -2006,7 +2006,7 @@ def _suite():
                 opf._opf_views.render = _orig_render28
             check("U28/FIX1 compound failure exits 2", rc28 == EXIT_ERROR)
             check("U28/FIX1 the mid-run render recovery advice still reaches the operator",
-                  "staged change is left for review" in out28)
+                  "uncommitted change is left for review" in out28)
             check("U28/FIX1 the render failure (not the lease error) governs the refusal line",
                   "view render after the schema delta failed" in out28)
             check("U28/FIX1 the lease-replaced note is ALSO surfaced (not displaced)",

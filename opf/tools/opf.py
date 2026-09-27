@@ -1607,7 +1607,7 @@ def _cmd_upgrade(rest):
     row NOT already declared by an enabled 1.0.0 module; add the two new view rows; WIDEN the DECISIONS.md
     composed view WHERE DECLARED; extend counters with zeros for any missing CN/MD/PP namespace,
     preserving existing high-waters; create the missing empty indexes, skipping any that already exist),
-    RENDERS the declared views, and requires a full doctor VALID before offering the staged change. It is
+    RENDERS the declared views, and requires a full doctor VALID before offering the uncommitted change. It is
     ORIGIN-AWARE: a governance- or decision_support-enabled 1.0.0 store, and a store that omits the
     optional decision_support key or the DECISIONS.md view, each migrate correctly (spec 9.2, G1-G4).
     Before ANY write it enforces two fail-closed preconditions: STORE-PATH CLEANLINESS, including ignored
@@ -1737,7 +1737,7 @@ def _upgrade_recovery_text(store_root, product_root, created_relpaths, product_r
     r = shlex.quote(str(store_root))
     w = " ".join(shlex.quote(p) for p in sorted(store_relpaths))
     tracked = " ".join(shlex.quote(p) for p in sorted(set(store_relpaths) - set(created_relpaths)))
-    lines = ["opf upgrade: the staged change is left for review; recover it scoped to the paths this run "
+    lines = ["opf upgrade: the uncommitted change is left for review; recover it scoped to the paths this run "
              "planned (tracked content was clean against HEAD; untracked and ignored content was refused). "
              "Confirm no opf run is live (spec 5.7), then inspect for intervening owner edits:"]
     if tracked:
@@ -1891,7 +1891,7 @@ def _upgrade_parse_porcelain(raw, prefix, lease_excl, pathspecs):
             # store is anomalous. That is REFUSED fail-closed and NAMED DISTINCTLY here, never silently
             # excluded. A silent drop of a " D" (a committed lease deleted in the worktree) would let step 4's
             # O_EXCL acquire succeed on the now-absent file and sweep the tracked lease's DELETION into the
-            # upgrade's staged change set (outside the spec-9.2 delta). Recovery and staging advice
+            # upgrade's uncommitted change set (outside the spec-9.2 delta). Recovery and staging advice
             # therefore also exclude the lease; no restore may resurrect one from HEAD.
             raise _UpgradeError(
                 "the single-writer lease {!r} is TRACKED in git (porcelain status {!r}, neither "
@@ -2450,7 +2450,7 @@ def _upgrade_run(root):
                     created_indexes.append(Path(idx_rel).name[:-len(_opf_check.INDEX_SUFFIX)])
 
             # Render the declared views (materializes the two new views and re-renders DECISIONS.md), then
-            # require a full doctor VALID before offering the staged change. Both run over the mutated
+            # require a full doctor VALID before offering the uncommitted change. Both run over the mutated
             # (uncommitted) tree, under the held lease (containment-clean; the mid-run doctor stays VALID).
             render_argv = ["--root", root, "--write"]
             try:
@@ -2458,7 +2458,7 @@ def _upgrade_run(root):
                 robs, _notes = _opf_observe.gather(rres) if rres.status == _opf_store.RESOLVED else (None, [])
                 rc = _opf_views.render(render_argv, observations=robs)
             except Exception as exc:  # noqa: BLE001  a render escape must not read as a clean upgrade
-                raise _UpgradeError("view render after the schema delta failed ({!r}); the staged change is "
+                raise _UpgradeError("view render after the schema delta failed ({!r}); the uncommitted change is "
                                     "left for review".format(exc))
             if rc != EXIT_OK:
                 print("opf upgrade: cannot evaluate: view render after the schema delta did not complete "
@@ -2494,7 +2494,7 @@ def _upgrade_run(root):
                       "failed. Confirm no opf run is live (spec 5.7) and reconcile the lease before "
                       "any further action; no restore/removal commands are offered.", file=sys.stderr)
                 raise
-            print("opf upgrade: store schema upgraded {} -> {} and doctor-VALID (staged, NOT committed)."
+            print("opf upgrade: store schema upgraded {} -> {} and doctor-VALID (uncommitted, NOT staged or committed)."
                   .format(origin_version, _UPGRADE_TO))
             print(json.dumps({
                 "event": "upgraded", "root": str(root), "from": origin_version, "to": _UPGRADE_TO,
@@ -2525,7 +2525,7 @@ def _upgrade_run(root):
             if not released:
                 # R5/FIX1: release the lease on every non-success exit. When a mid-run failure is ALREADY
                 # propagating (a render/doctor escape after the manifest+counters were rewritten, which
-                # carries its own "staged change is left for review" recovery advice) and the release then
+                # carries its own "uncommitted change is left for review" recovery advice) and the release then
                 # ALSO fails (its lease-replaced never-seize _UpgradeError), the release error must NOT
                 # DISPLACE that original exception: the operator still needs the mid-run recovery advice, so
                 # the lease-replaced note is surfaced ALONGSIDE it, never in place of it (exit 2 preserved,

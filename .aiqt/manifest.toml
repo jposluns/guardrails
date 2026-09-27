@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "86b90f1949073b8aa60d09016e084f004bc8e9b1ec7b8e60845f36775b63b35f"
+tree-sha256 = "406c5db7b12ebd4e1febf611fe8f1d3fa1f8cf1d17d5e48c3d81b6344b8e6874"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2381,8 +2381,8 @@ sha256 = "44fabb8f383a49b5344a6d3e1ff0b4e2ef3afe2411e3d2f0c0b00829bafecccb"
 
 [[sources]]
 path = "opf/site/adopt.html"
-bytes = 34932
-sha256 = "458bcc78ce1957a434c75d91de82efd7aebc7a2761bcbeb86b7c0b76bf2e1e0d"
+bytes = 34942
+sha256 = "9ffbe96dea0c3efda698d20ca64bc0ea9c8449448ae5a6c1ff759d6ebdb1827e"
 
 [[sources]]
 path = "opf/site/adopt.md"
@@ -2456,8 +2456,8 @@ sha256 = "60d56244cf05535c7c4a5cd04750f8f9f1815cf0d6708474de5c6f8e7e43b79a"
 
 [[sources]]
 path = "opf/site/tooling.html"
-bytes = 12217
-sha256 = "6c9c5090ab5c70dce49e86a92fa6262762b8c56fef6c128a400626d58c6a4131"
+bytes = 12227
+sha256 = "46d85a85ef11056d3cb477d4abe6c0b34e1e8e2870cb23b31dd4cd496c6bb402"
 
 [[sources]]
 path = "opf/spec/OPF-INIT-D2B-REVIEW.md"
@@ -2476,8 +2476,8 @@ sha256 = "573ac6cad9a676efed6bc35cf92914cde0907ca62e6960c78783e90fe505281e"
 
 [[sources]]
 path = "opf/spec/OPF-SPEC.md"
-bytes = 103977
-sha256 = "6ef353056381a8ffd83ab582f85c4493fb53c1097a63e36c78345cf219a57124"
+bytes = 104152
+sha256 = "f6909523e075b81b0dd5b0d885c2e0c29c38b9a419fce63c186833a45765878e"
 
 [[sources]]
 path = "opf/tools/_byte_canon.py"
@@ -2841,13 +2841,13 @@ sha256 = "8949c5d986eadf237d8d867a6887362fe87c426736b368a05145b1e109d162c1"
 
 [[sources]]
 path = "opf/tools/check_opf_upgrade.py"
-bytes = 152525
-sha256 = "c4eec09c87aa7655d0ba33f630ec5b3281230c7b3c54657b0598368a3a10238d"
+bytes = 152586
+sha256 = "00673251bc861f7757d8b100ef4a79d296a9b91a00f3f4d183241b376ab45b1e"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 236105
-sha256 = "cd623274b97435bc7afe05283ab98fbbcdfae003be657175fe406fa0a9546a2f"
+bytes = 236150
+sha256 = "3a16e8256a37d7c9193468750fe8f739bee687d94d26267916d6569ddc307f15"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"

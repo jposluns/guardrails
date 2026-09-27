@@ -215,7 +215,7 @@
 
     <h3 id="cmd-upgrade"><code>opf upgrade</code></h3>
     <p><b style="color:var(--ink)">Purpose.</b> Apply the in-place base-schema upgrade from spec 1.0.0
-      or 1.1.0 to 1.2.0, staged for your own review and merge.</p>
+      or 1.1.0 to 1.2.0, left uncommitted for your own review and merge.</p>
     <p>The schema delta for a 1.1.0 store changes only <code>spec_version</code>; a 1.0.0 store also
       receives the earlier schema delta. Declared views are then regenerated, so a stale committed
       view can change. Neither path creates bootstrap provenance for an existing store.</p>

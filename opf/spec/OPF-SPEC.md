@@ -1038,8 +1038,9 @@ lowers the fail-closed floor. Before any write it enforces two fail-closed preco
 the single-writer lease (section 5.7) and holds it across the whole mutation, and it verifies the
 store working tree is clean over exactly the paths it will write, so the committed HEAD is a verified
 restore path for that blast radius; a held lease or a dirty store refuses, and a dirty store is asked
-to commit its own changes, never restored by the tool. It never commits: it stages the change and
-requires a full doctor VALID before the change is offered for the adopter's own branch-and-merge.
+to commit its own changes, never restored by the tool. After applying the schema delta, it regenerates
+the declared views and requires a full doctor VALID before offering the uncommitted change for the
+adopter's own branch-and-merge. It never stages or commits the change.
 
 The manifest and counters rewrite is a model regeneration through the canonical new-document emitter,
 never a textual round-trip edit, bounded by two guards: a precondition that re-emitting the UNCHANGED
@@ -1068,8 +1069,9 @@ always-on, so a populated decision-support index is kept as is.
 Base spec 1.2.0 admits one new managed machine-store file, `.working/toml/init.toml`: the bootstrap
 provenance a coupled `opf init` records (its format is frozen in OPF-INIT-D2B). It is a managed leaf
 when present and is never required, so a store without it stays valid. For the 1.1.0 to 1.2.0 upgrade
-the allowed delta is the `spec_version` bump alone: no provenance is created for an existing store
-(none is ever fabricated), and no other field, file, or counter changes. A 1.0.0 store takes the
+the allowed schema delta is the `spec_version` bump alone: no other manifest field, schema file, or
+counter changes, and no provenance is created for an existing store (none is ever fabricated).
+Declared views are then regenerated, so a stale committed view can change. A 1.0.0 store takes the
 1.0.0 delta above directly to 1.2.0.
 
 ## 10. Views and deliverables
