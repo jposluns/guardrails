@@ -1028,7 +1028,8 @@ The migration refuses a store resolved outside the product root until a multi-ro
 Unproven legacy `.archive/` entries remain in place with a standing finding until dispositioned.
 
 A base-schema version bump ships a tested, in-place store-schema upgrade (`opf upgrade`). The upgrade
-is idempotent and journaled. A purely schema-level bump is additive; a homes-generation bump
+is idempotent. A purely schema-level bump is additive, using direct atomic file replacement and
+sequential writes with recovery scope held in memory, not a durable transaction journal. A homes-generation bump
 additionally relocates OPF control areas as a versioned, journaled, fail-closed relocation.
 Every destination is digest-verified before its source is removed. Both kinds of upgrade run under
 the store consistency contract and the single-writer lease (section 5.7).

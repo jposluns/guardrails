@@ -3,7 +3,7 @@
 
 Both the default entry and --self-test run the fixture suite. There is no live-adopter mutation leg and
 no root option: the gate drives `opf upgrade` (isolated, -I -B) over BYTE-PINNED 1.0.0 stores built beneath
-fresh temporary git repositories, and asserts the 1.0.0 -> 1.1.0 contract over an enumerated adopter-shape
+fresh temporary git repositories, and asserts the 1.0.0 -> 1.2.0 contract over an enumerated adopter-shape
 matrix, a set of refusal fixtures, direct postcondition unit vectors, and a seeded migration property test.
 
 FIXTURE FIDELITY. The 1.0.0 fixture bytes are FROZEN, anchored on the frozen `_FIX_MANIFEST` /
@@ -18,7 +18,7 @@ enabled variant was additionally graded doctor-VALID at authoring time by the ac
 (commit 1c90fbb, `tools/opf.py doctor`, its pre-move path at that commit); at 1.0.0 the module-tier records (maintainer_decision /
 preference_pattern) are schema-DEFERRED by the baseline validator and become fully-validated baseline records
 only at 1.1.0, so a POPULATED module-tier fixture's records are validated at run time by the actual
-upgrade -> 1.1.0 doctor leg here rather than by the 1.0.0 baseline. In-gate re-verification is canonicity-only;
+upgrade -> 1.2.0 doctor leg here rather than by the 1.0.0 baseline. In-gate re-verification is canonicity-only;
 1.0.0-doctor fidelity is authoring-time evidence.
 
 VECTOR ROSTER (U1-U25, P1):

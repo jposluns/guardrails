@@ -236,8 +236,10 @@
       newer-than-supported store or an older store failing the migration preconditions above, stops
       before writing the schema delta. A failure after the additive rewrite begins exits 2 and
       leaves changes already made in place. When render returns nonzero or the final doctor reports
-      a result other than VALID, upgrade prints recovery commands using the committed HEAD,
-      scoped to the affected store and product paths.</p>
+      a result other than VALID, or an exception escapes after lease acquisition while recovery
+      scope is active, upgrade prints recovery commands using the committed HEAD, scoped to the
+      planned store and product paths. After doctor VALID, recovery scope is cleared before lease
+      release; a release failure prints lease reconciliation advice without restore or removal commands.</p>
     <p class="refchips"><code>opf upgrade</code> <code>opf upgrade --root .</code></p>
 
     <h3 id="cmd-absorb"><code>opf absorb</code></h3>
