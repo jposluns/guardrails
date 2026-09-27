@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "6b4b26da3532aed271dabe147ee94eb50ee7704bfa4170d2b0ac7ec4bfe9d91f"
+tree-sha256 = "f3ef612f663fa733dcfe174d9abc675e419d62a9549aa1078add1d1b66bdcf67"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -31,8 +31,8 @@ sha256 = "536d77d58ab934ca38d1e0685e94deffb6c0796b0b4e839b676658410fea78fe"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
-bytes = 288606
-sha256 = "5f469be96c4b3966de6e996be194dbeea8294dc607f7d139260a0696e305baf1"
+bytes = 289485
+sha256 = "fbd55c0c258f6f26d0d1c715ec1fbacab09021ed6b84c30b4ac177e15854f3d0"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -81,8 +81,8 @@ sha256 = "3588274f3532e89b94b167cd99e9855733d93c25152c21011a510a750123f8c5"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
-bytes = 36295
-sha256 = "1502818315413d61b83cc38e2e2830d13cd59a8add2696b4cab96c478b71f6fc"
+bytes = 36983
+sha256 = "5b9d6f8aab8f609f6c4b458c54e678bb6af8203e7001d5acf7c8d70f92abaf53"
 
 [[sources]]
 path = ".aiqt/core/migration/crosswalk-schema.toml"
@@ -406,8 +406,8 @@ sha256 = "ed3443fb13e8dd7d19719c83d747153d27cc782ba278831180a817ede477bf4d"
 
 [[sources]]
 path = ".aiqt/core/rules/quali-test-hermeticity.md"
-bytes = 3255
-sha256 = "d92251be77e5358b95b97dff0855097b199ebd54e9e995b28cbc677113d66491"
+bytes = 3634
+sha256 = "31b92986866523123d59c2c77bab7cfb7c33fe0474790a4fd0393e0e9cb6a2cf"
 
 [[sources]]
 path = ".aiqt/core/rules/quali-verifier-delivery-completeness.md"
@@ -1166,8 +1166,8 @@ sha256 = "ed3443fb13e8dd7d19719c83d747153d27cc782ba278831180a817ede477bf4d"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-QUALI-test-hermeticity.md"
-bytes = 3255
-sha256 = "d92251be77e5358b95b97dff0855097b199ebd54e9e995b28cbc677113d66491"
+bytes = 3634
+sha256 = "31b92986866523123d59c2c77bab7cfb7c33fe0474790a4fd0393e0e9cb6a2cf"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-QUALI-verifier-delivery-completeness.md"
@@ -1816,8 +1816,8 @@ sha256 = "0bc9851b63c4fe7c4536585013f0f3c822d80ddee7d5f59d627be8ae913301eb"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-test-hermeticity.mdc"
-bytes = 3034
-sha256 = "c7defcb3bfe50389c92b6dacae4fc9384917d6591534fb6d4bc2cd528a587bd7"
+bytes = 3413
+sha256 = "82e49a179ba467401f72c32ad5475d0925c484349aa48bcfe98eecb210fab908"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-verifier-delivery-completeness.mdc"
@@ -2196,8 +2196,8 @@ sha256 = "9fd15ca9c6f915cf0b920e1e72407ff51caddcedfad52e6955b9a7c3eab66981"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
-bytes = 109352
-sha256 = "f0a5c958fd815b1037cbe610a1bcb9e6ca9ea01abafe92036451665a7b77480b"
+bytes = 109731
+sha256 = "dac46595a05670931c97effaaee0bcd8dfb23a50b0b77a8728feea72cdc54798"
 
 [[sources]]
 path = ".preview/README.md"
@@ -2241,8 +2241,8 @@ sha256 = "286295b9949eda2a6e9bcc919095d9bf14e181578c5e5085381c6106d6a934fd"
 
 [[sources]]
 path = "AGENTS.md"
-bytes = 109341
-sha256 = "c5a54684aa184f0726f108d5879661e59b2d0b457a271ff25900f70dd2c09b7e"
+bytes = 109720
+sha256 = "d963a1bfd4127d808801f93c4ca88de2838ad89cc2dbe6ef0cd6f9ea8704f1bb"
 
 [[sources]]
 path = "CHANGELOG.md"
@@ -2261,8 +2261,8 @@ sha256 = "6c1ca3c5a2934ec41f079fb22381db6517528ddbfb02a5ac7c0ad04b8a2c79cf"
 
 [[sources]]
 path = "GEMINI.md"
-bytes = 109348
-sha256 = "e5393d03fae03e6412316916d6941356652cf496dcd42eca2fda974f4c209a2b"
+bytes = 109727
+sha256 = "7bde20768114bd014bed73f29a83cf01085e53c689976ab33612ac61ace12a24"
 
 [[sources]]
 path = "LICENSE"
@@ -2611,8 +2611,8 @@ sha256 = "1a90448fc75bbf50d8f666c1caf23d0c92c291af738acd61662ef699ba22e757"
 
 [[sources]]
 path = "opf/tools/_opf_pack_manifest.py"
-bytes = 25652
-sha256 = "592d8203e27eae987f6c59d0ff1a8c6939a613ba522653a4e8bd3411340997bf"
+bytes = 24885
+sha256 = "264b16e13a9062207989b50d90f226d0a46ecfd229480df9fc28fc36458f6d2f"
 
 [[sources]]
 path = "opf/tools/_opf_release.py"
@@ -2831,8 +2831,8 @@ sha256 = "90b8264f4c99e6edd29faed84021cfb847905f77376c438d8746ce34f6303129"
 
 [[sources]]
 path = "opf/tools/check_opf_init_p0.py"
-bytes = 18823
-sha256 = "846e6f80ea2dab2d220a5d42ff5a54cc4724be97ac096bf6ced4e21208a33df7"
+bytes = 18461
+sha256 = "d9c5212104578e7bbbfd203857b88db298060b5d31695debee2350aaddc94975"
 
 [[sources]]
 path = "opf/tools/check_opf_init_qa.py"
@@ -3849,7 +3849,7 @@ sha256 = "ed3443fb13e8dd7d19719c83d747153d27cc782ba278831180a817ede477bf4d"
 artifact-id = "rules:.claude/rules/aiqt/10-QUALI-test-hermeticity.md"
 path = ".claude/rules/aiqt/10-QUALI-test-hermeticity.md"
 kind = "file"
-sha256 = "d92251be77e5358b95b97dff0855097b199ebd54e9e995b28cbc677113d66491"
+sha256 = "31b92986866523123d59c2c77bab7cfb7c33fe0474790a4fd0393e0e9cb6a2cf"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-QUALI-verifier-delivery-completeness.md"
@@ -4629,7 +4629,7 @@ sha256 = "0bc9851b63c4fe7c4536585013f0f3c822d80ddee7d5f59d627be8ae913301eb"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-test-hermeticity.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-test-hermeticity.mdc"
 kind = "file"
-sha256 = "c7defcb3bfe50389c92b6dacae4fc9384917d6591534fb6d4bc2cd528a587bd7"
+sha256 = "82e49a179ba467401f72c32ad5475d0925c484349aa48bcfe98eecb210fab908"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-verifier-delivery-completeness.mdc"
@@ -5079,13 +5079,13 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 artifact-id = "adapters:.github/copilot-instructions.md"
 path = ".github/copilot-instructions.md"
 kind = "file"
-sha256 = "f0a5c958fd815b1037cbe610a1bcb9e6ca9ea01abafe92036451665a7b77480b"
+sha256 = "dac46595a05670931c97effaaee0bcd8dfb23a50b0b77a8728feea72cdc54798"
 
 [[artifacts]]
 artifact-id = "agents:AGENTS.md"
 path = "AGENTS.md"
 kind = "file"
-sha256 = "c5a54684aa184f0726f108d5879661e59b2d0b457a271ff25900f70dd2c09b7e"
+sha256 = "d963a1bfd4127d808801f93c4ca88de2838ad89cc2dbe6ef0cd6f9ea8704f1bb"
 
 [[artifacts]]
 artifact-id = "claude:CLAUDE.md#RULES-INDEX"
@@ -5098,7 +5098,7 @@ sha256 = "69fa723a2b2d476a15abfc4466eba99040bfaed3f0d990b265ca60d8fe184013"
 artifact-id = "adapters:GEMINI.md"
 path = "GEMINI.md"
 kind = "file"
-sha256 = "e5393d03fae03e6412316916d6941356652cf496dcd42eca2fda974f4c209a2b"
+sha256 = "7bde20768114bd014bed73f29a83cf01085e53c689976ab33612ac61ace12a24"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt-instructions.txt"

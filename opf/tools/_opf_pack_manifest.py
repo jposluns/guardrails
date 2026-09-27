@@ -351,42 +351,19 @@ def _runner_check(expected, text=None):
     not the other gates' health or arbitrary shell-wrapper equivalence.
     """
     import ast
-    import os
-    import subprocess
-    import tempfile
 
     here = Path(__file__).resolve().parent
     runner = here / "run_all_checks.sh"
     source = runner.read_text(encoding="utf-8") if text is None else text
-    prefix = r'''
-python3() {
-  if [ "$#" -eq 4 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
-      && [ "$3" = "$manifest_test" ] && [ "$4" = "--self-test" ]; then
-    "$manifest_python" -I -B "$manifest_test" --self-test --vectors-only
-  else
-    case " $* " in *_opf_pack_manifest.py*) return 2;; esac
-    return 0
-  fi
-}
-manifest_python="$1"
-manifest_test="$2"
-'''
-    # No inherited BASH_ENV, exported functions, Python or Git controls.
-    with tempfile.TemporaryDirectory(prefix="opf-pack-registration-") as tmp:
-        proc = subprocess.run(
-            ["bash", "--noprofile", "--norc", "-c", prefix + source,
-             str(runner), sys.executable, str(here / "_opf_pack_manifest.py")],
-            cwd=tmp, env={"PATH": os.defpath, "TMPDIR": tmp,
-                          "PYTHONDONTWRITEBYTECODE": "1"},
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=30,
-        )
-    reports = [ast.literal_eval(line[len("PACK-MANIFEST "):])
-               for line in proc.stdout.splitlines()
-               if line.startswith("PACK-MANIFEST ")]
-    if proc.returncode != 0 or reports != [
-            {"executed": expected, "failures": []}]:
-        raise AssertionError("runner/pack-manifest-registration")
+    from _opf_runner_fixture import run_registration
+
+    target = ["-I", "-B", str(here / "_opf_pack_manifest.py"), "--self-test"]
+    for proc in run_registration(runner, source, target, "runner/pack-manifest-registration"):
+        reports = [ast.literal_eval(line[len("PACK-MANIFEST "):])
+                   for line in proc.stdout.splitlines()
+                   if line.startswith("PACK-MANIFEST ")]
+        if reports != [{"executed": expected, "failures": []}]:
+            raise AssertionError("runner/pack-manifest-registration")
 
 
 def _runner_registration_test(expected):

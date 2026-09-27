@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""P0 contract vectors and source reversions. No store, Git or scratch effects.
+"""P0 contract vectors and source reversions. Vectors have no store or Git effects.
 
 The D2a fixture retains the landed source-only builders' bytes in memory before
 any P0 guard is exercised. Reversions receive those same intact fixtures.
@@ -10,7 +10,6 @@ That check proves P0 dispatch, not that the other standalone gates passed.
 import argparse
 import copy
 import hashlib
-import subprocess
 import sys
 import types
 from pathlib import Path
@@ -304,25 +303,13 @@ def runner_check(expected, text=None):
     source = runner.read_text(encoding="utf-8") if text is None else text
     # Run the real dispatcher text, preserving its branches/exit behaviour. Intercept
     # other gate commands and reduce only this suite to its non-recursive vector leg.
-    prefix = r'''
-python3() {
-  if [ "$#" -eq 5 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
-      && [ "$3" = "$p0_test" ] && [ "$4" = "--self-test" ] \
-      && [ "$5" = "--red-on-revert" ]; then
-    "$p0_python" -I -B "$p0_test" --self-test --vectors-only
-  else
-    case " $* " in *check_opf_init_p0.py*) return 2;; esac
-    return 0
-  fi
-}
-p0_python="$1"
-p0_test="$2"
-'''
-    proc = subprocess.run(
-        ["bash", "-c", prefix + source, str(runner), sys.executable, str(here / Path(__file__).name)],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
-    reached = tuple(line[5:] for line in proc.stdout.splitlines() if line.startswith("PASS "))
-    check(proc.returncode == 0 and reached == expected, "runner/declared-test-executes")
+    from _opf_runner_fixture import run_registration
+
+    target = ["-I", "-B", str(here / Path(__file__).name),
+              "--self-test", "--red-on-revert"]
+    for proc in run_registration(runner, source, target, "runner/declared-test-executes"):
+        reached = tuple(line[5:] for line in proc.stdout.splitlines() if line.startswith("PASS "))
+        check(reached == expected, "runner/declared-test-executes")
 
 
 def main():
