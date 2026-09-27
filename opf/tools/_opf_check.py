@@ -1160,8 +1160,8 @@ def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine
         if exc.status == CANNOT_EVALUATE:
             rep.cant("{}: {}".format(exc.relpath, exc))
         else:
-            for finding in exc.findings:
-                rep.finding("manifest: {}".format(finding))
+            rep.cant("{} is not evaluated: {} failed manifest validation "
+                     "(see C-MANIFEST)".format(relpath, exc.relpath))
         if propagate_manifest_failure:
             raise
         return None
@@ -2516,6 +2516,9 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     evaluated_profiles = sorted(declared_profiles - set(unevaluated_profiles))
     if mv.findings or mv.status != VALID:
         # No manifest-dependent source is safe to traverse after any finding.
+        rep.ran("C-RECORDS")
+        rep.cant("active worklog source under {} is not evaluated: {} failed manifest "
+                 "validation (see C-MANIFEST)".format(machine_rel, manifest_rel))
         return evaluated_profiles, unevaluated_profiles
 
     dp = manifest_data.get("opf") if isinstance(manifest_data, dict) else None

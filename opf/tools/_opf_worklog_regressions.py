@@ -5,6 +5,12 @@ The fixture replaces contained filesystem primitives, not the loader or TOML
 parser. Upgrade additionally uses isolated on-disk stores and the real CLI.
 Permission failures are injected at read time so these tests also work
 as root. Production callers and their exception translations still execute.
+
+Doctor intentionally stops after manifest failure: C-MANIFEST owns the original
+findings, and an INVALID manifest produces one C-RECORDS cannot-evaluate naming
+the unread active source. It no longer grades an unread ledger as empty. A later
+intake failure also stops traversal before archive reads. Independently invoked
+archive intake retains its fixed legacy shape and has no manifest contract.
 """
 import contextlib
 import datetime
@@ -267,7 +273,8 @@ def _manifest_diagnostics(data, validation):
                       + message + " (fail-closed, spec 4.5/9)"),
         "doctor": (["m/manifest.toml: " + message]
                    if validation.status == _opf_store.CANNOT_EVALUATE else
-                   ["manifest: " + finding for finding in validation.findings]),
+                   ["m/worklog.toml is not evaluated: m/manifest.toml failed manifest "
+                    "validation (see C-MANIFEST)"]),
         "import": "store manifest is not VALID ({}: {})".format(validation.status, message),
     }
     base = data.get("opf") if isinstance(data, dict) else None
@@ -294,7 +301,7 @@ def _manifest_intake_regressions(check):
     Views had no single-link or 1-MiB store cap: those cases deliberately keep
     U1's fail-closed refusal, NOT a claim of baseline diagnostic parity.
     Intentional multi-fault divergence from 32fcfbc: a manifest failure now
-    outranks an absent or unreadable worklog ledger. Baseline read that ledger
+    outranks an absent, unreadable, or unparseable worklog ledger. Baseline read that ledger
     first; reproducing its precedence would violate the absolute prohibition on
     probing a worklog source after manifest failure. Version absence still wins
     over manifest absence/schema failure using the version already read; manifest
@@ -412,7 +419,13 @@ def _manifest_intake_regressions(check):
         control = value[1] if phase == "validation" else None
         if control is not None:
             # Only doctor accepts supported_profiles. Never change base-only intake.
-            expected = {"doctor": expected["doctor"]}
+            validation = _opf_store.validate_manifest(data, control)
+            expected = {"doctor": (
+                ["m/manifest.toml: " + message]
+                if validation.status == _opf_store.CANNOT_EVALUATE else
+                ["active worklog source under m is not evaluated: m/manifest.toml failed manifest "
+                 "validation (see C-MANIFEST)"]
+                + ["manifest: " + finding for finding in validation.findings])}
         for caller, baseline in expected.items():
             label = "F1-manifest-{}-{}".format(mode, caller)
             with _Fixture() as fx:
@@ -786,6 +799,62 @@ def _upgrade_preflight_regressions(check, fence):
                           and wl.generation(upgraded) == 1)
 
 
+def _round5_regressions(check):
+    """Full doctor attribution/probe boundary, plus the import refusal contract."""
+    import _opf_emit
+
+    for fault in ("absent", "unparseable", "bad-kind"):
+        with _Fixture() as fx:
+            _manifest_readers(fx)  # Include indexes and an archive worklog.
+            fx.manifest["junk"] = {}
+            fx.files[M + "/manifest.toml"] = _opf_emit.emit_checked(fx.manifest).encode()
+            if fault == "absent":
+                del fx.files[LEGACY]
+            elif fault == "unparseable":
+                fx.files[LEGACY] = b"not TOML ["
+            else:
+                fx.files[LEGACY] = LEDGER.replace(b'kind = "fixed"', b'kind = "unknown"')
+            probes = []
+
+            def watch(method):
+                def run(fd, rel, *args, **kwargs):
+                    probes.append(fx.path(fd, rel))
+                    return method(fd, rel, *args, **kwargs)
+                return run
+
+            with patch.object(_journal, "_lstat_contained", watch(fx.lstat)), \
+                    patch.object(_journal, "_read_contained", watch(fx.read)), \
+                    patch.object(_journal, "_open_dir_contained", watch(fx.open_dir)), \
+                    patch.object(_opf_check, "_list_contained", watch(fx.list_contained)):
+                result = _opf_check.validate_store(fx.res)
+            label = "F2g-doctor-" + fault
+            finding = "manifest: unknown top-level table(s): junk"
+            check(label + "-manifest-once",
+                  (result.findings + result.cannot_evaluate).count(finding) == 1
+                  and result.by_check.get("C-MANIFEST") == [finding])
+            check(label + "-records-cannot",
+                  result.checks["C-RECORDS"] == _opf_store.CANNOT_EVALUATE
+                  and result.by_check.get("C-RECORDS") == [
+                      "active worklog source under m is not evaluated: m/manifest.toml failed "
+                      "manifest validation (see C-MANIFEST)"])
+            check(label + "-no-worklog-probe", bool(probes) and not any(
+                p == LEGACY or p == M + "/worklog" or p.startswith(M + "/worklog/")
+                or (p.startswith(M + "/archive/") and p.endswith("/worklog.toml"))
+                for p in probes))
+            check(label + "-dependent-checks-cannot", all(
+                result.checks[c] == _opf_store.CANNOT_EVALUATE
+                for c in ("C-ID-SPACE", "C-CHANGELOG-GATES", "C-ARCHIVE-ENUM")))
+
+    with _Fixture() as fx:
+        # Defensive seam: production only raises this exception for absence.
+        # A future non-missing raise must still refuse, never fall through to data.
+        exc = wl.ManifestShapeError(M + "/manifest.toml", {})
+        with patch.object(wl, "read_manifest_at", side_effect=exc):
+            message = _error(lambda: _opf_import._worklog_ids(fx.fd, M))
+        check("F2g-import-shape-refusal", message ==
+              "m/manifest.toml: the store manifest is absent; the storage layout cannot be determined (spec 9)")
+
+
 def self_test():
     failures, checks = [], []
 
@@ -793,6 +862,8 @@ def self_test():
         checks.append(name)
         if not ok:
             failures.append(name)
+
+    _round5_regressions(check)
 
     # Baseline 32fcfbc2dba710eab3d03e53ad77fa754461fe50:
     # _opf_views.py:230-245; _opf_check.py:469-488,1132-1156;

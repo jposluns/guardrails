@@ -914,9 +914,8 @@ def _worklog_ids(store_root_fd, machine_rel, roster=None, registered_vendors=fro
         rel = _opf_worklog.source_relpath(machine_rel, manifest)
         data = _opf_worklog.load_worklog_at(store_root_fd, machine_rel, required=False)
     except _opf_worklog.ManifestShapeError as exc:
-        if exc.missing:
-            raise _cannot("{}: the store manifest is absent; the storage layout cannot be determined "
-                          "(spec 9)".format(exc.relpath))
+        raise _cannot("{}: the store manifest is absent; the storage layout cannot be determined "
+                      "(spec 9)".format(exc.relpath)) from exc
     except _opf_worklog.ManifestValidationError as exc:
         base = exc.manifest.get("opf") if isinstance(exc.manifest, dict) else None
         layout = base.get("layout") if isinstance(base, dict) else None

@@ -42,21 +42,26 @@ class ManifestReadError(WorklogError):
 class ManifestShapeError(WorklogError):
     """Absent or unidentifiable manifest; callers retain their legacy wording.
 
-    This is not a generation-1 selection. No worklog source may be inspected
-    after this exception. The default text matches load_manifest's findings.
+    This is not a generation-1 selection. The manifest-selected active source
+    must not be probed after this exception. Explicit archive reads use a fixed
+    legacy shape independently; the enclosing doctor traversal stops on manifest
+    failure. The default text matches load_manifest's findings.
     """
 
     def __init__(self, relpath, manifest):
         self.relpath = relpath
         self.missing = manifest is None
-        self.not_table = manifest is not None and not isinstance(manifest, dict)
         message = (relpath + " vanished after discovery" if self.missing else
                    "; ".join(_opf_store.validate_manifest(manifest).findings))
         super().__init__(message)
 
 
 class ManifestValidationError(WorklogError):
-    """A present manifest failed the store validator; no source may be probed."""
+    """A present manifest failed validation; do not probe its active source.
+
+    Explicit archive reads have a fixed legacy shape and no manifest contract.
+    Doctor stops its enclosing traversal before archive intake on this failure.
+    """
 
     def __init__(self, relpath, manifest, validation):
         self.relpath = relpath

@@ -20,6 +20,119 @@ MANIFEST_CALLERS = ("loader", "views", "plan_views", "import",
                     "changelog", "absorb", "doctor")
 
 
+def _finding_sites(source, check):
+    """Closed syntax census over the validator's local, literal call graph.
+
+    Reject accumulator aliases/mutations and unfamiliar result construction.
+    Dynamic dispatch, imported emitters, reflection and deliberate AST spoofing
+    remain outside this static census; changes to those require manual review.
+    """
+    tree = ast.parse(source)
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    names, pending = set(), ["validate_manifest"]
+    while pending:
+        name = pending.pop()
+        if name in names:
+            continue
+        names.add(name)
+        for node in ast.walk(functions[name]):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                called = node.func.id
+                if called in functions:
+                    pending.append(called)
+    parents = {child: parent for parent in ast.walk(tree)
+               for child in ast.iter_child_nodes(parent)}
+    unsupported = []
+    sites = set()
+    for name in names:
+        for node in ast.walk(functions[name]):
+            parent = parents.get(node)
+            if isinstance(node, ast.Name) and node.id == "findings":
+                # Only a fresh empty accumulator, append, checked helper argument,
+                # status test, and the final constructor may consume this name.
+                allowed = (
+                    isinstance(parent, ast.Assign) and parent.targets == [node]
+                    and isinstance(parent.value, ast.List) and not parent.value.elts)
+                if isinstance(parent, ast.Attribute):
+                    call = parents.get(parent)
+                    allowed = (parent.attr == "append" and isinstance(call, ast.Call)
+                               and call.func is parent and len(call.args) == 1
+                               and not call.keywords
+                               and isinstance(parents.get(call), ast.Expr))
+                elif isinstance(parent, ast.Call) and isinstance(parent.func, ast.Name):
+                    callee = functions.get(parent.func.id)
+                    if callee is not None and node in parent.args:
+                        i = parent.args.index(node)
+                        params = callee.args.posonlyargs + callee.args.args
+                        allowed = i < len(params) and params[i].arg == "findings"
+                    elif parent.func.id == "ManifestValidation":
+                        allowed = ast.unparse(parent) == (
+                            "ManifestValidation(status, findings, unevaluated, base, parsed_profiles)")
+                elif isinstance(parent, ast.IfExp):
+                    allowed = ast.unparse(parent) == "INVALID if findings else VALID"
+                if not allowed:
+                    unsupported.append((name, node.lineno, "findings use"))
+            if isinstance(node, ast.Name) and node.id == "ManifestValidation":
+                allowed = (
+                    isinstance(parent, ast.Call) and parent.func is node
+                    and isinstance(parents.get(parent), ast.Return)
+                    and not parent.keywords and (
+                        ast.unparse(parent) ==
+                        "ManifestValidation(status, findings, unevaluated, base, parsed_profiles)"
+                        or (len(parent.args) == 2
+                            and isinstance(parent.args[0], ast.Name)
+                            and parent.args[0].id == "CANNOT_EVALUATE"
+                            and isinstance(parent.args[1], ast.List)
+                            and len(parent.args[1].elts) == 1)))
+                if not allowed:
+                    unsupported.append((name, node.lineno, "validation construction"))
+            emission = (
+                isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "findings" and node.func.attr == "append")
+            rejection = (
+                isinstance(node, ast.Return) and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)
+                and node.value.func.id == "ManifestValidation"
+                and bool(node.value.args)
+                and isinstance(node.value.args[0], ast.Name)
+                and node.value.args[0].id == "CANNOT_EVALUATE")
+            if emission or rejection:
+                literals = [n.value for n in ast.walk(node)
+                            if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+                # validate_manifest rejects a non-table supported profile at
+                # _profile_major before calling this helper. Its defensive
+                # not-table branch cannot emit through the public validator.
+                if name == "_validate_supported_profile" and "{} is not a table" in literals:
+                    continue
+                sites.add(node.lineno)
+
+    check("F2g-census-recognized-emissions", not unsupported)
+    # HEAD 3b5ea91: 67 append sites - 1 unreachable profile-table defence
+    # + 5 CANNOT_EVALUATE returns = 71 reachable emission sites.
+    check("F2g-census-site-count-71", len(sites) == 71)
+    return sites
+
+
+def _census_regressions(source, check):
+    # Keep the count unchanged while adding an unrecognized emission style.
+    extended = source.replace("    findings = []", "    findings = []; findings.extend([])", 1)
+    failures = []
+    _finding_sites(extended, lambda name, ok: failures.append(name) if not ok else None)
+    check("F2g-census-rejects-extend", failures == ["F2g-census-recognized-emissions"])
+
+    # Remove a genuine emission without changing the supported syntax.
+    tree = ast.parse(source)
+    function = next(n for n in tree.body
+                    if isinstance(n, ast.FunctionDef) and n.name == "_validate_top_level")
+    emission = function.body[1].body[0]
+    assert isinstance(emission, ast.Expr) and isinstance(emission.value, ast.Call)
+    function.body[1].body[0] = ast.Pass()
+    failures = []
+    _finding_sites(ast.unparse(tree), lambda name, ok: failures.append(name) if not ok else None)
+    check("F2g-census-rejects-shrink", failures == ["F2g-census-site-count-71"])
+
+
 def manifest_cases(check):
     valid = _opf_store.tomllib.loads(_opf_init.build_manifest())
     rows = []
@@ -124,43 +237,9 @@ def manifest_cases(check):
     prof("namespace-shape", {"extension_namespace": "bad"})
     prof("namespace-unregistered", {"extension_namespace": "x-fixture"})
 
-    # Enumerate the validator's helper call graph and finding emission sites.
     source = inspect.getsource(_opf_store)
-    tree = ast.parse(source)
-    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
-    names, pending = set(), ["validate_manifest"]
-    while pending:
-        name = pending.pop()
-        if name in names:
-            continue
-        names.add(name)
-        for node in ast.walk(functions[name]):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                called = node.func.id
-                if called in functions:
-                    pending.append(called)
-    sites = set()
-    for name in names:
-        for node in ast.walk(functions[name]):
-            emission = (
-                isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "findings" and node.func.attr == "append")
-            rejection = (
-                isinstance(node, ast.Return) and isinstance(node.value, ast.Call)
-                and isinstance(node.value.func, ast.Name)
-                and node.value.func.id == "ManifestValidation"
-                and isinstance(node.value.args[0], ast.Name)
-                and node.value.args[0].id == "CANNOT_EVALUATE")
-            if emission or rejection:
-                literals = [n.value for n in ast.walk(node)
-                            if isinstance(n, ast.Constant) and isinstance(n.value, str)]
-                # validate_manifest rejects a non-table supported profile at
-                # _profile_major before calling this helper. Its defensive
-                # not-table branch cannot emit through the public validator.
-                if name == "_validate_supported_profile" and "{} is not a table" in literals:
-                    continue
-                sites.add(node.lineno)
+    sites = _finding_sites(source, check)
+    _census_regressions(source, check)
 
     seen = set()
     filename = _opf_store.validate_manifest.__code__.co_filename

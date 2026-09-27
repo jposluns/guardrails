@@ -872,8 +872,16 @@ inclusion, block actionability, counters, lock ordering, or actor attribution.
 
 ## 9. The manifest
 
-`.working/toml/manifest.toml` is the store's control document and discovery marker. Illustrative
-shape (the schema release that follows this specification is normative):
+`.working/toml/manifest.toml` is the store's control document and discovery marker.
+
+The optional `[opf].worklog` key selects the active worklog storage generation,
+independently of `[opf].homes` and `layout`. Omission and integer `1` select the
+legacy `worklog.toml` ledger. This build supports only generation 1: integer `2`
+is reserved and refused before source selection; booleans, other types, and
+other integers are invalid. Archive buckets retain their legacy `worklog.toml`
+shape. Recognizing this key does not activate generation-2 writers or migration.
+
+Illustrative shape (the schema release that follows this specification is normative):
 
 ```toml
 # .working/toml/manifest.toml
