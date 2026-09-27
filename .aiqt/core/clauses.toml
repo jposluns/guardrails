@@ -4928,7 +4928,7 @@ source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
 start-line = 17
 end-line = 18
 canonical-text = "A test is built so its pass or fail is caused by the behaviour under test, not by ambient state the test\ndoes not control."
-source-digest = "77b69172769ccfc492b700453682bef75097157f208cb66b542480b6ce4d46d2"
+source-digest = "76fcd50b0c87390e1bb75af0454edc76c3ff7c9147e1f9e3f1f87c849f37a0da"
 
 [[clause]]
 clause-id = "tsthrm.2"
@@ -4937,7 +4937,7 @@ source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
 start-line = 18
 end-line = 22
 canonical-text = "State that varies between machines, runs, users, or working directories, the process\numask and inherited filesystem default permissions, the locale, timezone, and clock, environment variables\nand the executable search path, and the order in which other tests run, is pinned to a known value,\nneutralized, or kept out of what the assertion depends on, so the same code yields the same verdict\neverywhere."
-source-digest = "77b69172769ccfc492b700453682bef75097157f208cb66b542480b6ce4d46d2"
+source-digest = "76fcd50b0c87390e1bb75af0454edc76c3ff7c9147e1f9e3f1f87c849f37a0da"
 
 [[clause]]
 clause-id = "tsthrm.3"
@@ -4946,7 +4946,7 @@ source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
 start-line = 22
 end-line = 23
 canonical-text = "An assertion narrows to the property the code itself establishes rather than a composite the\nenvironment can perturb;"
-source-digest = "77b69172769ccfc492b700453682bef75097157f208cb66b542480b6ce4d46d2"
+source-digest = "76fcd50b0c87390e1bb75af0454edc76c3ff7c9147e1f9e3f1f87c849f37a0da"
 
 [[clause]]
 clause-id = "tsthrm.4"
@@ -4955,7 +4955,7 @@ source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
 start-line = 23
 end-line = 25
 canonical-text = "but where a system-created property can carry more than the code sets, the\nassertion covers the whole of it rather than only the convenient part, so an unintended widening is caught\nrather than concealed."
-source-digest = "77b69172769ccfc492b700453682bef75097157f208cb66b542480b6ce4d46d2"
+source-digest = "76fcd50b0c87390e1bb75af0454edc76c3ff7c9147e1f9e3f1f87c849f37a0da"
 
 [[clause]]
 clause-id = "tsthrm.5"
@@ -4964,7 +4964,7 @@ source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
 start-line = 25
 end-line = 26
 canonical-text = "A failure that traces to such uncontrolled state is a defect in the test, fixed at\nthe test, not a finding against the code;"
-source-digest = "77b69172769ccfc492b700453682bef75097157f208cb66b542480b6ce4d46d2"
+source-digest = "76fcd50b0c87390e1bb75af0454edc76c3ff7c9147e1f9e3f1f87c849f37a0da"
 
 [[clause]]
 clause-id = "tsthrm.6"
@@ -4973,7 +4973,7 @@ source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
 start-line = 26
 end-line = 27
 canonical-text = "a pass that rests on a convenient local default is not evidence\nthe code is correct."
-source-digest = "77b69172769ccfc492b700453682bef75097157f208cb66b542480b6ce4d46d2"
+source-digest = "76fcd50b0c87390e1bb75af0454edc76c3ff7c9147e1f9e3f1f87c849f37a0da"
 
 [[clause]]
 clause-id = "tsthrm.7"
@@ -4982,7 +4982,7 @@ source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
 start-line = 29
 end-line = 29
 canonical-text = "A test also leaves the host as it found it."
-source-digest = "77b69172769ccfc492b700453682bef75097157f208cb66b542480b6ce4d46d2"
+source-digest = "76fcd50b0c87390e1bb75af0454edc76c3ff7c9147e1f9e3f1f87c849f37a0da"
 
 [[clause]]
 clause-id = "tsthrm.8"
@@ -4991,7 +4991,7 @@ source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
 start-line = 29
 end-line = 31
 canonical-text = "It creates, moves, deletes, or changes the permissions or\nownership of only paths within a temporary location it made for itself and removes afterwards, and it never\nmutates state outside that location."
-source-digest = "77b69172769ccfc492b700453682bef75097157f208cb66b542480b6ce4d46d2"
+source-digest = "76fcd50b0c87390e1bb75af0454edc76c3ff7c9147e1f9e3f1f87c849f37a0da"
 
 [[clause]]
 clause-id = "tsthrm.9"
@@ -5000,7 +5000,7 @@ source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
 start-line = 31
 end-line = 33
 canonical-text = "Where a test must walk real parent directories, it bounds the walk by\nthat fixture root, never by a host property such as ownership, which can reach far past the fixture and\ndisturb unrelated state."
-source-digest = "77b69172769ccfc492b700453682bef75097157f208cb66b542480b6ce4d46d2"
+source-digest = "76fcd50b0c87390e1bb75af0454edc76c3ff7c9147e1f9e3f1f87c849f37a0da"
 
 [[clause]]
 clause-id = "tsthrm.10"
@@ -5009,7 +5009,7 @@ source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
 start-line = 35
 end-line = 37
 canonical-text = "Where verification substitutes for an external executable that the code under test reaches by command lookup\nor process launch, the substitute is an executable fixture, never a shell function or alias; an in-process\ndouble of the launch interface, which launches nothing, is outside this requirement."
-source-digest = "77b69172769ccfc492b700453682bef75097157f208cb66b542480b6ce4d46d2"
+source-digest = "76fcd50b0c87390e1bb75af0454edc76c3ff7c9147e1f9e3f1f87c849f37a0da"
 
 [[clause]]
 clause-id = "tsthrm.11"
@@ -5018,7 +5018,7 @@ source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
 start-line = 37
 end-line = 40
 canonical-text = "The verification declares\nthe shells, if any, and the invocation routes it exercises, including child processes, has each fixture record\nthe invocations it receives, and checks that invocation evidence against the invocations each test case\nexpects."
-source-digest = "77b69172769ccfc492b700453682bef75097157f208cb66b542480b6ce4d46d2"
+source-digest = "76fcd50b0c87390e1bb75af0454edc76c3ff7c9147e1f9e3f1f87c849f37a0da"
 
 [[clause]]
 clause-id = "tsthrm.17"
@@ -5027,16 +5027,16 @@ source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
 start-line = 40
 end-line = 40
 canonical-text = "The harness initializes executable lookup and configuration from controlled inputs."
-source-digest = "77b69172769ccfc492b700453682bef75097157f208cb66b542480b6ce4d46d2"
+source-digest = "76fcd50b0c87390e1bb75af0454edc76c3ff7c9147e1f9e3f1f87c849f37a0da"
 
 [[clause]]
 clause-id = "tsthrm.12"
 corpus-id = "tsthrm"
 source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
 start-line = 40
-end-line = 51
-canonical-text = "The routes,\nincluding absolute paths, a replaced search path, and clients implemented without that executable, by which\nthe substituted executable is launched or its service reached are all routes that the code under test, or\nthe verification itself (its test cases, inputs, fixtures, harness, and mutations), can take when run as\nthe verification runs it, including routes taken in turn, at any depth, by anything loaded, launched, or\ncontacted along such a route; a route counts whether or not review finds it, and a route reachable only\nunder inputs the verification neither supplies nor passes through does not count. Where any such route\ncould, in that run, reach live credentials, among them credentials inherited through the passed\nenvironment, reach remote services, write outside the fixture, or read outside the fixture and its declared\ninputs, the harness enforces isolation over every such route: it removes access to live credentials and\nremote services, confines writes to its fixture, and limits reads to declared inputs, among them the code\nunder test."
-source-digest = "77b69172769ccfc492b700453682bef75097157f208cb66b542480b6ce4d46d2"
+end-line = 50
+canonical-text = "The routes,\nincluding absolute paths, a replaced search path, and clients implemented without that executable, by which\nthe substituted executable is launched or its service reached are all routes that the code under test, or\nthe verification itself (its test cases, inputs, fixtures, harness, and mutations), can take when run as\nthe verification runs it, including routes taken in turn, at any depth, by anything loaded, launched, or\ncontacted along such a route; a route counts whether or not review finds it, and a route reachable only\nunder inputs the verification neither supplies nor passes through does not count. Where any such route\ncould, in that run, reach live credentials, among them credentials inherited through the passed\nenvironment, reach remote services, or write outside the fixture, the harness enforces isolation\nover every such route: it removes access to live credentials and remote services and confines writes\nto its fixture."
+source-digest = "76fcd50b0c87390e1bb75af0454edc76c3ff7c9147e1f9e3f1f87c849f37a0da"
 
 [[clause]]
 clause-id = "tsthrm.19"
@@ -5044,8 +5044,8 @@ corpus-id = "tsthrm"
 source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
 start-line = 51
 end-line = 53
-canonical-text = "Only where every such route to that executable or its service, not only the declared invocation\nroutes, is confined to fixture state and to reads of declared inputs do executable fixtures and checked\ninvocation evidence suffice without enforced isolation."
-source-digest = "77b69172769ccfc492b700453682bef75097157f208cb66b542480b6ce4d46d2"
+canonical-text = "Only where every such route to that executable or its service, not only the declared invocation routes,\nreaches no live credentials or remote services and writes only fixture state do executable fixtures and checked\ninvocation evidence suffice without enforced isolation."
+source-digest = "76fcd50b0c87390e1bb75af0454edc76c3ff7c9147e1f9e3f1f87c849f37a0da"
 
 [[clause]]
 clause-id = "tsthrm.13"
@@ -5054,7 +5054,7 @@ source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
 start-line = 53
 end-line = 56
 canonical-text = "Placing a fixture first on the executable\nsearch path does not intercept absolute-path calls, calls using a replaced search path, or clients\nimplemented without that executable, so executable fixtures supplement required isolation and never replace\nit."
-source-digest = "77b69172769ccfc492b700453682bef75097157f208cb66b542480b6ce4d46d2"
+source-digest = "76fcd50b0c87390e1bb75af0454edc76c3ff7c9147e1f9e3f1f87c849f37a0da"
 
 [[clause]]
 clause-id = "tsthrm.14"
@@ -5063,7 +5063,7 @@ source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
 start-line = 56
 end-line = 57
 canonical-text = "If the required isolation cannot be established, or the verification cannot determine whether it is\nrequired, execution is refused and verification reports that it cannot be evaluated."
-source-digest = "77b69172769ccfc492b700453682bef75097157f208cb66b542480b6ce4d46d2"
+source-digest = "76fcd50b0c87390e1bb75af0454edc76c3ff7c9147e1f9e3f1f87c849f37a0da"
 
 [[clause]]
 clause-id = "tsthrm.15"
@@ -5072,7 +5072,7 @@ source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
 start-line = 57
 end-line = 58
 canonical-text = "Missing, malformed,\nor unexpected invocation evidence fails verification."
-source-digest = "77b69172769ccfc492b700453682bef75097157f208cb66b542480b6ce4d46d2"
+source-digest = "76fcd50b0c87390e1bb75af0454edc76c3ff7c9147e1f9e3f1f87c849f37a0da"
 
 [[clause]]
 clause-id = "tsthrm.16"
@@ -5081,7 +5081,7 @@ source-path = ".aiqt/core/rules/quali-test-hermeticity.md"
 start-line = 58
 end-line = 60
 canonical-text = "Shell functions may\nthemselves be the subject of a test; where that test also substitutes for an external executable, the\nrequirements above apply to the substitution."
-source-digest = "77b69172769ccfc492b700453682bef75097157f208cb66b542480b6ce4d46d2"
+source-digest = "76fcd50b0c87390e1bb75af0454edc76c3ff7c9147e1f9e3f1f87c849f37a0da"
 
 [[clause]]
 clause-id = "trkasy.1"

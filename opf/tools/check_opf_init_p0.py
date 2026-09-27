@@ -453,9 +453,9 @@ exit 0
         log.chmod(0o600)
         env = {name: value for name, value in os.environ.items()
                if name not in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4")
-               and not name.startswith(("GIT_", "BASH_FUNC_", "PYTHON", "LD_",
-                                        "SSH_", "AWS_", "GPG_"))
-               and not any(marker in name for marker in
+               and not name.upper().startswith(("GIT_", "BASH_FUNC_", "PYTHON", "LD_",
+                                                "SSH_", "AWS_", "GPG_"))
+               and not any(marker in name.upper() for marker in
                            ("TOKEN", "SECRET", "PASSWORD", "PASSPHRASE",
                             "CREDENTIAL", "APIKEY", "API_KEY", "ACCESS_KEY",
                             "AUTH"))}
@@ -652,6 +652,31 @@ def runner_red_checks(expected):
         else:
             raise AssertionError(identity + "/" + label + "/not-red")
         print("RED {} -> {}".format(label, wanted))
+
+    # Exercise the actual environment passed to the runner, using synthetic
+    # values only. Check lowercase and mixed-case credential names as well as
+    # uppercase names, while preserving ordinary conditional-dispatch inputs.
+    credentials = ("GH_TOKEN", "api_token", "GitHub_ToKeN", "client_secret",
+                   "db_password", "key_passphrase", "cloud_credential",
+                   "service_apikey", "service_api_key", "service_access_key",
+                   "npm_config__authToken", "ssh_agent", "Aws_Profile", "gpg_home")
+    popen = subprocess.Popen
+
+    def checked_environment(*args, **kwargs):
+        env = kwargs["env"]
+        if any(name in env for name in credentials):
+            raise AssertionError(identity + "/credential-environment")
+        if env.get("CI") != "true" or env.get("BUILD_NUMBER") != "fixture-build":
+            raise AssertionError(identity + "/ordinary-environment")
+        return popen(*args, **kwargs)
+
+    with patch.dict(os.environ, dict.fromkeys(credentials, "synthetic-only") | {
+            "CI": "true", "BUILD_NUMBER": "fixture-build"}), \
+            patch("subprocess.Popen", side_effect=checked_environment) as launch:
+        runner_check(expected)
+        if not launch.called:
+            raise AssertionError(identity + "/environment-not-exercised")
+    print("PASS " + identity + "/credential-environment")
 
     # Unsupported expansion in any registration word refuses before launch.
     original_read_text = Path.read_text
