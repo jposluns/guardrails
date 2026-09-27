@@ -37,6 +37,10 @@ attributed acceptance.json (no live-store write), and `--apply` wires onto the P
 operation: an unresolved / NOT-ADOPTED root fails cannot-evaluate (exit 2) with a "run `opf init` first"
 message rather than reporting NOT APPLICABLE (divergence D7).
 
+`init` HAS landed: `opf init [--root DIR]` creates validated store sources and a pointer, without git
+writes or rendering. `absorb` HAS landed: `opf absorb [--root DIR] [--covers TOKEN] [--freeze-digest]`
+prints a changelog draft or freeze digest without writing files.
+
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
 root named by --root (default: the cwd), never on this pack's own tree via `_gen_common.repo_root()`.
 The pack is a readable non-adopter root, so a live `opf.py render --root . --check` here reports NOT

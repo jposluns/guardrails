@@ -82,9 +82,10 @@
         <h3>By hand (fallback)</h3>
         <p>Create the plain-TOML store, configure your own checks, and work records-first. The standard
           requires no particular tool. The reference tooling validates spec 1.2.0 stores in either
-          layout, with limits: it does not yet render or drift-check per-record views, and the baseline
-          validator reports module-tier and importer record content schemas as cannot-evaluate. A
-          hand-built store using those features cannot yet be fully checked by it.</p>
+          layout, with limits: it does not render or drift-check per-record views, and the baseline
+          validator reports module-tier and importer record content schemas as cannot-evaluate.
+          For a per-record store that declares views, doctor's overall verdict is cannot-evaluate
+          (exit 2).</p>
       </div>
     </div>
     <p>On the assistant-driven path, ask for a plan naming what to create, import, or retire and how the
@@ -146,8 +147,9 @@
       drifted, or cannot be evaluated, and writing nothing. <code>--write</code> gates on source integrity, not
       on the whole-store verdict: it gathers the git-derived observations, and a drifted or missing view is
       its output to regenerate rather than a reason to refuse, so it rewrites the declared views from their
-      sources. A source-integrity violation refuses with exit 2 before writing. Planning errors can
-      also refuse before writing; a later I/O failure can leave partial output and is reported.</p>
+      sources. A source-integrity check that fails or reports cannot-evaluate refuses with exit 2
+      before writing. Planning errors can also refuse before writing; a later I/O failure can leave
+      partial output and is reported.</p>
     <p><b style="color:var(--ink)">Result.</b> Under <code>--check</code>, a verdict and no change.
       Under <code>--write</code>, post-write validation checks source integrity and the regenerated
       outputs. A disagreement triggers a rollback attempt and exit 2; an incomplete rollback is
@@ -163,12 +165,15 @@
       them. It makes no store change, and its report is a structured per-check verdict map, the findings
       and cannot-evaluates, and a residual count, never a wall of diff lines. Its coverage spans schema
       validity, ID uniqueness and counter monotonicity, bidirectional index reconciliation, transition
-      legality where observations suffice, the all-or-none resolution bundle, byte drift for every
-      declared view in an inline-layout store, worklog span tiling and frozen digests, changelog coverage
-      and freeze, archive integrity, the tracked-store
+      legality where observations suffice, the all-or-none resolution bundle, byte drift for declared
+      baseline views in an inline-layout store, the root <code>VERSION</code> deliverable whenever
+      releases exist, worklog span tiling and frozen digests, changelog coverage and freeze, archive
+      integrity, the tracked-store
       requirement, pointer and sync-target agreement, and path containment.</p>
     <p>Doctor reports per-record view drift and the content schemas of module-tier and importer
-      records, including <code>legacy_fragment</code>, as cannot-evaluate. Transition checks also report
+      records, including <code>legacy_fragment</code>, as cannot-evaluate. Baseline view coverage includes
+      composed views and projections. A declared view outside the baseline set, such as a module-type
+      index mirror, makes the whole drift check cannot-evaluate. Transition checks also report
       cannot-evaluate when legality depends on an unidentified last-transition actor or a rejection
       requires unavailable pre-proposal state. Doctor does not check behind, ahead, or divergence
       against a sync target.</p>
@@ -198,9 +203,10 @@
     <p><b style="color:var(--ink)">Result.</b> An inventory, a staged run id and report, an acceptance
       record, or a promoted store, one per mode; everything not confidently mapped is quarantined rather
       than dropped, and the originals stay in place until an <code>--apply</code> promotes a fully
-      reviewed run. An import that promotes quarantined <code>legacy_fragment</code> records can succeed
-      while subsequent doctor checks report cannot-evaluate, because the baseline validator does not
-      validate those records' content schemas.</p>
+      reviewed run. An import that promotes quarantined <code>legacy_fragment</code> records can succeed,
+      but afterwards doctor reports cannot-evaluate, and <code>opf render --write</code> and
+      <code>opf upgrade</code> refuse, because the baseline validator does not validate those records'
+      content schemas. Module-tier records have the same effect.</p>
     <p class="refchips"><code>opf import --scan --set sources.toml</code> <code>opf import --plan --set sources.toml</code> <code>opf import --review R --actor "you" --decisions d.toml</code> <code>opf import --apply R</code></p>
 
     <h3 id="cmd-upgrade"><code>opf upgrade</code></h3>
@@ -288,9 +294,10 @@
     <p class="lead">OPFiles specifies formats, layout, naming, lifecycle, and enforcement posture, and
       requires no particular tool: the specification states that a project can conform with
       hand-maintained files and its own checks. The reference tooling validates spec 1.2.0 stores in
-      either layout, with limits: it does not yet render or drift-check per-record views, and the baseline
-      validator reports module-tier and importer record content schemas as cannot-evaluate. A hand-built
-      store using those features cannot yet be fully checked by it.</p>
+      either layout, with limits: it does not render or drift-check per-record views, and the baseline
+      validator reports module-tier and importer record content schemas as cannot-evaluate.
+      For a per-record store that declares views, doctor's overall verdict is cannot-evaluate
+      (exit 2).</p>
     <p>The shape of the manual path is short: create the store (either run <code>opf init</code> to
       scaffold it, or write the files from the specification and schemas), commit it, generate the views
       with <code>opf render --write</code> for a supported store or your own renderer, and then work
@@ -408,9 +415,10 @@
     <h2>Bring your own checks</h2>
     <p>Even before you run the reference validator, you can assert the standard's key invariants
       yourself. A hand adopter can check that the store is a tracked git repository (an untracked
-      store is a hard failure, not a warning); that generated views match a fresh render; that worklog
-      spans tile the released versions with no gap or overlap; and that the changelog range
-      tiles every released version, with published entries unchanged since their recorded digest. These
+      store is a hard failure, not a warning); that generated views match a fresh render; that release
+      worklog spans tile the released worklog entries in ID order without gaps or overlaps; and that
+      changelog summary ranges tile the released versions without gaps or overlaps, with published entries
+      unchanged since their recorded digest. These
       are integrity checks specified by OPFiles. Record the scope and results of your manual checks.</p>
   </div>
 </section>
