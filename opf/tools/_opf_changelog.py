@@ -1065,15 +1065,11 @@ def self_test():
 
         # F1 (Fable/codex, BLOCKER): a FIFO at CHANGELOG.md must fail closed as a non-regular input, never
         # block. _load_inputs lstat-checks S_ISREG BEFORE opening (mirroring _read_toml_contained), so a
-        # reader-only FIFO can never hang. A SIGALRM watchdog bounds a pre-fix regression (which blocks in
-        # os.open) so the suite fails fast; post-fix the guard returns a "not a regular file" cannot-evaluate
-        # well within it, and the alarm never fires.
-        import signal as _signal
-        import time as _time
+        # reader-only FIFO can never hang. A bounded child contains a blocking regression
+        # without modifying the caller's timer, handler, mask, or pending signals.
+        from _opf_emit import run_bounded
         fifo_root = build_store(version_text, worklog_text, None)
         os.mkfifo(str(fifo_root / CHANGELOG_REL))
-        def _fifo_watchdog(_signum, _frame):
-            raise TimeoutError("evaluate() blocked on the FIFO changelog (pre-fix hang)")
         # G (self-test-discrimination): the LOCAL pre-open S_ISREG guard in _load_inputs, not the hardened
         # downstream _journal._read_contained (which ALSO refuses a non-regular file with an identical "not a
         # regular file" diagnostic), must refuse the FIFO. Record whether the downstream reader is reached:
@@ -1086,40 +1082,17 @@ def self_test():
                 _rc_calls.append(relpath)                 # (version/worklog/manifest also route through _read_contained)
             return _orig_rc(root_fd, relpath, **_kw)
         _journal._read_contained = _recording_rc
-        # C (test-hermeticity): snapshot the caller's SIGALRM disposition and mask, and its ITIMER_REAL +
-        # pending state through the SHARED _opf_store.snapshot_caller_alarm helper; unblock SIGALRM for the
-        # probe; and restore all of them so this watchdog leaves the ambient alarm state unchanged (never
-        # cancelling a caller's timer, unblocking its SIGALRM, nor destroying its pending alarm).
-        _old_alarm = _signal.getsignal(_signal.SIGALRM)          # capture WITHOUT installing yet (F2)
-        _have_mask = hasattr(_signal, "pthread_sigmask")
-        _prev_mask = _signal.pthread_sigmask(_signal.SIG_BLOCK, []) if _have_mask else None
-        _alarm_snap = _opf_store.snapshot_caller_alarm()         # ITIMER value/interval + pending (shared helper)
-        # F2 (round-10, class-width): the SIGALRM UNBLOCK and the timer ARM live INSIDE the try, so the
-        # finally restores the caller's mask, disposition, and timer even if a signal fires during setup. An
-        # ambient SIGALRM that is BLOCKED and already PENDING (the timer fired while blocked) would otherwise
-        # be delivered the instant SIGALRM is unblocked and, with the unblock OUTSIDE the try/finally, would
-        # raise out of the watchdog uncaught AND leave the caller's mask corrupted (SIGALRM unblocked). Any
-        # inherited pending SIGALRM is first DISCARDED under SIG_IGN (POSIX: setting SIG_IGN discards a
-        # pending signal whether or not it is blocked) so it cannot fire the probe handler spuriously; the
-        # shared restore_caller_alarm RE-POSTS it on exit (round-15 F2) so the caller's pending alarm is
-        # preserved, not destroyed.
-        try:
-            _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)     # discard any inherited pending SIGALRM
-            _signal.signal(_signal.SIGALRM, _fifo_watchdog)      # now install the watchdog handler
-            if _have_mask:
-                _signal.pthread_sigmask(_signal.SIG_UNBLOCK, {_signal.SIGALRM})
-            _signal.setitimer(_signal.ITIMER_REAL, 5)
+        def _fifo_probe():
             r_fifo = evaluate(fifo_root)
+            return str(r_fifo.status == CANNOT_EVALUATE
+                       and any("not a regular file" in f for f in r_fifo.findings)
+                       and not _rc_calls)
+
+        try:
+            fifo_result = run_bounded(_fifo_probe, timeout_s=5)
         finally:
-            _signal.setitimer(_signal.ITIMER_REAL, 0)
-            _signal.signal(_signal.SIGALRM, _old_alarm)
-            if _have_mask:
-                _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)
-            _opf_store.restore_caller_alarm(*_alarm_snap)        # shared elapsed-aware timer + pending restore
             _journal._read_contained = _orig_rc
-        check("f1-fifo-changelog-not-regular-fail-closed",
-              r_fifo.status == CANNOT_EVALUATE and any("not a regular file" in f for f in r_fifo.findings)
-              and not _rc_calls)
+        check("f1-fifo-changelog-not-regular-fail-closed", fifo_result == "True")
 
         # F-A (RANGE-BOUNDS, hostile store-file on disk): an OVERSIZE CHANGELOG.md is refused by
         # _load_inputs on the pre-open st.st_size ceiling BEFORE the whole file is read into memory,

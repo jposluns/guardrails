@@ -600,9 +600,9 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
     verdict token, so a check whose bounds could not be installed FAILS closed rather than reading a
     possibly-unbounded run as a clean pass (no-concealed-failure).
 
-    Test-harness only: the three OPF self-tests (_opf_check, _opf_release, _opf_emit) share THIS one
-    implementation so the fork/timer/pipe hardening lives in a single place and cannot diverge again; the
-    production validators fork nothing.
+    Test-harness only: OPF self-tests, including the FIFO refusal probes, share this
+    implementation. Timer setup happens only in the child; the parent's timers,
+    handlers, masks and pending signals are never borrowed. Production validators fork nothing.
 
     Hardening: (fork-less) a host without os.fork returns SETUP-ERROR WITHOUT running the thunk, never the
     thunk's own result run unbounded. (child) the child resets SIGALRM to SIG_DFL AND UNBLOCKS it in its

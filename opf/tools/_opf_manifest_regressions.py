@@ -10,7 +10,6 @@ through doctor's real profile handling.
 import ast
 import copy
 import inspect
-import sys
 
 import _opf_init
 import _opf_store
@@ -24,8 +23,9 @@ def _finding_sites(source, check):
     """Closed syntax census over the validator's local, literal call graph.
 
     Reject accumulator aliases/mutations and unfamiliar result construction.
-    Emissions must start on a line containing no other statement or condition;
-    a line event alone cannot prove an inline conditional's body executed.
+    Emissions must start on a line containing no other statement or condition.
+    Runtime coverage records completed appends and their propagated values,
+    not visits to source lines.
     Dynamic dispatch, imported emitters, reflection and deliberate AST spoofing
     remain outside this static census; changes to those require manual review.
     """
@@ -46,52 +46,14 @@ def _finding_sites(source, check):
                for child in ast.iter_child_nodes(parent)}
     unsupported = []
     sites = set()
-    # Exempt only this exact defence AND its local unreachability proof.
-    # Pin the non-table rejection, the caller's skip, and the sole direct call.
-    # A changed prerequisite fails closed and puts the defence back in the census.
-    major = ast.parse("""
-def _profile_major(prof):
-    if not isinstance(prof, dict):
-        return None
-    parsed = _parse(prof.get("version")) if isinstance(prof.get("version"), str) else None
-    return None if parsed is None else parsed[0]
-""").body[0]
-    route = ast.parse("""
-prof_major = _profile_major(prof)
-if prof_major is None:
-    findings.append("[profiles.{}] is a supported profile but its major cannot be determined "
-                    "(version absent, non-string, or not a bare SemVer); fail-closed".format(
-                        _safe_display(name)))
-    continue
-if prof_major not in supported_majors:
-    unevaluated.append(name)
-    continue
-_validate_supported_profile(name, prof, spec_tuple, base_posture, modules_enabled,
-                            registered_vendors, findings)
-""").body
-    actual_major = copy.deepcopy(functions["_profile_major"])
-    if ast.get_docstring(actual_major) is not None:
-        actual_major.body.pop(0)
-    calls = [node for name in names for node in ast.walk(functions[name])
-             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-             and node.func.id == "_validate_supported_profile"]
-    loop = parents.get(parents.get(calls[0])) if len(calls) == 1 else None
-    prerequisites = (
-        ast.dump(actual_major) == ast.dump(major)
-        and isinstance(loop, ast.For) and loop in functions["validate_manifest"].body
-        and [ast.dump(node) for node in loop.body[-len(route):]]
-        == [ast.dump(node) for node in route])
-    check("F2k-census-defence-prerequisites", prerequisites)
-    defence = ast.parse("""
-if not isinstance(prof, dict):
-    findings.append("{} is not a table".format(where))
-    return
-""").body[0]
-    helper = functions["_validate_supported_profile"]
-    guarded = helper.body[2] if len(helper.body) > 2 else None
-    exempt = (guarded.body[0].value
-              if prerequisites and isinstance(guarded, ast.If)
-              and ast.dump(guarded) == ast.dump(defence) else None)
+    creations = [node for node in functions["validate_manifest"].body
+                 if isinstance(node, ast.Assign)
+                 and len(node.targets) == 1
+                 and isinstance(node.targets[0], ast.Name)
+                 and node.targets[0].id == "findings"
+                 and isinstance(node.value, ast.List) and not node.value.elts]
+    check("F2l-census-one-creation", len(creations) == 1)
+    creation = creations[0] if len(creations) == 1 else None
     for name in names:
         for node in ast.walk(functions[name]):
             parent = parents.get(node)
@@ -99,8 +61,8 @@ if not isinstance(prof, dict):
                 # Only a fresh empty accumulator, append, checked helper argument,
                 # status test, and the final constructor may consume this name.
                 allowed = (
-                    isinstance(parent, ast.Assign) and parent.targets == [node]
-                    and isinstance(parent.value, ast.List) and not parent.value.elts)
+                    name == "validate_manifest" and parent is creation
+                    and parent.targets == [node])
                 if isinstance(parent, ast.Attribute):
                     call = parents.get(parent)
                     allowed = (parent.attr == "append" and isinstance(call, ast.Call)
@@ -146,13 +108,14 @@ if not isinstance(prof, dict):
                 and isinstance(node.value.args[0], ast.Name)
                 and node.value.args[0].id == "CANNOT_EVALUATE")
             if emission or rejection:
-                # _profile_major rejects non-tables before this helper is called.
-                if node is exempt:
-                    continue
+                ancestor = parents.get(node)
+                while ancestor is not None:
+                    if emission and isinstance(ancestor, (ast.Try, ast.TryStar)):
+                        unsupported.append((name, node.lineno, "caught emission"))
+                    ancestor = parents.get(ancestor)
                 sites.add((node.lineno, node.col_offset, node.end_lineno, node.end_col_offset))
 
-    # Coverage below uses Python line events. Overlapping line spans (including
-    # an append after a multiline call's closing parenthesis) are ambiguous.
+    # Keep emissions individually reviewable, including multiline calls.
     lines = [line for start, _, end, _ in sites for line in range(start, end + 1)]
     check("F2h-census-unambiguous-lines", len(set(lines)) == len(lines))
 
@@ -165,34 +128,61 @@ if not isinstance(prof, dict):
         for start, column, _, _ in sites))
 
     check("F2g-census-recognized-emissions", not unsupported)
-    # HEAD 3b5ea91: 67 append sites - 1 unreachable profile-table defence
-    # + 5 CANNOT_EVALUATE returns = 71 reachable emission sites.
-    check("F2g-census-site-count-71", len(sites) == 71)
+    # 67 append sites (including the directly exercised defensive helper)
+    # plus 5 CANNOT_EVALUATE returns in the validator's local call graph.
+    check("F2g-census-site-count-72", len(sites) == 72)
     return sites
 
 
 def _census_regressions(source, check):
-    for mutation in ("non-table-major", "missing-continue"):
+    for mutation in ("non-table-major", "missing-continue", "accumulator-rebind",
+                     "pre-guard-reassignment", "caught-append-argument"):
         tree = ast.parse(source)
         functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+        helper = functions["_validate_supported_profile"]
         if mutation == "non-table-major":
-            guard = functions["_profile_major"].body[1]
-            assert isinstance(guard, ast.If) and isinstance(guard.body[0], ast.Return)
-            guard.body[0].value = ast.Constant(value=1)
-        else:
-            loop = next(node for node in functions["validate_manifest"].body
-                        if isinstance(node, ast.For) and any(
-                            isinstance(child, ast.If)
-                            and ast.unparse(child.test) == "prof_major is None"
-                            for child in node.body))
-            guard = next(node for node in loop.body if isinstance(node, ast.If)
+            functions["_profile_major"].body[1].body[0].value = ast.Constant(value=1)
+        elif mutation == "missing-continue":
+            guard = next(node for node in ast.walk(functions["validate_manifest"])
+                         if isinstance(node, ast.If)
                          and ast.unparse(node.test) == "prof_major is None")
-            assert isinstance(guard.body[-1], ast.Continue)
             guard.body[-1] = ast.Pass()
+        elif mutation == "pre-guard-reassignment":
+            helper.body[1] = ast.parse(
+                'where, prof = "[profiles.{}]".format(_safe_display(name)), '
+                'prof.get("requirements", prof)').body[0]
+        else:
+            guard = next(node for node in ast.walk(helper)
+                         if isinstance(node, ast.If)
+                         and ast.unparse(node.test) == "spec_tuple is None")
+            if mutation == "accumulator-rebind":
+                guard.body.insert(0, ast.parse("findings = []").body[0])
+            else:
+                emission = guard.body[0]
+                emission.value.args[0] = ast.parse("1 / 0", mode="eval").body
+                guard.body = [ast.Try(body=[emission],
+                                     handlers=[ast.ExceptHandler(
+                                         type=ast.Name(id="ZeroDivisionError", ctx=ast.Load()),
+                                         name=None, body=[ast.Pass()])],
+                                     orelse=[], finalbody=[])]
+        mutant = ast.unparse(ast.fix_missing_locations(tree))
         failures = []
-        _finding_sites(ast.unparse(tree), lambda name, ok: failures.append(name) if not ok else None)
-        check("F2k-census-rejects-" + mutation, failures == [
-            "F2k-census-defence-prerequisites", "F2g-census-site-count-71"])
+        report = lambda name, ok: failures.append(name) if not ok else None
+        _finding_sites(mutant, report)
+        try:
+            _profile_emission_cases(_validator_namespace(mutant), report)
+        except Exception as exc:
+            failures.append("raised-" + type(exc).__name__)
+        expected = {
+            "non-table-major": "F2l-nontable-major",
+            "missing-continue": "F2l-nontable-route",
+            "accumulator-rebind": "F2g-census-recognized-emissions",
+            "pre-guard-reassignment": "F2l-profile-binding",
+            "caught-append-argument": "F2g-census-recognized-emissions"}
+        check("F2l-census-rejects-" + mutation, expected[mutation] in failures)
+        if mutation in ("accumulator-rebind", "caught-append-argument"):
+            check("F2l-census-lost-diagnostic-" + mutation,
+                  "F2l-profile-propagation" in failures)
 
     # Keep the count unchanged while adding an unrecognized emission style.
     extended = source.replace("    findings = []", "    findings = []; findings.extend([])", 1)
@@ -209,7 +199,7 @@ def _census_regressions(source, check):
     function.body[1].body[0] = ast.Pass()
     failures = []
     _finding_sites(ast.unparse(tree), lambda name, ok: failures.append(name) if not ok else None)
-    check("F2g-census-rejects-shrink", failures == ["F2g-census-site-count-71"])
+    check("F2g-census-rejects-shrink", failures == ["F2g-census-site-count-72"])
 
     tree = ast.parse(source)
     helper = next(n for n in tree.body
@@ -223,7 +213,7 @@ if not isinstance(prof.get("base_compat"), str):
     failures = []
     _finding_sites(ast.unparse(tree), lambda name, ok: failures.append(name) if not ok else None)
     check("F2h-census-rejects-reachable-same-wording",
-          "F2g-census-site-count-71" in failures)
+          "F2g-census-site-count-72" in failures)
 
     duplicate = source.replace(
         'findings.append("[profiles] is not a table")',
@@ -232,7 +222,7 @@ if not isinstance(prof.get("base_compat"), str):
     failures = []
     _finding_sites(duplicate, lambda name, ok: failures.append(name) if not ok else None)
     check("F2h-census-rejects-same-line",
-          "F2g-census-site-count-71" in failures
+          "F2g-census-site-count-72" in failures
           and "F2h-census-unambiguous-lines" in failures)
 
 
@@ -247,6 +237,80 @@ if not isinstance(prof.get("base_compat"), str):
     check("F2j-census-rejects-conditional-only-line",
           failures == ["F2j-census-emission-only-lines"])
 
+def _validator_namespace(source, transform=None):
+    tree = ast.parse(source)
+    # Execute function definitions only, using the actual module's imports and constants.
+    tree.body = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+    if transform is not None:
+        tree = transform.visit(tree)
+    namespace = dict(vars(_opf_store))
+    exec(compile(ast.fix_missing_locations(tree), "<manifest-census>", "exec"), namespace)
+    return namespace
+
+
+def _profile_emission_cases(namespace, check):
+    """Independent diagnostics for the defensive site and its routing prerequisites."""
+    check("F2l-nontable-major", namespace["_profile_major"]([]) is None)
+    data = _opf_store.tomllib.loads(_opf_init.build_manifest())
+    data["profiles"] = {"demo": []}
+    got = namespace["validate_manifest"](data, {"demo": [1]})
+    check("F2l-nontable-route", not got.unevaluated_profiles and got.findings == [
+        "[profiles.'demo'] is a supported profile but its major cannot be determined "
+        "(version absent, non-string, or not a bare SemVer); fail-closed"])
+    data["profiles"]["demo"] = {
+        "version": "1.0.0", "base_compat": ">=1.2.0", "requirements": []}
+    got = namespace["validate_manifest"](data, {"demo": [1]})
+    check("F2l-profile-binding", got.findings == [
+        "[profiles.'demo'] unknown key(s): requirements"])
+    del data["profiles"]["demo"]["requirements"]
+    data["opf"]["spec_version"] = "bad"
+    got = namespace["validate_manifest"](data, {"demo": [1]})
+    check("F2l-profile-propagation", got.findings == [
+        "[opf].spec_version 'bad' is not a bare SemVer",
+        "[profiles.'demo'] declares base_compat but the base spec_version is unparseable, "
+        "so compatibility cannot be confirmed (fail-closed)"])
+
+    helper = namespace["_validate_supported_profile"]
+    findings = []
+    helper("demo", [], (1, 2, 0), "off", set(), set(), findings)
+    check("F2l-defensive-emission", findings == ["[profiles.'demo'] is not a table"])
+
+
+def _emission_runner(source, sites):
+    """Record only completed emissions; callers check their final propagation."""
+    observed = []
+
+    class Instrument(ast.NodeTransformer):
+        def visit_Call(self, node):
+            span = (node.lineno, node.col_offset, node.end_lineno, node.end_col_offset)
+            if span in sites:
+                return ast.copy_location(ast.Call(
+                    func=ast.Name(id="_census_append", ctx=ast.Load()),
+                    args=[node.func.value, node.args[0], ast.Constant(value=span)],
+                    keywords=[]), node)
+            return self.generic_visit(node)
+
+        def visit_Return(self, node):
+            span = (node.lineno, node.col_offset, node.end_lineno, node.end_col_offset)
+            if span in sites:
+                node.value = ast.Call(func=ast.Name(id="_census_return", ctx=ast.Load()),
+                                      args=[node.value, ast.Constant(value=span)], keywords=[])
+                return node
+            return self.generic_visit(node)
+
+    namespace = _validator_namespace(source, Instrument())
+
+    def append(accumulator, value, span):
+        accumulator.append(value)
+        observed.append((span, accumulator, value))
+
+    def returned(validation, span):
+        for value in validation.findings:
+            observed.append((span, validation.findings, value))
+        return validation
+
+    namespace.update(_census_append=append, _census_return=returned)
+    return namespace, observed
 
 def manifest_cases(check):
     valid = _opf_store.tomllib.loads(_opf_init.build_manifest())
@@ -356,24 +420,31 @@ def manifest_cases(check):
     sites = _finding_sites(source, check)
     _census_regressions(source, check)
 
-    seen = set()
-    filename = _opf_store.validate_manifest.__code__.co_filename
-
-    def trace(frame, event, arg):
-        if event == "line" and frame.f_code.co_filename == filename:
-            seen.add(frame.f_lineno)
-        return trace
-
-    previous = sys.gettrace()
-    results = []
-    try:
-        sys.settrace(trace)
-        for name, data, control in rows:
-            validation = _opf_store.validate_manifest(data, control)
-            check("F1-generated-" + name + "-finding", bool(validation.findings))
-            results.append((name, data, validation, control))
-    finally:
-        sys.settrace(previous)
+    namespace, observed = _emission_runner(source, sites)
+    _profile_emission_cases(vars(_opf_store), check)
+    seen, results = set(), []
+    # This site is defensive at the public boundary but part of the census.
+    defensive = []
+    namespace["_validate_supported_profile"](
+        "demo", [], (1, 2, 0), "off", set(), set(), defensive)
+    check("F2l-defensive-completed", defensive == ["[profiles.'demo'] is not a table"]
+          and len(observed) == 1 and observed[0][1] is defensive)
+    seen.update(span for span, _, _ in observed)
+    for name, data, control in rows:
+        observed.clear()
+        validation = _opf_store.validate_manifest(data, control)
+        traced = namespace["validate_manifest"](data, control)
+        check("F1-generated-" + name + "-finding", bool(validation.findings))
+        check("F2l-propagated-" + name,
+              traced.findings == validation.findings
+              and traced.status == validation.status
+              and traced.unevaluated_profiles == validation.unevaluated_profiles
+              and [value for _, accumulator, value in observed
+                   if accumulator is traced.findings] == traced.findings
+              and all(accumulator is traced.findings for _, accumulator, _ in observed))
+        seen.update(span for span, accumulator, value in observed
+                    if accumulator is traced.findings and value in traced.findings)
+        results.append((name, data, validation, control))
     for span in sorted(sites):
-        check("F1-validator-finding-site-" + str(span), span[0] in seen)
+        check("F1-validator-finding-site-" + str(span), span in seen)
     return results

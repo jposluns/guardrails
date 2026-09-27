@@ -652,8 +652,8 @@ def boundary_self_test():
                                                             target=".working/journals/file")))
         # plan_views now uses validated shared manifest intake. Keep this boundary
         # fixture's deliberate empty source set, but supply the current reader and
-        # the validator's findings field. Manifest-fault coverage remains in the
-        # worklog entry-point regressions.
+        # the validator's full result type, including profile scope. Manifest-fault
+        # coverage remains in the worklog entry-point regressions.
         def view_toml(_fd, rel):
             if rel != machine + "/manifest.toml":
                 raise AssertionError("unexpected view source read: " + rel)
@@ -661,14 +661,17 @@ def boundary_self_test():
 
         with patch.object(store, "_read_toml_contained", side_effect=view_toml), \
                 patch.object(store, "validate_manifest",
-                             return_value=SimpleNamespace(status=store.VALID, findings=())), \
+                             return_value=store.ManifestValidation(store.VALID)), \
                 patch.object(views, "_resolve_view", return_value=("projection", [], lambda _src: "1.0.0\n")), \
                 patch.object(views, "_spec_destination", return_value=("store", ".working/journals/file")):
             return refusal(lambda: views.plan_views(-1, machine)) or ""
 
     with active():
         check("view-journal-destination-refused", lambda: "journal home" in view_plan(manifest2))
-        check("view-legacy-journal-destination-planned", lambda: view_plan(manifest) == "")
+        # Pair the legacy allowance with the same destination's homes-2 refusal:
+        # removing the destination guard must not make this allowance vacuously pass.
+        check("view-legacy-journal-destination-planned", lambda: view_plan(manifest) == ""
+              and "journal home" in view_plan(manifest2))
 
     import _opf_adopt_plan as planning
     import _opf_emit as emit
@@ -687,7 +690,7 @@ def boundary_self_test():
                 patch.object(planning.os, "close"), \
                 patch.object(store, "_read_pointer_target", return_value=None), \
                 patch.object(store, "resolve_store", return_value=resolved), \
-                patch.object(store, "validate_manifest", return_value=SimpleNamespace(status=store.VALID)), \
+                patch.object(store, "validate_manifest", return_value=store.ManifestValidation(store.VALID)), \
                 patch.object(planning, "_read_rel", return_value=emit.emit_checked(model).encode()), \
                 patch.object(store._journal, "_open_parent", side_effect=_Enumerated), \
                 patch.object(planning.os, "stat", side_effect=_Enumerated):
@@ -753,7 +756,7 @@ def boundary_self_test():
                 patch.object(planning.os, "close"), \
                 patch.object(store, "_read_pointer_target", return_value=None), \
                 patch.object(store, "resolve_store", return_value=resolved), \
-                patch.object(store, "validate_manifest", return_value=SimpleNamespace(status=store.VALID)), \
+                patch.object(store, "validate_manifest", return_value=store.ManifestValidation(store.VALID)), \
                 patch.object(planning, "_read_rel", return_value=emit.emit_checked(model).encode()), \
                 patch.object(store._journal, "_open_parent", side_effect=FileNotFoundError), \
                 patch.object(adopt, "validate_plan", wraps=adopt.validate_plan) as frozen:
@@ -795,7 +798,7 @@ def boundary_self_test():
         with patch.object(store, "SUPPORTED_HOMES", generation), \
                 patch.object(store, "_open_store_root_fd", return_value=-1), patch.object(ingest.os, "close"), \
                 patch.object(store, "_read_toml_contained", return_value=copy.deepcopy(model)), \
-                patch.object(store, "validate_manifest", return_value=SimpleNamespace(status=store.VALID)), \
+                patch.object(store, "validate_manifest", return_value=store.ManifestValidation(store.VALID)), \
                 patch.object(ingest, "_managed_paths", return_value=(set(), set(), set(), set(), set())), \
                 patch.object(ingest, "_detect_store_scope", return_value=[]) as walked:
             return ingest._detect_rows("/store", same_root, None), walked.call_args.kwargs.get("homes")
@@ -804,7 +807,7 @@ def boundary_self_test():
     check("detect-rows-legacy-generation", lambda: detected_rows(1) == (([], 1), 1))
     check("detect-rows-activated-legacy-generation", lambda: detected_rows(2, manifest) == (([], 1), 1))
     with patch.object(journal, "require_containment"), patch.object(store, "resolve_store", return_value=same_root), \
-            patch.object(store, "load_manifest", return_value=SimpleNamespace(status=store.VALID, findings=[])), \
+            patch.object(store, "load_manifest", return_value=store.ManifestValidation(store.VALID)), \
             patch.object(ingest, "_detect_rows", return_value=([], 2)), \
             patch.object(ingest, "validate_worksheet", return_value=[]):
         check("detect-result-carries-generation", lambda: ingest.detect("/store").homes == 2)

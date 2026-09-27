@@ -71,7 +71,32 @@ class ManifestValidationError(WorklogError):
         super().__init__("; ".join(self.findings))
 
 
-def read_manifest_at(root_fd, machine_rel, *, supported_profiles=None):
+class ManifestModel:
+    """One validation and profile scope for a descriptor-bound intake.
+
+    Doctor passes this same object to every manifest consumer. File replacement
+    after this read belongs to a later run; other store files are not a snapshot.
+    Consumers treat data as read-only.
+    """
+
+    def __init__(self, root_fd, machine_rel, data, supported_profiles=None):
+        self.root_fd, self.machine_rel, self.data = root_fd, machine_rel, data
+        self.validation = _opf_store.validate_manifest(data, supported_profiles)
+        profiles = data.get("profiles") if isinstance(data, dict) else None
+        declared = {k for k in profiles if isinstance(k, str)} if isinstance(profiles, dict) else set()
+        self.unevaluated_profiles = tuple(self.validation.unevaluated_profiles)
+        self.evaluated_profiles = tuple(sorted(declared - set(self.unevaluated_profiles)))
+
+    def require_valid(self, root_fd, machine_rel):
+        if (root_fd, machine_rel) != (self.root_fd, self.machine_rel):
+            raise WorklogError("manifest model belongs to a different intake")
+        if self.validation.status != _opf_store.VALID or self.validation.findings:
+            raise ManifestValidationError(
+                machine_rel + "/" + _opf_store.MANIFEST_NAME, self.data, self.validation)
+        return self.data
+
+
+def read_manifest_model_at(root_fd, machine_rel, *, supported_profiles=None):
     """Read the generation authority once, refusing intake failure before routing."""
     relpath = machine_rel + "/" + _opf_store.MANIFEST_NAME
     try:
@@ -80,10 +105,14 @@ def read_manifest_at(root_fd, machine_rel, *, supported_profiles=None):
         raise ManifestReadError(relpath, exc) from exc
     if manifest is None:
         raise ManifestShapeError(relpath, manifest)
-    validation = _opf_store.validate_manifest(manifest, supported_profiles)
-    if validation.findings:
-        raise ManifestValidationError(relpath, manifest, validation)
-    return manifest
+    model = ManifestModel(root_fd, machine_rel, manifest, supported_profiles)
+    model.require_valid(root_fd, machine_rel)
+    return model
+
+
+def read_manifest_at(root_fd, machine_rel, *, supported_profiles=None):
+    return read_manifest_model_at(
+        root_fd, machine_rel, supported_profiles=supported_profiles).data
 
 
 def _valid_wl_ref(value):
@@ -173,7 +202,7 @@ def _read_document(root_fd, relpath):
 
 
 def load_worklog_at(root_fd, machine_rel, *, required=True, with_raw=False, read_legacy=None,
-                    on_legacy_conflict=None, supported_profiles=None):
+                    on_legacy_conflict=None, supported_profiles=None, manifest_model=None):
     """Load only the manifest-selected source beneath an already-resolved descriptor.
 
     with_raw preserves legacy bytes; generation 2 uses a length-framed stream in
@@ -186,7 +215,10 @@ def load_worklog_at(root_fd, machine_rel, *, required=True, with_raw=False, read
     This callback cannot change source selection or permit a generation-2 conflict.
     """
     try:
-        manifest = read_manifest_at(root_fd, machine_rel, supported_profiles=supported_profiles)
+        if manifest_model is None:
+            manifest_model = read_manifest_model_at(
+                root_fd, machine_rel, supported_profiles=supported_profiles)
+        manifest = manifest_model.require_valid(root_fd, machine_rel)
         gen = generation(manifest)
         rel = source_relpath(machine_rel, manifest)
         other = machine_rel + "/" + (LEGACY_NAME if gen == 2 else DIRECTORY_NAME)

@@ -263,7 +263,7 @@ def _with_worklog_diagnostics(read):
 
 
 def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds, *,
-                  on_legacy_conflict=None, supported_profiles=None):
+                  on_legacy_conflict=None, supported_profiles=None, manifest_model=None):
     """Load and validate worklog.toml (spec 6.2); return (raw_bytes, [entry, ...]) in file order.
     Disclosed divergence (disclose-guard-residuals): unlike the index schema marker, which
     _load_records pins MANDATORY and exact, the ledger schema marker follows U3 optional-marker
@@ -273,7 +273,7 @@ def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds, 
     got = _with_worklog_diagnostics(lambda: _opf_worklog.load_worklog_at(
         store_root_fd, relpath.rsplit("/", 1)[0], required=False, with_raw=True,
         read_legacy=_read_raw_and_parsed, on_legacy_conflict=on_legacy_conflict,
-        supported_profiles=supported_profiles))
+        supported_profiles=supported_profiles, manifest_model=manifest_model))
     if got is None:
         raise ViewsError("declared source {} is missing (the worklog ledger must exist)".format(relpath))
     raw, data = got
@@ -1610,7 +1610,8 @@ def _render_resolved_store(product_root, res, check, capture=None):
         os.close(product_root_fd)
 
 
-def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported_profiles=None):
+def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported_profiles=None,
+               manifest_model=None):
     """Phase 1 of the resolved-store render, extracted as a public READ-ONLY planner (OPF core-tooling U6
     reuses it for byte-level view-drift detection). Reads the manifest and every declared view source
     beneath store_root_fd, renders each declared target's full text, and returns the planned list of
@@ -1618,9 +1619,12 @@ def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported
     on an unreadable manifest or source, a `per-record` store (deferred, F7), a view/kind/target mismatch,
     or a byte-canon-invalid render, exactly as the render path does; _render_resolved calls it and performs
     the writes. It makes no state-changing or outbound side effect (a planner is a preview)."""
+    if manifest_model is None:
+        manifest_model = _with_worklog_diagnostics(
+            lambda: _opf_worklog.read_manifest_model_at(
+                store_root_fd, machine_rel, supported_profiles=supported_profiles))
     manifest = _with_worklog_diagnostics(
-        lambda: _opf_worklog.read_manifest_at(
-            store_root_fd, machine_rel, supported_profiles=supported_profiles))
+        lambda: manifest_model.require_valid(store_root_fd, machine_rel))
 
     # U4 renders the `inline` layout only. A `per-record` store is a CLEAR cannot-evaluate (deferred),
     # detected here from the manifest rather than mis-reported as a downstream malformed-record error and
@@ -1655,7 +1659,7 @@ def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported
         if name == "worklog":
             raw, entries = _load_worklog(
                 store_root_fd, relpath, registered_vendors, registered_kinds,
-                on_legacy_conflict=on_legacy_conflict, supported_profiles=supported_profiles)
+                on_legacy_conflict=on_legacy_conflict, manifest_model=manifest_model)
             rows_by_source[name] = entries
         elif name == "version":
             raw, releases, summaries = _load_version(store_root_fd, relpath)
@@ -2224,15 +2228,10 @@ def self_test():
         check("project-column-closed", raises_views_error(lambda: t_project({"id": "BI-1"}, ("bogus",))))
         check("filter-predicate-closed", raises_views_error(lambda: t_filter([], "bogus")))
 
-        import signal as _signal
-        import time as _time
+        from _opf_emit import run_bounded
         _fifo_dir = base / "fifo-src"; _fifo_dir.mkdir()
         os.mkfifo(str(_fifo_dir / "blk.index.toml"))
         _ffd = os.open(str(_fifo_dir), os.O_RDONLY | os.O_DIRECTORY)
-        class _Watchdog(Exception):
-            pass
-        def _boom(_s, _f):
-            raise _Watchdog()
         # G (self-test-discrimination): the LOCAL pre-open S_ISREG guard in _read_raw_and_parsed, not the
         # hardened downstream _journal._read_contained (which ALSO refuses a non-regular file with an
         # identical "not a regular file" diagnostic), must be what refuses the FIFO. Record whether the
@@ -2244,45 +2243,19 @@ def self_test():
             _rc_calls.append(relpath)
             return _orig_rc(root_fd, relpath)
         _journal._read_contained = _recording_rc
-        # C (test-hermeticity): snapshot the caller's SIGALRM disposition and mask, and its ITIMER_REAL +
-        # pending state through the SHARED _opf_store.snapshot_caller_alarm helper; unblock SIGALRM for the
-        # probe; and restore all of them so this watchdog leaves the ambient alarm state unchanged (never
-        # cancelling a caller's timer, unblocking its SIGALRM, nor destroying its pending alarm).
-        _prev = _signal.getsignal(_signal.SIGALRM)               # capture WITHOUT installing yet (F2)
-        _have_mask = hasattr(_signal, "pthread_sigmask")
-        _prev_mask = _signal.pthread_sigmask(_signal.SIG_BLOCK, []) if _have_mask else None
-        _alarm_snap = _opf_store.snapshot_caller_alarm()         # ITIMER value/interval + pending (shared helper)
-        _fifo_ok = False
-        # F2 (round-10, class-width): the SIGALRM UNBLOCK and the timer ARM live INSIDE the try, so the
-        # finally restores the caller's mask, disposition, and timer even if a signal fires during setup. An
-        # ambient SIGALRM that is BLOCKED and already PENDING (the timer fired while blocked) would otherwise
-        # be delivered the instant SIGALRM is unblocked and, with the unblock OUTSIDE the try/finally, would
-        # raise _Watchdog out of the probe uncaught AND leave the caller's mask corrupted (SIGALRM
-        # unblocked). Any inherited pending SIGALRM is first DISCARDED under SIG_IGN (POSIX: setting SIG_IGN
-        # discards a pending signal whether or not it is blocked) so it cannot fire _boom spuriously; the
-        # shared restore_caller_alarm RE-POSTS it on exit (round-15 F2) so the caller's pending alarm is
-        # preserved, not destroyed.
-        try:
-            _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)     # discard any inherited pending SIGALRM
-            _signal.signal(_signal.SIGALRM, _boom)               # now install the watchdog handler
-            if _have_mask:
-                _signal.pthread_sigmask(_signal.SIG_UNBLOCK, {_signal.SIGALRM})
-            _signal.setitimer(_signal.ITIMER_REAL, 5)
+        def _fifo_probe():
             try:
                 _read_raw_and_parsed(_ffd, "blk.index.toml")
             except ViewsError:
-                _fifo_ok = True
-            except _Watchdog:
-                _fifo_ok = False
+                return str(not _rc_calls)
+            return "ACCEPTED"
+
+        try:
+            fifo_result = run_bounded(_fifo_probe, timeout_s=5)
         finally:
-            _signal.setitimer(_signal.ITIMER_REAL, 0)
-            _signal.signal(_signal.SIGALRM, _prev)
-            if _have_mask:
-                _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)
-            _opf_store.restore_caller_alarm(*_alarm_snap)        # shared elapsed-aware timer + pending restore
             _journal._read_contained = _orig_rc
             os.close(_ffd)
-        check("fifo-source-fails-closed-not-hang", _fifo_ok and not _rc_calls)
+        check("fifo-source-fails-closed-not-hang", fifo_result == "True")
         _slp = base / "symparent"; _slp.mkdir(); (_slp / "real").mkdir()
         (_slp / "real" / "x.index.toml").write_text("schema = 1\n", encoding="utf-8")
         (_slp / "toml").symlink_to("real")

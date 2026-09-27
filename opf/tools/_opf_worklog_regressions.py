@@ -202,10 +202,9 @@ def _manifest_readers(fx, supported_profiles=None):
 def _manifest_read_regressions(check):
     """Fail the loader's manifest read after a validated generation-1 resolution.
 
-    Import reads the manifest before entering the loader, so arm the fault only
-    at loader entry (at planner entry for plan_views). A blanket manifest
-    fault would pass there even with the
-    loader's old wrapper restored and would not discriminate this regression.
+    Doctor and views own one initial manifest model; fault that first read.
+    Other wrappers still enter standalone intake after resolution, so inject
+    there. Late changes to a shared model are covered by the snapshot cases.
     """
     import _opf_init
 
@@ -221,8 +220,7 @@ def _manifest_read_regressions(check):
         "views": "cannot read m/manifest.toml (fixture unreadable)",
         "plan_views": "cannot read m/manifest.toml (fixture unreadable)",
         "import": "cannot read m/manifest.toml (fixture unreadable)",
-        "doctor": ["cannot read m/manifest.toml: cannot read m/manifest.toml (fixture unreadable)",
-                   _DOCTOR_DEPENDENT],
+        "doctor": ["cannot read m/manifest.toml: cannot read m/manifest.toml (fixture unreadable)"],
     }
     for caller, baseline in expected.items():
         label = "F1-baseline-manifest-unreadable-" + caller
@@ -235,7 +233,7 @@ def _manifest_read_regressions(check):
                   and _opf_store.validate_manifest(observed).status == _opf_store.VALID
                   and wl.generation(observed) == 1
                   and "worklog" not in observed["opf"])
-            armed, attempted = caller == "plan_views", []
+            armed, attempted = caller in ("views", "plan_views", "doctor"), []
             original_load = wl.load_worklog_at
 
             def fail_read(fd, rel, **kwargs):
@@ -257,7 +255,7 @@ def _manifest_read_regressions(check):
                                  side_effect=load_after_resolution) as intake:
                 actual = readers[caller]()
             check(label, actual == baseline
-                  and intake.call_count == (0 if caller == "plan_views" else 1)
+                  and intake.call_count == (0 if caller in ("views", "plan_views", "doctor") else 1)
                   and attempted == [manifest_rel])
 
 
@@ -276,7 +274,7 @@ def _manifest_diagnostics(data, validation):
                       + message + " (fail-closed, spec 4.5/9)"),
         "doctor": (["m/manifest.toml: " + message]
                    if validation.status == _opf_store.CANNOT_EVALUATE else
-                   ["m/worklog.toml is not evaluated: m/manifest.toml failed manifest "
+                   ["active worklog source under m is not evaluated: m/manifest.toml failed manifest "
                     "validation (see C-MANIFEST)"]
                    + ["manifest: " + finding for finding in validation.findings]),
         "import": "store manifest is not VALID ({}: {})".format(validation.status, message),
@@ -430,8 +428,6 @@ def _manifest_intake_regressions(check):
                 ["active worklog source under m is not evaluated: m/manifest.toml failed manifest "
                  "validation (see C-MANIFEST)"]
                 + ["manifest: " + finding for finding in validation.findings])}
-        if control is None and _DOCTOR_DEPENDENT not in expected["doctor"]:
-            expected["doctor"] = expected["doctor"] + [_DOCTOR_DEPENDENT]
         for caller, baseline in expected.items():
             label = "F1-manifest-{}-{}".format(mode, caller)
             with _Fixture() as fx:
@@ -441,7 +437,7 @@ def _manifest_intake_regressions(check):
                       fx.res.status == _opf_store.RESOLVED
                       and _opf_store.validate_manifest(observed).status == _opf_store.VALID
                       and wl.generation(observed) == 1 and "worklog" not in observed["opf"])
-                armed, attempted = caller == "plan_views" or control is not None, []
+                armed, attempted = caller in ("views", "plan_views", "doctor") or control is not None, []
                 original_load = wl.load_worklog_at
                 original_parse = _opf_store.tomllib.loads
                 def result(item):
@@ -523,7 +519,8 @@ def _manifest_intake_regressions(check):
                                   and bool(attempted) and set(attempted) == {p})
                     attempted = single_attempted
                 check(label, actual == baseline
-                      and single_intake == (0 if caller == "plan_views" or control is not None else 1)
+                      and single_intake == (0 if caller in ("views", "plan_views", "doctor")
+                                           or control is not None else 1)
                       and bool(attempted) and set(attempted) == {p})
                 check(label + "-no-active-read", not any(
                     path == LEGACY or path.startswith(M + "/worklog/") for path in source_reads))
@@ -681,125 +678,104 @@ def _entry_point_regressions(check):
                 check("F2f-reachable-archive-doctor", ARCHIVE in reads)
 
 
-def _doctor_reread_regressions(check):
-    """Each manifest reread owns its fault, including both real view intakes."""
+def _doctor_snapshot_regressions(check):
+    """A late filesystem change cannot replace this run's manifest or scope."""
+    import copy
     import _opf_emit
-    for phase, mode in ((phase, mode)
-                        for phase in ("records", "planner", "view-worklog")
-                        for mode in ("invalid", "generation", "parse", "unreadable", "absent",
-                                     "profile", "profile-iterator")):
+    modes = ("invalid", "generation", "parse", "unreadable", "absent",
+             "profile", "major", "addition", "removal", "routing")
+    for phase in ("records", "planner", "view-worklog"):
+        for mode in modes:
+            with _Fixture() as fx:
+                _manifest_readers(fx)
+                fx.manifest["profiles"] = {
+                    "demo": {"version": "1.0.0", "base_compat": ">=1.2.0"},
+                    "opaque": {"version": "2.0.0", "base_compat": "<0.0.1"}}
+                path = M + "/manifest.toml"
+                fx.files[path] = _opf_emit.emit_checked(fx.manifest).encode()
+                baseline = _opf_check.validate_store(fx.res, {"demo": [1], "opaque": [1]})
+                late = copy.deepcopy(fx.manifest)
+                if mode == "invalid":
+                    late["junk"] = {}
+                elif mode == "generation":
+                    late["opf"]["worklog"] = 2
+                elif mode == "profile":
+                    late["profiles"]["demo"]["base_compat"] = "<0.0.1"
+                elif mode == "major":
+                    late["profiles"]["demo"]["version"] = "2.0.0"
+                elif mode == "addition":
+                    late["profiles"]["added"] = {"version": "1.0.0"}
+                elif mode == "removal":
+                    del late["profiles"]["demo"]
+                elif mode == "routing":
+                    late["views"] = {}
+                    late["vendors"] = {"registered": ["x-late"]}
+                payload = _opf_emit.emit_checked(late).encode()
+                if mode == "parse":
+                    payload = b"not TOML ["
+                elif mode == "unreadable":
+                    payload = PermissionError("late manifest denied")
+                reads, models = [], []
+                armed = in_plan = False
+                real_load, real_plan = wl.load_worklog_at, _opf_views.plan_views
+
+                def read(fd, rel, **kwargs):
+                    if fx.path(fd, rel) == path:
+                        reads.append(path)
+                    return fx.read(fd, rel, **kwargs)
+
+                def change():
+                    nonlocal armed
+                    armed = True
+                    if mode == "absent":
+                        fx.files.pop(path, None)
+                    else:
+                        fx.files[path] = payload
+
+                def intake(*args, **kwargs):
+                    models.append(kwargs.get("manifest_model"))
+                    if phase == "records" or (phase == "view-worklog" and in_plan):
+                        change()
+                    return real_load(*args, **kwargs)
+
+                def plan(*args, **kwargs):
+                    nonlocal in_plan
+                    in_plan = True
+                    models.append(kwargs.get("manifest_model"))
+                    if phase == "planner":
+                        change()
+                    return real_plan(*args, **kwargs)
+
+                with patch.object(_journal, "_read_contained", side_effect=read), \
+                        patch.object(wl, "load_worklog_at", side_effect=intake), \
+                        patch.object(_opf_views, "plan_views", side_effect=plan):
+                    result = _opf_check.validate_store(
+                        fx.res, {"demo": iter([1]), "opaque": iter([1])})
+                label = "F2l-snapshot-" + phase + "-" + mode
+                check(label + "-one-read", armed and reads == [path])
+                check(label + "-one-model", len(models) == 3 and models[0] is not None
+                      and all(model is models[0] for model in models))
+                check(label + "-verdict", all(
+                    getattr(result, field) == getattr(baseline, field)
+                    for field in _opf_check.StoreValidation.__slots__))
+                check(label + "-scope", result.evaluated_profiles == ["demo"]
+                      and result.unevaluated_profiles == ["opaque"])
+
+    # Standalone entries validate the same full scope, including iterator controls.
+    for caller in ("loader", "planner", "view-worklog"):
         with _Fixture() as fx:
             _manifest_readers(fx)
-            profile = mode in ("profile", "profile-iterator")
-            control = None
-            if profile:
-                fx.manifest["profiles"] = {"demo": {
-                    "version": "1.0.0", "base_compat": ">=1.2.0"}}
-                fx.files[M + "/manifest.toml"] = _opf_emit.emit_checked(fx.manifest).encode()
-                control = {"demo": [1]}
-                baseline = _opf_check.validate_store(fx.res, control)
-                check("F2k-doctor-reread-" + phase + "-" + mode + "-baseline",
-                      baseline.checks["C-MANIFEST"] == "PASS"
-                      and baseline.evaluated_profiles == ["demo"])
-                if mode == "profile-iterator":
-                    control = {"demo": iter([1])}
-            bad = dict(fx.manifest, junk={})
-            if profile:
-                bad = dict(fx.manifest, profiles={"demo": {
-                    "version": "1.0.0", "base_compat": "<0.0.1"}})
-            if mode == "generation":
-                bad = dict(fx.manifest, opf=dict(fx.manifest["opf"], worklog=2))
-            payload = _opf_emit.emit_checked(bad).encode()
-            if mode == "parse":
-                payload = b"not TOML ["
-            if mode == "unreadable":
-                payload = PermissionError("fixture reread denied")
-            expected = {
-                "invalid": "unknown top-level table(s): junk",
-                "profile": "[profiles.'demo'].base_compat '<0.0.1' does not admit the base spec_version",
-                "profile-iterator": "[profiles.'demo'].base_compat '<0.0.1' does not admit the base spec_version",
-                "generation": "[opf].worklog = 2 is not supported by this build "
-                              "(maximum supported worklog generation: 1)",
-                "parse": "cannot parse m/manifest.toml",
-                "unreadable": "cannot read m/manifest.toml (fixture reread denied)",
-                "absent": "m/manifest.toml is absent (the store manifest is required; spec 4.5)",
-            }[mode]
-            # Pin the complete parser diagnostic without depending on its
-            # Python-version-specific wording.
-            if mode == "parse":
-                try:
-                    _opf_store.tomllib.loads(payload.decode())
-                except ValueError as exc:
-                    expected = "cannot parse m/manifest.toml ({})".format(exc)
-            original = {
-                "invalid": "manifest: " + expected,
-                "profile": "manifest: " + expected,
-                "profile-iterator": "manifest: " + expected,
-                "generation": "m/manifest.toml: " + expected,
-                "parse": "cannot read m/manifest.toml: " + expected,
-                "unreadable": "cannot read m/manifest.toml: " + expected,
-                "absent": expected,
-            }[mode]
-            manifest_reads, later_reads = [], []
-            real_load, real_plan = wl.load_worklog_at, _opf_views.plan_views
-            armed = in_plan = False
-
-            def read(fd, rel, **kwargs):
-                path = fx.path(fd, rel)
-                if path == M + "/manifest.toml":
-                    manifest_reads.append(path)
-                if armed:
-                    later_reads.append(path)
-                return fx.read(fd, rel, **kwargs)
-
-            def fault():
-                nonlocal armed
-                armed = True
-                if mode == "absent":
-                    fx.files.pop(M + "/manifest.toml")
-                else:
-                    fx.files[M + "/manifest.toml"] = payload
-
-            def intake(*args, **kwargs):
-                if phase == "records" or (phase == "view-worklog" and in_plan):
-                    fault()
-                return real_load(*args, **kwargs)
-
-            def plan(*args, **kwargs):
-                nonlocal in_plan
-                in_plan = True
-                if phase == "planner":
-                    fault()
-                return real_plan(*args, **kwargs)
-
-            with patch.object(_journal, "_read_contained", side_effect=read), \
-                    patch.object(wl, "load_worklog_at", side_effect=intake) as entered, \
-                    patch.object(_opf_views, "plan_views", side_effect=plan) as planned:
-                result = _opf_check.validate_store(fx.res, control)
-            label = "F2j-doctor-reread-" + phase + "-" + mode
-            messages = result.cannot_evaluate + result.findings
-            reads = {"records": 2, "planner": 3, "view-worklog": 4}[phase]
-            check(label + "-reached", armed
-                  and entered.call_count == (2 if phase == "view-worklog" else 1)
-                  and planned.call_count == (0 if phase == "records" else 1)
-                  and len(manifest_reads) == reads - (mode == "absent"))
-            check(label + "-manifest-verdict", result.checks["C-MANIFEST"] ==
-                  ("FINDING" if mode == "invalid" or profile else "CANNOT-EVALUATE")
-                  and result.status != _opf_store.VALID)
-            check(label + "-original-once",
-                  sum(expected in m for m in messages) == 1
-                  and result.by_check.get("C-MANIFEST") == [original])
-            dependent = "C-RECORDS" if phase == "records" else "C-VIEW-DRIFT"
-            refusal = (_DOCTOR_DEPENDENT if phase == "records" else
-                       "C-VIEW-DRIFT is not evaluated: m/manifest.toml failed manifest "
-                       "validation (see C-MANIFEST)")
-            check(label + "-dependent", result.checks[dependent] == "CANNOT-EVALUATE"
-                  and result.by_check.get(dependent) == [refusal])
-            check(label + "-no-duplicate-check",
-                  not any("was run more than once" in m for m in messages))
-            check(label + "-no-worklog-read", not any(
-                path == LEGACY or path.startswith(M + "/worklog/")
-                or path.endswith("/worklog.toml") for path in later_reads))
+            fx.manifest["profiles"] = {"demo": {
+                "version": "1.0.0", "base_compat": "<0.0.1"}}
+            fx.files[M + "/manifest.toml"] = _opf_emit.emit_checked(fx.manifest).encode()
+            scope = {"demo": iter([1])}
+            calls = {
+                "loader": lambda: wl.load_worklog_at(fx.fd, M, supported_profiles=scope),
+                "planner": lambda: _opf_views.plan_views(fx.fd, M, supported_profiles=scope),
+                "view-worklog": lambda: _opf_views._load_worklog(
+                    fx.fd, LEGACY, frozenset(), [], supported_profiles=scope)}
+            check("F2l-standalone-scope-" + caller,
+                  "does not admit the base spec_version" in (_error(calls[caller]) or ""))
 
 
 def _outer_readers(fx):
@@ -850,11 +826,16 @@ def _outer_entry_regressions(check):
                         patch.object(_journal, "_read_contained", side_effect=read):
                     rc, message = run()
                 label = "F2h-outer-{}-{}".format(caller, mode)
+                shared = caller in ("render_check", "render_write")
                 check(label + "-reached-loader",
-                      entered.call_count >= 1 if mode == "reachable" else entered.call_count == 1)
-                check(label + "-refused", rc == 2 and _late_fault_text(mode) in message)
-                if mode == "reachable":
+                      entered.call_count >= 1 if shared or mode == "reachable"
+                      else entered.call_count == 1)
+                check(label + "-refused", rc == 2 and _late_fault_text(
+                    "reachable" if shared else mode) in message)
+                if shared or mode == "reachable":
                     check(label + "-active-witness", LEGACY in reads)
+                    if shared:
+                        check(label + "-snapshot", M + "/manifest.toml" not in reads)
                 else:
                     check(label + "-manifest-only", reads == [M + "/manifest.toml"])
 
@@ -1207,7 +1188,7 @@ def self_test():
     _manifest_intake_regressions(check)
     _entry_point_census(check)
     _entry_point_regressions(check)
-    _doctor_reread_regressions(check)
+    _doctor_snapshot_regressions(check)
     _outer_entry_regressions(check)
     _apply_intake_regressions(check)
 

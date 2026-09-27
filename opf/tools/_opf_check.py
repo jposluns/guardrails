@@ -68,8 +68,6 @@ from _opf_store import (  # noqa: E402
     _read_toml_contained, _open_store_root_fd, _open_root_fd, validate_manifest, classify_target,
     _sorted_key_names, _safe_display, _is_contained_relpath,
     BASELINE_TYPES, MODULE_TYPES, IMPORTER_TYPES, KNOWN_MODULES, SUPPORTED_SPEC_VERSION,
-    snapshot_caller_alarm,  # round-17 F-R16-1: capture caller ITIMER+pending before a fixture borrows SIGALRM
-    restore_caller_alarm,   # round-15 F2 + round-17 F-R16-1: shared elapsed-aware caller-alarm save/restore
 )
 # U2 supplies the record validator, the counter guards, the transition validator, and the type specs.
 from _opf_schema import (  # noqa: E402
@@ -1137,7 +1135,7 @@ def _worklog_legacy_conflict(_relpath):
 
 
 def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine_rel=None,
-                    *, propagate_manifest_failure=False, supported_profiles=None):
+                    *, propagate_manifest_failure=False, supported_profiles=None, manifest_model=None):
     """Read and validate a worklog.toml (active or an archive bucket) through U3's validate_worklog, and
     return its WL-number -> entry map. A required (active) worklog that is absent is CANNOT-EVALUATE; an
     archive-bucket worklog that is absent returns None (the caller only reads it when the bucket has one).
@@ -1150,7 +1148,7 @@ def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine
         else:
             data = _opf_worklog.load_worklog_at(
                 root_fd, machine_rel, required=False, on_legacy_conflict=_worklog_legacy_conflict,
-                supported_profiles=supported_profiles)
+                supported_profiles=supported_profiles, manifest_model=manifest_model)
         st = "absent" if data is None else "present"
     except _opf_worklog.ManifestShapeError as exc:
         if propagate_manifest_failure:
@@ -2521,15 +2519,9 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         if st == "absent":
             rep.cant("{} is absent (the store manifest is required; spec 4.5)".format(manifest_rel))
         return [], []
-    # Freeze the effective scope before the first validation consumes a possible
-    # one-shot majors iterator. Reuse the validator's bounded materializer;
-    # malformed values remain malformed and retain its original diagnostic.
-    if supported_profiles is not None:
-        scope, scope_ok = _opf_store._require_mapping(supported_profiles)
-        if scope_ok:
-            supported_profiles = {name: _opf_store._materialize_majors(majors)
-                                  for name, majors in scope.items()}
-    mv = validate_manifest(manifest_data, supported_profiles)
+    manifest_model = _opf_worklog.ManifestModel(
+        root_fd, machine_rel, manifest_data, supported_profiles)
+    mv = manifest_model.validation
     if mv.status == CANNOT_EVALUATE:
         rep.cant("{}: {}".format(manifest_rel, "; ".join(mv.findings)))
         return [], []
@@ -2538,12 +2530,8 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     # --- C-PROFILES: name the evaluated / unevaluated profile scope (spec 16) -------------------------
     rep.ran("C-PROFILES")
-    declared_profiles = set()
-    prof_tbl = manifest_data.get("profiles") if isinstance(manifest_data, dict) else None
-    if isinstance(prof_tbl, dict):
-        declared_profiles = {k for k in prof_tbl if isinstance(k, str)}
-    unevaluated_profiles = list(mv.unevaluated_profiles)
-    evaluated_profiles = sorted(declared_profiles - set(unevaluated_profiles))
+    unevaluated_profiles = list(manifest_model.unevaluated_profiles)
+    evaluated_profiles = list(manifest_model.evaluated_profiles)
     if mv.findings or mv.status != VALID:
         # No manifest-dependent source is safe to traverse after any finding.
         rep.ran("C-RECORDS")
@@ -2582,7 +2570,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         active_worklog = _gather_worklog(
             root_fd, _rel(machine_rel, WORKLOG_NAME), registered_vendors, rep,
             required=True, machine_rel=machine_rel, propagate_manifest_failure=True,
-            supported_profiles=supported_profiles) or {}
+            manifest_model=manifest_model) or {}
     except (_opf_worklog.ManifestShapeError, _opf_worklog.ManifestValidationError,
             _opf_worklog.ManifestReadError) as exc:
         _attribute_manifest_failure(rep, exc)
@@ -2945,7 +2933,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         try:
             planned = _opf_views.plan_views(
                 root_fd, machine_rel, on_legacy_conflict=_worklog_legacy_conflict,
-                supported_profiles=supported_profiles)
+                manifest_model=manifest_model)
         except _opf_views.ViewsManifestError as exc:
             _attribute_manifest_failure(rep, exc.manifest_error)
             rep.cant("C-VIEW-DRIFT is not evaluated: {} failed manifest validation "
@@ -4084,101 +4072,21 @@ def self_test():
             finally:
                 _sig7.setitimer = _real_setitimer
             check("f7-setup-failure-yields-setup-error-not-normal", _setup.startswith("SETUP-ERROR"))
-            # (c) the child must not inherit an ambient SIG_IGN SIGALRM disposition that would defeat the
-            # watchdog: with SIGALRM ignored in the parent, a thunk that sleeps past the timeout must still
-            # TIMEOUT (the child resets SIG_DFL). Reverted (no reset), the ignored timer lets the sleep run
-            # to completion and the thunk's own result returns instead of TIMEOUT.
-            # Test-hermeticity (round-15 F2 + round-17 F-R16-1): installing SIG_IGN over this ~1s window both
-            # DISCARDS a caller SIGALRM pending on entry (POSIX) AND silently drops a caller ITIMER_REAL
-            # deadline that EXPIRES inside the window (the timer's generated SIGALRM is ignored, never
-            # re-armed). So this fixture snapshots the caller's FULL alarm state (ITIMER value+interval and
-            # pending) BEFORE installing SIG_IGN and hands it to the shared restore_caller_alarm helper in the
-            # finally: the timer is re-armed elapsed-aware (an in-window-expired deadline clamps to a tiny
-            # positive so it still FIRES rather than being destroyed), and a discarded pending is re-posted,
-            # leaving the caller's alarm state unchanged. A prior 0.0 stand-in restored only the pending and
-            # let an in-window caller deadline vanish (F-R16-1).
-            # F-R18-COV1TEST: the SINGLE snapshot -> SIG_IGN -> run_bounded -> restore path that BOTH the f7
-            # ignored-sigalrm check and the COV1 caller-deadline-preservation probe exercise, so a revert of
-            # the caller-timer snapshot/restore here (e.g. zeroing _snap7) reds the COV1 probe below rather
-            # than passing on the probe's own separate copy. The caller's FULL alarm is snapshotted BEFORE
-            # SIG_IGN and restored elapsed-aware after (F-R16-1 / F2).
-            def _f7_ignore_window(_thunk, _timeout_s):
-                _snap7 = snapshot_caller_alarm()   # caller ITIMER + pending, captured BEFORE SIG_IGN
-                _prev7 = _sig7.signal(_sig7.SIGALRM, _sig7.SIG_IGN)
-                try:
-                    return run_bounded(_thunk, timeout_s=_timeout_s)
-                finally:
-                    _sig7.signal(_sig7.SIGALRM, _prev7)
-                    restore_caller_alarm(*_snap7)   # elapsed-aware ITIMER restore + re-post pending
-            _to = _f7_ignore_window(lambda: (_t7.sleep(3), "F7-SLEPT-THROUGH")[1], 1)
-            check("f7-inherited-ignored-sigalrm-still-times-out", _to == "TIMEOUT")
-            # (d) the child must also UNBLOCK SIGALRM, not merely reset its DISPOSITION: a caller with
-            # SIGALRM BLOCKED in its signal mask passes that blocked mask across the fork, so the timer's
-            # SIGALRM stays pending (never delivered) and never terminates the child, leaving the parent
-            # blocked in os.read() with no deadline. With SIGALRM blocked in the parent, a thunk that sleeps
-            # past the timeout must still TIMEOUT (the child unblocks it before arming the timer). Reverted
-            # (no unblock), the pending timer never fires and the sleep runs to completion, so the thunk's
-            # own result returns instead of TIMEOUT.
+            # Change hostile signal state only inside an outer bounded child.
+            # The parent never borrows a caller timer or discards pending SIGALRM.
+            def _hostile_child(blocked):
+                if blocked:
+                    _sig7.pthread_sigmask(_sig7.SIG_BLOCK, {_sig7.SIGALRM})
+                else:
+                    _sig7.signal(_sig7.SIGALRM, _sig7.SIG_IGN)
+                return run_bounded(lambda: (_t7.sleep(3), "F7-SLEPT-THROUGH")[1],
+                                   timeout_s=1)
+
+            check("f7-inherited-ignored-sigalrm-still-times-out",
+                  run_bounded(lambda: _hostile_child(False)) == "TIMEOUT")
             if hasattr(_sig7, "pthread_sigmask"):
-                # test-hermeticity: SNAPSHOT the caller's mask and RESTORE it exactly (SIG_SETMASK), never a
-                # blind SIG_UNBLOCK -- a caller that had SIGALRM blocked must stay blocked afterward, so this
-                # probe leaves the ambient signal mask as it found it. SIG_BLOCK returns the prior mask.
-                _prev_mask7 = _sig7.pthread_sigmask(_sig7.SIG_BLOCK, {_sig7.SIGALRM})
-                try:
-                    _tb = run_bounded(lambda: (_t7.sleep(3), "F7-SLEPT-THROUGH")[1], timeout_s=1)
-                finally:
-                    _sig7.pthread_sigmask(_sig7.SIG_SETMASK, _prev_mask7)
-                check("f7-inherited-blocked-sigalrm-still-times-out", _tb == "TIMEOUT")
-
-            # F-R17-COV1 / F-R18-COV1TEST: exercise the ACTUAL f7 restoration path,
-            # independently of signal-delivery latency. Supply a known expired
-            # snapshot and observe the successful setitimer call itself: it must
-            # re-arm to the positive clamp, never zero or the verbatim 0.3s value.
-            # Snapshot acquisition and signal delivery are covered by the shared
-            # alarm / hostile-ambient tests; this probe owns f7's restore wiring.
-            # Keep blocked+pending callers untouched during the hostile rerun.
-            _cov_blocked = (hasattr(_sig7, "pthread_sigmask")
-                            and _sig7.SIGALRM in _sig7.pthread_sigmask(_sig7.SIG_BLOCK, set()))
-            if hasattr(_sig7, "setitimer") and hasattr(_sig7, "ITIMER_REAL") and not _cov_blocked:
-                from unittest.mock import patch as _cov_patch
-                _cov_outer = snapshot_caller_alarm()
-                _cov_prev = _sig7.signal(_sig7.SIGALRM, lambda _s, _f: None)
-                _cov_real_set = _sig7.setitimer
-                try:
-                    for _cov_mode in ("elapsed", "delayed", "verbatim", "dropped"):
-                        _cov_real_set(_sig7.ITIMER_REAL, 0)
-                        _cov_calls = []
-
-                        def _cov_arm(which, value, interval=0.0):
-                            result = _cov_real_set(which, value, interval)
-                            _cov_calls.append((which, value, interval))
-                            # A delayed observation must still pass the clamp and
-                            # reject a verbatim timer even after that timer fires.
-                            if _cov_mode in ("delayed", "verbatim"):
-                                _t7.sleep(0.35)
-                            return result
-
-                        _cov_restore = restore_caller_alarm
-                        if _cov_mode == "verbatim":
-                            _cov_restore = lambda value, interval, _t0, _pending: _sig7.setitimer(
-                                _sig7.ITIMER_REAL, value, interval)
-                        elif _cov_mode == "dropped":
-                            _cov_restore = lambda *_args: None
-                        with _cov_patch.object(sys.modules[__name__], "snapshot_caller_alarm",
-                                               return_value=(0.3, 0.0, _t7.monotonic() - 1.0, False)) as _snap, \
-                                _cov_patch.object(sys.modules[__name__], "restore_caller_alarm",
-                                                  side_effect=_cov_restore), \
-                                _cov_patch.object(_sig7, "setitimer", side_effect=_cov_arm):
-                            _f7_ignore_window(lambda: "COV-RETURNED", 1)
-                        _cov_ok = (_snap.call_count == 1
-                                   and _cov_calls == [(_sig7.ITIMER_REAL, 1e-6, 0.0)])
-                        check("cov1-caller-itimer-preserved-across-f7-fixture"
-                              if _cov_mode == "elapsed" else "cov1-restore-observation-" + _cov_mode,
-                              _cov_ok == (_cov_mode in ("elapsed", "delayed")))
-                finally:
-                    _cov_real_set(_sig7.ITIMER_REAL, 0)
-                    _sig7.signal(_sig7.SIGALRM, _cov_prev)
-                    restore_caller_alarm(*_cov_outer)
+                check("f7-inherited-blocked-sigalrm-still-times-out",
+                      run_bounded(lambda: _hostile_child(True)) == "TIMEOUT")
 
         # --- io fail-closed ---------------------------------------------------------------------------
         f = clean_machine()
