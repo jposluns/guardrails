@@ -221,7 +221,7 @@
         choosing an ID and reserving it can double-allocate. Counters are never reset and IDs are never
         reused, even when a record is superseded, refuted, or its work reverted. Rotation, index
         rewrites, and store relocation never touch this file. When <code>opf upgrade</code> migrates a 1.0.0
-        store to 1.2.0, the earlier schema delta adds the CN, MD, and PP namespaces and preserves every
+        store to 1.2.0, the earlier schema delta adds any missing CN, MD, and PP namespaces and preserves every
         existing high-water; a 1.1.0 store's counters are unchanged. Counters are a control
         ledger, not a record type, so no view renders from them.</p>
       <p>It is created by <code>opf init</code> with all namespaces at zero, updated by ID allocation
