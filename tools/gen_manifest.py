@@ -831,6 +831,13 @@ def _build_fixture(base, own_extra="", extra_files=None, do_commit=True):
 
 
 def self_test_main():
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _git_fixture_env import fixture_git_lifecycle
+    with fixture_git_lifecycle():
+        return _self_test_main_isolated()
+
+
+def _self_test_main_isolated():
     from _git_fixture_env import scrub_git_environment
     scrub_git_environment()
     import io

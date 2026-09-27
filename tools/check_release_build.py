@@ -2256,10 +2256,10 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                         subprocess.run(["git", "-C", str(ac), "tag", "-a", "v1.0.0", "-m", "1.0.0"],
                                        check=True, capture_output=True, env=ge)
                         a_tobj = subprocess.run(["git", "-C", str(ac), "rev-parse", "refs/tags/v1.0.0"],
-                                                capture_output=True, text=True).stdout.strip()
+                                                capture_output=True, text=True, env=ge).stdout.strip()
                         a_csha = subprocess.run(["git", "-C", str(ac), "rev-parse",
                                                  "refs/tags/v1.0.0^{commit}"], capture_output=True,
-                                                text=True).stdout.strip()
+                                                text=True, env=ge).stdout.strip()
                         a_tagger = _tagger_epoch(ac, "v1.0.0")
                         a_qa_body = ('candidate-sha = "{}"\n\n'.format(a_csha) + "".join(
                             '[[family]]\nname = "{}"\nfinished-signal = true\nverdict = "PASS"\n'
@@ -2279,7 +2279,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                                         "attestation commit: append row 1", "--no-verify"],
                                        capture_output=True, env=ge)
                         a_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
-                                               capture_output=True, text=True).stdout.strip()
+                                               capture_output=True, text=True, env=ge).stdout.strip()
                         # The attestation-green verdict (finding 6) is meaningful only when the base manifest
                         # was actually regenerated; a setup gen-failure is recorded DISTINCTLY above and must
                         # NOT be misattributed here as a finding-6 non-green result.
@@ -2309,7 +2309,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                             # (#4) an ORPHAN commit carrying the SAME valid attestation tree does not descend
                             # from the tagged candidate -> exit 1 (the pre-fix gate accepted it).
                             a_tree = subprocess.run(["git", "-C", str(ac), "rev-parse", a_oid + "^{tree}"],
-                                                    capture_output=True, text=True).stdout.strip()
+                                                    capture_output=True, text=True, env=ge).stdout.strip()
                             orphan_oid = subprocess.run(
                                 ["git", "-C", str(ac), "commit-tree", a_tree, "-m", "orphan"],
                                 capture_output=True, text=True, env=ge).stdout.strip()
@@ -2326,7 +2326,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                             subprocess.run(["git", "-C", str(ac), "commit", "-q", "-m", "tamper root.txt",
                                             "--no-verify"], capture_output=True, env=ge)
                             tamper_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
-                                                        capture_output=True, text=True).stdout.strip()
+                                                        capture_output=True, text=True, env=ge).stdout.strip()
                             if _run_post_tag_quiet(ac, tamper_oid, str(a_qa)) != 1:
                                 failures.append("(#2) a tampered branch-integrity artifact on the attestation "
                                                 "commit must be REJECTED by the recompute (exit 1)")
@@ -2357,7 +2357,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                         subprocess.run(["git", "-C", str(ac), "commit", "-q", "-m", "forge chronology",
                                         "--no-verify"], capture_output=True, env=ge)
                         forge_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
-                                                   capture_output=True, text=True).stdout.strip()
+                                                   capture_output=True, text=True, env=ge).stdout.strip()
                         if forge_ok and _run_post_tag_quiet(ac, forge_oid, str(forge_qa)) != 1:
                             failures.append("(post-tag) a QA object whose retrieved timestamps postdate the "
                                             "tag while the row lists an early timestamp must exit 1 (#6)")
@@ -2377,7 +2377,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                                             "chmod releases.toml 0o755", "--no-verify"],
                                            capture_output=True, env=ge)
                             chmod_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
-                                                       capture_output=True, text=True).stdout.strip()
+                                                       capture_output=True, text=True, env=ge).stdout.strip()
                             if _run_post_tag_quiet(ac, chmod_oid, str(a_qa)) != 1:
                                 failures.append("(finding 3) an attestation commit that chmods releases.toml to "
                                                 "0o755 must be rejected by the raw mode/type delta check "
@@ -2404,7 +2404,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                                 subprocess.run(["git", "-C", str(ac), "commit", "-q", "-m", msg, "--no-verify"],
                                                capture_output=True, env=ge)
                                 return subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
-                                                      capture_output=True, text=True).stdout.strip()
+                                                      capture_output=True, text=True, env=ge).stdout.strip()
 
                             # symlink (120000): the blob content is the link target; only the raw dst mode drives
                             # the finding, so the target text is immaterial.

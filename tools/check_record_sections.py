@@ -614,6 +614,13 @@ def _quiet_run(*args):
 
 
 def self_test():
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _git_fixture_env import fixture_git_lifecycle
+    with fixture_git_lifecycle():
+        return _self_test_isolated()
+
+
+def _self_test_isolated():
     import tempfile
 
     failures = []

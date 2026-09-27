@@ -825,6 +825,19 @@ def render_digest(surfaces, extra_lines=None):
 
 # --- self-test --------------------------------------------------------------------------------------
 def _self_test():
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _git_fixture_env import fixture_git_lifecycle
+    global _GIT
+    saved_git = _GIT
+    try:
+        with fixture_git_lifecycle() as fixture_git:
+            _GIT = fixture_git
+            return _self_test_isolated()
+    finally:
+        _GIT = saved_git
+
+
+def _self_test_isolated():
     import shutil
     import tempfile
 

@@ -43,6 +43,9 @@ config) for FIXTURE calls BY DESIGN: a fixture repo in a fresh temp directory ne
 but a self-test's read of the real repository does, which is what caller_env_without_git() is for.
 """
 import atexit
+from contextlib import contextmanager
+from pathlib import Path
+import shlex
 import os
 import shutil
 import tempfile
@@ -114,3 +117,36 @@ def scrub_git_environment():
                 "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
         os.environ[key] = env[key]
     return env
+
+
+@contextmanager
+def fixture_git_lifecycle():
+    """Isolate a whole self-test, including production helpers that strip GIT_*.
+    The PATH wrapper reasserts the system-config pins after such a scrub; HOME and
+    XDG remain fixture-owned. Yield its absolute path for helpers with a cached git
+    executable. Restore the caller environment even on an exception.
+    Self-test only: never wrap real-checkout archive reads that need caller trust.
+    Residual: an absolute git executable not rebound to the yielded path bypasses
+    the wrapper; repository-local config and the trusted toolchain remain in scope.
+    """
+    saved = dict(os.environ)
+    real_git = shutil.which("git")
+    if real_git is None:
+        raise RuntimeError("self-test requires git")
+    real_git = os.path.abspath(real_git)
+    try:
+        with tempfile.TemporaryDirectory(prefix="aiqt-fixture-git-bin-") as directory:
+            wrapper = Path(directory) / "git"
+            wrapper.write_text(
+                "#!/bin/sh\n"
+                "export GIT_CONFIG_NOSYSTEM=1\n"
+                "export GIT_CONFIG_SYSTEM={}\n"
+                "exec {} \"$@\"\n".format(shlex.quote(os.devnull), shlex.quote(real_git)),
+                encoding="utf-8")
+            wrapper.chmod(0o700)
+            scrub_git_environment()
+            os.environ["PATH"] = directory + os.pathsep + saved.get("PATH", os.defpath)
+            yield str(wrapper)
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)

@@ -360,6 +360,13 @@ def main():
 #   (h) an order record disagreeing with the operative constants -> exit 1.
 
 def self_test_main():
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _git_fixture_env import fixture_git_lifecycle
+    with fixture_git_lifecycle():
+        return _self_test_main_isolated()
+
+
+def _self_test_main_isolated():
     import io
     import shutil
     import tempfile
