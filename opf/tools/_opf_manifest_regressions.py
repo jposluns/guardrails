@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Generated finding fixtures, with a source-derived emission-site census.
 
-Base cases use the production validator unchanged. Profile/control cases supply
-the real validator's optional control at the test seam: production intake is
-base-only, but must transport any validator finding without probing a source.
-This covers finding classes, not every possible malformed value. The generated
-rows run against MANIFEST_CALLERS in _manifest_intake_regressions; plan_views
-enters directly, before any declared source is read.
+Base cases use the production validator unchanged. Profile/control cases enter
+doctor with supported_profiles; production base-only intake receives no injected
+control. This covers finding classes, not every possible malformed value. Base
+rows run against MANIFEST_CALLERS at their public boundaries; profile rows run
+through doctor's real profile handling.
 """
 import ast
 import copy

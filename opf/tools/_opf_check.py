@@ -1136,10 +1136,13 @@ def _worklog_legacy_conflict(_relpath):
     return None
 
 
-def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine_rel=None):
+def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine_rel=None,
+                    *, propagate_manifest_failure=False):
     """Read and validate a worklog.toml (active or an archive bucket) through U3's validate_worklog, and
     return its WL-number -> entry map. A required (active) worklog that is absent is CANNOT-EVALUATE; an
-    archive-bucket worklog that is absent returns None (the caller only reads it when the bucket has one)."""
+    archive-bucket worklog that is absent returns None (the caller only reads it when the bucket has one).
+    The enclosing traversal requests manifest failures back after diagnostic translation so it can
+    stop dependent archive reads; an ordinary ledger failure still permits archive diagnostics."""
     try:
         if machine_rel is None:       # explicitly named archive bucket, never shape-probed (M7)
             data = _opf_worklog.load_archive_worklog_at(root_fd, relpath)
@@ -1150,6 +1153,8 @@ def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine
     except _opf_worklog.ManifestShapeError as exc:
         rep.cant("{} is absent (the store manifest is required; spec 4.5)".format(exc.relpath)
                  if exc.missing else "{}: {}".format(exc.relpath, exc))
+        if propagate_manifest_failure:
+            raise
         return None
     except _opf_worklog.ManifestValidationError as exc:
         if exc.status == CANNOT_EVALUATE:
@@ -1157,10 +1162,14 @@ def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine
         else:
             for finding in exc.findings:
                 rep.finding("manifest: {}".format(finding))
+        if propagate_manifest_failure:
+            raise
         return None
     except _opf_worklog.ManifestReadError as exc:
         # Match _read_toml's manifest diagnostic, not the worklog ledger's path.
         rep.cant("cannot read {}: {}".format(exc.relpath, exc))
+        if propagate_manifest_failure:
+            raise
         return None
     except _opf_worklog.WorklogError as exc:
         rep.cant(str(exc))
@@ -2494,9 +2503,20 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     if mv.status == CANNOT_EVALUATE:
         rep.cant("{}: {}".format(manifest_rel, "; ".join(mv.findings)))
         return [], []
-    if mv.status != VALID:
-        for f in mv.findings:
-            rep.finding("manifest: {}".format(f))
+    for f in mv.findings:
+        rep.finding("manifest: {}".format(f))
+
+    # --- C-PROFILES: name the evaluated / unevaluated profile scope (spec 16) -------------------------
+    rep.ran("C-PROFILES")
+    declared_profiles = set()
+    prof_tbl = manifest_data.get("profiles") if isinstance(manifest_data, dict) else None
+    if isinstance(prof_tbl, dict):
+        declared_profiles = {k for k in prof_tbl if isinstance(k, str)}
+    unevaluated_profiles = list(mv.unevaluated_profiles)
+    evaluated_profiles = sorted(declared_profiles - set(unevaluated_profiles))
+    if mv.findings or mv.status != VALID:
+        # No manifest-dependent source is safe to traverse after any finding.
+        return evaluated_profiles, unevaluated_profiles
 
     dp = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
     layout = dp.get("layout") if isinstance(dp, dict) else None
@@ -2509,15 +2529,6 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     enabled_modules = _enabled_modules(manifest_data)
     homes = _opf_store.homes_generation(manifest_data)
     rep.require_homes(homes)
-
-    # --- C-PROFILES: name the evaluated / unevaluated profile scope (spec 16) -------------------------
-    rep.ran("C-PROFILES")
-    declared_profiles = set()
-    prof_tbl = manifest_data.get("profiles") if isinstance(manifest_data, dict) else None
-    if isinstance(prof_tbl, dict):
-        declared_profiles = {k for k in prof_tbl if isinstance(k, str)}
-    unevaluated_profiles = list(mv.unevaluated_profiles)
-    evaluated_profiles = sorted(declared_profiles - set(unevaluated_profiles))
 
     # --- C-ROSTER: reconcile the manifest [types] against the authoritative roster (spec 9/8.1) -------
     rep.ran("C-ROSTER")
@@ -2534,8 +2545,15 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     rep.ran("C-RECORDS")
     active_recs, recon = _gather_active_records(root_fd, machine_rel, enabled_types, layout,
                                                 registered_vendors, rep)
-    active_worklog = _gather_worklog(root_fd, _rel(machine_rel, WORKLOG_NAME), registered_vendors, rep,
-                                     required=True, machine_rel=machine_rel) or {}
+    try:
+        active_worklog = _gather_worklog(
+            root_fd, _rel(machine_rel, WORKLOG_NAME), registered_vendors, rep,
+            required=True, machine_rel=machine_rel, propagate_manifest_failure=True) or {}
+    except (_opf_worklog.ManifestShapeError, _opf_worklog.ManifestValidationError,
+            _opf_worklog.ManifestReadError):
+        # Intake reopens the manifest. A failure there invalidates the enclosing
+        # traversal too; archive intake has no independent manifest gate.
+        return evaluated_profiles, unevaluated_profiles
 
     # --- C-PERRECORD-RECONCILE: replay the bidirectional index<->body reconciliation (spec 13) --------
     rep.ran("C-PERRECORD-RECONCILE")
@@ -3551,8 +3569,9 @@ def self_test():
         _malr = run(_mal)
         check("unmanaged-malformed-path-cannot-eval", _malr is not None and _malr.status == CANNOT_EVALUATE)
         check("unmanaged-malformed-path-named",
-              _malr is not None and any("not a contained store-relative string" in m
-                                        for m in _malr.cannot_evaluate))
+              _malr is not None and any(
+                  "[unmanaged].paths entry '/etc/passwd' must be a root-relative path" in m
+                  for m in _malr.by_check["C-MANIFEST"]))
         # round-14 empty-dir: an unregistered EMPTY directory under the machine store (no files at all) must
         # be graded as a stray, not silently laundered (the walk previously graded files only).
         _ed_root = build(clean_machine())
@@ -4631,7 +4650,13 @@ def self_test():
         mbad = base_manifest()
         mbad["bogus_table"] = {"x": 1}
         f["manifest.toml"] = mbad
-        check("manifest-unknown-table-invalid", run(f).status == INVALID)
+        bad_manifest = run(f)
+        check("manifest-unknown-table-invalid", bad_manifest.checks["C-MANIFEST"] == "FINDING"
+              and "manifest: unknown top-level table(s): bogus_table" in bad_manifest.findings)
+        check("manifest-unknown-table-stops-dependent-checks",
+              bad_manifest.status == CANNOT_EVALUATE
+              and bad_manifest.checks["C-RECORDS"] == CANNOT_EVALUATE
+              and bad_manifest.checks["C-ARCHIVE-ENUM"] == CANNOT_EVALUATE)
         # F6.5: index unknown-top-level-key finding (_index_rows).
         f = clean_machine()
         ibad = idx([bi(1, "done"), bi(2, "open")])

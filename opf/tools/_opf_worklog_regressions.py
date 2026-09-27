@@ -7,6 +7,7 @@ Permission failures are injected at read time so these tests also work
 as root. Production callers and their exception translations still execute.
 """
 import contextlib
+import datetime
 import os
 import stat
 from pathlib import Path
@@ -87,7 +88,18 @@ class _Fixture:
         prefix = self.prefixes[fd]
         return list(dict.fromkeys(
             p[len(prefix):].split("/", 1)[0]
-            for p in self.files if p.startswith(prefix)))
+            for p in list(self.files) + sorted(self.dirs)
+            if p.startswith(prefix) and p != prefix.rstrip("/")))
+
+    def list_contained(self, fd, rel):
+        path = self.path(fd, rel)
+        if path not in self.dirs:
+            return None, None
+        prefix = path + "/"
+        return (sorted(p[len(prefix):] for p in self.dirs
+                       if p.startswith(prefix) and "/" not in p[len(prefix):]),
+                sorted(p[len(prefix):] for p in self.files
+                       if p.startswith(prefix) and "/" not in p[len(prefix):]))
 
     def __enter__(self):
         self.stack = contextlib.ExitStack()
@@ -98,6 +110,8 @@ class _Fixture:
         self.res = SimpleNamespace(status=_opf_store.RESOLVED, store_root=self.root,
                                    pointer_source="default", machine_rel=M)
         for obj, name, value in (
+                (_opf_check, "_list_contained", self.list_contained),
+                (_opf_check, "_open_store_root_fd", self.open_root),
                 (_journal, "_lstat_contained", self.lstat),
                 (_journal, "_read_contained", self.read),
                 (_journal, "_open_dir_contained", self.open_dir),
@@ -120,7 +134,7 @@ def _error(call):
     return None
 
 
-def _doctor(fx, archive=False):
+def _doctor_leaf(fx, archive=False):
     rep = _opf_check._Report()
     _opf_check._gather_worklog(
         fx.fd, ARCHIVE if archive else LEGACY, frozenset(), rep, required=not archive,
@@ -128,7 +142,7 @@ def _doctor(fx, archive=False):
     return rep.cannot + rep.findings
 
 
-def _readers(fx):
+def _helper_readers(fx):
     return {
         "loader": lambda: _error(lambda: wl.load_worklog_at(fx.fd, M)),
         "views": lambda: _error(lambda: _opf_views._load_worklog(
@@ -139,11 +153,42 @@ def _readers(fx):
     }
 
 
-def _manifest_readers(fx):
-    # plan_views has its own manifest boundary; it need not load a worklog.
-    return dict(_readers(fx),
-                plan_views=lambda: _error(lambda: _opf_views.plan_views(fx.fd, M)),
-                doctor=lambda: _doctor(fx))
+def _doctor_entry(fx, supported_profiles=None):
+    rep = _opf_check._Report()
+    fx.profile_scope = _opf_check._validate_opened_store(
+        fx.fd, None, M, supported_profiles, _opf_check._normalize_observations(None)[0],
+        None, "default", True, rep)
+    fx.manifest_findings = rep.by_check.get("C-MANIFEST", [])
+    return rep.cannot + rep.findings
+
+
+def _doctor_public(fx, supported_profiles=None):
+    result = _opf_check.validate_store(fx.res, supported_profiles)
+    fx.profile_scope = (result.evaluated_profiles, result.unevaluated_profiles)
+    fx.manifest_findings = result.by_check.get("C-MANIFEST", [])
+    return result.cannot_evaluate + result.findings
+
+
+def _manifest_readers(fx, supported_profiles=None):
+    """Public boundaries. The leaf compatibility tests above are not matrix columns."""
+    import _opf_init
+    for name in _opf_init.INDEX_TYPES:
+        fx.files.setdefault(M + "/" + name + ".index.toml", b"schema = 1\nrecord = []\n")
+    fx.files.setdefault(M + "/counters.toml", _opf_init.build_counters().encode())
+    fx.files.setdefault(ARCHIVE, LEDGER)
+    fx.files.setdefault(M + "/archive/2026/archive.toml", b"schema = 1\n")
+    return {
+        "loader": lambda: _error(lambda: wl.load_worklog(fx.res)),
+        "views": lambda: _error(lambda: _opf_views.plan_views(fx.fd, M)),
+        "plan_views": lambda: _error(lambda: _opf_views.plan_views(fx.fd, M)),
+        "import": lambda: (_opf_import.stage_import(
+            fx.root, [], {"fragments": {}},
+            now=datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc),
+            run_nonce="worklog-boundary").findings or [None])[0],
+        "changelog": lambda: (_opf_changelog.evaluate(fx.root).findings or [None])[0],
+        "absorb": lambda: (_opf_absorb.evaluate(fx.root).findings or [None])[0],
+        "doctor": lambda: _doctor_entry(fx, supported_profiles),
+    }
 
 
 def _manifest_read_regressions(check):
@@ -364,6 +409,10 @@ def _manifest_intake_regressions(check):
                                      "opf-empty", "standard-absent", "standard-wrong",
                                      "standard-wrong-type"))
 
+        control = value[1] if phase == "validation" else None
+        if control is not None:
+            # Only doctor accepts supported_profiles. Never change base-only intake.
+            expected = {"doctor": expected["doctor"]}
         for caller, baseline in expected.items():
             label = "F1-manifest-{}-{}".format(mode, caller)
             with _Fixture() as fx:
@@ -373,16 +422,9 @@ def _manifest_intake_regressions(check):
                       fx.res.status == _opf_store.RESOLVED
                       and _opf_store.validate_manifest(observed).status == _opf_store.VALID
                       and wl.generation(observed) == 1 and "worklog" not in observed["opf"])
-                armed, attempted = caller == "plan_views", []
+                armed, attempted = caller == "plan_views" or control is not None, []
                 original_load = wl.load_worklog_at
                 original_parse = _opf_store.tomllib.loads
-                original_validate = _opf_store.validate_manifest
-
-                def validate(data, *args, **kwargs):
-                    if armed and phase == "validation":
-                        return original_validate(data, value[1])
-                    return original_validate(data, *args, **kwargs)
-
                 def result(item):
                     if isinstance(item, Exception):
                         raise item
@@ -422,11 +464,18 @@ def _manifest_intake_regressions(check):
                     armed = True
                     return original_load(*args, **kwargs)
 
-                readers = _manifest_readers(fx)
+                source_reads = []
+                original_read = read
+
+                def instrumented_read(fd, rel, **kwargs):
+                    if armed:
+                        source_reads.append(fx.path(fd, rel))
+                    return original_read(fd, rel, **kwargs)
+
+                readers = _manifest_readers(fx, control)
                 with patch.object(_journal, "_lstat_contained", side_effect=lstat), \
-                        patch.object(_journal, "_read_contained", side_effect=read), \
+                        patch.object(_journal, "_read_contained", side_effect=instrumented_read), \
                         patch.object(_opf_store.tomllib, "loads", side_effect=parse), \
-                        patch.object(_opf_store, "validate_manifest", side_effect=validate), \
                         patch.object(wl, "load_worklog_at", side_effect=load_after_resolution) as intake:
                     actual = readers[caller]()
                     # Keep the single-fault observation before the multi-fault runs.
@@ -455,11 +504,160 @@ def _manifest_intake_regressions(check):
                                   and bool(attempted) and set(attempted) == {p})
                     attempted = single_attempted
                 check(label, actual == baseline
-                      and single_intake == (0 if caller == "plan_views" else 1)
+                      and single_intake == (0 if caller == "plan_views" or control is not None else 1)
                       and bool(attempted) and set(attempted) == {p})
+                check(label + "-no-active-read", not any(
+                    path == LEGACY or path.startswith(M + "/worklog/") for path in source_reads))
+                check(label + "-no-archive-read", not any(
+                    path.startswith(M + "/archive/") and path.endswith("/worklog.toml")
+                    for path in source_reads))
                 check(label + "-diagnostic", actual == baseline)
                 check(label + "-manifest-only",
                       bool(attempted) and set(attempted) == {p})
+
+
+
+
+def _entry_point_census(check):
+    """Reconcile the first public boundaries against production source calls.
+
+    Follow private callers back from both worklog-loading APIs, stopping at each
+    public boundary. CLI/operation wrappers above those boundaries are delegated
+    coverage. This static census covers literal module/function calls, not import
+    aliases, dynamic dispatch, subprocess invocations, or generic tree copies.
+    """
+    import ast
+    nodes = {}
+    for path in Path(__file__).resolve().parent.iterdir():
+        if (path.suffix != ".py" or not path.stem.startswith("_opf_")
+                or path.stem.endswith("_regressions")):
+            continue
+        for node in ast.parse(path.read_text(encoding="utf-8")).body:
+            if isinstance(node, ast.FunctionDef) and node.name not in ("self_test", "main"):
+                nodes[path.stem + "." + node.name] = node
+    reverse = {}
+    for key, node in nodes.items():
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            fun = call.func
+            if isinstance(fun, ast.Name):
+                target = key.rsplit(".", 1)[0] + "." + fun.id
+            elif isinstance(fun, ast.Attribute) and isinstance(fun.value, ast.Name):
+                target = fun.value.id + "." + fun.attr
+            else:
+                continue
+            if target in nodes:
+                reverse.setdefault(target, set()).add(key)
+    pending = ["_opf_worklog.load_worklog_at", "_opf_worklog.load_archive_worklog_at"]
+    boundaries, seen = set(pending), set()
+    while pending:
+        target = pending.pop()
+        if target in seen:
+            continue
+        seen.add(target)
+        for caller in reverse.get(target, ()):
+            if caller.rsplit(".", 1)[1].startswith("_"):
+                pending.append(caller)
+            else:
+                boundaries.add(caller)
+    # Every member has a public-entry case below, except the explicitly named
+    # archive loader: it has no manifest contract and retains F1 archive cases.
+    check("F2f-public-entry-census", boundaries == {
+        "_opf_absorb.evaluate", "_opf_changelog.evaluate", "_opf_check.validate_store",
+        "_opf_import.stage_import", "_opf_import.apply_import", "_opf_ingest_apply.apply_ingest",
+        "_opf_views.plan_views", "_opf_worklog.load_worklog", "_opf_worklog.load_worklog_at",
+        "_opf_worklog.load_archive_worklog_at"})
+
+
+def _entry_point_regressions(check):
+    """First-intake failures, complementing the matrix's later loader failures.
+
+    Instrument the contained read primitive, including archive destinations; never
+    substitute a validator or give a profile control to a base-only consumer.
+    These are deterministic intake failures, not concurrent filesystem race tests.
+    """
+    import _opf_emit
+    import _opf_ingest_apply
+    from _opf_manifest_regressions import manifest_cases
+
+    p = M + "/manifest.toml"
+    now = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+    run_id = "imp-20260101T000000Z-0000000000000000"
+    for name, data, validation, control in manifest_cases(check):
+        with _Fixture() as fx:
+            readers = _manifest_readers(fx, control)
+            # Apply has its own public preflight before it can acquire a lease.
+            readers.update(
+                import_apply=lambda: (_opf_import.apply_import(
+                    fx.root, run_id, now=now).findings or [None])[0],
+                ingest_apply=lambda: (_opf_ingest_apply.apply_ingest(
+                    fx.root, run_id, now=now).findings or [None])[0],
+                loader_at=lambda: _error(lambda: wl.load_worklog_at(fx.fd, M)),
+                doctor_public=lambda: _doctor_public(fx, control))
+            if control is not None:
+                readers = {key: readers[key] for key in ("doctor", "doctor_public")}
+            original_parse = _opf_store.tomllib.loads
+            if isinstance(data, dict):
+                fx.files[p] = _opf_emit.emit_checked(data).encode()
+
+            def parse(raw, **kwargs):
+                # TOML cannot express a non-table root: retain that defensive seam.
+                if not isinstance(data, dict) and raw == fx.files[p].decode():
+                    return data
+                return original_parse(raw, **kwargs)
+
+            for caller, run in readers.items():
+                label = "F2f-entry-{}-{}".format(name, caller)
+                reads = []
+
+                def read(fd, rel, **kwargs):
+                    reads.append(fx.path(fd, rel))
+                    return fx.read(fd, rel, **kwargs)
+
+                with patch.object(_journal, "_read_contained", side_effect=read), \
+                        patch.object(_opf_store.tomllib, "loads", side_effect=parse):
+                    actual = run()
+                messages = actual if isinstance(actual, list) else [actual]
+                check(label + "-manifest-diagnostic", all(
+                    any(isinstance(message, str) and finding in message for message in messages)
+                    for finding in validation.findings))
+                check(label + "-manifest-read", p in reads)
+                check(label + "-no-active-read", not any(
+                    path == LEGACY or path.startswith(M + "/worklog/") for path in reads))
+                check(label + "-no-archive-read", not any(
+                    path.startswith(M + "/archive/") and path.endswith("/worklog.toml")
+                    for path in reads))
+                if caller in ("doctor", "doctor_public"):
+                    check(label + "-manifest-attribution", all(
+                        any(finding in message for message in fx.manifest_findings)
+                        for finding in validation.findings))
+                    declared = data.get("profiles", {}) if isinstance(data, dict) else {}
+                    declared = set(declared) if isinstance(declared, dict) else set()
+                    scope = ([], []) if validation.status == _opf_store.CANNOT_EVALUATE else (
+                        sorted(declared - set(validation.unevaluated_profiles)),
+                        list(validation.unevaluated_profiles))
+                    check(label + "-profile-scope", fx.profile_scope == scope)
+
+    # Positive reachability witnesses: a healthy manifest must reach the active
+    # source through each matrix entry; doctor's walk must reach the archive too.
+    # Failing the active read prevents the staging entry from publishing a run.
+    with _Fixture() as fx:
+        for caller, run in _manifest_readers(fx).items():
+            reads = []
+
+            def read(fd, rel, **kwargs):
+                path = fx.path(fd, rel)
+                reads.append(path)
+                if path == LEGACY:
+                    raise PermissionError("fixture active-read witness")
+                return fx.read(fd, rel, **kwargs)
+
+            with patch.object(_journal, "_read_contained", side_effect=read):
+                run()
+            check("F2f-reachable-active-" + caller, LEGACY in reads)
+            if caller == "doctor":
+                check("F2f-reachable-archive-doctor", ARCHIVE in reads)
 
 
 def _upgrade_preflight_regressions(check, fence):
@@ -621,8 +819,8 @@ def self_test():
                 del fx.files[LEGACY]
             else:
                 fx.files[LEGACY] = raw
-            readers = _readers(fx)
-            readers["doctor"] = lambda: _doctor(fx)
+            readers = _helper_readers(fx)
+            readers["doctor"] = lambda: _doctor_leaf(fx)
             for caller, baseline in expected.items():
                 check("F1-baseline-" + label + "-" + caller, readers[caller]() == baseline)
             # Absorb delegates to the same intake and must preserve its bytes too.
@@ -634,6 +832,8 @@ def self_test():
 
     _manifest_read_regressions(check)
     _manifest_intake_regressions(check)
+    _entry_point_census(check)
+    _entry_point_regressions(check)
 
     archive_parse = ("cannot parse m/archive/2026/worklog.toml "
                      "(Expected '=' after a key in a key/value pair (at line 1, column 5))")
@@ -648,7 +848,7 @@ def self_test():
             check("F1-baseline-archive-" + label + "-loader",
                   _error(lambda: wl.load_archive_worklog_at(fx.fd, ARCHIVE)) == message)
             expected = [] if message is None else ["cannot read m/archive/2026/worklog.toml: " + message]
-            check("F1-baseline-archive-" + label + "-doctor", _doctor(fx, archive=True) == expected)
+            check("F1-baseline-archive-" + label + "-doctor", _doctor_leaf(fx, archive=True) == expected)
 
     for ref in ("WL-1\u0662", "WL-1\u0662.abcd", "WL-1\uff12.abcd"):
         check("F3-ascii-ref-" + ref, wl._valid_wl_ref(ref) is None)
@@ -659,9 +859,9 @@ def self_test():
     check("F5-shipped-ceiling", _opf_store.SUPPORTED_WORKLOG == 1)
     with _Fixture(2) as fx:
         expected = _manifest_diagnostics(fx.manifest, _opf_store.validate_manifest(fx.manifest))
-        for caller, read in _readers(fx).items():
+        for caller, read in _helper_readers(fx).items():
             check("F5-production-" + caller, read() == expected[caller])
-        check("F5-production-doctor", _doctor(fx) == expected["doctor"])
+        check("F5-production-doctor", _doctor_leaf(fx) == expected["doctor"])
         mv = _opf_store.validate_manifest(fx.manifest)
         check("F5-production-manifest", mv.status == _opf_store.CANNOT_EVALUATE
               and mv.findings == [fence])
@@ -675,16 +875,16 @@ def self_test():
                 fx.dirs.add("m/worklog")
                 conflict = ("m/" + ("worklog" if gen == 1 else "worklog.toml")
                             + " conflicts with the manifest-selected worklog shape")
-                for caller, read in _readers(fx).items():
+                for caller, read in _helper_readers(fx).items():
                     check("F2-mixed-{}-{}".format(gen, caller), read() == conflict)
                 if gen == 1:
                     # The doctor's explicit policy still reads the manifest-selected ledger.
-                    check("F2-doctor-legacy-intake", _doctor(fx) == [])
+                    check("F2-doctor-legacy-intake", _doctor_leaf(fx) == [])
                     check("F2-doctor-legacy-view", _opf_views._load_worklog(
                         fx.fd, LEGACY, frozenset(), [],
                         on_legacy_conflict=_opf_check._worklog_legacy_conflict)[0] == LEDGER)
                 else:
-                    check("F2-doctor-gen2-conflict", _doctor(fx) == [conflict])
+                    check("F2-doctor-gen2-conflict", _doctor_leaf(fx) == [conflict])
 
         with _Fixture(2) as fx:
             check("F5-explicit-test-activation", wl.load_worklog_at(fx.fd, M)["entry"][0]["id"] == "WL-1")
@@ -699,7 +899,7 @@ def self_test():
                 check("F3-absorb-route", _opf_absorb.evaluate(fx.root).findings == [sentinel]
                       and intake.call_count == 1)
             with patch.object(wl, "load_worklog_at", side_effect=wl.WorklogError(sentinel)) as intake:
-                check("F3-doctor-route", _doctor(fx) == [sentinel] and intake.call_count == 1)
+                check("F3-doctor-route", _doctor_leaf(fx) == [sentinel] and intake.call_count == 1)
 
             fx.files["m/worklog/WL-10.toml"] = BODY.replace(b"WL-1", b"WL-10")
             fx.files["m/worklog/WL-2.abcd.toml"] = BODY.replace(b"WL-1", b"WL-2.abcd")
