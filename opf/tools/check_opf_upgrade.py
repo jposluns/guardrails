@@ -49,6 +49,8 @@ VECTOR ROSTER (U1-U25, P1):
   U14b ignored render destinations and directory collisions refuse before mutation; ignored prefix
       siblings and declared unmanaged content permit doctor-VALID upgrades. Companion flips restore
       the erroneous refusals. Collapsed ignored ancestors still expose occupied destinations.
+  U14c non-UTF-8 nested prefixes: ignored manifest, counters, render target and collapsed ancestor
+      refuse with unchanged files/index/HEAD; restoring lossy prefix normalization allows mutation.
   U15 [types.contribution] pre-declared: exit 2 naming contribution as an impossible 1.0.0 shape; unchanged.
   U16 governance=false plus [types.maintainer_decision]: exit 2 naming the module inconsistency; unchanged.
   U17 the above-tooling, non-canonical, NOT-ADOPTED, and partial-1.1.0 triage refusals (with the scoped
@@ -432,7 +434,7 @@ def _run_opf(argv, env):
     script = Path(__file__).resolve().parent / "opf.py"
     proc = subprocess.run(
         [sys.executable, "-I", "-B", str(script)] + list(argv),
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=180, env=env)
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="backslashreplace", timeout=180, env=env)
     if proc.returncode not in (EXIT_OK, EXIT_FINDING, EXIT_ERROR):
         raise OSError("opf child returned unexpected status {}".format(proc.returncode))
     return proc.returncode, proc.stdout + proc.stderr
@@ -522,7 +524,7 @@ def _suite():
             proc = subprocess.run(
                 ["git", "-C", str(store), "-c", "init.templateDir=", "-c", "init.defaultBranch=main",
                  "-c", "user.email=t@t", "-c", "user.name=t"] + list(args),
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120, env=env_holder["env"])
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="backslashreplace", timeout=120, env=env_holder["env"])
             if proc.returncode != 0:
                 raise OSError("fixture git failed at {!r}: {}".format(str(store), proc.stderr))
             return proc.stdout
@@ -564,19 +566,19 @@ def _suite():
         def flipped_upgrade(store, flip):
             """Run a controlled regression in an isolated child; the normal fixture is unchanged on refusal."""
             script = (
-                "import sys\nsys.path.insert(0, {!r})\nimport opf\nopf._bootstrap()\n".format(
+                "import os, sys\nsys.path.insert(0, {!r})\nimport opf\nopf._bootstrap()\n".format(
                     str(Path(__file__).resolve().parent))
                 + flip + "\nsys.exit(opf._cmd_upgrade(['--root', sys.argv[1]]))\n")
             proc = subprocess.run(
                 [sys.executable, "-I", "-B", "-c", script, str(store)],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=180,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="backslashreplace", timeout=180,
                 env=env_holder["env"])
             return proc.returncode, proc.stdout + proc.stderr
 
         no_ignored_filter = (
             "original = opf._upgrade_parse_porcelain\n"
             "def parse(raw, prefix, lease, specs):\n"
-            "    extra = [r[3:].decode('utf-8').removeprefix(prefix).rstrip('/')\n"
+            "    extra = [os.fsdecode(r[3:]).removeprefix(os.fsdecode(prefix)).rstrip('/')\n"
             "             for r in raw.split(b'\\x00') if r.startswith(b'!! ')]\n"
             "    return original(raw, prefix, lease, list(specs) + extra)\n"
             "opf._upgrade_parse_porcelain = parse\n")
@@ -1038,6 +1040,60 @@ def _suite():
                 check("U14b {} preserves owner content and tree".format(collision),
                       _snapshot(sa) == before_collision)
 
+            # U14c) Git -z paths and --show-prefix carry filesystem bytes, not necessarily UTF-8.
+            # Use real nested repositories and prove matching mode actually emits the ignored record.
+            # The flip restores the old lossy prefix round trip AND its silent non-match fallback.
+            lossy_prefix = (
+                "def old_status_path(pbytes, prefix):\n"
+                "    prefix_b = os.fsencode(prefix).decode('utf-8', 'replace').encode('utf-8')\n"
+                "    return pbytes[len(prefix_b):] if prefix_b and pbytes.startswith(prefix_b) else pbytes\n"
+                "opf._upgrade_status_path = old_status_path\n")
+            for case, target_rel in (
+                    ("manifest", ".working/toml/manifest.toml"),
+                    ("counters", ".working/toml/counters.toml"),
+                    ("render", ignored_rel),
+                    ("ancestor", ignored_rel)):
+                repo = base / ("u14c-" + case)
+                nested = repo / os.fsdecode(b"nested-\xff")
+                build_store(nested, commit=False)
+                (nested / ".git").rename(repo / ".git")
+                git_call(repo, ["--literal-pathspecs", "add", "-A"])
+                git_call(repo, ["commit", "-m", "seed non-UTF-8 nested store"])
+                if case in ("render", "ancestor"):
+                    (nested / target_rel).write_bytes(b"owner render destination\n")
+                untrack = ".working" if case == "ancestor" else target_rel
+                if case != "render":
+                    git_call(nested, ["--literal-pathspecs", "rm", "--cached", "-r", "--", untrack])
+                    git_call(repo, ["commit", "-m", "retain ignored owner content outside HEAD"])
+                prefix = b"nested-\xff/"
+                ignored = b".working/" if case == "ancestor" else os.fsencode(target_rel)
+                (repo / ".git/info").mkdir(exist_ok=True)
+                (repo / ".git/info/exclude").write_bytes(b"/" + prefix + ignored + b"\n")
+                observed_prefix = opf._opf_observe._run_git("git", nested, ["rev-parse", "--show-prefix"])
+                check("U14c {} real non-UTF-8 prefix".format(case),
+                      observed_prefix.completed and observed_prefix.rc == 0
+                      and observed_prefix.out == prefix + b"\n")
+                observed = opf._opf_observe._run_git("git", nested,
+                    ["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                     "--ignored=matching", "--no-renames", "--", target_rel])
+                check("U14c {} real ignored record (collapsed for ancestor)".format(case),
+                      observed.completed and observed.rc == 0
+                      and b"!! " + prefix + ignored in observed.out.split(b"\x00"))
+                before = _snapshot(repo)
+                before_index = (repo / ".git/index").read_bytes()
+                before_head = git_call(repo, ["rev-parse", "HEAD"])
+                rc, out = upgrade(nested)
+                check("U14c {} refuses before mutation with dirty-store advice".format(case),
+                      rc == EXIT_ERROR and target_rel in out and "Commit your store changes" in out)
+                check("U14c {} unchanged tree, index and HEAD".format(case),
+                      _snapshot(repo) == before and (repo / ".git/index").read_bytes() == before_index
+                      and git_call(repo, ["rev-parse", "HEAD"]) == before_head)
+                flipped_rc, flipped_out = flipped_upgrade(nested, lossy_prefix)
+                check("U14c {} FLIP loses pre-mutation refusal and changes manifest".format(case),
+                      flipped_rc in (EXIT_OK, EXIT_ERROR) and "Commit your store changes" not in flipped_out
+                      and (nested / ".working/toml/manifest.toml").read_bytes()
+                          != before[os.fsdecode(prefix) + ".working/toml/manifest.toml"])
+
             # U15) [types.contribution] pre-declared: an impossible 1.0.0 shape.
             s15 = base / "u15-contribution-predeclared"
             s15.mkdir()
@@ -1227,6 +1283,21 @@ def _suite():
                 check("U18 component scope {!r}".format(payload), parsed == expected and error is None)
             malformed, error = _grammar_ok(b"ZZ .working.bak/child\x00")
             check("U18 malformed out-of-scope status still refuses", malformed is None and error is not None)
+
+            # Byte paths remain lossless through prefix stripping, lease exclusion and scope matching.
+            byte_prefix = b"nested-\xff/"
+            byte_path = b".working/\xfe"
+            check("U18 byte path scope preserves filesystem bytes",
+                  opf._upgrade_parse_porcelain(b"!! " + byte_prefix + byte_path + b"\x00",
+                      byte_prefix, None, [os.fsdecode(byte_path)]) == [os.fsdecode(byte_path)])
+            check("U18 byte prefix lease exclusion",
+                  opf._upgrade_parse_porcelain(b"!! " + byte_prefix + b".working/toml/lease.toml\x00",
+                      byte_prefix, ".working/toml/lease.toml", [".working"]) == [])
+            for bad_path in (b"elsewhere/file", b"sub/", b"sub//file", b"sub/../file",
+                             b"sub/./file", b"/sub/file"):
+                parsed, error = _grammar_ok(b"!! " + bad_path + b"\x00", prefix="sub/")
+                check("U18 unnormalizable ignored path {!r} refuses".format(bad_path),
+                      parsed is None and error is not None)
 
             # R1b: the show-prefix normalization must strip ONLY the trailing newline, never LEADING
             # whitespace, so a store dir whose name begins with a space keeps its prefix and its lease is

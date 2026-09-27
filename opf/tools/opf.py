@@ -1786,6 +1786,25 @@ _PORCELAIN_VALID_PAIRS = frozenset(
     + list(_PORCELAIN_UNMERGED_PAIRS))
 
 
+def _upgrade_status_path(pbytes, prefix):
+    """Normalize a repository-relative status path without losing filesystem bytes.
+
+    A path that cannot be normalized is refusing dirt, never an out-of-scope ignored record.
+    The same normalization serves scope filtering and collapsed-ancestor expansion.
+    """
+    prefix_b = os.fsencode(prefix)
+    if prefix_b:
+        if not prefix_b.endswith(b"/") or not pbytes.startswith(prefix_b):
+            raise _UpgradeError("git status returned a path outside the reported repository prefix; "
+                                "the store cleanliness cannot be verified (fail-closed)")
+        pbytes = pbytes[len(prefix_b):]
+    # Git emits normalized relative paths; only directory records may have a final slash.
+    if any(part in (b"", b".", b"..") for part in pbytes.removesuffix(b"/").split(b"/")):
+        raise _UpgradeError("git status returned a path that cannot be normalized; "
+                            "the store cleanliness cannot be verified (fail-closed)")
+    return pbytes
+
+
 def _upgrade_parse_porcelain(raw, prefix, lease_excl, pathspecs):
     """Parse a `git status --porcelain=v1 -z --untracked-files=all --ignored=matching --no-renames` payload into the list of
     dirty paths, each normalized `root`-relative (the `prefix`, the store's repo-root-relative path with a
@@ -1806,9 +1825,8 @@ def _upgrade_parse_porcelain(raw, prefix, lease_excl, pathspecs):
     if parts[-1] != b"":
         raise _UpgradeError("git status returned a porcelain payload that is not NUL-terminated; the store "
                             "cleanliness cannot be verified (fail-closed)")
-    prefix_b = prefix.encode("utf-8")
-    lease_b = lease_excl.encode("utf-8") if lease_excl is not None else None
-    specs_b = [p.encode("utf-8") for p in pathspecs]
+    lease_b = os.fsencode(lease_excl) if lease_excl is not None else None
+    specs_b = [os.fsencode(p) for p in pathspecs]
     dirty = []
     for rec in parts[:-1]:
         # porcelain v1 -z: two status chars, a space, then the path bytes (verbatim under -z, no quoting).
@@ -1827,9 +1845,7 @@ def _upgrade_parse_porcelain(raw, prefix, lease_excl, pathspecs):
             raise _UpgradeError("git status returned a porcelain record with an out-of-vocabulary "
                                 "status pair ({!r}); the store cleanliness cannot be verified "
                                 "(fail-closed)".format(rec[:16]))
-        pbytes = rec[3:]
-        if prefix_b and pbytes.startswith(prefix_b):
-            pbytes = pbytes[len(prefix_b):]
+        pbytes = _upgrade_status_path(rec[3:], prefix)
         if lease_b is not None and pbytes == lease_b:
             # An untracked or ignored lease is the legitimate held-lease case
             # that step 4 handles as its never-seize refusal, so it is EXCLUDED here. Any OTHER (tracked)
@@ -1853,7 +1869,7 @@ def _upgrade_parse_porcelain(raw, prefix, lease_excl, pathspecs):
         if rec[:2] == b"!!" and not any(
                 pbytes == p or pbytes == p + b"/" or pbytes.startswith(p + b"/") for p in specs_b):
             continue
-        dirty.append(pbytes.decode("utf-8", "replace"))
+        dirty.append(os.fsdecode(pbytes))
     return dirty
 
 
@@ -1920,20 +1936,18 @@ def _upgrade_probe_dirty(git, root, pathspecs, lease_excl):
     # Strip ONLY the trailing newline git appends, NEVER leading whitespace: a store dir whose name begins
     # with a space (" leading/") would lose that space under .strip(), breaking the prefix match and the
     # lease exclusion. "" at the repo toplevel, else "<dir>/" (trailing /).
-    prefix = pfx.out.decode("utf-8", "replace").rstrip("\n")
+    # Keep git path bytes intact through prefix stripping, scope and ancestor matching.
+    prefix = pfx.out.removesuffix(b"\n")
     dirty = _upgrade_parse_porcelain(out.out, prefix, lease_excl, pathspecs)
     # Matching mode collapses ignored ancestors (e.g. !! .working/ for a selected view). Expand
     # those with traditional mode over the SAME destinations, never by adding the ancestor to scope.
     # The first parse validates the entire payload before any record is used here.
-    prefix_b = prefix.encode("utf-8")
     ancestors = []
     for rec in out.out.split(b"\x00")[:-1]:
-        p = rec[3:]
-        if prefix_b and p.startswith(prefix_b):
-            p = p[len(prefix_b):]
+        p = _upgrade_status_path(rec[3:], prefix)
         if rec[:2] == b"!!" and p.endswith(b"/"):
             ancestors.append(p)
-    if any(spec.encode("utf-8").startswith(p) for spec in pathspecs for p in ancestors):
+    if any(os.fsencode(spec).startswith(p) for spec in pathspecs for p in ancestors):
         expanded_args = ["--ignored=traditional" if a == "--ignored=matching" else a for a in args]
         expanded = _opf_observe._run_git(git, root, expanded_args, config_overrides=neutralizing)
         if not expanded.completed or expanded.rc != 0:
