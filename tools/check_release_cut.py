@@ -12,10 +12,14 @@ and base-changelog-sha256 = "absent", against proven absence only.
 
 A declaration is author-controlled intent, not authorization or readiness.
 This reusable pack author tool is opt-in for adopters of this changelog schema.
-PR/push event binding (Part B) is not yet implemented. CI uses the same local
-ancestry comparison, deriving the protected ref from GITHUB_BASE_REF when set,
-otherwise origin/HEAD; an unresolved ref fails closed. Local refs may be unfetched. Endpoint comparison cannot see transient changes
-inside a squash or prove atomicity of its intermediate commits. Other version
+For pull_request events or when GITHUB_BASE_REF is set, require a merge HEAD
+whose raw first parent equals the resolved origin/GITHUB_BASE_REF tip, and use
+that parent as the comparison base. Missing or mismatched bindings fail closed.
+Other runs use local ancestry against origin/HEAD and certify only against the
+local tracking ref, which may be unfetched. Full event-payload/push binding and
+remote freshness beyond the checked-out merge remain outside coverage.
+Endpoint comparison cannot see transient changes inside a squash or prove
+atomicity of its intermediate commits. Other version
 sources and semantic release scope remain outside coverage. Existing version,
 artifact, generation and release gates remain necessary. Trusted executable
 provenance, gate code, repository configuration and protected review are assumed.
@@ -28,6 +32,7 @@ Usage: python3 -I -B tools/check_release_cut.py [--root DIR]
        python3 -I -B tools/check_release_cut.py --self-test --red-on-revert
 """
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -96,9 +101,12 @@ def parse_changelog(raw, label):
                 where + ": unsupported release field")
         version(row.get("version"), where)
         require(isinstance(row.get("title"), str), where + ": missing string title")
-        for key in ("date", "tag"):
-            if key in row:
-                require(isinstance(row[key], str), where + ": " + key + " must be a string")
+        if "date" in row:
+            # datetime is a date subclass, but TOML timestamps are not local dates.
+            require(isinstance(row["date"], str) or type(row["date"]) is datetime.date,
+                    where + ": date must be a string or local date")
+        if "tag" in row:
+            require(isinstance(row["tag"], str), where + ": tag must be a string")
         for key in ("items", "refs"):
             if key in row:
                 require(isinstance(row[key], list)
@@ -335,6 +343,8 @@ def context(root):
     else:
         raise CannotEvaluate("grafts file present; ancestry cannot be trusted")
     base_ref = os.environ.get("GITHUB_BASE_REF", "")
+    ci_context = os.environ.get("GITHUB_EVENT_NAME") == "pull_request" or bool(base_ref)
+    require(not ci_context or bool(base_ref), "PR comparison requires GITHUB_BASE_REF")
     if base_ref:
         protected = "refs/remotes/origin/" + base_ref
         git(root, "check-ref-format", protected)
@@ -354,13 +364,19 @@ def context(root):
     for line in ancestry.splitlines():
         for value in line.split(b" "):
             oid(value, "ancestry")
-    bases = git(root, "merge-base", "--all", head, target).splitlines()
-    require(len(bases) == 1, "expected exactly one merge base")
-    base = oid(bases[0], "merge base")
     head_tree, parents = commit_header(root, head)
-    if head == target:
-        # At the protected tip, checking HEAD against itself would conceal a cut.
-        base = parents[0] if parents else None
+    if ci_context:
+        require(len(parents) >= 2, "PR comparison requires a merge HEAD")
+        require(parents[0] == target,
+                "PR merge first parent does not match " + protected)
+        base = parents[0]
+    else:
+        bases = git(root, "merge-base", "--all", head, target).splitlines()
+        require(len(bases) == 1, "expected exactly one merge base")
+        base = oid(bases[0], "merge base")
+        if head == target:
+            # At the protected tip, checking HEAD against itself would conceal a cut.
+            base = parents[0] if parents else None
     base_tree = commit_header(root, base)[0] if base is not None else None
     return root, {
         "head": head, "protected_ref": protected, "target": target,
@@ -369,7 +385,7 @@ def context(root):
 
 
 def local_report(root):
-    # CI currently uses this local ancestry comparison too; event binding is Part B.
+    # context binds PR checkouts to their raw first parent; other runs use local ancestry.
     root, binding = context(root)
     base = ((None, None) if binding["base_tree"] is None else
             tuple(tree_blob(root, binding["base_tree"], path) for path in PATHS))
@@ -419,7 +435,7 @@ def fixture_declaration(base, previous="1.0.0", following="1.1.0", **changes):
 
 
 def test_cases():
-    """Part A cases include CI ref resolution; PR/push event binding is Part B."""
+    """Transition policy, local ancestry and PR merge first-parent binding."""
     base = fixture_changelog(["1.0.0"])
     cut = fixture_changelog(["1.0.0", "1.1.0"])
     declaration = fixture_declaration(base)
@@ -434,6 +450,13 @@ def test_cases():
     add("notes", 0, after=fixture_changelog(["1.0.0"], "curated note"))
     add("title-date", 0, after=base.replace(b'"Release"', b'"Published"')
         .replace(b'"2000-01-01"', b'"2000-02-02"'))
+    native = base.replace(b'"2000-01-01"', b"2000-01-01")
+    add("native-date-maintenance", 0, before=native,
+        after=native.replace(b'items = ["note"]', b'items = ["curated note"]'))
+    add("native-date-edit", 0, before=native,
+        after=native.replace(b"2000-01-01", b"2000-02-02"))
+    add("date-string-to-native", 0, after=native)
+    add("date-native-to-string", 0, before=native)
     add("formatting", 0, after=b"# formatting only\n\n" + base)
     add("metadata", 0, after=base + (
         'tag = "v1.0.0"\nrefs = ["pr:17"]\n[release.artifacts]\n'
@@ -483,6 +506,10 @@ def test_cases():
         "typed-version": base.replace(b'"1.0.0"', b"1"),
         "renderer-title": base.replace(b'title = "Release"', b"title = 7"),
         "renderer-items": base.replace(b'items = ["note"]', b"items = [7]"),
+        "date-number": base.replace(b'"2000-01-01"', b"7"),
+        "date-timestamp": base.replace(b'"2000-01-01"', b"2000-01-01T00:00:00"),
+        "date-offset-timestamp": base.replace(b'"2000-01-01"', b"2000-01-01T00:00:00Z"),
+        "tag-native-date": base + b"tag = 2000-01-01\n",
         "metadata-refs": base + b"refs = 7\n",
         "metadata-artifacts": base + b'artifacts = ["wrong"]\n',
     }
@@ -508,9 +535,16 @@ def test_cases():
                  "shallow", "grafts", "git-failure", "ci-missing-protected",
                  "ci-missing-base-ref", "ci-invalid-base-ref"):
         add(name, 2, tweak=name)
-    add("ci-origin-head", 0, tweak="ci-origin-head")
+    add("ci-origin-head", 2, tweak="ci-origin-head")
+    add("ci-nonmerge", 2, tweak="ci-nonmerge")
     add("ci-base-ref", 0, tweak="ci-base-ref")
     add("ci-merge-cut", 0, after=cut, new=declaration, tweak="ci-merge")
+    add("ci-merge-undeclared", 1, after=cut, tweak="ci-merge")
+    relabel = fixture_changelog(["1.0.0", "1.2.0"])
+    stale_declaration = fixture_declaration(base, following="1.2.0")
+    for name, expected in (("ci-stale-tracking", 2), ("ci-fresh-tracking", 1),
+                           ("base-ref-only-stale", 2), ("base-ref-only-fresh", 1)):
+        add(name, expected, after=relabel, new=stale_declaration, tweak=name)
     add("protected-tip", 1, after=cut, tweak="protected")
     add("staged-hidden", 1, tweak="staged")
     return cases
@@ -580,6 +614,14 @@ def fixture_repo(parent, name, case, env):
     command("update-ref", "refs/remotes/origin/main", base)
     command("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
     command("switch", "-q", "-c", "feature")
+    binding_fixture = tweak in (
+        "ci-stale-tracking", "ci-fresh-tracking",
+        "base-ref-only-stale", "base-ref-only-fresh",
+    )
+    if binding_fixture:
+        # The target advanced, but the candidate declares against the old tracking tip.
+        write(fixture_changelog(["1.0.0", "1.1.0"]), None)
+        first_parent = commit("advanced target")
     write(after, new)
     (root / "consumer.txt").write_text("ordinary consumer edit\n", encoding="utf-8")
     if tweak == "squash":
@@ -589,13 +631,21 @@ def fixture_repo(parent, name, case, env):
         write(after, new)
     head = commit("candidate")
     tree = command("rev-parse", head + "^{tree}")
-    if tweak in ("merge", "squash", "ci-merge"):
+    if binding_fixture:
+        head = command("commit-tree", tree, "-p", first_parent, "-p", head,
+                       payload=b"PR merge\n")
+        command("update-ref", "HEAD", head)
+        if tweak in ("ci-fresh-tracking", "base-ref-only-fresh"):
+            command("update-ref", "refs/remotes/origin/main", first_parent)
+    elif tweak in ("merge", "squash", "ci-merge", "ci-base-ref"):
         args = ["commit-tree", tree, "-p", base]
-        if tweak in ("merge", "ci-merge"):
+        if tweak in ("merge", "ci-merge", "ci-base-ref"):
             other = command("commit-tree", tree, "-p", base, payload=b"other\n")
             args += ["-p", other]
         head = command(*args, payload=b"integration\n")
         command("update-ref", "HEAD", head)
+        if tweak == "ci-base-ref":
+            command("symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
     elif tweak == "staged":
         (root / CHANGELOG).write_bytes(fixture_changelog(["1.0.0", "1.1.0"]))
         command("add", "--", CHANGELOG)
@@ -627,7 +677,7 @@ def fixture_repo(parent, name, case, env):
                 payload=("100644 " + blob + " 1\t" + CHANGELOG + "\n").encode())
     elif tweak == "unresolved-base":
         command("update-ref", "-d", "refs/remotes/origin/main")
-    elif tweak in ("ci-base-ref", "ci-missing-protected"):
+    elif tweak == "ci-missing-protected":
         command("symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
     elif tweak == "ambiguous-base":
         a = command("commit-tree", tree, "-p", base, payload=b"a\n")
@@ -676,12 +726,15 @@ def observe(script, root, tweak, env):
     if tweak and tweak.startswith("ci-"):
         env.update({"CI": "true", "GITHUB_ACTIONS": "true",
                     "GITHUB_EVENT_NAME": "pull_request"})
-        if tweak in ("ci-base-ref", "ci-merge"):
+        if tweak in ("ci-base-ref", "ci-merge", "ci-nonmerge",
+                     "ci-stale-tracking", "ci-fresh-tracking"):
             env["GITHUB_BASE_REF"] = "main"
         elif tweak == "ci-missing-base-ref":
             env["GITHUB_BASE_REF"] = "missing"
         elif tweak == "ci-invalid-base-ref":
             env["GITHUB_BASE_REF"] = "../main"
+    if tweak in ("base-ref-only-stale", "base-ref-only-fresh"):
+        env["GITHUB_BASE_REF"] = "main"
     args = [sys.executable, "-I", "-B"]
     if tweak == "unreadable":
         args += ["-c", UNREADABLE_DRIVER]
@@ -724,6 +777,12 @@ def self_test(red_on_revert):
             fixtures[case_id] = root
             report = observe(script, root, case[-1], env)
             check(case_id, report["code"] == case[0])
+            if case_id in ("ci-base-ref", "ci-merge-cut", "ci-merge-undeclared",
+                           "ci-fresh-tracking", "base-ref-only-fresh"):
+                binding = report["context"]
+                _, parents = commit_header(root, binding["head"])
+                check(case_id + "-first-parent",
+                      len(parents) >= 2 and binding["base"] == parents[0] == binding["target"])
             if case_id == "staged-hidden":
                 check("staged-hidden-snapshots",
                       [(r["snapshot"], r["code"]) for r in report["snapshots"]]
@@ -753,6 +812,10 @@ def self_test(red_on_revert):
                  "identities = lambda rows: rows", "notes", 1),
                 ("index", 'names = ("HEAD", "index", "working")',
                  'names = ("HEAD", "working")', "staged-hidden", 0),
+                ("first-parent-binding", "if ci_context:", "if False:",
+                 "ci-stale-tracking", 0),
+                ("first-parent-tip", "require(parents[0] == target,",
+                 "require(True,", "ci-stale-tracking", 1),
             )
             parser_bytes = (script.parents[1] / "opf" / "tools" / "_semver.py").read_bytes()
             for name, old, new, case_id, mutated_code in mutations:
