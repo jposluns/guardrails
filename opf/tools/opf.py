@@ -23,8 +23,10 @@ upgrade from 1.0.0 or 1.1.0 to 1.2.0. The 1.1.0 path changes only spec_version; 
 applies the earlier schema delta
 (base-table and discovery-token rename, decision_support retirement, type and view declarations,
 DECISIONS.md source widening, counters, and missing indexes). Neither creates init.toml provenance.
-It refuses a store above the tooling spec or non-canonical manifest/counters, renders declared views,
-and requires a full doctor VALID before offering the uncommitted change for review and merge. A store already at the
+It refuses a store above the tooling spec. When migrating an older store, it requires canonical
+manifest/counters, clean write paths, and acquisition of its lease, then applies the schema delta,
+renders declared views, and requires a full doctor VALID before offering the uncommitted change for
+review and merge. A store already at the
 tooling spec_version is a byte no-op when doctor-VALID and exits 2 otherwise; a NOT-ADOPTED root reports
 NOT APPLICABLE and exits 0. `import` HAS
 landed (OPF-IMPORT-VERB): `opf import [--root DIR] (--scan --set FILE | --plan --set FILE | --review
@@ -37,8 +39,9 @@ attributed acceptance.json (no live-store write), and `--apply` wires onto the P
 operation: an unresolved / NOT-ADOPTED root fails cannot-evaluate (exit 2) with a "run `opf init` first"
 message rather than reporting NOT APPLICABLE (divergence D7).
 
-`init` HAS landed: `opf init [--root DIR]` creates validated store sources and a pointer, without git
-writes or rendering. `absorb` HAS landed: `opf absorb [--root DIR] [--covers TOKEN] [--freeze-digest]`
+`init` HAS landed: `opf init [--root DIR]` creates validated store sources, a pointer, and a starter
+`CHANGELOG.md` when none exists, without git writes or rendering.
+`absorb` HAS landed: `opf absorb [--root DIR] [--covers TOKEN] [--freeze-digest]`
 prints a changelog draft or freeze digest without writing files.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
@@ -496,8 +499,9 @@ def _cmd_render(rest):
     exactly the required one (0 clean, 1 drift, 2 cannot-evaluate; a NOT-ADOPTED root reports NOT APPLICABLE
     and exits 0, the pack's own `--root .` case). The mutating `--write` half (VC-4/PR-C) gathers the inert
     git-derived observations caller-side (_opf_observe.gather over the RESOLVED store, exactly as doctor does)
-    and hands them to the same engine, which composes the U6 store-integrity gate and permits the write only
-    on a VALID verdict, printing the findings/cannot-evaluates and returning 2 (writing nothing) otherwise, so
+    and hands them to the same engine, which composes the store-integrity gate and permits the write only
+    when source integrity is sound, printing the findings/cannot-evaluates and returning 2 (writing nothing)
+    otherwise, so
     a write can never read as a silent no-op. Exactly one of `--check`/`--write` is required: a bare
     `opf render` is a usage error (a preview never defaults into a write). The parser is the house fail-closed
     idiom (unknown token, an empty or option-looking or duplicate --root value -> exit 2), matching
@@ -1586,8 +1590,9 @@ def _cmd_upgrade(rest):
     spec_version {to} (spec 9.2). Two origins are supported: a 1.1.0 store takes the 1.1.0 -> {to} delta,
     the spec_version bump alone (no init.toml provenance is fabricated, nothing else changes); a 1.0.0
     store takes the full delta below, straight to {to}.
-    It RESOLVES the store at --root, refuses fail-closed on a store above the tooling spec or on
-    a non-canonical (hand-edited/comment-bearing) manifest or counters, applies EXACTLY the allowed delta as
+    It RESOLVES the store at --root and refuses a store above the tooling spec. When migrating an older
+    store, it requires canonical manifest/counters, clean write paths, and acquisition of its lease,
+    then applies EXACTLY the allowed delta as
     a model regeneration through the canonical new-document emitter (bump spec_version; drop the retired
     decision_support module WHERE PRESENT; add each contribution/maintainer_decision/preference_pattern type
     row NOT already declared by an enabled 1.0.0 module; add the two new view rows; WIDEN the DECISIONS.md
@@ -1599,7 +1604,8 @@ def _cmd_upgrade(rest):
     preconditions: STORE-PATH CLEANLINESS over exactly the paths it writes (HEAD is a verified restore path,
     SECA-verified-restore-path) and a SINGLE-WRITER LEASE it claims atomically and holds across the mutation,
     render, and final doctor (spec 5.7). It NEVER commits: the adopter reviews and merges. A store already at
-    {to} is a byte no-op (idempotent, still requiring doctor-VALID); a NOT-ADOPTED root is NOT APPLICABLE
+    {to} returns without those migration preconditions: doctor-VALID yields a byte no-op (exit 0),
+    otherwise it exits 2 without writing. A NOT-ADOPTED root is NOT APPLICABLE
     (exit 0), any other non-resolved status a located cannot-evaluate (exit 2). Two disclosed residuals: a
     killed run leaves the lease, which is spec-conformant (present only while held; a leftover is released
     through operator reconciliation, spec 5.7) and is what the EEXIST refusal covers; and the lease is not

@@ -84,8 +84,8 @@
           requires no particular tool. The reference tooling validates spec 1.2.0 stores in either
           layout, with limits: it does not render or drift-check per-record views, and the baseline
           validator reports module-tier and importer record content schemas as cannot-evaluate.
-          For a per-record store that declares views, doctor's overall verdict is cannot-evaluate
-          (exit 2).</p>
+          For a store with module-tier or importer records, or a per-record store that declares views,
+          doctor's overall verdict is cannot-evaluate (exit 2).</p>
       </div>
     </div>
     <p>On the assistant-driven path, ask for a plan naming what to create, import, or retire and how the
@@ -106,14 +106,14 @@
       one implementation of it. A base adopter can use their own tooling instead, or adopt by hand. The
       standard and the reference suite are both a draft, so this reference documents each command by
       what it does at source today, except where marked Planned.</p>
-    <p>Every command shares one exit contract, which is what makes it usable as a commit or CI check:
-      <b style="color:var(--ink)">0</b> clean, <b style="color:var(--ink)">1</b> a finding or drift, and
-      <b style="color:var(--ink)">2</b> cannot-evaluate, a fail-closed "I could not tell" that is never
-      read as a pass. One command-specific exception sits on top of this: <code>render --write</code>
-      refuses a source-integrity violation with exit 2 and writes nothing, so a source defect that
-      <code>doctor</code> reports as a finding (exit 1) makes <code>render --write</code> exit 2, declining
-      to write over an unsound source rather than exiting 1. Where a command is aimed at a directory that
-      has not adopted OPFiles, the
+    <p><code>doctor</code> distinguishes <b style="color:var(--ink)">0</b> clean,
+      <b style="color:var(--ink)">1</b> a finding, and <b style="color:var(--ink)">2</b> cannot-evaluate.
+      <code>render --check</code> uses exit 1 for drift. Mutating commands can also exit 2 on a refusal
+      or an unsuccessful operation: <code>render --write</code> requires passing source-integrity
+      checks, with no internal or unattributed faults; otherwise it exits 2 and writes nothing.
+      <code>upgrade</code> exits 2 when its doctor result is not VALID; after a schema rewrite,
+      failure at render or doctor leaves the changes in place for recovery.
+      Where a command is aimed at a directory that has not adopted OPFiles, the
       applicability probes (<code>render</code>, <code>doctor</code>, <code>upgrade</code>,
       <code>absorb</code>) report NOT APPLICABLE and exit 0. The eight commands, documented one by one below, are <code>init</code>,
       <code>render</code>, <code>doctor</code>, <code>import</code>, <code>upgrade</code>,
@@ -166,8 +166,9 @@
       and cannot-evaluates, and a residual count, never a wall of diff lines. Its coverage spans schema
       validity, ID uniqueness and counter monotonicity, bidirectional index reconciliation, transition
       legality where observations suffice, the all-or-none resolution bundle, byte drift for declared
-      baseline views in an inline-layout store, the root <code>VERSION</code> deliverable whenever
-      releases exist, worklog span tiling and frozen digests, changelog coverage and freeze, archive
+      baseline views in an inline-layout store, the root <code>VERSION</code> deliverable (required
+      whenever releases exist, absent before the first release), worklog span tiling and frozen digests,
+      changelog coverage and freeze, archive
       integrity, the tracked-store
       requirement, pointer and sync-target agreement, and path containment.</p>
     <p>Doctor reports per-record view drift and the content schemas of module-tier and importer
@@ -204,9 +205,11 @@
       record, or a promoted store, one per mode; everything not confidently mapped is quarantined rather
       than dropped, and the originals stay in place until an <code>--apply</code> promotes a fully
       reviewed run. An import that promotes quarantined <code>legacy_fragment</code> records can succeed,
-      but afterwards doctor reports cannot-evaluate, and <code>opf render --write</code> and
-      <code>opf upgrade</code> refuse, because the baseline validator does not validate those records'
-      content schemas. Module-tier records have the same effect.</p>
+      but afterwards doctor reports cannot-evaluate, <code>opf render --write</code> refuses, and
+      <code>opf upgrade</code> exits 2 without offering the change, because the baseline validator does
+      not validate those records' content schemas. Module-tier records have the same effect. If an
+      upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before failing at render,
+      leaving the changes in place for recovery.</p>
     <p class="refchips"><code>opf import --scan --set sources.toml</code> <code>opf import --plan --set sources.toml</code> <code>opf import --review R --actor "you" --decisions d.toml</code> <code>opf import --apply R</code></p>
 
     <h3 id="cmd-upgrade"><code>opf upgrade</code></h3>
@@ -215,19 +218,19 @@
     <p>A 1.1.0 store needs only the <code>spec_version</code> bump; a 1.0.0 store also receives the
       earlier schema delta. Neither path creates bootstrap provenance for an existing store.</p>
     <p><b style="color:var(--ink)">How it works.</b> The upgrade is additive and idempotent. It resolves
-      the store and refuses fail-closed on a store above the tooling's spec version, on a hand-edited or
-      comment-bearing manifest or counters, on a held lease, or on a store that is unclean over the paths
-      it will write. Before any write it claims a single-writer lease and holds it across the change,
-      applies exactly the allowed schema delta as a canonical model regeneration (not a textual edit),
-      renders the declared views, and requires a full doctor-valid before offering the change. It never
-      commits: you review and merge. A store already at the target version is a byte no-op, still
-      requiring doctor-valid.</p>
-    <p><b style="color:var(--ink)">Result.</b> The upgraded store staged in your working tree and left
-      uncommitted for your branch-and-merge; a preflight refusal (the fail-closed checks above: a store above
-      the tooling's spec, a hand-edited or comment-bearing manifest or counters, a held lease, or a store
-      unclean over the paths it writes) stops before any write and changes nothing, while a failure once the
-      additive rewrite has begun (at the render or the final doctor) leaves the staged changes in place for a
-      recorded, store-subtree-scoped recovery against the committed HEAD, not a no-op.</p>
+      the store and refuses a store above the tooling's spec version. A store already at the target
+      version returns a byte no-op if doctor is VALID, or exits 2 without writing otherwise.
+      When migrating a 1.0.0 or 1.1.0 store, it requires canonical manifest and counters files,
+      clean write paths, and acquisition of its single-writer lease. Comment-bearing controls or a
+      held lease prevent that migration. It holds the lease across the change, applies the allowed
+      schema delta as a canonical model regeneration, renders the declared views, and requires a full
+      doctor-valid before offering the change. It never commits: you review and merge.</p>
+    <p><b style="color:var(--ink)">Result.</b> A successful migration leaves the upgraded store
+      uncommitted in your working tree for review and merge. A preflight refusal, including a
+      newer-than-supported store or an older store failing the migration preconditions above, stops
+      before writing the schema delta. A failure after the additive rewrite begins, at render or the
+      final doctor, exits 2 and leaves the changes in place for the recorded recovery against the
+      committed HEAD, scoped to the affected store and product paths.</p>
     <p class="refchips"><code>opf upgrade</code> <code>opf upgrade --root .</code></p>
 
     <h3 id="cmd-absorb"><code>opf absorb</code></h3>
@@ -296,8 +299,8 @@
       hand-maintained files and its own checks. The reference tooling validates spec 1.2.0 stores in
       either layout, with limits: it does not render or drift-check per-record views, and the baseline
       validator reports module-tier and importer record content schemas as cannot-evaluate.
-      For a per-record store that declares views, doctor's overall verdict is cannot-evaluate
-      (exit 2).</p>
+      For a store with module-tier or importer records, or a per-record store that declares views,
+      doctor's overall verdict is cannot-evaluate (exit 2).</p>
     <p>The shape of the manual path is short: create the store (either run <code>opf init</code> to
       scaffold it, or write the files from the specification and schemas), commit it, generate the views
       with <code>opf render --write</code> for a supported store or your own renderer, and then work
@@ -417,8 +420,9 @@
       yourself. A hand adopter can check that the store is a tracked git repository (an untracked
       store is a hard failure, not a warning); that generated views match a fresh render; that release
       worklog spans tile the released worklog entries in ID order without gaps or overlaps; and that
-      changelog summary ranges tile the released versions without gaps or overlaps, with published entries
-      unchanged since their recorded digest. These
+      changelog summary ranges, among non-superseded summaries and excluding <code>unreleased</code>,
+      tile the released versions without gaps or overlaps, with published entries unchanged since their
+      recorded digest. These
       are integrity checks specified by OPFiles. Record the scope and results of your manual checks.</p>
   </div>
 </section>
