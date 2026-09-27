@@ -303,8 +303,10 @@ normalization-insensitive filesystem git's toplevel and --show-prefix may echo t
 spelling (getcwd there decides), so the key never rests on them alone: each component of a nested
 store's path inside its toplevel must appear verbatim in its parent's directory listing and lead,
 opened no-follow, to the store root's own identity, so a store addressed by any spelling but the
-stored one refuses and one store never keys two homes (a directory between the toplevel and a
-nested store that cannot be listed refuses too); a store root that is ITSELF a repository is
+stored one refuses and no spelling makes one store key two homes (a directory between the
+toplevel and a nested store that cannot be listed refuses too); a mount-level alias is outside that
+guarantee, since a bind mount inside the enclosing work tree gives one store two real paths with one
+identity and so two keyed homes, a disclosed residual; a store root that is ITSELF a repository is
 resolved only when git's --show-toplevel there names it, so such a store whose .git sets
 core.bare=true (git answers no toplevel) or core.worktree to another directory (git names that
 directory) refuses, where it once anchored on --git-common-dir alone; git's answers for a
@@ -6595,7 +6597,7 @@ def _t_f5_1_signal_acquisition(d, env):
     release_operation(cap)
     funcs = _st_named("_acquire_body", "_create_control_file", "_publish_staged",
                       "_set_record_mode", "_open_path_dir_nofollow", "_fstat_or_refuse",
-                      "_classify_git_entry", "_git_common_dir", "_open_control_dir", "_open_dir_at",
+                      "_classify_git_entry", "_open_control_dir", "_open_dir_at",
                       "_control_root_dir", "_git_rev_parse_path", "_git_rev_parse_output",
                       "_git_view", "_root_spelling", "_bind_repository_view",
                       "_validate_ctl_dir_fd", "_validate_file_fd", "_flock_exclusive",
