@@ -329,8 +329,11 @@ def runner_check(expected, text=None, *, fail_own=0):
                     continue
                 raise
             if stat.S_ISREG(info.st_mode) and info.st_size == len(marker_bytes):
-                # An unrelated write-only log cannot be our readable marker.
-                if fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_WRONLY:
+                # Admit only readable descriptors. O_PATH has O_RDONLY access
+                # bits but cannot be read. A failed flag query still refuses.
+                flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+                if (flags & getattr(os, "O_PATH", 0)
+                        or flags & os.O_ACCMODE not in (os.O_RDONLY, os.O_RDWR)):
                     continue
                 # Readable candidates still fail closed on inspection errors.
                 if os.pread(fd, len(marker_bytes), 0) == marker_bytes:
@@ -492,46 +495,56 @@ exit 0
         raise AssertionError(identity + "/own-argv")
 
 
-def _runner_write_only_fd_check():
+def _runner_non_readable_fd_checks():
     import os
     import subprocess
     import tempfile
 
-    identity = "runner/declared-test-executes/inherited-write-only-fd"
-    # Run the full self-test with a genuine inherited 37-byte O_WRONLY fd.
-    # Suppress only this self-spawning case in the child; keep its other
+    kinds = [("write-only", os.O_WRONLY | os.O_APPEND)]
+    if hasattr(os, "O_PATH"):
+        kinds.append(("path", os.O_PATH))
+    # Run the full self-test once per non-readable inherited 37-byte fd kind.
+    # Suppress only this self-spawning helper in each child; keep its other
     # vectors, registration checks and REDs enabled.
-    with tempfile.TemporaryDirectory(prefix="opf-write-only-fd-") as tmp:
-        os.chmod(tmp, 0o700)
-        log = Path(tmp) / "ordinary.log"
-        log.write_bytes(b"x" * 37)
-        log.chmod(0o600)
-        fd = os.open(log, os.O_WRONLY | os.O_APPEND)
-        try:
-            child = (
-                "import fcntl, importlib, os, sys\n"
-                "from pathlib import Path\n"
-                "from unittest.mock import patch\n"
-                f"assert os.fstat({fd}).st_size == 37\n"
-                f"assert fcntl.fcntl({fd}, fcntl.F_GETFL) & os.O_ACCMODE == os.O_WRONLY\n"
-                "sys.argv = sys.argv[1:]\n"
-                "sys.path.insert(0, str(Path(sys.argv[0]).parent))\n"
-                "module = importlib.import_module(Path(sys.argv[0]).stem)\n"
-                "with patch.object(module, '_runner_write_only_fd_check'):\n"
-                "    raise SystemExit(module.main())\n")
+    for kind, flags in kinds:
+        identity = "runner/declared-test-executes/inherited-" + kind + "-fd"
+        with tempfile.TemporaryDirectory(prefix="opf-" + kind + "-fd-") as tmp:
+            os.chmod(tmp, 0o700)
+            log = Path(tmp) / "ordinary.log"
+            log.write_bytes(b"x" * 37)
+            log.chmod(0o600)
+            fd = os.open(log, flags)
             try:
-                # Deliberate fast-fail ceiling for this regression child.
-                proc = subprocess.run(
-                    [sys.executable, "-I", "-B", "-c", child,
-                     str(Path(__file__).resolve()), "--self-test", "--red-on-revert"],
-                    pass_fds=(fd,), capture_output=True, text=True, timeout=300)
-            except Exception as exc:
-                raise AssertionError(identity) from exc
-            if proc.returncode != 0:
-                raise AssertionError(identity)
-        finally:
-            os.close(fd)
-    print("PASS " + identity)
+                child = (
+                    "import fcntl, importlib, os, sys\n"
+                    "from pathlib import Path\n"
+                    "from unittest.mock import patch\n"
+                    f"assert os.fstat({fd}).st_size == 37\n"
+                    f"flags = fcntl.fcntl({fd}, fcntl.F_GETFL)\n"
+                    f"assert flags & os.O_ACCMODE == {flags & os.O_ACCMODE}\n"
+                    f"assert flags & {flags} == {flags}\n"
+                    "sys.argv = sys.argv[1:]\n"
+                    "sys.path.insert(0, str(Path(sys.argv[0]).parent))\n"
+                    "module = importlib.import_module(Path(sys.argv[0]).stem)\n"
+                    "with patch.object(module, '_runner_non_readable_fd_checks'):\n"
+                    "    raise SystemExit(module.main())\n")
+                try:
+                    # Deliberate fast-fail ceiling for this regression child.
+                    proc = subprocess.run(
+                        [sys.executable, "-I", "-B", "-c", child,
+                         str(Path(__file__).resolve()), "--self-test", "--red-on-revert"],
+                        pass_fds=(fd,), capture_output=True, text=True, timeout=300)
+                except Exception as exc:
+                    print(identity + ": child launch failed: {!r}".format(exc), file=sys.stderr)
+                    raise AssertionError(identity) from exc
+                if proc.returncode != 0:
+                    # Surface the child's own diagnostics; the identity stays exact.
+                    print(identity + ": child rc={}\n{}".format(proc.returncode, proc.stderr),
+                          file=sys.stderr)
+                    raise AssertionError(identity)
+            finally:
+                os.close(fd)
+        print("PASS " + identity)
 
 
 def runner_red_checks(expected):
@@ -650,6 +663,9 @@ def runner_red_checks(expected):
     # every nested Popen even if the recursion guard is reverted. A nonzero
     # outer runner exit alone is insufficient: require the exact refusal and
     # zero launch attempts recorded by the child after env -i.
+    # Replacing sys.executable with PATH-selected python3 is non-discriminating
+    # on a host where sys.executable is /usr/bin/python3; this case alone
+    # does not verify alternate-interpreter selection on that host.
     with tempfile.TemporaryDirectory(prefix="opf-recursion-red-") as tmp:
         os.chmod(tmp, 0o700)
         report = Path(tmp) / "refusal.txt"
@@ -797,7 +813,7 @@ def runner_red_checks(expected):
                 if launch.call_count:
                     raise AssertionError(identity + "/pathsep/unexpected-launch")
 
-    _runner_write_only_fd_check()
+    _runner_non_readable_fd_checks()
 
 
 def main():
