@@ -15,9 +15,13 @@ This reusable pack author tool is opt-in for adopters of this changelog schema.
 For pull_request events or when GITHUB_BASE_REF is set, require a merge HEAD
 whose raw first parent equals the resolved origin/GITHUB_BASE_REF tip, and use
 that parent as the comparison base. Missing or mismatched bindings fail closed.
-Other runs use local ancestry against origin/HEAD and certify only against the
-local tracking ref, which may be unfetched. Full event-payload/push binding and
-remote freshness beyond the checked-out merge remain outside coverage.
+Other runs use local ancestry against --protected (a full ref or origin/BRANCH)
+or origin/HEAD's target when omitted. At the protected tip, compare the last
+first-parent transition. Explicit refs must resolve and cannot be origin/HEAD;
+PR runs derive their target from GITHUB_BASE_REF and reject --protected.
+Full event-payload/push-range binding and remote freshness beyond the checked-out
+merge remain outside coverage. Execution-report emission and registration in
+tools/selftest_checks.toml are deferred; wrapper coverage is not claimed.
 Endpoint comparison cannot see transient changes inside a squash or prove
 atomicity of its intermediate commits. Other version
 sources and semantic release scope remain outside coverage. Existing version,
@@ -28,7 +32,7 @@ stored, so a transforming checkout filter can cause refusal. Submodules at
 either input path are refused, not traversed. Snapshots are sampled separately,
 not transactionally; concurrent writers must be excluded by the caller.
 
-Usage: python3 -I -B tools/check_release_cut.py [--root DIR]
+Usage: python3 -I -B tools/check_release_cut.py [--root DIR] [--protected REF]
        python3 -I -B tools/check_release_cut.py --self-test --red-on-revert
 """
 import argparse
@@ -327,7 +331,7 @@ def working_blob(root, path):
         os.close(directory)
 
 
-def context(root):
+def context(root, protected=None):
     root = Path(one_line(git(root, "rev-parse", "--show-toplevel"), "repository root"))
     require(root.is_absolute(), "repository root must be absolute")
     require(git(root, "rev-parse", "--is-shallow-repository") == b"false\n",
@@ -345,7 +349,15 @@ def context(root):
     base_ref = os.environ.get("GITHUB_BASE_REF", "")
     ci_context = os.environ.get("GITHUB_EVENT_NAME") == "pull_request" or bool(base_ref)
     require(not ci_context or bool(base_ref), "PR comparison requires GITHUB_BASE_REF")
-    if base_ref:
+    if protected is not None:
+        require(not ci_context, "PR comparison derives its target from GITHUB_BASE_REF")
+        if protected.startswith("origin/"):
+            protected = "refs/remotes/" + protected
+        require(protected.startswith("refs/")
+                and protected != "refs/remotes/origin/HEAD",
+                "--protected must name a full ref or origin branch, not origin/HEAD")
+        git(root, "check-ref-format", protected)
+    elif base_ref:
         protected = "refs/remotes/origin/" + base_ref
         git(root, "check-ref-format", protected)
         require(protected != "refs/remotes/origin/HEAD",
@@ -384,9 +396,9 @@ def context(root):
     }
 
 
-def local_report(root):
+def local_report(root, protected=None):
     # context binds PR checkouts to their raw first parent; other runs use local ancestry.
-    root, binding = context(root)
+    root, binding = context(root, protected)
     base = ((None, None) if binding["base_tree"] is None else
             tuple(tree_blob(root, binding["base_tree"], path) for path in PATHS))
     results = []
@@ -435,7 +447,7 @@ def fixture_declaration(base, previous="1.0.0", following="1.1.0", **changes):
 
 
 def test_cases():
-    """Transition policy, local ancestry and PR merge first-parent binding."""
+    """Transition policy, local ancestry, PR merge binding and explicit push refs."""
     base = fixture_changelog(["1.0.0"])
     cut = fixture_changelog(["1.0.0", "1.1.0"])
     declaration = fixture_declaration(base)
@@ -545,6 +557,13 @@ def test_cases():
     for name, expected in (("ci-stale-tracking", 2), ("ci-fresh-tracking", 1),
                            ("base-ref-only-stale", 2), ("base-ref-only-fresh", 1)):
         add(name, expected, after=relabel, new=stale_declaration, tweak=name)
+    add("push-protected", 0, tweak="push-protected")
+    add("push-protected-full", 0, tweak="push-protected-full")
+    add("push-declared", 0, after=cut, new=declaration, tweak="push-protected")
+    add("push-undeclared", 1, after=cut, tweak="push-protected")
+    for name in ("push-bare", "push-empty-ref", "push-invalid-ref", "push-missing-ref",
+                 "push-origin-head", "push-origin-head-full", "ci-explicit-protected"):
+        add(name, 2, tweak=name)
     add("protected-tip", 1, after=cut, tweak="protected")
     add("staged-hidden", 1, tweak="staged")
     return cases
@@ -650,8 +669,10 @@ def fixture_repo(parent, name, case, env):
         (root / CHANGELOG).write_bytes(fixture_changelog(["1.0.0", "1.1.0"]))
         command("add", "--", CHANGELOG)
         (root / CHANGELOG).write_bytes(after)
-    elif tweak == "protected":
+    elif tweak == "protected" or (tweak and tweak.startswith("push-")):
         command("update-ref", "refs/remotes/origin/main", head)
+        if tweak != "protected" and tweak not in ("push-origin-head", "push-origin-head-full"):
+            command("symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
     elif tweak == "missing-head":
         (root / CHANGELOG).unlink()
         commit("delete changelog")
@@ -727,7 +748,7 @@ def observe(script, root, tweak, env):
         env.update({"CI": "true", "GITHUB_ACTIONS": "true",
                     "GITHUB_EVENT_NAME": "pull_request"})
         if tweak in ("ci-base-ref", "ci-merge", "ci-nonmerge",
-                     "ci-stale-tracking", "ci-fresh-tracking"):
+                     "ci-stale-tracking", "ci-fresh-tracking", "ci-explicit-protected"):
             env["GITHUB_BASE_REF"] = "main"
         elif tweak == "ci-missing-base-ref":
             env["GITHUB_BASE_REF"] = "missing"
@@ -738,8 +759,23 @@ def observe(script, root, tweak, env):
     args = [sys.executable, "-I", "-B"]
     if tweak == "unreadable":
         args += ["-c", UNREADABLE_DRIVER]
-    result = subprocess.run(args + [str(script), "--root", str(root)],
-                            capture_output=True, env=env, timeout=TIMEOUT)
+    args += [str(script), "--root", str(root)]
+    if tweak and tweak.startswith("push-"):
+        env.update({"CI": "true", "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "push",
+                    "GITHUB_BASE_REF": "", "GITHUB_REF_NAME": "main"})
+        if tweak != "push-bare":
+            protected = {
+                "push-protected-full": "refs/remotes/origin/main",
+                "push-empty-ref": "",
+                "push-invalid-ref": "origin/../main",
+                "push-missing-ref": "origin/missing",
+                "push-origin-head": "origin/HEAD",
+                "push-origin-head-full": "refs/remotes/origin/HEAD",
+            }.get(tweak, "origin/" + env["GITHUB_REF_NAME"])
+            args += ["--protected", protected]
+    if tweak == "ci-explicit-protected":
+        args += ["--protected", "origin/main"]
+    result = subprocess.run(args, capture_output=True, env=env, timeout=TIMEOUT)
     require(result.returncode in (0, 1, 2) and not result.stderr,
             "self-test child crashed: " + result.stderr.decode("utf-8", "replace"))
     try:
@@ -783,6 +819,20 @@ def self_test(red_on_revert):
                 _, parents = commit_header(root, binding["head"])
                 check(case_id + "-first-parent",
                       len(parents) >= 2 and binding["base"] == parents[0] == binding["target"])
+            if case_id in ("push-protected", "push-protected-full", "push-declared",
+                           "push-undeclared"):
+                binding = report["context"]
+                _, parents = commit_header(root, binding["head"])
+                check(case_id + "-first-parent",
+                      binding["head"] == binding["target"] and binding["base"] == parents[0])
+            if case_id == "push-protected":
+                bare = observe(script, root, "push-bare", env)
+                check("push-protected-without-argument",
+                      bare["code"] == 2 and "refs/remotes/origin/HEAD" in bare["detail"])
+            if case_id in ("push-origin-head", "push-origin-head-full"):
+                check(case_id + "-ambiguous", "not origin/HEAD" in report["detail"])
+            if case_id == "ci-explicit-protected":
+                check(case_id + "-binding", "derives its target" in report["detail"])
             if case_id == "staged-hidden":
                 check("staged-hidden-snapshots",
                       [(r["snapshot"], r["code"]) for r in report["snapshots"]]
@@ -816,6 +866,8 @@ def self_test(red_on_revert):
                  "ci-stale-tracking", 0),
                 ("first-parent-tip", "require(parents[0] == target,",
                  "require(True,", "ci-stale-tracking", 1),
+                ("explicit-protected", "root, binding = context(root, protected)",
+                 "root, binding = context(root)", "push-protected", 2),
             )
             parser_bytes = (script.parents[1] / "opf" / "tools" / "_semver.py").read_bytes()
             for name, old, new, case_id, mutated_code in mutations:
@@ -846,6 +898,7 @@ def self_test(red_on_revert):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path.cwd())
+    parser.add_argument("--protected", help="full ref or origin/BRANCH (non-PR runs only)")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--red-on-revert", action="store_true")
     args = parser.parse_args(argv)
@@ -854,7 +907,7 @@ def main(argv=None):
     try:
         if args.self_test:
             return self_test(args.red_on_revert)
-        report = local_report(args.root)
+        report = local_report(args.root, args.protected)
     except OracleFailure as exc:
         print("FAIL self-test assertion " + exc.case_id, file=sys.stderr)
         return 1

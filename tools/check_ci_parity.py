@@ -85,6 +85,17 @@ ALLOWLIST = (
     },
     {
         "side": "ci-only",
+        "identity": "tools/check_release_cut.py --protected <ref:origin/${GITHUB_REF_NAME}>",
+        "reason": (
+            "The push CI job supplies its runtime-derived origin ref because "
+            "origin/HEAD need not exist; at the protected tip the gate checks "
+            "the last first-parent transition. The bare leg runs locally and "
+            "in pull_request CI, where GITHUB_BASE_REF binds the merge parent."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
         "identity": "tools/check_version_monotonicity.py --base <ref:origin/${GITHUB_BASE_REF}>",
         "reason": (
             "CI derives the comparison base from trusted event and repository "

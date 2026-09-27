@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "b8717bd58612f948d78fcddc622062b0b4aee3303c71904175a9eccbec883533"
+tree-sha256 = "9290ddcf14b774bb0aa847cf6b3a481dec40c6c81e106c79bceda63ae1ddc0c1"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 188468
-sha256 = "53fb93ea7556a2b3626f575b5067c709fae3d9fcd604540aea19980418ad51b4"
+bytes = 188841
+sha256 = "339025440dc8e870e0960b6c44e185da22ee0c65042ff7d1303302cd7a6b5393"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -3111,8 +3111,8 @@ sha256 = "7f6b2539235b5eea9dc6a61636336ebbdeb7917d1e23f35a6663107ee519ab7b"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 77441
-sha256 = "443f9b3546255f7e8235abcfe38af75f605de21a679213841f6081ee51850194"
+bytes = 77953
+sha256 = "4fc7ebca26611970f8e11449e79cd76d2bb8f522697bfac790d038329f08d18f"
 
 [[sources]]
 path = "tools/check_clauses.py"
@@ -3246,8 +3246,8 @@ sha256 = "3e50583f0a84c71eea3935d977556670bb9086bbbac6e0d83517fa055ef7a778"
 
 [[sources]]
 path = "tools/check_release_cut.py"
-bytes = 41513
-sha256 = "96025863059784e3f0409d47d3b1a57e06cdcb9c192a39318eb31cf3d97ae334"
+bytes = 45031
+sha256 = "d2b448e10ca8c9fac7b7ea396367a0986e4dbb18e160b98fd4d832e1091a32c0"
 
 [[sources]]
 path = "tools/check_release_delta.py"
