@@ -228,7 +228,8 @@ def _load_records(store_root_fd, relpath, type_name, registered_vendors, registe
     return raw, out
 
 
-def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds):
+def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds, *,
+                  on_legacy_conflict=None):
     """Load and validate worklog.toml (spec 6.2); return (raw_bytes, [entry, ...]) in file order.
     Disclosed divergence (disclose-guard-residuals): unlike the index schema marker, which
     _load_records pins MANDATORY and exact, the ledger schema marker follows U3 optional-marker
@@ -236,11 +237,14 @@ def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds):
     version is refused) but PERMITS an absent one. A schema-less ledger authored for another schema
     version is not caught here; grading an unsupported-schema-version ledger is U3/U6 remit (F2)."""
     try:
-        raw, data = _opf_worklog.load_worklog_at(
-            store_root_fd, relpath.rsplit("/", 1)[0], with_raw=True,
-            read_legacy=_read_raw_and_parsed)
+        got = _opf_worklog.load_worklog_at(
+            store_root_fd, relpath.rsplit("/", 1)[0], required=False, with_raw=True,
+            read_legacy=_read_raw_and_parsed, on_legacy_conflict=on_legacy_conflict)
     except _opf_worklog.WorklogError as exc:
         raise ViewsError(str(exc))
+    if got is None:
+        raise ViewsError("declared source {} is missing (the worklog ledger must exist)".format(relpath))
+    raw, data = got
     wv = _opf_release.validate_worklog(data, registered_vendors=registered_vendors,
                                        registered_kinds=registered_kinds)
     if wv.status != _opf_store.VALID:
@@ -1574,7 +1578,7 @@ def _render_resolved_store(product_root, res, check, capture=None):
         os.close(product_root_fd)
 
 
-def plan_views(store_root_fd, machine_rel):
+def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None):
     """Phase 1 of the resolved-store render, extracted as a public READ-ONLY planner (OPF core-tooling U6
     reuses it for byte-level view-drift detection). Reads the manifest and every declared view source
     beneath store_root_fd, renders each declared target's full text, and returns the planned list of
@@ -1622,7 +1626,9 @@ def plan_views(store_root_fd, machine_rel):
     for name in sorted(needed):
         relpath = _source_relpath(machine_rel, name, manifest)
         if name == "worklog":
-            raw, entries = _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds)
+            raw, entries = _load_worklog(
+                store_root_fd, relpath, registered_vendors, registered_kinds,
+                on_legacy_conflict=on_legacy_conflict)
             rows_by_source[name] = entries
         elif name == "version":
             raw, releases, summaries = _load_version(store_root_fd, relpath)

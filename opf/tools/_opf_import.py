@@ -908,12 +908,17 @@ def _worklog_ids(store_root_fd, machine_rel, roster=None, registered_vendors=fro
     registered custom worklog kinds are outside this build's manifest surface (validate_worklog's built-in
     kind vocabulary is the accepted set here), so a promoted entry using a custom registered kind fails closed
     to CANNOT-EVALUATE rather than being wrongly accepted."""
-    rel = "{}/worklog.toml".format(machine_rel)
     import _opf_worklog
     try:
+        manifest = _read_toml(store_root_fd, machine_rel + "/" + _opf_store.MANIFEST_NAME)
+        rel = _opf_worklog.source_relpath(machine_rel, manifest)
         data = _opf_worklog.load_worklog_at(store_root_fd, machine_rel, required=False)
-    except _opf_worklog.WorklogError as exc:
+    except _opf_store.StoreError as exc:
         raise _cannot(str(exc))
+    except _journal.JournalError as exc:
+        raise _cannot("cannot read {} ({})".format(rel, exc))
+    except ValueError as exc:
+        raise _cannot("cannot parse {} ({})".format(rel, exc))
     if data is None:
         return []
     wv = _opf_release.validate_worklog(data, registered_vendors=registered_vendors)

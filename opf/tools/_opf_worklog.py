@@ -59,6 +59,10 @@ def generation(manifest):
     value = opf.get("worklog", 1)
     if type(value) is not int or value not in (1, 2):
         raise WorklogError("[opf].worklog must be the integer 1 or 2")
+    if value > _opf_store.SUPPORTED_WORKLOG:
+        raise WorklogError("[opf].worklog = {} is not supported by this build "
+                           "(maximum supported worklog generation: {})".format(
+                               value, _opf_store.SUPPORTED_WORKLOG))
     return value
 
 
@@ -109,22 +113,22 @@ def build_alias_map(entries):
 
 
 def _read_document(root_fd, relpath):
-    """The store reader's original byte cap and single-link policy, plus raw bytes."""
-    try:
-        return _opf_store._read_toml_contained(root_fd, relpath, with_raw=True)
-    except (_opf_store.StoreError, OSError, RecursionError) as exc:
-        raise WorklogError("cannot read worklog {} ({})".format(relpath, exc))
+    """Preserve the contained reader's exceptions for each legacy caller to translate."""
+    return _opf_store._read_toml_contained(root_fd, relpath, with_raw=True)
 
 
-def load_worklog_at(root_fd, machine_rel, *, required=True, with_raw=False, read_legacy=None):
-    """Load the active model beneath an already-resolved store descriptor.
+def load_worklog_at(root_fd, machine_rel, *, required=True, with_raw=False, read_legacy=None,
+                    on_legacy_conflict=None):
+    """Load only the manifest-selected source beneath an already-resolved descriptor.
 
-    with_raw preserves generation-1 bytes for view headers. Generation 2 uses a
-    length-framed, filename-sorted byte stream as its view source identity.
-    read_legacy lets views retain their existing raw-byte reader and error policy;
-    it cannot select the layout. The default retains the store reader safeguards.
-    required=False preserves the importer's optional generation-1 intake; a
-    generation-2 directory is always required, even when it has no entries.
+    with_raw preserves legacy bytes; generation 2 uses a length-framed stream in
+    numeric (number, suffix) order. read_legacy preserves the view reader's policy.
+    required=False allows only an absent generation-1 ledger.
+
+    Standalone readers refuse the opposite shape. Doctor alone supplies
+    on_legacy_conflict: it already grades the generation-1 directory as INVALID
+    in C-CONTAINMENT, and must still inspect the legacy ledger and its views.
+    This callback cannot change source selection or permit a generation-2 conflict.
     """
     try:
         manifest = _opf_store._read_toml_contained(
@@ -132,23 +136,35 @@ def load_worklog_at(root_fd, machine_rel, *, required=True, with_raw=False, read
         gen = generation(manifest)
         rel = source_relpath(machine_rel, manifest)
         other = machine_rel + "/" + (LEGACY_NAME if gen == 2 else DIRECTORY_NAME)
-        # Generation 1 keeps its legacy read behavior; containment already grades
-        # a stray worklog/ there. Do not turn its existing INVALID into CANNOT-EVALUATE.
-        if gen == 2 and _journal._lstat_contained(root_fd, other) is not None:
-            raise WorklogError("{} conflicts with the manifest-selected worklog shape".format(other))
-        if gen == 1:
-            got = (read_legacy or _read_document)(root_fd, rel)
-            if got is None:
-                if required:
-                    raise WorklogError("{} is absent (the active worklog ledger is required)".format(rel))
-                return None
-            return got if with_raw else got[1]
+        if _journal._lstat_contained(root_fd, other) is not None:
+            if gen == 1 and on_legacy_conflict is not None:
+                on_legacy_conflict(other)
+            else:
+                raise WorklogError("{} conflicts with the manifest-selected worklog shape".format(other))
+    except WorklogError:
+        raise
+    except (_opf_store.StoreError, _journal.JournalError, OSError, RecursionError) as exc:
+        raise WorklogError("cannot load worklog ({})".format(exc))
+
+    if gen == 1:
+        # Outside the generation-2 wrapper: views, doctor, import, and changelog
+        # retain their original exception translation, including archive intake.
+        got = (read_legacy or _read_document)(root_fd, rel)
+        if got is None:
+            if required:
+                raise WorklogError("{} is absent (the active worklog ledger is required)".format(rel))
+            return None
+        return got if with_raw else got[1]
+    try:
         dfd = _journal._open_dir_contained(root_fd, rel)
         try:
             entries, blobs = [], []
-            for name in sorted(os.listdir(dfd)):
+            names = os.listdir(dfd)
+            for name in names:
                 if parse_worklog_filename(name) is None:
                     raise WorklogError("{}/{} is not a worklog filename".format(rel, name))
+            for name in sorted(names, key=lambda name: (
+                    parse_worklog_filename(name)[0], parse_worklog_filename(name)[1] or "")):
                 got = _read_document(dfd, name)
                 if got is None:
                     raise WorklogError("{}/{} vanished during enumeration".format(rel, name))
@@ -167,6 +183,8 @@ def load_worklog_at(root_fd, machine_rel, *, required=True, with_raw=False, read
             return (b"".join(blobs), data) if with_raw else data
         finally:
             os.close(dfd)
+    except WorklogError:
+        raise
     except (_opf_store.StoreError, _journal.JournalError, OSError, RecursionError) as exc:
         raise WorklogError("cannot load worklog ({})".format(exc))
 
@@ -192,6 +210,15 @@ def load_worklog(store):
 
 
 def self_test():
+    from unittest.mock import patch
+    from _opf_worklog_regressions import self_test as regressions
+    result = regressions()
+    # Explicit in-memory activation only; no environment variable or CLI bypass.
+    with patch.object(_opf_store, "SUPPORTED_WORKLOG", 2):
+        return max(result, _self_test())
+
+
+def _self_test():
     """Discriminators for each PR-1 rule; filesystem fixtures never touch a live store."""
     import copy
     import tempfile
@@ -303,7 +330,7 @@ def self_test():
             digest = coverage_digest(old["entry"])
             directory = machine / DIRECTORY_NAME
             directory.mkdir()
-            check("gen1-does-not-probe", load_worklog_at(fd, ".working/custom") == old)
+            check("gen1-mixed-refused", refused(lambda: load_worklog_at(fd, ".working/custom")))
             manifest.write_text("[opf]\nworklog = 2\n", encoding="utf-8")
             check("gen2-mixed-refused", refused(lambda: load_worklog_at(fd, ".working/custom")))
             legacy.unlink()
@@ -343,8 +370,8 @@ def self_test():
             os.mkfifo(record)
             check("fifo", refused(lambda: load_worklog_at(fd, ".working/custom")))
             record.unlink()
-            bad = directory / "README"
-            bad.write_text("x", encoding="utf-8")
+            bad = directory / "WL-1.TOML"
+            bad.write_text('id = "WL-1"\n', encoding="utf-8")
             check("directory-closure", refused(lambda: load_worklog_at(fd, ".working/custom")))
             bad.unlink()
             with patch.object(os, "listdir", side_effect=PermissionError("fixture")):

@@ -497,6 +497,9 @@ def _managed_paths(resolution, manifest_data):
     # A malformed [unmanaged] entry is a located CANNOT-EVALUATE (a by-construction backstop: the manifest
     # validator `_opf_store._validate_unmanaged` normally rejects an escaping / non-string entry upstream, so
     # `detect` fails closed at init-first validation before reaching here; this mirrors the checker's cant).
+    if cls.worklog_errors:
+        raise _cannot("worklog generation cannot be evaluated, mirroring _opf_check "
+                      "C-CONTAINMENT: {}".format("; ".join(cls.worklog_errors)))
     if cls.malformed:
         raise _cannot("a declared [unmanaged] path entry cannot be evaluated, mirroring _opf_check "
                       "C-CONTAINMENT (spec 14.2): {}".format("; ".join(cls.malformed)))

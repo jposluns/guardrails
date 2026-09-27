@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+"""Bounded, in-memory regressions for the PR-1 intake boundary.
+
+The fixture replaces contained filesystem primitives, not the loader or TOML
+parser. Permission failures are injected at read time so these tests also work
+as root. Production callers and their exception translations still execute.
+"""
+import contextlib
+import os
+import stat
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import _journal
+import _opf_absorb
+import _opf_changelog
+import _opf_check
+import _opf_import
+import _opf_ingest
+import _opf_store
+import _opf_views
+import _opf_worklog as wl
+
+M = "m"
+LEGACY = "m/worklog.toml"
+ARCHIVE = "m/archive/2026/worklog.toml"
+BODY = (b'id = "WL-1"\ndate = "2026-01-01T00:00:00Z"\n'
+        b'actor = {kind = "maintainer"}\nkind = "fixed"\nsummary = "x"\n')
+LEDGER = b"schema = 1\n[[entry]]\n" + BODY
+
+
+class _Fixture:
+    def __init__(self, gen=1):
+        self.manifest = {"opf": {"standard": "opf", "layout": "inline", "worklog": gen}}
+        self.files = {
+            "m/manifest.toml": ('[opf]\nstandard = "opf"\nlayout = "inline"\n'
+                                'worklog = {}\n'.format(gen)).encode(),
+            "m/version.toml": b"schema = 1\n",
+            "CHANGELOG.md": b"",
+        }
+        self.dirs = {"m", "m/archive", "m/archive/2026"}
+        if gen == 1:
+            self.files[LEGACY] = LEDGER
+        else:
+            self.dirs.add("m/worklog")
+            self.files["m/worklog/WL-1.toml"] = BODY
+        self.prefixes = {}
+
+    def path(self, fd, rel):
+        return self.prefixes.get(fd, "") + rel
+
+    def lstat(self, fd, rel):
+        path = self.path(fd, rel)
+        if path in self.dirs:
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_size=0)
+        if path in self.files:
+            raw = self.files[path]
+            return SimpleNamespace(st_mode=stat.S_IFREG | 0o600,
+                                   st_size=0 if isinstance(raw, Exception) else len(raw))
+        return None
+
+    def read(self, fd, rel, **_kwargs):
+        raw = self.files[self.path(fd, rel)]
+        if isinstance(raw, Exception):
+            raise raw
+        return raw, self.lstat(fd, rel)
+
+    def open_root(self, *_args):
+        out = os.dup(self.fd)
+        self.prefixes[out] = ""
+        return out
+
+    def open_dir(self, fd, rel):
+        path = self.path(fd, rel)
+        if path not in self.dirs:
+            raise _journal.JournalError("fixture directory absent: " + path)
+        out = os.dup(self.fd)
+        self.prefixes[out] = path + "/"
+        return out
+
+    def listdir(self, fd):
+        prefix = self.prefixes[fd]
+        return list(dict.fromkeys(
+            p[len(prefix):].split("/", 1)[0]
+            for p in self.files if p.startswith(prefix)))
+
+    def __enter__(self):
+        self.stack = contextlib.ExitStack()
+        # Real descriptors keep close/dup ownership honest; all fixture data stays in memory.
+        self.root = Path(__file__).resolve().parent
+        self.fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        self.stack.callback(os.close, self.fd)
+        self.res = SimpleNamespace(status=_opf_store.RESOLVED, store_root=self.root,
+                                   pointer_source="default", machine_rel=M)
+        for obj, name, value in (
+                (_journal, "_lstat_contained", self.lstat),
+                (_journal, "_read_contained", self.read),
+                (_journal, "_open_dir_contained", self.open_dir),
+                (os, "listdir", self.listdir),
+                (_opf_store, "_open_store_root_fd", self.open_root),
+                (_opf_store, "_open_root_fd", self.open_root),
+                (_opf_store, "resolve_store", lambda *_: self.res)):
+            self.stack.enter_context(patch.object(obj, name, value))
+        return self
+
+    def __exit__(self, *exc):
+        return self.stack.__exit__(*exc)
+
+
+def _error(call):
+    try:
+        call()
+    except Exception as exc:
+        return str(exc)
+    return None
+
+
+def _doctor(fx, archive=False):
+    rep = _opf_check._Report()
+    _opf_check._gather_worklog(
+        fx.fd, ARCHIVE if archive else LEGACY, frozenset(), rep, required=not archive,
+        machine_rel=None if archive else M)
+    return rep.cannot
+
+
+def _readers(fx):
+    return {
+        "loader": lambda: _error(lambda: wl.load_worklog_at(fx.fd, M)),
+        "views": lambda: _error(lambda: _opf_views._load_worklog(
+            fx.fd, LEGACY, frozenset(), [])),
+        "import": lambda: _error(lambda: _opf_import._worklog_ids(fx.fd, M)),
+        "changelog": lambda: _opf_changelog._load_inputs(fx.res, fx.root)[-1],
+        "absorb": lambda: (_opf_absorb.evaluate(fx.root).findings or [None])[0],
+    }
+
+
+def self_test():
+    failures, checks = [], []
+
+    def check(name, ok):
+        checks.append(name)
+        if not ok:
+            failures.append(name)
+
+    # Baseline 32fcfbc2dba710eab3d03e53ad77fa754461fe50:
+    # _opf_views.py:230-245; _opf_check.py:469-488,1132-1156;
+    # _opf_import.py:486-506,896-919; _opf_changelog.py:451-555.
+    # Literal expected bytes, independently read from that revision's translators.
+    missing = {
+        "views": "declared source m/worklog.toml is missing (the worklog ledger must exist)",
+        "doctor": ["m/worklog.toml is absent (the active worklog ledger is required; spec 6.2)"],
+        "import": None,
+        "changelog": "worklog.toml is absent from the resolved store (a required input; fail-closed, spec 6.2)",
+    }
+    parse = "cannot parse m/worklog.toml (Expected '=' after a key in a key/value pair (at line 1, column 5))"
+    unreadable = "cannot read m/worklog.toml (fixture unreadable)"
+    for label, raw, expected in (
+            ("missing", None, missing),
+            ("malformed", b"not TOML [", {
+                "views": parse, "doctor": ["cannot read m/worklog.toml: " + parse],
+                "import": parse, "changelog": parse}),
+            ("unreadable", PermissionError("fixture unreadable"), {
+                "views": unreadable, "doctor": ["cannot read m/worklog.toml: " + unreadable],
+                "import": unreadable, "changelog": unreadable})):
+        with _Fixture() as fx:
+            if raw is None:
+                del fx.files[LEGACY]
+            else:
+                fx.files[LEGACY] = raw
+            readers = _readers(fx)
+            readers["doctor"] = lambda: _doctor(fx)
+            for caller, baseline in expected.items():
+                check("F1-baseline-" + label + "-" + caller, readers[caller]() == baseline)
+            # Absorb delegates to the same intake and must preserve its bytes too.
+            check("F1-baseline-" + label + "-absorb", readers["absorb"]() == expected["changelog"])
+            if raw is not None:
+                check("F1-baseline-" + label + "-loader", readers["loader"]() == expected["changelog"])
+            else:
+                check("F1-optional-loader-missing", wl.load_worklog_at(fx.fd, M, required=False) is None)
+
+    archive_parse = ("cannot parse m/archive/2026/worklog.toml "
+                     "(Expected '=' after a key in a key/value pair (at line 1, column 5))")
+    archive_unreadable = "cannot read m/archive/2026/worklog.toml (fixture unreadable)"
+    for label, raw, message in (
+            ("missing", None, None),
+            ("malformed", b"not TOML [", archive_parse),
+            ("unreadable", PermissionError("fixture unreadable"), archive_unreadable)):
+        with _Fixture() as fx:
+            if raw is not None:
+                fx.files[ARCHIVE] = raw
+            check("F1-baseline-archive-" + label + "-loader",
+                  _error(lambda: wl.load_archive_worklog_at(fx.fd, ARCHIVE)) == message)
+            expected = [] if message is None else ["cannot read m/archive/2026/worklog.toml: " + message]
+            check("F1-baseline-archive-" + label + "-doctor", _doctor(fx, archive=True) == expected)
+
+    for ref in ("WL-1\u0662", "WL-1\u0662.abcd", "WL-1\uff12.abcd"):
+        check("F3-ascii-ref-" + ref, wl._valid_wl_ref(ref) is None)
+        check("F3-ascii-filename-" + ref, wl.parse_worklog_filename(ref + ".toml") is None)
+
+    fence = ("[opf].worklog = 2 is not supported by this build "
+             "(maximum supported worklog generation: 1)")
+    check("F5-shipped-ceiling", _opf_store.SUPPORTED_WORKLOG == 1)
+    with _Fixture(2) as fx:
+        for caller, read in _readers(fx).items():
+            check("F5-production-" + caller, read() == fence)
+        check("F5-production-doctor", _doctor(fx) == [fence])
+        mv = _opf_store.validate_manifest(fx.manifest)
+        check("F5-production-manifest", mv.status == _opf_store.CANNOT_EVALUATE
+              and mv.findings == [fence])
+
+    with patch.object(_opf_store, "SUPPORTED_WORKLOG", 2):
+        for gen in (1, 2):
+            with _Fixture(gen) as fx:
+                fx.files[LEGACY] = LEDGER
+                fx.dirs.add("m/worklog")
+                conflict = ("m/" + ("worklog" if gen == 1 else "worklog.toml")
+                            + " conflicts with the manifest-selected worklog shape")
+                for caller, read in _readers(fx).items():
+                    check("F2-mixed-{}-{}".format(gen, caller), read() == conflict)
+                if gen == 1:
+                    # The doctor's explicit policy still reads the manifest-selected ledger.
+                    check("F2-doctor-legacy-intake", _doctor(fx) == [])
+                    check("F2-doctor-legacy-view", _opf_views._load_worklog(
+                        fx.fd, LEGACY, frozenset(), [],
+                        on_legacy_conflict=_opf_check._worklog_legacy_conflict)[0] == LEDGER)
+                else:
+                    check("F2-doctor-gen2-conflict", _doctor(fx) == [conflict])
+
+        with _Fixture(2) as fx:
+            check("F5-explicit-test-activation", wl.load_worklog_at(fx.fd, M)["entry"][0]["id"] == "WL-1")
+            # Behavioral route assertions fail at their own name, before any unrelated
+            # ledger/manifest validation can mask a bypass.
+            sentinel = "fixture worklog route"
+            with patch.object(wl, "load_worklog_at", side_effect=wl.WorklogError(sentinel)) as intake:
+                check("F3-changelog-route",
+                      _opf_changelog._load_inputs(fx.res, fx.root)[-1] == sentinel
+                      and intake.call_count == 1)
+            with patch.object(wl, "load_worklog_at", side_effect=wl.WorklogError(sentinel)) as intake:
+                check("F3-absorb-route", _opf_absorb.evaluate(fx.root).findings == [sentinel]
+                      and intake.call_count == 1)
+            with patch.object(wl, "load_worklog_at", side_effect=wl.WorklogError(sentinel)) as intake:
+                check("F3-doctor-route", _doctor(fx) == [sentinel] and intake.call_count == 1)
+
+            fx.files["m/worklog/WL-10.toml"] = BODY.replace(b"WL-1", b"WL-10")
+            fx.files["m/worklog/WL-2.abcd.toml"] = BODY.replace(b"WL-1", b"WL-2.abcd")
+            fx.files["m/worklog/WL-2.0001.toml"] = BODY.replace(b"WL-1", b"WL-2.0001")
+            fx.files["m/worklog/WL-2.toml"] = BODY.replace(b"WL-1", b"WL-2")
+            want = ["WL-1", "WL-2", "WL-2.0001", "WL-2.abcd", "WL-10"]
+            raw, data = wl.load_worklog_at(fx.fd, M, with_raw=True)
+            check("F4-numeric-suffix-order", [e["id"] for e in data["entry"]] == want)
+            want_raw = b""
+            for ident in want:
+                name = (ident + ".toml").encode()
+                body = fx.files["m/worklog/" + name.decode()]
+                want_raw += str(len(name)).encode() + b":" + name
+                want_raw += str(len(body)).encode() + b":" + body
+            check("F4-source-byte-order", raw == want_raw)
+            message = _error(lambda: _opf_import._worklog_ids(fx.fd, M))
+            check("F7-selected-display-path",
+                  message is not None and message.startswith("m/worklog: worklog does not satisfy"))
+
+        with _Fixture(2) as fx:
+            # Valid TOML and a matching id: only the filename grammar should reject it.
+            del fx.files["m/worklog/WL-1.toml"]
+            fx.files["m/worklog/WL-1.TOML"] = BODY
+            check("F3-directory-closure",
+                  _error(lambda: wl.load_worklog_at(fx.fd, M))
+                  == "m/worklog/WL-1.TOML is not a worklog filename")
+
+        # Exercise the doctor's directory walk, not only its pure leaf classifier.
+        for gen in (1, 2):
+            with _Fixture(gen) as fx:
+                rep = _opf_check._Report()
+                def listing(_fd, rel, _rep):
+                    return {
+                        ".working": (["toml"], []),
+                        ".working/toml": (["worklog"], []),
+                        ".working/toml/worklog": ([], ["WL-1.toml"]),
+                    }[rel]
+                with patch.object(_opf_check, "_list_dir", listing):
+                    _opf_check._check_containment(fx.fd, ".working/toml", fx.manifest, "clean", rep)
+                if gen == 1:
+                    check("F2-doctor-containment-classification", not rep.cannot
+                          and any("unregistered path '.working/toml/worklog'" in x for x in rep.findings))
+                else:
+                    check("F3-doctor-directory-route", not rep.cannot and not rep.findings)
+
+    with _Fixture() as fx:
+        bad = {"opf": {"worklog": "bad", "layout": "inline"}}
+        cls = _opf_check.classify_containment(bad, M)
+        check("F6-generation-classification", not cls.malformed and bool(cls.worklog_errors))
+        msg = _error(lambda: _opf_ingest._managed_paths(fx.res, bad))
+        check("F6-ingest-attribution", msg is not None
+              and "worklog generation cannot be evaluated" in msg and "[unmanaged]" not in msg)
+
+    for name in failures:
+        print("OPF-WORKLOG REGRESSION: FAIL " + name)
+    if not failures:
+        print("OPF-WORKLOG REGRESSION: PASS ({} boundary assertions)".format(len(checks)))
+    return int(bool(failures))

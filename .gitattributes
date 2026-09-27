@@ -528,6 +528,7 @@ opf/tools/_opf_schema.py text eol=lf
 opf/tools/_opf_store.py text eol=lf
 opf/tools/_opf_views.py text eol=lf
 opf/tools/_opf_worklog.py text eol=lf
+opf/tools/_opf_worklog_regressions.py text eol=lf
 opf/tools/_semver.py text eol=lf
 opf/tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json binary
 opf/tools/_vendor/licenses/marko-MIT.txt text eol=lf

@@ -96,6 +96,8 @@ STORE_ROOT_CONTROL_DIRS = (".git", ".aiqt")
 # SUPPORTED_HOMES is the highest homes generation this tooling activates; homes 2 activates with the
 # migration, so until then every store, whatever it declares, keeps its legacy grading (generation 1).
 SUPPORTED_HOMES = 1
+# Worklog 2 remains test-only until schema, doctor, and release support land.
+SUPPORTED_WORKLOG = 1
 IMPORTED_DIRNAME = "imported"
 ARCHIVE_DIRNAME_STORE = "archive"       # distinct from the machine-store record archive
 STAGING_DIRNAME = "staging"
@@ -1171,6 +1173,15 @@ def validate_manifest(data, supported_profiles=None):
         return ManifestValidation(CANNOT_EVALUATE,
                                   ["[opf].standard is absent or is not {!r} (not identifiably a "
                                    "opf store)".format(STANDARD_TOKEN)])
+
+    # Refuse activation before any production validator can interpret generation-2
+    # entries using the generation-1 schema/release rules. No schema activation here.
+    if "worklog" in base:
+        import _opf_worklog
+        try:
+            _opf_worklog.generation(data)
+        except _opf_worklog.WorklogError as exc:
+            return ManifestValidation(CANNOT_EVALUATE, [str(exc)])
 
     findings = []
     _validate_top_level(data, findings)

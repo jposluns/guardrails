@@ -1130,6 +1130,12 @@ def _gather_active_records(root_fd, machine_rel, enabled_types, layout, register
     return recs, recon
 
 
+def _worklog_legacy_conflict(_relpath):
+    """C-CONTAINMENT grades the stray directory; keep inspecting the declared legacy source."""
+    # Only load_worklog_at's generation-1 branch invokes this policy.
+    return None
+
+
 def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine_rel=None):
     """Read and validate a worklog.toml (active or an archive bucket) through U3's validate_worklog, and
     return its WL-number -> entry map. A required (active) worklog that is absent is CANNOT-EVALUATE; an
@@ -1138,12 +1144,17 @@ def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine
         if machine_rel is None:       # explicitly named archive bucket, never shape-probed (M7)
             data = _opf_worklog.load_archive_worklog_at(root_fd, relpath)
         else:
-            data = _opf_worklog.load_worklog_at(root_fd, machine_rel, required=False)
+            data = _opf_worklog.load_worklog_at(
+                root_fd, machine_rel, required=False, on_legacy_conflict=_worklog_legacy_conflict)
         st = "absent" if data is None else "present"
     except _opf_worklog.WorklogError as exc:
         rep.cant(str(exc))
         return None
-    if st == "error":
+    except StoreError as exc:
+        rep.cant("cannot read {}: {}".format(relpath, exc))
+        return None
+    except _journal.JournalError as exc:
+        rep.cant("cannot read {} ({})".format(relpath, exc))
         return None
     if st == "absent":
         if required:
@@ -1938,10 +1949,12 @@ def _check_evidence(root_fd, homes, rep):
 # `managed_file` the tree-walk managed test; and `layout` / `perrecord_body_dirs` / `archive_root` /
 # `imports_root` the derived structures the walk needs; `homes` the store's active homes generation and
 # `control_roots` / `evidence_roots` the store control and homes-2 evidence roots it registers.
+# `worklog_errors` holds generation failures separately from malformed [unmanaged] entries.
 ContainmentClassification = collections.namedtuple(
     "ContainmentClassification",
     ("view_targets", "valid_unmanaged", "malformed", "colliding", "managed_file", "layout",
-     "perrecord_body_dirs", "archive_root", "imports_root", "control_roots", "evidence_roots", "homes"))
+     "perrecord_body_dirs", "archive_root", "imports_root", "control_roots", "evidence_roots", "homes",
+     "worklog_errors"))
 
 
 def classify_containment(manifest_data, machine_rel):
@@ -1994,10 +2007,11 @@ def classify_containment(manifest_data, machine_rel):
                 malformed.append(
                     "C-CONTAINMENT: [unmanaged] path entry {} is not a contained store-relative string "
                     "(spec 14.2); the unmanaged declaration cannot be evaluated".format(_safe_display(p)))
+    worklog_errors = []
     try:
         worklog2 = _opf_worklog.generation(manifest_data) == 2
     except _opf_worklog.WorklogError as exc:
-        malformed.append("C-CONTAINMENT: " + str(exc))
+        worklog_errors.append("C-CONTAINMENT: worklog generation cannot be evaluated: " + str(exc))
         worklog2 = False
     ledger_names = frozenset({MANIFEST_NAME, COUNTERS_NAME, VERSION_NAME, LEASE_NAME,
                               INIT_PROVENANCE_NAME} | (set() if worklog2 else {WORKLOG_NAME}))
@@ -2096,7 +2110,8 @@ def classify_containment(manifest_data, machine_rel):
         view_targets=view_targets, valid_unmanaged=valid_unmanaged, malformed=malformed,
         colliding=colliding, managed_file=managed_file, layout=layout,
         perrecord_body_dirs=perrecord_body_dirs, archive_root=archive_root, imports_root=imports_root,
-        control_roots=control_roots, evidence_roots=evidence_roots, homes=homes)
+        control_roots=control_roots, evidence_roots=evidence_roots, homes=homes,
+        worklog_errors=worklog_errors)
 
 
 def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
@@ -2114,7 +2129,7 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
     cls = classify_containment(manifest_data, machine_rel)
     # Re-emit the classifier's collected messages in the ORIGINAL order (all malformed CANNOT-EVALUATEs, then
     # all colliding findings), exactly as the inline classification emitted them before the extraction.
-    for msg in cls.malformed:
+    for msg in cls.malformed + cls.worklog_errors:
         rep.cant(msg)
     for msg in cls.colliding:
         rep.finding(msg)
@@ -2860,7 +2875,8 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     if isinstance(views_tbl := (manifest_data.get("views") if isinstance(manifest_data, dict) else None),
                   dict) and len(views_tbl) > 0:
         try:
-            planned = _opf_views.plan_views(root_fd, machine_rel)
+            planned = _opf_views.plan_views(
+                root_fd, machine_rel, on_legacy_conflict=_worklog_legacy_conflict)
         except _opf_views.ViewsError as exc:
             rep.cant("C-VIEW-DRIFT: {}".format(exc))
             planned = None
