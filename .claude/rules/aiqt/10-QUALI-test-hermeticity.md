@@ -37,15 +37,17 @@ or process launch, the substitute is an executable fixture, never a shell functi
 double of the launch interface, which launches nothing, is outside this requirement. The verification declares
 the shells, if any, and the invocation routes it exercises, including child processes, has each fixture record
 the invocations it receives, and checks that invocation evidence against the invocations each test case
-expects. The harness initializes executable lookup and configuration from controlled inputs. Where the
-external executable being substituted, or its service, could reach live credentials, remote services,
-or state outside the fixture by any route present in the code under test or introduced by the
-verification's own mutations, including absolute paths, a replaced search path, or clients that bypass
-the executable, the harness enforces isolation: it removes access to live credentials and remote services,
-confines writes to its fixture, and limits reads to declared inputs, among them the code under test.
-Only where every such route, not only the declared invocation routes, is
-confined to declared inputs and fixture state do executable fixtures and checked invocation evidence
-suffice without enforced isolation. Placing a fixture first on the executable
+expects. The harness initializes executable lookup and configuration from controlled inputs. The routes
+by which the substituted executable is launched or its service reached are those in the code under test,
+in anything that code loads or launches, and in the verification's own fixtures, harness, and mutations,
+including absolute paths, a replaced search path, and clients that bypass the executable; a route in any
+of these counts whether or not review finds it, and no route counts merely because the code could
+conceivably be made to take it. Where any such route could reach live credentials, remote services, or
+state outside the fixture, the harness enforces isolation: it removes access to live credentials and
+remote services, confines writes to its fixture, and limits reads to declared inputs, among them the code
+under test. Only where every such route to that executable or its service, not only the declared
+invocation routes, is confined to declared inputs and fixture state do executable fixtures and checked
+invocation evidence suffice without enforced isolation. Placing a fixture first on the executable
 search path does not intercept absolute-path calls, calls using a replaced search path, or clients
 implemented without that executable, so executable fixtures supplement required isolation and never replace
 it. If the required isolation cannot be established, or the verification cannot determine whether it is
