@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """opf: the OPFiles (OPF) reference-tooling dispatcher (OPF core-tooling, skeleton from U1).
 
-  opf.py --self-test                run every registered OPF helper self-test (the CI leg)
+  opf.py --self-test                run every registered OPF helper self-test (Linux CI leg)
   opf.py <verb> [--root DIR] ...    a store verb (default --root: the cwd product repository root)
 
 This is the dispatcher the OPF core-tooling units grow into. U1 lands it with the store-side helper
@@ -141,6 +141,7 @@ def _watchdog_timer_case(label, mode):
     functions = {
         "changelog": _opf_changelog.self_test, "views": _opf_views.self_test,
         "store": _opf_store.self_test, "check": _opf_check.self_test,
+        "emit": _opf_emit.self_test,
         "window": lambda: 0 if _opf_emit.run_bounded(
             lambda: (time.sleep(2), "RETURNED")[1], timeout_s=10) == "RETURNED" else 1}
     which = {"virtual": signal.ITIMER_VIRTUAL, "prof": signal.ITIMER_PROF}.get(
@@ -220,7 +221,7 @@ def _watchdog_isolation_self_test():
     if not hasattr(os, "fork") or not all(hasattr(signal, name) for name in required):
         print("opf watchdog isolation: FAIL (required POSIX facilities unavailable)")
         return EXIT_FINDING
-    cases = [(label, mode) for label in ("changelog", "views", "store", "check")
+    cases = [(label, mode) for label in ("changelog", "views", "store", "check", "emit")
              for mode in ("inactive", "single", "periodic", "virtual", "prof", "pending")]
     cases.append(("window", "expiry"))
     failed = False
@@ -539,7 +540,130 @@ def _watchdog_completion_case(mode):
             return
         raise AssertionError("fixture was accepted: " + mode)
 
-    if mode == "audit-ignore":
+    if mode == "exec-first":
+        import time
+        caller, real_setpgid = os.getpid(), os.setpgid
+        with tempfile.TemporaryDirectory(prefix="opf-exec-first-") as directory:
+            marker = Path(directory, "exec")
+            code = ("from pathlib import Path; Path(" + repr(str(marker))
+                    + ").write_text('exec'); return 0")
+
+            def child_first(pid, group):
+                if pid > 0 and os.getpid() != caller:
+                    # Only the guardian waits, and only until the exec'd program
+                    # proves it has started. No scheduler-dependent fixed delay.
+                    deadline = time.monotonic() + 5
+                    while not marker.exists():
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("exec-first marker absent")
+                        time.sleep(0.005)
+                return real_setpgid(pid, group)
+
+            with patch.object(os, "setpgid", child_first):
+                # Flip: restore the unguarded parent setpgid call.
+                with patch.object(emit, "_fixture_setpgid", lambda pid: os.setpgid(pid, pid)):
+                    refuses(emit.ChildStatusUnavailable, lambda: launch(code))
+                assert marker.read_text() == "exec"
+                marker.unlink()
+                assert launch(code).returncode == 0
+                assert marker.read_text() == "exec"
+    elif mode == "group-ownership":
+        import errno
+        # Neither numeric group equality nor an unrelated errno licenses recovery.
+        for error, owned, group, expected in (
+                (errno.EACCES, True, 123, None),
+                (errno.EACCES, False, 123, ChildProcessError),
+                (errno.EACCES, True, 456, PermissionError),
+                (errno.EPERM, True, 123, PermissionError)):
+            with patch.object(os, "setpgid", side_effect=OSError(error, "injected")), \
+                    patch.object(os, "waitid", side_effect=None if owned else ChildProcessError(),
+                                 return_value=None) as wait, \
+                    patch.object(os, "getpgid", return_value=group) as getgroup:
+                if expected is None:
+                    emit._fixture_setpgid(123)
+                    assert wait.called and getgroup.called
+                else:
+                    refuses(expected, lambda: emit._fixture_setpgid(123))
+                    if error != errno.EACCES:
+                        assert not wait.called and not getgroup.called
+    elif mode == "guardian-error":
+        import errno
+        caller, real_setpgid = os.getpid(), os.setpgid
+
+        def fail_group(pid, group):
+            if pid > 0 and os.getpid() != caller:
+                raise OSError(errno.EIO, "injected guardian exception")
+            return real_setpgid(pid, group)
+
+        def diagnose():
+            try:
+                launch()
+            except emit.ChildStatusUnavailable as exc:
+                message = str(exc)
+                assert "OSError" in message and '"errno": 5' in message, message
+                assert "injected guardian exception" in message, message
+                assert "raw wait status=32000" in message and "exitcode=125" in message, message
+                return
+            raise AssertionError("guardian failure was accepted")
+
+        with patch.object(os, "setpgid", fail_group):
+            diagnose()
+            # Flip the caller's reader back to the old evidence-discarding path.
+            with patch.object(emit._FixtureProcess, "_read_report",
+                              side_effect=emit.ChildStatusUnavailable("fixture guardian failed")):
+                refuses(AssertionError, diagnose)
+        with patch.object(emit, "_fixture_subreaper",
+                          side_effect=OSError(errno.EIO, "injected guardian exception")):
+            diagnose()  # before READY must carry the same evidence
+    elif mode == "empty-children":
+        real_read, real_drain = Path.read_text, emit._fixture_drain
+
+        def empty(path, *args, **kwargs):
+            if str(path).endswith("/children"):
+                return ""
+            return real_read(path, *args, **kwargs)
+
+        first = [True]
+        def old_census(subject, subject_fd=None):
+            if first[0]:
+                first[0] = False
+                children = Path("/proc/self/task/{}/children".format(os.getpid()))
+                if not children.read_text(encoding="ascii").split():
+                    raise emit.ChildStatusUnavailable("child census disagrees with waitid")
+            return real_drain(subject, subject_fd)
+
+        with patch.object(Path, "read_text", empty):
+            # Flip: the old immediate-fatal census rejects this exact stimulus.
+            with patch.object(emit, "_fixture_drain", old_census):
+                refuses(emit.ChildStatusUnavailable, launch)
+            assert launch().returncode == 0
+        # A transiently empty PPID census also needs a retry, never a clean pass.
+        first, real_children = [True], emit._fixture_children
+        def transient():
+            if first[0]:
+                first[0] = False
+                return []
+            return real_children()
+        with patch.object(emit, "_fixture_children", transient):
+            assert launch().returncode == 0
+    elif mode == "inherited-control":
+        import time
+        other = emit._FixtureProcess(time.monotonic() + 10)
+        real_subreaper = emit._fixture_subreaper
+        try:
+            def check_guardian():
+                assert other.control.fileno() == -1, "unrelated control inherited by guardian"
+                assert other.peer.fileno() == -1, "unrelated peer inherited by guardian"
+                real_subreaper()
+            with patch.object(emit, "_fixture_subreaper", check_guardian):
+                assert launch().returncode == 0
+                # Flip: omit the unrelated endpoints from child-side closure.
+                with patch.object(emit, "_fixture_sockets", type(emit._fixture_sockets)()):
+                    refuses(emit.ChildStatusUnavailable, launch)
+            assert not other.control.get_inheritable() and not other.peer.get_inheritable()
+        finally:
+            other.close()
+    elif mode == "audit-ignore":
         events = []
 
         def ignore(event, args):
@@ -731,7 +855,9 @@ def _watchdog_regression_self_test():
                   prefix + "return opf._watchdog_completion_case(" + repr(mode) + ")", 40)
                  for mode in ("audit-ignore", "reaper", "nonce", "fixture-id", "status",
                               "early-exit", "cleanup-reaped", "cleanup-cancel", "premature-exit",
-                              "nested-timeout", "nested-cancel", "no-signal-echild"))
+                              "nested-timeout", "nested-cancel", "no-signal-echild",
+                              "exec-first", "group-ownership", "guardian-error",
+                              "empty-children", "inherited-control"))
     # Resolve the real registration, without recursively invoking this regression runner.
     # Both inherited disposition and mask are hostile; the outer runner's state is untouched.
     cases.append(("blocked-isolation", prefix
@@ -739,7 +865,7 @@ def _watchdog_regression_self_test():
                   + "signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM}); "
                   + "rc = opf._bootstrap(); "
                   + "return rc if rc else dict(opf._self_tests())['opf-watchdog-isolation']()",
-                  25 * 180 + 30))                       # the isolation matrix's full budget plus launch margin
+                  31 * 180 + 30))                       # the isolation matrix's full budget plus launch margin
     failed = False
     for label, code, timeout in cases:
         try:

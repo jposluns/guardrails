@@ -62,6 +62,7 @@ resident model, and this bounds that output rather than the structure.
 
 The live leg is folded into `opf/tools/opf.py --self-test` (build plan section 3); this module is a library
 consumed by U7 (import) and `opf init`, with no live/standalone mode beyond the self-test.
+The self-tests require Linux fork/waitid, readable procfs and child-subreaper support.
 
 Exit convention (matches the repo's gates): 0 clean, 1 a self-test finding, 2 misuse.
 """
@@ -69,6 +70,8 @@ import datetime
 import math
 import re
 import sys
+import threading
+import weakref
 from pathlib import Path
 
 try:
@@ -667,34 +670,75 @@ def _fixture_subreaper():
         raise ChildStatusUnavailable("cannot confirm child subreaping")
 
 
+def _fixture_setpgid(subject):
+    """An exec'd child may already have established the required group."""
+    import errno
+    import os
+    try:
+        os.setpgid(subject, subject)
+    except OSError as exc:
+        if exc.errno != errno.EACCES:
+            raise
+        # WNOWAIT retains the child identity, including an exited zombie. ECHILD
+        # refuses; a matching numeric process group alone is not ownership.
+        os.waitid(os.P_PID, subject, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        if os.getpgid(subject) != subject:
+            raise
+
+
+def _fixture_children():
+    """Census by PPID; task/children can transiently omit adopted children."""
+    import os
+    from pathlib import Path
+    owner = os.getpid()
+    pids = []
+    with os.scandir("/proc") as entries:
+        for entry in entries:
+            if not entry.name.isdecimal():
+                continue
+            try:
+                stat = Path(entry.path, "stat").read_bytes()
+            except (FileNotFoundError, ProcessLookupError):
+                continue  # an unrelated process disappeared during enumeration
+            # comm is parenthesized and may contain spaces and ')' characters.
+            fields = stat.rsplit(b")", 1)[1].split()
+            if int(fields[1]) == owner:
+                pids.append(int(entry.name))
+    return pids
+
+
 def _fixture_drain(subject, subject_fd=None):
     """Dedicated single-threaded subreaper: every child belongs to this fixture.
 
     Kill groups BEFORE reaping leaders, then collect adopted descendants, including
     nested guardians and descendants in other sessions. Only kernel ECHILD proves
-    completion. /proc read failures refuse; an empty snapshot is not completion.
-    SIGKILL/reap requires kernel progress. Subjects attacking their guardian are
-    outside this trusted harness's contract.
+    completion. /proc read failures refuse; an empty snapshot is retried, never
+    treated as completion or an immediate contradiction. Cleanup has a five-second
+    polling budget; expiry yields cannot-evaluate, never success. Syscalls still
+    require kernel progress. Subjects attacking their guardian are outside this
+    trusted harness's contract.
     """
     import os
     import signal
-    from pathlib import Path
+    import time
     status = None
-    children = Path("/proc/self/task/{}/children".format(os.getpid()))
+    deadline = time.monotonic() + 5
     while True:
         try:
             os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
         except ChildProcessError:
             return status
-        pids = [int(token) for token in children.read_text(encoding="ascii").split()]
-        if not pids:
-            raise ChildStatusUnavailable("child census disagrees with waitid")
+        if time.monotonic() >= deadline:
+            raise ChildStatusUnavailable("descendant cleanup deadline: ECHILD not observed")
+        pids = _fixture_children()
         for pid in pids:
             fd = subject_fd if pid == subject else _fixture_pidfd(pid)
             try:
                 if not _fixture_signal(pid, signal.SIGKILL, fd):
                     raise ChildStatusUnavailable("lost descendant ownership")
-                waited, raw = os.waitpid(pid, 0)
+                waited, raw = os.waitpid(pid, os.WNOHANG)
+                if waited == 0:
+                    continue
                 if waited != pid:
                     raise ChildStatusUnavailable("unexpected descendant wait PID")
                 if pid == subject:
@@ -702,6 +746,14 @@ def _fixture_drain(subject, subject_fd=None):
             finally:
                 if fd is not None and fd != subject_fd:
                     os.close(fd)
+        time.sleep(0.005)
+
+
+# Serialize socket registration with guardian forks. CLOEXEC alone cannot release
+# endpoints inherited by guardians, which never exec. Only this helper's forks
+# participate; arbitrary external forks and foreign reapers remain out of contract.
+_fixture_socket_lock = threading.Lock()
+_fixture_sockets = weakref.WeakSet()
 
 
 class _FixtureProcess:
@@ -720,7 +772,9 @@ class _FixtureProcess:
         self.deadline = deadline
         self.pid = self.pidfd = self.status = None
         self.armed = self.collected = self.timed_out = False
-        self.control, self.peer = socket.socketpair()
+        with _fixture_socket_lock:
+            self.control, self.peer = socket.socketpair()  # non-inheritable across exec
+            _fixture_sockets.update((self.control, self.peer))
         try:
             self.report = tempfile.TemporaryFile()
         except BaseException:
@@ -747,11 +801,15 @@ class _FixtureProcess:
             raise ChildStatusUnavailable("Linux fork/waitid/subreaping required")
         if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
             raise ChildStatusUnavailable("unowned SIGCHLD disposition")
-        pid = os.fork()
+        with _fixture_socket_lock:
+            pid = os.fork()
         if pid == 0:
-            self.control.close()
             subject = subject_fd = None
+            stage = "startup"
             try:
+                for endpoint in list(_fixture_sockets):
+                    if endpoint is not self.peer:
+                        endpoint.close()
                 os.setpgid(0, 0)
                 _fixture_subreaper()
                 os.write(self.peer.fileno(), b"R")
@@ -763,10 +821,12 @@ class _FixtureProcess:
                     self.report.close()
                     os.setpgid(0, 0)
                     return 0
-                os.setpgid(subject, subject)
+                stage = "subject-group"
+                _fixture_setpgid(subject)
                 subject_fd = _fixture_pidfd(subject)
                 self.peer.setblocking(False)
                 timed_out = False
+                stage = "supervision"
                 while True:
                     ended = os.waitid(os.P_PID, subject, os.WEXITED | os.WNOHANG | os.WNOWAIT)
                     if ended is not None:
@@ -781,6 +841,7 @@ class _FixtureProcess:
                     except BlockingIOError:
                         pass
                     time.sleep(0.005)
+                stage = "drain"
                 status = _fixture_drain(subject, subject_fd)
                 subject = None
                 if subject_fd is not None:
@@ -788,17 +849,50 @@ class _FixtureProcess:
                     subject_fd = None
                 if status is None:
                     raise ChildStatusUnavailable("subject status unavailable")
+                stage = "receipt"
                 self.report.write(json.dumps([status, timed_out]).encode("ascii"))
                 self.report.flush()
                 os._exit(0)
-            except BaseException:
+            except BaseException as exc:
+                def detail(error):
+                    try:
+                        message = str(error)[:512]
+                    except BaseException:
+                        message = "<exception message unavailable>"
+                    try:
+                        number = getattr(error, "errno", None)
+                    except BaseException:
+                        number = None
+                    return {"type": type(error).__name__[:128],
+                            "errno": number if type(number) is int else None, "message": message}
+
+                failure = {"stage": stage, "error": detail(exc), "cleanup": "pending"}
+
+                def record_failure():
+                    try:
+                        self.report.seek(0)
+                        self.report.truncate()
+                        self.report.write(json.dumps(failure).encode("ascii"))
+                        self.report.flush()
+                    except BaseException:
+                        # A broken report channel cannot certify anything. The
+                        # caller still reports the raw nonzero guardian status.
+                        pass
+
+                record_failure()  # preserve the cause even if cleanup cannot finish
                 try:
                     if subject is not None:
                         _fixture_drain(subject, subject_fd)
+                    failure["cleanup"] = "ECHILD" if subject is not None else "no subject"
+                except BaseException as cleanup_exc:
+                    failure["cleanup"] = detail(cleanup_exc)
                 finally:
-                    if subject_fd is not None:
-                        os.close(subject_fd)
-                    os._exit(125)
+                    record_failure()
+                    try:
+                        if subject_fd is not None:
+                            os.close(subject_fd)
+                    finally:
+                        os._exit(125)
         self.pid = pid
         self.peer.close()
         self.pidfd = _fixture_pidfd(pid)
@@ -809,6 +903,11 @@ class _FixtureProcess:
         while time.monotonic() < self.deadline:
             if poller.poll(5):
                 if os.read(self.control.fileno(), 1) != b"R":
+                    waited, raw = _fixture_wait(self.pid, 0)
+                    if waited != self.pid:
+                        raise ChildStatusUnavailable("unexpected startup wait PID")
+                    self.collected = True
+                    self._read_report(raw)
                     raise ChildStatusUnavailable("guardian failed before READY")
                 if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
                     raise ChildStatusUnavailable("SIGCHLD changed during launch")
@@ -834,16 +933,22 @@ class _FixtureProcess:
     def _read_report(self, raw):
         import json
         import os
-        if not os.WIFEXITED(raw) or os.WEXITSTATUS(raw) != 0:
-            raise ChildStatusUnavailable("fixture guardian failed")
+        termination = "raw wait status={}, exitcode={}".format(raw, os.waitstatus_to_exitcode(raw))
         self.report.seek(0)
+        payload = self.report.read(8193)
+        if not os.WIFEXITED(raw) or os.WEXITSTATUS(raw) != 0:
+            receipt = payload[:8192].decode("ascii", errors="backslashreplace")
+            raise ChildStatusUnavailable("fixture guardian failed: {}; receipt={}".format(
+                termination, receipt or "<missing>"))
         try:
-            result = json.loads(self.report.read())
+            if len(payload) > 8192:
+                raise ValueError("oversized receipt")
+            result = json.loads(payload)
         except (ValueError, UnicodeError) as exc:
-            raise ChildStatusUnavailable("missing tree-cleanup receipt") from exc
+            raise ChildStatusUnavailable("missing tree-cleanup receipt; " + termination) from exc
         if (not isinstance(result, list) or len(result) != 2
                 or type(result[0]) is not int or type(result[1]) is not bool):
-            raise ChildStatusUnavailable("malformed tree-cleanup receipt")
+            raise ChildStatusUnavailable("malformed tree-cleanup receipt; " + termination)
         self.status, self.timed_out = result
 
     def close(self):
@@ -1521,47 +1626,26 @@ def self_test():
         # wait-status (a child that raises SIGALRM on itself under SIG_DFL) and pair it with a leftover
         # token. Pre-fix (bytes checked first) this returned the token; post-fix the signal wins -> TIMEOUT.
         #
-        # DISCRIMINATION for finding 3: run this fixture with SIGALRM BLOCKED in the parent, the exact hostile
-        # ambient the child must survive. The child resets SIG_DFL and UNBLOCKS SIGALRM in ITS OWN process, so
-        # it still dies by SIGALRM here; reverting the child's unblock (or signal.pause -> the nonexistent
-        # os.pause) leaves the self-signal pending-and-blocked so the child parks and _reap_bounded times out
-        # to a SIGKILL, flipping the status-first-setup assertion red even under a DEFAULT ambient. The parent
-        # mask is restored in the finally, so the self-test leaves the ambient SIGALRM mask unchanged.
-        _blocked_prev = None
-        if hasattr(_sig6, "pthread_sigmask"):
-            _blocked_prev = _sig6.pthread_sigmask(_sig6.SIG_BLOCK, {_sig6.SIGALRM})
-        try:
+        # The blocked-mask stimulus belongs to an owned process, never this
+        # self-test's caller (which may have a live timer or pending SIGALRM).
+        def _blocked_status_case():
+            _sig6.pthread_sigmask(_sig6.SIG_BLOCK, {_sig6.SIGALRM})
             _case5 = _FixtureProcess(_time6.monotonic() + 5)
-            _pid5 = _case5.start()
-            if _pid5 == 0:
-                # child (its OWN process): reset SIGALRM to SIG_DFL AND UNBLOCK it in THIS child's mask before
-                # self-signalling. An INHERITED blocked SIGALRM (the ambient this fixture deliberately sets,
-                # and the hostile ambient the whole self-test may run under, finding 3) would otherwise leave
-                # the self-sent SIGALRM pending-and-blocked, so the child would never die and would PARK in
-                # signal.pause() forever, hanging the parent's reap. Unblocked under SIG_DFL the self-signal
-                # terminates the child at once, so signal.pause() (the correct call; os.pause does not exist,
-                # finding 3(a)) is unreachable and is only a belt-and-braces park. A setup failure exits
-                # cleanly rather than escaping into the parent runner.
+            if _case5.start() == 0:
                 try:
                     _sig6.signal(_sig6.SIGALRM, _sig6.SIG_DFL)
-                    if hasattr(_sig6, "pthread_sigmask"):
-                        _sig6.pthread_sigmask(_sig6.SIG_UNBLOCK, {_sig6.SIGALRM})
+                    _sig6.pthread_sigmask(_sig6.SIG_UNBLOCK, {_sig6.SIGALRM})
                     _sig6.raise_signal(_sig6.SIGALRM)
                     _sig6.pause()
-                except BaseException:                      # noqa: BLE001 (child boundary: never unwind into the parent)
-                    pass
-                _os6._exit(0)                              # unreachable under SIG_DFL+unblocked; a clean exit otherwise
+                finally:
+                    _os6._exit(0)
             _wst5 = _reap_bounded(_case5)
-        finally:
-            if _blocked_prev is not None:
-                _sig6.pthread_sigmask(_sig6.SIG_SETMASK, _blocked_prev)  # restore the ambient mask
-        if not (_os6.WIFSIGNALED(_wst5) and _os6.WTERMSIG(_wst5) == _sig6.SIGALRM):
-            failures.append("run_bounded/status-first-setup: the fixture child was not SIGALRM-signaled "
-                            "under a blocked-SIGALRM parent (the child must unblock SIGALRM in its own "
-                            "process and use signal.pause; finding 3)")
-        elif _bounded_child_result(b"LEFTOVER-TOKEN", _wst5) != "TIMEOUT":
-            failures.append("run_bounded/status-first: a token-then-SIGALRM child returned the buffered "
-                            "token instead of TIMEOUT (termination status not inspected first)")
+            if not (_os6.WIFSIGNALED(_wst5) and _os6.WTERMSIG(_wst5) == _sig6.SIGALRM):
+                return "NOT-SIGALRM"
+            return "STATUS:" + _bounded_child_result(b"LEFTOVER-TOKEN", _wst5)
+
+        if run_bounded(_blocked_status_case, timeout_s=15) != "STATUS:TIMEOUT":
+            failures.append("run_bounded/status-first: blocked-mask child did not report SIGALRM")
         # regression: a child that exited NORMALLY with bytes returns those bytes (the fix does not swallow
         # a legitimate result).
         _case5b = _FixtureProcess(_time6.monotonic() + 5)
