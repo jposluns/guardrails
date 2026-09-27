@@ -947,9 +947,11 @@ def _st_staged_apply(gate, base, kind, case):
         return (refused and results["transaction-schema"][0] is False
                 and "unreadable/unparseable" in results["transaction-schema"][1])
     if case == "withheld":
-        error = "the store's homes generation was not supplied to this manifest-free gate"
-        return (refused and all(results[cid] == (False, error) for cid in
-                               ("transaction-schema", "transaction-consistency")))
+        error = ("cannot evaluate: {}: the store's homes generation was not supplied to this manifest-free "
+                 "gate".format(staged))
+        # Flip: removing the public generation boundary restores partial grading and unlocated errors.
+        return (refused and tuple(results) == gate.EXPECTED_CHECKS
+                and all(value == (False, error) for value in results.values()))
     raise ValueError("unknown staged apply case: " + case)
 
 
@@ -2830,11 +2832,15 @@ def _d_home_retained(kind):
 
 
 def _d_transaction_generation_required(module, base_dir):
-    """An invalid supplied generation must never downgrade to legacy transaction grading."""
+    """The internal reader must refuse invalid generations independently of the public boundary."""
     from unittest.mock import patch
     _root, _rid, run = _st_build(base_dir, "transaction-generation")
-    with patch.object(_opf_store, "SUPPORTED_HOMES", 1):
-        result = module.check_staged_run(run, homes=3)
+    rd = module._RunDir(run)
+    try:
+        with patch.object(_opf_store, "SUPPORTED_HOMES", 1):
+            result = module._check_staged_run(rd, homes=3)
+    finally:
+        rd.close()
     error = "the supplied homes generation 3 is not 1 or 2, or is above the tooling's supported generation 1"
     _revert_check(all(result[cid] == (False, error) for cid in
                       ("transaction-schema", "transaction-consistency")),
@@ -3380,7 +3386,8 @@ _DISCRIMINATORS += tuple(
     for kind in ("import", "ingest") for rule in ("property-holding", "second-claim"))
 
 
-# Unit rows observe the named contract directly; every other row observes the public outcome.
+# Unit rows observe the named contract directly; transaction-generation-required observes the internal
+# reader's registry; every other row observes the public outcome.
 # The property-holding/second-claim /isolated rows deliberately use the public boundary: corrupt=False
 # removes the overlapping record finding, so their declared transaction bits measure R2 refusal itself.
 _REVERT_UNIT_BOUNDARIES = {
@@ -3479,6 +3486,9 @@ def _revert_trace(module, key, identity, trace):
     from unittest.mock import patch
     unit = _REVERT_UNIT_BOUNDARIES.get(identity)
     method = unit[0] if unit else {"gate": "check_staged_run", "apply": "apply_ingest"}[key]
+    # Observe the inner guard directly so the public refusal cannot mask its reversal.
+    if identity == "gate/transaction-generation-required":
+        method = "_check_staged_run"
     actual = getattr(module, method)
 
     def observed(*args, **kwargs):
