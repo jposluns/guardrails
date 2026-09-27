@@ -743,6 +743,18 @@ mutates state outside that location. Where a test must walk real parent director
 that fixture root, never by a host property such as ownership, which can reach far past the fixture and
 disturb unrelated state.
 
+Verification that substitutes for an external executable uses an executable fixture, never a shell function
+or alias as the substitute. It declares the target shells and invocation routes it exercises, including
+child processes, and checks the fixture invocation evidence against each case's expected calls. The harness
+removes access to live credentials, external services, and mutable host state outside its fixture, and
+initializes executable lookup and configuration from controlled inputs. Placing a fixture first on the
+executable search path does not intercept absolute-path calls, calls using a replaced search path, or
+clients implemented without that executable, so executable fixtures supplement enforced isolation and never
+replace it. If the required isolation cannot be established, execution is refused and verification reports
+that it cannot be evaluated. Missing, malformed, or unexpected invocation evidence fails verification. This
+requirement concerns substitutes for external executables; shell functions may themselves be the subject of
+a test within the same isolation boundary.
+
 ## A degraded verifier delivery is not a verdict
 
 A verifier's output counts as a verdict only when the verifier actually delivered one. Completeness is
