@@ -591,6 +591,9 @@ def run(root, config_path, config_required, post_merge_ref="HEAD",
 
 
 def _selftest_git(root, args, input_text=None):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _git_fixture_env import git_fixture_env
+    env = git_fixture_env(GIT_GRAFT_FILE=os.devnull)
     proc = subprocess.run(
         ["git", "-C", str(root), *args],
         input=input_text,
@@ -598,7 +601,7 @@ def _selftest_git(root, args, input_text=None):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=30,
-        env=_clean_env())
+        env=env)
     if proc.returncode != 0:
         raise RuntimeError("self-test git {} failed ({})"
                            .format(args[0], proc.returncode))

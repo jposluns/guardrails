@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "dc9fdd13b1a523185affa5225e9317d3bc58ab36f63462cee901587ad692717e"
+tree-sha256 = "2e27b256ca2463b21e4e0a4b81ae2fe92b79920bb136f29c19562961a115e8e2"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3106,8 +3106,8 @@ sha256 = "2a3b00eb95b38e8fba1505b7438ff0519b1933598868d71c69067b3b2f0afafd"
 
 [[sources]]
 path = "tools/check_branch_root.py"
-bytes = 25194
-sha256 = "6d720b8993132eddb65e07e895cf85fb8501a7eb774b915075bfe28b25bdd286"
+bytes = 25449
+sha256 = "bb193909bd3e5cdfe3d48a27893ae333f4078bd1f5f5eb549f0b71759f31f4b5"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
@@ -3141,8 +3141,8 @@ sha256 = "2f574d11ee716e3104b37a34ef5d19fcf89764380c9a54e6cf15cd6649b6aced"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
-bytes = 87002
-sha256 = "7a1b9a7b41a59f06e59fa5f264166decdda54342eadf8bbdb9eb188f1ea7a46d"
+bytes = 87013
+sha256 = "05149d9846ca4a94aa3468092f652e5fbf44cfb3f1fb8b1be1fe94543ec80590"
 
 [[sources]]
 path = "tools/check_git_option_table.py"
@@ -3221,8 +3221,8 @@ sha256 = "250b98e974d1d9f5151d4e8103d55d6aebf84a39a7ea9acd4e5f02b47ab32441"
 
 [[sources]]
 path = "tools/check_portability.py"
-bytes = 89114
-sha256 = "b1a1292a552e4b8ee8e73b591cdc596462a64a1f909d916f3a9d5eb44b93afcc"
+bytes = 89169
+sha256 = "dd5bd44da0d42bfa626c705fb7b8277327281b828412a41a87a02d287fc393d3"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
@@ -3236,8 +3236,8 @@ sha256 = "190cdba91af19da9c3df0b8186bf6ca382cd693e34a1c64a1a4fefdb396d7fc0"
 
 [[sources]]
 path = "tools/check_record_sections.py"
-bytes = 73847
-sha256 = "2729fb27bc13dd2968643f74d492fd04a5d6176b3ed53854f0f9e2e15a61c7c8"
+bytes = 74001
+sha256 = "b46eaba02a4549f76ba392137e839b305330d2a613ef9aa2b422a1e72be030db"
 
 [[sources]]
 path = "tools/check_reference_facts.py"
@@ -3246,13 +3246,13 @@ sha256 = "064d47416f70f46adb0a0aeb6eba0934c7e4dc4cc547ca62f8068458cbdf6cd1"
 
 [[sources]]
 path = "tools/check_release_build.py"
-bytes = 183145
-sha256 = "d066bdd4a9e65f1b18317c2bb4fc40e4b5a13f79163a70f64484e5c8632a83ff"
+bytes = 183065
+sha256 = "3bb9f11c159345a17c6c666d6a0e0b364d73cad69bd2d490bf0e16e88f4bc305"
 
 [[sources]]
 path = "tools/check_release_delta.py"
-bytes = 194626
-sha256 = "7017a8ba458f184dc7a667db700cab97797d63339f6c02301ef62bb0969f5fed"
+bytes = 194429
+sha256 = "595072c573e5d02f3988d38b391f343f063c5936708b7018724390939bdab1fc"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
@@ -3381,8 +3381,8 @@ sha256 = "64f2adcf49949237202e7e5e2b6770442319eab85afc813eafd1d82597de4c0c"
 
 [[sources]]
 path = "tools/gen_manifest.py"
-bytes = 60897
-sha256 = "e37c0998f5507604df6826ad2835d4e9555955dd987a186193dbb5e9cfeab6a0"
+bytes = 60935
+sha256 = "7d29113f8c4a6e55e559e8df83cf4957cab5e3842ceddf10165a50f5c4d0a9ea"
 
 [[sources]]
 path = "tools/gen_mappings.py"
@@ -3491,8 +3491,8 @@ sha256 = "ae911ddec6c6ef8643895397cafbeac0071e1685819bd9ffc62f5f8b7da3c37d"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 16723
-sha256 = "ec24df1efcbf9ab9f719f28da3bbdce46d9bacacde284c514228a258760991ed"
+bytes = 18786
+sha256 = "8d4b768b9b57ebb344da6da704f78a7feece93832ea529db96f8225df9f77941"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -3501,8 +3501,8 @@ sha256 = "505a962660f03dc1a6217ff6e36e2f47db3b4966aab71f3dfe61b2928609a85a"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 30261
-sha256 = "e8914d91e40569460f8954117c92ec46e35a5ea5ee8e58b5cf7f92f2fb8a6ac2"
+bytes = 42863
+sha256 = "6e382bc72386bb5291452c49a3e57fcb29cfa0ce6b53542aec71395dae51cd71"
 
 [[sources]]
 path = "tools/selftest_opf_render.py"

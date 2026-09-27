@@ -1147,7 +1147,8 @@ def _run_write(root, stem):
 def _git_fixture(repo, *args):
     """Run git in a fixture repo with a pinned identity and no user config, matching _materialize_git.
     check=True: a setup failure surfaces loudly rather than a silently broken fixture."""
-    env = _sanitized_env({"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull})
+    from _git_fixture_env import git_fixture_env
+    env = git_fixture_env(PYTHONDONTWRITEBYTECODE="1")
     return subprocess.run(
         ["git", "-C", str(repo), "-c", "user.name=aiqt-failclose",
          "-c", "user.email=failclose@invalid", "-c", "commit.gpgsign=false",

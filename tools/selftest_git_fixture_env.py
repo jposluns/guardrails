@@ -28,8 +28,8 @@ Verdicts use child return codes and byte comparisons, never output tokens. DISCL
 routing/scope check proves the scrub call site and its position in the named entry, not that every
 later git call in the same process still runs under it; launch aliases, indirect helper calls,
 early returns and control-flow reachability are outside this syntactic check's coverage. The
-end-to-end probes prove execution for the corpus member; the other members' fixture behaviour rides
-their own self-tests. The trust check covers LITERAL subprocess.run launches (a launch built
+config-injection lane runs the explicitly listed member self-tests under caller hooks and ignore
+files; the repository-selector lanes below exercise the corpus member. The trust check covers LITERAL subprocess.run launches (a launch built
 through a variable is outside its reach); and the end-to-end probe poisons two representative
 variables, the allowlist unit checks covering the rest of the GIT_-prefixed family.
 
@@ -225,6 +225,217 @@ def _archive_reads_use_caller_env(member_path, fixture_calls=False):
         if env_name != expected:
             return "a git launch whose env is not {}()".format(expected)
     return True if found else "no matching git launch found"
+
+
+def _call_name(node):
+    func = node.func if isinstance(node, ast.Call) else node
+    return func.id if isinstance(func, ast.Name) else (
+        func.attr if isinstance(func, ast.Attribute) else None)
+
+
+def _binding_calls(member_path, owner_name, binding, factory, launches=False):
+    """Check one named assignment in one function, optionally its literal git launches.
+    Syntactic only: aliases, later reassignment and indirect calls are not proved.
+    OPF's dict(_scrubbed_env(), HOME=...) is an intentional standalone adapter."""
+    try:
+        tree = ast.parse(member_path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError) as exc:
+        return str(exc)
+    owners = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == owner_name]
+    if len(owners) != 1:
+        return False
+    owner = owners[0]
+    assignments = [n for n in ast.walk(owner) if isinstance(n, ast.Assign)
+                   and any(isinstance(t, ast.Name) and t.id == binding for t in n.targets)]
+    if len(assignments) != 1:
+        return False
+    value = assignments[0].value
+    if _call_name(value) == "dict" and isinstance(value, ast.Call) and len(value.args) == 1:
+        value = value.args[0]
+    if not isinstance(value, ast.Call) or _call_name(value) != factory:
+        return False
+    if not launches:
+        return True
+    found = []
+    for n in ast.walk(owner):
+        if not isinstance(n, ast.Call) or _call_name(n) != "run" or not n.args:
+            continue
+        argv = n.args[0]
+        if (isinstance(argv, (ast.List, ast.Tuple)) and argv.elts
+                and isinstance(argv.elts[0], ast.Constant) and argv.elts[0].value == "git"):
+            found.append(n)
+    return bool(found) and all(any(kw.arg == "env" and isinstance(kw.value, ast.Name)
+                                  and kw.value.id == binding for kw in n.keywords)
+                               for n in found)
+
+
+def _caller_env_archive_only():
+    """Reject caller-env uses outside literal archives of the real checkout, across both trees.
+    Direct name/attribute references are checked, including alias assignments. Dynamic getattr,
+    exec strings and rebinding repo_root itself remain outside this syntactic check's coverage.
+    The child-code trust probe intentionally uses a string, not an operational call site."""
+    def fail_walk(exc):
+        raise exc
+
+    try:
+        found = []
+        for directory in (ROOT / "tools", ROOT / "opf" / "tools"):
+            for base, dirs, files in os.walk(directory, onerror=fail_walk):
+                for filename in files:
+                    if not filename.endswith(".py"):
+                        continue
+                    path = Path(base) / filename
+                    tree = ast.parse(path.read_text(encoding="utf-8"))
+                    parents = {child: node for node in ast.walk(tree)
+                               for child in ast.iter_child_nodes(node)}
+                    for node in ast.walk(tree):
+                        if not isinstance(node, (ast.Name, ast.Attribute)):
+                            continue
+                        if _call_name(node) != "caller_env_without_git":
+                            continue
+                        call = parents.get(node)
+                        kw = parents.get(call)
+                        launch = parents.get(kw)
+                        if not (isinstance(call, ast.Call) and call.func is node
+                                and not call.args and not call.keywords
+                                and isinstance(kw, ast.keyword) and kw.arg == "env"
+                                and isinstance(launch, ast.Call)
+                                and ast.unparse(launch.func) == "subprocess.run"
+                                and launch.args):
+                            return False
+                        argv = ast.unparse(launch.args[0])
+                        rel = path.relative_to(ROOT).as_posix()
+                        if rel == "tools/check_release_build.py":
+                            if argv != "['git', '-C', str(repo_root()), 'archive', 'HEAD']":
+                                return False
+                        elif rel == "tools/check_release_delta.py":
+                            if argv != "['git', '-C', str(real), 'archive', 'HEAD']":
+                                return False
+                            owner = launch
+                            while owner in parents and not isinstance(owner, ast.FunctionDef):
+                                owner = parents[owner]
+                            if not isinstance(owner, ast.FunctionDef) or owner.name != "_archive_head":
+                                return False
+                            if [a.arg for a in owner.args.args] != ["real"]:
+                                return False
+                            if any(isinstance(n, ast.Name) and n.id == "real"
+                                   and isinstance(n.ctx, ast.Store) for n in ast.walk(owner)):
+                                return False
+                            refs = [n for n in ast.walk(tree) if isinstance(n, ast.Name)
+                                    and n.id == "_archive_head"]
+                            if not refs or any(not isinstance(parents.get(n), ast.Call)
+                                               or ast.unparse(parents[n]) != "_archive_head(repo_root())"
+                                               for n in refs):
+                                return False
+                        else:
+                            return False
+                        found.append(rel)
+        return sorted(found) == ["tools/check_release_build.py", "tools/check_release_build.py",
+                                 "tools/check_release_delta.py"]
+    except (OSError, SyntaxError, UnicodeError, ValueError) as exc:
+        return "cannot inspect caller-env uses: {}".format(exc)
+
+
+# Direct fixture-launching members, including the standalone OPF and closed-allowlist exemptions.
+# This suite itself is excluded to prevent recursion; its fixtures use git_fixture_env directly.
+CONFIG_MEMBERS = (
+    "tools/selftest_aiqt_corpus.py",
+    "tools/selftest_orch_hooks.py",
+    "tools/selftest_aiqt_hooks.py",
+    "tools/_qa_adapter.py",
+    "tools/check_record_drift.py",
+    "tools/check_mistakes_register.py",
+    "tools/check_version_monotonicity.py",
+    "tools/check_release_build.py",
+    "tools/check_release_delta.py",
+    "tools/check_record_sections.py",
+    "tools/check_portability.py",
+    "tools/gen_manifest.py",
+    "tools/check_manifest.py",
+    "tools/check_branch_root.py",
+    "tools/check_gensrc_failclose.py",
+    "tools/selftest_ci_status.py",
+    "opf/tools/check_opf_init.py",
+    "opf/tools/check_opf_upgrade.py",
+    "opf/tools/check_opf_doctor.py",
+    "opf/tools/_opf_init_operation.py",
+    "opf/tools/_opf_oplock.py",
+    "opf/tools/_opf_observe.py",
+)
+
+
+def _config_injection_lane(base):
+    """CONFIG-INJECTION: no inherited GIT_* pins may hide the caller's on-disk poison.
+    Each member gets rc and hook-byte assertions; neither one substitutes for the other.
+    A real commit first proves the marker hooks execute under this caller configuration."""
+    import shlex
+
+    home, xdg, hooks = (base / name for name in ("config-home", "config-xdg", "config-hooks"))
+    for directory in (home, xdg / "git", hooks):
+        directory.mkdir(parents=True)
+    marker = base / "hook-invocations"
+    marker.write_bytes(b"")
+    ignore = home / "ignore"
+    ignore.write_text("*\n", encoding="utf-8")
+    (xdg / "git" / "ignore").write_text("*\n", encoding="utf-8")
+    (home / ".gitconfig").write_text(
+        '[safe]\n\tdirectory = {}\n[core]\n\thooksPath = {}\n\texcludesFile = {}\n'.format(
+            json.dumps(str(ROOT)), json.dumps(str(hooks)), json.dumps(str(ignore))), encoding="utf-8")
+    for name in ("pre-commit", "prepare-commit-msg", "commit-msg", "post-commit",
+                 "post-checkout", "post-merge", "reference-transaction"):
+        hook = hooks / name
+        hook.write_text("#!/bin/sh\nprintf 'invoked\\n' >> {}\n".format(shlex.quote(str(marker))),
+                        encoding="utf-8")
+        hook.chmod(0o700)
+    # Deliberately UNSCRUBBED input: using git_fixture_env here would mask the defect.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(HOME=str(home), XDG_CONFIG_HOME=str(xdg), PYTHONDONTWRITEBYTECODE="1")
+    control = base / "config-control"
+    control.mkdir()
+    (control / "seed").write_text("seed\n", encoding="utf-8")
+    for args in (("init", "-q"), ("add", "-f", "seed"),
+                 ("-c", "user.name=Selftest", "-c", "user.email=selftest@example.invalid",
+                  "-c", "commit.gpgsign=false", "commit", "-q", "-m", "control")):
+        subprocess.run(["git", "-C", str(control), *args], env=env, check=True,
+                       capture_output=True, timeout=60)
+    check("config/injection-control", bool(marker.read_bytes()), True)
+    for member in CONFIG_MEMBERS:
+        marker.write_bytes(b"")
+        path = ROOT / member
+        args = [] if path.name.startswith("selftest_") else ["--self-test"]
+        try:
+            proc = subprocess.run([sys.executable, "-I", "-B", str(path), *args],
+                                  cwd=ROOT, env=env, capture_output=True, text=True, timeout=1200)
+            rc = proc.returncode
+            if rc:
+                print("CONFIG-INJECTION {}:\n{}".format(member, (proc.stdout + proc.stderr)[-2000:]),
+                      file=sys.stderr)
+        except (OSError, subprocess.SubprocessError) as exc:
+            rc = str(exc)
+        check("config/" + path.stem + "/rc", rc, 0)
+        check("config/" + path.stem + "/hooks", marker.read_bytes(), b"")
+
+
+def _manifest_setup_failures(base):
+    """A failed add or commit must raise even when the earlier init succeeded."""
+    import gen_manifest
+
+    original = gen_manifest._git
+    try:
+        for operation in ("add", "commit"):
+            def fake_git(root, *args):
+                return subprocess.CompletedProcess(args, int(args[0] == operation))
+            gen_manifest._git = fake_git
+            try:
+                gen_manifest._build_fixture(base / ("failed-" + operation))
+            except subprocess.CalledProcessError:
+                refused = True
+            else:
+                refused = False
+            check("setup/gen-manifest-" + operation + "-checked", refused, True)
+    finally:
+        gen_manifest._git = original
 
 
 def _build_decoy(base):
@@ -489,12 +700,37 @@ def main(report_path=None):
                  ("scrub_git_environment",)),
                 ("route/check-opf-upgrade", "opf/tools/check_opf_upgrade.py",
                  ("_scrubbed_env",)),
-                ("route/check-opf-init", "opf/tools/check_opf_init.py",
-                 ("_scrubbed_env",)),
                 ("route/selftest-aiqt-hooks", "tools/selftest_aiqt_hooks.py",
                  ("scrub_git_environment",)),
         ):
             check(check_id, _calls_any(ROOT / member_rel, scrub_names), True)
+
+        for check_id, member, owner, binding, factory, launches in (
+                ("route/check-record-sections", "tools/check_record_sections.py",
+                 "_selftest_git", "env", "git_fixture_env", True),
+                ("route/check-portability", "tools/check_portability.py",
+                 "self_test_main", "git_env", "git_fixture_env", True),
+                ("route/gen-manifest", "tools/gen_manifest.py",
+                 "_git", "env", "git_fixture_env", False),
+                ("route/check-release-delta-env", "tools/check_release_delta.py",
+                 "_selftest_env", "env", "git_fixture_env", False),
+                ("route/check-release-delta-init", "tools/check_release_delta.py",
+                 "_git_init_commit", "env", "git_fixture_env", True),
+                ("route/check-release-delta-spy", "tools/check_release_delta.py",
+                 "_spy_index", "senv", "git_fixture_env", True),
+                ("route/check-release-build-attestation", "tools/check_release_build.py",
+                 "self_test_main", "ge", "git_fixture_env", False),
+                ("route/check-branch-root", "tools/check_branch_root.py",
+                 "_fixture_git", "env", "git_fixture_env", False),
+                ("route/check-gensrc-failclose", "tools/check_gensrc_failclose.py",
+                 "_git_fixture", "env", "git_fixture_env", True),
+                ("route/qa-adapter-fixture-env", "tools/_qa_adapter.py",
+                 "_self_test", "genv", "git_fixture_env", True),
+                ("route/check-opf-init", "opf/tools/check_opf_init.py",
+                 "_suite", "fixture_env", "_scrubbed_env", False),
+        ):
+            check(check_id, _binding_calls(ROOT / member, owner, binding, factory, launches), True)
+        check("trust/caller-env-archive-only", _caller_env_archive_only(), True)
 
         check("route/selftest-aiqt-hooks-fixture-env",
               _archive_reads_use_caller_env(ROOT / "tools" / "selftest_aiqt_hooks.py",
@@ -508,6 +744,8 @@ def main(report_path=None):
         # protections removed. Each named self-test entry must itself lead with the in-place
         # scrub, a top-level call with no process-launching call before it.
         for check_id, member_rel, func_name in (
+                ("scope/check-portability", "tools/check_portability.py", "self_test_main"),
+                ("scope/gen-manifest", "tools/gen_manifest.py", "self_test_main"),
                 ("scope/selftest-aiqt-corpus-setup", "tools/selftest_aiqt_corpus.py", "GitTests.setUp"),
                 ("scope/selftest-orch-hooks", "tools/selftest_orch_hooks.py", "main"),
                 ("scope/selftest-aiqt-hooks", "tools/selftest_aiqt_hooks.py", "main"),
@@ -531,6 +769,9 @@ def main(report_path=None):
                 ("trust/check-release-delta-archive-env", "tools/check_release_delta.py"),
         ):
             check(check_id, _archive_reads_use_caller_env(ROOT / member_rel), True)
+
+        _config_injection_lane(base)
+        _manifest_setup_failures(base)
 
         # ---------- layer 3: the end-to-end leak probe ----------
         decoy = _build_decoy(base)

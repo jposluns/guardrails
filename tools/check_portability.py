@@ -793,6 +793,8 @@ def _build_surface(base, name, email):
 
 
 def self_test_main():
+    from _git_fixture_env import scrub_git_environment
+    scrub_git_environment()
     name, email = "Jeff Posluns", "jeff@posluns.ca"
     ident_forms = identity_deny_forms(name, email)
     ident_maxn = max(len(_tokens(name)), len(_tokens(email)))
@@ -1424,8 +1426,8 @@ def self_test_main():
                 skipped.append("real-git tracked/untracked GD-130 pair (git is unavailable)")
             else:
                 sroot, _entries = _fresh("real-git")
-                git_env = {key: value for key, value in os.environ.items()
-                           if not key.startswith("GIT_")}
+                from _git_fixture_env import git_fixture_env
+                git_env = git_fixture_env()
 
                 def _git(*args):
                     try:

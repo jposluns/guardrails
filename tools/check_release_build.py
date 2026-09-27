@@ -2235,9 +2235,9 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                 try:
                     with tarfile.open(fileobj=io.BytesIO(arch6.stdout), mode="r:") as tf:
                         tf.extractall(ac)
-                    ge = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-                    ge.update({"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
-                               "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.invalid",
+                    from _git_fixture_env import git_fixture_env
+                    ge = git_fixture_env()
+                    ge.update({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.invalid",
                                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e.invalid",
                                "GIT_COMMITTER_DATE": "2000-01-01T00:00:00"})
                     # test-hermeticity: the archived tree carries the LIVE repo's release-version, so pin the

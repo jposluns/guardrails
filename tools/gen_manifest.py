@@ -791,9 +791,8 @@ _DISPOSITIONS = "format-version = 1\n"
 
 
 def _git(root, *args):
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env["GIT_CONFIG_GLOBAL"] = os.devnull
-    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    from _git_fixture_env import git_fixture_env
+    env = git_fixture_env()
     base = ["git", "-C", str(root), "-c", "user.name=aiqt-selftest",
             "-c", "user.email=selftest@invalid", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"]
     return subprocess.run(base + list(args), capture_output=True, env=env, timeout=60)
@@ -826,12 +825,14 @@ def _build_fixture(base, own_extra="", extra_files=None, do_commit=True):
     if do_commit:
         if _git(base, "init", "-q", "--template=").returncode != 0:
             return None
-        _git(base, "add", "-A")
-        _git(base, "commit", "-q", "-m", "fixture", "--no-verify")
+        _git(base, "add", "-A").check_returncode()
+        _git(base, "commit", "-q", "-m", "fixture", "--no-verify").check_returncode()
     return base
 
 
 def self_test_main():
+    from _git_fixture_env import scrub_git_environment
+    scrub_git_environment()
     import io
     import shutil
     import tempfile
