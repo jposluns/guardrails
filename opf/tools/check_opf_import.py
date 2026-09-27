@@ -101,7 +101,10 @@ Checks (each with a fail-without-it discriminator exercised by --self-test):
   - transaction-consistency : the transaction record's state machine, and that the attributed acceptance is
                            archived (`.aiqt/import-archive/<run-id>/acceptance.json`) once state >= published.
                            Both store-root control paths are read beneath a store-root descriptor opened from
-                           the run-dir descriptor, no-follow on EVERY component (_read_store_control): a
+                           the run-dir descriptor using the validated generation's run homes and inode binding
+                           (a detached run retains the legacy three-up fallback, bound to no store). An invalid
+                           generation, or one unsupplied once homes 2 is supported, fails both checks closed.
+                           No-follow on EVERY component (_read_store_control): a
                            symlinked parent, a FIFO, or any non-regular entry is a FINDING, never followed.
                            The shared journal `.aiqt/import/journal` and the archive path are classified
                            ALWAYS (whatever the record's state, or with no record); a present record must be
@@ -1528,6 +1531,7 @@ def _verify_ingest_review_model(rd, bundle, run, report, inventory, homes=None):
 # Durable acceptance is outside the staged registry. A staged copy remains an unexpected artefact.
 _INGEST_EVIDENCE_REGISTRY = (("acceptance.json", "VALIDATE", "ingest-acceptance-binding", "if-reviewed"),)
 _INGEST_ACCEPTANCE_CHECKS = ("ingest-acceptance-binding", "ingest-acceptance-completeness")
+_TRANSACTION_CHECKS = ("transaction-schema", "transaction-consistency")
 
 
 def _gate_homes(homes):
@@ -1535,7 +1539,7 @@ def _gate_homes(homes):
     only while no later generation can be active (the rule _row_scope_error applies). A supplied generation
     other than the integer 1 or 2 (a bool, a str, a float, 3), or one above the tooling's supported
     generation, raises. The staged-run gate takes no generation-dependent path on an invalid value:
-    ingest and ingest-acceptance checks fail with that error, as do an ingest-marked run's staged
+    ingest, ingest-acceptance and transaction checks fail with that error, as do an ingest-marked run's staged
     acceptance checks. Listing-based marker classification and ordinary runs' staged-data grading
     are generation-independent and still run."""
     import _opf_store
@@ -1576,6 +1580,18 @@ def _ingest_store_fd(rd, homes=None):
             raise
         return fd
     return None
+
+
+def _staged_run_store_fd(rd, homes):
+    """The store root holding the opened run, for the per-run transaction checks. The supplied homes is the
+    gate's already-validated generation, never None: the run is located through the generation-aware
+    run homes and inode binding durable acceptance uses (_ingest_store_fd), so a homes-2 staging run
+    (.working/staging/<kind>/<run-id>) reads its store four levels up. A detached copy (no home
+    matches) keeps the legacy three-up parent, which is bound to no store (disclosed residual)."""
+    fd = _ingest_store_fd(rd, homes)
+    if fd is None:
+        fd = os.open("../../..", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rd.fd)
+    return fd
 
 
 def _ingest_acceptance_checks(rd, homes=None):
@@ -1643,11 +1659,11 @@ def _check_staged_run(rd, homes=None):
         results[cid] = (bool(ok), detail)
 
     # A generation validation failure takes no generation-dependent path.
-    # Listing-based marker classification, ordinary runs' staged-data grading, and transaction checks
-    # remain generation-independent. Every ingest and ingest-acceptance check records the generation
-    # error, as do an ingest-marked run's staged acceptance checks.
+    # Listing-based marker classification and ordinary runs' staged-data grading remain
+    # generation-independent. Every ingest, ingest-acceptance and transaction check records the
+    # generation error, as do an ingest-marked run's staged acceptance checks.
     _ingest_ids = ("ingest-run-structure",) + _INGEST_CHECK_IDS
-    generation_checks = _ingest_ids + _INGEST_ACCEPTANCE_CHECKS
+    generation_checks = _ingest_ids + _INGEST_ACCEPTANCE_CHECKS + _TRANSACTION_CHECKS
     try:
         gen, gen_error = _gate_homes(homes), ""
     except _GateError as exc:
@@ -2215,24 +2231,28 @@ def _check_staged_run(rd, homes=None):
     # it survives the terminal run-dir deletion and never enters the store containment walk). It is
     # CONDITIONALLY PRESENT (mirroring acceptance.json): absent = "run not yet applied", recorded as a PASS
     # for both Group C checks; present = validated for schema and state-machine consistency. The store root
-    # is derived from the run dir (<store>/.working/imports/<run-id>), so the gate finds the record at its
-    # relocated home without a separate argument.
-    # Round-4 F3: the store root is opened BENEATH THE SUPPLIED RUN-DIR DESCRIPTOR (`../../..` from rd.fd: a
-    # `..` component is never a symlink), so it is the physical store holding the directory the run-dir
-    # classification observed, never a re-resolved string path; every store-relative control path below is
+    # is located through the validated generation's run homes and inode binding, with the legacy
+    # three-up fallback for a detached run (bound to no store).
+    # Round-4 F3: the store root is opened from THE SUPPLIED RUN-DIR DESCRIPTOR using parent components
+    # (never symlinks), so a located home binds the physical store holding the classified directory,
+    # never a re-resolved string path; every store-relative control path below is
     # then read through _read_store_control (a no-follow descriptor walk on EVERY component, non-blocking,
     # fstat regular-file check). A symlinked parent component (to a directory in or outside the store), a
     # FIFO, or any non-regular entry is a located FINDING, never followed and never read as "absent".
     run_name = run_dir.name
     txn_rel = "{}/{}/{}".format(imp.IMPORT_OPS_REL, run_name, imp.TRANSACTION_NAME)
     arch_rel = "{}/{}/{}".format(imp.IMPORT_ARCHIVE_REL, run_name, imp.ACCEPTANCE_NAME)
-    try:
-        store_fd = os.open("../../..", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rd.fd)
-    except (OSError, ValueError) as exc:
-        store_fd = None
-        for cid in ("transaction-schema", "transaction-consistency"):
-            record(cid, False, "cannot evaluate: cannot open the store root beneath the run dir no-follow "
-                               "({})".format(exc))
+    store_fd = None
+    if gen is None:
+        for cid in _TRANSACTION_CHECKS:
+            record(cid, False, gen_error)
+    else:
+        try:
+            store_fd = _staged_run_store_fd(rd, gen)
+        except Exception as exc:  # noqa: BLE001 - fail-closed, as the acceptance locator above
+            for cid in _TRANSACTION_CHECKS:
+                record(cid, False, "cannot evaluate: cannot open the store root beneath the run dir "
+                                   "no-follow ({})".format(exc))
     if store_fd is not None:
         jfd = None
         try:
@@ -2373,6 +2393,7 @@ def _self_test_gate_generation_sites(expect):
         ('gen', 'if gen == imp.INGEST_HOMES_GENERATION and marker is None and rd.kind(imp.ACCEPTANCE_NAME) == "file":'),
         ('gen', 'if gen is None:'),
         ('gen', 'if gen is None:'),
+        ('gen', 'if gen is None:'),
         ('gen', 'if gen is not None and ingest_is_run:'),
         ('gen', 'if gen is not None and marker is None:'),
         ('gen', 'if ingest_is_run and gen is None:'),
@@ -2380,9 +2401,11 @@ def _self_test_gate_generation_sites(expect):
         ('gen', 'legacy_generation = gen is not None and gen != imp.INGEST_HOMES_GENERATION'),
         ('gen', 'legacy_generation = gen is not None and gen != imp.INGEST_HOMES_GENERATION'),
         ('gen', 'record(cid, False, gen_error if gen is None and cid in generation_checks else str(exc))'),
+        ('gen', 'store_fd = ' '_staged_run_store_fd(rd, gen)'),
         ('gen_error', 'gen, gen_error = None, str(exc)'),
         ('gen_error', 'gen, gen_error = _gate_homes(homes), ""'),
         ('gen_error', 'record(cid, False, gen_error if gen is None and cid in generation_checks else str(exc))'),
+        ('gen_error', 'record(cid, False, gen_error)'),
         ('gen_error', 'record(cid, False, gen_error)'),
         ('gen_error', 'record(cid, False, gen_error)'),
         ('gen_error', 'record(cid, False, gen_error)'),
@@ -2676,9 +2699,11 @@ def _self_test_gate_generation_transaction_cases():
 
     def store_root_unopenable(run, store):
         real_open = os.open
+        parents = {"/".join([".."] * len(rel.split("/")))
+                   for rel in imp._import_run_locations(run.name, 2)}
 
         def refuse(path, *args, **kwargs):
-            if path == "../../..":
+            if path in parents:
                 raise OSError("store root unavailable (injected)")
             return real_open(path, *args, **kwargs)
         return patch.object(os, "open", side_effect=refuse)
@@ -2802,29 +2827,60 @@ def _self_test_gate_generation_applied(expect, label, run_dir, swept=None, inges
     the staged acceptance ids route by generation, so every invalid generation fails them too, and generation 2 keeps
     every result except the two ingest-acceptance ids, which grade the durable home, and the staged acceptance ids,
     which must then report that grading (a completeness id the completeness result, every other the binding
-    result). Appends (label, generation-1
+    result). Transaction checks require a valid generation but keep their results at both generations
+    in the legacy home. Each legacy fixture is also graded at both depth-4 homes against its generation-2
+    results. Appends (label, generation-1
     results, generation-2 results, credit) to `swept` and returns the generation-1 results; `credit` is the (id,
     located detail) pairs the fixture claims, which count only as _self_test_gate_generation_coverage allows."""
     from unittest.mock import patch
     import _opf_store
+    import _opf_import as imp
     dependent = ("ingest-run-structure",) + _INGEST_CHECK_IDS + _INGEST_ACCEPTANCE_CHECKS
     staged = ("acceptance-schema", "acceptance-binding", "acceptance-attribution", "acceptance-completeness")
-    routed = dependent + (staged if ingest else ())
+    routed = dependent + _TRANSACTION_CHECKS + (staged if ingest else ())
     second = None
     with patch.object(_opf_store, "SUPPORTED_HOMES", 2):
         baseline = check_staged_run(run_dir, homes=1)
+        expected_second = dict(baseline)
+        try:
+            imp._import_run_locations(Path(run_dir).name, 2)
+        except ValueError as exc:
+            # Malformed names are not registered homes: generation 2 rejects the name before
+            # opening a descriptor. Pin this refusal instead of requiring the legacy error locus.
+            error = "cannot evaluate: cannot open the store root beneath the run dir no-follow ({})".format(exc)
+            # A core-read failure returns before Group C and keeps its prerequisite error.
+            if baseline["transaction-schema"] != baseline["staged-run-structure"]:
+                expected_second.update((cid, (False, error)) for cid in _TRANSACTION_CHECKS)
         for case, homes in (("generation-2", 2),) + _self_test_gate_generation_cases():
             result = check_staged_run(run_dir) if homes is None else check_staged_run(run_dir, homes=homes)
             if case == "generation-2":
                 second = result
                 varies = _INGEST_ACCEPTANCE_CHECKS + staged if ingest else dependent
-                ok = all(result[cid] == value for cid, value in baseline.items() if cid not in varies) and (
+                ok = all(result[cid] == value for cid, value in expected_second.items() if cid not in varies) and (
                     not ingest or all(result[cid] == result[_INGEST_ACCEPTANCE_CHECKS[cid.endswith("completeness")]]
                                       for cid in staged))
             else:
                 ok = (all(result[cid] == value for cid, value in baseline.items() if cid not in routed)
                       and not any(result[cid][0] for cid in routed))
             expect("gate-generation-applied-{}-{}".format(label, case), set(result) == set(EXPECTED_CHECKS) and ok)
+        # Re-grade each legacy-located fixture at both registered depth-4 homes. Move the same bytes
+        # (including FIFOs and unreadable entries) within the fixture store; restore even on failure.
+        # The gate is manifest-free: scoped tooling activation above supplies generation 2 explicitly.
+        run = Path(run_dir)
+        if tuple(run.parts[-3:-1]) == tuple(imp.IMPORTS_REL.split("/")):
+            store = run.parents[2]
+            for kind in ("import", "ingest"):
+                # Derive the parent with a valid fixture id, retaining malformed basenames used by
+                # the structure discriminators instead of asking the constructor to admit them.
+                home = _opf_store.stage_run(kind, "imp-20000101T000000Z-0000000000000000")
+                staged_run = store / Path(home).parent / run.name
+                staged_run.parent.mkdir(parents=True, exist_ok=True)
+                run.rename(staged_run)
+                try:
+                    current = check_staged_run(staged_run, homes=2)
+                    expect("gate-generation-staging-{}-{}".format(label, kind), current == second)
+                finally:
+                    staged_run.rename(run)
     if swept is not None:
         swept.append((label, baseline, second, tuple(credit)))
     return baseline
@@ -2875,8 +2931,8 @@ def _self_test_gate_generation_coverage(swept, ids):
     return covered
 
 
-def _self_test_gate_generation_disk(store, fixture=None):
-    """Write the synthetic run of _opf_import._memory_ingest_run beneath `store` at its staging location and return the
+def _self_test_gate_generation_disk(store, fixture=None, location="legacy"):
+    """Write the synthetic run of _opf_import._memory_ingest_run beneath `store` at the legacy home or stage_run(location) and return the
     run directory. With `fixture` (one of _self_test_gate_generation_acceptance_cases) the ingest markers are dropped,
     the report is re-rendered for the ordinary run, and that fixture's corruption is applied, as
     _self_test_gate_generation does in memory; a non-regular acceptance is a FIFO and an unreadable one is mode 000.
@@ -2892,7 +2948,9 @@ def _self_test_gate_generation_disk(store, fixture=None):
         files[imp.REPORT_MD_NAME] = imp._render_report_md(
             inv["inventory_digest"], inv["fragment"], norm, rd.path.name).encode("utf-8")
         _self_test_gate_generation_accept(rd, files, fixture)
-    run_dir = Path(store) / imp.IMPORTS_REL / rd.path.name
+    rel = (imp.IMPORTS_REL + "/" + rd.path.name if location == "legacy"
+           else imp._opf_store.stage_run(location, rd.path.name))
+    run_dir = Path(store) / rel
     for name, data in files.items():
         (run_dir / name).parent.mkdir(parents=True, exist_ok=True)
         if rd.tree.get(name) == "other":
@@ -2920,7 +2978,7 @@ def _self_test_gate_generation(expect):
     import _opf_store
 
     gate = sys.modules[__name__]
-    dependent = ("ingest-run-structure",) + _INGEST_CHECK_IDS + _INGEST_ACCEPTANCE_CHECKS
+    dependent = ("ingest-run-structure",) + _INGEST_CHECK_IDS + _INGEST_ACCEPTANCE_CHECKS + _TRANSACTION_CHECKS
     staged_acceptance = ("acceptance-schema", "acceptance-binding", "acceptance-attribution",
                          "acceptance-completeness")
     cases = _self_test_gate_generation_cases()
@@ -3073,7 +3131,15 @@ def _self_test():
         if twin is not None:
             detached_labels.append(label + "-detached")
             _self_test_gate_generation_applied(expect, label + "-detached", twin, swept, False, credit)
-            expect("gate-generation-detached-{}".format(label), swept[-1][1] == first)
+            # A control character is refused earlier by a located home's inode walk than by a
+            # detached copy's control-path reads. Both must still fail at that character.
+            twin_first = swept[-1][1]
+            expect("gate-generation-detached-{}".format(label), all(
+                twin_first[cid] == value or (
+                    cid in _TRANSACTION_CHECKS and value[0] is False and twin_first[cid][0] is False
+                    and "carries a control character" in value[1]
+                    and "carries a control character" in twin_first[cid][1])
+                for cid, value in first.items()))
         return first
 
     NOW = datetime.datetime(2026, 9, 9, 12, 0, 0, tzinfo=datetime.timezone.utc)
@@ -3161,7 +3227,7 @@ def _self_test():
         # Preserve the original imp-... run-id BASENAME (under a unique parent) so a clean copy still
         # passes staged-run-structure (run-id grammar) and report-schema (report.run_id == dir name);
         # otherwise every copy would fail those on the rename alone and no discriminator would isolate.
-        # The copy sits at its store's staging location, so generation 2 locates the store (never a detached copy).
+        # The copy sits at its store's legacy run home, so generation 2 locates it (never a detached copy).
         parent = base / "mut-{:03d}".format(counter[0] * 100 + len(list(base.glob("mut-*")))) / imp.IMPORTS_REL
         parent.mkdir(parents=True)
         dest = parent / run_dir.name
@@ -4168,6 +4234,51 @@ def _self_test():
             unsupplied = check_staged_run(h1_run, homes=None)
         expect("ordinary-gate-homes-unsupplied", all(unsupplied[cid][0] is False for cid in
                ("ingest-acceptance-binding", "ingest-acceptance-completeness")))
+        # Flip: removing Group C's generation guard grades the legacy transaction path on invalid input.
+        expect("txn-homes-unsupplied-cannot", all(unsupplied[cid] == (
+            False, "the store's homes generation was not supplied to this manifest-free gate")
+            for cid in _TRANSACTION_CHECKS))
+        for supported in (1, 2):
+            with unittest.mock.patch.object(_opf_store, "SUPPORTED_HOMES", supported):
+                for bad in (3, "2", True, 1.0, 0):
+                    invalid = check_staged_run(h1_run, homes=bad)
+                    error = ("the supplied homes generation {!r} is not 1 or 2, or is above the tooling's "
+                             "supported generation {}".format(bad, supported))
+                    expect("txn-homes-invalid-cannot-{}-{!r}".format(supported, bad),
+                           all(invalid[cid] == (False, error) for cid in _TRANSACTION_CHECKS))
+        # Flip: fixed three-up reads the .working decoy and misses the true store-root record.
+        # Exercise both registered staging kinds, with fixture-only manifest activation.
+        for kind in ("import", "ingest"):
+            txn_root, _machine = build_store({})
+            txn_run = _self_test_gate_generation_disk(txn_root, "accepted", location=kind)
+            record = txn_root / imp.IMPORT_OPS_REL / txn_run.name / imp.TRANSACTION_NAME
+            decoy = txn_root / ".working" / imp.IMPORT_OPS_REL / txn_run.name / imp.TRANSACTION_NAME
+            record.parent.mkdir(parents=True)
+            decoy.parent.mkdir(parents=True)
+            record.write_bytes(b"state =\n")
+            legacy = check_staged_run(txn_run, homes=1)
+            expect("txn-homes1-staging-legacy-parent-" + kind,
+                   all(legacy[cid] == (True, "no transaction record (run not yet applied)")
+                       for cid in _TRANSACTION_CHECKS))
+            with imp._self_test_homes2_active(txn_root):
+                corrupt = check_staged_run(txn_run, homes=2)
+                expect("txn-homes2-staging-store-root-" + kind,
+                       corrupt["transaction-schema"][0] is False
+                       and "unreadable/unparseable" in corrupt["transaction-schema"][1])
+                record.unlink()
+                decoy.write_bytes(b"state =\n")
+                txn_clean = check_staged_run(txn_run, homes=2)
+                expect("txn-homes2-staging-not-working-parent-" + kind,
+                       txn_clean["transaction-schema"][0] is True)
+                decoy.unlink()
+                txn_clean = check_staged_run(txn_run, homes=2)
+                expect("txn-homes2-staging-clean-" + kind,
+                       set(txn_clean) == set(EXPECTED_CHECKS)
+                       and all(txn_clean[cid][0] for cid in EXPECTED_CHECKS))
+            decoy.write_bytes(b"state =\n")
+            legacy = check_staged_run(txn_run, homes=1)
+            expect("txn-homes1-staging-legacy-parent-decoy-" + kind,
+                   legacy["transaction-schema"][0] is False)
         # Flip: a _gate_homes that returns its input unvalidated admits each malformed generation.
         with unittest.mock.patch.object(_opf_store, "SUPPORTED_HOMES", 2):
             refused = []

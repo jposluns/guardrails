@@ -1904,6 +1904,36 @@ def _d_inline_required(module, base_dir):
                   "per-record/inline-required")
 
 
+def _d_staged_run_store_depth(module, base_dir):
+    """A corrupt store-root transaction refuses depth-4 ingest promotion. The candidate gate must
+    be installed by name: _require_review_gate imports it lazily. Fixed three-up falsely promotes."""
+    from unittest.mock import patch
+    root, rid, run = _st_build(base_dir, "staged-depth")
+    staged = root / _opf_store.stage_run("ingest", rid)
+    staged.parent.mkdir(parents=True)
+    run.rename(staged)
+    record = root / _opf_import.IMPORT_OPS_REL / rid / _opf_import.TRANSACTION_NAME
+    record.parent.mkdir(parents=True)
+    record.write_bytes(b"state =\n")
+    with _opf_import._self_test_homes2_active(root), patch.dict(sys.modules, {"check_opf_import": module}):
+        result = apply_ingest(root, rid, now=_NOW)
+    _revert_check(result.promoted is False and result.outcome == "aborted"
+                  and any("transaction-schema" in finding for finding in result.findings),
+                  "gate/staged-run-store-depth")
+
+
+def _d_transaction_generation_required(module, base_dir):
+    """An invalid supplied generation must never downgrade to legacy transaction grading."""
+    from unittest.mock import patch
+    _root, _rid, run = _st_build(base_dir, "transaction-generation")
+    with patch.object(_opf_store, "SUPPORTED_HOMES", 1):
+        result = module.check_staged_run(run, homes=3)
+    error = "the supplied homes generation 3 is not 1 or 2, or is above the tooling's supported generation 1"
+    _revert_check(all(result[cid] == (False, error) for cid in
+                      ("transaction-schema", "transaction-consistency")),
+                  "gate/transaction-generation-required")
+
+
 # Post-launch probes: each drives one sibling of the committed-reported-as-aborted class (or the genuine
 # rollback it must not absorb) through a candidate module and returns whether it is reported truthfully. An
 # indeterminate probe also requires the journal-evidence finding, so the helper-failure guard's own
@@ -2312,8 +2342,14 @@ _POST_LAUNCH = (
 
 # (identity, source-key, focused test, unique old, new). source-key selects which module's source is
 # mutated: "apply" is this file, "alloc" is _opf_allocation.py (a dependency guard, mutated at source the
-# same way the observer gate mutates its shared _opf_observe.py).
+# same way the observer gate mutates its shared _opf_observe.py); "gate" is check_opf_import.py.
 _DISCRIMINATORS = (
+    ("gate/staged-run-store-depth", "gate", _d_staged_run_store_depth,
+     "store_fd = _staged_run_store_fd(rd, gen)",
+     'store_fd = os.open("../../..", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rd.fd)'),
+    ("gate/transaction-generation-required", "gate", _d_transaction_generation_required,
+     "if gen is None:\n        for cid in _TRANSACTION_CHECKS:\n            record(cid, False, gen_error)",
+     "if False:\n        for cid in _TRANSACTION_CHECKS:\n            record(cid, False, gen_error)"),
     ("acceptance/reject-refused", "apply", _d_reject_refused, "if rejected:", "if False:"),
     ("path/canonical-contained", "apply", _d_canonical_contained,
      "return _opf_store._home_file(path)", "return path"),
@@ -2331,7 +2367,8 @@ def _red_on_revert():
     import shutil
     import tempfile
     here = Path(__file__).resolve().parent
-    sources = {"apply": here.joinpath("_opf_ingest_apply.py"), "alloc": here.joinpath("_opf_allocation.py")}
+    sources = {"apply": here.joinpath("_opf_ingest_apply.py"), "alloc": here.joinpath("_opf_allocation.py"),
+               "gate": here.joinpath("check_opf_import.py")}
     read = dict((key, path.read_text(encoding="utf-8")) for key, path in sources.items())
     ids = [d[0] for d in _DISCRIMINATORS]
     if len(ids) != len(set(ids)):
