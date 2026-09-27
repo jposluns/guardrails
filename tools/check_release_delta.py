@@ -1036,7 +1036,12 @@ def _selftest_env():
 
 
 def _archive_head(real):
-    arch = subprocess.run(["git", "-C", str(real), "archive", "HEAD"], capture_output=True)
+    # A REAL-repository read reached from the scrubbed self-test: the caller's env (minus GIT_*)
+    # keeps the safe.directory trust the in-place fixture scrub drops, so a foreign-owned checkout
+    # does not silently skip the real full-pack cases.
+    from _git_fixture_env import caller_env_without_git
+    arch = subprocess.run(["git", "-C", str(real), "archive", "HEAD"], capture_output=True,
+                          env=caller_env_without_git())
     return arch.stdout if arch.returncode == 0 and arch.stdout else None
 
 

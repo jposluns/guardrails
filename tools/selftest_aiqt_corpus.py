@@ -302,6 +302,22 @@ class MetadataTests(unittest.TestCase):
 
 
 class GitTests(unittest.TestCase):
+    def setUp(self):
+        # Hermetic fixtures on EVERY invocation surface (test-hermeticity): the git()/git_show()
+        # calls under test read os.environ at CALL time, so an entry-point scrub alone leaves an
+        # importer's inherited GIT_DIR live (run_self_test() called from another module, or
+        # unittest loading GitTests directly, would read the CALLER's repository). Scrub in the
+        # fixture lifecycle itself and restore the caller's environment afterwards (a test leaves
+        # the host as it found it).
+        saved = dict(os.environ)
+
+        def _restore():
+            os.environ.clear()
+            os.environ.update(saved)
+
+        self.addCleanup(_restore)
+        scrub_git_environment()
+
     def _init_repo(self, d):
         # Hermetic fixture env (test-hermeticity): an inherited GIT_INDEX_FILE / GIT_DIR /
         # GIT_WORK_TREE (git exports these to hook children) would redirect these writes into
@@ -433,6 +449,8 @@ def run_self_test():
 
 
 if __name__ == "__main__":
-    # The git()/git_show() calls under test inherit os.environ, so scrub it in place too.
+    # Defence-in-depth for the direct run: GitTests.setUp scrubs the fixture lifecycle itself
+    # (covering the imported surfaces, run_self_test() and unittest-loaded GitTests, too); this
+    # entry-point scrub backstops anything outside the unittest lifecycle.
     scrub_git_environment()
     raise SystemExit(run_self_test())

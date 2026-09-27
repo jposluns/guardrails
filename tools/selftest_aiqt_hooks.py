@@ -116,6 +116,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
+from _git_fixture_env import git_fixture_env, scrub_git_environment  # noqa: E402
 import gen_secret_patterns  # noqa: E402  (same tools dir, for the drift-gate F-129 self-test)
 
 sys.path.insert(0, str(repo_root() / ".aiqt" / "core" / "hooks" / "scripts"))
@@ -154,7 +155,7 @@ def _git(repo, *args, env_identity=False):
         cmd += ["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
                 "-c", "commit.gpgsign=false"]
     cmd += list(args)
-    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=30)
+    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=30, env=git_fixture_env())
 
 
 def _recovery_refs(repo):
@@ -163,7 +164,8 @@ def _recovery_refs(repo):
     unreadable ref list can never be mistaken for an empty one (a broken listing must not falsely 'prove'
     that no snapshot was made)."""
     out = subprocess.run(["git", "-C", str(repo), "for-each-ref", "--format=%(refname)",
-                          "refs/aiqt-recovery/"], capture_output=True, text=True, timeout=30)
+                          "refs/aiqt-recovery/"], capture_output=True, text=True, timeout=30,
+                         env=git_fixture_env())
     if out.returncode != 0:
         raise RuntimeError("for-each-ref refs/aiqt-recovery/ failed in {} (rc={}): {}"
                            .format(repo, out.returncode, out.stderr.strip()))
@@ -175,7 +177,7 @@ def _init_repo(path):
     plus a second branch 'other' at the same commit, and return the Path. Raises on any git failure."""
     path.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "init", "-q", "-b", "main", str(path)],
-                   check=True, capture_output=True, text=True, timeout=30)
+                   check=True, capture_output=True, text=True, timeout=30, env=git_fixture_env())
     (path / "file.txt").write_text("committed line\n", encoding="utf-8")
     (path / "clean.txt").write_text("clean line\n", encoding="utf-8")
     _git(path, "add", "file.txt", "clean.txt")
@@ -340,6 +342,7 @@ def _test_git_stash_ref(failures):
 
 
 def main():
+    scrub_git_environment()
     handler = aiqt_hooks.git_discard
     try:
         tmp = Path(tempfile.mkdtemp(prefix="aiqt-hooks-selftest-"))
@@ -353,8 +356,12 @@ def main():
     # gate's own runner happens to carry (a shell may export GIT_EDITOR, CI may export others), so each case
     # below is judged ONLY against the GIT_* vars it explicitly sets. Production still reads the real
     # os.environ; this scrub is a test-harness isolation, not a change to the control.
-    for _amb in [k for k in os.environ if k.startswith("GIT_")]:
-        os.environ.pop(_amb, None)
+    # The synthetic handler environment must not include harness config pins: the
+    # production guard correctly treats those as repository-view overrides. Fixture
+    # git subprocesses receive git_fixture_env() explicitly, including all three pins.
+    # Handler-internal scrubs still have their documented system-config residual.
+    for key in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"):
+        os.environ.pop(key, None)
     # F-106 regression guard: run the whole self-test with NO ambient git identity, so the EN-6 recovery
     # snapshot's `git commit-tree` must supply its OWN fixed identity to succeed. The recovery layer scrubs
     # GIT_CONFIG_*/GIT_AUTHOR_*/GIT_COMMITTER_* itself (the allowlist posture), but NOT HOME/XDG_CONFIG_HOME,
@@ -825,14 +832,14 @@ def main():
                 failures.append("(f5-staged-flag) the snapshot must flag a distinct STAGED state (finding 5)")
             _f5staged = subprocess.run(
                 ["git", "-C", str(f5), "show", "{}^2:file.txt".format(_f5info["ref"])],
-                capture_output=True, text=True, timeout=30)
+                capture_output=True, text=True, timeout=30, env=git_fixture_env())
             if _f5staged.returncode != 0 or _f5staged.stdout != "STAGED-A\n":
                 failures.append("(f5-staged-recover) the discarded STAGED version A must be recoverable from "
                                 "the ref's second parent (finding 5); got rc={} out={!r}"
                                 .format(_f5staged.returncode, _f5staged.stdout))
             _f5wt = subprocess.run(
                 ["git", "-C", str(f5), "show", "{}:file.txt".format(_f5info["ref"])],
-                capture_output=True, text=True, timeout=30)
+                capture_output=True, text=True, timeout=30, env=git_fixture_env())
             if _f5wt.stdout != "WORKTREE-B\n":
                 failures.append("(f5-worktree) the snapshot's primary tree must hold the worktree version B; "
                                 "got {!r}".format(_f5wt.stdout))
@@ -866,7 +873,7 @@ def main():
             # the preserved MOST-RECENT stash (stash@{0} = s2) must be recoverable from its ref
             _f6ref0 = sorted(_f6_new)[0]  # ...-stash0
             _f6show = subprocess.run(["git", "-C", str(f6), "show", "{}:file.txt".format(_f6ref0)],
-                                     capture_output=True, text=True, timeout=30)
+                                     capture_output=True, text=True, timeout=30, env=git_fixture_env())
             if "stash-2" not in _f6show.stdout:
                 failures.append("(f6-clear-recover) a preserved stash entry must carry the stashed worktree "
                                 "content (finding 6); got {!r}".format(_f6show.stdout))
@@ -1217,7 +1224,8 @@ def main():
         def _snap(*a):
             # CHECK the return code: a git probe that errors must surface as a harness failure, not be
             # swallowed into an empty string that then matches "before" and falsely proves invariance.
-            r = subprocess.run(["git", "-C", str(rec_inv), *a], capture_output=True, text=True, timeout=30)
+            r = subprocess.run(["git", "-C", str(rec_inv), *a], capture_output=True, text=True, timeout=30,
+                               env=git_fixture_env())
             if r.returncode != 0:
                 failures.append("(rec-inv-probe) git {} failed in the invariant probe (rc={}): {}"
                                 .format(" ".join(a), r.returncode, r.stderr.strip()))
@@ -1362,7 +1370,8 @@ def main():
         amb_index = rec_amb / ".git" / "index"
         amb_idx_before = amb_index.read_bytes()
         amb_head_before = subprocess.run(["git", "-C", str(rec_amb), "rev-parse", "HEAD"],
-                                         capture_output=True, text=True, timeout=30).stdout.strip()
+                                         capture_output=True, text=True, timeout=30,
+                                         env=git_fixture_env()).stdout.strip()
         amb_env = {"GIT_AUTHOR_NAME": "Ambient", "GIT_AUTHOR_EMAIL": "a@example.invalid",
                    "GIT_COMMITTER_NAME": "Ambient", "GIT_COMMITTER_EMAIL": "a@example.invalid",
                    "GIT_PAGER": "cat"}
@@ -1381,7 +1390,8 @@ def main():
         if amb_index.read_bytes() != amb_idx_before:
             failures.append("(rec-ambient-index) the real index changed with ambient GIT_* env present")
         amb_head_after = subprocess.run(["git", "-C", str(rec_amb), "rev-parse", "HEAD"],
-                                        capture_output=True, text=True, timeout=30).stdout.strip()
+                                        capture_output=True, text=True, timeout=30,
+                                        env=git_fixture_env()).stdout.strip()
         if amb_head_after != amb_head_before:
             failures.append("(rec-ambient-head) HEAD changed with ambient GIT_* env present")
 
@@ -1491,7 +1501,8 @@ def main():
         (rec_decoy / "file.txt").write_text("committed line\nreal dirty work\n", encoding="utf-8")
         decoy = _init_repo(tmp / "rec-decoy-clean")  # a CLEAN decoy the ambient env points at
         real_head = subprocess.run(["git", "-C", str(rec_decoy), "rev-parse", "HEAD"],
-                                   capture_output=True, text=True, timeout=30).stdout.strip()
+                                   capture_output=True, text=True, timeout=30,
+                                   env=git_fixture_env()).stdout.strip()
         real_idx_bytes = (rec_decoy / ".git" / "index").read_bytes()
         decoy_env = {"GIT_DIR": str(decoy / ".git"), "GIT_WORK_TREE": str(decoy)}
         for _k, _v in decoy_env.items():
@@ -1517,7 +1528,8 @@ def main():
         if (rec_decoy / ".git" / "index").read_bytes() != real_idx_bytes:
             failures.append("(rec-decoy-index) the real index changed under an ambient GIT_DIR/GIT_WORK_TREE")
         real_head_after = subprocess.run(["git", "-C", str(rec_decoy), "rev-parse", "HEAD"],
-                                         capture_output=True, text=True, timeout=30).stdout.strip()
+                                         capture_output=True, text=True, timeout=30,
+                                         env=git_fixture_env()).stdout.strip()
         if real_head_after != real_head:
             failures.append("(rec-decoy-head) the real HEAD changed under an ambient GIT_DIR/GIT_WORK_TREE")
 
@@ -1714,7 +1726,8 @@ def main():
             got_col1 = _decision(handler, "git checkout -- file.txt", cwd=str(rec_col))
             refs_after1 = _recovery_refs(rec_col)
             first_sha = subprocess.run(["git", "-C", str(rec_col), "rev-parse", refs_after1[0]],
-                                       capture_output=True, text=True, timeout=30).stdout.strip() \
+                                       capture_output=True, text=True, timeout=30,
+                                       env=git_fixture_env()).stdout.strip() \
                 if refs_after1 else ""
             data_col2 = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
                          "tool_input": {"command": "git checkout -- file.txt"}, "cwd": str(rec_col)}
@@ -1739,7 +1752,8 @@ def main():
                             "a collision, was {} now {}".format(refs_after1, refs_after2))
         if refs_after2 and first_sha and subprocess.run(
                 ["git", "-C", str(rec_col), "rev-parse", refs_after2[0]],
-                capture_output=True, text=True, timeout=30).stdout.strip() != first_sha:
+                capture_output=True, text=True, timeout=30,
+                env=git_fixture_env()).stdout.strip() != first_sha:
             failures.append("(rec-refcollision-sha) the prior recovery ref sha was clobbered by a collision")
 
         # (rec-fd-nonpristine) C6 (F-D EXPAND): a NON-PRISTINE in-scope ASK (a compound snapshottable
@@ -1793,7 +1807,8 @@ def main():
         (rec_cfg / "file.txt").write_text("committed line\nreal cfg work\n", encoding="utf-8")
         cfg_decoy = _init_repo(tmp / "rec-cfgcount-clean")  # a CLEAN worktree the injected config points at
         cfg_head = subprocess.run(["git", "-C", str(rec_cfg), "rev-parse", "HEAD"],
-                                  capture_output=True, text=True, timeout=30).stdout.strip()
+                                  capture_output=True, text=True, timeout=30,
+                                  env=git_fixture_env()).stdout.strip()
         cfg_idx_bytes = (rec_cfg / ".git" / "index").read_bytes()
         cfg_wt_bytes = (rec_cfg / "file.txt").read_bytes()
         cfg_env = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.worktree",
@@ -1826,7 +1841,8 @@ def main():
             failures.append("(rec-cfgcount-worktree) the real worktree changed under an injected "
                             "GIT_CONFIG_COUNT")
         cfg_head_after = subprocess.run(["git", "-C", str(rec_cfg), "rev-parse", "HEAD"],
-                                        capture_output=True, text=True, timeout=30).stdout.strip()
+                                        capture_output=True, text=True, timeout=30,
+                                        env=git_fixture_env()).stdout.strip()
         if cfg_head_after != cfg_head:
             failures.append("(rec-cfgcount-head) the real HEAD changed under an injected GIT_CONFIG_COUNT")
 
@@ -2160,7 +2176,7 @@ def main():
         r3f8 = tmp / "r3f8-unborn"
         r3f8.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "init", "-q", "-b", "main", str(r3f8)], check=True, capture_output=True,
-                       text=True, timeout=30)
+                       text=True, timeout=30, env=git_fixture_env())
         (r3f8 / "f").write_text("STAGED-ONLY\n", encoding="utf-8")
         _git(r3f8, "add", "f")                               # staged in an unborn-HEAD index
         (r3f8 / "f").write_text("WORKTREE\n", encoding="utf-8")   # worktree differs -> staged-only content
@@ -2174,7 +2190,7 @@ def main():
                 failures.append("(r3f8-ptr) unborn-HEAD staged parent must be '^1', got {!r} (finding 8)"
                                 .format(_info.get("staged_pointer")))
             _show1 = subprocess.run(["git", "-C", str(r3f8), "show", "{}^1:f".format(_info["ref"])],
-                                    capture_output=True, text=True, timeout=30)
+                                    capture_output=True, text=True, timeout=30, env=git_fixture_env())
             if _show1.returncode != 0 or _show1.stdout != "STAGED-ONLY\n":
                 failures.append("(r3f8-resolve) '<ref>^1:f' must resolve to the staged-only content on an "
                                 "unborn HEAD (finding 8), got rc={} {!r}".format(_show1.returncode,
@@ -2236,7 +2252,7 @@ def main():
         r6f6 = tmp / "r6-f6-staged"
         r6f6.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "init", "-q", "-b", "main", str(r6f6)], check=True, capture_output=True,
-                       text=True, timeout=30)
+                       text=True, timeout=30, env=git_fixture_env())
         (r6f6 / "s.txt").write_text("committed\n", encoding="utf-8")
         _git(r6f6, "add", "s.txt")
         _git(r6f6, "commit", "-q", "-m", "seed", env_identity=True)
@@ -2281,7 +2297,7 @@ def main():
         try:
             cf3 = tmp / "cf3 space repo"          # a repo whose path carries a SPACE (and a ';' would inject)
             subprocess.run(["git", "init", "-q", "-b", "main", str(cf3)],
-                           check=True, capture_output=True, text=True, timeout=30)
+                           check=True, capture_output=True, text=True, timeout=30, env=git_fixture_env())
             (cf3 / "f.txt").write_text("x\n", encoding="utf-8")
             _git(cf3, "add", "f.txt")
             _git(cf3, "commit", "-q", "-m", "seed", env_identity=True)
@@ -3462,7 +3478,7 @@ def main():
         _git(br_repo, "commit", "-q", "-m", "second", env_identity=True)
         br_tip = subprocess.run(
             ["git", "-C", brr, "rev-parse", "HEAD"],
-            check=True, capture_output=True, text=True, timeout=30).stdout.strip()
+            check=True, capture_output=True, text=True, timeout=30, env=git_fixture_env()).stdout.strip()
         _git(br_repo, "update-ref", "refs/remotes/origin/main", br_tip)
         _git(br_repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
 
@@ -3477,13 +3493,13 @@ def main():
         # H2: a parentless commit in the same object database is an explicit orphan start.
         br_tree = subprocess.run(
             ["git", "-C", brr, "rev-parse", "HEAD^{tree}"],
-            check=True, capture_output=True, text=True, timeout=30).stdout.strip()
+            check=True, capture_output=True, text=True, timeout=30, env=git_fixture_env()).stdout.strip()
         br_orphan = subprocess.run(
             ["git", "-C", brr, "-c", "user.name=Test", "-c",
              "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
              "commit-tree", br_tree],
             input="orphan root\n", check=True, capture_output=True, text=True,
-            timeout=30).stdout.strip()
+            timeout=30, env=git_fixture_env()).stdout.strip()
         _git(br_repo, "update-ref", "refs/heads/orphan-start", br_orphan)
         brexpect("(H2) checkout -b from orphan denies",
                  "git checkout -b x orphan-start", "deny")
@@ -3495,7 +3511,8 @@ def main():
         # --work-tree value (br_wt, where 'orphan-start' is rooted) and ALLOWED. Reverting reds this (-> allow).
         br_wt = _init_repo(tmp / "br-wt")
         _brwt_tip = subprocess.run(["git", "-C", str(br_wt), "rev-parse", "HEAD"],
-                                   check=True, capture_output=True, text=True, timeout=30).stdout.strip()
+                                   check=True, capture_output=True, text=True, timeout=30,
+                                   env=git_fixture_env()).stdout.strip()
         _git(br_wt, "update-ref", "refs/remotes/origin/main", _brwt_tip)
         _git(br_wt, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
         _git(br_wt, "branch", "orphan-start")   # a ROOTED branch (shares origin/HEAD) of the SAME name
@@ -5217,7 +5234,7 @@ def main():
             path = tmp / name
             path.mkdir(parents=True, exist_ok=True)
             subprocess.run(["git", "init", "-q", "-b", "main", str(path)],
-                           check=True, capture_output=True, text=True, timeout=30)
+                           check=True, capture_output=True, text=True, timeout=30, env=git_fixture_env())
             return path
 
         def gdecide(data):
@@ -6267,15 +6284,15 @@ def main():
             ws_rp = tmp / "wsrepo"
             ws_rp.mkdir(parents=True, exist_ok=True)
             subprocess.run(["git", "init", "-q", "-b", "main", str(ws_rp)],
-                           check=True, capture_output=True, text=True, timeout=30)
+                           check=True, capture_output=True, text=True, timeout=30, env=git_fixture_env())
             ws_other = tmp / "wsother"
             ws_other.mkdir(parents=True, exist_ok=True)
             subprocess.run(["git", "init", "-q", "-b", "main", str(ws_other)],
-                           check=True, capture_output=True, text=True, timeout=30)
+                           check=True, capture_output=True, text=True, timeout=30, env=git_fixture_env())
             ws_nested = ws_rp / "nested"
             ws_nested.mkdir(parents=True, exist_ok=True)
             subprocess.run(["git", "init", "-q", "-b", "main", str(ws_nested)],
-                           check=True, capture_output=True, text=True, timeout=30)
+                           check=True, capture_output=True, text=True, timeout=30, env=git_fixture_env())
         except (OSError, subprocess.SubprocessError) as exc:
             print("SELF-TEST ERROR: could not build the write-scope fixtures: {}".format(exc),
                   file=sys.stderr)
@@ -6537,7 +6554,7 @@ def main():
             ws_reg = tmp / "wsreg"
             ws_reg.mkdir(parents=True, exist_ok=True)
             subprocess.run(["git", "init", "-q", "-b", "main", str(ws_reg)],
-                           check=True, capture_output=True, text=True, timeout=30)
+                           check=True, capture_output=True, text=True, timeout=30, env=git_fixture_env())
         except (OSError, subprocess.SubprocessError) as exc:
             print("SELF-TEST ERROR: could not build the write-scope registry fixture: {}".format(exc),
                   file=sys.stderr)
@@ -6640,12 +6657,12 @@ def main():
             for _p in (cs_sess, cs_store, cs_other):
                 _p.mkdir(parents=True, exist_ok=True)
                 subprocess.run(["git", "init", "-q", "-b", "main", str(_p)],
-                               check=True, capture_output=True, text=True, timeout=30)
+                               check=True, capture_output=True, text=True, timeout=30, env=git_fixture_env())
             cs_nonrepo.mkdir(parents=True, exist_ok=True)   # a plain dir, not a git repo
             cs_store_nested = cs_store / "innerrepo"         # a repo NESTED inside the store
             cs_store_nested.mkdir(parents=True, exist_ok=True)
             subprocess.run(["git", "init", "-q", "-b", "main", str(cs_store_nested)],
-                           check=True, capture_output=True, text=True, timeout=30)
+                           check=True, capture_output=True, text=True, timeout=30, env=git_fixture_env())
         except (OSError, subprocess.SubprocessError) as exc:
             print("SELF-TEST ERROR: could not build the companion-store fixtures: {}".format(exc),
                   file=sys.stderr)
@@ -6731,7 +6748,7 @@ def main():
         cs_sess_nested = cs_sess / "nested"
         cs_sess_nested.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "init", "-q", "-b", "main", str(cs_sess_nested)],
-                       check=True, capture_output=True, text=True, timeout=30)
+                       check=True, capture_output=True, text=True, timeout=30, env=git_fixture_env())
         wsexpect("(ws-cs-nested-session) a nested-in-SESSION repo still DENIES (unchanged)",
                  "deny", "Write", os.path.join(str(cs_sess_nested), "f.txt"), cs_sess)
         # AUDIT: a companion-store ALLOW emits a guard-event row (kind wrtscp, decision allow).
@@ -6934,7 +6951,7 @@ def main():
         _f18_repo = _f18_tmp / "repo"
         _f18_repo.mkdir()
         subprocess.run(["git", "init", "-q", "-b", "main", str(_f18_repo)],
-                       check=True, capture_output=True, timeout=30)
+                       check=True, capture_output=True, timeout=30, env=git_fixture_env())
         _f18_stub = _f18_repo / "enum-stub.py"
         _f18_stub.write_text("import sys\nsys.stdout.write(open(sys.argv[1]).read())\n"
                              "sys.exit(int(open(sys.argv[2]).read().strip()))\n", encoding="utf-8")

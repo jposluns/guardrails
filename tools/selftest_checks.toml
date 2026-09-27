@@ -423,8 +423,11 @@ expected-check-ids = [
   "env/override-kept",
   "env/non-git-preserved",
   "env/scrub-in-place-child",
+  "env/caller-env-restores-trust-config",
+  "env/opf-init-inherited-allowlist",
   # ---------- layer 2: per-member routing (one named check per fixture-class member) ----------
   "route/selftest-aiqt-corpus",
+  "route/selftest-aiqt-corpus-fixture-env",
   "route/selftest-orch-hooks",
   "route/qa-adapter",
   "route/check-record-drift",
@@ -433,9 +436,26 @@ expected-check-ids = [
   "route/check-release-build",
   "route/check-release-delta",
   "route/check-opf-upgrade",
+  "route/check-opf-init",
+  "route/selftest-aiqt-hooks",
+  "route/selftest-aiqt-hooks-fixture-env",
+  # function-scoped: the named self-test entry itself leads with the in-place scrub
+  "scope/selftest-aiqt-corpus-setup",
+  "scope/selftest-orch-hooks",
+  "scope/selftest-aiqt-hooks",
+  "scope/check-record-drift",
+  "scope/check-mistakes-register",
+  "scope/check-version-monotonicity",
+  "scope/check-release-build",
+  "scope/check-release-delta",
+  # real-repository reads carry the caller's trust configuration (the safe.directory regression)
+  "trust/check-release-build-archive-env",
+  "trust/check-release-delta-archive-env",
   # ---------- layer 3: the end-to-end caller-repository leak probe ----------
   "leak/index-poison-fixture-green",
   "leak/index-poison-caller-unchanged",
   "leak/gitdir-poison-fixture-green",
   "leak/gitdir-poison-caller-unchanged",
+  "leak/imported-gitdir-poison-fixture-green",
+  "leak/imported-gitdir-poison-caller-unchanged",
 ]

@@ -1181,7 +1181,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
     # os.environ, where an inherited GIT_INDEX_FILE / GIT_DIR (git exports these to hook
     # children) would redirect the fixture's init/add/commit into the CALLER's repository.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from _git_fixture_env import scrub_git_environment
+    from _git_fixture_env import caller_env_without_git, scrub_git_environment
     scrub_git_environment()
     failures = []
     # CANNOT-EVALUATE collection, kept DISTINCT from `failures` (round-10 finding 6): an unavailable/empty
@@ -1795,7 +1795,10 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             # WITHOUT --first-pin still AUTO-REQUIRES first-pin evidence (finding 5), and reproduce_gate runs
             # on the RAW-materialized + fresh-init candidate (finding 1, no worktree). The raw materialization
             # and reproduce both exercise the round-4 cannot-evaluate propagation on the real toolchain.
-            arch = subprocess.run(["git", "-C", str(repo_root()), "archive", "HEAD"], capture_output=True)
+            # A REAL-repository read: the caller's env (minus GIT_*) keeps the safe.directory trust the
+            # in-place fixture scrub drops (a foreign-owned checkout otherwise refuses with rc=128).
+            arch = subprocess.run(["git", "-C", str(repo_root()), "archive", "HEAD"],
+                                  capture_output=True, env=caller_env_without_git())
             if arch.returncode != 0 or not arch.stdout:
                 # (round-9 finding 2) `git archive HEAD` is always available in-repo; an unavailable/empty
                 # archive is a SELF-TEST FAILURE, never a silent skip that still reports full PASS.
@@ -2215,7 +2218,9 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             # GREEN on that attestation commit (the required commit merges through the normal gates), and
             # post-tag validates the REGENERATED artifacts. The QA object lives OUTSIDE the tree so it is not
             # a tracked pack path. Skipped (no false pass) if the archive is unavailable.
-            arch6 = subprocess.run(["git", "-C", str(repo_root()), "archive", "HEAD"], capture_output=True)
+            # A REAL-repository read: caller env for the same safe.directory reason as the genesis case.
+            arch6 = subprocess.run(["git", "-C", str(repo_root()), "archive", "HEAD"],
+                                   capture_output=True, env=caller_env_without_git())
             if arch6.returncode != 0 or not arch6.stdout:
                 # (round-9 finding 2) `git archive HEAD` is always available in-repo; an unavailable/empty
                 # archive is a SELF-TEST FAILURE, never a silent skip that still reports full PASS.
