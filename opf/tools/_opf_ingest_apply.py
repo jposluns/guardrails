@@ -1760,6 +1760,15 @@ TESTS = (("happy-path", _t_happy_path), ("retry-monotonic", _t_retry_monotonic),
 
 
 def self_test(only=None):
+    """Keep caller HOME/XDG out of fixture reads, including in-process production helpers."""
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home):
+            return self_test_isolated(only)
+
+
+def self_test_isolated(only=None):
     """Run the slice-1 vectors in a private temporary tree, report the executed test identities and the
     check count, and return 0 (pass), 1 (a failed check), or 2 (a harness error)."""
     import shutil

@@ -947,8 +947,8 @@ def _self_test_main_isolated():
         (stale / ".aiqt" / "core" / "ownership.toml").write_text(
             _OWN_BASE + '\n[[exclusion]]\npath = "nonexistent-file.txt"\nreason = "stale"\n' + _OWN_TAIL,
             encoding="utf-8")
-        _git(stale, "add", "-A")
-        _git(stale, "commit", "-q", "-m", "stale", "--no-verify")
+        _git(stale, "add", "-A").check_returncode()
+        _git(stale, "commit", "-q", "-m", "stale", "--no-verify").check_returncode()
         if run_quiet(stale, check=False) != 2:
             failures.append("a stale exclusion (zero matches) expected exit 2")
 
@@ -966,9 +966,9 @@ def _self_test_main_isolated():
             + _OWN_TAIL.replace("[adopter-extent]",
                                 '[checkout]\nbinary = ["blob.bin"]\n\n[adopter-extent]'),
             encoding="utf-8")
-        _git(binok, "init", "-q", "--template=")
-        _git(binok, "add", "-A")
-        _git(binok, "commit", "-q", "-m", "binok", "--no-verify")
+        _git(binok, "init", "-q", "--template=").check_returncode()
+        _git(binok, "add", "-A").check_returncode()
+        _git(binok, "commit", "-q", "-m", "binok", "--no-verify").check_returncode()
         if run_quiet(binok, check=False) != 0:
             failures.append("a declared-binary non-UTF-8 file expected exit 0")
 
@@ -990,9 +990,9 @@ def _self_test_main_isolated():
         # (h) a broken CLAUDE.md marker pair -> 2.
         marker = _build_fixture(tmp / "marker", do_commit=False)
         (marker / "CLAUDE.md").write_text("# no markers here\n", encoding="utf-8")
-        _git(marker, "init", "-q", "--template=")
-        _git(marker, "add", "-A")
-        _git(marker, "commit", "-q", "-m", "marker", "--no-verify")
+        _git(marker, "init", "-q", "--template=").check_returncode()
+        _git(marker, "add", "-A").check_returncode()
+        _git(marker, "commit", "-q", "-m", "marker", "--no-verify").check_returncode()
         if run_quiet(marker, check=False) != 2:
             failures.append("a missing CLAUDE.md marker pair expected exit 2")
 

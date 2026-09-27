@@ -1797,7 +1797,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             # and reproduce both exercise the round-4 cannot-evaluate propagation on the real toolchain.
             # A REAL-repository read: the caller's env (minus GIT_*) keeps the safe.directory trust the
             # in-place fixture scrub drops (a foreign-owned checkout otherwise refuses with rc=128).
-            arch = subprocess.run(["git", "-C", str(repo_root()), "archive", "HEAD"],
+            arch = subprocess.run(["git", "-C", str(repo_root()), "-c", "core.attributesFile=/dev/null", "archive", "HEAD"],
                                   capture_output=True, env=caller_env_without_git())
             if arch.returncode != 0 or not arch.stdout:
                 # (round-9 finding 2) `git archive HEAD` is always available in-repo; an unavailable/empty
@@ -2219,7 +2219,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             # post-tag validates the REGENERATED artifacts. The QA object lives OUTSIDE the tree so it is not
             # a tracked pack path. Skipped (no false pass) if the archive is unavailable.
             # A REAL-repository read: caller env for the same safe.directory reason as the genesis case.
-            arch6 = subprocess.run(["git", "-C", str(repo_root()), "archive", "HEAD"],
+            arch6 = subprocess.run(["git", "-C", str(repo_root()), "-c", "core.attributesFile=/dev/null", "archive", "HEAD"],
                                    capture_output=True, env=caller_env_without_git())
             if arch6.returncode != 0 or not arch6.stdout:
                 # (round-9 finding 2) `git archive HEAD` is always available in-repo; an unavailable/empty

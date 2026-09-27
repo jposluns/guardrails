@@ -84,7 +84,10 @@ def caller_env_without_git():
     safe.directory entry), which the fixture scrub deliberately pins away. Never use this for a
     FIXTURE git call: it reintroduces the caller's configuration surfaces.
     Residual: trust supplied only through GIT_CONFIG_* is deliberately not restored;
-    on-disk caller configuration is trusted for these real-repository reads. The
+    on-disk caller configuration is trusted for these real-repository reads, except
+    that their launches pin core.attributesFile=/dev/null to prevent caller
+    export-ignore/export-subst rules from changing the archive. Repository and
+    system attributes remain effective. The
     snapshot belongs to the first caller in this interpreter, not later env changes."""
     _remember_prescrub_environ()
     return {k: v for k, v in _PRESCRUB_ENVIRON.items() if not k.startswith("GIT_")}

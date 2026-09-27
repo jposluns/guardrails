@@ -29,7 +29,7 @@ routing/scope check proves the scrub call site and its position in the named ent
 later git call in the same process still runs under it; launch aliases, indirect helper calls,
 early returns and control-flow reachability are outside this syntactic check's coverage. The
 config-injection lane runs the explicitly listed member self-tests under caller hooks and ignore
-files, with fsmonitor and malformed-config probes for the production-helper lifecycle members;
+files, attributes and fsmonitor, with separate malformed-config probes;
 the repository-selector lanes below exercise the corpus member. The trust check covers LITERAL
 subprocess.run launches (a launch built
 through a variable is outside its reach); and the end-to-end probe poisons two representative
@@ -293,7 +293,7 @@ def _binding_calls(member_path, owner_name, binding, factory, launches=False):
 
 def _caller_env_archive_only():
     """Reject caller-env uses outside literal archives of the real checkout, across both trees.
-    Direct name/attribute references are checked, including alias assignments. Dynamic getattr,
+    Direct name/attribute references and ImportFrom aliases are checked. Dynamic getattr,
     exec strings and rebinding repo_root itself remain outside this syntactic check's coverage.
     The child-code trust probe intentionally uses a string, not an operational call site."""
     def fail_walk(exc):
@@ -311,6 +311,10 @@ def _caller_env_archive_only():
                     parents = {child: node for node in ast.walk(tree)
                                for child in ast.iter_child_nodes(node)}
                     for node in ast.walk(tree):
+                        if isinstance(node, ast.ImportFrom) and any(
+                                alias.name == "caller_env_without_git" and alias.asname is not None
+                                for alias in node.names):
+                            return False
                         if not isinstance(node, (ast.Name, ast.Attribute)):
                             continue
                         if _call_name(node) != "caller_env_without_git":
@@ -328,10 +332,10 @@ def _caller_env_archive_only():
                         argv = ast.unparse(launch.args[0])
                         rel = path.relative_to(ROOT).as_posix()
                         if rel == "tools/check_release_build.py":
-                            if argv != "['git', '-C', str(repo_root()), 'archive', 'HEAD']":
+                            if argv != "['git', '-C', str(repo_root()), '-c', 'core.attributesFile=/dev/null', 'archive', 'HEAD']":
                                 return False
                         elif rel == "tools/check_release_delta.py":
-                            if argv != "['git', '-C', str(real), 'archive', 'HEAD']":
+                            if argv != "['git', '-C', str(real), '-c', 'core.attributesFile=/dev/null', 'archive', 'HEAD']":
                                 return False
                             owner = launch
                             while owner in parents and not isinstance(owner, ast.FunctionDef):
@@ -364,22 +368,37 @@ def _config_injection_lane(base):
     A real commit first proves the marker hooks execute under this caller configuration.
     Hooks/ignore poison cannot see read-only git calls. The fsmonitor marker covers
     index reads; malformed HOME/XDG config also covers reads such as rev-parse.
-    The extra lanes target the four lifecycle members below; they do not certify
-    every git command or repository-local configuration. Real-checkout archive
-    readers retain caller config by contract and are not malformed-config targets."""
+    The literal member rows below are the CONFIG_MEMBERS inventory. Every member
+    receives hooks, explicit and fallback ignore/attributes, and fsmonitor poison.
+    The legacy /hooks IDs assert both hook and fsmonitor marker bytes. Separate
+    malformed-config runs exclude the two real-checkout archive readers, which
+    retain caller config by contract. This does not certify every git command,
+    system configuration, or repository-local configuration."""
     import shlex
 
     home, xdg, hooks = (base / name for name in ("config-home", "config-xdg", "config-hooks"))
-    for directory in (home, xdg / "git", hooks):
+    for directory in (home / ".config" / "git", xdg / "git", hooks):
         directory.mkdir(parents=True)
     marker = base / "hook-invocations"
     marker.write_bytes(b"")
     ignore = home / "ignore"
-    ignore.write_text("*\n", encoding="utf-8")
-    (xdg / "git" / "ignore").write_text("*\n", encoding="utf-8")
-    (home / ".gitconfig").write_text(
-        '[safe]\n\tdirectory = {}\n[core]\n\thooksPath = {}\n\texcludesFile = {}\n'.format(
-            json.dumps(str(ROOT)), json.dumps(str(hooks)), json.dumps(str(ignore))), encoding="utf-8")
+    attributes = home / "attributes"
+    for path in (ignore, xdg / "git" / "ignore", home / ".config" / "git" / "ignore"):
+        path.write_text("*\n", encoding="utf-8")
+    for path in (attributes, xdg / "git" / "attributes", home / ".config" / "git" / "attributes"):
+        path.write_text("* export-ignore fixture-poison\n", encoding="utf-8")
+    monitor = base / "fsmonitor"
+    monitor_marker = base / "fsmonitor-invocations"
+    monitor_marker.write_bytes(b"")
+    monitor.write_text(
+        "#!/bin/sh\nprintf 'invoked\\n' >> {}\nprintf 'token\\000'\n".format(
+            shlex.quote(str(monitor_marker))), encoding="utf-8")
+    monitor.chmod(0o700)
+    config = ('[safe]\n\tdirectory = {}\n[core]\n\thooksPath = {}\n'
+              '\texcludesFile = {}\n\tattributesFile = {}\n\tfsmonitor = {}\n').format(
+                  *(json.dumps(str(p)) for p in (ROOT, hooks, ignore, attributes, monitor)))
+    for path in (home / ".gitconfig", xdg / "git" / "config", home / ".config" / "git" / "config"):
+        path.write_text(config, encoding="utf-8")
     for name in ("pre-commit", "prepare-commit-msg", "commit-msg", "post-commit",
                  "post-checkout", "post-merge", "reference-transaction"):
         hook = hooks / name
@@ -392,12 +411,50 @@ def _config_injection_lane(base):
     control = base / "config-control"
     control.mkdir()
     (control / "seed").write_text("seed\n", encoding="utf-8")
-    for args in (("init", "-q"), ("add", "-f", "seed"),
+    (control / "survivor").write_text("kept\n", encoding="utf-8")
+    (control / ".gitattributes").write_text("survivor -export-ignore\n", encoding="utf-8")
+    for args in (("init", "-q"), ("add", "-f", "seed", "survivor", ".gitattributes"),
                  ("-c", "user.name=Selftest", "-c", "user.email=selftest@example.invalid",
                   "-c", "commit.gpgsign=false", "commit", "-q", "-m", "control")):
         subprocess.run(["git", "-C", str(control), *args], env=env, check=True,
                        capture_output=True, timeout=60)
     check("config/injection-control", bool(marker.read_bytes()), True)
+    (control / "untracked").write_text("dirt\n", encoding="utf-8")
+    # Exercise each on-disk source independently, including HOME's fallback.
+    for ignore_id, attributes_id, mode in (
+            ("config/explicit-ignore-control", "config/explicit-attributes-control", "explicit"),
+            ("config/xdg-ignore-control", "config/xdg-attributes-control", "xdg"),
+            ("config/home-ignore-control", "config/home-attributes-control", "home"),
+    ):
+        probe_env = dict(env)
+        if mode != "explicit":
+            probe_env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+                             GIT_CONFIG_NOSYSTEM="1")
+        if mode == "home":
+            probe_env.pop("XDG_CONFIG_HOME")
+        probe = subprocess.run(["git", "-C", str(control), "status", "--porcelain"],
+                               env=probe_env, capture_output=True, timeout=60, check=True)
+        check(ignore_id, probe.stdout, b"")
+        probe = subprocess.run(["git", "-C", str(control), "check-attr", "fixture-poison", "--", "seed"],
+                               env=probe_env, capture_output=True, timeout=60, check=True)
+        check(attributes_id, probe.stdout, b"seed: fixture-poison: set\n")
+    for archive_id, pin in (
+            ("config/archive-attributes-live", False),
+            ("config/archive-attributes-neutralized", True),
+    ):
+        import io
+        import tarfile
+        args = ["-c", "core.attributesFile=/dev/null"] if pin else []
+        archive = subprocess.run(["git", "-C", str(control), *args, "archive", "HEAD"],
+                                 env=env, capture_output=True, timeout=60, check=True)
+        with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+            names = tar.getnames()
+        check(archive_id, "seed" in names, pin)
+    monitor_marker.write_bytes(b"")
+    probe = subprocess.run(["git", "-C", str(control), "ls-files"], env=env,
+                           capture_output=True, timeout=60)
+    check("config/combined-fsmonitor-control", (probe.returncode, bool(monitor_marker.read_bytes())),
+          (0, True))
     for rc_id, hooks_id, member in (
             ("config/selftest_aiqt_corpus/rc", "config/selftest_aiqt_corpus/hooks",
              "tools/selftest_aiqt_corpus.py"),
@@ -443,8 +500,17 @@ def _config_injection_lane(base):
              "opf/tools/_opf_oplock.py"),
             ("config/_opf_observe/rc", "config/_opf_observe/hooks",
              "opf/tools/_opf_observe.py"),
+            ("config/check_opf_import/rc", "config/check_opf_import/hooks",
+             "opf/tools/check_opf_import.py"),
+            ("config/check_opf_ingest/rc", "config/check_opf_ingest/hooks",
+             "opf/tools/check_opf_ingest.py"),
+            ("config/_opf_ingest_apply/rc", "config/_opf_ingest_apply/hooks",
+             "opf/tools/_opf_ingest_apply.py"),
+            ("config/opf/rc", "config/opf/hooks",
+             "opf/tools/opf.py"),
     ):
         marker.write_bytes(b"")
+        monitor_marker.write_bytes(b"")
         path = ROOT / member
         args = [] if path.name.startswith("selftest_") else ["--self-test"]
         try:
@@ -457,20 +523,15 @@ def _config_injection_lane(base):
         except (OSError, subprocess.SubprocessError) as exc:
             rc = str(exc)
         check(rc_id, rc, 0)
-        check(hooks_id, marker.read_bytes(), b"")
+        check(hooks_id, (marker.read_bytes(), monitor_marker.read_bytes()), (b"", b""))
 
 
     # No hooks or ignore poison in these lanes: read-only production helpers
     # must be tested independently of fixture writes.
-    ignore.unlink()
-    (xdg / "git" / "ignore").unlink()
-    monitor = base / "fsmonitor"
-    monitor_marker = base / "fsmonitor-invocations"
-    monitor_marker.write_bytes(b"")
-    monitor.write_text(
-        "#!/bin/sh\nprintf 'invoked\\n' >> {}\nprintf 'token\\000'\n".format(
-            shlex.quote(str(monitor_marker))), encoding="utf-8")
-    monitor.chmod(0o700)
+    for path in (ignore, attributes, xdg / "git" / "ignore", xdg / "git" / "attributes",
+                 home / ".config" / "git" / "ignore", home / ".config" / "git" / "attributes",
+                 home / ".config" / "git" / "config"):
+        path.unlink()
     fsconfig = '[core]\n\tfsmonitor = {}\n'.format(json.dumps(str(monitor)))
     malformed = "[invalid\n"
     (home / ".gitconfig").write_text(fsconfig, encoding="utf-8")
@@ -484,15 +545,15 @@ def _config_injection_lane(base):
                            capture_output=True, timeout=60)
     check("config/malformed-control", probe.returncode != 0, True)
 
-    for fs_rc_id, fs_marker_id, malformed_id, member in (
+    for fs_rc_id, fs_marker_id, member in (
             ("config/check_manifest/fsmonitor-rc", "config/check_manifest/fsmonitor",
-             "config/check_manifest/malformed", "tools/check_manifest.py"),
+             "tools/check_manifest.py"),
             ("config/gen_manifest/fsmonitor-rc", "config/gen_manifest/fsmonitor",
-             "config/gen_manifest/malformed", "tools/gen_manifest.py"),
+             "tools/gen_manifest.py"),
             ("config/check_record_sections/fsmonitor-rc", "config/check_record_sections/fsmonitor",
-             "config/check_record_sections/malformed", "tools/check_record_sections.py"),
+             "tools/check_record_sections.py"),
             ("config/_qa_adapter/fsmonitor-rc", "config/_qa_adapter/fsmonitor",
-             "config/_qa_adapter/malformed", "tools/_qa_adapter.py"),
+             "tools/_qa_adapter.py"),
     ):
         (home / ".gitconfig").write_text(fsconfig, encoding="utf-8")
         (xdg / "git" / "config").write_text(fsconfig, encoding="utf-8")
@@ -500,14 +561,41 @@ def _config_injection_lane(base):
         rc = _run_config_member(member, env)
         check(fs_rc_id, rc, 0)
         check(fs_marker_id, monitor_marker.read_bytes(), b"")
-        (home / ".gitconfig").write_text(malformed, encoding="utf-8")
-        (xdg / "git" / "config").write_text(malformed, encoding="utf-8")
+    (home / ".gitconfig").write_text(malformed, encoding="utf-8")
+    (xdg / "git" / "config").write_text(malformed, encoding="utf-8")
+    for malformed_id, member in (
+            ("config/selftest_aiqt_corpus/malformed", "tools/selftest_aiqt_corpus.py"),
+            ("config/selftest_orch_hooks/malformed", "tools/selftest_orch_hooks.py"),
+            ("config/selftest_aiqt_hooks/malformed", "tools/selftest_aiqt_hooks.py"),
+            ("config/_qa_adapter/malformed", "tools/_qa_adapter.py"),
+            ("config/check_record_drift/malformed", "tools/check_record_drift.py"),
+            ("config/check_mistakes_register/malformed", "tools/check_mistakes_register.py"),
+            ("config/check_version_monotonicity/malformed", "tools/check_version_monotonicity.py"),
+            ("config/check_record_sections/malformed", "tools/check_record_sections.py"),
+            ("config/check_portability/malformed", "tools/check_portability.py"),
+            ("config/gen_manifest/malformed", "tools/gen_manifest.py"),
+            ("config/check_manifest/malformed", "tools/check_manifest.py"),
+            ("config/check_branch_root/malformed", "tools/check_branch_root.py"),
+            ("config/check_gensrc_failclose/malformed", "tools/check_gensrc_failclose.py"),
+            ("config/selftest_ci_status/malformed", "tools/selftest_ci_status.py"),
+            ("config/check_opf_init/malformed", "opf/tools/check_opf_init.py"),
+            ("config/check_opf_upgrade/malformed", "opf/tools/check_opf_upgrade.py"),
+            ("config/check_opf_doctor/malformed", "opf/tools/check_opf_doctor.py"),
+            ("config/_opf_init_operation/malformed", "opf/tools/_opf_init_operation.py"),
+            ("config/_opf_oplock/malformed", "opf/tools/_opf_oplock.py"),
+            ("config/_opf_observe/malformed", "opf/tools/_opf_observe.py"),
+            ("config/check_opf_import/malformed", "opf/tools/check_opf_import.py"),
+            ("config/check_opf_ingest/malformed", "opf/tools/check_opf_ingest.py"),
+            ("config/_opf_ingest_apply/malformed", "opf/tools/_opf_ingest_apply.py"),
+            ("config/opf/malformed", "opf/tools/opf.py"),
+    ):
         check(malformed_id, _run_config_member(member, env), 0)
 
 
 def _run_config_member(member, env):
     try:
-        proc = subprocess.run([sys.executable, "-I", "-B", str(ROOT / member), "--self-test"],
+        args = [] if Path(member).name.startswith("selftest_") else ["--self-test"]
+        proc = subprocess.run([sys.executable, "-I", "-B", str(ROOT / member), *args],
                               cwd=ROOT, env=env, capture_output=True, text=True, timeout=1200)
         if proc.returncode:
             print("CONFIG-INJECTION {}:\n{}".format(member, proc.stdout + proc.stderr),
@@ -539,6 +627,86 @@ def _manifest_setup_failures(base):
             check(check_id, refused, True)
     finally:
         gen_manifest._git = original
+
+
+
+def _manifest_extra_setup_failures():
+    """Execute each standalone setup expression with a failing git result.
+    These are the eight stale/binok/marker calls outside _build_fixture; parsing
+    the actual expressions catches removal of their check_returncode calls.
+    This bounded probe does not simulate the rest of the generator's self-test.
+    """
+    tree = ast.parse((ROOT / "tools" / "gen_manifest.py").read_text(encoding="utf-8"))
+    owners = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+              and n.name == "_self_test_main_isolated"]
+    for check_id, fixture, operation in (
+            ("setup/gen-manifest-stale-add", "stale", "add"),
+            ("setup/gen-manifest-stale-commit", "stale", "commit"),
+            ("setup/gen-manifest-binok-init", "binok", "init"),
+            ("setup/gen-manifest-binok-add", "binok", "add"),
+            ("setup/gen-manifest-binok-commit", "binok", "commit"),
+            ("setup/gen-manifest-marker-init", "marker", "init"),
+            ("setup/gen-manifest-marker-add", "marker", "add"),
+            ("setup/gen-manifest-marker-commit", "marker", "commit"),
+    ):
+        expressions = [n for owner in owners for n in ast.walk(owner)
+                       if isinstance(n, ast.Expr) and any(
+                           isinstance(call, ast.Call) and _call_name(call) == "_git"
+                           and len(call.args) >= 2 and isinstance(call.args[0], ast.Name)
+                           and call.args[0].id == fixture
+                           and isinstance(call.args[1], ast.Constant)
+                           and call.args[1].value == operation for call in ast.walk(n))]
+        refused = False
+        if len(expressions) == 1:
+            def failed_git(*args):
+                return subprocess.CompletedProcess(args, 1)
+            try:
+                exec(compile(ast.Module(body=expressions, type_ignores=[]),
+                             "<fixture-setup-probe>", "exec"),
+                     {"_git": failed_git, fixture: Path("/unused-fixture")})
+            except subprocess.CalledProcessError:
+                refused = True
+        check(check_id, refused, True)
+
+
+def _opf_home_lifecycles():
+    """Observe each entry before its delegate, then force exceptional restoration."""
+    code = "\n".join((
+        "import importlib, json, os, sys",
+        "sys.path.insert(0, sys.argv[1])",
+        "module = importlib.import_module(sys.argv[2])",
+        "entry = sys.argv[3]",
+        "saved = dict(os.environ)",
+        "seen = []",
+        "class StopProbe(Exception): pass",
+        "def stop(*args):",
+        "    home = os.environ.get('HOME')",
+        "    seen.append([home != saved.get('HOME'),",
+        "                 home == os.environ.get('XDG_CONFIG_HOME'), os.path.isdir(home)])",
+        "    raise StopProbe()",
+        "setattr(module, entry + '_isolated', stop)",
+        "try:",
+        "    getattr(module, entry)()",
+        "except StopProbe:",
+        "    pass",
+        "print(json.dumps([seen, dict(os.environ) == saved]))",
+    ))
+    for check_id, module, entry in (
+            ("env/opf-upgrade-home-lifecycle", "check_opf_upgrade", "_suite"),
+            ("env/opf-import-home-lifecycle", "check_opf_import", "_self_test"),
+            ("env/opf-ingest-home-lifecycle", "check_opf_ingest", "_self_test"),
+            ("env/opf-ingest-apply-home-lifecycle", "_opf_ingest_apply", "self_test"),
+            ("env/opf-tooling-home-lifecycle", "opf", "run_self_tests"),
+    ):
+        env = dict(os.environ, HOME="/caller-home", XDG_CONFIG_HOME="/caller-xdg")
+        child = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", code, str(ROOT / "opf" / "tools"), module, entry],
+            env=env, capture_output=True, text=True, timeout=60)
+        try:
+            got = (child.returncode, json.loads(child.stdout))
+        except ValueError:
+            got = (child.returncode, child.stdout, child.stderr)
+        check(check_id, got, (0, [[[True, True, True]], True]))
 
 
 def _build_decoy(base):
@@ -904,6 +1072,8 @@ def main(report_path=None):
 
         _config_injection_lane(base)
         _manifest_setup_failures(base)
+        _manifest_extra_setup_failures()
+        _opf_home_lifecycles()
 
         # ---------- layer 3: the end-to-end leak probe ----------
         decoy = _build_decoy(base)

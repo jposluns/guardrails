@@ -452,6 +452,15 @@ def _snapshot(root):
 
 
 def _suite():
+    """Keep caller HOME/XDG out of fixture reads, including in-process production helpers."""
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home):
+            return _suite_isolated()
+
+
+def _suite_isolated():
     """Build byte-pinned 1.0.0 fixtures and drive `opf upgrade` over them, asserting the spec-9.2 contract."""
     try:
         import tomllib

@@ -1039,7 +1039,7 @@ def _archive_head(real):
     # keeps the safe.directory trust the in-place fixture scrub drops, so a foreign-owned checkout
     # does not silently skip the real full-pack cases.
     from _git_fixture_env import caller_env_without_git
-    arch = subprocess.run(["git", "-C", str(real), "archive", "HEAD"], capture_output=True,
+    arch = subprocess.run(["git", "-C", str(real), "-c", "core.attributesFile=/dev/null", "archive", "HEAD"], capture_output=True,
                           env=caller_env_without_git())
     return arch.stdout if arch.returncode == 0 and arch.stdout else None
 

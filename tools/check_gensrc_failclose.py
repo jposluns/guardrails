@@ -1145,7 +1145,8 @@ def _run_write(root, stem):
 
 
 def _git_fixture(repo, *args):
-    """Run git in a fixture repo with a pinned identity and no user config, matching _materialize_git.
+    """Run git in a fixture repo with a pinned identity and no user config.
+    git_fixture_env preserves non-GIT variables; _materialize_git uses an allowlist.
     check=True: a setup failure surfaces loudly rather than a silently broken fixture."""
     from _git_fixture_env import git_fixture_env
     env = git_fixture_env(PYTHONDONTWRITEBYTECODE="1")
