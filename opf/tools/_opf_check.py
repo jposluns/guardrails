@@ -4112,44 +4112,53 @@ def self_test():
                     _sig7.pthread_sigmask(_sig7.SIG_SETMASK, _prev_mask7)
                 check("f7-inherited-blocked-sigalrm-still-times-out", _tb == "TIMEOUT")
 
-            # F-R17-COV1 / F-R18-COV1TEST: the f7 checks above assert only the CHILD's TIMEOUT outcome, so the
-            # module self-test passed even with the caller-timer snapshot reverted to zeros -- the
-            # timer-restore class (F-R16-1 / F-R17-C2) went undiscriminated in-suite. Close that gap: arm a
-            # REAL caller ITIMER_REAL that EXPIRES inside the ~1s SIG_IGN window, and run the caller deadline
-            # through the SHARED _f7_ignore_window callable (the ACTUAL f7 restoration path), so zeroing the
-            # snapshot/restore reds this probe. Assert the caller's deadline is PRESERVED and fires PROMPTLY
-            # after the elapsed-aware restore (which clamps an in-window-expired deadline to a tiny positive),
-            # within a TIGHT bound that distinguishes a prompt clamp (fires within a few ms) from a fresh 0.3s
-            # deadline: a zeros revert never re-arms (never fires) and a verbatim revert re-arms the full 0.3s
-            # (fires ~0.3s after the restore, outside the bound) -- both red. The prior 0.5s window admitted a
-            # verbatim-restored 0.3s timer, so it did not discriminate a verbatim revert.
-            # SKIP when SIGALRM is currently BLOCKED (the hostile-ambient wrapper re-runs this self-test with
-            # SIGALRM blocked-and-pending): the probe needs the deadline DELIVERED, and unblocking would
-            # consume the caller's pending SIGALRM the wrapper asserts must survive. In the normal run SIGALRM
-            # is deliverable, so the discrimination still holds where it matters.
+            # F-R17-COV1 / F-R18-COV1TEST: exercise the ACTUAL f7 restoration path,
+            # independently of signal-delivery latency. Supply a known expired
+            # snapshot and observe the successful setitimer call itself: it must
+            # re-arm to the positive clamp, never zero or the verbatim 0.3s value.
+            # Snapshot acquisition and signal delivery are covered by the shared
+            # alarm / hostile-ambient tests; this probe owns f7's restore wiring.
+            # Keep blocked+pending callers untouched during the hostile rerun.
             _cov_blocked = (hasattr(_sig7, "pthread_sigmask")
                             and _sig7.SIGALRM in _sig7.pthread_sigmask(_sig7.SIG_BLOCK, set()))
             if hasattr(_sig7, "setitimer") and hasattr(_sig7, "ITIMER_REAL") and not _cov_blocked:
-                _cov_fired = []
+                from unittest.mock import patch as _cov_patch
                 _cov_outer = snapshot_caller_alarm()
-                _cov_prev = _sig7.signal(_sig7.SIGALRM,
-                                         lambda _s, _f: _cov_fired.append(_t7.monotonic()))
+                _cov_prev = _sig7.signal(_sig7.SIGALRM, lambda _s, _f: None)
+                _cov_real_set = _sig7.setitimer
                 try:
-                    _sig7.setitimer(_sig7.ITIMER_REAL, 0)          # quiet baseline
-                    _sig7.setitimer(_sig7.ITIMER_REAL, 0.3, 0.0)   # a caller deadline that EXPIRES in-window
-                    # Exercise the ACTUAL f7 restoration via the shared callable (it snapshots BEFORE its
-                    # SIG_IGN and restores elapsed-aware, then re-installs the counting handler captured as the
-                    # pre-SIG_IGN disposition), so the clamped deadline fires under the counting handler.
-                    _f7_ignore_window(lambda: (_t7.sleep(1), "COV-SLEPT")[1], 1)   # ~1s > 0.3s
-                    # TIGHT bound (0.12s): a prompt clamp fires within a few ms of the restore; a verbatim
-                    # revert's fresh 0.3s deadline fires ~0.3s later (outside 0.12s) and a zeros revert never
-                    # fires -- both red.
-                    _cov_stop = _t7.monotonic() + 0.12
-                    while not _cov_fired and _t7.monotonic() < _cov_stop:
-                        _t7.sleep(0.002)
-                    check("cov1-caller-itimer-preserved-across-f7-fixture", bool(_cov_fired))
+                    for _cov_mode in ("elapsed", "delayed", "verbatim", "dropped"):
+                        _cov_real_set(_sig7.ITIMER_REAL, 0)
+                        _cov_calls = []
+
+                        def _cov_arm(which, value, interval=0.0):
+                            result = _cov_real_set(which, value, interval)
+                            _cov_calls.append((which, value, interval))
+                            # A delayed observation must still pass the clamp and
+                            # reject a verbatim timer even after that timer fires.
+                            if _cov_mode in ("delayed", "verbatim"):
+                                _t7.sleep(0.35)
+                            return result
+
+                        _cov_restore = restore_caller_alarm
+                        if _cov_mode == "verbatim":
+                            _cov_restore = lambda value, interval, _t0, _pending: _sig7.setitimer(
+                                _sig7.ITIMER_REAL, value, interval)
+                        elif _cov_mode == "dropped":
+                            _cov_restore = lambda *_args: None
+                        with _cov_patch.object(sys.modules[__name__], "snapshot_caller_alarm",
+                                               return_value=(0.3, 0.0, _t7.monotonic() - 1.0, False)) as _snap, \
+                                _cov_patch.object(sys.modules[__name__], "restore_caller_alarm",
+                                                  side_effect=_cov_restore), \
+                                _cov_patch.object(_sig7, "setitimer", side_effect=_cov_arm):
+                            _f7_ignore_window(lambda: "COV-RETURNED", 1)
+                        _cov_ok = (_snap.call_count == 1
+                                   and _cov_calls == [(_sig7.ITIMER_REAL, 1e-6, 0.0)])
+                        check("cov1-caller-itimer-preserved-across-f7-fixture"
+                              if _cov_mode == "elapsed" else "cov1-restore-observation-" + _cov_mode,
+                              _cov_ok == (_cov_mode in ("elapsed", "delayed")))
                 finally:
-                    _sig7.setitimer(_sig7.ITIMER_REAL, 0)
+                    _cov_real_set(_sig7.ITIMER_REAL, 0)
                     _sig7.signal(_sig7.SIGALRM, _cov_prev)
                     restore_caller_alarm(*_cov_outer)
 

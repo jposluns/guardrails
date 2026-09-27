@@ -471,8 +471,22 @@ def boundary_self_test():
                 raise AssertionError("doctor read a journal record")
             return None, "absent"
 
+        # Worklog intake reopens the manifest through the shared contained reader.
+        # Give that read the SAME filesystem observation as doctor's initial read;
+        # a real read through this fixture's fd 0 is a manifest fault, not a homes test.
+        def worklog_toml(fd, rel, *, with_raw=False):
+            data, _status = doctor_toml(fd, rel, None)
+            return (b"", data) if with_raw and data is not None else data
+
+        def worklog_stat(_fd, rel):
+            if rel != machine + "/worklog":
+                raise AssertionError("unexpected worklog shape probe: " + rel)
+            return None                         # no conflicting generation-2 directory
+
         del listed[:]
         with patch.object(doctor, "_list_contained", listing), patch.object(doctor, "_read_toml", doctor_toml), \
+                patch.object(store, "_read_toml_contained", side_effect=worklog_toml), \
+                patch.object(journal, "_lstat_contained", side_effect=worklog_stat), \
                 patch.object(doctor, "_read_bytes", read_bytes), \
                 patch.object(importer, "_sibling_ids", return_value=[]):
             report = doctor._Report()
@@ -636,15 +650,25 @@ def boundary_self_test():
     def view_plan(model):
         view_manifest = dict(model, views=dict(VERSION=dict(kind="projection", sources=[],
                                                             target=".working/journals/file")))
-        with patch.object(views, "_read_raw_and_parsed", return_value=(b"", view_manifest)), \
-                patch.object(store, "validate_manifest", return_value=SimpleNamespace(status=store.VALID)), \
+        # plan_views now uses validated shared manifest intake. Keep this boundary
+        # fixture's deliberate empty source set, but supply the current reader and
+        # the validator's findings field. Manifest-fault coverage remains in the
+        # worklog entry-point regressions.
+        def view_toml(_fd, rel):
+            if rel != machine + "/manifest.toml":
+                raise AssertionError("unexpected view source read: " + rel)
+            return copy.deepcopy(view_manifest)
+
+        with patch.object(store, "_read_toml_contained", side_effect=view_toml), \
+                patch.object(store, "validate_manifest",
+                             return_value=SimpleNamespace(status=store.VALID, findings=())), \
                 patch.object(views, "_resolve_view", return_value=("projection", [], lambda _src: "1.0.0\n")), \
                 patch.object(views, "_spec_destination", return_value=("store", ".working/journals/file")):
             return refusal(lambda: views.plan_views(-1, machine)) or ""
 
     with active():
         check("view-journal-destination-refused", lambda: "journal home" in view_plan(manifest2))
-        check("view-legacy-journal-destination-planned", lambda: "journal home" not in view_plan(manifest))
+        check("view-legacy-journal-destination-planned", lambda: view_plan(manifest) == "")
 
     import _opf_adopt_plan as planning
     import _opf_emit as emit
