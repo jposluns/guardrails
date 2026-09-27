@@ -4928,6 +4928,56 @@ def _t_e8_nested_close_failure(d, env):
     assert k > 1, "the sweep must see closes in the acquisition"
 
 
+def _t_e9_own_repo_bare(d, env):
+    """T-e9 (D2): an own-repository store with literal core.bare=true refuses when git's
+    --show-toplevel query fails, before the path comparison. Removing only that comparison does
+    not bypass this refusal; bypassing the own-repository toplevel query does. Unsetting the
+    option on the SAME fixture is the positive control: it acquires and releases."""
+    own = _st_git_store(d, "own", env)
+    _st_git(["config", "core.bare", "true"], own, env)
+    _st_expect_refusal(
+        acquire_operation, own, "op-bare",
+        needle="git rev-parse --show-toplevel --show-prefix --git-common-dir failed at")
+    for path in (_st_ctl_dir(own), os.path.join(own, CONTROL_DIRNAME), _st_lease_path(own)):
+        assert not os.path.exists(path), \
+            "a refused core.bare store must create no lock or lease ({})".format(path)
+    _st_git(["config", "--unset", "core.bare"], own, env)
+    cap = acquire_operation(own, "op-without-bare")
+    try:
+        assert os.path.isfile(os.path.join(_st_ctl_dir(own), ACTIVE_NAME)), \
+            "without core.bare the same store must acquire in its own git dir"
+        assert os.path.isfile(_st_lease_path(own)), "the positive control must hold a lease"
+    finally:
+        release_operation(cap)
+
+
+def _t_e10_own_repo_worktree(d, env):
+    """T-e10 (D2): literal core.worktree pointing at a sibling directory refuses by the
+    toplevel cross-check. Without that comparison the refusal assertion must fail
+    (acquire_operation did not refuse). Unsetting the option on the SAME fixture is the
+    positive control: it acquires and releases."""
+    own = _st_git_store(d, "own", env)
+    sibling = os.path.join(d, "sibling")
+    os.mkdir(sibling)
+    _st_git(["config", "core.worktree", sibling], own, env)
+    _st_expect_refusal(
+        acquire_operation, own, "op-redirected",
+        needle="whose .git entry the no-follow classification found; refusing")
+    for path in (_st_ctl_dir(own), os.path.join(own, CONTROL_DIRNAME),
+                 _st_lease_path(own), os.path.join(sibling, CONTROL_DIRNAME),
+                 _st_lease_path(sibling)):
+        assert not os.path.exists(path), \
+            "a refused core.worktree store must create no lock or lease ({})".format(path)
+    _st_git(["config", "--unset", "core.worktree"], own, env)
+    cap = acquire_operation(own, "op-without-worktree")
+    try:
+        assert os.path.isfile(os.path.join(_st_ctl_dir(own), ACTIVE_NAME)), \
+            "without core.worktree the same store must acquire in its own git dir"
+        assert os.path.isfile(_st_lease_path(own)), "the positive control must hold a lease"
+    finally:
+        release_operation(cap)
+
+
 def _t_c3_companion(d, env):
     """T-c3-companion (LOW-4): two product roots companion-pointed at ONE store contend on the
     single shared anchor; the lease is rooted at the RESOLVED store root, not at either product
@@ -9068,14 +9118,16 @@ def self_test():
     capability, an interrupted post-unlink fsync is noted as an unconfirmed removal, and an
     interrupted anchor close is retried and attributed; T-f11-1, fix round 11: an unobservable
     interrupted removal is noted per record, never as not removed; T-f7-4 and T-f8-4
-    extended to interrupted closes), and T-e1 to T-e8 (a nested store anchors at its enclosing
+    extended to interrupted closes), and T-e1 to T-e10 (a nested store anchors at its enclosing
     repository's common git dir, shared across worktrees; malformed, ambiguous, or unreadable
     enclosing git state refuses; distinct nested stores hold distinct anchors; a store nested in a
     submodule refuses; git's toplevel is cross-checked by path and identity for a store that
     is its own repository and for a nested store, and a nested store's own root by identity; a
     "//" root spelling shares the lock while a
     path spelled unlike its directory listing refuses; and a failing close anywhere in a nested
-    store's acquisition leaks nothing), each a witness against a named defect. A
+    store's acquisition leaks nothing; literal core.bare=true and a core.worktree redirect to a
+    sibling refuse for an own-repository store, with the same fixtures acquiring once the settings
+    are removed), each a witness against a named defect. A
     missing containment primitive or git binary, or a fixture base inside a git repository, is a
     REFUSAL (non-zero), never a clean skip. The git fixtures are pinned
     hermetically (LOW-5). The restrictive-umask witnesses (T-f5-4, T-f6-1, T-f7-3) run under a
@@ -9134,6 +9186,10 @@ def self_test():
          _t_e7_path_spellings),
         ("T-e8 a failing close anywhere in a nested store's acquisition leaks nothing",
          _t_e8_nested_close_failure),
+        ("T-e9 an own-repository store with literal core.bare=true refuses",
+         _t_e9_own_repo_bare),
+        ("T-e10 an own-repository store with literal core.worktree redirected refuses",
+         _t_e10_own_repo_worktree),
         ("T-c12 contention and double release refuse", _t_c12_contention_and_double_release),
         ("T-c13 FIFO control names cannot block or pass", _t_c13_fifo_control_names),
         ("T-c8/T-c14 nested-lock scope-out (PR3)", _t_c8_c14_scope_out),
