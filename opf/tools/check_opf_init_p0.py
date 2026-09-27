@@ -300,14 +300,19 @@ def red_on_revert(source, f):
 
 def runner_check(expected, text=None, *, fail_own=False):
     import os
+    import shlex
     import shutil
     import signal
     import tempfile
 
+    identity = "runner/declared-test-executes"
+    # Vector-only entry points never call this registration check.
+    # Refuse an escaped fixture invocation before any shell can launch.
+    if "p0_log" in os.environ:
+        raise RuntimeError(identity + "/cannot-evaluate/recursion")
     here = Path(__file__).resolve().parent
     runner = here / "run_all_checks.sh"
     source = runner.read_text(encoding="utf-8") if text is None else text
-    identity = "runner/declared-test-executes"
     bash = shutil.which("bash")
     if bash is None:
         raise RuntimeError(identity + "/cannot-evaluate/bash")
@@ -320,10 +325,14 @@ def runner_check(expected, text=None, *, fail_own=False):
     # It does not assert that other registered suites are dispatched:
     # sibling dispatch completeness is outside this check; a runner-level
     # dispatch audit would be a separate control.
-    # PATH interception also covers child shells, command and env forms.
-    # Absolute paths or a changed PATH can bypass it; this is not a process
-    # sandbox. Intercepted siblings return 0, so their failure propagation
-    # is outside this check too.
+    # Fix-4 accounting: in-runner PATH changes remain covered by the
+    # function shim (PASS in-runner-path; RED removed-function-shim).
+    # The PATH fixture also covers child shells, command and env forms.
+    # Absolute paths, or bypassing the function together with changing
+    # PATH, remain outside interception; this is not a process sandbox.
+    # Removing the log environment marker can bypass recursion refusal.
+    # Intercepted siblings return 0; their failure propagation is outside
+    # this check too.
     fixture = r'''#!/bin/sh
 printf '%s\0' "$#" "$@" >> "$p0_log" || exit 2
 if [ "$#" -eq 5 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
@@ -389,17 +398,17 @@ exit 0
                           "type -P python3")
         if probe.returncode != 0 or probe.stdout != str(executable) + "\n":
             raise RuntimeError(identity + "/cannot-evaluate/interception")
-        proc = run_shell(source)
+        # Exec only in the function subshell, so the runner can continue.
+        shim = "python3() ( exec " + shlex.quote(str(executable)) + ' "$@" );\n'
+        proc = run_shell(shim + source)
         try:
             argv_log = log.read_bytes()
         except OSError as exc:
             raise RuntimeError(identity + "/cannot-evaluate/argv-log") from exc
-    reached = tuple(line[5:] for line in proc.stdout.splitlines() if line.startswith("PASS "))
-    check(proc.returncode == 0, identity + "/return-code")
-    check(reached == expected, identity + "/pass-lines")
 
     # NUL-framed records begin with argc; only THIS suite's calls are asserted.
-    # Keep the existing return-code/pass-lines identities ahead of own-argv.
+    # Diagnose malformed own calls before their exit or missing output.
+    # Absent calls retain the existing return-code/pass-lines identities.
     fields = argv_log.split(b"\0")
     if fields.pop() != b"":
         raise AssertionError(identity + "/own-argv")
@@ -421,12 +430,20 @@ exit 0
             own.append(argv)
     own_argv = tuple(os.fsencode(arg) for arg in (
         "-I", "-B", env["p0_test"], "--self-test", "--red-on-revert"))
+    if own and own != [own_argv]:
+        raise AssertionError(identity + "/own-argv")
+
+    reached = tuple(line[5:] for line in proc.stdout.splitlines() if line.startswith("PASS "))
+    check(proc.returncode == 0, identity + "/return-code")
+    check(reached == expected, identity + "/pass-lines")
+
     if own != [own_argv]:
         raise AssertionError(identity + "/own-argv")
 
 
 def runner_red_checks(expected):
     import os
+    import shlex
     import subprocess
     import tempfile
     from unittest.mock import patch
@@ -478,6 +495,56 @@ def runner_red_checks(expected):
         red(label, lambda command=command: runner_check(
             expected, source.replace(propagation, propagation + "\n" + command, 1)),
             AssertionError, identity + "/own-argv")
+
+    # Drop a required flag from exactly this suite's registration.
+    own_lines = [line for line in source.splitlines(keepends=True)
+                 if line.startswith('run_gate "opf-init-p0-selftest"')]
+    if len(own_lines) != 1 or own_lines[0].count(" --red-on-revert") != 1:
+        raise AssertionError(identity + "/red-fixture")
+    red("dropped-own-flag", lambda: runner_check(
+        expected, source.replace(own_lines[0],
+                                 own_lines[0].replace(" --red-on-revert", "", 1), 1)),
+        AssertionError, identity + "/own-argv")
+
+    # Presence, including an empty value, must refuse before any bash launch.
+    for value in ("", "nested-argv.log"):
+        with patch.dict(os.environ, {"p0_log": value}):
+            with patch("subprocess.Popen", side_effect=AssertionError(
+                    identity + "/recursion/unexpected-launch")) as launch:
+                red("nested-invocation", lambda: runner_check(expected), RuntimeError,
+                    identity + "/cannot-evaluate/recursion")
+                if launch.call_count:
+                    raise AssertionError(identity + "/recursion/unexpected-launch")
+
+    # A harmless competing executable makes reverting the function safe.
+    # The normal check requires exactly one own call in the fixture's log.
+    with tempfile.TemporaryDirectory(prefix="opf-runner-path-") as tmp:
+        os.chmod(tmp, 0o700)
+        if os.pathsep in tmp:
+            raise RuntimeError(identity + "/cannot-evaluate/pathsep")
+        stub = Path(tmp) / "python3"
+        stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o700)
+        changed_path = "PATH=" + shlex.quote(tmp) + ":$PATH\n" + source
+        runner_check(expected, changed_path)
+        print("PASS " + identity + "/in-runner-path")
+
+        original_popen = subprocess.Popen
+        removed = 0
+
+        def without_function(*args, **kwargs):
+            nonlocal removed
+            command = list(args[0])
+            if command[4].startswith("python3() ( exec "):
+                command[4] = command[4].split("\n", 1)[1]
+                removed += 1
+            return original_popen(command, *args[1:], **kwargs)
+
+        with patch("subprocess.Popen", side_effect=without_function):
+            red("removed-function-shim", lambda: runner_check(expected, changed_path),
+                AssertionError, identity + "/pass-lines")
+        if removed != 1:
+            raise AssertionError(identity + "/in-runner-path/removed-count")
 
     # Remove every execute bit, including for root. Permit only the probe:
     # a reverted interception guard must never launch the real runner.
