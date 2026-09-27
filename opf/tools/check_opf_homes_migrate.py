@@ -30,6 +30,7 @@ import _opf_emit as emit
 import _opf_import as imp
 import _opf_store as store
 import _opf_homes_migrate as migrate
+import _opf_write_guard as write_guard
 import opf
 
 
@@ -536,7 +537,7 @@ def self_test(red_on_revert=False):
         with contextlib.ExitStack() as stack:
             stack.enter_context(patch.object(migrate, "_clock_now", return_value=NOW))
             for owner, name in (
-                (opf, "_upgrade_run"), (opf, "_upgrade_acquire_lease"),
+                (opf, "_upgrade_run"), (write_guard, "acquire_lease"),
                 (opf, "_upgrade_replace"), (journal, "apply_ops"),
                 (journal, "run_transaction"), (journal, "recover"),
             ):
