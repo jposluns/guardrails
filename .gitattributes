@@ -504,6 +504,7 @@ opf/tools/_containment.py text eol=lf
 opf/tools/_journal.py text eol=lf
 opf/tools/_opf_absorb.py text eol=lf
 opf/tools/_opf_adopt.py text eol=lf
+opf/tools/_opf_adopt_observe.py text eol=lf
 opf/tools/_opf_adopt_plan.py text eol=lf
 opf/tools/_opf_allocation.py text eol=lf
 opf/tools/_opf_changelog.py text eol=lf

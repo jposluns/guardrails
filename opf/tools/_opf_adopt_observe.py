@@ -1,0 +1,1975 @@
+#!/usr/bin/env python3
+"""Pinned HTTPS observations and non-executing quarantine for OPF adoption.
+
+Public contract:
+    gather_release(request, policy) -> (observation, notes)
+    self_test() -> 0 / 1 / 2 (local fixtures require openssl and bash)
+
+request is a plain dict with exactly:
+    product_root: absolute, lexically contained POSIX directory path
+    version:      bare pack SemVer
+    commit:       full lowercase SHA-1 commit identifier
+
+policy is a plain dict supplied ONLY by the installed bootstrap trust caller:
+    format:       "opf.adoption.https-policy/v1"
+    repository:   canonical "https://github.com/<owner>/<repository>"
+    release_url:  exact codeload URL for request["commit"]
+    anchors:      ["https://posluns.dev/hashes.txt"]
+
+This module does not discover, parse, or activate a reference registry. The
+caller must read its bootstrap-pinned registry before calling this function.
+The downloaded archive cannot supply policy, URLs, quorum, or TLS settings.
+
+A VALID observation means that the requested observations were obtained and
+that the archive satisfied this module's containment grammar. It is NOT a
+trust verdict, an inventory freeze, or permission to apply anything. Anchor
+bodies remain uninterpreted bytes. No manifest, ROOT, or TREE is parsed or
+computed here.
+
+On refusal, notes contain named statuses and the observation omits both
+"quarantine" and "members". Already completed HTTP observations may remain as
+diagnostic evidence. No partial HTTP body is reported as a completed response.
+Unexpected exceptions map to CANNOT_EVALUATE. BaseException cancellation
+propagates without returning an observation.
+
+Supported transport is deliberately narrow: HTTPS/443, one numeric-address
+connection, no retry, no redirect, HTTP/1.0 or HTTP/1.1 status 200, identity
+content encoding, and either an unambiguous Content-Length or strict chunked
+framing without extensions or trailers. Connection closure must follow the
+complete body; an extra byte or unclean TLS EOF refuses.
+
+Supported archive dialect is a single gzip member containing POSIX USTAR.
+PAX, GNU extensions, sparse archives, alternate numeric encodings, and other
+dialects refuse. USTAR members are validated before materialization; only
+regular files and directories are accepted. Exactly one wrapper is removed.
+All materialized files have mode 0600 and directories mode 0700. Original
+permission bits are inert metadata only.
+
+Quarantine creation uses atomic mkdir, which is the directory equivalent of
+exclusive creation; O_EXCL is used for every file creation. Existing run or
+quarantine directories are never reused. Files are opened descriptor-relative
+with no-follow and nonblocking flags and reread with inode/stamp checks.
+Failed attempts can leave private, incomplete quarantine directories. They
+carry no returned locator or success marker. Cleanup is a separate operation.
+
+R1: bootstrap code/policy, the Python runtime, OS, resolver, and system CA store
+are trusted. Compromise of those components defeats these guarantees.
+R7: byte/count/depth caps are not a process sandbox. Parsing relies on Python's
+zlib/tarfile implementations on capped input. Filesystem and scheduling latency
+are not hard-real-time guarantees. noexec mounts can add protection; the
+prohibition here is that fetched bytes are never imported, executed, or checked
+out. One daemon resolver worker may survive a timeout until the OS resolver
+returns; a process-wide slot prevents accumulating such workers. Its result is
+never reused by another request, and it cannot fetch an HTTP body.
+R8: an adversarial same-privilege concurrent writer to process memory,
+environment, or quarantine is out of scope. Gather is main-thread-only and
+non-reentrant because its environment scrub is process-global.
+R10: larger responses and unsupported publisher formats refuse until a reviewed
+bootstrap update. Transport bounds refuse as CANNOT_EVALUATE; understood archive
+content violating an archive bound refuses as INVALID.
+
+OQ-2 recommendation: capture the oldest instant at gather entry using
+_capture_instant(). PR-C3 owns the proposed ten-minute freshness bound and must
+also establish the monotonic clock domain before comparing persisted records.
+"""
+
+import contextlib
+import datetime
+import hashlib
+import ipaddress
+import os
+import queue
+import re
+import secrets
+import socket
+import ssl
+import stat
+import sys
+import tarfile
+import threading
+import time
+import zlib
+from pathlib import Path
+from urllib.parse import urlsplit
+
+# The standalone CLI needs the installed sibling directory under python -I.
+# No quarantine path is ever added. Preserve sibling imports' ambient path
+# edits so a lazy public gather call does not change its caller's sys.path.
+if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+_import_path = list(sys.path)
+try:
+    import _opf_adopt as schema
+    import _opf_adopt_plan as planning
+    import _opf_store as store
+    import _opf_pack_manifest as manifest
+    from _semver import _parse as parse_version
+finally:
+    sys.path[:] = _import_path
+    del _import_path
+
+VALID = store.VALID
+INVALID = store.INVALID
+CANNOT_EVALUATE = store.CANNOT_EVALUATE
+
+MAX_ENTRIES = planning.MAX_ENTRIES
+MAX_DEPTH = planning.MAX_DEPTH
+MAX_PATH_BYTES = planning.MAX_PATH_BYTES
+MAX_FILE_BYTES = planning.MAX_FILE_BYTES
+MAX_TOTAL_BYTES = planning.MAX_TOTAL_BYTES
+
+MAX_ANCHOR_BYTES = 64 * 1024
+MAX_ARCHIVE_BYTES = MAX_TOTAL_BYTES
+MAX_HEADER_BYTES = MAX_ANCHOR_BYTES
+
+CONNECT_SECONDS = 10.0
+INACTIVITY_SECONDS = 10.0
+REQUEST_SECONDS = 60.0
+GATHER_SECONDS = 120.0
+
+POLICY_FORMAT = "opf.adoption.https-policy/v1"
+OBSERVATION_FORMAT = "opf.adoption.release-observation/v1"
+ANCHOR_URL = "https://posluns.dev/hashes.txt"
+
+_GATHER_LOCK = threading.Lock()
+_RESOLVER_SLOT = threading.BoundedSemaphore(1)
+_REPOSITORY = re.compile(
+    r"https://github[.]com/"
+    r"([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/"
+    r"([A-Za-z0-9][A-Za-z0-9_.-]{0,99})\Z",
+    re.ASCII,
+)
+_COMMIT = re.compile(r"[0-9a-f]{40}\Z", re.ASCII)
+_HEADER_NAME = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+\Z")
+_HTTP_STATUS = re.compile(rb"HTTP/1[.][01] ([0-9]{3})(?: [\x20-\x7e]*)?\r\n\Z")
+_EXTRA_DENIED_NETWORKS = (
+    ipaddress.ip_network("168.63.129.16/32"),
+    ipaddress.ip_network("64:ff9b::/96"),
+    ipaddress.ip_network("64:ff9b:1::/48"),
+)
+
+SELF_TEST_ROSTER = ()
+
+
+class ObserveError(Exception):
+    def __init__(self, status, phase, detail):
+        super().__init__(detail)
+        self.status = status
+        self.phase = phase
+        self.detail = detail
+
+
+def _require(condition, status, phase, detail):
+    if not condition:
+        raise ObserveError(status, phase, detail)
+
+
+def _capture_instant():
+    """Oldest observation instant; freshness policy belongs to PR-C3."""
+    return time.monotonic_ns()
+
+
+class _Deadline:
+    def __init__(self, seconds, parent=None):
+        _require(type(seconds) in (int, float) and 0 < seconds <= 120,
+                 CANNOT_EVALUATE, "deadline", "invalid deadline control")
+        # Reserve cleanup time. Tests assert return before the nominal deadline.
+        reserve = min(0.05, seconds / 10.0)
+        self.end = time.monotonic() + seconds - reserve
+        if parent is not None:
+            self.end = min(self.end, parent.end)
+
+    def left(self, maximum=None):
+        remaining = self.end - time.monotonic()
+        _require(remaining > 0, CANNOT_EVALUATE, "deadline",
+                 "observation deadline expired")
+        return remaining if maximum is None else min(remaining, maximum)
+
+
+def _note(notes, status, phase, detail):
+    notes.append({"status": status, "phase": phase, "detail": detail})
+
+
+def _url(value, expected):
+    _require(type(value) is str, CANNOT_EVALUATE, "destination",
+             "destination is not a string")
+    _require(value.isascii() and value == expected,
+             CANNOT_EVALUATE, "destination",
+             "destination differs from the bootstrap-pinned route")
+    parsed = urlsplit(value)
+    _require(
+        parsed.scheme == "https"
+        and parsed.port in (None, 443)
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.query
+        and not parsed.fragment
+        and "%" not in value
+        and "\\" not in value
+        and all(ord(ch) >= 0x21 and ord(ch) < 0x7f for ch in value),
+        CANNOT_EVALUATE, "destination", "unsupported URL spelling",
+    )
+    return value
+
+
+def _validate(request, policy):
+    _require(type(request) is dict, CANNOT_EVALUATE, "request",
+             "request is not a table")
+    _require(type(policy) is dict, CANNOT_EVALUATE, "policy",
+             "bootstrap policy is not a table")
+
+    for key in ("version", "commit"):
+        _require(key in request and request[key] is not None,
+                 CANNOT_EVALUATE, "request", "release identity unavailable")
+    _require(set(request) == {"product_root", "version", "commit"},
+             INVALID, "request", "request key set is not the closed schema")
+
+    _require(all(type(n) is int and n > 0 for n in (
+        MAX_ENTRIES, MAX_DEPTH, MAX_PATH_BYTES, MAX_FILE_BYTES,
+        MAX_TOTAL_BYTES, MAX_ARCHIVE_BYTES, MAX_ANCHOR_BYTES, MAX_HEADER_BYTES,
+    )), CANNOT_EVALUATE, "policy", "invalid observation bounds")
+    root = request["product_root"]
+    version = request["version"]
+    commit = request["commit"]
+    _require(
+        type(root) is str and root.startswith("/") and not root.startswith("//")
+        and root != "/" and not root.endswith("/")
+        and manifest._path_ok(root[1:]),
+        INVALID, "request", "product_root is not a contained absolute path",
+    )
+    try:
+        root.encode("utf-8")
+    except UnicodeError:
+        raise ObserveError(INVALID, "request", "product_root is not UTF-8")
+    _require(type(version) is str and parse_version(version) is not None,
+             INVALID, "request", "malformed release version")
+    _require(type(commit) is str and _COMMIT.fullmatch(commit) is not None,
+             INVALID, "request", "malformed pinned commit")
+
+    _require(
+        set(policy) == {"format", "repository", "release_url", "anchors"},
+        CANNOT_EVALUATE, "policy", "bootstrap policy unavailable or unsupported",
+    )
+    _require(policy["format"] == POLICY_FORMAT,
+             CANNOT_EVALUATE, "policy", "unsupported bootstrap policy format")
+    repository = policy["repository"]
+    _require(type(repository) is str, CANNOT_EVALUATE, "policy",
+             "repository is not a string")
+    match = _REPOSITORY.fullmatch(repository)
+    _require(match is not None, CANNOT_EVALUATE, "policy",
+             "unsupported bootstrap repository")
+    _require(match.group(2) not in (".", ".."),
+             CANNOT_EVALUATE, "policy", "unsupported repository component")
+
+    expected = "https://codeload.github.com/{}/{}/tar.gz/{}".format(
+        match.group(1), match.group(2), commit,
+    )
+    release = _url(policy["release_url"], expected)
+    anchors = policy["anchors"]
+    _require(type(anchors) is list, CANNOT_EVALUATE, "policy",
+             "anchor roster is not an array")
+    _require(len(anchors) == 1, CANNOT_EVALUATE, "policy",
+             "bootstrap anchor roster is unsupported")
+    anchor = _url(anchors[0], ANCHOR_URL)
+
+    # Copy immutable leaves before inspecting any candidate byte.
+    return (
+        {"product_root": root, "version": version, "commit": commit},
+        {"release_url": release, "anchors": (anchor,)},
+    )
+
+
+@contextlib.contextmanager
+def _environment():
+    _require(threading.current_thread() is threading.main_thread(),
+             CANNOT_EVALUATE, "environment", "gather requires the main thread")
+    _require(_GATHER_LOCK.acquire(blocking=False),
+             CANNOT_EVALUATE, "environment", "another gather is active")
+    previous = dict(os.environ)
+    try:
+        clean = {key: previous[key] for key in ("PATH", "HOME") if key in previous}
+        os.environ.clear()
+        os.environ.update(clean)
+        yield
+    finally:
+        try:
+            os.environ.clear()
+            os.environ.update(previous)
+        finally:
+            _GATHER_LOCK.release()
+
+
+def _client_context():
+    # Called only inside _environment: CA overrides and SSLKEYLOGFILE are absent.
+    context = ssl.create_default_context()
+    _require(context.check_hostname and context.verify_mode == ssl.CERT_REQUIRED,
+             CANNOT_EVALUATE, "tls", "TLS verification is not enabled")
+    _require(context.keylog_filename is None,
+             CANNOT_EVALUATE, "tls", "TLS key logging is not permitted")
+    return context
+
+
+def _public(address):
+    ip = ipaddress.ip_address(address)
+    if not ip.is_global or ip.is_multicast or ip.is_unspecified:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None or ip.sixtofour is not None or ip.teredo is not None:
+            return False
+    return not any(
+        ip.version == network.version and ip in network
+        for network in _EXTRA_DENIED_NETWORKS
+    )
+
+
+def _lookup(host):
+    return socket.getaddrinfo(
+        host, 443, family=socket.AF_UNSPEC,
+        type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP,
+    )
+
+
+def _resolve(host, deadline):
+    _require(_RESOLVER_SLOT.acquire(blocking=False),
+             CANNOT_EVALUATE, "dns", "a prior resolver call is still outstanding")
+    result = queue.Queue(maxsize=1)
+
+    def worker():
+        try:
+            try:
+                result.put((True, _lookup(host)))
+            except Exception as exc:
+                result.put((False, exc))
+        finally:
+            _RESOLVER_SLOT.release()
+
+    thread = threading.Thread(
+        target=worker, name="opf-adopt-resolver", daemon=True,
+    )
+    try:
+        thread.start()
+    except BaseException:
+        _RESOLVER_SLOT.release()
+        raise
+    try:
+        succeeded, value = result.get(timeout=deadline.left())
+    except queue.Empty:
+        raise ObserveError(CANNOT_EVALUATE, "dns", "resolver deadline expired")
+    deadline.left()
+    _require(succeeded, CANNOT_EVALUATE, "dns", "resolver could not answer")
+    _require(type(value) is list and 0 < len(value) <= MAX_ENTRIES,
+             CANNOT_EVALUATE, "dns", "invalid or empty resolver answer")
+
+    addresses = []
+    for row in value:
+        _require(
+            type(row) is tuple and len(row) == 5
+            and row[0] in (socket.AF_INET, socket.AF_INET6)
+            and row[1] == socket.SOCK_STREAM
+            and row[2] == socket.IPPROTO_TCP
+            and type(row[4]) is tuple,
+            CANNOT_EVALUATE, "dns", "unsupported resolver answer",
+        )
+        family, _, _, _, endpoint = row
+        expected_length = 2 if family == socket.AF_INET else 4
+        _require(len(endpoint) == expected_length and endpoint[1] == 443,
+                 CANNOT_EVALUATE, "dns", "unexpected resolved endpoint")
+        if family == socket.AF_INET6:
+            _require(endpoint[2:] == (0, 0), CANNOT_EVALUATE, "dns",
+                     "scoped or flow-labelled address is not supported")
+        address = ipaddress.ip_address(endpoint[0])
+        _require(
+            address.version == (4 if family == socket.AF_INET else 6)
+            and _public(address),
+            CANNOT_EVALUATE, "address", "resolved address is prohibited",
+        )
+        pair = (family, str(address))
+        if pair not in addresses:
+            addresses.append(pair)
+    return addresses[0]  # No automatic fallback or retry.
+
+
+def _connect(sock, endpoint, timeout):
+    sock.settimeout(timeout)
+    sock.connect(endpoint)
+
+
+def _peer(sock):
+    peer = sock.getpeername()
+    return peer[0], peer[1]
+
+
+def _check_peer(sock, selected):
+    address, port = _peer(sock)
+    _require(
+        port == 443 and ipaddress.ip_address(address) == ipaddress.ip_address(selected)
+        and _public(address),
+        CANNOT_EVALUATE, "address", "connected peer differs from checked address",
+    )
+
+
+def _tls(context, sock, host, deadline):
+    _require(context.check_hostname and context.verify_mode == ssl.CERT_REQUIRED,
+             CANNOT_EVALUATE, "tls", "TLS verification is not enabled")
+    wrapped = context.wrap_socket(
+        sock, server_hostname=host, do_handshake_on_connect=False,
+        suppress_ragged_eofs=False,
+    )
+    try:
+        wrapped.settimeout(deadline.left())
+        wrapped.do_handshake()
+        deadline.left()
+        return wrapped
+    except BaseException:
+        wrapped.close()
+        raise
+
+
+class _Wire:
+    def __init__(self, sock, deadline):
+        self.sock = sock
+        self.deadline = deadline
+        self.buffer = bytearray()
+
+    def _receive(self):
+        self.sock.settimeout(self.deadline.left(INACTIVITY_SECONDS))
+        block = self.sock.recv(65536)
+        self.deadline.left()
+        return block
+
+    def take(self, size, eof=False):
+        while len(self.buffer) < size:
+            block = self._receive()
+            if not block:
+                _require(eof and not self.buffer, CANNOT_EVALUATE, "http",
+                         "body ended before its declared framing")
+                break
+            self.buffer.extend(block)
+        result = bytes(self.buffer[:size])
+        del self.buffer[:size]
+        return result
+
+    def line(self):
+        while True:
+            end = self.buffer.find(b"\r\n")
+            if end >= 0:
+                _require(end + 2 <= MAX_HEADER_BYTES,
+                         CANNOT_EVALUATE, "http", "line exceeds bound")
+                result = bytes(self.buffer[:end + 2])
+                del self.buffer[:end + 2]
+                return result
+            _require(len(self.buffer) <= MAX_HEADER_BYTES,
+                     CANNOT_EVALUATE, "http", "line exceeds bound")
+            block = self._receive()
+            _require(bool(block), CANNOT_EVALUATE, "http", "incomplete HTTP line")
+            self.buffer.extend(block)
+
+
+def _header_policy(status, headers):
+    _require(status == 200 and "location" not in headers,
+             CANNOT_EVALUATE, "http", "non-200 or redirect response")
+    _require(headers.get("content-encoding", "identity").lower() == "identity",
+             CANNOT_EVALUATE, "http", "non-identity content encoding")
+
+
+def _response(wire, cap):
+    first = wire.line()
+    match = _HTTP_STATUS.fullmatch(first)
+    _require(match is not None, CANNOT_EVALUATE, "http", "invalid HTTP status line")
+    status = int(match.group(1))
+    headers = {}
+    header_bytes = len(first)
+    while True:
+        line = wire.line()
+        header_bytes += len(line)
+        _require(header_bytes <= MAX_HEADER_BYTES,
+                 CANNOT_EVALUATE, "http", "headers exceed bound")
+        if line == b"\r\n":
+            break
+        _require(b":" in line and line[:1] not in (b" ", b"\t"),
+                 CANNOT_EVALUATE, "http", "malformed or folded header")
+        name, value = line[:-2].split(b":", 1)
+        _require(_HEADER_NAME.fullmatch(name) is not None,
+                 CANNOT_EVALUATE, "http", "invalid header name")
+        _require(all(byte == 9 or 32 <= byte < 127 for byte in value),
+                 CANNOT_EVALUATE, "http", "invalid header value")
+        key = name.decode("ascii").lower()
+        _require(key not in headers, CANNOT_EVALUATE, "http", "duplicate header")
+        headers[key] = value.decode("ascii").strip(" \t")
+
+    _header_policy(status, headers)
+    length = headers.get("content-length")
+    transfer = headers.get("transfer-encoding")
+    _require(not (length is not None and transfer is not None),
+             CANNOT_EVALUATE, "http", "conflicting body framing")
+    body = bytearray()
+
+    def append(size):
+        _require(size <= cap - len(body),
+                 CANNOT_EVALUATE, "http", "streamed response bound exceeded")
+        while size:
+            amount = min(size, 65536)
+            body.extend(wire.take(amount))
+            size -= amount
+
+    if length is not None:
+        _require(re.fullmatch(r"[0-9]{1,20}", length, re.ASCII) is not None,
+                 CANNOT_EVALUATE, "http", "invalid Content-Length")
+        append(int(length))
+    else:
+        _require(transfer is not None and transfer.lower() == "chunked",
+                 CANNOT_EVALUATE, "http", "unsupported or absent body framing")
+        while True:
+            line = wire.line()
+            _require(re.fullmatch(rb"[0-9A-Fa-f]{1,16}\r\n", line) is not None,
+                     CANNOT_EVALUATE, "http", "invalid chunk framing")
+            size = int(line[:-2], 16)
+            if size == 0:
+                _require(wire.line() == b"\r\n", CANNOT_EVALUATE, "http",
+                         "chunk trailers are unsupported")
+                break
+            append(size)
+            _require(wire.take(2) == b"\r\n",
+                     CANNOT_EVALUATE, "http", "invalid chunk terminator")
+
+    _require(wire.take(1, eof=True) == b"",
+             CANNOT_EVALUATE, "http", "bytes follow the framed response")
+    wire.deadline.left()
+    return bytes(body)
+
+
+def _fetch(url, cap, parent, context):
+    request_deadline = _Deadline(REQUEST_SECONDS, parent)
+    connection_deadline = _Deadline(CONNECT_SECONDS, request_deadline)
+    parsed = urlsplit(url)
+    family, address = _resolve(parsed.hostname, connection_deadline)
+    endpoint = (address, 443) if family == socket.AF_INET else (address, 443, 0, 0)
+    with contextlib.ExitStack() as stack:
+        raw = stack.enter_context(socket.socket(family, socket.SOCK_STREAM))
+        _connect(raw, endpoint, connection_deadline.left())
+        connection_deadline.left()
+        _check_peer(raw, address)
+        secured = stack.enter_context(
+            _tls(context, raw, parsed.hostname, connection_deadline)
+        )
+        _check_peer(secured, address)
+        secured.settimeout(request_deadline.left(INACTIVITY_SECONDS))
+        request = (
+            "GET {} HTTP/1.1\r\n"
+            "Host: {}\r\n"
+            "Connection: close\r\n"
+            "Accept-Encoding: identity\r\n"
+            "User-Agent: opf-adopt-observe/1\r\n\r\n"
+        ).format(parsed.path, parsed.hostname).encode("ascii")
+        secured.sendall(request)
+        request_deadline.left()
+        return _response(_Wire(secured, request_deadline), cap)
+
+
+def _open_directory(parent, name, fresh=False):
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent)
+    except FileExistsError:
+        if fresh:
+            raise ObserveError(CANNOT_EVALUATE, "quarantine",
+                               "exclusive directory already exists")
+    fd = os.open(
+        name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK,
+        dir_fd=parent,
+    )
+    try:
+        opened = os.fstat(fd)
+        named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        _require(planning._stamp(opened) == planning._stamp(named),
+                 CANNOT_EVALUATE, "quarantine", "directory changed while opening")
+        if fresh:
+            _require(
+                stat.S_IMODE(opened.st_mode) == 0o700
+                and opened.st_uid == os.geteuid(),
+                CANNOT_EVALUATE, "quarantine", "quarantine is not private",
+            )
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+@contextlib.contextmanager
+def _quarantine(root, request_id):
+    store._journal.require_containment()
+    with contextlib.ExitStack() as stack:
+        def hold(fd):
+            stack.callback(os.close, fd)
+            return fd
+
+        root_fd = hold(store._open_dir_nofollow(root))
+        working = hold(_open_directory(root_fd, ".working"))
+        adopt = hold(_open_directory(working, "adopt"))
+        run = hold(_open_directory(adopt, request_id, fresh=True))
+        quarantine = hold(_open_directory(run, "quarantine", fresh=True))
+        path = root + "/.working/adopt/" + request_id + "/quarantine"
+        for entry in list(sys.path) + os.environ.get("PATH", "").split(os.pathsep):
+            if not isinstance(entry, str):
+                continue
+            absolute = os.path.abspath(entry or os.getcwd())
+            _require(
+                absolute != path and not absolute.startswith(path + "/"),
+                CANNOT_EVALUATE, "quarantine",
+                "quarantine overlaps an import or executable search entry",
+            )
+        yield quarantine, path
+
+
+def _put(parent, name, payload, deadline):
+    fd = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK,
+        0o600, dir_fd=parent,
+    )
+    try:
+        opened = os.fstat(fd)
+        _require(stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1,
+                 CANNOT_EVALUATE, "quarantine", "output is not an exclusive regular file")
+        os.fchmod(fd, 0o600)
+        remaining = memoryview(payload)
+        while remaining:
+            deadline.left()
+            written = os.write(fd, remaining[:65536])
+            _require(written > 0, CANNOT_EVALUATE, "quarantine", "short file write")
+            remaining = remaining[written:]
+        deadline.left()
+    finally:
+        os.close(fd)
+
+
+def _read_archive(parent, deadline):
+    before = os.stat("archive.tar.gz", dir_fd=parent, follow_symlinks=False)
+    fd = os.open(
+        "archive.tar.gz", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+        dir_fd=parent,
+    )
+    try:
+        opened = os.fstat(fd)
+        _require(
+            stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1
+            and planning._stamp(before) == planning._stamp(opened)
+            and opened.st_size <= MAX_ARCHIVE_BYTES,
+            CANNOT_EVALUATE, "quarantine", "archive inode or bound changed",
+        )
+        data = bytearray()
+        while True:
+            deadline.left()
+            block = os.read(fd, min(65536, MAX_ARCHIVE_BYTES - len(data) + 1))
+            if not block:
+                break
+            data.extend(block)
+            _require(len(data) <= MAX_ARCHIVE_BYTES,
+                     CANNOT_EVALUATE, "quarantine", "archive read exceeds bound")
+        _require(
+            planning._stamp(os.fstat(fd)) == planning._stamp(opened)
+            and planning._stamp(os.stat(
+                "archive.tar.gz", dir_fd=parent, follow_symlinks=False,
+            )) == planning._stamp(opened),
+            CANNOT_EVALUATE, "quarantine", "archive changed during read",
+        )
+        return bytes(data)
+    finally:
+        os.close(fd)
+
+
+def _inflate(archive, deadline):
+    _require(archive.startswith(b"\x1f\x8b"),
+             CANNOT_EVALUATE, "archive", "unsupported compression dialect")
+    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    remaining = archive
+    output = bytearray()
+    while True:
+        deadline.left()
+        allowance = min(65536, MAX_TOTAL_BYTES - len(output) + 1)
+        block = decoder.decompress(remaining, allowance)
+        output.extend(block)
+        _require(len(output) <= MAX_TOTAL_BYTES,
+                 INVALID, "archive", "total archive expansion exceeds bound")
+        remaining = decoder.unconsumed_tail
+        if decoder.eof:
+            _require(not decoder.unused_data and not remaining,
+                     INVALID, "archive", "concatenated gzip or trailing data")
+            return bytes(output)
+        _require(bool(block) or bool(remaining),
+                 CANNOT_EVALUATE, "archive", "truncated gzip stream")
+
+
+def _tar_text(field):
+    head, separator, tail = field.partition(b"\0")
+    _require(not separator or not any(tail),
+             INVALID, "archive", "conflicting string field padding")
+    try:
+        return head.decode("utf-8")
+    except UnicodeError:
+        raise ObserveError(CANNOT_EVALUATE, "archive", "unparseable member name")
+
+
+def _archive_member_policy(info):
+    known_special = (tarfile.LNKTYPE, tarfile.SYMTYPE, tarfile.CHRTYPE,
+                     tarfile.BLKTYPE, tarfile.FIFOTYPE)
+    _require(info.type not in known_special,
+             INVALID, "archive", "link or special member")
+    _require(info.type in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE),
+             CANNOT_EVALUATE, "archive", "unsupported tar member dialect")
+    _require(
+        not info.linkname and info.devmajor == 0 and info.devminor == 0
+        and info.sparse is None and 0 <= info.mode <= 0o7777
+        and info.size >= 0
+        and (info.type != tarfile.DIRTYPE or info.size == 0),
+        INVALID, "archive", "conflicting member metadata",
+    )
+
+
+def _member_path(name, directory):
+    if directory and name.endswith("/"):
+        name = name[:-1]
+    _require(manifest._path_ok(name),
+             INVALID, "archive", "uncontained member path")
+    name.encode("utf-8")
+    return name
+
+
+def _unpack(parent, archive, deadline):
+    raw = _inflate(archive, deadline)
+    _require(len(raw) % 512 == 0, CANNOT_EVALUATE, "archive",
+             "truncated tar block")
+    offset = 0
+    wrapper = None
+    explicit = set()
+    nodes = {}
+    files = []
+    entry_count = 0
+    raw_path_bytes = 0
+    materialized_path_bytes = 0
+    payload_bytes = 0
+    terminated = False
+
+    def add_node(path, kind):
+        nonlocal materialized_path_bytes
+        old = nodes.get(path)
+        _require(old is None or old == kind,
+                 INVALID, "archive", "file/directory collision")
+        if old is None:
+            nodes[path] = kind
+            materialized_path_bytes += len(path.encode("utf-8"))
+        _require(len(nodes) <= MAX_ENTRIES, INVALID, "archive",
+                 "materialized entry bound exceeded")
+        _require(materialized_path_bytes <= MAX_PATH_BYTES,
+                 INVALID, "archive", "materialized path-byte bound exceeded")
+
+    while offset < len(raw):
+        deadline.left()
+        header = raw[offset:offset + 512]
+        offset += 512
+        if header == b"\0" * 512:
+            _require(
+                raw[offset:offset + 512] == b"\0" * 512
+                and not any(raw[offset + 512:]),
+                INVALID, "archive", "missing terminator or trailing tar content",
+            )
+            terminated = True
+            break
+        _require(header[257:265] == b"ustar\x0000",
+                 CANNOT_EVALUATE, "archive", "unsupported tar dialect")
+        for start, end in ((100, 108), (108, 116), (116, 124),
+                           (124, 136), (136, 148), (148, 156),
+                           (329, 337), (337, 345)):
+            field = header[start:end]
+            _require(not (field[0] & 0x80),
+                     CANNOT_EVALUATE, "archive", "unsupported numeric encoding")
+            text = field.strip(b" \0")
+            _require(not text or all(48 <= byte <= 55 for byte in text),
+                     INVALID, "archive", "malformed USTAR numeric field")
+        checksum = header[148:156].strip(b" \0")
+        _require(bool(checksum), INVALID, "archive", "missing tar checksum")
+        _require(
+            int(checksum, 8) == sum(header[:148]) + 8 * 32 + sum(header[156:]),
+            INVALID, "archive", "tar checksum mismatch",
+        )
+        _require(not any(header[500:]), INVALID, "archive",
+                 "conflicting USTAR reserved metadata")
+        info = tarfile.TarInfo.frombuf(header, "utf-8", "strict")
+        _archive_member_policy(info)
+        directory = info.type == tarfile.DIRTYPE
+        leaf = _tar_text(header[:100])
+        prefix = _tar_text(header[345:500])
+        name = _member_path((prefix + "/" if prefix else "") + leaf, directory)
+        # Validate even unused string fields; do not accept shadow metadata.
+        for field in (header[157:257], header[265:297], header[297:329]):
+            _tar_text(field)
+
+        entry_count += 1
+        raw_path_bytes += len(name.encode("utf-8"))
+        _require(entry_count <= MAX_ENTRIES, INVALID, "archive",
+                 "archive entry bound exceeded")
+        _require(raw_path_bytes <= MAX_PATH_BYTES, INVALID, "archive",
+                 "archive path-byte bound exceeded")
+        components = name.split("/")
+        if wrapper is None:
+            wrapper = components[0]
+        _require(components[0] == wrapper, INVALID, "archive",
+                 "multiple wrapper directories")
+        path = "/".join(components[1:])
+        _require(path not in explicit, INVALID, "archive",
+                 "duplicate effective path after wrapper removal")
+        explicit.add(path)
+        _require(len(components) - 1 <= MAX_DEPTH, INVALID, "archive",
+                 "member depth bound exceeded")
+        _require(bool(path) or directory, INVALID, "archive",
+                 "wrapper is not a directory")
+        _require(info.size <= MAX_FILE_BYTES, INVALID, "archive",
+                 "member size bound exceeded")
+        payload_bytes += info.size
+        _require(payload_bytes <= MAX_TOTAL_BYTES, INVALID, "archive",
+                 "member expansion bound exceeded")
+
+        end = offset + info.size
+        padded_end = offset + ((info.size + 511) // 512) * 512
+        _require(padded_end <= len(raw), CANNOT_EVALUATE, "archive",
+                 "truncated member content")
+        _require(not any(raw[end:padded_end]), INVALID, "archive",
+                 "nonzero member padding")
+        payload = memoryview(raw)[offset:end]
+        offset = padded_end
+        if path:
+            pieces = path.split("/")
+            for count in range(1, len(pieces)):
+                add_node("/".join(pieces[:count]), "directory")
+            add_node(path, "directory" if directory else "file")
+            if not directory:
+                files.append((path, info.mode, payload))
+
+    _require(terminated and wrapper is not None,
+             INVALID, "archive", "archive has no supported wrapped member stream")
+    members_fd = _open_directory(parent, "members", fresh=True)
+    try:
+        for path, kind in sorted(nodes.items(), key=lambda item: (item[0].count("/"), item[0])):
+            if kind != "directory":
+                continue
+            pfd, name = store._journal._open_parent(members_fd, path)
+            try:
+                child = _open_directory(pfd, name, fresh=True)
+                os.close(child)
+            finally:
+                os.close(pfd)
+        result = []
+        budget = [0]
+        for path, mode, payload in files:
+            deadline.left()
+            pfd, name = store._journal._open_parent(members_fd, path)
+            try:
+                _put(pfd, name, payload, deadline)
+                before = os.stat(name, dir_fd=pfd, follow_symlinks=False)
+                reread = planning._read(pfd, name, before, budget)
+                _require(reread == payload, CANNOT_EVALUATE, "quarantine",
+                         "member reread differs from written bytes")
+                _require(stat.S_IMODE(before.st_mode) == 0o600,
+                         CANNOT_EVALUATE, "quarantine", "member is executable or non-private")
+            finally:
+                os.close(pfd)
+            result.append({"path": path, "size": len(payload), "archive_mode": mode})
+        return result
+    finally:
+        os.close(members_fd)
+
+
+def _work(request, policy, observation, notes, deadline):
+    request, policy = _validate(request, policy)
+    observation["release_identity"] = {
+        "version": request["version"], "commit": request["commit"],
+    }
+    with _environment():
+        context = _client_context()
+        with _quarantine(request["product_root"], observation["request_id"]) as (qfd, path):
+            archive = None
+            anchors = []
+            destinations = [
+                ("archive", policy["release_url"], MAX_ARCHIVE_BYTES),
+                *[("anchor", url, MAX_ANCHOR_BYTES) for url in policy["anchors"]],
+            ]
+            for kind, url, cap in destinations:
+                try:
+                    body = _fetch(url, cap, deadline, context)
+                except ObserveError as exc:
+                    _note(notes, exc.status, exc.phase, exc.detail)
+                    continue
+                except (OSError, ssl.SSLError) as exc:
+                    _note(notes, CANNOT_EVALUATE, kind,
+                          "transport could not complete: " + type(exc).__name__)
+                    continue
+                if kind == "archive":
+                    archive = body
+                    observation["archive"] = {
+                        "url": url, "size": len(body),
+                        "sha256": "sha256:" + hashlib.sha256(body).hexdigest(),
+                    }
+                else:
+                    anchors.append({"url": url, "body": body})
+            if anchors:
+                observation["anchors"] = anchors
+            if notes:
+                return
+            _require(archive is not None and len(anchors) == len(policy["anchors"]),
+                     CANNOT_EVALUATE, "observation", "required response omitted")
+            _put(qfd, "archive.tar.gz", archive, deadline)
+            reread = _read_archive(qfd, deadline)
+            _require(reread == archive, CANNOT_EVALUATE, "quarantine",
+                     "archive reread differs from response")
+            members = _unpack(qfd, reread, deadline)
+            deadline.left()
+        # Publish the locator only after descriptor teardown succeeded.
+        observation["quarantine"] = path
+        observation["members"] = members
+    deadline.left()
+
+
+def _seal_observation(observation, notes):
+    document = dict(observation)
+    if "anchors" in document:
+        document["anchors"] = [
+            {"url": row["url"], "body_hex": row["body"].hex()}
+            for row in document["anchors"]
+        ]
+    document["notes"] = list(notes)
+    return planning._seal(document, "observation_digest")
+
+
+def gather_release(request, policy):
+    """Return inert evidence and structured omission notes; never a trust verdict."""
+    observation = {}
+    notes = []
+    try:
+        observation.update({
+            "format": OBSERVATION_FORMAT,
+            "request_id": "adopt-{}-{}".format(
+                datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+                secrets.token_hex(8),
+            ),
+            "captured_monotonic_ns": _capture_instant(),
+        })
+        deadline = _Deadline(GATHER_SECONDS)
+        _work(request, policy, observation, notes, deadline)
+    except ObserveError as exc:
+        _note(notes, exc.status, exc.phase, exc.detail)
+    except Exception as exc:
+        _note(notes, CANNOT_EVALUATE, "observer",
+              "unexpected observer failure: " + type(exc).__name__)
+    except BaseException:
+        observation.clear()
+        raise
+
+    if notes:
+        observation.pop("quarantine", None)
+        observation.pop("members", None)
+    observation["status"] = (
+        CANNOT_EVALUATE if any(row["status"] == CANNOT_EVALUATE for row in notes)
+        else INVALID if notes else VALID
+    )
+    try:
+        observation["record"] = _seal_observation(observation, notes)
+    except Exception as exc:
+        observation.pop("quarantine", None)
+        observation.pop("members", None)
+        observation.pop("record", None)
+        observation["status"] = CANNOT_EVALUATE
+        _note(notes, CANNOT_EVALUATE, "record",
+              "observation could not be sealed: " + type(exc).__name__)
+    return observation, notes
+
+
+def _guard_self_test():
+    """Exact named-guard mutations, including independent HTTP wire vectors.
+
+    These supplement the end-to-end TLS fixtures. A unit mutant may still be
+    refused by a later containment guard; a changed status makes the original
+    status discriminator red without weakening that second guard.
+    """
+    import gzip
+    import tempfile
+    from unittest.mock import patch
+
+    module = sys.modules[__name__]
+    original = _require
+    rows = []
+
+    def check(identifier, guard, expected, probe):
+        def status():
+            try:
+                return probe()
+            except ObserveError as exc:
+                return exc.status
+            except Exception:
+                return CANNOT_EVALUATE
+
+        baseline = status()
+
+        def disabled(condition, result, phase, detail):
+            if detail != guard:
+                original(condition, result, phase, detail)
+
+        with patch.object(module, "_require", disabled):
+            mutant = status()
+        rows.append({
+            "id": identifier, "guard": guard, "expected": expected,
+            "observed": baseline, "mutant_observed": mutant,
+            "mutation_detected": mutant != expected,
+            "test_status": VALID if baseline == expected and mutant != expected else INVALID,
+        })
+
+    class LocalWire(_Wire):
+        def __init__(self, raw):
+            self.raw = raw
+            self.buffer = bytearray()
+            self.deadline = _Deadline(1)
+
+        def _receive(self):
+            result, self.raw = self.raw[:7], self.raw[7:]
+            return result
+
+    http_cases = (
+        ("truncated", "body ended before its declared framing",
+         b"Content-Length: 20\r\n\r\nshort", 64),
+        ("conflict", "conflicting body framing",
+         b"Content-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\nabc", 64),
+        ("duplicate", "duplicate header",
+         b"Content-Length: 3\r\nContent-Length: 3\r\n\r\nabc", 64),
+        ("absent", "unsupported or absent body framing",
+         b"\r\n3\r\nabc\r\n0\r\n\r\n", 64),
+        ("extra", "bytes follow the framed response",
+         b"Content-Length: 3\r\n\r\nabcd", 64),
+        ("encoding", "non-identity content encoding",
+         b"Content-Length: 3\r\nContent-Encoding: gzip\r\n\r\nabc", 64),
+        ("cap", "streamed response bound exceeded",
+         b"Content-Length: 3\r\n\r\nabc", 2),
+        ("chunk-cap", "streamed response bound exceeded",
+         b"Transfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n", 2),
+        ("terminator", "invalid chunk terminator",
+         b"Transfer-Encoding: chunked\r\n\r\n3\r\nabcXX0\r\n\r\n", 64),
+    )
+    for name, guard, body, cap in http_cases:
+        def probe(body=body, cap=cap):
+            _response(LocalWire(b"HTTP/1.1 200 OK\r\n" + body), cap)
+            return VALID
+        check("unit/http/" + name, guard, CANNOT_EVALUATE, probe)
+
+    root = ("wrap/", tarfile.DIRTYPE, b"")
+
+    def archive(entries):
+        blocks = []
+        for name, kind, payload in entries:
+            member = tarfile.TarInfo(name)
+            member.type, member.size = kind, len(payload)
+            if kind in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+                member.linkname = "outside"
+            blocks += [member.tobuf(format=tarfile.USTAR_FORMAT), payload,
+                       b"\0" * ((-len(payload)) % 512)]
+        return gzip.compress(b"".join(blocks) + b"\0" * 1024, mtime=0)
+
+    archive_cases = [
+        ("traversal", "uncontained member path",
+         [root, ("wrap/../escape", tarfile.REGTYPE, b"x")], None),
+        ("duplicate", "duplicate effective path after wrapper removal",
+         [root, ("wrap/a", tarfile.REGTYPE, b"x"),
+          ("wrap/a", tarfile.REGTYPE, b"y")], None),
+        ("wrapper", "multiple wrapper directories",
+         [root, ("other/a", tarfile.REGTYPE, b"x")], None),
+        ("collision", "file/directory collision",
+         [root, ("wrap/a", tarfile.REGTYPE, b"x"),
+          ("wrap/a/b", tarfile.REGTYPE, b"x")], None),
+        ("entries", "archive entry bound exceeded",
+         [root, ("wrap/a", tarfile.REGTYPE, b"x"),
+          ("wrap/b", tarfile.REGTYPE, b"x")], ("MAX_ENTRIES", 2)),
+        ("depth", "member depth bound exceeded",
+         [root, ("wrap/a/b/c", tarfile.REGTYPE, b"x")], ("MAX_DEPTH", 2)),
+        ("paths", "archive path-byte bound exceeded",
+         [root, ("wrap/" + "a" * 20, tarfile.REGTYPE, b"x")], ("MAX_PATH_BYTES", 24)),
+        ("member", "member size bound exceeded",
+         [root, ("wrap/a", tarfile.REGTYPE, b"x" * 65)], ("MAX_FILE_BYTES", 64)),
+        ("expansion", "total archive expansion exceeds bound",
+         [root, ("wrap/a", tarfile.REGTYPE, b"x" * 3000)], ("MAX_TOTAL_BYTES", 4096)),
+    ]
+    for name, kind in (("symlink", tarfile.SYMTYPE), ("hardlink", tarfile.LNKTYPE),
+                       ("fifo", tarfile.FIFOTYPE), ("char", tarfile.CHRTYPE),
+                       ("block", tarfile.BLKTYPE)):
+        archive_cases.append((name, "link or special member",
+                              [root, ("wrap/a", kind, b"")], None))
+    for name, guard, entries, limit in archive_cases:
+        raw = archive(entries)
+
+        def probe(raw=raw):
+            with tempfile.TemporaryDirectory(prefix="opf-observe-guard-") as tmp:
+                fd = store._open_dir_nofollow(tmp)
+                try:
+                    _unpack(fd, raw, _Deadline(5))
+                finally:
+                    os.close(fd)
+            return VALID
+
+        with contextlib.ExitStack() as stack:
+            if limit:
+                stack.enter_context(patch.object(module, *limit))
+            check("unit/archive/" + name, guard, INVALID, probe)
+    expected_ids = (["unit/http/" + case[0] for case in http_cases]
+                    + ["unit/archive/" + case[0] for case in archive_cases])
+    if [row["id"] for row in rows] != expected_ids:
+        raise AssertionError("unit/guard-roster")
+    return rows
+
+
+def _runner_check(expected, source):
+    """Exercise the real standalone shell dispatcher independently of manifests.
+
+    Other Python gates are intercepted. Only this suite's vector leg runs.
+    This checks exact dispatch, not other gates or arbitrary shell rewrites.
+    """
+    import json
+    import subprocess
+    import tempfile
+
+    here = Path(__file__).resolve().parent
+    runner = here / "run_all_checks.sh"
+    prefix = r'''
+python3() {
+  if [ "$#" -eq 4 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
+      && [ "$3" = "$observe_test" ] && [ "$4" = "--self-test" ]; then
+    "$observe_python" -I -B "$observe_test" --self-test --vectors-only
+  else
+    case " $* " in *_opf_adopt_observe.py*) return 2;; esac
+    return 0
+  fi
+}
+observe_python="$1"
+observe_test="$2"
+'''
+    with tempfile.TemporaryDirectory(prefix="opf-observe-registration-") as tmp:
+        proc = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-c", prefix + source,
+             str(runner), sys.executable, str(here / "_opf_adopt_observe.py")],
+            cwd=tmp, env={"PATH": os.defpath, "TMPDIR": tmp,
+                          "PYTHONDONTWRITEBYTECODE": "1"},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=120,
+        )
+    reports = [json.loads(line)["opf_adopt_observe_tests"]
+               for line in proc.stdout.splitlines()
+               if line.startswith('{"opf_adopt_observe_tests":')]
+    # Timing measurements vary between executions; compare the authoritative
+    # roster identities and actual statuses, never finding text or manifest rows.
+    if (proc.returncode != 0 or len(reports) != 1
+            or [row["id"] for row in reports[0]] != expected
+            or any(row["test_status"] != VALID for row in reports[0])):
+        raise AssertionError("runner/adopt-observe-registration")
+
+
+def _runner_registration_test(expected):
+    runner = Path(__file__).resolve().parent / "run_all_checks.sh"
+    source = runner.read_text(encoding="utf-8")
+    _runner_check(expected, source)
+    lines = [line for line in source.splitlines(keepends=True)
+             if line.startswith('run_gate "opf-adopt-observe-selftest"')]
+    if len(lines) != 1:
+        raise AssertionError("runner/adopt-observe-unique-registration")
+    try:
+        _runner_check(expected, source.replace(lines[0], "", 1))
+    except AssertionError as exc:
+        if str(exc) != "runner/adopt-observe-registration":
+            raise
+    else:
+        raise AssertionError("runner/adopt-observe-registration-not-red")
+    print("PASS runner/adopt-observe-registration")
+    print("RED runner-registration -> runner/adopt-observe-registration")
+
+
+def self_test(vectors_only=False):
+    """Local fixtures only; report executed rows and require mutation sensitivity.
+
+    Socket routing is replaced only inside this function: production destinations
+    and SNI stay unchanged while TCP is delivered to a loopback fixture. The peer
+    adapter models the checked public endpoint separately from that physical
+    fixture address. There is no production localhost, alternate-CA, timeout,
+    verification-disable, or transport-injection option.
+
+    The write-deny harness covers Python open/write/mkdir entry points and
+    process-launch entry points. It is not an OS sandbox for arbitrary native
+    extension syscalls. The production environment scrub prevents SSL key-log
+    output; R1 and R7 remain the native-runtime boundaries.
+    """
+    import builtins
+    import copy
+    import gzip
+    import io
+    import json
+    import subprocess
+    import tempfile
+    import shutil
+    from unittest import mock
+
+    global SELF_TEST_ROSTER
+    SELF_TEST_ROSTER = ()
+    executed = []
+    module = sys.modules[__name__]
+    original_context = ssl.create_default_context
+    original_fetch = _fetch
+    original_tls = _tls
+    public_ip = "93.184.216.34"
+    commit = "a" * 40
+    release_url = "https://codeload.github.com/jposluns/guardrails/tar.gz/" + commit
+    baseline_anchor = b"synthetic uninterpreted anchor\n"
+
+    def archive(rows):
+        blocks = []
+        for name, kind, payload in rows:
+            info = tarfile.TarInfo(name)
+            info.type = kind
+            info.mode = 0o755 if name.endswith("pre-commit") else 0o644
+            info.size = len(payload)
+            if kind in (tarfile.LNKTYPE, tarfile.SYMTYPE):
+                info.linkname = "outside"
+            if kind in (tarfile.CHRTYPE, tarfile.BLKTYPE):
+                info.devmajor = 1
+                info.devminor = 3
+            blocks.append(info.tobuf(format=tarfile.USTAR_FORMAT))
+            blocks.append(payload)
+            blocks.append(b"\0" * ((-len(payload)) % 512))
+        blocks.append(b"\0" * 1024)
+        return gzip.compress(b"".join(blocks), mtime=0)
+
+    root_row = ("wrap/", tarfile.DIRTYPE, b"")
+    baseline_archive = archive([root_row, ("wrap/data", tarfile.REGTYPE, b"data")])
+
+    def reply(body, extra=b"", status=b"200 OK", chunked=False):
+        if chunked:
+            headers = b"Transfer-Encoding: chunked\r\n"
+            body = (
+                format(len(body), "x").encode("ascii") + b"\r\n" + body
+                + b"\r\n0\r\n\r\n"
+            )
+        else:
+            headers = b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n"
+        return b"HTTP/1.1 " + status + b"\r\n" + headers + extra + b"\r\n" + body
+
+    class Server:
+        def __init__(self, context, archive_body, anchor_response, mode="normal"):
+            self.context = context
+            self.archive_body = archive_body
+            self.anchor_response = anchor_response
+            self.mode = mode
+            self.requests = []
+            self.errors = []
+            self.stop = threading.Event()
+            self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.listener.bind(("127.0.0.1", 0))
+            self.listener.listen(8)
+            self.listener.settimeout(0.05)
+            self.port = self.listener.getsockname()[1]
+            self.thread = threading.Thread(target=self.serve, daemon=True)
+            self.thread.start()
+
+        def serve(self):
+            while not self.stop.is_set():
+                try:
+                    raw, _ = self.listener.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                secured = None
+                try:
+                    raw.settimeout(0.5)
+                    if self.mode == "tls-stall":
+                        self.stop.wait(0.5)
+                        continue
+                    secured = self.context.wrap_socket(raw, server_side=True)
+                    request = bytearray()
+                    while not request.endswith(b"\r\n\r\n"):
+                        block = secured.recv(4096)
+                        if not block:
+                            break
+                        request.extend(block)
+                        if len(request) > MAX_HEADER_BYTES:
+                            raise AssertionError("fixture request exceeded bound")
+                    self.requests.append(bytes(request))
+                    anchor_request = request.startswith(b"GET /hashes.txt ")
+                    response = (
+                        self.anchor_response if anchor_request
+                        else reply(self.archive_body)
+                    )
+                    if anchor_request and self.mode in ("slow", "stall"):
+                        header, body = response.split(b"\r\n\r\n", 1)
+                        secured.sendall(header + b"\r\n\r\n")
+                        if self.mode == "stall":
+                            self.stop.wait(1.0)
+                        else:
+                            for byte in body:
+                                if self.stop.wait(0.04):
+                                    break
+                                secured.sendall(bytes([byte]))
+                    else:
+                        secured.sendall(response)
+                    # Produce a genuine TLS close_notify. The peer can close
+                    # without completing unwrap; that fixture teardown is benign.
+                    try:
+                        secured.unwrap().close()
+                    except (OSError, ssl.SSLError):
+                        pass
+                except (OSError, ssl.SSLError):
+                    # Expected for wrong-chain/name and deadline cases.
+                    pass
+                except Exception as exc:
+                    self.errors.append(type(exc).__name__)
+                finally:
+                    if secured is not None:
+                        secured.close()
+                    raw.close()
+
+        def close(self):
+            self.stop.set()
+            self.listener.close()
+            self.thread.join(timeout=1.0)
+            if self.thread.is_alive():
+                raise AssertionError("local TLS fixture did not stop")
+
+    def snapshot(root):
+        result = {}
+        for directory, dirs, files in os.walk(root, followlinks=False):
+            relative = Path(directory).relative_to(root)
+            if relative == Path(".working"):
+                dirs[:] = [name for name in dirs if name != "adopt"]
+            for name in files:
+                path = Path(directory) / name
+                result[str(path.relative_to(root))] = (
+                    stat.S_IMODE(path.stat().st_mode), path.read_bytes(),
+                )
+        return result
+
+    @contextlib.contextmanager
+    def deny_effects(root, violations):
+        actual_open = os.open
+        actual_write = os.write
+        actual_mkdir = os.mkdir
+        builtin_open = builtins.open
+        io_open = io.open
+
+        def absolute(path, dir_fd=None):
+            if isinstance(path, int):
+                return Path(os.readlink("/proc/self/fd/" + str(path)))
+            path = Path(os.fsdecode(path))
+            if not path.is_absolute():
+                base = (
+                    Path(os.readlink("/proc/self/fd/" + str(dir_fd)))
+                    if dir_fd is not None else Path.cwd()
+                )
+                path = base / path
+            return Path(os.path.normpath(path))
+
+        def allowed(path, scaffolding=False):
+            try:
+                parts = path.relative_to(root).parts
+            except ValueError:
+                return False
+            if scaffolding and parts in ((".working",), (".working", "adopt")):
+                return True
+            if len(parts) < 3 or parts[:2] != (".working", "adopt"):
+                return False
+            if schema._RUN_ID_RE.fullmatch(parts[2]) is None:
+                return False
+            if scaffolding and len(parts) == 3:
+                return True
+            return len(parts) >= 4 and parts[3] == "quarantine"
+
+        def refuse(label):
+            violations.append(label)
+            raise PermissionError(label)
+
+        def guarded_open(path, flags, mode=0o777, *, dir_fd=None):
+            writing = flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND)
+            if writing and not allowed(absolute(path, dir_fd)):
+                refuse("write-mode os.open outside quarantine")
+            return actual_open(path, flags, mode, dir_fd=dir_fd)
+
+        def guarded_write(fd, data):
+            if not allowed(absolute(fd)):
+                refuse("os.write outside quarantine")
+            return actual_write(fd, data)
+
+        def guarded_mkdir(path, mode=0o777, *, dir_fd=None):
+            if not allowed(absolute(path, dir_fd), scaffolding=True):
+                refuse("mkdir outside permitted scaffolding")
+            return actual_mkdir(path, mode, dir_fd=dir_fd)
+
+        def file_open(original):
+            def call(file, mode="r", *args, **kwargs):
+                if any(flag in mode for flag in "wax+") and not allowed(absolute(file)):
+                    refuse("write-mode file open outside quarantine")
+                return original(file, mode, *args, **kwargs)
+            return call
+
+        def no_process(*args, **kwargs):
+            refuse("process execution attempted")
+
+        # The containment probe reads dir_fd support by function identity. The
+        # delegating wrappers forward dir_fd, so each inherits exactly its
+        # original's actual membership; an unsupported platform still refuses.
+        supports_dir_fd = set(os.supports_dir_fd)
+        for original, wrapper in ((actual_open, guarded_open),
+                                  (actual_mkdir, guarded_mkdir)):
+            if original in os.supports_dir_fd:
+                supports_dir_fd.add(wrapper)
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(os, "open", guarded_open))
+            stack.enter_context(mock.patch.object(os, "write", guarded_write))
+            stack.enter_context(mock.patch.object(os, "mkdir", guarded_mkdir))
+            stack.enter_context(mock.patch.object(os, "supports_dir_fd", supports_dir_fd))
+            stack.enter_context(mock.patch.object(builtins, "open", file_open(builtin_open)))
+            stack.enter_context(mock.patch.object(io, "open", file_open(io_open)))
+            stack.enter_context(mock.patch.object(subprocess, "Popen", no_process))
+            for name in (
+                "system", "fork", "forkpty", "posix_spawn", "posix_spawnp",
+                "execl", "execle", "execlp", "execlpe", "execv", "execve",
+                "execvp", "execvpe",
+            ):
+                if hasattr(os, name):
+                    stack.enter_context(mock.patch.object(os, name, no_process))
+            yield
+
+    # This table is the suite's authoritative executed-case roster. Each row
+    # names an outcome and a guard-family mutation, not finding-text patterns.
+    cases = []
+
+    def add(identifier, expected=VALID, mutation="archive", **config):
+        cases.append((identifier, expected, mutation, config))
+
+    add("TG-05/candidate-policy-is-inert", mutation="candidate",
+        archive=archive([
+            root_row,
+            ("wrap/.aiqt/core/references.toml", tarfile.REGTYPE,
+             b'quorum = 0\nlocation = "https://candidate.invalid/anchor"\n'),
+            ("wrap/data", tarfile.REGTYPE, b"data"),
+        ]))
+    for label, url in (
+        ("off-list-host", release_url.replace("codeload.github.com", "evil.invalid")),
+        ("http", release_url.replace("https:", "http:", 1)),
+        ("userinfo", release_url.replace("https://", "https://user@", 1)),
+        ("alternate-port", release_url.replace(".com/", ".com:444/", 1)),
+        ("encoded-separator", release_url.replace("/tar.gz/", "%2ftar.gz/", 1)),
+        ("query", release_url + "?next=elsewhere"),
+        ("fragment", release_url + "#elsewhere"),
+    ):
+        add("TG-06/" + label, CANNOT_EVALUATE, "url", release_url=url,
+            before_connect=True)
+    add("TG-06/off-list-anchor", CANNOT_EVALUATE, "url",
+        anchor_url="https://candidate.invalid/hashes.txt", before_connect=True)
+    add("TG-07/wrong-chain", CANNOT_EVALUATE, "chain", wrong_chain=True)
+    add("TG-07/wrong-hostname", CANNOT_EVALUATE, "hostname", wrong_hostname=True)
+    for target in (ANCHOR_URL, "https://candidate.invalid/hashes.txt"):
+        add("TG-08/redirect-" + ("same" if target == ANCHOR_URL else "cross"),
+            CANNOT_EVALUATE, "headers",
+            response=reply(b"anchor", b"Location: " + target.encode() + b"\r\n",
+                           status=b"302 Found"), redirect=True)
+    for label, address in (
+        ("loopback", "127.0.0.1"),
+        ("private", "10.0.0.1"),
+        ("metadata", "169.254.169.254"),
+        ("mapped", "::ffff:93.184.216.34"),
+        ("platform-address", "168.63.129.16"),
+    ):
+        add("TG-09/" + label, CANNOT_EVALUATE, "address",
+            address=address, before_connect=True)
+    add("TG-09/rebound-peer", CANNOT_EVALUATE, "peer", rebound=True)
+    add("TG-10/ambient-proxy-netrc-ca", mutation="environment", ambient=True)
+
+    for label, response in (
+        ("truncated-body", b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\nshort"),
+        ("wrong-framing", b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n"
+                          b"Transfer-Encoding: chunked\r\n\r\nabc"),
+        ("duplicate-length", b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n"
+                             b"Content-Length: 3\r\n\r\nabc"),
+        ("missing-framing", b"HTTP/1.1 200 OK\r\n\r\nabc"),
+        ("truncated-chunk", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                            b"9\r\nabc"),
+        ("extra-body", b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabcd"),
+        ("content-encoding", reply(b"abc", b"Content-Encoding: gzip\r\n")),
+    ):
+        add("TG-11/" + label, CANNOT_EVALUATE, "fetch", response=response)
+    add("TG-11/oversize-declared", CANNOT_EVALUATE, "anchor-cap",
+        anchor_cap=64, response=reply(b"x" * 65))
+    add("TG-11/oversize-undeclared", CANNOT_EVALUATE, "anchor-cap",
+        anchor_cap=64, response=reply(b"x" * 65, chunked=True))
+    # The baseline must fit the cap so the bypass mutant reaches VALID rather
+    # than the quarantine reread bound; the response is one byte over it.
+    add("TG-11/oversize-compressed", CANNOT_EVALUATE, "archive-cap",
+        archive_cap=len(baseline_archive) + 64,
+        archive=baseline_archive + b"x" * 65)
+    add("TG-11/slow-drip", CANNOT_EVALUATE, "fetch",
+        mode="slow", response=reply(b"x" * 200), timed=True)
+    add("TG-11/read-inactivity", CANNOT_EVALUATE, "fetch",
+        mode="stall", timed=True)
+    add("TG-11/stalled-resolver", CANNOT_EVALUATE, "fetch",
+        stalled_resolver=True, timed=True)
+    add("TG-11/connect-timeout", CANNOT_EVALUATE, "fetch",
+        connect_stall=True, timed=True)
+    add("TG-11/tls-timeout", CANNOT_EVALUATE, "fetch",
+        mode="tls-stall", timed=True)
+    add("TG-12/observer-backstop", CANNOT_EVALUATE, "backstop", exception=True)
+    add("TG-12/public-wrapper-backstop", CANNOT_EVALUATE, "wrapper",
+        wrapper_exception=True)
+    add("TG-12/cancellation", "CANCELLED", "cancellation", cancellation=True,
+        public_wrapper=True)
+
+    bad_archives = [
+        ("traversal", [root_row, ("wrap/../escape", tarfile.REGTYPE, b"x")]),
+        ("duplicate", [root_row, ("wrap/a", tarfile.REGTYPE, b"x"),
+                       ("wrap/a", tarfile.REGTYPE, b"y")]),
+        ("normalized-directory-duplicate",
+         [root_row, ("wrap/d/", tarfile.DIRTYPE, b""),
+          ("wrap/d", tarfile.DIRTYPE, b"")]),
+        ("wrapper-collision", [root_row, ("other/b", tarfile.REGTYPE, b"x")]),
+        ("file-directory-collision",
+         [root_row, ("wrap/a", tarfile.REGTYPE, b"x"),
+          ("wrap/a/b", tarfile.REGTYPE, b"y")]),
+    ]
+    for label, kind in (
+        ("symlink", tarfile.SYMTYPE), ("hardlink", tarfile.LNKTYPE),
+        ("fifo", tarfile.FIFOTYPE), ("character-device", tarfile.CHRTYPE),
+        ("block-device", tarfile.BLKTYPE),
+    ):
+        bad_archives.append((label, [root_row, ("wrap/a", kind, b"")]))
+    for label, rows in bad_archives:
+        add("TG-13/" + label, INVALID, "archive", archive=archive(rows))
+    add("TG-13/unsupported-dialect", CANNOT_EVALUATE, "archive",
+        archive=archive([("wrap/pax", tarfile.XHDTYPE, b"")]))
+    add("TG-13/absent-containment", CANNOT_EVALUATE, "containment",
+        containment=False)
+
+    add("TG-14/entries", INVALID, "limit", limit=("MAX_ENTRIES", 2),
+        archive=archive([root_row, ("wrap/a", tarfile.REGTYPE, b"a"),
+                         ("wrap/b", tarfile.REGTYPE, b"b")]))
+    add("TG-14/depth", INVALID, "limit", limit=("MAX_DEPTH", 2),
+        archive=archive([root_row, ("wrap/a/b/c", tarfile.REGTYPE, b"x")]))
+    add("TG-14/path-bytes", INVALID, "limit", limit=("MAX_PATH_BYTES", 24),
+        archive=archive([root_row, ("wrap/" + "a" * 20, tarfile.REGTYPE, b"x")]))
+    add("TG-14/member-bytes", INVALID, "limit", limit=("MAX_FILE_BYTES", 64),
+        archive=archive([root_row, ("wrap/a", tarfile.REGTYPE, b"x" * 65)]))
+    add("TG-14/expansion", INVALID, "limit", limit=("MAX_TOTAL_BYTES", 4096),
+        archive=archive([root_row, ("wrap/a", tarfile.REGTYPE, b"x" * 5000)]))
+
+    hostile_names = archive([
+        root_row,
+        ("wrap/ssl.py", tarfile.REGTYPE, b"raise RuntimeError('must not import')\n"),
+        ("wrap/sitecustomize.py", tarfile.REGTYPE, b"raise RuntimeError('must not import')\n"),
+        ("wrap/_opf_adopt_observe.py", tarfile.REGTYPE, b"raise RuntimeError('shadow')\n"),
+        ("wrap/.git/hooks/pre-commit", tarfile.REGTYPE,
+         b"#!/bin/sh\nexit 97\n"),
+    ])
+    add("TG-15/no-process-execution", mutation="execute", archive=hostile_names,
+        public_wrapper=True)
+    add("TG-15/no-product-write", mutation="write", archive=hostile_names,
+        public_wrapper=True)
+
+    def run_case(base, contexts, case, mutated):
+        identifier, expected, mutation, config = case
+        product = base / secrets.token_hex(8)
+        product.mkdir(mode=0o700)
+        (product / "product-marker").write_bytes(b"unchanged\n")
+        before = snapshot(product)
+        request = {"product_root": str(product), "version": "1.0.0", "commit": commit}
+        policy = {
+            "format": POLICY_FORMAT,
+            "repository": "https://github.com/jposluns/guardrails",
+            "release_url": config.get("release_url", release_url),
+            "anchors": [config.get("anchor_url", ANCHOR_URL)],
+        }
+        archive_body = config.get("archive", baseline_archive)
+        server = Server(
+            contexts[bool(config.get("wrong_hostname"))],
+            archive_body, config.get("response", reply(baseline_anchor)),
+            config.get("mode", "normal"),
+        )
+        violations = []
+        connect_calls = []
+        fetch_calls = []
+        fetch_durations = []
+        environments = []
+        resolver_sockets = None
+        backlog = None
+        backlog_clients = []
+        status = "ESCAPED"
+        observation = None
+        notes = None
+        elapsed = 0.0
+        path_before = list(sys.path)
+        environment_before = None
+
+        def fixture_context():
+            environments.append(set(os.environ))
+            return original_context(cadata=fixture_certificates)
+
+        def lookup(host):
+            if config.get("stalled_resolver"):
+                resolver_sockets[0].recv(1)
+            address = config.get("address", public_ip)
+            family = socket.AF_INET6 if ":" in address else socket.AF_INET
+            endpoint = (address, 443, 0, 0) if family == socket.AF_INET6 else (address, 443)
+            return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", endpoint)]
+
+        def connect(sock, endpoint, timeout):
+            connect_calls.append(endpoint)
+            environments.append(set(os.environ))
+            sock.settimeout(timeout)
+            port = backlog.getsockname()[1] if backlog is not None else server.port
+            sock.connect(("127.0.0.1", port))
+
+        def tracked_fetch(url, cap, deadline, context):
+            fetch_calls.append(url)
+            if config.get("cancellation"):
+                raise KeyboardInterrupt
+            if config.get("exception"):
+                raise RuntimeError("synthetic observer exception")
+            started = time.monotonic()
+            try:
+                return original_fetch(url, cap, deadline, context)
+            finally:
+                fetch_durations.append(time.monotonic() - started)
+
+        def bypass_fetch(url, cap, deadline, context):
+            fetch_calls.append(url)
+            return baseline_archive if url == release_url else baseline_anchor
+
+        def no_containment():
+            raise OSError("synthetic missing containment primitive")
+
+        def raising_gather(*args, **kwargs):
+            raise RuntimeError("synthetic public-wrapper exception")
+
+        def swallowed_cancellation(req, pol):
+            try:
+                return schema.gather_release(req, pol)
+            except KeyboardInterrupt:
+                return {"status": CANNOT_EVALUATE}, []
+
+        def unprotected_gather(req, pol):
+            if config.get("exception"):
+                raise RuntimeError("synthetic observer exception")
+            return gather_release(req, pol)
+
+        original_unpack = _unpack
+
+        def execute_mutant(parent, body, deadline):
+            os.system("true")
+            return original_unpack(parent, body, deadline)
+
+        def write_mutant(parent, body, deadline):
+            fd = os.open(str(product / "product-marker"), os.O_WRONLY | os.O_TRUNC)
+            os.close(fd)
+            return original_unpack(parent, body, deadline)
+
+        def candidate_mutant(parent, body, deadline):
+            fetch_calls.append("https://candidate.invalid/anchor")
+            return original_unpack(parent, body, deadline)
+
+        try:
+            if config.get("stalled_resolver"):
+                resolver_sockets = socket.socketpair()
+                resolver_sockets[0].settimeout(2.0)
+            if config.get("connect_stall"):
+                backlog = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                backlog.bind(("127.0.0.1", 0))
+                backlog.listen(1)
+                saturated = False
+                for _ in range(16):
+                    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    client.settimeout(0.03)
+                    try:
+                        client.connect(backlog.getsockname())
+                    except socket.timeout:
+                        client.close()
+                        saturated = True
+                        break
+                    backlog_clients.append(client)
+                if not saturated:
+                    raise AssertionError("local listener did not saturate")
+
+            with contextlib.ExitStack() as stack:
+                patch = lambda obj, name, value: stack.enter_context(
+                    mock.patch.object(obj, name, value)
+                )
+                patch(module, "CONNECT_SECONDS", 0.20)
+                patch(module, "INACTIVITY_SECONDS", 0.15)
+                patch(module, "REQUEST_SECONDS", 0.80)
+                patch(module, "GATHER_SECONDS", 1.20)
+                patch(module, "_lookup", lookup)
+                patch(module, "_connect", connect)
+                patch(module, "_peer", lambda sock: (
+                    "127.0.0.1" if config.get("rebound") else public_ip, 443,
+                ))
+                patch(ssl, "create_default_context",
+                      original_context if config.get("wrong_chain") else
+                      lambda *a, **k: fixture_context())
+                patch(module, "_fetch", tracked_fetch)
+                if "anchor_cap" in config:
+                    patch(module, "MAX_ANCHOR_BYTES", config["anchor_cap"])
+                if "archive_cap" in config:
+                    patch(module, "MAX_ARCHIVE_BYTES", config["archive_cap"])
+                if "limit" in config:
+                    name, value = config["limit"]
+                    patch(module, name, value)
+                if config.get("containment") is False:
+                    patch(store._journal, "require_containment", no_containment)
+                if config.get("ambient"):
+                    home = base / "home"
+                    home.mkdir(exist_ok=True)
+                    (home / ".netrc").write_text(
+                        "machine codeload.github.com login planted password planted\n",
+                        encoding="ascii",
+                    )
+                    stack.enter_context(mock.patch.dict(os.environ, {
+                        "HOME": str(home),
+                        "HTTPS_PROXY": "http://127.0.0.1:1",
+                        "https_proxy": "http://127.0.0.1:1",
+                        "ALL_PROXY": "http://127.0.0.1:1",
+                        "NO_PROXY": "*",
+                        "SSL_CERT_FILE": str(home / "absent-ca"),
+                        "SSL_CERT_DIR": str(home / "absent-ca-dir"),
+                        "REQUESTS_CA_BUNDLE": str(home / "absent-ca"),
+                        "CURL_CA_BUNDLE": str(home / "absent-ca"),
+                        "GIT_TRACE": str(home / "must-not-write"),
+                    }))
+                call = gather_release
+                if config.get("public_wrapper") or config.get("wrapper_exception"):
+                    call = schema.gather_release
+                if config.get("wrapper_exception"):
+                    patch(module, "gather_release", raising_gather)
+
+                if mutated:
+                    if mutation == "url":
+                        patch(module, "_url", lambda value, expected: value)
+                    elif mutation == "chain":
+                        patch(module, "_client_context", fixture_context)
+                    elif mutation == "hostname":
+                        patch(module, "_tls", lambda ctx, sock, host, deadline:
+                              original_tls(ctx, sock, "wrong.invalid", deadline))
+                    elif mutation == "headers":
+                        patch(module, "_header_policy", lambda status, headers: None)
+                    elif mutation == "address":
+                        patch(module, "_public", lambda address: True)
+                    elif mutation == "peer":
+                        patch(module, "_check_peer", lambda sock, selected: None)
+                    elif mutation == "environment":
+                        patch(module, "_environment", contextlib.nullcontext)
+                    elif mutation == "fetch":
+                        patch(module, "_fetch", bypass_fetch)
+                    elif mutation == "anchor-cap":
+                        patch(module, "MAX_ANCHOR_BYTES", 64 * 1024)
+                    elif mutation == "archive-cap":
+                        patch(module, "_fetch", bypass_fetch)
+                    elif mutation == "backstop":
+                        call = unprotected_gather
+                    elif mutation == "wrapper":
+                        call = raising_gather
+                    elif mutation == "cancellation":
+                        call = swallowed_cancellation
+                    elif mutation == "archive":
+                        patch(module, "_unpack", lambda parent, body, deadline: [])
+                    elif mutation == "containment":
+                        patch(store._journal, "require_containment", lambda: None)
+                    elif mutation == "limit":
+                        name, _ = config["limit"]
+                        patch(module, name, getattr(planning, name))
+                    elif mutation == "execute":
+                        patch(module, "_unpack", execute_mutant)
+                    elif mutation == "write":
+                        patch(module, "_unpack", write_mutant)
+                    elif mutation == "candidate":
+                        patch(module, "_unpack", candidate_mutant)
+                    else:
+                        raise AssertionError("unregistered mutation")
+
+                environment_before = dict(os.environ)
+                started = time.monotonic()
+                with deny_effects(product, violations):
+                    try:
+                        observation, notes = call(copy.deepcopy(request), copy.deepcopy(policy))
+                        status = observation["status"]
+                    except KeyboardInterrupt:
+                        status = "CANCELLED"
+                    except Exception:
+                        status = "ESCAPED"
+                elapsed = time.monotonic() - started
+                environment_restored = dict(os.environ) == environment_before
+
+            passed = (
+                status == expected
+                and not violations
+                and snapshot(product) == before
+                and sys.path == path_before
+                and environment_restored
+                and not server.errors
+            )
+            if status == "CANCELLED":
+                passed = passed and observation is None and not _GATHER_LOCK.locked()
+            if status in (INVALID, CANNOT_EVALUATE):
+                passed = passed and (
+                    type(observation) is dict
+                    and "quarantine" not in observation
+                    and "members" not in observation
+                    and bool(notes)
+                    and all(row["status"] in (INVALID, CANNOT_EVALUATE) for row in notes)
+                )
+            if status == VALID:
+                passed = passed and (
+                    type(observation) is dict
+                    and not notes
+                    and type(observation.get("record")) is bytes
+                    and type(observation.get("captured_monotonic_ns")) is int
+                    and schema._RUN_ID_RE.fullmatch(observation["request_id"]) is not None
+                    and Path(observation["quarantine"]).is_dir()
+                    and stat.S_IMODE(Path(observation["quarantine"]).stat().st_mode) == 0o700
+                    and len(observation.get("anchors", [])) == 1
+                )
+                if passed:
+                    for member in observation["members"]:
+                        candidate = Path(observation["quarantine"]) / "members" / member["path"]
+                        passed = passed and stat.S_IMODE(candidate.stat().st_mode) == 0o600
+            if config.get("before_connect"):
+                passed = passed and not connect_calls
+            if config.get("redirect"):
+                passed = passed and fetch_calls == [release_url, ANCHOR_URL]
+            if config.get("ambient"):
+                passed = passed and bool(environments) and all(
+                    names <= {"PATH", "HOME"} for names in environments
+                )
+                passed = passed and all(
+                    b"authorization:" not in request.lower()
+                    and b"cookie:" not in request.lower()
+                    for request in server.requests
+                )
+            if config.get("timed"):
+                passed = (passed and elapsed < 1.20 and bool(fetch_durations)
+                          and all(duration < 0.80 for duration in fetch_durations))
+            if identifier.startswith("TG-05/"):
+                passed = passed and fetch_calls == [release_url, ANCHOR_URL]
+            return passed, status, elapsed
+        finally:
+            if resolver_sockets is not None:
+                resolver_sockets[1].close()
+                resolver_sockets[0].close()
+                if not _RESOLVER_SLOT.acquire(timeout=1.0):
+                    raise AssertionError("resolver fixture retained its slot")
+                _RESOLVER_SLOT.release()
+            for client in backlog_clients:
+                client.close()
+            if backlog is not None:
+                backlog.close()
+            server.close()
+
+    try:
+        if not Path("/dev/shm").is_dir() or not Path("/proc/self/fd").is_dir():
+            raise RuntimeError("local fixture filesystem primitives unavailable")
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-observe-", dir="/dev/shm") as temp:
+            base = Path(temp)
+            # Fresh disposable keys, never embedded in the source or used by
+            # production. Missing openssl is a refusing harness error.
+            executable = shutil.which("openssl", path=os.defpath)
+            if executable is None:
+                raise RuntimeError("openssl fixture builder unavailable")
+            contexts = []
+            fixture_certificates = ""
+            for index, names in enumerate((
+                "DNS:codeload.github.com,DNS:posluns.dev", "DNS:wrong.invalid",
+            )):
+                key = base / ("fixture-key-{}.pem".format(index))
+                cert = base / ("fixture-cert-{}.pem".format(index))
+                subprocess.run(
+                    [os.path.abspath(executable), "req", "-x509", "-newkey",
+                     "rsa:2048", "-nodes", "-days", "2", "-subj", "/CN=fixture",
+                     "-addext", "subjectAltName=" + names,
+                     "-keyout", str(key), "-out", str(cert)],
+                    cwd=base, env={"PATH": os.defpath, "OPENSSL_CONF": os.devnull},
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    check=True, timeout=15,
+                )
+                os.chmod(key, 0o600)
+                fixture_certificates += cert.read_text(encoding="ascii")
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                context.load_cert_chain(str(cert), str(key))
+                contexts.append(context)
+
+            # Establish an actual positive TLS/quarantine fixture before negatives.
+            positive = ("positive/local-tls-quarantine", VALID, "archive", {})
+            passed, status, elapsed = run_case(base, contexts, positive, False)
+            executed.append({
+                "id": positive[0], "expected": VALID, "observed": status,
+                "test_status": VALID if passed else INVALID,
+                "elapsed_seconds": elapsed,
+            })
+            if not passed:
+                SELF_TEST_ROSTER = tuple(executed)
+                print(json.dumps({"opf_adopt_observe_tests": executed}, sort_keys=True))
+                return 1
+
+            guard_rows = _guard_self_test()
+            executed.extend(guard_rows)
+            for case in cases:
+                passed, status, elapsed = run_case(base, contexts, case, False)
+                mutant_passed, mutant_status, mutant_elapsed = run_case(
+                    base, contexts, case, True,
+                )
+                executed.append({
+                    "id": case[0],
+                    "guard": case[2],
+                    "expected": case[1],
+                    "observed": status,
+                    "mutant_observed": mutant_status,
+                    "mutation_detected": not mutant_passed,
+                    "test_status": VALID if passed and not mutant_passed else INVALID,
+                    "elapsed_seconds": elapsed,
+                    "mutant_elapsed_seconds": mutant_elapsed,
+                })
+    except Exception as exc:
+        executed.append({
+            "id": "fixture/setup-or-teardown",
+            "test_status": CANNOT_EVALUATE,
+            "exception": type(exc).__name__,
+        })
+        SELF_TEST_ROSTER = tuple(executed)
+        print(json.dumps({"opf_adopt_observe_tests": executed}, sort_keys=True))
+        return 2
+
+    SELF_TEST_ROSTER = tuple(executed)
+    print(json.dumps({"opf_adopt_observe_tests": executed}, sort_keys=True))
+    expected_ids = ([positive[0]] + [row["id"] for row in guard_rows]
+                    + [case[0] for case in cases])
+    if [row["id"] for row in executed] != expected_ids:
+        return 1
+    if any(row["test_status"] != VALID for row in executed):
+        return 1
+    if not vectors_only:
+        try:
+            _runner_registration_test(expected_ids)
+        except AssertionError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        except Exception as exc:
+            print("registration cannot evaluate:", type(exc).__name__, file=sys.stderr)
+            return 2
+    return 0
+
+
+def main():
+    if sys.argv[1:] in (["--self-test"], ["--self-test", "--vectors-only"]):
+        # Let the public lazy wrapper address this exact module in a standalone
+        # invocation, rather than importing a second copy of its test mutations.
+        sys.modules.setdefault("_opf_adopt_observe", sys.modules[__name__])
+        return self_test(vectors_only="--vectors-only" in sys.argv[1:])
+    print("usage: _opf_adopt_observe.py --self-test", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
