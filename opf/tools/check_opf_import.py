@@ -715,14 +715,10 @@ def _row_scope_error(ing, ws_rows, base, homes):
     otherwise cannot evaluate rather than grade a store by the wrong reserved roots. A supplied generation
     other than the integer 1 or 2 (a bool, a float, NaN, or any other value), or one above the generation the
     tooling supports, cannot evaluate either."""
-    import _opf_store
-    if homes is None:
-        if _opf_store.SUPPORTED_HOMES >= 2:
-            return "cannot evaluate: the store's homes generation was not supplied to this manifest-free gate"
-        homes = 1
-    elif type(homes) is not int or homes not in (1, 2) or homes > _opf_store.SUPPORTED_HOMES:
-        return ("cannot evaluate: the supplied homes generation {!r} is not 1 or 2, or is above the tooling's "
-                "supported generation {}".format(homes, _opf_store.SUPPORTED_HOMES))
+    try:
+        homes = _gate_homes(homes)
+    except _GateError as exc:
+        return "cannot evaluate: {}".format(exc)
     for r in ws_rows:
         try:
             ing.admit_row_scope(r["scope"], r["source_path"], base, homes=homes)
@@ -1612,12 +1608,10 @@ _TRANSACTION_CHECKS = ("transaction-schema", "transaction-consistency")
 
 def _gate_homes(homes):
     """The validated generation the gate evaluates under: an unsupplied generation is the legacy generation 1
-    only while no later generation can be active (the rule _row_scope_error applies). A supplied generation
+    only while no later generation can be active. Shared with _row_scope_error. A supplied generation
     other than the integer 1 or 2 (a bool, a str, a float, 3), or one above the tooling's supported
-    generation, raises. The staged-run gate takes no generation-dependent path on an invalid value:
-    ingest, ingest-acceptance and transaction checks fail with that error, as do an ingest-marked run's staged
-    acceptance checks. Listing-based marker classification and ordinary runs' staged-data grading
-    are generation-independent and still run."""
+    generation, raises. The public staged-run boundary refuses the complete registry before opening the
+    run or probing store controls. The internal reader also guards its generation-dependent checks."""
     import _opf_store
     if homes is None:
         if _opf_store.SUPPORTED_HOMES >= 2:
@@ -1938,7 +1932,12 @@ def check_staged_run(run_dir, homes=None):
     that one descriptor with a non-blocking, regular-file-validated open, so an unopenable or unlistable run
     dir fails every check closed and a FIFO or symlink in an artefact's place is a located FINDING, never a
     hang (A-M1/A-M2). `homes` is the store's homes generation for a caller that read the store manifest; the
-    ingest scope check fails closed on an unsupplied generation once a later generation can be active."""
+    complete registry fails closed on an invalid generation, or an unsupplied one once a later generation
+    can be active, before the run or any store controls are read."""
+    try:
+        homes = _gate_homes(homes)
+    except _GateError as exc:
+        return {cid: (False, "cannot evaluate: {}: {}".format(run_dir, exc)) for cid in EXPECTED_CHECKS}
     try:
         rd = _RunDir(run_dir)
     except _GateError as exc:
@@ -2648,9 +2647,10 @@ def _self_test_gate_generation_sites(expect):
     (_self_test_gate_generation_acceptance_cases) on a synthetic run with no store. _self_test_gate_generation_applied
     grades on disk, beneath a real store located at generation 2: every discriminator fixture of _self_test, the same
     acceptance table, the transaction table (_self_test_gate_generation_transaction_cases) on a genuinely applied run,
-    and ingest runs beside a provisioned durable home. Each requires every generation-independent result to be
-    identical under generation 2 and every invalid generation. The coverage assertion (gate-generation-sweep-coverage)
-    requires every registered id to be credited by a swept fixture under the rule of
+    and ingest runs beside a provisioned durable home. Valid generations retain generation-independent results;
+    the public boundary refuses the complete registry for invalid generations.
+    The coverage assertion (gate-generation-sweep-coverage) requires every registered id to be credited by a
+    swept fixture under the rule of
     _self_test_gate_generation_coverage: the fixture passes staged-run-structure and the id's other prerequisites and
     fails that id with its own located detail, so a blanket failure (an empty run, an unreadable core) credits
     nothing. Its controls show that an always-passing id registered beside the others is reported uncovered, and
@@ -3132,9 +3132,9 @@ def _self_test_gate_generation_transaction_cases():
 
 def _self_test_gate_generation_applied(expect, label, run_dir, swept=None, ingest=False, credit=()):
     """One fixture graded on disk beneath its store, with the located-store branch and transaction grading live (no
-    store failure is injected): every generation-independent id keeps its generation-1 result under generation 2 and
-    under every invalid generation, and every invalid generation fails each dependent id. On an ingest run (`ingest`)
-    the staged acceptance ids route by generation, so every invalid generation fails them too, and generation 2 keeps
+    store failure is injected): every invalid generation refuses the complete registry at the public boundary.
+    At generation 2 every generation-independent id keeps its generation-1 result. On an ingest run (`ingest`),
+    the staged acceptance ids route by generation, and generation 2 keeps
     every result except the two ingest-acceptance ids, which grade the durable home, and the staged acceptance ids,
     which must then report that grading (a completeness id the completeness result, every other the binding
     result). Transaction checks require a valid generation but keep their results at both generations
@@ -3147,7 +3147,6 @@ def _self_test_gate_generation_applied(expect, label, run_dir, swept=None, inges
     import _opf_import as imp
     dependent = ("ingest-run-structure",) + _INGEST_CHECK_IDS + _INGEST_ACCEPTANCE_CHECKS
     staged = ("acceptance-schema", "acceptance-binding", "acceptance-attribution", "acceptance-completeness")
-    routed = dependent + _TRANSACTION_CHECKS + (staged if ingest else ())
     second = None
     with patch.object(_opf_store, "SUPPORTED_HOMES", 2):
         baseline = check_staged_run(run_dir, homes=1)
@@ -3170,8 +3169,12 @@ def _self_test_gate_generation_applied(expect, label, run_dir, swept=None, inges
                     not ingest or all(result[cid] == result[_INGEST_ACCEPTANCE_CHECKS[cid.endswith("completeness")]]
                                       for cid in staged))
             else:
-                ok = (all(result[cid] == value for cid, value in baseline.items() if cid not in routed)
-                      and not any(result[cid][0] for cid in routed))
+                error = ("the store's homes generation was not supplied to this manifest-free gate"
+                         if homes is None else
+                         "the supplied homes generation {!r} is not 1 or 2, or is above the tooling's "
+                         "supported generation 2".format(homes))
+                expected = (False, "cannot evaluate: {}: {}".format(run_dir, error))
+                ok = tuple(result) == EXPECTED_CHECKS and all(value == expected for value in result.values())
             expect("gate-generation-applied-{}-{}".format(label, case), set(result) == set(EXPECTED_CHECKS) and ok)
         # Re-grade each legacy-located fixture at both registered depth-4 homes. Move the same bytes
         # (including FIFOs and unreadable entries) within the fixture store; restore even on failure.
@@ -3412,7 +3415,7 @@ def _self_test():
     _self_test_gate_generation_sites(expect)
 
     # Every on-disk fixture below is graded through the generation sweep (_self_test_gate_generation_applied): its
-    # generation-independent results must not change under generation 2 or any invalid generation.
+    # generation-independent results must not change under generation 2; invalid generations refuse every id.
     swept = []
     # The ids a detached ordinary run grades from its own bytes: at generation 2 _ingest_store_fd finds no store and
     # the gate takes the detached branch, so each credited discriminator for these ids is graded again as a detached
@@ -4540,9 +4543,10 @@ def _self_test():
             unsupplied = check_staged_run(h1_run, homes=None)
         expect("ordinary-gate-homes-unsupplied", all(unsupplied[cid][0] is False for cid in
                ("ingest-acceptance-binding", "ingest-acceptance-completeness")))
-        # Flip: removing Group C's generation guard grades the legacy transaction path on invalid input.
+        # Flip: bypassing the public generation guard loses the located boundary refusal.
         expect("txn-homes-unsupplied-cannot", all(unsupplied[cid] == (
-            False, "the store's homes generation was not supplied to this manifest-free gate")
+            False, "cannot evaluate: {}: the store's homes generation was not supplied to this manifest-free "
+            "gate".format(h1_run))
             for cid in _TRANSACTION_CHECKS))
         for supported in (1, 2):
             with unittest.mock.patch.object(_opf_store, "SUPPORTED_HOMES", supported):
@@ -4551,7 +4555,8 @@ def _self_test():
                     error = ("the supplied homes generation {!r} is not 1 or 2, or is above the tooling's "
                              "supported generation {}".format(bad, supported))
                     expect("txn-homes-invalid-cannot-{}-{!r}".format(supported, bad),
-                           all(invalid[cid] == (False, error) for cid in _TRANSACTION_CHECKS))
+                           all(invalid[cid] == (False, "cannot evaluate: {}: {}".format(h1_run, error))
+                               for cid in _TRANSACTION_CHECKS))
         # Flip: fixed three-up reads the .working decoy and misses the true store-root record.
         # Exercise both registered staging kinds, with fixture-only manifest activation.
         for kind in ("import", "ingest"):
