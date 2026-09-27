@@ -2003,6 +2003,47 @@ def _d_staging_generation_mismatch(kind):
     return test
 
 
+def _d_staging_alias(kind):
+    """An alias of a registered run (a dotdot, relative, or ancestor-symlink spelling) is located by descriptor
+    identity: it refuses the generation mismatch, reads the true store-root record, and ignores a .working decoy.
+    Restoring the literal-suffix locator sends every alias to the three-up fallback."""
+    def test(module, base_dir):
+        from unittest.mock import patch
+        root, rid, run = _st_build(base_dir, "staging-alias-" + kind)
+        staged = root / _opf_store.stage_run(kind, rid)
+        staged.parent.mkdir(parents=True)
+        run.rename(staged)
+        link = base_dir / ("staging-alias-link-" + kind)
+        link.symlink_to(staged.parent)
+        record = root / _opf_import.IMPORT_OPS_REL / rid / _opf_import.TRANSACTION_NAME
+        decoy = root / ".working" / _opf_import.IMPORT_OPS_REL / rid / _opf_import.TRANSACTION_NAME
+        record.parent.mkdir(parents=True)
+        decoy.parent.mkdir(parents=True)
+        error = ("cannot evaluate: cannot open the store root beneath the run dir no-follow "
+                 "(run path is registered outside homes generation 1)")
+        outcomes = []
+        for corrupt in (record, decoy):
+            corrupt.write_bytes(b"state =\n")
+            for spelling, cwd in ((staged / ".." / rid, None), (Path(rid), staged.parent), (link / rid, None)):
+                cwd_fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    if cwd is not None:
+                        os.chdir(str(cwd))
+                    with patch.object(_opf_store, "SUPPORTED_HOMES", 1):
+                        legacy = module.check_staged_run(spelling, homes=1)
+                    with _opf_import._self_test_homes2_active(root):
+                        located = module.check_staged_run(spelling, homes=2)
+                finally:
+                    os.fchdir(cwd_fd)
+                    os.close(cwd_fd)
+                outcomes.append(all(legacy[cid] == (False, error) for cid in
+                                    ("transaction-schema", "transaction-consistency")))
+                outcomes.append(located["transaction-schema"][0] is (corrupt is decoy))
+            corrupt.unlink()
+        _revert_check(all(outcomes), "gate/staging-alias/" + kind)
+    return test
+
+
 def _d_transaction_generation_required(module, base_dir):
     """An invalid supplied generation must never downgrade to legacy transaction grading."""
     from unittest.mock import patch
@@ -2430,7 +2471,12 @@ _DISCRIMINATORS = tuple(
      'store_fd = os.open("../../..", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rd.fd)')
     for kind in ("import", "ingest")) + tuple(
     ("gate/staging-generation-mismatch/" + kind, "gate", _d_staging_generation_mismatch(kind),
-     "if rd.path.parts[-len(parts):] == parts:", "if False:")
+     "if other is not None:", "if False:")
+    for kind in ("import", "ingest")) + tuple(
+    ("gate/staging-alias/" + kind, "gate", _d_staging_alias(kind),
+     "    for rel in locations:\n        fd = os.open(",
+     '    for rel in locations:\n        if rd.path.parts[-len(rel.split("/")):] != tuple(rel.split("/")):\n'
+     "            continue\n        fd = os.open(")
     for kind in ("import", "ingest")) + (
     ("gate/transaction-generation-required", "gate", _d_transaction_generation_required,
      "if gen is None:\n        for cid in _TRANSACTION_CHECKS:\n            record(cid, False, gen_error)",

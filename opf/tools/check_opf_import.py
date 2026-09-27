@@ -1558,52 +1558,76 @@ def _gate_homes(homes):
     return homes
 
 
-def _ingest_store_fd(rd, homes=None):
-    """Bind the store to this opened run, through the shared generation-aware run-location constructor
-    (_opf_import._import_run_locations) and inode comparison. Returns None for a detached copy (no
-    store-relative home matches): it cannot establish absence of durable acceptance, so an ingest run's
-    durable checks refuse, while an ordinary run is classified from its own listing. Staged snapshot
-    checks still evaluate the supplied bytes.
-    """
+def _registered_run_store_fd(rd, generation):
+    """The store root whose `generation` run home IS the opened run directory, or None when no such home is.
+    Identity is descriptor-bound, never read from the supplied spelling: for each location the shared
+    constructor (_opf_import._import_run_locations) registers, the candidate store root is the run
+    descriptor's parent at that location's depth (`..` resolved by the kernel from rd.fd, so a dotdot,
+    relative, or ancestor-symlink spelling binds the same physical ancestry), the location is walked
+    no-follow beneath it, and the walked directory must be the opened run by (st_dev, st_ino). Only an absent
+    component reads as no match; an ancestor or component that cannot be opened (a symlink, a non-directory,
+    EACCES) raises, so identity that cannot be established is never classified as detached. The spelling
+    never admits: a path that spells a registered home its descriptor ancestry does not hold (a symlinked
+    store component) refuses. Residual: a mount that re-roots the run's ancestry (a bind mount) is classified
+    by the mounted ancestry, which is the only ancestry its descriptor has."""
     import _journal
     import _opf_import as imp
-    for rel in imp._import_run_locations(rd.path.name, _gate_homes(homes)):
-        if tuple(rd.path.parts[-len(rel.split("/")):]) != tuple(rel.split("/")):
-            continue
-        depth = len(rel.split("/"))
-        fd = os.open("/".join([".."] * depth), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rd.fd)
+    run = os.fstat(rd.fd)
+    locations = imp._import_run_locations(rd.path.name, generation)
+    for rel in locations:
+        fd = os.open("/".join([".."] * len(rel.split("/"))), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                     dir_fd=rd.fd)
         try:
-            check_fd = _journal._open_dir_contained(fd, rel)
             try:
-                a, b = os.fstat(check_fd), os.fstat(rd.fd)
-                if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
-                    raise _GateError("run identity changed while locating durable evidence")
-            finally:
-                os.close(check_fd)
+                check_fd = _journal._open_dir_contained(fd, rel)
+            except FileNotFoundError:
+                check_fd = None
+            if check_fd is not None:
+                try:
+                    home = os.fstat(check_fd)
+                finally:
+                    os.close(check_fd)
+                if (home.st_dev, home.st_ino) == (run.st_dev, run.st_ino):
+                    return fd
         except BaseException:
             os.close(fd)
             raise
-        return fd
+        os.close(fd)
+    for rel in locations:
+        parts = tuple(rel.split("/"))
+        if rd.path.parts[-len(parts):] == parts:
+            raise _GateError("run path spells the registered home {!r}, which its descriptor ancestry does "
+                             "not hold".format(rel))
     return None
+
+
+def _ingest_store_fd(rd, homes=None):
+    """Bind the store to this opened run, through the shared generation-aware run-location constructor
+    and descriptor-bound identity (_registered_run_store_fd). Returns None for a detached copy (no
+    registered home of the generation is the run): it cannot establish absence of durable acceptance, so an
+    ingest run's durable checks refuse, while an ordinary run is classified from its own listing. Staged
+    snapshot checks still evaluate the supplied bytes.
+    """
+    return _registered_run_store_fd(rd, _gate_homes(homes))
 
 
 def _staged_run_store_fd(rd, homes):
     """The store root holding the opened run, for the per-run transaction checks. The supplied homes is the
     gate's already-validated generation, never None: the run is located through the generation-aware
-    run homes and inode binding durable acceptance uses (_ingest_store_fd), so a homes-2 staging run
-    (.working/staging/<kind>/<run-id>) reads its store four levels up. A path registered in another
-    generation refuses; only a detached copy matching no generation's run homes keeps the legacy
-    three-up parent, which is bound to no store (disclosed residual)."""
-    import _opf_import as imp
+    run homes and descriptor-bound identity durable acceptance uses (_ingest_store_fd), so a homes-2 staging
+    run (.working/staging/<kind>/<run-id>) reads its store four levels up, whatever path spells it. A run
+    that a home registered in another generation holds refuses; only a detached copy that no generation's
+    run home holds by identity keeps the legacy three-up parent, which is bound to no store (disclosed
+    residual)."""
     fd = _ingest_store_fd(rd, homes)
     if fd is None:
         # Enumerate the constructor's registered generations, including inactive ones: using
         # SUPPORTED_HOMES here would misclassify a homes-2 staging shape as detached under homes 1.
         for generation in (1, 2):
-            for rel in imp._import_run_locations(rd.path.name, generation):
-                parts = tuple(rel.split("/"))
-                if rd.path.parts[-len(parts):] == parts:
-                    raise _GateError("run path is registered outside homes generation {}".format(homes))
+            other = _registered_run_store_fd(rd, generation)
+            if other is not None:
+                os.close(other)
+                raise _GateError("run path is registered outside homes generation {}".format(homes))
         fd = os.open("../../..", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rd.fd)
     return fd
 
@@ -2245,8 +2269,8 @@ def _check_staged_run(rd, homes=None):
     # it survives the terminal run-dir deletion and never enters the store containment walk). It is
     # CONDITIONALLY PRESENT (mirroring acceptance.json): absent = "run not yet applied", recorded as a PASS
     # for both Group C checks; present = validated for schema and state-machine consistency. The store root
-    # is located through the validated generation's run homes and inode binding, with the legacy
-    # three-up fallback only for a path matching no generation's registered home (bound to no store).
+    # is located through the validated generation's run homes and descriptor-bound identity, with the legacy
+    # three-up fallback only for a run no generation's registered home holds (bound to no store).
     # Round-4 F3: the store root is opened from THE SUPPLIED RUN-DIR DESCRIPTOR using parent components
     # (never symlinks), so a located home binds the physical store holding the classified directory,
     # never a re-resolved string path; every store-relative control path below is
@@ -3145,17 +3169,11 @@ def _self_test():
         if twin is not None:
             detached_labels.append(label + "-detached")
             _self_test_gate_generation_applied(expect, label + "-detached", twin, swept, False, credit)
-            # A control character is refused by a located home's inode walk. A detached copy
-            # must instead fail run-id validation while enumerating registered homes, before fallback.
+            # Located and detached copies share one descriptor-bound identity walk, so a run-id the walk
+            # refuses (a control character) is refused identically in both.
             twin_first = swept[-1][1]
-            expect("gate-generation-detached-{}".format(label), all(
-                twin_first[cid] == value or (
-                    cid in _TRANSACTION_CHECKS and value[0] is False
-                    and "carries a control character" in value[1]
-                    and twin_first[cid] == (False,
-                        "cannot evaluate: cannot open the store root beneath the run dir no-follow "
-                        "(invalid ingest run-id: {!r})".format(twin.name)))
-                for cid, value in first.items()))
+            expect("gate-generation-detached-{}".format(label),
+                   all(twin_first[cid] == value for cid, value in first.items()))
         return first
 
     NOW = datetime.datetime(2026, 9, 9, 12, 0, 0, tzinfo=datetime.timezone.utc)
@@ -4300,6 +4318,67 @@ def _self_test():
             legacy = check_staged_run(txn_run, homes=1)
             expect("txn-homes1-staging-decoy-cannot-" + kind,
                    all(legacy[cid] == (False, mismatch) for cid in _TRANSACTION_CHECKS))
+        # Flip: a literal-suffix locator lets an alias of a registered run (a dotdot, relative, or ancestor-symlink
+        # spelling) skip the generation-mismatch refusal and read the three-up fallback, so a corrupt store-root
+        # record goes unseen and a .working decoy steers the verdict. Every alias grades exactly as the canonical
+        # path, at both staging kinds; a registered spelling its ancestry does not hold refuses; detached still grades.
+        for kind in ("import", "ingest"):
+            alias_root, _machine = build_store({})
+            alias_run = _self_test_gate_generation_disk(alias_root, "accepted", location=kind)
+            record = alias_root / imp.IMPORT_OPS_REL / alias_run.name / imp.TRANSACTION_NAME
+            decoy = alias_root / ".working" / imp.IMPORT_OPS_REL / alias_run.name / imp.TRANSACTION_NAME
+            link = base / "alias-link-{}".format(kind)
+            os.symlink(str(alias_run.parent), str(link))
+            spellings = (("dotdot", alias_run / ".." / alias_run.name, None),
+                         ("relative", Path(alias_run.name), alias_run.parent),
+                         ("ancestor-symlink", link / alias_run.name, None))
+
+            def graded_as(spelling, cwd, homes):
+                cwd_fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    if cwd is not None:
+                        os.chdir(str(cwd))
+                    if homes == 1:
+                        return check_staged_run(spelling, homes=1)
+                    with imp._self_test_homes2_active(alias_root):
+                        return check_staged_run(spelling, homes=2)
+                finally:
+                    os.fchdir(cwd_fd)
+                    os.close(cwd_fd)
+
+            record.parent.mkdir(parents=True)
+            record.write_bytes(b"state =\n")
+            decoy.parent.mkdir(parents=True)
+            for state in ("corrupt", "corrupt-decoy", "decoy"):
+                if state == "corrupt-decoy":
+                    decoy.write_bytes(b"state =\n")
+                if state == "decoy":
+                    record.unlink()
+                canonical = {homes: graded_as(alias_run, None, homes) for homes in (1, 2)}
+                expect("txn-alias-canonical-{}-{}".format(kind, state),
+                       all(canonical[1][cid] == (False, mismatch) for cid in _TRANSACTION_CHECKS)
+                       and canonical[2]["transaction-schema"][0] is (state == "decoy"))
+                for label, spelling, cwd in spellings:
+                    expect("txn-alias-{}-{}-{}".format(label, kind, state),
+                           all(graded_as(spelling, cwd, homes) == canonical[homes] for homes in (1, 2)))
+            record.write_bytes(b"state =\n")
+            decoy.unlink()
+            elsewhere = base / "alias-staging-{}".format(kind)
+            staging = alias_root / imp._opf_store.STAGING_REL
+            os.rename(str(staging), str(elsewhere))
+            os.symlink(str(elsewhere), str(staging))
+            spelled = ("cannot evaluate: cannot open the store root beneath the run dir no-follow (run path spells "
+                       "the registered home {!r}, which its descriptor ancestry does not hold)".format(
+                           imp._opf_store.stage_run(kind, alias_run.name)))
+            expect("txn-alias-symlinked-staging-cannot-" + kind, all(
+                graded_as(alias_run, None, homes)[cid] == (False, spelled)
+                for homes in (1, 2) for cid in _TRANSACTION_CHECKS))
+            detached = base / "alias-detached-{}".format(kind) / "d" / alias_run.name
+            detached.parent.mkdir(parents=True)
+            os.rename(str(elsewhere / kind / alias_run.name), str(detached))
+            expect("txn-alias-detached-" + kind, all(
+                graded_as(detached, None, homes)[cid] == (True, "no transaction record (run not yet applied)")
+                for homes in (1, 2) for cid in _TRANSACTION_CHECKS))
         # Flip: a _gate_homes that returns its input unvalidated admits each malformed generation.
         with unittest.mock.patch.object(_opf_store, "SUPPORTED_HOMES", 2):
             refused = []
