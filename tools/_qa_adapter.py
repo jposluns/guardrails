@@ -1232,8 +1232,13 @@ def _self_test():
         if shutil.which("git"):
             gitrepo = tmp / "gitrepo"
             gitrepo.mkdir()
-            genv = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e",
-                        GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e")
+            # Hermetic fixture env (test-hermeticity): an inherited GIT_INDEX_FILE / GIT_DIR
+            # (git exports these to hook children) would redirect this fixture's git writes
+            # into the CALLER's repository; the scrub drops GIT_* and keeps only what we set.
+            sys.path.append(str(Path(__file__).resolve().parent))
+            from _git_fixture_env import git_fixture_env
+            genv = git_fixture_env(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e",
+                                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e")
 
             def _git(*a):
                 return subprocess.run(["git", *a], cwd=str(gitrepo), capture_output=True, text=True, env=genv)

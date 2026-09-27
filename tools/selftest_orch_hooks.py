@@ -53,6 +53,7 @@ from _gen_common import repo_root  # noqa: E402
 
 sys.path.insert(0, str(repo_root() / ".aiqt" / "core" / "hooks" / "scripts"))
 import aiqt_hooks  # noqa: E402
+from _git_fixture_env import scrub_git_environment  # noqa: E402
 
 FAILURES = []
 EXECUTED = []        # ordered check ids actually reached this run
@@ -230,6 +231,11 @@ def main(report_path=None):
         print("SELF-TEST ERROR: no writable temp dir: {}".format(exc), file=sys.stderr)
         return 2
     os.environ["XDG_STATE_HOME"] = str(tmp / "xdg")  # hermetic default state root
+    # Hermetic git fixtures on a DIRECT run (test-hermeticity): the selftest-execution gate
+    # launches this runner git-neutral, but a direct run inherits the caller's environment,
+    # where an inherited GIT_INDEX_FILE / GIT_DIR (git exports these to hook children) would
+    # redirect every fixture git init/add/commit below into the CALLER's repository.
+    scrub_git_environment()
     try:
         # ---------- component 1: the stop guard ----------
         f = Fixture(tmp, "stop")

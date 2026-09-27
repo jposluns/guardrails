@@ -411,3 +411,31 @@ expected-check-ids = [
   "ci/settle-deadline-strict",
   "ci/pagination-count-mismatch-not-green",
 ]
+[[suite]]
+id = "git-fixture-env-selftest"
+runner = "tools/selftest_git_fixture_env.py"
+expected-check-ids = [
+  # ---------- layer 1: the shared scrub itself ----------
+  "env/repo-selectors-dropped",
+  "env/allowlist-drops-novel-var",
+  "env/config-pins",
+  "env/scratch-home",
+  "env/override-kept",
+  "env/non-git-preserved",
+  "env/scrub-in-place-child",
+  # ---------- layer 2: per-member routing (one named check per fixture-class member) ----------
+  "route/selftest-aiqt-corpus",
+  "route/selftest-orch-hooks",
+  "route/qa-adapter",
+  "route/check-record-drift",
+  "route/check-mistakes-register",
+  "route/check-version-monotonicity",
+  "route/check-release-build",
+  "route/check-release-delta",
+  "route/check-opf-upgrade",
+  # ---------- layer 3: the end-to-end caller-repository leak probe ----------
+  "leak/index-poison-fixture-green",
+  "leak/index-poison-caller-unchanged",
+  "leak/gitdir-poison-fixture-green",
+  "leak/gitdir-poison-caller-unchanged",
+]

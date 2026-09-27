@@ -1177,6 +1177,12 @@ _ARCHIVE_FAILCLOSED_REENTRANT = False
 
 
 def self_test_main():  # noqa: C901  a flat sequence of independent predicate and fixture cases
+    # Hermetic git fixtures (test-hermeticity): every fixture git call below inherits
+    # os.environ, where an inherited GIT_INDEX_FILE / GIT_DIR (git exports these to hook
+    # children) would redirect the fixture's init/add/commit into the CALLER's repository.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _git_fixture_env import scrub_git_environment
+    scrub_git_environment()
     failures = []
     # CANNOT-EVALUATE collection, kept DISTINCT from `failures` (round-10 finding 6): an unavailable/empty
     # `git archive`, a setup/fixture that could not be staged, or a caught setup/fixture exception did not

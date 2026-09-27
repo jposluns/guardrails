@@ -166,6 +166,7 @@ run_gate "hooks-preview" python3 -I -B tools/check_hooks_preview.py
 run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execution.py --self-test
 run_gate "orch-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
 run_gate "ci-status-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
+run_gate "git-fixture-env-selftest" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest
 run_gate "record-drift-selftest" python3 -I -B tools/check_record_drift.py --self-test
 run_gate "record-drift"          python3 -I -B tools/check_record_drift.py
 run_gate "record-sections-selftest" python3 -I -B tools/check_record_sections.py --self-test

@@ -570,9 +570,13 @@ def _suite():
             base = Path(temporary).resolve()
             home = base / "home"
             home.mkdir()
-            env_holder["env"] = dict(os.environ, HOME=str(home))
-            env_holder["env"].pop("XDG_CONFIG_HOME", None)
-            env_holder["env"].pop("XDG_CONFIG_DIRS", None)
+            # Hermetic fixture env (test-hermeticity): an inherited GIT_INDEX_FILE / GIT_DIR
+            # (git exports these to hook children) would redirect git_call's init/add/commit
+            # into the CALLER's repository; route through the pack's allowlist scrub, HOME
+            # re-pinned to the fixture home (the scrub carries only PATH and HOME, so the
+            # XDG_CONFIG_HOME / XDG_CONFIG_DIRS drop this fixture needs is kept too).
+            import _opf_observe
+            env_holder["env"] = dict(_opf_observe._scrubbed_env(), HOME=str(home))
 
             # U1) Happy path: 1.0.0 -> 1.1.0, doctor VALID, exact delta applied.
             s1 = base / "u1-happy"
