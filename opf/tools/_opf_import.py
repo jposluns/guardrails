@@ -5439,7 +5439,7 @@ imp._build_publication_ops = arm
 result = imp.apply_import(Path(sys.argv[2]), sys.argv[3], now=now)
 raise SystemExit(result.verdict)
 """
-    cp = subprocess.run([sys.executable, "-I", "-B", "-c", child,
+    cp = _opf_emit.run_status_owned([sys.executable, "-I", "-B", "-c", child,
                          str(Path(__file__).resolve().parent), str(root), run, mirror, now.isoformat()],
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
     require("D5-killed-after-view", cp.returncode == 137
@@ -6671,7 +6671,7 @@ def self_test():
         # dispatcher through opf.py (the CLI round-trip lives in opf.py's own opf-cli self-test leg).
         opf_py = str(Path(__file__).resolve().parent / "opf.py")
         root4, machine4 = build_store(sources={"a.txt": src})
-        cp_nomode = subprocess.run([sys.executable, "-I", "-B", opf_py, "import", "--root", str(root4)],
+        cp_nomode = _opf_emit.run_status_owned([sys.executable, "-I", "-B", opf_py, "import", "--root", str(root4)],
                                    capture_output=True)
         check("3-verb-no-mode-exits-2", cp_nomode.returncode == 2)
         check("3-verb-no-mode-stages-nothing", not (machine4.parent / "imports").exists())
@@ -6683,7 +6683,7 @@ def self_test():
         plan4 = plan_import(root4, ["a.txt"], now=NOW, run_nonce="verb-apply-pin")
         check("3-apply-plan-staged", plan4.verdict == 0 and bool(plan4.run_id))
         machine4_before = snapshot(machine4)
-        cp_apply = subprocess.run([sys.executable, "-I", "-B", opf_py, "import", "--apply",
+        cp_apply = _opf_emit.run_status_owned([sys.executable, "-I", "-B", opf_py, "import", "--apply",
                                    plan4.run_id or "imp-00000000T000000Z-0000000000000000",
                                    "--root", str(root4)], capture_output=True)
         check("3-apply-unreviewed-exits-2", cp_apply.returncode == 2)

@@ -208,10 +208,15 @@ def _watchdog_timer_case(label, mode):
 def _watchdog_isolation_self_test():
     """Exercise actual callers in fresh processes, without borrowing our timer."""
     import subprocess
+    import signal
+    from _opf_emit import run_status_owned
+    # These fixtures own their children's statuses; never borrow the caller's disposition.
+    if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        print("opf watchdog isolation: FAIL (unowned SIGCHLD disposition)")
+        return EXIT_FINDING
     if _bootstrap() != EXIT_OK:
         return EXIT_MALFORMED
     required = ("ITIMER_REAL", "ITIMER_VIRTUAL", "ITIMER_PROF", "pthread_sigmask", "sigpending")
-    import signal
     if not hasattr(os, "fork") or not all(hasattr(signal, name) for name in required):
         print("opf watchdog isolation: FAIL (required POSIX facilities unavailable)")
         return EXIT_FINDING
@@ -224,7 +229,7 @@ def _watchdog_isolation_self_test():
                 + "); import opf; sys.exit(opf._watchdog_timer_case("
                 + repr(label) + ", " + repr(mode) + "))")
         try:
-            result = subprocess.run([sys.executable, "-B", "-c", code],
+            result = run_status_owned([sys.executable, "-B", "-c", code],
                                     capture_output=True, text=True, timeout=180)
             ok = result.returncode == EXIT_OK
             detail = result.stdout + result.stderr
@@ -310,6 +315,7 @@ def _watchdog_deadline_case(mode):
     if mode in ("delayed-start", "stuck-start"):
         os.register_at_fork(after_in_child=startup)
     result, elapsed, reaped, gone = None, None, False, False
+    owned = True
     try:
         start = time.monotonic()
         with patch.object(os, "fork", fork), patch.object(os, "pipe", capture_pipe):
@@ -320,22 +326,27 @@ def _watchdog_deadline_case(mode):
             worker.join()
         # Assert reaping before emergency cleanup can conceal a leak. Only ECHILD proves reaping.
         try:
-            os.waitpid(child[0], os.WNOHANG)
+            waited, _ = os.waitpid(child[0], os.WNOHANG)
+            if waited == child[0]:
+                owned = False                         # fixture reaped a leak: FAIL, no later signal
         except ChildProcessError:
             reaped = True
+            owned = False
         try:
             os.kill(child[0], 0)
         except ProcessLookupError:
             gone = True
+        except PermissionError:
+            pass                                      # recycled PID; liveness is diagnostic only
         os.set_blocking(started_r, False)
         reached = os.read(started_r, 200) == b"started"
         ok = (result == "TIMEOUT" and elapsed < 1.5 and not rescued
-              and reached and gone)
+              and reached and reaped)
     finally:
         finished.set()
         for worker in rescuers:
             worker.join()
-        if child and not reaped and not gone:
+        if child and owned:
             kill_child(child[0])
             try:
                 os.waitpid(child[0], 0)
@@ -348,10 +359,203 @@ def _watchdog_deadline_case(mode):
     return EXIT_OK if ok else EXIT_FINDING
 
 
+def _watchdog_safety_case(mode):
+    """Private process: exercise ownership, descriptor bounds, and the reap discriminator."""
+    import errno
+    import signal
+    import time
+    from unittest.mock import patch
+    import _opf_emit
+
+    real_pipe, real_fork, real_wait, real_waitid = os.pipe, os.fork, os.waitpid, os.waitid
+    pipes, children, kills, stolen = [], [], [], []
+    saved = signal.getsignal(signal.SIGCHLD)
+
+    def pipe():
+        pair = real_pipe()
+        pipes.extend(pair)
+        return pair
+
+    def fork():
+        pid = real_fork()
+        if pid:
+            children.append(pid)
+        return pid
+
+    def reaper(*_):
+        try:
+            pid, _status = real_wait(-1, os.WNOHANG)
+            if pid:
+                stolen.append(pid)
+        except ChildProcessError:
+            pass
+
+    def steal_wait(pid, options):
+        if options == os.WNOHANG:
+            stolen.append(real_wait(pid, 0)[0])
+        return real_wait(pid, options)                  # real ECHILD after a competing reap
+
+    def steal_cleanup(*args):
+        stolen.append(real_wait(children[0], 0)[0])
+        return real_waitid(*args)                       # real ECHILD at the cleanup ownership probe
+
+    def closed():
+        for fd in pipes:
+            try:
+                os.fstat(fd)
+            except OSError as exc:
+                if exc.errno == errno.EBADF:
+                    continue
+                raise
+            return False
+        return True
+
+    if mode == "liveness-permission":
+        real_kill = os.kill
+        def denied_probe(pid, sig):
+            if sig == 0:
+                raise PermissionError("recycled PID")
+            return real_kill(pid, sig)
+        with patch.object(os, "kill", denied_probe):
+            return _watchdog_deadline_case("pipe-stall")
+
+    if mode == "missing-reap":
+        original = _opf_emit.run_bounded
+        def skip_reap(pid, options):
+            if options == 0:
+                time.sleep(0.03)                       # let SIGKILL terminate, but leave the zombie
+                return pid, 0
+            return real_wait(pid, options)
+        def mutant(*args, **kwargs):
+            with patch.object(os, "waitpid", skip_reap):
+                return original(*args, **kwargs)
+        with patch.object(_opf_emit, "run_bounded", mutant):
+            return (EXIT_OK if _watchdog_deadline_case("pipe-stall") == EXIT_FINDING
+                    else EXIT_FINDING)
+
+    with patch.object(os, "pipe", pipe), patch.object(os, "fork", fork):
+        if mode in ("ignored-chld", "reaper-chld", "lost-reap", "lost-cleanup"):
+            disposition = (signal.SIG_IGN if mode == "ignored-chld"
+                           else reaper if mode == "reaper-chld" else signal.SIG_DFL)
+            signal.signal(signal.SIGCHLD, disposition)
+            try:
+                from contextlib import ExitStack
+                with ExitStack() as stack:
+                    stack.enter_context(patch.object(
+                        os, "kill", lambda *args: kills.append(("kill", args))))
+                    stack.enter_context(patch.object(
+                        os, "killpg", lambda *args: kills.append(("killpg", args))))
+                    if mode == "lost-reap":
+                        stack.enter_context(patch.object(os, "waitpid", steal_wait))
+                    elif mode == "lost-cleanup":
+                        stack.enter_context(patch.object(os, "waitpid", return_value=(0, 0)))
+                        stack.enter_context(patch.object(os, "waitid", steal_cleanup))
+                    result = _opf_emit.run_bounded(lambda: "OK", timeout_s=0.1)
+                expected = ("SETUP-ERROR:ChildOwnershipLost" if mode.startswith("lost-")
+                            else "SETUP-ERROR:ChildOwnership")
+                ok = (result == expected and not kills and closed()
+                      and signal.getsignal(signal.SIGCHLD) == disposition)
+                ok = ok and (stolen == children and len(children) == 1 if mode.startswith("lost-")
+                             else not children and not pipes)
+            finally:
+                signal.signal(signal.SIGCHLD, saved)
+        elif mode == "high-fd":
+            fds = []
+            try:
+                while len(fds) <= 1024 or fds[-1] <= 1024:
+                    fds.append(os.open(os.devnull, os.O_RDONLY))
+                result = _opf_emit.run_bounded(lambda: "OK", timeout_s=1)
+                ok = result == "OK" and min(pipes) > 1024 and closed()
+            finally:
+                for fd in fds:
+                    os.close(fd)
+        elif mode == "huge-timeout":
+            result = _opf_emit.run_bounded(lambda: "UNBOUNDED", timeout_s=10**400)
+            ok = result.startswith("SETUP-ERROR:") and not pipes and not children and closed()
+        elif mode == "fork-error":
+            with patch.object(os, "fork", side_effect=RuntimeError("fork setup")):
+                result = _opf_emit.run_bounded(lambda: "UNBOUNDED")
+            ok = result == "SETUP-ERROR:RuntimeError" and len(pipes) == 2 and closed()
+        elif mode == "poll-error":
+            import select
+            with patch.object(select, "poll", side_effect=RuntimeError("poll setup")):
+                try:
+                    _opf_emit.run_bounded(lambda: "OK")
+                except RuntimeError:
+                    result = "ERROR"
+                else:
+                    result = "RETURNED"
+            reaped = False
+            try:
+                real_wait(children[0], os.WNOHANG)
+            except ChildProcessError:
+                reaped = True
+            ok = result == "ERROR" and reaped and closed()
+        else:
+            raise ValueError("unknown watchdog safety case: " + mode)
+    print("opf watchdog safety:", mode, "PASS" if ok else "FAIL", result, kills)
+    return EXIT_OK if ok else EXIT_FINDING
+
+
+def _watchdog_launcher_case(label, disposition):
+    """Inject exit-37 children into both watchdog launchers and the shared status guard."""
+    import contextlib
+    import io
+    import signal
+    import subprocess
+    from unittest.mock import patch
+
+    from _opf_emit import run_status_owned
+
+    def shared():
+        try:
+            run_status_owned([sys.executable, "-I", "-B", "-c", "raise SystemExit(37)"],
+                             check=True, capture_output=True, timeout=5)
+        except (RuntimeError, subprocess.CalledProcessError):
+            return EXIT_FINDING
+        return EXIT_OK
+
+    runner = {"isolation": _watchdog_isolation_self_test,
+              "regression": _watchdog_regression_self_test, "shared": shared}[label]
+    real_run = subprocess.run
+    statuses = []
+
+    def failure(*args, **kwargs):
+        result = real_run([sys.executable, "-I", "-B", "-c", "raise SystemExit(37)"],
+                          capture_output=True, text=True, timeout=5)
+        statuses.append(result.returncode)
+        if kwargs.get("check") and result.returncode:
+            raise subprocess.CalledProcessError(result.returncode, result.args)
+        return result
+
+    saved = signal.getsignal(signal.SIGCHLD)
+    hostile = signal.SIG_IGN if disposition == "ignored" else lambda *_: None
+    try:
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+        with patch.object(subprocess, "run", failure), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            control = runner()
+            control_ok = control == EXIT_FINDING and bool(statuses) and set(statuses) == {37}
+            statuses.clear()
+            signal.signal(signal.SIGCHLD, hostile)
+            result = runner()
+        ok = (control_ok and result == EXIT_FINDING and not statuses
+              and signal.getsignal(signal.SIGCHLD) == hostile)
+    finally:
+        signal.signal(signal.SIGCHLD, saved)
+    print("opf watchdog launcher:", label, disposition, "PASS" if ok else "FAIL",
+          "refused", result, "launched statuses", statuses)
+    return EXIT_OK if ok else EXIT_FINDING
+
+
 def _watchdog_regression_self_test():
     """R10: startup/collection/exit bounds and the registered runner under hostile inherited state."""
     import signal
     import subprocess
+    from _opf_emit import run_status_owned
+    if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        print("opf watchdog regressions: FAIL (unowned SIGCHLD disposition)")
+        return EXIT_FINDING
     if not hasattr(os, "register_at_fork") or not hasattr(signal, "pthread_sigmask"):
         print("opf watchdog regressions: FAIL (required POSIX facilities unavailable)")
         return EXIT_FINDING
@@ -359,6 +563,15 @@ def _watchdog_regression_self_test():
               + "); import opf; ")
     cases = [(mode, prefix + "sys.exit(opf._watchdog_deadline_case(" + repr(mode) + "))", 10)
              for mode in ("delayed-start", "stuck-start", "pipe-stall", "exit-stall")]
+    cases.extend((mode, prefix + "sys.exit(opf._watchdog_safety_case(" + repr(mode) + "))", 15)
+                 for mode in ("ignored-chld", "reaper-chld", "lost-reap", "lost-cleanup",
+                              "high-fd", "huge-timeout", "fork-error", "poll-error", "missing-reap",
+                              "liveness-permission"))
+    cases.extend((label + "-" + disposition,
+                  prefix + "sys.exit(opf._watchdog_launcher_case("
+                  + repr(label) + ", " + repr(disposition) + "))", 30)
+                 for label in ("isolation", "regression", "shared")
+                 for disposition in ("ignored", "handler"))
     # Resolve the real registration, without recursively invoking this regression runner.
     # Both inherited disposition and mask are hostile; the outer runner's state is untouched.
     cases.append(("blocked-isolation", prefix
@@ -370,7 +583,7 @@ def _watchdog_regression_self_test():
     failed = False
     for label, code, timeout in cases:
         try:
-            result = subprocess.run([sys.executable, "-I", "-B", "-c", code],
+            result = run_status_owned([sys.executable, "-I", "-B", "-c", code],
                                     capture_output=True, text=True, timeout=timeout)
             ok, detail = result.returncode == EXIT_OK, result.stdout + result.stderr
         except subprocess.TimeoutExpired:

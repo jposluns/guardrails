@@ -963,7 +963,6 @@ def _upgrade_preflight_regressions(check, fence):
     """
     import io
     import shutil
-    import subprocess
     import sys
     import tempfile
     import tomllib
@@ -1011,7 +1010,7 @@ def _upgrade_preflight_regressions(check, fence):
                "LC_ALL": "C", "TZ": "UTC", "TMPDIR": str(base)}
 
         def git_call(root, *args):
-            subprocess.run(
+            _opf_emit.run_status_owned(
                 [git, "-C", str(root), "-c", "init.templateDir=",
                  "-c", "init.defaultBranch=main", "-c", "core.hooksPath=" + str(home),
                  "-c", "commit.gpgSign=false", "-c", "user.name=OPF fixture",
@@ -1062,7 +1061,7 @@ def _upgrade_preflight_regressions(check, fence):
                             contextlib.redirect_stderr(io.StringIO()):
                         message = _error(lambda: opf._upgrade_run(str(root)))
                     check(label + "-before-lease", message == fence and lease.call_count == 0)
-                proc = subprocess.run(
+                proc = _opf_emit.run_status_owned(
                     [sys.executable, "-I", "-B", str(cli), "upgrade", "--root", str(root)],
                     env=env, cwd=base, capture_output=True, text=True, timeout=120)
                 after, index_after = snapshot(root)

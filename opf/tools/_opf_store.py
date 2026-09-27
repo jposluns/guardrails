@@ -2121,7 +2121,7 @@ def self_test():
         # cwd via subprocess cwd=base instead, resolves the relative name there, and prints its status and
         # resolved store root for the parent to compare. This exercises os.path.abspath's cwd anchoring (the
         # MAJOR 2 relative-root path) exactly as before, but with no mutation of this process's cwd.
-        import subprocess
+        from _opf_emit import run_status_owned
         import json
         # test-hermeticity: launch the child ISOLATED (-I ignores PYTHON* env like PYTHONHOME/PYTHONPATH and
         # user site; -B suppresses __pycache__ writes into the tools dir), so a hostile ambient PYTHONHOME the
@@ -2134,7 +2134,7 @@ def self_test():
             "import _opf_store as S\n"
             "r = S.resolve_store(sys.argv[2])\n"
             "sys.stdout.write(json.dumps([r.status, None if r.store_root is None else str(r.store_root)]))\n")
-        _child = subprocess.run(
+        _child = run_status_owned(
             [sys.executable, "-I", "-B", "-c", _child_src,
              str(Path(__file__).resolve().parent), rel_prod.name],
             cwd=str(base), capture_output=True, text=True)

@@ -1731,6 +1731,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
     import datetime
     import shutil
     import subprocess
+    from _opf_emit import run_status_owned
     import tomllib
     from contextlib import contextmanager
 
@@ -2022,7 +2023,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 wp, op = root / "worksheet.toml", root / "options.toml"
                 wp.write_bytes(_worksheet_bytes(ws))
                 op.write_bytes(b"option = [\n" if malformed else _worksheet_bytes(options(ws)))
-                proc = subprocess.run(
+                proc = run_status_owned(
                     [sys.executable, "-I", "-B", str(Path(__file__).with_name("opf.py")),
                      "import", "--root", str(root), "--plan", "--dispositions", str(wp),
                      "--ingest-options", str(op), "--include", files[0]],
@@ -3420,7 +3421,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                         "set(b) == set(c.EXPECTED_CHECKS))\nsys.exit(0 if ok else 3)\n").format(
                             tools=str(Path(__file__).resolve().parent), ingest=fifo_runs[0], core=fifo_runs[1])
                     try:
-                        _fifo = subprocess.run([sys.executable, "-I", "-B", "-c", probe], timeout=120,
+                        _fifo = run_status_owned([sys.executable, "-I", "-B", "-c", probe], timeout=120,
                                                capture_output=True)
                         _fifo_ok = _fifo.returncode == 0
                     except subprocess.TimeoutExpired:

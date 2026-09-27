@@ -587,11 +587,24 @@ def _rejects(document):
         return True
 
 
+def run_status_owned(*args, **kwargs):
+    """Self-test subprocess launcher: refuse dispositions that can hide a failed exit status.
+
+    As with run_bounded, callers must not change SIGCHLD or run competing wait calls during
+    the launch. This guard preserves caller state; it cannot police native or concurrent reapers.
+    """
+    import signal
+    import subprocess
+    if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        raise RuntimeError("cannot collect child status: unowned SIGCHLD disposition")
+    return subprocess.run(*args, **kwargs)
+
+
 def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
     """Run `thunk` (a zero-arg callable returning a short str) in a bounded CHILD PROCESS and return that
     str, or a sentinel: 'TIMEOUT' (wall-clock bound tripped), 'OOM' (address-space bound tripped),
     'CHILD-DIED', 'ERROR:<Type>' (the thunk raised), or 'SETUP-ERROR:<Type>' (the child could NOT install
-    its bounds, or fork is unavailable or failed: a cannot-evaluate, never a normal result). Several
+    its bounds, fork failed, or child ownership is unprovable: a cannot-evaluate, never a normal result). Several
     adversarial vectors drive an engine over a declared 10**9 high-water/span or a deeply-shared DAG; run
     IN-PROCESS a regression that reverted the bounded counting or an identity short-circuit would HANG or
     OOM the whole self-test before it could report. This watchdog turns such a regression into a
@@ -610,22 +623,31 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
     child timer; it then installs BOTH bounds or writes SETUP-ERROR without running the thunk.
     Independently, a parent-owned monotonic deadline starts BEFORE fork and covers child startup,
     nonblocking pipe collection and exit. On expiry the parent kills the child's process group and
-    reaps the child, returning TIMEOUT even if bytes were buffered. Exceptions also kill and reap;
+    reaps the child, returning TIMEOUT even if bytes were buffered. Exceptions also kill and reap an owned child;
     neither path relies on the child reaching its timer setup. Both pipe fds close on fork failure.
 
     Residual: synchronous callbacks in the PARENT's fork path and uninterruptible kernel waits cannot
     be preempted by this polling deadline. Reaping after SIGKILL relies on kernel progress. Descendants
     that escape the child's process group are outside group cleanup; this is a self-test helper, not
-    a hostile-process sandbox."""
+    a hostile-process sandbox. SIGCHLD must remain SIG_DFL and no other thread or callback may
+    reap this helper's child; inherited reapers are refused without changing caller state. A
+    non-reaping ownership probe precedes cleanup, and ECHILD means LOST OWNERSHIP, never permission
+    to signal a recycled PID. Arbitrary concurrent wait calls or native disposition changes are
+    outside this self-test contract (a probe cannot close their check-to-signal race)."""
     import os
     import signal
     import select
     import time
+    import math
     if not hasattr(os, "fork"):
         # A bound could NOT be installed on a fork-less host: a cannot-evaluate. Return the SETUP-ERROR
         # sentinel WITHOUT invoking the thunk (never run it unbounded); the caller fails closed because the
         # sentinel is never equal to an expected verdict token.
         return "SETUP-ERROR:NoFork"
+    if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        return "SETUP-ERROR:ChildOwnership"
+    if not all(hasattr(os, name) for name in ("waitid", "P_PID", "WNOWAIT")):
+        return "SETUP-ERROR:NoWaitid"
     import resource
     # Reject an UNBOUNDED or INVALID control BEFORE forking/running the thunk (codex round-6): a
     # timeout_s <= 0 installs setitimer(0, 0) which DISARMS the timer (no wall-clock bound at all), and a
@@ -639,6 +661,14 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
     if (isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float))
             or timeout_s != timeout_s or timeout_s == float("inf") or timeout_s <= 0):
         return "SETUP-ERROR:BadTimeout"
+    # Conversion and deadline arithmetic must precede pipe allocation, including huge integers.
+    try:
+        timeout_s = float(timeout_s)
+        deadline = time.monotonic() + timeout_s
+    except (OverflowError, ValueError):
+        return "SETUP-ERROR:BadTimeout"
+    if not math.isfinite(timeout_s) or not math.isfinite(deadline):
+        return "SETUP-ERROR:BadTimeout"
     # RLIM_INFINITY is the "no cap" sentinel; its integer representation is platform-dependent (it is -1
     # on Linux, a large positive on others), so reject it by identity AND by the <= 0 / >= positive-sentinel
     # bounds, rather than assuming one sign. Either way an unbounded or non-positive address-space control
@@ -648,13 +678,19 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
             or mem_bytes <= 0 or mem_bytes == _rlim_inf
             or (_rlim_inf > 0 and mem_bytes >= _rlim_inf)):
         return "SETUP-ERROR:BadMemBound"
-    rfd, wfd = os.pipe()
-    deadline = time.monotonic() + timeout_s
+    try:
+        rfd, wfd = os.pipe()
+    except OSError as exc:
+        return "SETUP-ERROR:" + type(exc).__name__
     try:
         pid = os.fork()
-    except OSError as exc:                               # fork failed: close BOTH pipe fds, no leak
-        os.close(rfd)
-        os.close(wfd)
+    except BaseException as exc:                         # even cancellation must release both fds
+        try:
+            os.close(rfd)
+        finally:
+            os.close(wfd)
+        if not isinstance(exc, Exception):
+            raise
         return "SETUP-ERROR:" + type(exc).__name__
     if pid == 0:                                         # child: bounded, writes one short token, never returns
         os.close(rfd)
@@ -690,6 +726,7 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
     data = b""
     wstatus = None
     timed_out = False
+    owned = True
     try:
         # Keep close inside the cleanup scope, including the close-then-raise fault case.
         os.close(wfd)
@@ -698,6 +735,8 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
         except ProcessLookupError:
             pass                                        # child already exited; collect its status below
         os.set_blocking(rfd, False)
+        poller = select.poll()
+        poller.register(rfd, select.POLLIN | select.POLLHUP | select.POLLERR)
         eof = False
         while True:
             remaining = deadline - time.monotonic()
@@ -710,7 +749,7 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
                 if _wpid == pid:
                     wstatus = status
                     break
-            ready, _, _ = select.select([] if eof else [rfd], [], [], min(remaining, 0.01))
+            ready = poller.poll(max(1, math.ceil(min(remaining, 0.01) * 1000)))
             if ready:
                 try:
                     chunk = os.read(rfd, 200)
@@ -718,13 +757,25 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
                     continue
                 if not chunk:
                     eof = True
+                    poller.unregister(rfd)
                 else:
                     data = (data + chunk)[:200]          # the short-token contract also bounds collection
+    except ChildProcessError:
+        owned = False                                   # ECHILD: never signal this numeric identity again
     finally:
         try:
             os.close(rfd)
         finally:
-            if wstatus is None:
+            if wstatus is None and owned:
+                # WNOWAIT verifies parentage without releasing the PID before group cleanup.
+                # Also refuse if a callback changed the disposition during supervision.
+                owned = signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL
+                if owned:
+                    try:
+                        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                    except ChildProcessError:
+                        owned = False
+            if wstatus is None and owned:
                 # Keep the child unreaped until group cleanup, so its PID cannot be recycled first.
                 # Kill the PID too: an exception may precede either side's setpgid.
                 try:
@@ -737,7 +788,12 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
                     except ProcessLookupError:
                         pass
                     finally:
-                        _wpid, wstatus = os.waitpid(pid, 0)  # only blocking wait, AFTER SIGKILL
+                        try:
+                            _wpid, wstatus = os.waitpid(pid, 0)  # only blocking wait, AFTER SIGKILL
+                        except ChildProcessError:
+                            owned = False
+    if not owned:
+        return "SETUP-ERROR:ChildOwnershipLost"
     return "TIMEOUT" if timed_out else _bounded_child_result(data, wstatus)
 
 
