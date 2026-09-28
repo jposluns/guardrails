@@ -343,11 +343,19 @@ def _case_passes(case):
     )
 
 
+# Prefixed to the runner text in place of a python3 shell function. A
+# read-only PATH pins executable lookup for the runner's own shell, so bare
+# python3 keeps resolving to the executable fixture.
+_RUNNER_PATH_PIN = "readonly PATH\n"
+
+
 def _runner_check(expected, text=None, *, fail_own=0):
     """Prove exact dispatch using the real shell text, as the P0 suite does.
 
-    Intercepted Python gates are stubbed. Only this parser's vector leg runs,
-    avoiding recursive registration checks. The scope is this suite only.
+    Intercepted Python gates reach an executable PATH fixture that records
+    every call; no shell function stands in for python3. Only this parser's
+    vector leg runs, avoiding recursive registration checks. The scope is
+    this suite's dispatch and the recorded call roster.
     """
     import ast
     import errno
@@ -401,28 +409,67 @@ def _runner_check(expected, text=None, *, fail_own=0):
     if bash is None:
         raise RuntimeError(identity + "/cannot-evaluate/bash")
     bash = os.path.abspath(bash)
+    # The on-disk runner is the call roster, including for a mutated source.
+    # This parser covers its one-line run_gate registrations, not general
+    # shell; malformed registrations or unresolved dollars refuse before launch.
+    own_argv = tuple(os.fsencode(arg) for arg in (
+        "-I", "-B", str(here / "_opf_pack_manifest.py"), "--self-test"))
+    roster = []
+    try:
+        for line in runner.read_text(encoding="utf-8").splitlines():
+            if line.lstrip().startswith("run_gate "):
+                words = [word.replace("$here", str(here)) for word in shlex.split(line)]
+                if (any("$" in word for word in words)
+                        or len(words) < 6 or words[2:5] != ["python3", "-I", "-B"]):
+                    raise ValueError(line)
+                roster.append(tuple(os.fsencode(word) for word in words[3:]))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(identity + "/cannot-evaluate/roster") from exc
+    if roster.count(own_argv) != 1:
+        raise RuntimeError(identity + "/cannot-evaluate/roster")
 
     # This self-test asserts that the runner dispatches THIS suite exactly
     # once with its exact argv (RED duplicate-own-call and wrong-own-argv,
     # using the runtime argv log), and propagates exits 1, 2 and 7 (RED
     # own-suite-failure variants, discriminated by swallowed-own-failure
     # and tolerate-1/tolerate-2). Other nonzero statuses are not injected.
-    # It does not assert that other registered suites are dispatched:
-    # sibling dispatch completeness is outside this check; a runner-level
-    # dispatch audit would be a separate control.
-    # Fix-4 accounting: in-runner PATH changes remain covered by the
-    # function shim (PASS in-runner-path; RED removed-function-shim).
-    # The PATH fixture also covers child shells, command and env forms.
+    # Every recorded call is also reconciled against the on-disk run_gate
+    # roster (/invocations; RED unexpected-call and dropped-sibling): each
+    # registered gate once, in order, with its exact argv, and no other
+    # python3 call. Sibling suites are not run, so their own assertions
+    # remain outside this check.
+    # Fix-4 accounting: in-runner PATH changes remain covered, now by the
+    # read-only PATH pin rather than a shell function (PASS in-runner-path;
+    # RED removed-path-pin, which removes the pin). No function or
+    # alias stands in for python3. Shells: bash --noprofile --norc runs the
+    # runner, /bin/sh the fixture. The PATH fixture also covers child
+    # shells, command and env forms, each run as a dispatch route
+    # (PASS route-command, route-env, route-child-shell).
     # PD-SFS-THREAT-BOUND: runners written to defeat this check are outside
     # scope, including wrappers recognizing injected output and swallowing
     # real SELF-TEST FAIL, PACK-MANIFEST FAIL or CANNOT diagnostics, and bare
     # alternate interpreter names such as python3.14. No mechanism covers them.
-    # Absolute paths, or bypassing the function together with changing PATH,
-    # remain outside interception. Deliberately closing inherited descriptors
+    # Absolute paths, command -p, hash -p, and a PATH replaced in a child
+    # process (env PATH=... or a child shell that reassigns it) remain outside
+    # interception: the pin binds only the runner's own shell. This runner
+    # does not set -e: a rejected PATH assignment can abort the rest of its
+    # line while later lines continue; a prefix assignment runs the command
+    # with the pinned PATH. Skipped or unintercepted registered calls fail
+    # invocation reconciliation; this detects bypasses, not prevents them.
+    # Deliberately closing inherited descriptors
     # while clearing the environment can bypass recursion refusal and spawn
     # nested sessions outside timeout killpg containment. Not a process sandbox.
     # Intercepted siblings return 0; their failure propagation is outside
     # this check too.
+    # The runner, its fixtures, this harness, and the fixed mutations exercised
+    # here launch no route to python3 other than the executable fixtures or the
+    # declared interpreter by absolute path on declared suite inputs (their
+    # other launches: bash, /bin/sh running the fixture, env, and dirname). The
+    # forwarded --vectors-only run and the modules it imports, themselves
+    # declared suite inputs, take no process-launching or service route on that
+    # path, and the environment filter below drops credential carriers from the
+    # passed environment. This bounded code review, not PATH interception
+    # alone, is the basis for omitting isolation.
     fixture = r'''#!/bin/sh
 printf '%s\0' "$#" "$@" >> "$manifest_log" || exit 2
 if [ "$#" -eq 4 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
@@ -437,8 +484,9 @@ case " $* " in *_opf_pack_manifest.py*) exit 2;; esac
 exit 0
 '''
     # Preserve ordinary caller variables (including CI) so conditional
-    # dispatch is exercised. Remove the execution controls listed below, then
-    # pin configuration and fixture variables; not an environment sandbox.
+    # dispatch is exercised. Remove the execution controls and the credential
+    # carriers matched below, then pin configuration and fixture variables;
+    # not an environment sandbox: only the named patterns are dropped.
     # Preserve the pack twin's existing scratch cwd; caller-cwd dispatch is
     # outside this twin's coverage.
     with tempfile.TemporaryDirectory(prefix="opf-pack-registration-") as tmp, ExitStack() as resources:
@@ -456,7 +504,12 @@ exit 0
         log.chmod(0o600)
         env = {name: value for name, value in os.environ.items()
                if name not in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4")
-               and not name.startswith(("GIT_", "BASH_FUNC_", "PYTHON", "LD_"))}
+               and not name.upper().startswith(("GIT_", "BASH_FUNC_", "PYTHON", "LD_",
+                                                "SSH_", "AWS_", "GPG_"))
+               and not any(marker in name.upper() for marker in
+                           ("TOKEN", "SECRET", "PASSWORD", "PASSPHRASE",
+                            "CREDENTIAL", "APIKEY", "API_KEY", "ACCESS_KEY",
+                            "AUTH"))}
         env.update({name: tmp for name in env if name.startswith("XDG_")})
         env.update({"PATH": tmp + os.pathsep + os.defpath, "TMPDIR": tmp,
                     "HOME": tmp, "XDG_CONFIG_HOME": tmp, "XDG_CACHE_HOME": tmp,
@@ -500,9 +553,9 @@ exit 0
                           "type -P python3")
         if probe.returncode != 0 or probe.stdout != str(executable) + "\n":
             raise RuntimeError(identity + "/cannot-evaluate/interception")
-        # Exec only in the function subshell, so the runner can continue.
-        shim = "python3() ( exec " + shlex.quote(str(executable)) + ' "$@" );\n'
-        proc = run_shell(shim + source)
+        # No function stands in for python3: the pin keeps bare lookup on
+        # the executable fixture even when the runner assigns PATH itself.
+        proc = run_shell(_RUNNER_PATH_PIN + source)
         try:
             argv_log = log.read_bytes()
         except OSError as exc:
@@ -518,6 +571,7 @@ exit 0
     if fields.pop() != b"":
         raise AssertionError(identity + "/own-argv")
     own = []
+    calls = []
     offset = 0
     basename = os.fsencode(Path(env["manifest_test"]).name)
     while offset < len(fields):
@@ -531,10 +585,9 @@ exit 0
             raise AssertionError(identity + "/own-argv")
         argv = tuple(fields[offset:offset + argc])
         offset += argc
+        calls.append(argv)
         if any(basename in arg for arg in argv):
             own.append(argv)
-    own_argv = tuple(os.fsencode(arg) for arg in (
-        "-I", "-B", env["manifest_test"], "--self-test"))
     if own and own != [own_argv]:
         raise AssertionError(identity + "/own-argv")
 
@@ -551,6 +604,33 @@ exit 0
 
     if own != [own_argv]:
         raise AssertionError(identity + "/own-argv")
+    # Missing, extra, reordered or re-argued sibling calls are unexpected
+    # invocation evidence, even when every earlier identity passed.
+    if calls != roster:
+        raise AssertionError(identity + "/invocations")
+    return roster
+
+
+def _runner_routes(identity):
+    import os
+    import shlex
+    import shutil
+
+    # Declared dispatch routes beyond run_gate's direct "$@": command
+    # (which bypasses shell functions), env, and a child bash process.
+    # Each reaches python3 by PATH lookup, so only the fixture can answer.
+    runner = Path(__file__).resolve().parent / "run_all_checks.sh"
+    source = runner.read_text(encoding="utf-8")
+    dispatch = 'if "$@"; then'
+    if source.count(dispatch) != 1:
+        raise AssertionError(identity + "/red-fixture")
+    bash = shutil.which("bash")
+    if bash is None:
+        raise RuntimeError(identity + "/cannot-evaluate/bash")
+    child = shlex.quote(os.path.abspath(bash)) + """ --noprofile --norc -c 'exec "$@"' _"""
+    for route, prefix in (("command", "command"), ("env", "env"),
+                          ("child-shell", child)):
+        yield route, source.replace(dispatch, "if " + prefix + ' "$@"; then', 1)
 
 
 def _runner_non_readable_fd_checks():
@@ -631,6 +711,55 @@ def _runner_red_checks(expected):
             raise AssertionError(identity + "/" + label + "/not-red")
         print("RED {} -> {}".format(label, wanted))
 
+    # Exercise the actual environment passed to the runner, using synthetic
+    # values only. Check lowercase and mixed-case credential names as well as
+    # uppercase names, while preserving ordinary conditional-dispatch inputs.
+    credentials = ("GH_TOKEN", "api_token", "GitHub_ToKeN", "client_secret",
+                   "db_password", "key_passphrase", "cloud_credential",
+                   "service_apikey", "service_api_key", "service_access_key",
+                   "npm_config__authToken", "ssh_agent", "Aws_Profile", "gpg_home")
+    popen = subprocess.Popen
+
+    def checked_environment(*args, **kwargs):
+        env = kwargs["env"]
+        if any(name in env for name in credentials):
+            raise AssertionError(identity + "/credential-environment")
+        if env.get("CI") != "true" or env.get("BUILD_NUMBER") != "fixture-build":
+            raise AssertionError(identity + "/ordinary-environment")
+        return popen(*args, **kwargs)
+
+    with patch.dict(os.environ, dict.fromkeys(credentials, "synthetic-only") | {
+            "CI": "true", "BUILD_NUMBER": "fixture-build"}), \
+            patch("subprocess.Popen", side_effect=checked_environment) as launch:
+        _runner_check(expected)
+        if not launch.called:
+            raise AssertionError(identity + "/environment-not-exercised")
+    print("PASS " + identity + "/credential-environment")
+
+    # Unsupported expansion in any registration word refuses before launch.
+    original_read_text = Path.read_text
+    for label, old, new in (
+        ("roster-braced-here", "$here/", "${here}/"),
+        ("roster-variable", "$here/", "$other/"),
+        ("roster-name-variable", "opf-homes-selftest", "opf-$other-selftest"),
+    ):
+        roster_source = source.replace(old, new, 1)
+        if roster_source == source:
+            raise AssertionError(identity + "/red-fixture")
+
+        def read_roster(path, *args, **kwargs):
+            if path == runner:
+                return roster_source
+            return original_read_text(path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", read_roster), \
+                patch("subprocess.Popen", side_effect=AssertionError(
+                    identity + "/roster/unexpected-launch")) as launch:
+            red(label, lambda: _runner_check(expected), RuntimeError,
+                identity + "/cannot-evaluate/roster")
+            if launch.called:
+                raise AssertionError(identity + "/roster/unexpected-launch")
+
     # Set CI in the caller, not in the constructed runner environment.
     with patch.dict(os.environ, {"CI": "true"}):
         red("ci-conditional-skip", lambda: _runner_check(
@@ -692,6 +821,19 @@ def _runner_red_checks(expected):
         expected, source.replace(own_lines[0],
                                  own_lines[0].replace(" --self-test", "", 1), 1)),
         AssertionError, identity + "/own-argv")
+
+    # Extra or missing sibling calls are unexpected invocation evidence.
+    siblings = [line for line in source.splitlines(keepends=True)
+                if line.startswith("run_gate ") and line not in own_lines]
+    if not siblings:
+        raise AssertionError(identity + "/red-fixture")
+    for label, text in (
+        ("unexpected-call", source.replace(
+            propagation, propagation + "\n  python3 -I -B -c pass >/dev/null 2>&1 || true", 1)),
+        ("dropped-sibling", source.replace(siblings[0], "", 1)),
+    ):
+        red(label, lambda text=text: _runner_check(expected, text),
+            AssertionError, identity + "/invocations")
 
     # Presence, including an empty value, must refuse before any bash launch.
     for value in ("", "nested-argv.log"):
@@ -759,35 +901,66 @@ def _runner_red_checks(expected):
         print("RED scrubbed-environment -> " + identity + "/cannot-evaluate/recursion")
         print("PASS " + identity + "/scrubbed-environment/no-nested-launch")
 
-    # A harmless competing executable makes reverting the function safe.
-    # The normal check requires exactly one own call in the fixture's log.
+    # A harmless competing executable makes removing the PATH pin safe.
+    # Check its own evidence too: zero calls with the pin, the complete
+    # on-disk roster without it. Exact NUL framing rejects malformed logs.
     with tempfile.TemporaryDirectory(prefix="opf-runner-path-") as tmp:
         os.chmod(tmp, 0o700)
         if os.pathsep in tmp:
             raise RuntimeError(identity + "/cannot-evaluate/pathsep")
+        competing_log = Path(tmp) / "competing-argv.log"
+        competing_log.write_bytes(b"")
+        competing_log.chmod(0o600)
         stub = Path(tmp) / "python3"
-        stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stub.write_text(
+            "#!/bin/sh\nprintf '%s\\0' \"$#\" \"$@\" >> "
+            + shlex.quote(str(competing_log)) + " || exit 2\nexit 0\n", encoding="utf-8")
         stub.chmod(0o700)
+
+        def check_competing_log(calls):
+            try:
+                actual = competing_log.read_bytes()
+            except OSError as exc:
+                raise RuntimeError(identity + "/cannot-evaluate/competing-argv-log") from exc
+            wanted = b"".join(
+                b"\0".join((str(len(argv)).encode("ascii"), *argv)) + b"\0"
+                for argv in calls)
+            if actual != wanted:
+                raise AssertionError(identity + "/competing-invocations")
+
         changed_path = "PATH=" + shlex.quote(tmp) + ":$PATH\n" + source
-        _runner_check(expected, changed_path)
+        roster = _runner_check(expected, changed_path)
+        check_competing_log([])
         print("PASS " + identity + "/in-runner-path")
 
         original_popen = subprocess.Popen
         removed = 0
 
-        def without_function(*args, **kwargs):
+        def without_pin(*args, **kwargs):
             nonlocal removed
             command = list(args[0])
-            if command[4].startswith("python3() ( exec "):
-                command[4] = command[4].split("\n", 1)[1]
+            if command[4].startswith(_RUNNER_PATH_PIN):
+                command[4] = command[4][len(_RUNNER_PATH_PIN):]
                 removed += 1
             return original_popen(command, *args[1:], **kwargs)
 
-        with patch("subprocess.Popen", side_effect=without_function):
-            red("removed-function-shim", lambda: _runner_check(expected, changed_path),
+        with patch("subprocess.Popen", side_effect=without_pin):
+            red("removed-path-pin", lambda: _runner_check(expected, changed_path),
                 AssertionError, identity + "/pass-lines")
         if removed != 1:
             raise AssertionError(identity + "/in-runner-path/removed-count")
+
+        check_competing_log(roster)
+        print("PASS " + identity + "/removed-path-pin/invocations")
+        # The empty-log assertion discriminates: without the pin, calls appear.
+        red("competing-log-not-empty", lambda: check_competing_log([]),
+            AssertionError, identity + "/competing-invocations")
+        competing_log.unlink()
+        red("missing-competing-log", lambda: check_competing_log(roster),
+            RuntimeError, identity + "/cannot-evaluate/competing-argv-log")
+        competing_log.write_bytes(b"malformed")
+        red("malformed-competing-log", lambda: check_competing_log(roster),
+            AssertionError, identity + "/competing-invocations")
 
     # Remove every execute bit, including for root. Permit only the probe:
     # a reverted interception guard must never launch the real runner.
@@ -866,6 +1039,9 @@ def _runner_registration_test(expected):
     source = runner.read_text(encoding="utf-8")
     _runner_check(expected, source)
     print("PASS runner/pack-manifest-registration")
+    for route, text in _runner_routes("runner/pack-manifest-registration"):
+        _runner_check(expected, text)
+        print("PASS runner/pack-manifest-registration/route-" + route)
     lines = [line for line in source.splitlines(keepends=True)
              if line.startswith('run_gate "opf-pack-manifest-selftest"')]
     if len(lines) != 1:
