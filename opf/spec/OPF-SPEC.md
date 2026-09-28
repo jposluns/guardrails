@@ -95,8 +95,9 @@ Two roots organize every path in this standard:
 ### 4.2 Layout overview
 
 Base spec 1.3.0 defines adoption and the separate imported series on homes 1. The 1.3.0
-requirements in sections 4.2, 8, 9.2, 11, and 14 are a target contract; they do not claim that
-the reference tooling has activated adoption, imported-series validation, or the import writer.
+requirements in sections 4.2, 6.1, 8, 9.2, 11, 12, and 14 are a target contract; they do not
+claim that the reference tooling has activated adoption, imported-series validation, or the
+import writer.
 Activation MUST include the tested upgrade in section 9.2 and deterministic doctor coverage
 before a writer accepts the new format. Homes 2 is a separate, later activation.
 
@@ -209,9 +210,12 @@ state. Journals are machine-local even after completion; a clone without them ca
 transactions, and requested recovery fails closed on a missing journal. Containment and doctor
 exclude journals and make no recovery claim; a rogue file there is outside their coverage.
 
-Under pre-1.3.0 tooling, every store, whatever it declares, keeps its legacy grading: the
-homes-2 names are ordinary store paths there, graded, detected, and dispositioned exactly as
-before, and the pre-1.3.0 doctor's check roster and residuals are unchanged. Activated 1.3.0
+Under pre-1.3.0 tooling, every store within that tooling's own version ceiling keeps its legacy
+grading: the homes-2 names are ordinary store paths there, graded, detected, and dispositioned
+exactly as before, and the pre-1.3.0 doctor's check roster and residuals are unchanged. Tooling
+that carries the section 9.2 ceiling refuses an above-ceiling declaration as cannot-evaluate;
+tooling released before that ceiling grades such a store as legacy instead, a disclosed residual
+of section 9.2. Activated 1.3.0
 tooling registers on homes 1 the imported managed leaves, the adoption archive
 `.working/archive/adoption/<run-id>/`, the Move destination `.working/archive/moved/`, and the
 evidence bundles `.working/imported/<kind>/<run-id>/`, all recognized by containment as OPF
@@ -954,10 +958,13 @@ waiver `active` > `expired` or `revoked`, expiry required at creation; mode `act
 tier_assessment `recorded`; session_lease `held` > `released` or `reconciled`;
 legacy_fragment `quarantined` > `resolved` or `ignored`.
 
-Actionability: a clean backlog item is actionable when its state is `open` or `active` and no
-clean, unqualified `active` block authored by a non-importer actor scopes it. Imported and
-importer-authored blocks never enter this join.
-This is the block join every scheduling view renders.
+Actionability: a clean backlog item authored by a non-importer actor is actionable when its
+state is `open` or `active` and no clean, unqualified `active` block authored by a non-importer
+actor scopes it. Imported and importer-authored records never enter this join on either side: an
+importer-authored backlog item is history, never actionable work, whatever its recorded state,
+and an importer-authored block never blocks (section 8.6).
+This is the block join every scheduling view renders; a scheduling view surfaces an
+importer-authored item only as history, never as actionable.
 
 ### 8.6 Links and reference capture
 
@@ -981,7 +988,11 @@ Imported history has an authority firewall, enforced by the writer and doctor an
 provenance rather than on series alone: it covers every record whose `actor.kind` is `importer`,
 in the imported series or written into the clean series by the pre-1.3.0 legacy importer. An
 importer-authored record MUST NOT satisfy a current approval, receipt, actionability or
-supersession obligation of any record authored by a non-importer actor. A clean `done` record's
+supersession obligation of any record authored by a non-importer actor. The same bar covers
+every current obligation, record-level or store-level, including field-borne authority: a
+gate_run verdict, a tier_assessment outcome, an artifact's promoted state, a release's published
+state and a maintainer_action's done on an importer-authored record describe history and
+discharge nothing now. A clean `done` record's
 `receipt_of` MUST target a clean backlog item, and a clean backlog item reaching ratified `done`
 requires a clean receipt authored by a non-importer actor; a legacy importer-authored receipt
 satisfies, as recorded history, only the legacy importer-authored backlog item it was recorded
@@ -993,7 +1004,13 @@ importer-authored record is never the current `handoff`, an active `waiver`, a h
 `session_lease`, an active `mode`, or a ratified active `preference_pattern`; a state-bearing
 status on an importer-authored record describes history at its source and confers nothing now,
 and every current-state join, including the section 8.5 at-most-one-current handoff rule,
-evaluates only clean records authored by non-importer actors. Acting on history requires a new
+evaluates only clean records authored by non-importer actors. After the section 9.2 upgrade an
+existing legacy importer-authored clean record keeps its bytes, its recorded state and its place
+in the clean series, and remains readable history there; what the upgrade changes, and its
+report enumerates (section 9.2), is authority alone: such a record leaves every current-state
+join, its open or active backlog items leave actionability, and its blocks stop granting a stop.
+The clean-series writer refuses a transition on an importer-authored record in either series
+(section 8.8). Acting on history requires a new
 strict clean record at the present time, with a link back to the historical record.
 C-IMPORTED-SEGREGATION enforces this firewall over importer-authored records in both series.
 
@@ -1018,7 +1035,10 @@ inclusion, block actionability, counters, lock ordering, or actor attribution.
 `opf record` is the reference tooling's record-authoring verb. Its clean-series subcommands use
 the strict record model; the new `import` write mode uses the separate 1.3.0 imported model.
 Import is not a flag that relaxes `create`, and the clean-series subcommands refuse
-`actor.kind = "importer"`: an importer authors only through `import`. Its subcommands:
+`actor.kind = "importer"`: an importer authors only through `import`. The clean-series
+subcommands also refuse an importer-authored record as their operand: acting on imported or
+legacy importer-authored history is a new clean record linking back (section 8.6). Its
+subcommands:
 
 - `create`: one new record of an enabled baseline type, in the type's initial state. An assistant
   or automation author entering a gated initial state lands `/proposed`; a created-terminal factual
@@ -1042,7 +1062,9 @@ Import is not a flag that relaxes `create`, and the clean-series subcommands ref
   fields, missingness, verbatim unparsed text and batch-local link keys. The writer resolves local
   keys to claimed imported IDs and recomputes source size and SHA-256 from preserved bytes,
   never trusting caller-supplied measurements. One invocation covers one source in one journaled
-  transaction, followed by one render and one full doctor.
+  transaction, followed by one render and one full doctor, both treating a deferred view
+  destination under sections 14.2 and 11, so a pending migrate or retire source at a declared
+  view path is neither overwritten nor an obstacle to VALID.
 
 Every subcommand runs one operation sequence, and an implementation of the verb MUST preserve its
 guarantees:
@@ -1074,7 +1096,11 @@ guarantees:
 6. Every rewritten file is published in one crash-durable journaled transaction, so an
    interruption leaves the store exactly at its prestate or exactly at its poststate once
    reconciled. The reference tooling keeps that journal under `.aiqt/record/journal` at homes 1.
-7. The declared views are rendered, then a full doctor must report VALID; a failure leaves the
+7. The declared views are rendered, except that a deferred view destination (section 14.2) is
+   never written and leaves the planned destination set, so the step 5 cleanliness gate does not
+   read it: its bytes are validated prospectively and the occupying source is left in place.
+   Then a full doctor must report VALID, evaluating a deferred destination under the section 11
+   bounded treatment; a failure leaves the
    change for review with recovery advice scoped to the planned paths.
 8. The lease is released, and only then are the claimed IDs and touched files reported. The
    change is left uncommitted in the working tree: the verb never stages or commits it.
@@ -1103,11 +1129,16 @@ Replay identity is `(source_sha256, batch content digest)`. A completed identica
 re-reads and verifies the published records and evidence, then succeeds as a no-op reporting
 the existing IDs. A partial overlap, including a differing batch against the same source within
 the run, refuses, names the overlap and directs to journal recovery. Each source admits at most
-one completed batch: a differing batch against a source whose batch already completed refuses
-and names the completed run. A corrected import is a fresh run whose batch declares the
-completed run it corrects; its records link `supersedes` or `corrects` to the imported records
-they replace, the previous run's immutable evidence is preserved, and source completion
-(section 14.1) evaluates the correcting run. Retry never allocates duplicate IDs.
+one completed batch per correction chain: a differing batch against a source whose batch already
+completed refuses and names the completed run, unless the new batch declares that run as the
+completed run it corrects. Such a corrected import is a fresh run; its records link `supersedes`
+or `corrects` to the imported records they replace, the previous run's immutable evidence is
+preserved, and source completion (section 14.1) evaluates the correcting run. Before the
+source's retirement, the live-bytes plan check of the refusal list binds a correcting run as it
+binds any other; after its retirement, the preserved original under
+`.working/imported/import/<run-id>/originals/` is the source of record, the digest bound is its
+recorded `source_sha256`, and the live-bytes check does not apply to the retired path. Retry
+never allocates duplicate IDs.
 
 ## 9. The manifest
 
@@ -1324,6 +1355,12 @@ Existing records, evidence, clean counters and imported high-water values MUST b
 a populated collision, missing ancestral counter or unprovable prestate refuses.
 The upgrade creates no historical records, adoption approval or provenance, changes no posture
 or import status, and adds no imported views.
+The bump changes no record's bytes, but it does change what a legacy importer-authored clean
+record confers, because the section 8.6 firewall keys on provenance: the upgrade report MUST
+enumerate every legacy importer-authored clean record whose current authority the firewall
+withdraws, naming each backlog item that leaves the actionability join, each block that stops
+granting a stop, and each record that ceases to be a current state under section 8.6, so that
+authority change is reported, never silent.
 An unresolved legacy import must be reconciled under its original contract before upgrading;
 legacy LF records and evidence remain readable and are never silently converted.
 A completed legacy import upgrades in place: its `import_status` stays `"complete"`,
@@ -1335,9 +1372,14 @@ Earlier stores compose their applicable deltas with this delta; repeated upgrade
 no-op only after full doctor VALID.
 The 1.3.0 delta remains a target contract until a tested upgrade and its required readers
 activate; import writing is a separate later activation.
-Declaring a spec_version above the tooling's supported version, 1.3.0 on older tooling included,
-is refused at validation rather than treated as supported; only the reserved homes-2 declaration
-of section 4.2 stays recognized, gated on its own activation.
+Declaring a spec_version above the tooling's supported version is refused at validation as
+cannot-evaluate rather than treated as supported; the 1.2.0 reference tooling that ships this
+ceiling already refuses a 1.3.0 declaration. Only the reserved homes-2 declaration of section 4.2
+stays recognized, and that recognition keeps legacy homes-1 grading until its own activation,
+never homes-2 validation. Two residuals are disclosed rather than silent: tooling released before
+this ceiling treats an above-ceiling declaration as legacy and can report it VALID, and the
+recognized homes-2 pair is graded under legacy rules, not refused. Both residuals end when
+pre-ceiling tooling leaves use and homes 2 activates.
 
 ## 10. Views and deliverables
 
@@ -1428,8 +1470,9 @@ the deterministic checks in sections 8.3 and 8.6; the authority firewall is neve
 `import_status = "none"` means clean start with no approved migrate-source import.
 `"partial"` means the adoption receipt enumerates migrate-disposed sources whose completion
 checks are not yet green; it can persist across assistant sessions without a process running.
-`"complete"` means every such source has a green completion result under section 14.1, or that
-a pre-1.3.0 legacy import finished and its preserved legacy run evidence substantiates it; the
+`"complete"` means every such source has a green completion result under section 14.1 whose
+cutover transaction has committed with its landed poststate re-checked, or that a pre-1.3.0
+legacy import finished and its preserved legacy run evidence substantiates it; the
 section 9.2 upgrade preserves that legacy status without fabricating an approval or receipt.
 A partial or complete status that neither an adoption receipt with completion results nor
 preserved legacy import evidence substantiates fails closed, as does a missing, unreadable or
@@ -1440,6 +1483,14 @@ digest, is bounded adoption state: containment reports it as `migration_incomple
 rather than failing it, at `"none"` during a clean start as much as at `"partial"`.
 A digest mismatch or an unenumerated path remains a containment-gate failure at `required`;
 the bounded treatment is never a blanket exemption.
+A deferred view destination (section 14.2), a plan-enumerated migrate or retire source whose
+digest-matched live bytes occupy a declared generated-view destination, receives the same
+bounded treatment for view drift: doctor and the render drift gate validate that view's
+generated bytes prospectively, from the store, without reading the occupied path as the view,
+and report the pending cutover as `migration_incomplete` detail rather than a drift failure, so
+a store awaiting a green completion check reaches VALID with the source bytes still in place. A
+digest mismatch at the occupied path remains a failure at `required`, exactly as for
+containment.
 
 Adoption coverage (which types are populated, which modules are wired, how much of the project's
 operational surface has moved into the store) is a report, never a gate: breadth of adoption is a
@@ -1447,7 +1498,8 @@ journey, and failing a build over it would train bypasses. It stays report-only 
 
 Defaults: scaffolding and clean-start adoption write `posture = "required"` and
 `import_status = "none"`. An adoption with migrate-disposed sources keeps `required` and sets
-`import_status = "partial"` until their completion checks are green, then `"complete"`.
+`import_status = "partial"` until each source's completion check is green and its cutover has
+committed and re-checked (section 14.1), then `"complete"`.
 Import status never weakens posture. Reports carry `migration_incomplete` while an approved
 source or detected file remains unresolved. Weakening the posture (`required` toward `warn`
 or `off`) is a guardrail-configuration change: it takes effect only through the maintainer's
@@ -1521,7 +1573,9 @@ distinguishes first adoption from re-adoption and records a digest-stamped inven
 governance surfaces for each supported assistant platform. Every foreign `.working/` file has
 a disposition before `init-store`; adoption never runs blind init over populated content.
 Apply composes the coupled-init substrate and the journaled adoption operations, with per-operation
-preimage checks and reversal. It ends with rendered views and an adoption receipt plus its
+preimage checks and reversal. It ends with rendered views at every declared destination except
+the deferred view destinations of section 14.2, whose occupying sources it leaves byte-identical
+in place, and with an adoption receipt plus its
 outcome-event chain. A bootstrap `views-ready` milestone alone is not adoption success.
 
 ### 14.1 One approval and completion
@@ -1554,21 +1608,37 @@ The clean-start completion check deterministically verifies the following roster
 4. Operational readiness: the store resolves to the planned identity, and CI asserts store
    presence and identity so absence cannot pass as NOT-APPLICABLE. Doctor validity and
    declared-view byte drift are evaluated against the validated prospective poststate in which
-   every plan-enumerated disposition and same-path publication has executed, so a plan-enumerated
+   every disposition and same-path publication this adoption itself executes has run, while a
+   migrate-disposed source, whose cutover belongs to import completion, stays in place and any
+   view destination it occupies stays deferred (section 14.2), so a plan-enumerated
    old file still occupying its planned destination is not a deadlock, and any drift the plan
    does not account for fails the check. Consumer repointings match the plan.
 5. Wiring: the enforcement pack is installed and probed, with a direct store write denied and
-   sanctioned writer and render paths succeeding. Server-side branch protection is
+   sanctioned writer and render paths succeeding under the same deferral as check 4: a probe
+   never writes a deferred view destination, its render output for such a destination is
+   validated against the prospective poststate, and the probe verifies that the sanctioned
+   paths withhold publication there while the applicable completion check is not green.
+   Server-side branch protection is
    adopter-attested, explicitly outside the local probe's guarantee.
 6. Retirement readiness: each retire-disposed file is present in the live tree and its live
    bytes still equal its plan digest.
 
-Retirement occurs only on a green completion check. Failure or cannot-evaluate reports incomplete,
+Retirement occurs only on a green completion check, and a green result evaluated against a
+prospective poststate is retirement eligibility, never completed adoption by itself. Adoption
+completes only when the journaled cutover transaction that executes the dispositions and
+same-path publications this adoption itself performs has committed, and a post-commit re-check
+has found the landed live poststate equal to the evaluated prospective poststate, digest for
+digest, with a live full doctor VALID, recorded as its own outcome event in the receipt's chain.
+An interrupted or rolled-back cutover leaves adoption incomplete whatever green result preceded
+it; the eligibility stands, the cutover is retried or recovered under the same approved plan,
+and neither the re-check nor the retry needs a new adopter approval. Failure or cannot-evaluate
+reports incomplete,
 retires nothing, and requires a fresh plan to change the approved work. Green proves preservation,
 restorability and operational coverage, never semantic fidelity or fulfilment of old obligations;
 the receipt discloses that limit. An occupied view destination uses a validated prospective
 poststate, preserved preimage and the same journaled transaction for retirement and publication
-(section 14.2); completion checks gate that cutover before removal or replacement.
+(section 14.2); completion checks gate that cutover before removal or replacement, and the
+cutover's own landed re-check completes it.
 
 The enforcement pack freezes the plan-enumerated old files until retirement and protects both
 record series, counters, declared views and evidence. It provides CI and staged-snapshot
@@ -1593,10 +1663,17 @@ and the prompt pack when this contract activates.
 
 For each migrate-disposed source, import completion verifies the preserved original's digest,
 at least one imported record referencing that source or a recorded skip under the approved
-policy, and doctor VALID over both the strict store and the imported series. It records the
-source's result in the adoption receipt's outcome-event chain. Only a green result permits
-that source's retirement through the adoption retirement path; the live preimage must still
-match the plan. When every migrate source is green, `import_status` becomes `"complete"`.
+policy, and doctor VALID over both the strict store and the imported series, evaluated on the
+live tree with any deferred view destination under the section 11 bounded treatment. It records
+the source's result in the adoption receipt's outcome-event chain. A green result is that
+source's retirement eligibility: only it permits the source's retirement through the adoption
+retirement path, in one journaled transaction with any same-path view publication, and the live
+preimage must still match the plan when that transaction runs. The source completes only when
+its cutover transaction has committed and the post-commit re-check has matched the landed
+bytes, the published view where the source occupied one included, against the validated
+poststate; an interruption or rollback leaves the source's result incomplete, retried under the
+same plan without a new approval. When every migrate source completes on those terms,
+`import_status` becomes `"complete"`.
 This proves source accounting and preservation, not byte-level mapping coverage or semantic
 fidelity. No writer-side leftover accounting is required.
 
@@ -1613,6 +1690,11 @@ Legacy runs may occupy `.working/staging/import/<run-id>/` or
 old acceptance records describe those runs and never authorize a new adoption or retirement.
 A legacy import completed under the pre-1.3.0 contract keeps its recorded status, substantiated
 by its preserved run evidence (section 11); no retrospective approval or receipt is fabricated.
+Preserved legacy run evidence is that run's durable archive in its recorded legacy home, for
+the reference tooling `.aiqt/import-archive/<run-id>/`, holding the run's acceptance record and
+its evidence inventory in the retained legacy format; substantiation re-reads that inventory
+and digest-matches every file it enumerates, and a missing, unreadable or digest-mismatched
+item leaves the status unsubstantiated, failing closed under section 11.
 Old import and ingest orchestration is retired by staged decoupling only after clean-start
 adoption ships. Required evidence is re-read and digest-matched in its durable home before staging
 reclamation. Reclamation is journaled and idempotent; an unreadable tree holds the run.
@@ -1635,10 +1717,20 @@ The plan records one disposition per foreign file from `keep`, `migrate`, `move`
 - **Migrate.** Keep the source frozen now for post-adoption import into the separate imported
   series. Preserve its exact bytes and retire it only after its source completion check is green.
   There is no imported view. Where an old file occupies a clean generated-view destination,
-  validate the prospective poststate and preserve the preimage, then retire and publish in the
-  same journaled transaction only after the applicable completion check is green. A pending
+  that path is a deferred view destination for as long as the plan-enumerated source's
+  digest-matched bytes occupy it and the applicable completion check is not yet green. One
+  deferral rule binds every sanctioned path: adoption apply, `opf render`, every `opf record`
+  subcommand including `import`, and every check 5 probe validate the view's generated bytes
+  prospectively and withhold the same-path publication, the deferred path sits outside a
+  writer's planned destinations so no cleanliness gate reads it, doctor grades it under the
+  section 11 bounded treatment, and no operation overwrites the source or requires the live
+  tree to hold the generated bytes before the cutover. Validate the prospective poststate and
+  preserve the preimage, then retire and publish in the
+  same journaled transaction only after the applicable completion check is green, re-checking
+  the landed bytes under section 14.1. A pending
   migrate source cannot be overwritten to make adoption pass: the occupied destination's
-  publication waits, in that same transaction, for the green check.
+  publication waits, in that same transaction, for the green check. A retire-disposed source at
+  a declared view destination defers identically, cut over by the adoption completion path.
 - **Move.** Relocate to a named destination outside the managed store, or by default to
   `.working/archive/moved/<source-path>`, preserving substructure. An occupied destination is a
   collision finding, never an overwrite. An explicit destination inside the store tree is valid
@@ -1729,6 +1821,14 @@ The gates in this standard are strong where they are strong and say so where the
 - The unreleased worklog tail is mutable until release: an entry there MAY be corrected in place, a
   guarantee that rests on review and version-control history rather than machine enforcement; machine
   freezing and immutability begin at release cut.
+- On homes 1, the adoption and import control areas (`.working/imported/<kind>/<run-id>/`,
+  `.working/archive/adoption/<run-id>/` and `.working/archive/moved/`) are recognized by
+  containment but not re-enumerated by doctor: the completion checks verify their evidence
+  digests when they run, and C-EVIDENCE-ENUM is inactive until homes 2 (section 4.2), so a file
+  added or altered there after completion, a tampered retire preimage no record references
+  included, is outside doctor's coverage until homes 2 activates. Version-control history over
+  the tracked store is the control, and C-IMPORTED-PROVENANCE still re-verifies every preserved
+  original an imported record references.
 - Store resolution fails closed on a pointer that does not resolve and on zero or multiple
   manifests at the target; it cannot detect a second store that no pointer names, placed somewhere
   the tooling was never aimed.

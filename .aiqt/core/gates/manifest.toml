@@ -562,10 +562,15 @@ platform = "ci"
 default = "block"
 class = "c"
 residue = """
-The default entry checks the homes spec contract and rendered gitignore block, and pins the 1.3.0
-adoption and import target text (sections 4.2, 6.1, 8.x, 11, 12, 14 and 14.x, 15) as
-complete-sentence contract pins; the self-test proves each pin unique in its section and deletes
-each pinned operative occurrence independently (never a replace-all), including in 4.2. The
+The default entry checks the homes spec contract and rendered gitignore block, and tiles the
+spec sections the 1.3.0 bump touches (the preamble and sections 1, 4.2, 4.4, 4.6, 5.7, 6.1, 8.1
+to 8.6, 8.8, 9, 9.2, 11, 12, 14, 14.1, 14.2, 14.3, 15, 17) with ordered contract pins whose
+space-joined concatenation must equal each section's normalized text, so deleting any sentence
+there, prose, list row, table row or fenced block included, turns the gate red; the self-test
+proves that tiling equality and a dropped-pin flip per section, proves each pin unique in its
+section, and deletes each pinned operative occurrence independently (never a replace-all),
+including in 4.2. Added contradictions and pin-preserving rewordings that only append or wrap
+text remain review's to catch. The
 self-test also checks
 constructors, discovery reservations and inert writer defaults, plus in-memory boundary fixtures:
 legacy (homes 1) behaviour kept for every store until activation (grading, detect rows, messages,
