@@ -871,9 +871,20 @@ def _roster_checks():
             ("roster/unparseable-ci-refused", ci,
              ci_text + '\n      - run: python3 -I -B tools/check_secrets.py --self-test | cat\n',
              ci + ": registry diagnostics:"),
-            ("roster/dynamic-arguments-refused", local,
-             add_local('\nrun_gate "dynamic" python3 -I -B tools/check_secrets.py --self-test --base "$PUSH_BEFORE"\n'),
+            # A reviewed masked expression survives extraction only in the CI
+            # workflow; the selection guard must still refuse the masked
+            # member as a dynamic self-test argument.
+            ("roster/dynamic-arguments-refused", ci,
+             ci_text + '\n      - name: Dynamic probe'
+                       '\n        run: python3 -I -B tools/check_secrets.py'
+                       ' --self-test --base "$PUSH_BEFORE"\n',
              "dynamic self-test arguments:"),
+            # In the LOCAL runner the same spelling is refused at extraction:
+            # the gate-word character allowlist admits no expansion, so a
+            # masked flag value never reaches selection there.
+            ("roster/local-masked-flag-refused", local,
+             add_local('\nrun_gate "dynamic" python3 -I -B tools/check_secrets.py --self-test --base "$PUSH_BEFORE"\n'),
+             local + ": registry diagnostics:"),
             ("roster/launcher-refused", local,
              add_local('\nrun_gate "launcher" python3 -B -I tools/check_secrets.py --self-test\n'),
              "unsupported self-test launcher:"),

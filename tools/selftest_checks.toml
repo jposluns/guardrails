@@ -426,6 +426,7 @@ expected-check-ids = [
   "env/opf-lifecycle-bypass-denied",
   "env/registered-opf-lifecycles",
   "roster/dynamic-arguments-refused",
+  "roster/local-masked-flag-refused",
   "roster/launcher-refused",
   "roster/empty-selftests-refused",
   "roster/prefixed-invalid-suite-refused",

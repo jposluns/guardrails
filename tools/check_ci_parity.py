@@ -11,11 +11,14 @@ Identity is the normalized command, including all script arguments. Python and s
 launcher words are removed. The recognized interpreter-only flags -I, -B, -E, -s,
 -P, and -u, including glued forms such as -IB, do not affect identity. The value of a
 runtime-derived flag (--base, --protected, --head) is masked as <ref:expression>,
-preserving which expression supplied it, only when it carries a shell expansion that is
-byte-for-byte one of the reviewed MASKED_REF_EXPRESSIONS (any other expansion there is
-cannot-evaluate, never masked), so a change among runtime spellings (including one
-making two refs identical, a self-comparison) diverges; a literal value stays in
-identity, so two different literals diverge. A ${{ }} GitHub expression inside a
+preserving which expression supplied it, only in the CI workflow and only when it
+carries a shell expansion that is byte-for-byte one of the reviewed
+MASKED_REF_EXPRESSIONS (any other expansion there is cannot-evaluate, never masked),
+so a change among runtime spellings (including one making two refs identical, a
+self-comparison) diverges; a literal value stays in identity, so two different
+literals diverge. In the local runner every run_gate word is held to a character
+allowlist that admits no expansion at all, so a runtime-derived flag value there is
+refused, never masked. A ${{ }} GitHub expression inside a
 gate command is cannot-evaluate, not masked. Every other argument remains
 order-preserving and identity-relevant. Duplicates collapse because comparison is
 set-based.
@@ -42,8 +45,9 @@ cannot-evaluate rather than a clean pass. Fail-closed cases include an unknown
 top-level or job-level workflow key, an exit outside the exact terminal summary
 blocks or the top-level directory-binding line before the first gate, unbalanced
 if/fi nesting in the runner, job content without a job mapping, a run_gate()
-dispatcher body outside its recognized shape, a run_gate label that is not a plain
-literal, a masked runtime-value flag whose expression is not reviewed, and a runner
+dispatcher body outside its recognized shape, a run_gate word (label or argument)
+outside the gate-line character allowlist, a masked runtime-value flag in the
+workflow whose expression is not reviewed, and a runner
 assignment to failed or failed_names other than the top-level initializer before the
 first gate or the gitleaks failure branch. A runner line holding $[ ], or naming
 failed or failed_names inside $(( )) or inside a ${ } with a subscript or a colon, is
@@ -70,9 +74,9 @@ each expansion must still be a plain $NAME, ${NAME} or $? of a name the runner
 itself sets or manages (failed, notrun, failed_names, name, rc, gitleaks_rc, HOME,
 PATH): under set -u, a plain expansion of any other, possibly unset, variable
 (x=$BASH_ENV) ends the runner mid-roster exactly as an abort expansion does. A
-${...:?...} abort expansion is refused on ANY runner line, including inside a masked
-runtime-value flag on a run_gate line, ahead of the masked-expression allowlist that
-also refuses every unreviewed expression there, because it exits the runner
+${...:?...} abort expansion is refused on ANY runner line, including inside a
+runtime-value flag on a run_gate line, ahead of the gate-word character allowlist
+that also refuses every expansion spelling there, because it exits the runner
 mid-roster with a non-zero status when its variable is unset.
 Deeper nested non-gate YAML (under on:, env:, with:, or strategy:) is structurally
 recognized but not exhaustively schema-validated; the shadow scan still prevents a
@@ -87,21 +91,35 @@ like a double-quoted one; and a duplicate run: key within one step is counted as
 members although YAML keeps one. The shadow scan has one soft edge: exotic quoting
 outside the supported grammar could hide a tools/ string from comment stripping.
 The runner's failure-state rules are lexical and shape-based: they validate each
-line against the allowlist, not reachability or runtime values. Every reported
-smuggling spelling is now refused: the offset-carried one (y=failed=0 then
-x=${PATH:y:0}) and the arithmetic-assignment class (RANDOM=failed=0) as outside
-the exact-line grammar; an expanded run_gate label (${x=failed=0}$((x)),
-$((notrun=0)), $BASH_ENV) because a label must be a plain literal with no $ or
-backquote, the only label shape either real runner contains; and an assigning,
-aborting or otherwise unreviewed masked flag value (${x=failed=0}, ${stub_log?},
-$((1/0))) because a runtime-derived --base, --protected or --head value must be
-byte-for-byte one of the reviewed MASKED_REF_EXPRESSIONS before it is masked.
-The ${...:?...} abort-expansion rule still screens every line first, so a masked
-${...:?...} abort is refused twice over; a self-test fixture pins that rule's own
-diagnostic and fails without it. What the grammar accepts and still cannot see
-into is exactly two surfaces: the content of a gate script the runner invokes,
-and the environment the runner inherits, which can change what an accepted
-literal line or a reviewed expression resolves to at runtime.
+line against the allowlist, not reachability or runtime values. Every run_gate
+line is screened by ONE character-allowlist rule over every word after quote
+removal: the label must fully match [a-z0-9][a-z0-9-]* (every label in the two
+real runners does) and every other word must fully match [A-Za-z0-9_./=:-]+, a
+set holding no shell metacharacter, so a word carrying any of { } * ? [ ] ~ $
+or a backquote, quote, backslash or whitespace is refused statically. That
+refuses the brace, glob and tilde words bash expands with no $ in them
+({d4,eval,"failed=0;"}, {dashes3,true}, {x,exit}, ~ and op[f]/tools/[or]* as
+labels; {--self-test,} and * as arguments) as well as every $ and backquote
+spelling the earlier two-character blocklist caught (${x=failed=0}$((x)),
+$((notrun=0)), $BASH_ENV). The same rule admits no expansion in an argument, so
+a runtime-derived --base, --protected or --head value is refused in the local
+runner outright; the reviewed MASKED_REF_EXPRESSIONS apply only to the CI
+workflow, where an assigning, aborting or otherwise unreviewed expression
+(${x=failed=0}, ${stub_log?}, $((1/0))) stays cannot-evaluate rather than
+masked. A reviewed workflow expression still resolves only at runtime: its
+variable can be empty (the flag then receives an empty value) or unset (each
+reviewed step's run block sets -u, so the step then ends early with a non-zero
+status); token-level parity sees neither. The ${...:?...} abort-expansion rule
+still screens every runner line first, so a masked ${...:?...} abort spelling
+is refused twice over; a self-test fixture pins that rule's own diagnostic and
+fails without it. The gitleaks-block lines (the PATH append, the gitleaks_rc
+capture and the gitleaks exit-code echo) are accepted only inside their real
+blocks, as notrun=0, set and cd already are, so a copy placed mid-roster
+cannot end the runner early under set -u through an unbound HOME or
+gitleaks_rc. What the grammar accepts and still cannot see into is exactly two
+surfaces: the content of a gate script the runner invokes, and the environment
+the runner inherits, which can change what an accepted literal line resolves
+to at runtime.
 The --self-test backs the rules at runtime with a scratch copy
 of the live runner: no gate failing, gitleaks and leaks failing together, gitleaks failing alone,
 and each registered gate failing alone. Those scenarios run in parallel, so every
@@ -134,9 +152,12 @@ CI_SOURCE = ".github/workflows/quality.yml"
 # produces a visible divergence until this reviewed set is extended.
 RUNTIME_VALUE_FLAGS = frozenset({"--base", "--protected", "--head"})
 
-# The only runtime-derived expressions a masked flag value may carry, enumerated from
-# the reviewed surfaces (.github/workflows/quality.yml; neither shell runner passes a
-# runtime-derived value). Membership is byte-for-byte: bash can assign inside an
+# The only runtime-derived expressions a masked flag value may carry, enumerated
+# from the one reviewed surface that may carry them, .github/workflows/quality.yml.
+# The local runner's gate-word allowlist admits no expansion, so this set never
+# applies there: neither real runner passes a runtime-derived value, and a local
+# spelling that tried would be refused as a non-literal gate word.
+# Membership is byte-for-byte: bash can assign inside an
 # expansion (${x=failed=0} assigns the string failed=0 to x, and a later $((x)) or
 # ${PATH:x:0} evaluates it as arithmetic) or abort there (${x?} without a colon,
 # $((1/0))), so an unreviewed expression is cannot-evaluate rather than masked, and a
@@ -587,6 +608,22 @@ def _safe_simple(tokens):
 
 FAILURE_STATE_WORD_RE = re.compile(r"(?<![A-Za-z0-9_])failed(?:_names)?(?![A-Za-z0-9_])")
 
+# ONE rule for every word of every run_gate line, applied to the shlex
+# quote-removed tokens ahead of any other gate handling: a strict character
+# ALLOWLIST with no shell metacharacters at all. Earlier rounds each blocked
+# one expansion construct ($ and backquote last); bash also expands brace
+# ({a,b}), glob (*, ?, [..]) and tilde (~) words that carry no $, so only a
+# full-word allowlist is literal-only. The label alphabet is
+# [a-z0-9][a-z0-9-]*, which every label in the two real runners already
+# matches. The argument alphabet [A-Za-z0-9_./=:-]+ is derived from the
+# complete word inventory of the two real runners' gate lines (letters,
+# digits, _ . / and -) plus = and :, to which bash gives no expansion or
+# globbing meaning inside an argument word; every brace, glob, tilde, dollar,
+# backquote, quote, backslash, whitespace or other metacharacter spelling
+# falls outside both alphabets and is refused statically.
+GATE_LABEL_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
+GATE_WORD_RE = re.compile(r"[A-Za-z0-9_./=:-]+")
+
 # The only runner lines outside run_gate() that may assign failure state after the
 # initializers; extract_local accepts each once, inside the gitleaks failure branch.
 GITLEAKS_FAILURE_UPDATES = (
@@ -599,14 +636,31 @@ GITLEAKS_FAILURE_UPDATES = (
 # [ ... ] test, bare or behind if, is outside the allowlist. This exact-shape set is
 # what rejects a -v operand (whose subscript can assign), any NAME[...] subscript
 # operand, and every unlisted operator or operand form.
+# The HOME guard is the only block in which the real runner appends the
+# user-local gitleaks directory to PATH; extract_local records its depth so
+# the PATH append is accepted nowhere else.
+HOME_GUARD_LINE = (
+    'if ! command -v gitleaks >/dev/null 2>&1 && '
+    '[ -n "${HOME:-}" ] && '
+    '[ -x "$HOME/.local/bin/gitleaks" ]; then')
+
 RUNNER_TEST_LINES = frozenset({
     'if [ "$failed" -ne 0 ]; then',
     'if [ "$notrun" -ne 0 ]; then',
-    'if ! command -v gitleaks >/dev/null 2>&1 && '
-    '[ -n "${HOME:-}" ] && '
-    '[ -x "$HOME/.local/bin/gitleaks" ]; then',
+    HOME_GUARD_LINE,
     'if command -v gitleaks >/dev/null 2>&1; then',
 })
+
+# The gitleaks-block lines are position-checked the way notrun=0 and cd
+# already are, never accepted by bare membership: each is accepted only
+# inside its real block. Placed anywhere else, the PATH append outside the
+# HOME guard and the exit-code echo without a prior gitleaks_rc capture each
+# end the runner mid-roster under set -u through an unbound variable, and a
+# stray gitleaks_rc=$? captures an unrelated exit status.
+PATH_APPEND_LINE = 'PATH="$PATH:$HOME/.local/bin"'
+GITLEAKS_RC_LINE = "gitleaks_rc=$?"
+GITLEAKS_FAILED_ECHO = (
+    'echo "GATE FAILED: secrets (gitleaks) (exit ${gitleaks_rc})"')
 
 # The only non-gate, non-test scaffold lines the two real runners contain outside
 # run_gate(), the failure-state initializers and updates, and the position-checked
@@ -620,16 +674,16 @@ RUNNER_TEST_LINES = frozenset({
 # assigns (x=([failed=0]=1)), and an expansion of an unset variable aborts under
 # set -u (x=$BASH_ENV, echo "$stub_log"). notrun=0 is accepted only at top level
 # before the first gate, because a later reset would hide the NOT RUN disclaimer.
+# The gitleaks-block lines (PATH_APPEND_LINE, GITLEAKS_RC_LINE and
+# GITLEAKS_FAILED_ECHO) are deliberately NOT members here: extract_local
+# accepts each of them only inside its real block.
 RUNNER_SCAFFOLD_LINES = frozenset({
     # tools/run_all_checks.sh
     "export PYTHONDONTWRITEBYTECODE=1",
-    'PATH="$PATH:$HOME/.local/bin"',
-    "gitleaks_rc=$?",
     "notrun=1",
     "echo",
     'echo "--- secrets (gitleaks) ---"',
     'echo "PASS: gitleaks found no leaks"',
-    'echo "GATE FAILED: secrets (gitleaks) (exit ${gitleaks_rc})"',
     'echo "NOT RUN: gitleaks is not on PATH locally. CI still runs it, so this is a gap"',
     'echo "  in THIS run only, not in the pipeline. Install it to close the gap:"',
     'echo "  see the pinned version and checksum in .github/workflows/quality.yml"',
@@ -704,10 +758,12 @@ def _abort_expansion(code):
     variable is unset (the disclosed harness-detection trigger), that expansion exits
     the runner mid-roster with a non-zero status, losing the remaining gates and the
     FAILED GATES summary; no line of either real runner uses one. This check runs
-    before the run_gate branch, so it also refuses an abort carried inside a masked
-    runtime-value flag, ahead of the MASKED_REF_EXPRESSIONS screen that also refuses
-    every unreviewed expression there; a vector 26 fixture pins this rule's own
-    diagnostic and fails without it."""
+    before the run_gate branch, so it also refuses an abort carried inside a
+    runtime-value flag, ahead of the gate-word character allowlist that also
+    refuses every expansion spelling there, and ahead of the
+    MASKED_REF_EXPRESSIONS screen that refuses every unreviewed expression on the
+    CI path; a vector 26 fixture pins this rule's own diagnostic and fails
+    without it."""
     return any(":?" in span for span in _expansion_spans(code, "${", "{", "}"))
 
 
@@ -786,6 +842,8 @@ def extract_local(text):
     gitleaks_depth = None
     gitleaks_else = False
     gitleaks_updates = set()
+    gitleaks_rc_set = False
+    home_guard_depth = None
     for line_number, raw in enumerate(text.splitlines(), 1):
         if line_number == 1 and raw == "#!/usr/bin/env bash":
             continue
@@ -821,12 +879,16 @@ def extract_local(text):
             if if_depth == gitleaks_depth:
                 gitleaks_depth = None
                 gitleaks_else = False
+            if if_depth == home_guard_depth:
+                home_guard_depth = None
             if if_depth == 0:
                 if_unbalanced = True
             else:
                 if_depth -= 1
         elif stripped.endswith("; then"):
             if_depth += 1
+            if stripped == HOME_GUARD_LINE:
+                home_guard_depth = if_depth
         elif stripped == "else" and if_depth == gitleaks_depth:
             gitleaks_else = True
 
@@ -887,20 +949,36 @@ def extract_local(text):
                     "run_gate needs a label and command",
                 ))
                 continue
-            # The label must be a plain literal: both real runners use only
-            # literal labels, and bash expands a label before run_gate runs, so
-            # ${x=failed=0} with a $((x)) or ${PATH:x:0} carrier assigns failure
-            # state, $((notrun=0)) hides the NOT RUN disclaimer, and $BASH_ENV
-            # aborts under set -u. A $ or backquote survives quote removal, so
-            # checking the token refuses every expansion spelling.
-            if "$" in tokens[1] or "`" in tokens[1]:
+            # ONE rule covers every word of the line, on the quote-removed
+            # tokens: a strict character allowlist with no shell
+            # metacharacters (GATE_LABEL_RE for the label, GATE_WORD_RE for
+            # every other word). Bash expands the line before run_gate runs,
+            # and brace ({a,b}), glob (*, ?, [..]) and tilde words expand
+            # with no $ in them: an expanded label shifts "$@" and runs a
+            # different command, and an expanded argument changes what the
+            # gate receives, so any word outside its alphabet is refused.
+            if not GATE_LABEL_RE.fullmatch(tokens[1]):
                 diagnostics.append(_diagnostic(
                     source,
                     line_number,
                     "run-gate-label",
-                    "run_gate label {!r} carries an expansion or substitution; "
-                    "a label must be a plain literal, the only label shape the "
-                    "real runners contain".format(tokens[1]),
+                    "run_gate label {!r} does not fully match "
+                    "[a-z0-9][a-z0-9-]*, the only label alphabet the real "
+                    "runners contain; a label outside it can expand before "
+                    "run_gate runs".format(tokens[1]),
+                ))
+                continue
+            unsafe = [word for word in tokens[2:]
+                      if not GATE_WORD_RE.fullmatch(word)]
+            if unsafe:
+                diagnostics.append(_diagnostic(
+                    source,
+                    line_number,
+                    "run-gate-word",
+                    "run_gate word {!r} does not fully match "
+                    "[A-Za-z0-9_./=:-]+; a gate word must carry no shell "
+                    "metacharacter, expansion, quote or whitespace".format(
+                        unsafe[0]),
                 ))
                 continue
             normalized = normalize(tokens[2:])
@@ -922,6 +1000,19 @@ def extract_local(text):
                 and tokens[1].lstrip("./") == "gitleaks"):
             gitleaks_depth = if_depth
             gitleaks_else = False
+            unsafe = [word for word in tokens[1:-2]
+                      if not GATE_WORD_RE.fullmatch(word)]
+            if unsafe:
+                diagnostics.append(_diagnostic(
+                    source,
+                    line_number,
+                    "run-gate-word",
+                    "gitleaks gate word {!r} does not fully match "
+                    "[A-Za-z0-9_./=:-]+; a gate word must carry no shell "
+                    "metacharacter, expansion, quote or whitespace".format(
+                        unsafe[0]),
+                ))
+                continue
             normalized = normalize(tokens[1:-2])
             if normalized.ok:
                 _add_member(
@@ -940,8 +1031,10 @@ def extract_local(text):
         # validated whole). These rules are lexical and shape-based: together with the
         # exact-line scaffold membership below they reject direct assignments, every
         # assignment, export or echo spelling the real runners do not contain, every
-        # non-plain or unlisted-name expansion, every expanded run_gate label, every
-        # unreviewed masked flag expression, and every unlisted test shape, not a
+        # non-plain or unlisted-name expansion, every run_gate word outside the
+        # gate-line character allowlist (every expanded label, every brace, glob or
+        # tilde word, and every runtime-derived flag value, reviewed or not), and
+        # every unlisted test shape, not a
         # reset smuggled through content they accept (a gate script, the inherited
         # environment). The
         # self-test exercises the declared scenarios; harness detection and untested
@@ -995,6 +1088,27 @@ def extract_local(text):
             # Only where the real runner puts it: top level, before any gate. A
             # later notrun=0 would clear the NOT RUN state and hide its disclaimer.
             scaffold = if_depth == 0 and not members
+        elif stripped == PATH_APPEND_LINE:
+            # Only where the real runner puts it: inside the HOME guard, which
+            # has just proven HOME non-empty. Outside that guard $HOME may be
+            # unset, and set -u then ends the runner mid-roster.
+            scaffold = (home_guard_depth is not None
+                        and if_depth == home_guard_depth)
+        elif stripped == GITLEAKS_RC_LINE:
+            # Only where the real runner puts it: the gitleaks failure branch,
+            # where $? is the gitleaks exit code. Anywhere else the line
+            # captures an unrelated status and vouches for a variable the
+            # exit-code echo below then trusts.
+            scaffold = if_depth == gitleaks_depth and gitleaks_else
+            if scaffold:
+                gitleaks_rc_set = True
+        elif stripped == GITLEAKS_FAILED_ECHO:
+            # Only after gitleaks_rc is captured in the same failure branch.
+            # Anywhere else ${gitleaks_rc} is unbound, and set -u then ends
+            # the runner mid-roster, losing the remaining gates and the
+            # FAILED GATES list.
+            scaffold = (if_depth == gitleaks_depth and gitleaks_else
+                        and gitleaks_rc_set)
         elif stripped in RUNNER_SCAFFOLD_LINES:
             # Exact membership decides; the named-expansion screen is belt and
             # braces so a future scaffold addition cannot widen the expansion
@@ -3218,6 +3332,33 @@ def self_test():
         live_extraction = extract_local(live_runner)
         if live_extraction.diagnostics:
             failures.append("26 live runner: {!r}".format(live_extraction.diagnostics))
+        # The standalone OPF runner, adapted exactly as
+        # tools/selftest_git_fixture_env.py adapts it (validated directory
+        # binding and terminal exit 0 removed, $here rebased), must also give
+        # zero diagnostics under the same grammar.
+        try:
+            opf_runner = (
+                ROOT / "opf" / "tools" / "run_all_checks.sh"
+            ).read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            failures.append(
+                "26 cannot read standalone runner: {!r}".format(exc))
+        else:
+            opf_binding = (
+                'here="$(cd "$(dirname "$0")" && pwd)" || exit 2')
+            opf_lines = opf_runner.splitlines()
+            if opf_lines.count(opf_binding) != 1 or opf_lines[-1] != "exit 0":
+                failures.append("26 standalone runner scaffold drift")
+            else:
+                opf_lines[opf_lines.index(opf_binding)] = "# validated binding"
+                opf_lines[-1] = "# validated terminal exit"
+                adapted = "\n".join(opf_lines).replace(
+                    '"$here/', '"opf/tools/')
+                adapted_diagnostics = extract_local(adapted).diagnostics
+                if adapted_diagnostics:
+                    failures.append(
+                        "26 adapted standalone runner: {!r}".format(
+                            adapted_diagnostics))
         def mutate(*edits):
             """Apply (old, new) edits to the live runner; None if an old text is not unique."""
             mutant = live_runner
@@ -3408,7 +3549,7 @@ def self_test():
             failures.append("26 offset-carried indirect reset was not rejected")
         # qa6 label rejections: each reported spelling smuggles an assignment or an
         # abort into the run_gate label, the channel the round-6 review found open.
-        # Each fails without the run-gate-label literal check.
+        # Each fails without the GATE_LABEL_RE character-allowlist fullmatch.
         label_fixtures = (
             ("assign-default label with arithmetic carrier",
              mutate((gitleaks,
@@ -3441,59 +3582,148 @@ def self_test():
             elif not any(item.code == "run-gate-label"
                          for item in extract_local(mutant).diagnostics):
                 failures.append("26 expanded label was not rejected: " + name)
-        # qa6 masked-value rejections: each reported spelling assigns failure state
-        # through bash's value evaluation, aborts mid-roster, or expands an
-        # unreviewed variable inside a masked runtime-value flag. Each fails
-        # without the MASKED_REF_EXPRESSIONS screen.
-        masked_fixtures = (
-            ("assign-default masked value with offset carrier",
-             mutate((gitleaks,
-                     'run_gate "masked-probe" python3 -I -B '
-                     "tools/check_version_monotonicity.py "
-                     '--base "${x=failed=0}${PATH:x:0}"\n' + gitleaks))),
-            ("two-stage masked assignment across flags",
-             mutate((gitleaks,
-                     'run_gate "masked-probe" python3 -I -B tools/check_leaks.py '
-                     '--base "${x=failed=0}" --head "$((x))"\n' + gitleaks))),
-            ("masked failed_names assignment",
-             mutate((gitleaks,
-                     'run_gate "masked-probe" python3 -I -B tools/check_leaks.py '
-                     '--base "${x=failed_names=0}"\n' + gitleaks))),
-            ("harness-conditional colon-free masked assignment",
-             mutate((gitleaks,
-                     'run_gate "masked-probe" python3 -I -B tools/check_leaks.py '
-                     '--base "${z=failed=failed*(SECONDS<31)}"\n' + gitleaks))),
-            ("colonless abort expansion in a masked value",
-             mutate((gitleaks,
-                     'run_gate "masked-probe" python3 -I -B tools/check_leaks.py '
-                     '--base "${stub_log?}"\n' + gitleaks))),
-            ("arithmetic abort in a masked value",
-             mutate((gitleaks,
-                     'run_gate "masked-probe" python3 -I -B tools/check_leaks.py '
-                     '--head "$((1/0))"\n' + gitleaks))),
-            ("unreviewed plain expansion in a masked value",
-             mutate((gitleaks,
-                     'run_gate "masked-probe" python3 -I -B tools/check_leaks.py '
-                     '--base "$BASH_ENV"\n' + gitleaks))),
+        # qa7 label rejections: brace, glob and tilde labels expand with no $
+        # in them, so the previous two-character blocklist was not
+        # literal-only; the GATE_LABEL_RE fullmatch refuses each statically.
+        # Each fails without the character-allowlist change.
+        qa7_labels = (
+            ("brace label resetting failed", '{d4,eval,"failed=0;"}'),
+            ("brace label splitting into two gates", "{dashes3,true}"),
+            ("brace label exiting mid-roster", "{x,exit}"),
+            ("tilde label", "~"),
         )
-        for name, mutant in masked_fixtures:
+        for name, label in qa7_labels:
+            mutant = mutate((gitleaks,
+                             "run_gate " + label + " python3 -I -B "
+                             "tools/check_no_dashes.py\n" + gitleaks))
             if mutant is None:
-                failures.append("26 masked fixture drift: " + name)
-            elif not any(item.code == "masked-value"
+                failures.append("26 label fixture drift: " + name)
+            elif not any(item.code == "run-gate-label"
                          for item in extract_local(mutant).diagnostics):
                 failures.append(
+                    "26 non-literal label was not rejected: " + name)
+        glob_label = mutate((
+            'run_gate "dashes"    python3 -I -B tools/check_no_dashes.py',
+            "run_gate op[f]/tools/[or]* python3 -I -B tools/check_no_dashes.py"))
+        if glob_label is None:
+            failures.append("26 label fixture drift: glob label")
+        elif not any(item.code == "run-gate-label"
+                     for item in extract_local(glob_label).diagnostics):
+            failures.append("26 glob label was not rejected")
+        # qa7 argument rejections: a brace or glob ARGUMENT expands the same
+        # way, so GATE_WORD_RE screens every non-label word too.
+        qa7_words = (
+            ("brace argument",
+             'run_gate "brace-args" python3 -I -B tools/check_secrets.py '
+             "{--self-test,}\n"),
+            ("glob argument",
+             'run_gate "glob-args" python3 -I -B tools/check_secrets.py *\n'),
+        )
+        for name, line in qa7_words:
+            mutant = mutate((gitleaks, line + gitleaks))
+            if mutant is None:
+                failures.append("26 word fixture drift: " + name)
+            elif not any(item.code == "run-gate-word"
+                         for item in extract_local(mutant).diagnostics):
+                failures.append(
+                    "26 expanding argument was not rejected: " + name)
+        # qa7 placement rejections: the gitleaks-block lines are accepted
+        # only in their real blocks; each copy below sits mid-roster, or
+        # ahead of the gitleaks_rc capture, and is refused as unclassified.
+        placement_fixtures = (
+            ("gitleaks exit-code echo outside the failure branch",
+             mutate((gitleaks,
+                     'echo "GATE FAILED: secrets (gitleaks) '
+                     '(exit ${gitleaks_rc})"\n' + gitleaks))),
+            ("gitleaks_rc capture outside the failure branch",
+             mutate((gitleaks, "gitleaks_rc=$?\n" + gitleaks))),
+            ("PATH append outside the HOME guard",
+             mutate((gitleaks,
+                     'PATH="$PATH:$HOME/.local/bin"\n' + gitleaks))),
+            ("exit-code echo ahead of the gitleaks_rc capture",
+             mutate(("    gitleaks_rc=$?\n    failed=1\n",
+                     '    echo "GATE FAILED: secrets (gitleaks) '
+                     '(exit ${gitleaks_rc})"\n    failed=1\n'))),
+        )
+        for name, mutant in placement_fixtures:
+            if mutant is None:
+                failures.append("26 placement fixture drift: " + name)
+            elif not any(item.code == "unclassified-line"
+                         for item in extract_local(mutant).diagnostics):
+                failures.append(
+                    "26 misplaced scaffold was not rejected: " + name)
+        # qa6 masked-value rejections, now behind two independent screens. In
+        # the LOCAL runner the word allowlist refuses every $-carrying gate
+        # word outright (run-gate-word), so a masked flag value never reaches
+        # _mask_value there; those assertions fail without the character
+        # allowlist. The MASKED_REF_EXPRESSIONS screen still guards the CI
+        # path (normalize on a workflow run: command), where each spelling
+        # assigns failure state through bash's value evaluation, aborts
+        # mid-step, or expands an unreviewed variable; the normalize
+        # assertions fail without that screen.
+        masked_fixtures = (
+            ("assign-default masked value with offset carrier",
+             "python3 -I -B tools/check_version_monotonicity.py "
+             '--base "${x=failed=0}${PATH:x:0}"'),
+            ("two-stage masked assignment across flags",
+             "python3 -I -B tools/check_leaks.py "
+             '--base "${x=failed=0}" --head "$((x))"'),
+            ("masked failed_names assignment",
+             "python3 -I -B tools/check_leaks.py "
+             '--base "${x=failed_names=0}"'),
+            ("harness-conditional colon-free masked assignment",
+             "python3 -I -B tools/check_leaks.py "
+             '--base "${z=failed=failed*(SECONDS<31)}"'),
+            ("colonless abort expansion in a masked value",
+             "python3 -I -B tools/check_leaks.py "
+             '--base "${stub_log?}"'),
+            ("arithmetic abort in a masked value",
+             "python3 -I -B tools/check_leaks.py "
+             '--head "$((1/0))"'),
+            ("unreviewed plain expansion in a masked value",
+             "python3 -I -B tools/check_leaks.py "
+             '--base "$BASH_ENV"'),
+        )
+        for name, command in masked_fixtures:
+            tokenized = _tokenize(command)
+            normalized = normalize(tokenized.value) if tokenized.ok else None
+            if (normalized is None or normalized.ok
+                    or normalized.code != "masked-value"):
+                failures.append(
                     "26 unreviewed masked value was not rejected: " + name)
-        # A reviewed expression still masks: the screen must refuse the unreviewed
-        # spellings without refusing the forms the reviewed surfaces use.
-        reviewed = mutate((gitleaks,
-                           'run_gate "masked-probe" python3 -I -B '
-                           'tools/check_leaks.py --base "$PUSH_BEFORE"\n'
-                           + gitleaks))
-        if reviewed is None:
-            failures.append("26 masked fixture drift: reviewed expression")
-        elif any(item.code in ("masked-value", "run-gate-label")
-                 for item in extract_local(reviewed).diagnostics):
-            failures.append("26 reviewed masked expression was refused")
+            mutant = mutate((gitleaks,
+                             'run_gate "masked-probe" ' + command + "\n"
+                             + gitleaks))
+            if mutant is None:
+                failures.append("26 masked fixture drift: " + name)
+            elif not any(item.code == "run-gate-word"
+                         for item in extract_local(mutant).diagnostics):
+                failures.append(
+                    "26 local masked flag word was not refused: " + name)
+        # MINOR-2 (qa7): neither real runner passes a runtime-derived flag
+        # value, so even a REVIEWED masked expression is refused in the
+        # local runner by the word allowlist; the same spelling still masks
+        # in the CI workflow, the only surface MASKED_REF_EXPRESSIONS
+        # applies to.
+        local_reviewed = mutate((gitleaks,
+                                 'run_gate "masked-probe" python3 -I -B '
+                                 'tools/check_leaks.py --base "$PUSH_BEFORE"\n'
+                                 + gitleaks))
+        if local_reviewed is None:
+            failures.append(
+                "26 masked fixture drift: local reviewed expression")
+        elif not any(item.code == "run-gate-word"
+                     for item in extract_local(local_reviewed).diagnostics):
+            failures.append("26 local reviewed masked flag was not refused")
+        ci_reviewed = extract_ci(ci_fixture(common + (
+            'python3 -I -B tools/check_leaks.py --base "$PUSH_BEFORE"',)))
+        if ci_reviewed.diagnostics:
+            failures.append(
+                "26 CI reviewed masked expression was refused: {!r}".format(
+                    ci_reviewed.diagnostics))
+        elif ("tools/check_leaks.py --base <ref:$PUSH_BEFORE>"
+              not in ci_reviewed.members):
+            failures.append("26 CI reviewed expression did not mask")
         # Sweep completeness is asserted on what runner_naming_problems EXECUTES
         # (through the same subprocess.run seam vector 27 patches) AND on what it
         # EVALUATES: a canary appended by the patched _scenario_problems must come
