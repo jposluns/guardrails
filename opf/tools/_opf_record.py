@@ -3,7 +3,7 @@
 
   opf record create --type T --title S --actor KIND[:ID] [--summary S] [--link REL=ID]...
                     [--ref KIND LOCATOR NOTE]... [--field NAME=VALUE]... [--scope ID]... [--root DIR]
-  opf record transition ID STATE --actor KIND[:ID] [--reason S] [--root DIR]
+  opf record transition ID STATE --actor KIND[:ID] [--reason S] [--decision S --decided-by S] [--root DIR]
   opf record done-with-receipt BI-ID --actor maintainer[:ID] [--summary S] [--root DIR]
   opf record worklog-append --kind K --summary S --actor KIND[:ID] [--detail S] [--link REL=ID]...
                     [--ref KIND LOCATOR NOTE]... [--root DIR]
@@ -22,6 +22,12 @@ removes it too. A proposed record that carries no `proposed_from` was proposed o
 (`create` itself lands a gated initial state at `/proposed` with no predecessor, and a canonical hand
 edit can propose too, so the absence establishes no provenance): its rejection target cannot be verified
 here, so the rejection refuses, never inventing a predecessor.
+A pending_decision's `open -> decided`, landing bare or `/proposed`, writes its resolution bundle (spec
+8.5) in the same act: --decision and --decided-by are required there and refused on every other
+transition, `decided_by` is the operator's value (never inferred from --actor, since the recorder of an
+answer is often not its decider), and `decided_at` is the operation's clock value. A ratification keeps
+the bundle; a rejection of `decided/proposed` removes it with `proposed_from` (an open decision carries
+none of it).
 `done-with-receipt` is maintainer-only (any other actor is refused before the store is touched): it moves an
 `active` or `done/proposed` backlog item to `done` and mints the one-to-one `done` receipt, linked
 `receipt_of`, in the same transaction (spec 8.5). `transition` never lands a backlog item at unqualified
@@ -50,7 +56,7 @@ record authoring (spec 9.2 is the precedent; spec 8.8 is normative):
      allowed delta, value for value and TYPE for type (the strict _opf_emit._model_equal comparison, so a
      True or 1.0 never reads as 1): the new rows appended, the counters advanced by exactly the claim,
      and for a transition the one named record's `status` and `updated_at` change plus its `proposed_from`
-     write or removal. The delta is
+     write or removal and a pending_decision's resolution bundle write or removal. The delta is
      derived INDEPENDENTLY of the planner's rows, from a pre-planning copy of the request, the allocation
      result, the clock value, the planned-from bytes, and the schema rules;
   6. the planned-destination cleanliness gate and the single-writer lease (the shared _opf_write_guard
@@ -85,9 +91,10 @@ a separate requirement; recovery proves each operand's state under the lease, bu
 restore then rewrites without re-checking, so an edit landing in that window, or one that leaves an exact
 byte prefix of the journaled preimage or planned bytes (read as a torn write), is not detected. A
 transition changes `status` and `updated_at` only, plus `proposed_from` (written when it lands a
-`/proposed` status, removed when it leaves one), so a target state that requires further fields (a
-`decided` pending_decision's resolution bundle, a `sent` contribution's delivery bundle) refuses at
-validate_record; posting a new handoff does not supersede the previous one in the same act. The
+`/proposed` status, removed when it leaves one) and a pending_decision's resolution bundle (written by
+`open -> decided`, removed by the rejection of `decided/proposed`), so a target state that requires
+further fields (a `sent` contribution's delivery bundle) refuses at validate_record; posting a new
+handoff does not supersede the previous one in the same act. The
 pre-proposal state a rejection restores is read from the record's own `proposed_from` field, which this
 verb wrote in the same journaled transaction that landed the `/proposed` status: a proposed record without
 the field (proposed outside `transition`, which includes a record `create` landed at a `/proposed` initial
@@ -148,7 +155,7 @@ _NON_STRING_FIELDS = frozenset(("scopes", "delivery"))
 
 _OPTIONS = {
     "create": ("--root", "--type", "--title", "--summary", "--actor", "--link", "--ref", "--field", "--scope"),
-    "transition": ("--root", "--actor", "--reason"),
+    "transition": ("--root", "--actor", "--reason", "--decision", "--decided-by"),
     "done-with-receipt": ("--root", "--actor", "--summary"),
     "worklog-append": ("--root", "--kind", "--summary", "--actor", "--detail", "--link", "--ref"),
 }
@@ -168,6 +175,10 @@ _LIFECYCLE_RE = re.compile(r"^opf-record (create|transition) ([A-Z]{2}-[1-9][0-9
 # maintainer rejection restores, and what leaving the `/proposed` status removes. Schema-validated by
 # _opf_schema._validate_proposed_from (legal only on a `/proposed` status, a legal predecessor state).
 PROPOSED_FROM = "proposed_from"
+PENDING_DECISION = "pending_decision"
+# The resolution bundle a pending_decision's `open -> decided` writes (spec 8.5, 8.8): all-or-none, all
+# three keys on `decided`, none on `open` or `withdrawn`.
+DECISION_BUNDLE = ("decision", "decided_at", "decided_by")
 # The single-writer journal lock of one publication carries `opf-record.<token>` as its session, and the
 # transaction directory it opens ends `.<token>`: a leftover lock names its own transaction by that token.
 _TOKEN_RE = re.compile(r"^[0-9a-f]{32}\Z")
@@ -231,6 +242,14 @@ def _require_maintainer(actor):
                           "ratifies".format(actor["kind"]))
 
 
+def _require_decision_pair(seen):
+    """--decision and --decided-by come together (the resolution bundle, spec 8.5), never one without the
+    other: a usage refusal, before any store is touched."""
+    if ("--decision" in seen) != ("--decided-by" in seen):
+        raise RecordError("transition: --decision and --decided-by are given together (the resolution bundle, "
+                          "spec 8.5), never one without the other")
+
+
 def parse_request(argv):
     """Parse `opf record <subcommand> ...` into a Request, or raise RecordError (a usage refusal, exit 2).
     Every option value must be present, non-empty, and must not start with `--` (so a swallowed next
@@ -288,6 +307,8 @@ def parse_request(argv):
     if sub == "transition" and "/" in req.positionals[1]:
         raise RecordError("transition: give the target STATE, not {!r}; the '/proposed' qualifier follows from "
                           "the actor (spec 8.4)".format(req.positionals[1]))
+    if sub == "transition":
+        _require_decision_pair(seen)
     if sub == "done-with-receipt":
         _require_maintainer(req.actor)
         if _ID_RE.match(req.positionals[0]).group(1) != _opf_store.BASELINE_TYPES[BACKLOG]:
@@ -712,6 +733,43 @@ def _require_receipt_path(rtype, to_status):
                           "which mints its one-to-one done receipt in the same act (spec 8.5); fail-closed")
 
 
+def _decides(rtype, cur_state, target):
+    """The one transition that writes the resolution bundle: a pending_decision's `open -> decided`,
+    landing bare (a maintainer) or `/proposed` (an assistant or automation filing an answer)."""
+    return rtype == PENDING_DECISION and cur_state == "open" and target == "decided"
+
+
+def _require_decision_options(req, rid, rtype, cur_state, target):
+    """--decision and --decided-by (given together, checked by the parser) are required on a decide and
+    refused on every other transition, the ratification of `decided/proposed` included (it keeps the
+    bundle its proposal wrote), before anything is planned."""
+    given = "--decision" in req.values
+    if _decides(rtype, cur_state, target) and not given:
+        raise RecordError("{} open -> decided writes the resolution bundle (decision, decided_at, decided_by; "
+                          "spec 8.5), so it requires --decision and --decided-by (decided_by names the "
+                          "decider and is never inferred from --actor); fail-closed".format(rid))
+    if given and not _decides(rtype, cur_state, target):
+        raise RecordError("--decision and --decided-by apply only to a pending_decision's open -> decided, not "
+                          "{} {} -> {} (a ratification keeps the bundle its proposal wrote); "
+                          "fail-closed".format(rid, cur_state, target))
+
+
+def _resolution_bundle(req, ts):
+    """The bundle a decide writes: --decision and --decided-by verbatim, and the operation's clock value as
+    decided_at. decided_by is never inferred from --actor: the recorder (an assistant filing an answer)
+    is often not the decider."""
+    return {"decision": req.values["--decision"], "decided_at": ts, "decided_by": req.values["--decided-by"]}
+
+
+def _proposal_keys(rtype, cur_state, rejection):
+    """The keys leaving a `/proposed` status removes: always proposed_from, and on a rejection also the
+    bundle its proposing transition wrote (a pending_decision's `decided/proposed` back to `open`, where
+    the bundle is forbidden, spec 8.5). A ratification keeps the bundle."""
+    if rejection and rtype == PENDING_DECISION and cur_state == "decided":
+        return (PROPOSED_FROM,) + DECISION_BUNDLE
+    return (PROPOSED_FROM,)
+
+
 def _plan_transition(req, ctx, operand, now):
     """`transition ID STATE`: one status change checked by validate_transition (spec 8.4, 8.5). The target
     status is derived from the actor: an assistant or automation landing a terminal or gated state gets
@@ -723,7 +781,9 @@ def _plan_transition(req, ctx, operand, now):
     `transition`, a record created at a `/proposed` initial state included) cannot be rejected here, and
     no predecessor is inferred or invented; the worklog lifecycle line is informational, never evidence. A
     backlog item never lands at unqualified `done` here (done-with-receipt mints the receipt in the same
-    act). The change is `status`, `updated_at`, and the `proposed_from` write or removal on that one
+    act). A pending_decision's `open -> decided` also writes its resolution bundle (_resolution_bundle),
+    and the rejection of `decided/proposed` removes it (_proposal_keys). The change is `status`,
+    `updated_at`, the `proposed_from` write or removal, and that bundle write or removal on that one
     record, plus its own worklog entry."""
     rid, target = req.positionals
     row = _locate(operand, rid)
@@ -737,6 +797,7 @@ def _plan_transition(req, ctx, operand, now):
     if parsed is None:
         raise RecordError("{} status {!r} cannot be parsed ({}); fail-closed".format(rid, current, err))
     cur_state, cur_qual = parsed
+    _require_decision_options(req, rid, rtype, cur_state, target)
     kind = req.actor["kind"]
     to_status = _derived_status(kind, spec, cur_state, target)
     _require_receipt_path(rtype, to_status)
@@ -757,12 +818,15 @@ def _plan_transition(req, ctx, operand, now):
     ts = _rfc3339(now)
     _require_later(row, ts)
     fields = {"status": to_status, "updated_at": ts}
+    if _decides(rtype, cur_state, target):
+        fields.update(_resolution_bundle(req, ts))
     # Landing a `/proposed` status records the pre-proposal state in the record itself; leaving one (a
-    # rejection or a ratification) removes it. validate_transition proved the two never coincide (a
-    # `/proposed` record only ever moves to an unqualified status).
+    # rejection or a ratification) removes it, and a rejection also removes the bundle its proposal
+    # wrote. validate_transition proved the two never coincide (a `/proposed` record only ever moves to
+    # an unqualified status).
     if to_status.endswith("/proposed"):
         fields[PROPOSED_FROM] = current
-    drop = (PROPOSED_FROM,) if cur_qual == "proposed" else ()
+    drop = _proposal_keys(rtype, cur_state, rejection) if cur_qual == "proposed" else ()
     new_row = {key: value for key, value in row.items() if key not in drop}
     new_row.update(fields)
     _validated(new_row, rtype, ctx)
@@ -957,6 +1021,20 @@ def _expected_delta(req, ctx, raws, now):
             prior.pop(PROPOSED_FROM, None)
         if proposed:
             prior[PROPOSED_FROM] = current
+        # The resolution bundle rule (spec 8.5/8.8), derived here on its own, apart from the planner: the
+        # rejection that leaves `decided/proposed` removes every key the schema's pending_decision
+        # declaration lists (spec.extra_keys); `open -> decided`, bare or `/proposed`, writes the three
+        # bundle keys named here, decided_at at the clock value and the other two from the request; a
+        # ratification leaves the bundle unchanged. spec is the schema entry for the row's type, so the
+        # guard below reads spec.name and compares it with the type-name literal; the open and decided
+        # states are named here, not read from the schema.
+        if spec.name == "pending_decision":
+            if cur_qual == "proposed" and target != cur_state and cur_state == "decided":
+                for key in spec.extra_keys:
+                    prior.pop(key, None)
+            if cur_state == "open" and target == "decided":
+                prior.update({"decision": req.values.get("--decision"), "decided_at": ts,
+                              "decided_by": req.values.get("--decided-by")})
         prior.update({"status": to_status, "updated_at": ts})
         verb = ("rejected" if target != cur_state else "ratified") if cur_qual == "proposed" else "transitioned"
         detail = "opf-record transition {} {} -> {}".format(rid, current, to_status)
@@ -1004,7 +1082,8 @@ def _postcondition(plan, req, ctx, now):
     (_strict_equal, so True and 1.0 never read as 1): each new row appended with the requested content
     (the record or receipt, and the operation's own worklog entry), the initial or target status the
     schema rules give, the clock's timestamps, and the claimed ids; for a status change exactly `status`,
-    `updated_at`, and the `proposed_from` write or removal of the one named record; the counters advanced by
+    `updated_at`, the `proposed_from` write or removal, and a pending_decision's resolution bundle write or
+    removal of the one named record; the counters advanced by
     exactly the claim; nothing else. A stray mutation of an existing record or of a new row, a lost or
     reordered row, a changed schema marker, a status change touching another field or another record, or
     a counter moved by anything but the claim refuses before anything is written, and so does a plan whose
@@ -1666,7 +1745,8 @@ def self_test():
             print("  - " + f, file=sys.stderr)
         return 1
     print("opf-record self-test: PASS ({} checks: grammar, allocation seam, completeness proof, planners, "
-          "transitions, receipts, released span, precondition, postcondition)".format(checked[0]))
+          "transitions, resolution bundle, receipts, released span, precondition, postcondition)".format(
+              checked[0]))
     return EXIT_OK
 
 
@@ -1693,6 +1773,12 @@ def _self_test_units(check):
                         (["transition", "--actor", "maintainer"], "requires the operand"),
                         (["transition", "bogus", "done", "--actor", "maintainer"], "not a record id"),
                         (["transition", "BI-1", "done/proposed", "--actor", "assistant"], "target STATE"),
+                        (["transition", "PD-1", "decided", "--actor", "maintainer", "--decision", "x"],
+                         "given together"),
+                        (["transition", "PD-1", "decided", "--actor", "maintainer", "--decided-by", "x"],
+                         "given together"),
+                        (["create", "--type", "pending_decision", "--title", "t", "--actor", "maintainer",
+                          "--decision", "x"], "unrecognized argument"),
                         (["transition", "BI-1", "done", "--actor", "maintainer", "--kind", "x"],
                          "unrecognized argument"),
                         (["done-with-receipt", "BI-1"], "missing required"),
@@ -2034,8 +2120,89 @@ def _self_test_transitions(check, plan, post, full, now):
             lambda status=status, dones=dones: plan(["done-with-receipt", "BI-1", "--actor", "maintainer"],
                                                     rows=[bi(status)], counters=dict(counters, DN=1), dones=dones),
             needle))
+    _self_test_decisions(check, plan, post, full, now)
     _self_test_pending(check)
     _self_test_leftover_lock(check)
+
+
+def _self_test_decisions(check, plan, post, full, now):
+    """The resolution bundle a pending_decision's `open -> decided` writes (bare or `/proposed`), keeps on
+    ratification, and removes on rejection, the refusals of its options, and its postcondition vectors."""
+    earlier = "2026-09-26T00:00:00Z"
+    ts = _rfc3339(now)
+    counters = dict(full, PD=1, WL=1)
+    bundle = {"decision": "use X", "decided_at": ts, "decided_by": "the board"}
+
+    def pd(status, kind="assistant", **kw):
+        return dict({"id": "PD-1", "type": PENDING_DECISION, "status": status, "title": "t",
+                     "created_at": earlier, "updated_at": earlier, "actor": {"kind": kind}}, **kw)
+
+    decide = ["--decision", "use X", "--decided-by", "the board"]
+    m_argv = ["transition", "PD-1", "decided", "--actor", "maintainer:j"] + decide
+    p, c, op = plan(m_argv, rows=[pd("open")], counters=counters)
+    got = op.new_model["record"][0]
+    check("a maintainer decide lands bare decided with the whole bundle, decided_by from --decided-by",
+          got == dict(pd("open"), status="decided", updated_at=ts, **bundle)
+          and post(p, c, m_argv) is None and p.transition == ("PD-1", "open", "decided"))
+    a_argv = ["transition", "PD-1", "decided", "--actor", "assistant:c"] + decide
+    p, c, op = plan(a_argv, rows=[pd("open")], counters=counters)
+    proposed = op.new_model["record"][0]
+    check("an assistant decide lands decided/proposed with the bundle and proposed_from open",
+          proposed == dict(pd("open"), status="decided/proposed", updated_at=ts, proposed_from="open", **bundle)
+          and post(p, c, a_argv) is None)
+    u_argv = ["transition", "PD-1", "decided", "--actor", "automation:ci"] + decide
+    p, c, op = plan(u_argv, rows=[pd("open")], counters=counters)
+    check("an automation decide lands decided/proposed with the bundle and proposed_from open",
+          op.new_model["record"][0] == dict(pd("open"), status="decided/proposed", updated_at=ts,
+                                            proposed_from="open", **bundle)
+          and post(p, c, u_argv) is None and p.transition == ("PD-1", "open", "decided/proposed"))
+    filed = dict(pd("decided/proposed", proposed_from="open"), decision="use X", decided_at=earlier,
+                 decided_by="the board")
+    r_argv = ["transition", "PD-1", "decided", "--actor", "maintainer"]
+    p, c, op = plan(r_argv, rows=[filed], counters=counters)
+    got = op.new_model["record"][0]
+    check("a ratification keeps the bundle unchanged and removes proposed_from",
+          got == dict({k: v for k, v in filed.items() if k != PROPOSED_FROM}, status="decided", updated_at=ts)
+          and post(p, c, r_argv) is None)
+    j_argv = ["transition", "PD-1", "open", "--actor", "maintainer", "--reason", "not the board's answer"]
+    p, c, op = plan(j_argv, rows=[filed], counters=counters)
+    got = op.new_model["record"][0]
+    check("a rejection of decided/proposed restores open with no bundle and no proposed_from",
+          got == dict(pd("decided/proposed"), status="open", updated_at=ts) and post(p, c, j_argv) is None)
+    withdrawn = pd("withdrawn/proposed", proposed_from="open")
+    w_argv = ["transition", "PD-1", "open", "--actor", "maintainer", "--reason", "r"]
+    p, c, op = plan(w_argv, rows=[withdrawn], counters=counters)
+    check("a rejection of withdrawn/proposed restores open (no bundle to remove)",
+          op.new_model["record"][0] == dict(pd("open"), updated_at=ts) and post(p, c, w_argv) is None)
+    for argv, rows, needle in (
+            (["transition", "PD-1", "decided", "--actor", "maintainer"], [pd("open")], "requires --decision"),
+            (["transition", "PD-1", "decided", "--actor", "assistant"], [pd("open")], "requires --decision"),
+            (["transition", "PD-1", "decided", "--actor", "automation"], [pd("open")], "requires --decision"),
+            (["transition", "PD-1", "withdrawn", "--actor", "maintainer"] + decide, [pd("open")], "apply only"),
+            (r_argv + decide, [filed], "apply only"),
+            (j_argv + decide, [filed], "apply only"),
+            (["transition", "BI-1", "active", "--actor", "maintainer"] + decide,
+             [{"id": "BI-1", "type": "backlog_item", "status": "open", "title": "t", "created_at": earlier,
+               "updated_at": earlier, "actor": {"kind": "maintainer"}}], "apply only"),
+            (["transition", "PD-1", "decided", "--actor", "maintainer", "--decision", "   ", "--decided-by", "b"],
+             [pd("open")], "non-empty string")):
+        check("a decision transition refuses {} ({})".format(needle, " ".join(argv[1:4])), _refuses(
+            lambda argv=argv, rows=rows: plan(argv, rows=rows, counters=dict(counters, BI=1)), needle))
+    for label, argv, rows, mutate in (
+            ("a decided_by taken from --actor", m_argv, [pd("open")],
+             lambda op: op.new_model["record"][0].__setitem__("decided_by", "maintainer:j")),
+            ("a decided_at other than the clock", m_argv, [pd("open")],
+             lambda op: op.new_model["record"][0].__setitem__("decided_at", earlier)),
+            ("a decide with no bundle", m_argv, [pd("open")],
+             lambda op: [op.new_model["record"][0].pop(k) for k in DECISION_BUNDLE]),
+            ("a ratification that rewrites the decision", r_argv, [filed],
+             lambda op: op.new_model["record"][0].__setitem__("decision", "use Y")),
+            ("a rejection that keeps the decision", j_argv, [filed],
+             lambda op: op.new_model["record"][0].__setitem__("decision", "use X"))):
+        p, c, op = plan(argv, rows=rows, counters=counters)
+        mutate(op)
+        check("the postcondition refuses {}".format(label),
+              _refuses(lambda argv=argv, p=p, c=c: post(p, c, argv), "postcondition failed"))
 
 
 def _self_test_pending(check):
