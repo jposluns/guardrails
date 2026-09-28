@@ -678,8 +678,8 @@ def _cmd_doctor(rest):
     integrity engine (_opf_check.validate_store) over them, returning that engine's own 0/1/2 contract via
     _opf_check.exit_code (0 VALID, 1 INVALID, 2 CANNOT-EVALUATE). A NOT-ADOPTED root reports NOT APPLICABLE
     and exits 0 (the pack's own `--root .` case, mirroring render); any other non-RESOLVED status is a located
-    cannot-evaluate (exit 2). `--require-store` is the enforcement-pack CI floor (spec 14.1: the pack MUST
-    provide CI checks): with it, a NOT-ADOPTED root is a located cannot-evaluate (exit 2) instead of NOT
+    cannot-evaluate (exit 2). `--require-store` is the enforcement-pack CI floor (spec 1.3.0 14.1: the pack
+    MUST provide CI checks): with it, a NOT-ADOPTED root is a located cannot-evaluate (exit 2) instead of NOT
     APPLICABLE, so a repository whose store was removed cannot pass CI vacuously; every other status keeps
     its unflagged outcome. Doctor is READ-ONLY: it makes no store change (SECI-preview-has-no-side-effects);
     the observation gather is git reads only. The parser is the house fail-closed idiom (unknown token, an

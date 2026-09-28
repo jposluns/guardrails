@@ -1,4 +1,4 @@
-# OPF CI floor: GitHub Actions template (enforcement pack, spec 14.1: the pack MUST provide CI checks).
+# OPF CI floor: GitHub Actions template (enforcement pack, spec 1.3.0 14.1: the pack MUST provide CI checks).
 #
 # Copy this file to .github/workflows/opf.yml in the adopting repository. It runs the portable recipe
 # opf/enforcement/ci/opf-ci.sh over the checked-out revision: `opf doctor --require-store` (a repository
@@ -6,7 +6,7 @@
 # The paths assume the OPF pack sits at opf/ in the repository; set OPF_TOOL on the step if opf.py lives
 # elsewhere. No step carries continue-on-error: a check that cannot fail is decorative.
 #
-# Inert until adoption installs it; the CI receipt-identity comparison is a later release.
+# Inert until adoption installs it; the CI receipt-identity comparison is a later release (U25).
 name: OPF
 
 on:
@@ -22,7 +22,9 @@ jobs:
     name: OPF store integrity
     runs-on: ubuntu-latest
     steps:
-      # Full history, so no git-derived doctor observation is limited by a shallow clone.
+      # fetch-depth 0 checks out the full commit history. Today's doctor observations read only HEAD
+      # and the index (none reads history), so a shallow clone would already satisfy them; the full
+      # history is kept for the CI receipt-identity comparison, which is U25's scope (a later release).
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0

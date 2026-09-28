@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "62f841b6ec831a4091b5e5e65de3be47ce385c3f4d57ac6935d26ba7b578f66e"
+tree-sha256 = "06e822ae30e737713a5c30fcdd65a3d603d394514ee359250349301e0e0385df"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 209052
-sha256 = "7680d4871efe15f2db465eb736d2b2ac3172cb8dad4b6a8909eb362f101e707d"
+bytes = 209773
+sha256 = "d8fb468fb468b575eab7c0f8b2222b932ae71d47351af15b1b4ae602212a33c8"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2371,13 +2371,13 @@ sha256 = "ac7597f96ce6a8a5445badee95573dd69d9cc6b116de610e69da522c4e32f8b8"
 
 [[sources]]
 path = "opf/enforcement/ci/github-actions.yml"
-bytes = 1248
-sha256 = "51b925992985a00b33f1547a4f0c0368e78f0f779251c095ce3ee46e83e14f00"
+bytes = 1475
+sha256 = "0d919956cfc81423686d3053bfd4094f76f6f24715c5abf6d2da9dd924025a99"
 
 [[sources]]
 path = "opf/enforcement/ci/opf-ci.sh"
-bytes = 1412
-sha256 = "b5b2da2dd411f3bfcf60defd1261e8d02933ada5e0e48a3dfd1e529fbc721380"
+bytes = 2172
+sha256 = "5f7e113ed71892bf762fde15e41b650848eba7492b43f984feb53ad589adb12f"
 
 [[sources]]
 path = "opf/site/_redirects"
@@ -2806,8 +2806,8 @@ sha256 = "363663005882dabe4f01b43e28926f4093bce4d718a4e67bfa13b7318a9a3247"
 
 [[sources]]
 path = "opf/tools/check_opf_doctor.py"
-bytes = 31042
-sha256 = "fe92a9dba40def509b5380a6bcf9887564604755fc02213d7ce879598a683978"
+bytes = 41278
+sha256 = "f822f93916cfa82ac6654196c055582103cca4274a2ac576fedbc099cd770d2a"
 
 [[sources]]
 path = "opf/tools/check_opf_drift.py"
@@ -2871,8 +2871,8 @@ sha256 = "3a03d86a02a8930a13ec9800ee96c1db52ef1627c1de5075737838482c7b3d16"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 205701
-sha256 = "bc1f2ce3f138daef3787e4086a1d45e60d8846878a67f8c92d1d9672d015a388"
+bytes = 205707
+sha256 = "20c792b1c81e86ed4b7940b410c948e2d5efbb740f9d8224ce18de60206f7f0b"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
@@ -3246,8 +3246,8 @@ sha256 = "250b98e974d1d9f5151d4e8103d55d6aebf84a39a7ea9acd4e5f02b47ab32441"
 
 [[sources]]
 path = "tools/check_portability.py"
-bytes = 89385
-sha256 = "24a90297445537835018eb14592725266478f8c81806dec768517970c569b7c3"
+bytes = 90424
+sha256 = "9cddfafc24b89833861c0d8adfb106b48643b1b6ccc16c9d12acd30930c013c4"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
