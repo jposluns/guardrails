@@ -1145,9 +1145,11 @@ def _run_write(root, stem):
 
 
 def _git_fixture(repo, *args):
-    """Run git in a fixture repo with a pinned identity and no user config, matching _materialize_git.
+    """Run git in a fixture repo with a pinned identity and no user config.
+    git_fixture_env preserves non-GIT variables; _materialize_git uses an allowlist.
     check=True: a setup failure surfaces loudly rather than a silently broken fixture."""
-    env = _sanitized_env({"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull})
+    from _git_fixture_env import git_fixture_env
+    env = git_fixture_env(PYTHONDONTWRITEBYTECODE="1")
     return subprocess.run(
         ["git", "-C", str(repo), "-c", "user.name=aiqt-failclose",
          "-c", "user.email=failclose@invalid", "-c", "commit.gpgsign=false",
@@ -1198,6 +1200,13 @@ def _build_repo(base, gens):
 
 
 def self_test_main():
+    from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
+    scrub_git_environment()
+    with fixture_git_lifecycle():
+        return _self_test_main_isolated()
+
+
+def _self_test_main_isolated():
     import io
     from contextlib import redirect_stdout, redirect_stderr
 

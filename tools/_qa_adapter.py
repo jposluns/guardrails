@@ -825,6 +825,19 @@ def render_digest(surfaces, extra_lines=None):
 
 # --- self-test --------------------------------------------------------------------------------------
 def _self_test():
+    sys.path.append(str(Path(__file__).resolve().parent))
+    from _git_fixture_env import fixture_git_lifecycle
+    global _GIT
+    saved_git = _GIT
+    try:
+        with fixture_git_lifecycle() as fixture_git:
+            _GIT = fixture_git
+            return _self_test_isolated()
+    finally:
+        _GIT = saved_git
+
+
+def _self_test_isolated():
     import shutil
     import tempfile
 
@@ -1232,8 +1245,13 @@ def _self_test():
         if shutil.which("git"):
             gitrepo = tmp / "gitrepo"
             gitrepo.mkdir()
-            genv = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e",
-                        GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e")
+            # Hermetic fixture env (test-hermeticity): an inherited GIT_INDEX_FILE / GIT_DIR
+            # (git exports these to hook children) would redirect this fixture's git writes
+            # into the CALLER's repository; the scrub drops GIT_* and keeps only what we set.
+            sys.path.append(str(Path(__file__).resolve().parent))
+            from _git_fixture_env import git_fixture_env
+            genv = git_fixture_env(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e",
+                                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e")
 
             def _git(*a):
                 return subprocess.run(["git", *a], cwd=str(gitrepo), capture_output=True, text=True, env=genv)

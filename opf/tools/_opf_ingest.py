@@ -3705,6 +3705,16 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
 
 
 def self_test():
+    """Isolate fixture configuration and restore the caller even on failure."""
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
+            return self_test_isolated()
+
+
+def self_test_isolated():
     """Detection + worksheet invariants over synthetic stores, with a discriminating vector per guarantee
     (change-carries-check). Judged on returned verdict / finding values, never by grepping output. The
     tempdir is removed in a finally (test-hermeticity)."""

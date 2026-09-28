@@ -591,6 +591,14 @@ TESTS = (
 
 
 def self_test(red_on_revert=False):
+    """Keep caller HOME/XDG out of fixture reads, including in-process production helpers."""
+    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
+            return _self_test_isolated(red_on_revert)
+
+
+def _self_test_isolated(red_on_revert=False):
     if shutil.which("git") is None:
         print("OPF-RECORD SELF-TEST ERROR: git is not on PATH (the fixtures need real commits); exit 2",
               file=sys.stderr)

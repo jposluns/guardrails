@@ -1176,7 +1176,20 @@ def _run_pre_tag_quiet(root, candidate_sha, qa_path, qa_sha256, first_pin, evide
 _ARCHIVE_FAILCLOSED_REENTRANT = False
 
 
-def self_test_main():  # noqa: C901  a flat sequence of independent predicate and fixture cases
+def self_test_main():
+    from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
+    scrub_git_environment()
+    with fixture_git_lifecycle():
+        return _self_test_main_isolated()
+
+
+def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent predicate and fixture cases
+    # Hermetic git fixtures (test-hermeticity): every fixture git call below inherits
+    # os.environ, where an inherited GIT_INDEX_FILE / GIT_DIR (git exports these to hook
+    # children) would redirect the fixture's init/add/commit into the CALLER's repository.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _git_fixture_env import caller_env_without_git, scrub_git_environment
+    scrub_git_environment()
     failures = []
     # CANNOT-EVALUATE collection, kept DISTINCT from `failures` (round-10 finding 6): an unavailable/empty
     # `git archive`, a setup/fixture that could not be staged, or a caught setup/fixture exception did not
@@ -1789,7 +1802,10 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             # WITHOUT --first-pin still AUTO-REQUIRES first-pin evidence (finding 5), and reproduce_gate runs
             # on the RAW-materialized + fresh-init candidate (finding 1, no worktree). The raw materialization
             # and reproduce both exercise the round-4 cannot-evaluate propagation on the real toolchain.
-            arch = subprocess.run(["git", "-C", str(repo_root()), "archive", "HEAD"], capture_output=True)
+            # A REAL-repository read: the caller's env (minus GIT_*) keeps the safe.directory trust the
+            # in-place fixture scrub drops (a foreign-owned checkout otherwise refuses with rc=128).
+            arch = subprocess.run(["git", "-C", str(repo_root()), "-c", "core.attributesFile=/dev/null", "archive", "HEAD"],
+                                  capture_output=True, env=caller_env_without_git())
             if arch.returncode != 0 or not arch.stdout:
                 # (round-9 finding 2) `git archive HEAD` is always available in-repo; an unavailable/empty
                 # archive is a SELF-TEST FAILURE, never a silent skip that still reports full PASS.
@@ -2209,7 +2225,9 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
             # GREEN on that attestation commit (the required commit merges through the normal gates), and
             # post-tag validates the REGENERATED artifacts. The QA object lives OUTSIDE the tree so it is not
             # a tracked pack path. Skipped (no false pass) if the archive is unavailable.
-            arch6 = subprocess.run(["git", "-C", str(repo_root()), "archive", "HEAD"], capture_output=True)
+            # A REAL-repository read: caller env for the same safe.directory reason as the genesis case.
+            arch6 = subprocess.run(["git", "-C", str(repo_root()), "-c", "core.attributesFile=/dev/null", "archive", "HEAD"],
+                                   capture_output=True, env=caller_env_without_git())
             if arch6.returncode != 0 or not arch6.stdout:
                 # (round-9 finding 2) `git archive HEAD` is always available in-repo; an unavailable/empty
                 # archive is a SELF-TEST FAILURE, never a silent skip that still reports full PASS.
@@ -2224,9 +2242,9 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                 try:
                     with tarfile.open(fileobj=io.BytesIO(arch6.stdout), mode="r:") as tf:
                         tf.extractall(ac)
-                    ge = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-                    ge.update({"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
-                               "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.invalid",
+                    from _git_fixture_env import git_fixture_env
+                    ge = git_fixture_env()
+                    ge.update({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.invalid",
                                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e.invalid",
                                "GIT_COMMITTER_DATE": "2000-01-01T00:00:00"})
                     # test-hermeticity: the archived tree carries the LIVE repo's release-version, so pin the
@@ -2245,10 +2263,10 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                         subprocess.run(["git", "-C", str(ac), "tag", "-a", "v1.0.0", "-m", "1.0.0"],
                                        check=True, capture_output=True, env=ge)
                         a_tobj = subprocess.run(["git", "-C", str(ac), "rev-parse", "refs/tags/v1.0.0"],
-                                                capture_output=True, text=True).stdout.strip()
+                                                capture_output=True, text=True, env=ge).stdout.strip()
                         a_csha = subprocess.run(["git", "-C", str(ac), "rev-parse",
                                                  "refs/tags/v1.0.0^{commit}"], capture_output=True,
-                                                text=True).stdout.strip()
+                                                text=True, env=ge).stdout.strip()
                         a_tagger = _tagger_epoch(ac, "v1.0.0")
                         a_qa_body = ('candidate-sha = "{}"\n\n'.format(a_csha) + "".join(
                             '[[family]]\nname = "{}"\nfinished-signal = true\nverdict = "PASS"\n'
@@ -2268,7 +2286,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                                         "attestation commit: append row 1", "--no-verify"],
                                        capture_output=True, env=ge)
                         a_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
-                                               capture_output=True, text=True).stdout.strip()
+                                               capture_output=True, text=True, env=ge).stdout.strip()
                         # The attestation-green verdict (finding 6) is meaningful only when the base manifest
                         # was actually regenerated; a setup gen-failure is recorded DISTINCTLY above and must
                         # NOT be misattributed here as a finding-6 non-green result.
@@ -2298,7 +2316,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                             # (#4) an ORPHAN commit carrying the SAME valid attestation tree does not descend
                             # from the tagged candidate -> exit 1 (the pre-fix gate accepted it).
                             a_tree = subprocess.run(["git", "-C", str(ac), "rev-parse", a_oid + "^{tree}"],
-                                                    capture_output=True, text=True).stdout.strip()
+                                                    capture_output=True, text=True, env=ge).stdout.strip()
                             orphan_oid = subprocess.run(
                                 ["git", "-C", str(ac), "commit-tree", a_tree, "-m", "orphan"],
                                 capture_output=True, text=True, env=ge).stdout.strip()
@@ -2315,7 +2333,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                             subprocess.run(["git", "-C", str(ac), "commit", "-q", "-m", "tamper root.txt",
                                             "--no-verify"], capture_output=True, env=ge)
                             tamper_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
-                                                        capture_output=True, text=True).stdout.strip()
+                                                        capture_output=True, text=True, env=ge).stdout.strip()
                             if _run_post_tag_quiet(ac, tamper_oid, str(a_qa)) != 1:
                                 failures.append("(#2) a tampered branch-integrity artifact on the attestation "
                                                 "commit must be REJECTED by the recompute (exit 1)")
@@ -2346,7 +2364,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                         subprocess.run(["git", "-C", str(ac), "commit", "-q", "-m", "forge chronology",
                                         "--no-verify"], capture_output=True, env=ge)
                         forge_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
-                                                   capture_output=True, text=True).stdout.strip()
+                                                   capture_output=True, text=True, env=ge).stdout.strip()
                         if forge_ok and _run_post_tag_quiet(ac, forge_oid, str(forge_qa)) != 1:
                             failures.append("(post-tag) a QA object whose retrieved timestamps postdate the "
                                             "tag while the row lists an early timestamp must exit 1 (#6)")
@@ -2366,7 +2384,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                                             "chmod releases.toml 0o755", "--no-verify"],
                                            capture_output=True, env=ge)
                             chmod_oid = subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
-                                                       capture_output=True, text=True).stdout.strip()
+                                                       capture_output=True, text=True, env=ge).stdout.strip()
                             if _run_post_tag_quiet(ac, chmod_oid, str(a_qa)) != 1:
                                 failures.append("(finding 3) an attestation commit that chmods releases.toml to "
                                                 "0o755 must be rejected by the raw mode/type delta check "
@@ -2393,7 +2411,7 @@ def self_test_main():  # noqa: C901  a flat sequence of independent predicate an
                                 subprocess.run(["git", "-C", str(ac), "commit", "-q", "-m", msg, "--no-verify"],
                                                capture_output=True, env=ge)
                                 return subprocess.run(["git", "-C", str(ac), "rev-parse", "HEAD"],
-                                                      capture_output=True, text=True).stdout.strip()
+                                                      capture_output=True, text=True, env=ge).stdout.strip()
 
                             # symlink (120000): the blob content is the link target; only the raw dst mode drives
                             # the finding, so the target text is immaterial.

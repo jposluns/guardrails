@@ -25,6 +25,9 @@ run_gate() {
 run_gate "opf-homes-selftest"          python3 -I -B "$here/check_opf_homes.py" --self-test
 run_gate "opf-homes-contract"          python3 -I -B "$here/check_opf_homes.py"
 run_gate "opf-tooling-selftest"        python3 -I -B "$here/opf.py" --self-test
+run_gate "opf-import-direct-selftest" python3 -I -B "$here/_opf_import.py" --self-test
+run_gate "opf-ingest-direct-selftest" python3 -I -B "$here/_opf_ingest.py" --self-test
+run_gate "opf-observe-direct-selftest" python3 -I -B "$here/_opf_observe.py" --self-test
 run_gate "opf-drift-selftest"          python3 -I -B "$here/check_opf_drift.py" --self-test
 run_gate "opf-doctor-selftest"         python3 -I -B "$here/check_opf_doctor.py" --self-test
 run_gate "opf-init-selftest"           python3 -I -B "$here/check_opf_init.py" --self-test

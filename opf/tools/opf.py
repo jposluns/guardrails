@@ -3072,6 +3072,16 @@ _INT_LIMIT_SELF_TESTS = frozenset({"opf-release", "opf-emit", "opf-schema", "opf
 
 
 def run_self_tests(tests=None):
+    """Keep caller HOME/XDG out of fixture reads, including in-process production helpers."""
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
+            return run_self_tests_isolated(tests)
+
+
+def run_self_tests_isolated(tests=None):
     """Run every registered helper self-test in order, forwarding each result. The aggregate exit code
     is the WORST outcome (2 cannot-evaluate > 1 finding > 0 clean): one degraded or failing helper fails
     the whole leg, never masked by a later clean one. With no explicit `tests`, the registered set is built
