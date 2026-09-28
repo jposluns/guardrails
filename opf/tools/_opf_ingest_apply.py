@@ -592,12 +592,14 @@ def _completed_evidence(root_fd, run_id, intent, receipt):
             raise ValueError("evidence {} is corrupt".format(path))
 
 
-def _verify_completed(cap, root_fd, run_id, attempt):
-    """A completed run is a no-op only while its immutable evidence verifies: the attempt's INTENT binds
-    the promotion receipt's exact bytes, the receipt binds the reservation and the evidence inventory,
-    and both inventories cover exactly the retained payload, whose sizes and digests still match.
-    Live index bytes are not compared (later legitimate additions must not trigger republishing)."""
-    intent = _opf_journal.attempt_intent(cap, KIND, run_id, attempt)
+def _verify_completed_evidence(root_fd, run_id, attempt, intent):
+    """The READ-ONLY core of completed-run verification, over a root descriptor and an already-VALIDATED
+    attempt INTENT: the INTENT binds the promotion receipt's exact bytes, the receipt binds the reservation
+    and the evidence inventory, and both inventories cover exactly the retained payload, whose sizes and
+    digests still match. Live index bytes are not compared (later legitimate additions must not trigger
+    republishing). Raises the coordinator's located _StageError on any failure; takes no capability,
+    acquires no lock, reserves nothing, and mutates nothing, so the generation-2 staged-run gate
+    (check_opf_import) shares it verbatim with the apply wrapper below."""
     home = _opf_import._ingest_acceptance_home(run_id)
     rec_rel = home + "/" + PROMOTION_NAME
     raw, _st = _journal._read_contained(root_fd, rec_rel, require_single_link=True)
@@ -617,6 +619,13 @@ def _verify_completed(cap, root_fd, run_id, attempt):
         raise _cannot("completed run {}: {}".format(run_id, exc))
     except (UnicodeDecodeError, ValueError, RecursionError, KeyError, TypeError) as exc:
         raise _cannot("completed run {}: its retained evidence is malformed ({!r})".format(run_id, exc))
+
+
+def _verify_completed(cap, root_fd, run_id, attempt):
+    """A completed run is a no-op only while its immutable evidence verifies (the read-only core above,
+    over the INTENT the held capability reads)."""
+    intent = _opf_journal.attempt_intent(cap, KIND, run_id, attempt)
+    _verify_completed_evidence(root_fd, run_id, attempt, intent)
     ref = dict(txn_id=_opf_journal.attempt_txn(KIND, run_id, attempt), journal_rel=_opf_store.journal_root(KIND))
     return ApplyResult(CLEAN, [], promoted=True, outcome="noop_already_complete", restore_ref=ref)
 
@@ -964,7 +973,7 @@ def _st_staged_apply(gate, base, kind, case):
     staged.parent.mkdir(parents=True)
     run.rename(staged)
     if case == "corrupt":
-        record = root / _opf_import.IMPORT_OPS_REL / rid / _opf_import.TRANSACTION_NAME
+        record = root / _opf_store.txn_record("ingest", rid)
         record.parent.mkdir(parents=True)
         record.write_bytes(b"state =\n")
     before = _st_counters(root)
@@ -2267,8 +2276,8 @@ def _d_staging_alias(kind):
         run.rename(staged)
         link = base_dir / ("staging-alias-link-" + kind)
         link.symlink_to(staged.parent)
-        record = root / _opf_import.IMPORT_OPS_REL / rid / _opf_import.TRANSACTION_NAME
-        decoy = root / ".working" / _opf_import.IMPORT_OPS_REL / rid / _opf_import.TRANSACTION_NAME
+        record = root / _opf_store.txn_record("ingest", rid)
+        decoy = root / ".working" / _opf_store.txn_record("ingest", rid)
         record.parent.mkdir(parents=True)
         decoy.parent.mkdir(parents=True)
         error = ("cannot evaluate: cannot open the store root beneath the run dir no-follow "
@@ -2307,7 +2316,9 @@ _ST_NO_BINDING = (False, "cannot evaluate: store binding refused "
 
 def _st_staged(base_dir, name, kind, corrupt=True):
     """An _st_build run moved to its `kind` staging home, beside a corrupt store-root transaction record when
-    `corrupt`. Returns (root, rid, staged)."""
+    `corrupt`: the legacy record for generation-1 grading AND the typed ingest projection for generation 2
+    (PR B: generation 2 reads only the typed namespaces; the run content is ingest whatever the staging
+    home). Returns (root, rid, staged)."""
     root, rid, run = _st_build(base_dir, name)
     staged = root / _opf_store.stage_run(kind, rid)
     staged.parent.mkdir(parents=True)
@@ -2316,6 +2327,9 @@ def _st_staged(base_dir, name, kind, corrupt=True):
         record = root / _opf_import.IMPORT_OPS_REL / rid / _opf_import.TRANSACTION_NAME
         record.parent.mkdir(parents=True)
         record.write_bytes(b"state =\n")
+        typed = root / _opf_store.txn_record("ingest", rid)
+        typed.parent.mkdir(parents=True)
+        typed.write_bytes(b"state =\n")
     return root, rid, staged
 
 
@@ -2454,15 +2468,18 @@ def _st_route_facts(cwd, spelling, depth):
 
 
 def _st_home_verdict(result, reads, root, rid, corrupt=True):
-    """Registered requires the expected transaction read at the physical store identity.
+    """Registered requires the expected transaction read at the physical store identity: the legacy
+    record at generation 1, the typed ingest projection at generation 2 (PR B).
     Neither a schema failure nor an absent-record verdict alone proves a registered read."""
     schema = result["transaction-schema"]
     if schema[1].startswith("cannot evaluate:"):
         return "refused"
     st = root.stat()
-    txn = str(Path(_opf_import.IMPORT_OPS_REL) / rid / _opf_import.TRANSACTION_NAME)
+    txns = (str(Path(_opf_import.IMPORT_OPS_REL) / rid / _opf_import.TRANSACTION_NAME),
+            _opf_store.txn_record("ingest", rid))
     body = b"state =\n" if corrupt else None
-    if schema[0] is (not corrupt) and ((st.st_dev, st.st_ino), txn, body) in reads:
+    if schema[0] is (not corrupt) and any(
+            ((st.st_dev, st.st_ino), txn, body) in reads for txn in txns):
         return "registered"
     if schema == _ST_DETACHED:
         return "detached"
@@ -2689,6 +2706,61 @@ def _t_home_property(base, check):
 TESTS += (("home-property", _t_home_property),)
 
 
+def _t_gate_typed_grading(base, check):
+    """PR B composition: a GENUINE promoted publication, re-staged byte-identically, grades CLEAN through
+    the generation-2 staged-run gate: the COMPLETE attempt's retained completion evidence verifies through
+    the SHARED read-only core (_verify_completed_evidence, writer-to-reader composition). Each single
+    corruption of the retained evidence then refuses with its own located reason: modified receipt bytes,
+    a tampered reservation, and the old-format ingest inventory (refused, never translated)."""
+    import shutil
+    import tomllib as _tl
+    from unittest.mock import patch
+    import check_opf_import as gate
+    root, rid, run = _st_build(base, "gate-typed")
+    keep = base / "gate-typed-keep"
+    shutil.copytree(str(run), str(keep))
+    with _opf_import._self_test_homes2_active(root):
+        result = apply_ingest(root, rid, now=_NOW)
+        check("gate-typed-promoted", result.promoted is True and result.outcome == "promoted")
+        if result.promoted is not True:
+            return
+        shutil.copytree(str(keep), str(run))
+        clean = gate.check_staged_run(run, homes=2)
+        check("gate-typed-complete-verified", clean["transaction-schema"][0] is True
+              and clean["transaction-consistency"][0] is True
+              and "retained completion evidence verified" in clean["transaction-consistency"][1])
+        home = root / _opf_import._ingest_acceptance_home(rid)
+        receipt = home / PROMOTION_NAME
+        original = receipt.read_bytes()
+        receipt.write_bytes(original + b"\n")
+        mutated = gate.check_staged_run(run, homes=2)
+        check("gate-typed-receipt-bytes-refused", mutated["transaction-consistency"][0] is False
+              and "completed publication attempt" in mutated["transaction-consistency"][1])
+        receipt.write_bytes(original)
+        alloc = root / _opf_store.allocation_record(KIND, rid)
+        alloc_original = alloc.read_bytes()
+        alloc.write_bytes(alloc_original + b"# tampered\n")
+        tampered = gate.check_staged_run(run, homes=2)
+        check("gate-typed-reservation-refused", tampered["transaction-consistency"][0] is False
+              and "reservation does not match its receipt" in tampered["transaction-consistency"][1])
+        alloc.write_bytes(alloc_original)
+        inventory = root / _opf_store.evidence_inventory("import", rid)
+        inv_original = inventory.read_bytes()
+        rows = _tl.loads(inv_original.decode("utf-8"))["file"]
+        legacy_rows = [dict(path=r["path"], sha256=r["sha256"], size=r["size"]) for r in rows]
+        inventory.write_bytes(_opf_import._emit_bytes(dict(
+            format="opf.ingest.evidence-inventory/v1", file=legacy_rows), "legacy inventory"))
+        old_format = gate.check_staged_run(run, homes=2)
+        check("gate-typed-old-format-refused", old_format["transaction-consistency"][0] is False
+              and "old-format ingest inventory is unsupported" in old_format["transaction-consistency"][1])
+        inventory.write_bytes(inv_original)
+        restored = gate.check_staged_run(run, homes=2)
+        check("gate-typed-restored", restored == clean)
+
+
+TESTS += (("gate-typed-grading", _t_gate_typed_grading),)
+
+
 def _d_home_claim_ancestors(kind, starting=False):
     """R2 needs both ancestor probes: the foreign claim is reached only by the selected probe."""
     def test(module, base_dir):
@@ -2708,7 +2780,9 @@ def _d_home_claim_ancestors(kind, starting=False):
         outcomes = []
         read_control = module._read_store_control
         st = root.stat()
-        txn = str(Path(_opf_import.IMPORT_OPS_REL) / rid / _opf_import.TRANSACTION_NAME)
+        # The registered read is generation-appropriate: legacy record at 1, typed projection at 2 (PR B).
+        txns = (str(Path(_opf_import.IMPORT_OPS_REL) / rid / _opf_import.TRANSACTION_NAME),
+                _opf_store.txn_record("ingest", rid))
         for homes in (1, 2):
             reads = []
 
@@ -2721,7 +2795,7 @@ def _d_home_claim_ancestors(kind, starting=False):
             with patch.object(module, "_read_store_control", read):
                 clean = _st_graded(module, root, run, homes)
             result = _st_graded(module, root, spelling, homes, cwd)
-            outcomes.append(((st.st_dev, st.st_ino), txn, None) in reads
+            outcomes.append(((st.st_dev, st.st_ino), txns[homes - 1], None) in reads
                             and all(clean[cid][0] for cid in _ST_TXN)
                             and all(not result[cid][0] and "ambiguous second store claim" in result[cid][1]
                                     for cid in _ST_TXN))
@@ -4076,9 +4150,10 @@ def _evidence_red_on_revert():
          'if r["disposition"] == "migrate" or r["dest"].startswith(_opf_store.ARCHIVE_REL + "/moved/"):',
          'if r["disposition"] == "migrate":', "evidence-retained-move"),
         ("generation-detail", "check_opf_import",
-         '_HOMES2_NO_LEGACY_TRANSACTION_DETAIL = (\n'
-         '    "no legacy transaction record (publication attempts are not graded by this gate)")',
-         '_HOMES2_NO_LEGACY_TRANSACTION_DETAIL = "changed wording"',
+         '_HOMES2_TYPED_UNAPPLIED_DETAIL = (\n'
+         '    "no typed transaction evidence (no projection, single-transaction journal, or publication attempt "\n'
+         '    "for this run)")',
+         '_HOMES2_TYPED_UNAPPLIED_DETAIL = "changed wording"',
          "F-OPF-GEN2-DETAIL-UNPINNED"),
     )
     with tempfile.TemporaryDirectory(prefix="opf-evidence-flips-") as tmp:

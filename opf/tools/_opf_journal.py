@@ -79,6 +79,64 @@ def _opened(cap, kind, run_id, create):
         cap._claim.release()
 
 
+# --- shared native-journal validation (PR B): pure, kind-generic, non-mutating -------------------------
+# The staged-run gate (check_opf_import, generation 2) grades typed evidence through EXACTLY these
+# validators and the projection model below, so the writer and the reader cannot drift. All of them are
+# pure over already-captured frames or identity strings: no descriptor is opened, no directory is created,
+# and no state is mutated. Identity is validated through the shared _opf_store constructors, so every
+# registered kind (import, ingest, adoption, layout, preview) is admitted by one grammar.
+
+PROJECTION_FORMAT = "opf.journal.transaction/v1"
+PROJECTION_STATES = ("complete", "rolled-back")
+_RUN_HEADER_KEYS = frozenset(("kind", "run_id", "operation_id"))
+
+
+def projection_record(kind, run_id, state, operation_id):
+    """The terminal transaction projection's exact model (the producer's only shape). Pure; raises
+    JournalError on a non-terminal state, an invalid identity, or a malformed operation id."""
+    _opf_store.txn_record(kind, run_id)  # validate both identity components (kind-generic)
+    if state not in PROJECTION_STATES:
+        raise _journal.JournalError("a transaction projection requires terminal journal evidence")
+    if not isinstance(operation_id, str) or not operation_id:
+        raise _journal.JournalError("a transaction projection requires a non-empty operation id")
+    return dict(format=PROJECTION_FORMAT, kind=kind, run_id=run_id, state=state,
+                operation_id=operation_id, journal_rel=_opf_store.journal_root(kind))
+
+
+def projection_payload(kind, run_id, state, operation_id):
+    """The canonical projection bytes the producer publishes; a reader requires exact equality."""
+    return _opf_emit.emit_checked(projection_record(kind, run_id, state, operation_id)).encode("utf-8")
+
+
+def state_of_frames(frames):
+    """The C2 state of ONE captured frame sequence (read_frames already drops a torn tail), so identity
+    and state are judged over the same observation instead of separate re-reads."""
+    types = [t for t, _ in frames]
+    if _journal.F_INTENT not in types:
+        return "nothing-opened"
+    if _journal.F_COMPLETE in types:
+        return "complete"
+    if _journal.F_RC in types:
+        return "rolled-back"
+    return "open"
+
+
+def check_run_frames(frames, kind, run_id):
+    """Pure validation of one single-transaction frame sequence against the requested identity: the C2
+    accepted-sequence state machine, then the exact {kind, run_id, operation_id} header binding. Raises
+    JournalError; returns the INTENT frame object (None for an empty sequence)."""
+    _journal._validate_terminal_agreement(frames)
+    intent = _journal._first(frames, _journal.F_INTENT)
+    if intent is not None:
+        header = intent.get("header")
+        if (intent.get("txn") != run_id or not isinstance(header, dict)
+                or set(header) != set(_RUN_HEADER_KEYS)
+                or header.get("kind") != kind or header.get("run_id") != run_id
+                or not isinstance(header.get("operation_id"), str) or not header["operation_id"]):
+            raise _journal.JournalError("store journal identity does not match the requested operation")
+    return intent
+
+
 def _existing_frames(jr_fd, txn_dir, kind, run_id):
     # The generic legacy reader treats an absent log as empty. Requested store recovery must
     # distinguish that from a present, empty pre-intent log before any truncate or append.
@@ -86,15 +144,7 @@ def _existing_frames(jr_fd, txn_dir, kind, run_id):
     if st is None or not stat.S_ISREG(st.st_mode):
         raise _journal.JournalError("requested recovery journal is missing or not a regular file")
     frames, _torn, _good = _journal.read_frames(jr_fd, txn_dir)
-    _journal._validate_terminal_agreement(frames)
-    intent = _journal._first(frames, _journal.F_INTENT)
-    if intent is not None:
-        header = intent.get("header")
-        if (intent.get("txn") != run_id or not isinstance(header, dict)
-                or set(header) != {"kind", "run_id", "operation_id"}
-                or header.get("kind") != kind or header.get("run_id") != run_id
-                or not isinstance(header.get("operation_id"), str) or not header["operation_id"]):
-            raise _journal.JournalError("store journal identity does not match the requested operation")
+    check_run_frames(frames, kind, run_id)
     return frames
 
 
@@ -103,12 +153,9 @@ def _project(root_fd, jr_fd, txn_dir, kind, run_id):
     intent = _journal._first(frames, _journal.F_INTENT)
     if intent is None:
         return
-    state = _journal.classify_state(jr_fd, txn_dir)
-    if state not in ("complete", "rolled-back"):
-        raise _journal.JournalError("a transaction projection requires terminal journal evidence")
-    record = dict(format="opf.journal.transaction/v1", kind=kind, run_id=run_id, state=state,
-                  operation_id=intent["header"]["operation_id"], journal_rel=_opf_store.journal_root(kind))
-    payload = _opf_emit.emit_checked(record).encode("utf-8")
+    # projection_record refuses a non-terminal state; frames were validated by _existing_frames, so the
+    # state is judged over the same captured sequence rather than a separate re-read.
+    payload = projection_payload(kind, run_id, state_of_frames(frames), intent["header"]["operation_id"])
     rel = _opf_store.txn_record(kind, run_id)
     prior = _journal._lstat_contained(root_fd, rel)
     if prior is not None:
@@ -195,22 +242,42 @@ def attempt_states(cap, kind, run_id):
         return states
 
 
-def attempt_intent(cap, kind, run_id, attempt):
-    """The INTENT of a COMPLETE attempt, bound to its own identity; anything else refuses."""
+def check_attempt_frames(frames, kind, run_id, attempt):
+    """Pure validation of one publication attempt's frame sequence against its exact identity (the C2
+    accepted sequences, then the closed attempt header). Raises JournalError; returns the INTENT frame
+    object (None for an empty sequence)."""
     txn = attempt_txn(kind, run_id, attempt)
-    with _opened(cap, kind, run_id, create=False) as (_root_fd, jr_fd, txn_dir):
-        path = txn_dir.parent / txn
-        if _journal.classify_state(jr_fd, path) != "complete":
-            raise _journal.JournalError("attempt {} is not complete".format(txn))
-        frames, _torn, _good = _journal.read_frames(jr_fd, path)
-        intent = _journal._first(frames, _journal.F_INTENT)
+    _journal._validate_terminal_agreement(frames)
+    intent = _journal._first(frames, _journal.F_INTENT)
+    if intent is not None:
         header = intent.get("header") if isinstance(intent, dict) else None
         if not (isinstance(header, dict) and set(header) == _ATTEMPT_HEADER_KEYS
                 and intent.get("txn") == txn and header.get("kind") == kind
                 and header.get("run_id") == run_id and header.get("attempt") == attempt
                 and isinstance(header.get("operation_id"), str) and header["operation_id"]):
             raise _journal.JournalError("attempt journal identity does not match {}".format(txn))
-        return intent
+    return intent
+
+
+def read_attempt_intent(jr_fd, kind, run_id, attempt):
+    """Read-only: the INTENT of a COMPLETE attempt, read beneath an ALREADY-OPEN journal-root descriptor
+    and bound to its own identity; anything else refuses. Shared by the capability wrapper below and the
+    generation-2 staged-run gate, which must never enter the create-capable _opened path."""
+    txn = attempt_txn(kind, run_id, attempt)
+    frames, _torn, _good = _journal.read_frames(jr_fd, txn)
+    _journal._validate_terminal_agreement(frames)
+    if state_of_frames(frames) != "complete":
+        raise _journal.JournalError("attempt {} is not complete".format(txn))
+    intent = check_attempt_frames(frames, kind, run_id, attempt)
+    if intent is None:
+        raise _journal.JournalError("attempt {} is not complete".format(txn))
+    return intent
+
+
+def attempt_intent(cap, kind, run_id, attempt):
+    """The INTENT of a COMPLETE attempt, under the held capability (read_attempt_intent does the work)."""
+    with _opened(cap, kind, run_id, create=False) as (_root_fd, jr_fd, _txn_dir):
+        return read_attempt_intent(jr_fd, kind, run_id, attempt)
 
 
 def run_attempt_transaction(cap, kind, run_id, attempt, ops, staged_reader):

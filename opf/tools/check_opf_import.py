@@ -94,12 +94,32 @@ Checks (each with a fail-without-it discriminator exercised by --self-test):
                            entry whose owning check passed without running its mechanism is a FINDING.
   - scan-determinism     : scan_import over the same inputs in reversed declaration order yields an equal
                            inventory digest, and an unreadable/absent declared source fails closed (exit 2).
-  - transaction-schema   : the per-run apply-promotion transaction record (PR-C), when present at the store-
-                           root `.aiqt/import/<run-id>/transaction.toml` (OUTSIDE .working/, so it survives
-                           the terminal run-dir deletion), is well-formed: schema/format/run-id binding, a
-                           known state, digest-shaped bindings, and allocation/restore_ref tables.
-  - transaction-consistency : the transaction record's state machine, and that the attributed acceptance is
+  - transaction-schema   : GENERATION 1: the per-run apply-promotion transaction record (PR-C), when
+                           present at the store-root `.aiqt/import/<run-id>/transaction.toml` (OUTSIDE
+                           .working/, so it survives the terminal run-dir deletion), is well-formed:
+                           schema/format/run-id binding, a known state, digest-shaped bindings, and
+                           allocation/restore_ref tables. GENERATION 2: the TYPED evidence's shape: the
+                           terminal projection at `.working/journals/<kind>/runs/<run-id>/transaction.toml`
+                           carries exactly the producer's fields, bound to this run's identity and journal
+                           home, as the producer's exact canonical bytes (_opf_journal.projection_payload),
+                           and every journal entry carrying this run's prefix is a canonical attempt
+                           spelling. A legacy-format record at the typed projection path is transported
+                           migration output without a receipt contract: the named
+                           transported-legacy-evidence finding (refused until migration apply ships it).
+  - transaction-consistency : GENERATION 1: the transaction record's state machine, and that the attributed acceptance is
                            archived (`.aiqt/import-archive/<run-id>/acceptance.json`) once state >= published.
+                           GENERATION 2: the typed history's consistency, over one captured frame sequence
+                           per transaction: an open, pre-INTENT, torn, or identity-mismatched single
+                           transaction or attempt refuses (present, incomplete evidence is never read as
+                           absent); a terminal journal requires its exactly-reconciling projection and a
+                           projection requires its journal (journals are machine-local, so a clone refuses
+                           here rather than trusting an unverifiable history); a terminal rollback permits a
+                           pre-publication retry; a COMPLETE ingest attempt requires its verified retained
+                           completion evidence (the shared read-only PR A verifier,
+                           _opf_ingest_apply._verify_completed_evidence); foreign-kind same-run evidence and
+                           conflicting single-transaction/attempt histories refuse. A reservation alone is
+                           neither publication nor failure and stays admissible. Generation 2 NEVER reads
+                           the legacy `.aiqt` controls: former legacy state is migration's, receipt-bound.
                            Both store-root control paths are read beneath a store-root descriptor opened from
                            the run-dir descriptor using the validated generation's run homes and inode binding
                            (only an absolute, symlink-free spelling of a run no registered home physically holds retains
@@ -143,10 +163,15 @@ about those. A genuinely detached generation-1 run (no registered home physicall
 absolute, symlink-free path) still reads transaction controls from the three-up parent, without binding
 that parent to a store: absent controls there can pass, and controls there can affect the verdict. This
 compatibility residual does not apply to a registered staging shape graded under a generation that does
-not admit it; that is refused. Generation 2 requires a registered store binding. Its typed transaction
-projections and single-transaction journals explicitly refuse until their semantics are supported.
-Publication-attempt journals and ID reservations remain owned by the ingest coordinator; this gate
-does not validate their state or establish their absence.
+not admit it; that is refused. Generation 2 requires a registered store binding and grades TYPED
+transaction evidence only (projection, single-transaction journal, publication attempts), classifying
+open ingest publication attempts itself, read-only; the coordinator's own preflight remains defence in
+depth. Generation-2 residuals (disclosed): journals are machine-local, so a clone without them refuses a
+projection-bearing run rather than proving anything; descriptor-based observation is not an atomic
+snapshot; the journal's checksum/state-machine model does not authenticate a deliberately forged,
+internally consistent history; and a reservation is not graded (it proves neither publication nor
+failure). Transported legacy history refuses with the named transported-legacy-evidence finding until
+migration apply ships its receipt contract.
 
 This repository is not an OPFiles adopter (it has no store to import into), so even though the `opf
 import` verb is now wired (OPF-IMPORT-VERB, opf.py `_cmd_import`) there is no staged import run to check
@@ -289,7 +314,7 @@ def _read_store_control(store_fd, rel):
 _JOURNAL_ROOT_FILES = ("lock", "lock.break")
 
 
-def _classify_import_journal(store_fd, journal_rel):
+def _classify_import_journal(store_fd, journal_rel, what="import journal"):
     """Round-5 F1: classify the shared import journal hierarchy beneath the store-root descriptor, ALWAYS
     (independent of any transaction record), through descriptor containment only. The root is lstat-ed
     no-follow beneath its contained parent (`_journal._lstat_contained`) and opened by the same O_DIRECTORY |
@@ -300,13 +325,15 @@ def _classify_import_journal(store_fd, journal_rel):
     or unopenable/unlistable root; a root entry other than a transaction directory or a regular lock /
     lock.break (a reserved name is dispatched first and is never a transaction directory; it must be a
     regular, singly-linked file that opens contained no-follow, round-6 F2); a transaction directory entry other than a regular singly-linked frames.log or a preimages
-    directory; a preimages entry other than a regular file."""
+    directory; a preimages entry other than a regular file. `what` prefixes each located message: the
+    legacy Group C caller keeps the default (byte-identical legacy diagnostics); the generation-2 typed
+    grader names the typed journal it classified."""
     import _journal
 
-    def fail(what, exc=None):
-        raise _GateError("import journal {} ({}); fail-closed, never followed and never read as "
-                         "absent".format(what, exc) if exc is not None else
-                         "import journal {}; fail-closed, never followed and never read as absent".format(what))
+    def fail(problem, exc=None):
+        raise _GateError("{} {} ({}); fail-closed, never followed and never read as "
+                         "absent".format(what, problem, exc) if exc is not None else
+                         "{} {}; fail-closed, never followed and never read as absent".format(what, problem))
 
     def entries(dfd, where):
         try:
@@ -1611,8 +1638,11 @@ def _verify_ingest_review_model(rd, bundle, run, report, inventory, homes=None):
 _INGEST_EVIDENCE_REGISTRY = (("acceptance.json", "VALIDATE", "ingest-acceptance-binding", "if-reviewed"),)
 _INGEST_ACCEPTANCE_CHECKS = ("ingest-acceptance-binding", "ingest-acceptance-completeness")
 _TRANSACTION_CHECKS = ("transaction-schema", "transaction-consistency")
-_HOMES2_NO_LEGACY_TRANSACTION_DETAIL = (
-    "no legacy transaction record (publication attempts are not graded by this gate)")
+_HOMES2_TYPED_UNAPPLIED_DETAIL = (
+    "no typed transaction evidence (no projection, single-transaction journal, or publication attempt "
+    "for this run)")
+# The named finding transported legacy history earns until migration apply ships its receipt contract.
+_TRANSPORTED_EVIDENCE_FINDING = "transported-legacy-evidence"
 
 
 def _gate_homes(homes):
@@ -1872,27 +1902,311 @@ def _ingest_store_fd(rd, homes=None):
     return _registered_run_store_fd(rd, _gate_homes(homes))
 
 
-def _typed_transaction_problem(store_fd, run_name):
-    """Refuse unsupported typed projections/single-transaction journals, not merely homes=2.
-
-    The shared constructors define both import/ingest homes regardless of the run's staging kind.
-    Absence is measured beneath the bound store descriptor, no-follow on every component. Even an
-    empty projection or an unfinished single-transaction journal is evidence requiring typed semantics.
-    Ingest publication attempts (<run>.aNNNN) and reservations have their own coordinator/validators;
-    this probe neither grades them nor mistakes an empty journal root or a lock for a transaction.
-    """
-    import _journal
+def _typed_projection_schema_problem(doc, raw, kind, run_name):
+    """The typed projection's SHAPE against the producer's exact model (_opf_journal.projection_record):
+    the closed field set, each binding to this run's identity and journal home, a terminal state, and the
+    producer's exact canonical bytes. Returns '' when well-formed, else the located reason."""
+    import _opf_journal
     import _opf_store
-    for kind in ("import", "ingest"):
-        try:
-            projection = _opf_store.txn_record(kind, run_name)
-            journal = _opf_store.journal_root(kind) + "/" + run_name
-            if (_read_store_control(store_fd, projection) is not None
-                    or _journal._lstat_contained(store_fd, journal) is not None):
-                return "cannot evaluate: typed transaction evidence is not supported ({})".format(kind)
-        except (_GateError, _journal.JournalError, OSError, ValueError, TypeError) as exc:
-            return "cannot evaluate: typed transaction evidence cannot be classified ({})".format(exc)
+    fields = ("format", "kind", "run_id", "state", "operation_id", "journal_rel")
+    if not isinstance(doc, dict) or set(doc) != set(fields):
+        return "typed projection does not carry exactly the producer's fields {}".format(list(fields))
+    if doc["format"] != _opf_journal.PROJECTION_FORMAT:
+        return "typed projection format is not {!r}".format(_opf_journal.PROJECTION_FORMAT)
+    if doc["kind"] != kind:
+        return "typed projection kind {!r} does not name this run's staging kind {!r}".format(
+            doc["kind"], kind)
+    if doc["run_id"] != run_name:
+        return "typed projection run_id does not name this run"
+    if doc["state"] not in _opf_journal.PROJECTION_STATES:
+        return "typed projection state {!r} is not a terminal state".format(doc["state"])
+    if not isinstance(doc["operation_id"], str) or not doc["operation_id"]:
+        return "typed projection operation_id is missing or not a non-empty string"
+    if doc["journal_rel"] != _opf_store.journal_root(kind):
+        return "typed projection journal_rel does not name this kind's journal home"
+    try:
+        canonical = _opf_journal.projection_payload(kind, run_name, doc["state"], doc["operation_id"])
+    except Exception as exc:  # noqa: BLE001 - an unemittable field set is a located schema problem
+        return "typed projection cannot be canonically emitted ({})".format(exc)
+    if raw != canonical:
+        return "typed projection bytes are not the producer's canonical emission"
     return ""
+
+
+def _typed_run_journal_entries(jfd, kind, run_name):
+    """This run's entries in an already-classified typed journal root: (single-transaction directory
+    present, sorted attempt numbers, located spelling problems). Foreign runs' entries are skipped; an
+    entry carrying this run's prefix in any other spelling is a problem, never skipped
+    (_opf_journal._attempt_of is the spelling authority)."""
+    import _journal
+    import _opf_journal
+    single, attempts, problems = False, [], []
+    try:
+        names = sorted(os.listdir(jfd))
+    except OSError as exc:
+        return False, [], ["cannot evaluate: typed journal root cannot be listed ({})".format(exc)]
+    for name in names:
+        if name in _JOURNAL_ROOT_FILES:
+            continue
+        if name == run_name:
+            single = True
+            continue
+        try:
+            n = _opf_journal._attempt_of(kind, run_name, name)
+        except _journal.JournalError as exc:
+            problems.append(str(exc))
+            continue
+        if n is not None:
+            attempts.append(n)
+    return single, sorted(attempts), problems
+
+
+def _typed_single_transaction(store_fd, jfd, kind, run_name, raw, doc, schema_problems, cons_problems):
+    """Grade the single native transaction (journal + projection) of one run, appending located problems.
+    `raw`/`doc` are the already-read projection bytes/document (None when absent or malformed). The journal
+    and the projection are reconciled over ONE captured frame sequence; present-but-incomplete evidence
+    refuses, never reads as absent. Returns the notes a passing history earns."""
+    import _journal
+    import _opf_journal
+    import _opf_store
+    notes = []
+    txn_rel = _opf_store.journal_root(kind) + "/" + run_name
+    valid_projection = raw is not None and doc is not None and not schema_problems
+    clone_note = ("typed projection has no journal transaction (journals are machine-local, so a clone "
+                  "cannot verify this history locally; fail-closed, never read as absent)")
+    if jfd is None:
+        if raw is not None:
+            cons_problems.append(clone_note)
+        return notes
+    try:
+        dir_st = _journal._lstat_contained(store_fd, txn_rel)
+        log_st = _journal._lstat_contained(store_fd, txn_rel + "/frames.log") if dir_st is not None else None
+    except (_journal.JournalError, OSError, ValueError, TypeError) as exc:
+        cons_problems.append("cannot evaluate: single-transaction journal cannot be classified ({})".format(exc))
+        return notes
+    if dir_st is None:
+        if raw is not None:
+            cons_problems.append(clone_note)
+        return notes
+    if log_st is None:
+        cons_problems.append("single-transaction journal {} is present without frames.log (present, "
+                             "incomplete evidence, never read as absent)".format(txn_rel))
+        return notes
+    try:
+        frames, torn, _good = _journal.read_frames(jfd, run_name)
+    except (_journal.JournalError, OSError, ValueError, TypeError) as exc:
+        cons_problems.append("single-transaction journal {} is unreadable or corrupt ({})".format(
+            txn_rel, exc))
+        return notes
+    if torn:
+        cons_problems.append("single-transaction journal {} carries a torn trailing frame (present, "
+                             "incomplete evidence)".format(txn_rel))
+        return notes
+    try:
+        intent = _opf_journal.check_run_frames(frames, kind, run_name)
+    except _journal.JournalError as exc:
+        cons_problems.append("single-transaction journal {}: {}".format(txn_rel, exc))
+        return notes
+    state = _opf_journal.state_of_frames(frames)
+    if state == "nothing-opened":
+        cons_problems.append("single-transaction journal {} is present but pre-INTENT (present, "
+                             "incomplete evidence, never read as absent)".format(txn_rel))
+        return notes
+    if state == "open":
+        cons_problems.append("single transaction {} is open (INTENT without a terminal frame); "
+                             "recovery is required before grading".format(txn_rel))
+        return notes
+    if raw is None:
+        cons_problems.append("terminal single-transaction journal {} awaits its projection "
+                             "(the producer publishes both; present, incomplete evidence)".format(txn_rel))
+        return notes
+    if not valid_projection:
+        cons_problems.append("typed projection cannot be reconciled with its terminal journal "
+                             "(the projection is malformed)")
+        return notes
+    if doc["state"] != state:
+        cons_problems.append("typed projection state {!r} does not match its journal's terminal "
+                             "state {!r}".format(doc["state"], state))
+        return notes
+    if doc["operation_id"] != intent["header"]["operation_id"]:
+        cons_problems.append("typed projection operation_id does not match the journal INTENT's")
+        return notes
+    notes.append("single transaction complete; projection bound" if state == "complete" else
+                 "single transaction rolled back; no completed publication")
+    return notes
+
+
+def _typed_attempts(store_fd, jfd, kind, run_name, attempts, cons_problems):
+    """Classify this run's publication attempts, READ-ONLY (never the create-capable attempt_states):
+    an open, pre-INTENT, torn, or identity-mismatched attempt refuses; a terminal rollback permits a
+    pre-publication retry; a COMPLETE attempt requires its verified retained completion evidence
+    (_opf_ingest_apply._verify_completed_evidence, the corrected PR A verifier). A reservation alone
+    proves neither publication nor failure, so it is not read here. Returns (the notes passing attempts
+    earn, whether a COMPLETE attempt exists)."""
+    import _journal
+    import _opf_journal
+    import _opf_import as imp
+    notes = []
+    completed = []
+    for n in attempts:
+        txn = _opf_journal.attempt_txn(kind, run_name, n)
+        try:
+            frames, torn, _good = _journal.read_frames(jfd, txn)
+        except (_journal.JournalError, OSError, ValueError, TypeError) as exc:
+            cons_problems.append("publication attempt {} is unreadable or corrupt ({})".format(txn, exc))
+            continue
+        if torn:
+            cons_problems.append("publication attempt {} carries a torn trailing frame (present, "
+                                 "incomplete evidence)".format(txn))
+            continue
+        try:
+            intent = _opf_journal.check_attempt_frames(frames, kind, run_name, n)
+        except _journal.JournalError as exc:
+            cons_problems.append("publication attempt {}: {}".format(txn, exc))
+            continue
+        state = _opf_journal.state_of_frames(frames)
+        if state == "nothing-opened":
+            # The coordinator's own aborted-before-INTENT resting state: nothing was applied, and a
+            # retry takes a fresh attempt. Distinct from absence, never a refusal.
+            notes.append("publication attempt {} was abandoned pre-INTENT (nothing applied; a "
+                         "pre-publication retry is permitted)".format(txn))
+        elif state == "open":
+            cons_problems.append("open publication attempt {}; recovery is required before "
+                                 "grading".format(txn))
+        elif state == "rolled-back":
+            notes.append("publication attempt {} rolled back (a pre-publication retry is permitted; "
+                         "reserved ids stay consumed)".format(txn))
+        else:
+            completed.append((n, txn, intent))
+    if len(completed) > 1:
+        cons_problems.append("conflicting publication attempts: more than one COMPLETE attempt ({})".format(
+            ", ".join(txn for _n, txn, _i in completed)))
+        return notes, True
+    if completed:
+        n, txn, intent = completed[0]
+        if kind != "ingest":
+            cons_problems.append("completed publication attempt {} of kind {!r} has no completion-receipt "
+                                 "contract; refused".format(txn, kind))
+            return notes, True
+        import _opf_ingest_apply
+        try:
+            _opf_ingest_apply._verify_completed_evidence(store_fd, run_name, n, intent)
+        except imp._StageError as exc:
+            cons_problems.append("completed publication attempt {}: {}".format(txn, exc.message))
+        except Exception as exc:  # noqa: BLE001 - fail-closed: unverifiable retained evidence refuses
+            cons_problems.append("completed publication attempt {}: retained completion evidence cannot "
+                                 "be evaluated ({!r})".format(txn, exc))
+        else:
+            notes.append("publication attempt {} complete; retained completion evidence "
+                         "verified".format(txn))
+    return notes, bool(completed)
+
+
+def _typed_transaction_checks(store_fd, run_name, kind):
+    """Generation-2 Group C: grade the run's TYPED transaction evidence beneath the bound store
+    descriptor, read-only and fail-closed. The legacy `.aiqt` controls are NEVER read here: former legacy
+    state belongs to migration, receipt-bound, and generation 2 never falls back to it. The projection,
+    the single-transaction journal, and the publication attempts are read through descriptor containment
+    only. Both kinds' namespaces are inspected so wrong-kind evidence cannot disappear merely because the
+    expected namespace is empty. A legacy-format record at the typed projection path is transported
+    migration output without a receipt contract: the named transported-legacy-evidence finding, refused
+    until migration apply ships that contract. Returns the two Group C entries as {cid: (ok, detail)}."""
+    import tomllib
+    import _opf_store
+    import _opf_import as imp
+    schema_problems, cons_problems, notes = [], [], []
+    other = "ingest" if kind == "import" else "import"
+
+    # Foreign-kind evidence for this run: never silently absent, never graded as this run's history.
+    try:
+        foreign_raw = _read_store_control(store_fd, _opf_store.txn_record(other, run_name))
+    except _GateError as exc:
+        foreign_raw = None
+        cons_problems.append("cannot evaluate: foreign-kind typed projection ({})".format(exc))
+    if foreign_raw is not None:
+        cons_problems.append("foreign-kind typed evidence: a {} projection exists for this {} "
+                             "run".format(other, kind))
+    foreign_jfd = None
+    try:
+        try:
+            foreign_jfd = _classify_import_journal(store_fd, _opf_store.journal_root(other),
+                                                   what="typed {} journal".format(other))
+        except _GateError as exc:
+            cons_problems.append("cannot evaluate: {}".format(exc))
+        if foreign_jfd is not None:
+            f_single, f_attempts, f_problems = _typed_run_journal_entries(foreign_jfd, other, run_name)
+            if f_single or f_attempts or f_problems:
+                cons_problems.append("foreign-kind typed evidence: {} journal entries exist for this {} "
+                                     "run".format(other, kind))
+    finally:
+        if foreign_jfd is not None:
+            os.close(foreign_jfd)
+
+    # The expected kind's namespaces: projection, single-transaction journal, publication attempts.
+    projection_rel = _opf_store.txn_record(kind, run_name)
+    try:
+        raw = _read_store_control(store_fd, projection_rel)
+    except _GateError as exc:
+        raw = None
+        schema_problems.append("cannot evaluate: typed projection ({})".format(exc))
+        cons_problems.append("cannot evaluate: typed projection unreadable ({})".format(exc))
+    doc = None
+    transported = False
+    if raw is not None:
+        try:
+            doc = tomllib.loads(raw.decode("utf-8"))
+        except (ValueError, RecursionError) as exc:
+            doc = None
+            schema_problems.append("typed projection {} unreadable/unparseable ({})".format(
+                projection_rel, exc))
+        if isinstance(doc, dict) and doc.get("format") == imp.TRANSACTION_FORMAT:
+            transported = True
+        elif doc is not None:
+            problem = _typed_projection_schema_problem(doc, raw, kind, run_name)
+            if problem:
+                schema_problems.append(problem)
+                doc = None
+    jfd = None
+    single = False
+    attempts = []
+    try:
+        try:
+            jfd = _classify_import_journal(store_fd, _opf_store.journal_root(kind),
+                                           what="typed {} journal".format(kind))
+        except _GateError as exc:
+            cons_problems.append("cannot evaluate: {}".format(exc))
+            jfd = None
+        else:
+            if jfd is not None:
+                single, attempts, spelled = _typed_run_journal_entries(jfd, kind, run_name)
+                for problem in spelled:
+                    schema_problems.append(problem)
+        if not transported:
+            notes += _typed_single_transaction(store_fd, jfd, kind, run_name, raw, doc,
+                                               schema_problems, cons_problems)
+            if jfd is not None and attempts:
+                attempt_notes, completed = _typed_attempts(store_fd, jfd, kind, run_name, attempts,
+                                                           cons_problems)
+                notes += attempt_notes
+                if completed and (single or raw is not None):
+                    cons_problems.append("conflicting single-transaction and publication-attempt "
+                                         "histories for this run")
+    finally:
+        if jfd is not None:
+            os.close(jfd)
+
+    if transported:
+        detail = ("cannot evaluate: transported legacy transaction evidence at the typed projection path "
+                  "{} (format {!r}) requires a validated migration receipt, and migration apply is not "
+                  "built; refused, never rewritten or read at its former location ({} finding)".format(
+                      projection_rel, imp.TRANSACTION_FORMAT, _TRANSPORTED_EVIDENCE_FINDING))
+        return {"transaction-schema": (False, detail),
+                "transaction-consistency": (False, "; ".join([detail] + cons_problems))}
+    if not (raw is not None or single or attempts or schema_problems or cons_problems):
+        return {cid: (True, _HOMES2_TYPED_UNAPPLIED_DETAIL) for cid in _TRANSACTION_CHECKS}
+    return {"transaction-schema": (not schema_problems, "; ".join(schema_problems) or "; ".join(notes)),
+            "transaction-consistency": (not (cons_problems or schema_problems),
+                                        "; ".join(cons_problems or schema_problems) or "; ".join(notes))}
 
 
 def _staged_run_store_fd(rd, homes):
@@ -2609,7 +2923,23 @@ def _check_staged_run(rd, homes=None):
             for cid in _TRANSACTION_CHECKS:
                 record(cid, False, "cannot evaluate: cannot open the store root beneath the run dir "
                                    "no-follow ({})".format(exc))
-    if store_fd is not None:
+    if store_fd is not None and gen == 2:
+        # Generation 2 grades ONLY the typed evidence (projection, single-transaction journal,
+        # publication attempts), read-only, through descriptor containment; the legacy `.aiqt` controls
+        # below are generation 1's and are never read here (former legacy state is migration's,
+        # receipt-bound). Open ingest publication attempts are classified by this gate itself now,
+        # standalone callers included; the coordinator's own preflight remains defence in depth.
+        try:
+            for cid, (ok, detail) in _typed_transaction_checks(
+                    store_fd, run_name, "ingest" if ingest_is_run else "import").items():
+                record(cid, ok, detail)
+        except Exception as exc:  # noqa: BLE001 - fail-closed, as the store binding above
+            for cid in _TRANSACTION_CHECKS:
+                record(cid, False, "cannot evaluate: typed transaction evidence cannot be classified "
+                                   "({!r})".format(exc))
+        finally:
+            os.close(store_fd)
+    elif store_fd is not None:
         jfd = None
         try:
             # Round-5 F1 + F2: the journal hierarchy and the archived acceptance path are classified ALWAYS,
@@ -2638,14 +2968,7 @@ def _check_staged_run(rd, homes=None):
                 record("transaction-consistency", False, "; ".join(
                     ["cannot evaluate: transaction record unreadable ({})".format(txn_err)] + ctl_problems))
             elif txn_bytes is None:
-                # This pass describes only the legacy transaction record. At generation 2,
-                # the probe below excludes <run>.aNNNN publication-attempt journals: an open,
-                # rolled-back or malformed attempt can coexist with this exact pass detail.
-                # It proves neither "not applied" nor absence of an outstanding attempt.
-                # _opf_ingest_apply._apply_locked owns attempt classification and refuses
-                # open attempts before invoking this gate; standalone callers get no such check.
-                detail = (_HOMES2_NO_LEGACY_TRANSACTION_DETAIL
-                          if gen == 2 else "no transaction record (run not yet applied)")
+                detail = "no transaction record (run not yet applied)"
                 record("transaction-schema", True, detail)
                 record("transaction-consistency", not ctl_problems, "; ".join(ctl_problems) or detail)
             else:
@@ -2680,12 +3003,6 @@ def _check_staged_run(rd, homes=None):
                         if bind:
                             tc_problems.append(bind)
                     record("transaction-consistency", not tc_problems, "; ".join(tc_problems))
-            if gen == 2:
-                typed_problem = _typed_transaction_problem(store_fd, run_name)
-                if typed_problem:
-                    for cid in _TRANSACTION_CHECKS:
-                        ok, detail = results[cid]
-                        record(cid, False, typed_problem + ("; " + detail if not ok and detail else ""))
         finally:
             if jfd is not None:
                 os.close(jfd)
@@ -2739,7 +3056,7 @@ def _self_test_gate_generation_sites(expect):
     tree = ast.parse(src)
     names = ("gen", "homes", "gen_error", "legacy_generation", "fd", "ing_results", "marker", "ingest_is_run",
              "durable_unavailable", "ingest_bundle", "ingest_load_failed", "ingest_load_detail", "acc_raw",
-             "results", "typed_problem", "kind", "other")
+             "results", "kind", "other")
     found = sorted((n.id, lines[n.lineno - 1].strip()) for n in ast.walk(tree)
                    if isinstance(n, ast.Name) and n.id in names)
     expected = sorted((
@@ -2760,16 +3077,15 @@ def _self_test_gate_generation_sites(expect):
         ('gen', 'for cid, (ok, detail) in _ingest_acceptance_checks(rd, gen).items():'),
         ('gen', 'gen, gen_error = None, str(exc)'),
         ('gen', 'gen, gen_error = _gate_homes(homes), ""'),
+        ('gen', 'if gen == 2:'),
         ('gen', 'if gen == imp.INGEST_HOMES_GENERATION and marker is None and rd.kind(imp.ACCEPTANCE_NAME) == "file":'),
-        ('gen', 'if gen == 2:'),
-        ('gen', 'if gen == 2:'),
         ('gen', 'if gen is None:'),
         ('gen', 'if gen is None:'),
         ('gen', 'if gen is None:'),
-        ('gen', 'if gen == 2 else "no transaction record (run not yet applied)")'),
         ('gen', 'if gen is not None and ingest_is_run:'),
         ('gen', 'if gen is not None and marker is None:'),
         ('gen', 'if ingest_is_run and gen is None:'),
+        ('gen', 'if store_fd is not None and gen == 2:'),
         ('gen', 'ing_results = _verify_ingest_review_model(rd, ingest_bundle, run, report, inventory, gen)'),
         ('gen', 'legacy_generation = gen is not None and gen != imp.INGEST_HOMES_GENERATION'),
         ('gen', 'legacy_generation = gen is not None and gen != imp.INGEST_HOMES_GENERATION'),
@@ -2801,10 +3117,7 @@ def _self_test_gate_generation_sites(expect):
         ('ingest_is_run', 'ingest_is_run = marker is not None'),
         ('ingest_is_run', 'kind = "ingest" if ingest_is_run else "import"'),
         ('ingest_is_run', 'other = "import" if ingest_is_run else "ingest"'),
-        ('kind', 'kind = "ingest" if ingest_is_run else "import"'),
-        ('kind', '["staging kind does not match {} run content".format(kind)]'),
-        ('other', 'other = "import" if ingest_is_run else "ingest"'),
-        ('other', 'if imp._opf_store.stage_run(other, run_dir.name) in rd.home_binding:'),
+        ('ingest_is_run', 'store_fd, run_name, "ingest" if ingest_is_run else "import").items():'),
         ('ingest_load_detail', 'ingest_load_detail = ""'),
         ('ingest_load_detail', 'ingest_load_detail = "ingest-review bundle present but malformed ({})".format(exc.message)'),
         ('ingest_load_detail', 'ingest_load_detail = "ingest-review bundle present but unreadable ({})".format(exc)'),
@@ -2816,6 +3129,8 @@ def _self_test_gate_generation_sites(expect):
         ('ingest_load_failed', 'ingest_load_failed = True'),
         ('ingest_load_failed', 'ingest_load_failed = True'),
         ('ingest_load_failed', 'ingest_load_failed = True'),
+        ('kind', '["staging kind does not match {} run content".format(kind)]'),
+        ('kind', 'kind = "ingest" if ingest_is_run else "import"'),
         ('legacy_generation', 'elif ingest_is_run and not legacy_generation:'),
         ('legacy_generation', 'elif legacy_generation:'),
         ('legacy_generation', 'legacy_generation = gen is not None and gen != imp.INGEST_HOMES_GENERATION'),
@@ -2826,16 +3141,14 @@ def _self_test_gate_generation_sites(expect):
         ('marker', 'marker = "durable import evidence"'),
         ('marker', 'marker = imp.ACCEPTANCE_NAME'),
         ('marker', 'marker = next((name for name in imp._INGEST_RUN_MARKERS if rd.kind(name) is not None), None)'),
-        ('results', 'ok, detail = results["staged-run-structure"]'),
-        ('results', 'ok, detail = results[cid]'),
+        ('other', 'if imp._opf_store.stage_run(other, run_dir.name) in rd.home_binding:'),
+        ('other', 'other = "import" if ingest_is_run else "ingest"'),
         ('results', 'if cid not in results:'),
+        ('results', 'ok, detail = results["staged-run-structure"]'),
         ('results', 'results = {}'),
         ('results', 'results[cid] = (bool(ok), detail)'),
         ('results', 'return results'),
         ('results', 'return results'),
-        ('typed_problem', 'typed_problem = _typed_transaction_problem(store_fd, run_name)'),
-        ('typed_problem', 'if typed_problem:'),
-        ('typed_problem', 'record(cid, False, typed_problem + ("; " + detail if not ok and detail else ""))'),
     ))
     expect("gate-generation-read-sites", found == expected)
     # A name bound in the body of a branch that tests the generation itself is generation-derived: it must be listed.
@@ -3218,9 +3531,10 @@ def _self_test_gate_generation_applied(expect, label, run_dir, swept=None, inges
     the staged acceptance ids route by generation, and generation 2 keeps
     every result except the two ingest-acceptance ids, which grade the durable home, and the staged acceptance ids,
     which must then report that grading (a completeness id the completeness result, every other the binding
-    result). Transaction checks keep their verdicts at both generations in a registered legacy home
-    without typed transaction evidence; generation 2 qualifies the absent-record detail to exclude attempts,
-    and detached generation-2 copies refuse the missing binding. Each legacy
+    result). Transaction checks are generation-dependent: generation 1 grades the legacy `.aiqt` controls,
+    while generation 2 grades ONLY the typed namespaces, so every store-bound legacy fixture reads empty
+    typed evidence there (the typed-unapplied pass), and detached generation-2 copies refuse the missing
+    binding. Each legacy
     fixture is also graded at both depth-4 homes: cross-kind placement additionally fails staged-run-structure
     once the run can be parsed and bound; the other results keep their generation-2 values. Appends (label, generation-1
     results, generation-2 results, credit) to `swept` and returns the generation-1 results; `credit` is the (id,
@@ -3234,10 +3548,15 @@ def _self_test_gate_generation_applied(expect, label, run_dir, swept=None, inges
     with patch.object(_opf_store, "SUPPORTED_HOMES", 2):
         baseline = check_staged_run(run_dir, homes=1)
         expected_second = dict(baseline)
+        # Generation 2 grades ONLY the typed namespaces (PR B), never the legacy `.aiqt` controls these
+        # legacy fixtures corrupt, so a store-bound fixture's transaction checks read empty typed
+        # namespaces whatever its legacy record/journal/archive hold. A blanket core-read failure
+        # returns before Group C, and an injected store-open failure refuses at both generations.
+        blanket = all(value == baseline["staged-run-structure"] for value in baseline.values())
         for cid in _TRANSACTION_CHECKS:
-            if baseline[cid] == (True, "no transaction record (run not yet applied)"):
-                expected_second[cid] = (
-                    True, _HOMES2_NO_LEGACY_TRANSACTION_DETAIL)
+            if not blanket and not baseline[cid][1].startswith(
+                    "cannot evaluate: cannot open the store root"):
+                expected_second[cid] = (True, _HOMES2_TYPED_UNAPPLIED_DETAIL)
         # A detached copy retains legacy transaction grading only at generation 1.
         # Core-read failures return before transaction grading and keep their prerequisite error.
         if not all(value == baseline["staged-run-structure"] for value in baseline.values()):
@@ -3335,7 +3654,10 @@ def _self_test_gate_generation_coverage(swept, ids):
     fails with a detail containing the located text, no other failing id carries that text unless it depends on the
     id, and generation 2 gives the same result. The two ingest-acceptance ids are judged on the generation-2 result,
     the only generation that grades the durable home; there the staged acceptance ids report the same durable
-    grading, so they may carry the text. Every other id is judged on the generation-1 result."""
+    grading, so they may carry the text. Every other id is judged on the generation-1 result. The two
+    transaction ids are generation-DEPENDENT (typed grading at generation 2, legacy at 1), so their
+    generation-1 credit is exempt from the generation-2 equality clause; the typed fixtures carry their own
+    generation-2 discriminators."""
     staged_acceptance = ("acceptance-schema", "acceptance-binding", "acceptance-attribution", "acceptance-completeness")
     covered = {}
     for label, first, second, credit in swept:
@@ -3349,7 +3671,7 @@ def _self_test_gate_generation_coverage(swept, ids):
                     and not results[cid][0] and needle in results[cid][1]
                     and not any(not ok and needle in detail for c, (ok, detail) in results.items()
                                 if c != cid and c not in shared)
-                    and second[cid] == results[cid]):
+                    and (cid in _TRANSACTION_CHECKS or second[cid] == results[cid])):
                 covered[cid] = label
     return covered
 
@@ -3503,8 +3825,9 @@ def _self_test_gate_generation(expect):
 
 def _self_test_generation_detail(expect):
     expect("F-OPF-GEN2-DETAIL-UNPINNED",
-           _HOMES2_NO_LEGACY_TRANSACTION_DETAIL ==
-           "no legacy transaction record (publication attempts are not graded by this gate)")
+           _HOMES2_TYPED_UNAPPLIED_DETAIL ==
+           "no typed transaction evidence (no projection, single-transaction journal, or publication "
+           "attempt for this run)")
 
 
 def _self_test():
@@ -4688,13 +5011,14 @@ def _self_test_isolated():
                     expect("txn-homes-invalid-cannot-{}-{!r}".format(supported, bad),
                            all(invalid[cid] == (False, "cannot evaluate: {}: {}".format(h1_run, error))
                                for cid in _TRANSACTION_CHECKS))
-        # Flip: fixed three-up reads the .working decoy and misses the true store-root record.
+        # Flip: fixed three-up reads the .working decoy and misses the true store-root record. The
+        # generation-2 record is the TYPED projection (PR B: the legacy `.aiqt` record is unread there).
         # Exercise both registered staging kinds, with fixture-only manifest activation.
         for kind in ("import", "ingest"):
             txn_root, _machine = build_store({})
             txn_run = _self_test_gate_generation_disk(txn_root, "accepted", location=kind)
-            record = txn_root / imp.IMPORT_OPS_REL / txn_run.name / imp.TRANSACTION_NAME
-            decoy = txn_root / ".working" / imp.IMPORT_OPS_REL / txn_run.name / imp.TRANSACTION_NAME
+            record = txn_root / imp._opf_store.txn_record("import", txn_run.name)
+            decoy = txn_root / ".working" / imp._opf_store.txn_record("import", txn_run.name)
             record.parent.mkdir(parents=True)
             decoy.parent.mkdir(parents=True)
             record.write_bytes(b"state =\n")
@@ -4736,8 +5060,8 @@ def _self_test_isolated():
         for kind in ("import", "ingest"):
             alias_root, _machine = build_store({})
             alias_run = _self_test_gate_generation_disk(alias_root, "accepted", location=kind)
-            record = alias_root / imp.IMPORT_OPS_REL / alias_run.name / imp.TRANSACTION_NAME
-            decoy = alias_root / ".working" / imp.IMPORT_OPS_REL / alias_run.name / imp.TRANSACTION_NAME
+            record = alias_root / imp._opf_store.txn_record("import", alias_run.name)
+            decoy = alias_root / ".working" / imp._opf_store.txn_record("import", alias_run.name)
             link = base / "alias-link-{}".format(kind)
             os.symlink(str(alias_run.parent), str(link))
             spellings = (("dotdot", alias_run / ".." / alias_run.name, None),
@@ -5299,7 +5623,7 @@ def _self_test_isolated():
                         all(not second[cid][0] and "not a JSON object" in second[cid][1]
                             for cid in _INGEST_ACCEPTANCE_CHECKS))
                    and all(second[cid] == (
-                       True, _HOMES2_NO_LEGACY_TRANSACTION_DETAIL)
+                       True, _HOMES2_TYPED_UNAPPLIED_DETAIL)
                        for cid in _TRANSACTION_CHECKS)
                    and all(second[cid] == first[cid] for cid in first
                            if cid not in _INGEST_ACCEPTANCE_CHECKS + staged_ids + _TRANSACTION_CHECKS))
@@ -5363,6 +5687,298 @@ def _self_test_isolated():
                 label == clabel + suffix and [cid for cid, (ok, _d) in first.items() if not ok] == [cond_id]
                 for label, first, _second, _credit in swept) for clabel, _edit in conditions
                 for suffix in ("", "-detached")))
+
+        # --- PR B: generation-2 TYPED transaction grading over writer-produced evidence ---------------
+        import _opf_journal
+        import _opf_allocation
+
+        def typed_fixture(kind):
+            counter[0] += 1
+            root = base / "typed-{:03d}".format(counter[0])
+            return root, _self_test_gate_generation_disk(
+                root, None if kind == "ingest" else "accepted", location=kind)
+
+        def typed_journal(root, kind, rid, frames, project=True, operation_id="op-typed-0001"):
+            """Writer-shaped frames through the engine's own publish; the projection through the
+            producer itself (_opf_journal._project), so positives are real writer output."""
+            root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                _journal.ensure_journal_dirs(root_fd, _opf_store.journal_root(kind))
+                jr_fd = _journal.open_journal_root_fd(root_fd, _opf_store.journal_root(kind))
+                try:
+                    tdir = root / _opf_store.journal_root(kind) / rid
+                    tdir.mkdir(parents=True, exist_ok=True)
+                    intent = dict(txn=rid, header=dict(kind=kind, run_id=rid,
+                                                       operation_id=operation_id), ops=[])
+                    for ftype in frames:
+                        _journal.publish(jr_fd, tdir, ftype,
+                                         intent if ftype == _journal.F_INTENT else dict(txn=rid))
+                    if project:
+                        _opf_journal._project(root_fd, jr_fd, tdir, kind, rid)
+                finally:
+                    os.close(jr_fd)
+            finally:
+                os.close(root_fd)
+
+        def graded2(run):
+            with unittest.mock.patch.object(_opf_store, "SUPPORTED_HOMES", 2):
+                return check_staged_run(run, homes=2)
+
+        def txn2(run):
+            res = graded2(run)
+            return res, res["transaction-schema"], res["transaction-consistency"]
+
+        # Real writer-produced terminal histories grade CLEAN, both kinds, both terminal states.
+        for t_kind in ("import", "ingest"):
+            t_root, t_run = typed_fixture(t_kind)
+            typed_journal(t_root, t_kind, t_run.name, (_journal.F_INTENT, _journal.F_COMPLETE))
+            t_all, t_ts, t_tc = txn2(t_run)
+            expect("typed-complete-positive-" + t_kind,
+                   t_ts == (True, "single transaction complete; projection bound")
+                   and t_tc == (True, "single transaction complete; projection bound")
+                   and all(ok for cid, (ok, _d) in t_all.items()))
+            rb_root, rb_run = typed_fixture(t_kind)
+            typed_journal(rb_root, t_kind, rb_run.name,
+                          (_journal.F_INTENT, _journal.F_RIP, _journal.F_RC))
+            _rb_all, rb_ts, rb_tc = txn2(rb_run)
+            expect("typed-rolled-back-positive-" + t_kind,
+                   rb_ts[0] is True and rb_tc[0] is True
+                   and "rolled back; no completed publication" in rb_tc[1])
+
+        # Projection schema, identity, and canonical-byte discriminators over the real payload.
+        m_root, m_run = typed_fixture("import")
+        typed_journal(m_root, "import", m_run.name, (_journal.F_INTENT, _journal.F_COMPLETE))
+        m_proj = m_root / _opf_store.txn_record("import", m_run.name)
+        m_payload = m_proj.read_bytes()
+        m_model = __import__("tomllib").loads(m_payload.decode("utf-8"))
+        other_rid = m_run.name[:-1] + ("1" if m_run.name[-1] != "1" else "2")
+
+        def mutated_projection(change, payload=None):
+            model = json.loads(json.dumps(m_model))
+            change(model)
+            m_proj.write_bytes(payload if payload is not None else _opf_emit.emit(model).encode("utf-8"))
+            try:
+                return txn2(m_run)
+            finally:
+                m_proj.write_bytes(m_payload)
+
+        for p_label, p_change, p_cid, p_needle in (
+                ("kind", lambda m: m.update(kind="ingest"), 1, "does not name this run's staging kind"),
+                ("run-id", lambda m: m.update(run_id=other_rid), 1, "run_id does not name this run"),
+                ("format", lambda m: m.update(format="opf.import.not-transaction/v9"), 1,
+                 "format is not"),
+                ("journal-rel", lambda m: m.update(journal_rel=".working/journals/ingest/journal"), 1,
+                 "journal_rel does not name this kind's journal home"),
+                ("extra-field", lambda m: m.update(extra="x"), 1, "producer's fields"),
+                ("missing-field", lambda m: m.pop("operation_id"), 1, "producer's fields"),
+                ("bad-state", lambda m: m.update(state="published"), 1, "is not a terminal state"),
+                ("state-flip", lambda m: m.update(state="rolled-back"), 2,
+                 "does not match its journal's terminal state"),
+                ("operation-id", lambda m: m.update(operation_id="op-typed-9999"), 2,
+                 "does not match the journal INTENT's")):
+            _m_all, m_ts, m_tc = mutated_projection(p_change)
+            got = (m_ts, m_tc)[p_cid - 1]
+            expect("typed-projection-" + p_label,
+                   got[0] is False and p_needle in got[1] and (p_cid == 2) == (m_ts[0] is True))
+        _c_all, c_ts, _c_tc = mutated_projection(lambda m: None, payload=m_payload + b"\n")
+        expect("typed-projection-canonical-bytes",
+               c_ts[0] is False and "canonical emission" in c_ts[1])
+
+        # Frame-state machine: present incomplete evidence refuses, never reads as absent.
+        def framed(f_label, f_build, f_needle, schema_ok=True):
+            f_root, f_run = typed_fixture("import")
+            f_build(f_root, f_run)
+            _f_all, f_ts, f_tc = txn2(f_run)
+            expect("typed-frames-" + f_label,
+                   f_tc[0] is False and f_needle in f_tc[1] and f_ts[0] is schema_ok
+                   and f_tc[1] != _HOMES2_TYPED_UNAPPLIED_DETAIL)
+
+        def journal_dir(root, run, *names):
+            d = root / _opf_store.journal_root("import") / run.name
+            d.mkdir(parents=True)
+            for name in names:
+                (d / name).write_bytes(b"")
+
+        framed("empty-dir", lambda r, n: journal_dir(r, n), "without frames.log")
+        framed("empty-log", lambda r, n: journal_dir(r, n, "frames.log"), "pre-INTENT")
+        framed("intent-only", lambda r, n: typed_journal(r, "import", n.name, (_journal.F_INTENT,),
+                                                         project=False), "is open")
+        framed("rollback-open", lambda r, n: typed_journal(
+            r, "import", n.name, (_journal.F_INTENT, _journal.F_RIP), project=False), "is open")
+        framed("terminal-unprojected", lambda r, n: typed_journal(
+            r, "import", n.name, (_journal.F_INTENT, _journal.F_COMPLETE), project=False),
+            "awaits its projection")
+        framed("rolled-back-unprojected", lambda r, n: typed_journal(
+            r, "import", n.name, (_journal.F_INTENT, _journal.F_RIP, _journal.F_RC), project=False),
+            "awaits its projection")
+        framed("duplicate-intent", lambda r, n: typed_journal(
+            r, "import", n.name, (_journal.F_INTENT, _journal.F_INTENT), project=False),
+            "not an accepted terminal sequence")
+
+        def torn_tail(root, run):
+            typed_journal(root, "import", run.name, (_journal.F_INTENT,), project=False)
+            log = root / _opf_store.journal_root("import") / run.name / "frames.log"
+            with open(str(log), "ab") as fh:
+                fh.write(_journal.MAGIC + b" COMPLETE 100 " + b"0" * 64 + b"\nhalf")
+        framed("torn-suffix", torn_tail, "torn trailing frame")
+
+        def publish_frames(root, run, frames):
+            root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                _journal.ensure_journal_dirs(root_fd, _opf_store.journal_root("import"))
+                jr_fd = _journal.open_journal_root_fd(root_fd, _opf_store.journal_root("import"))
+                try:
+                    tdir = root / _opf_store.journal_root("import") / run.name
+                    tdir.mkdir(parents=True, exist_ok=True)
+                    for ftype, obj in frames:
+                        _journal.publish(jr_fd, tdir, ftype, obj)
+                finally:
+                    os.close(jr_fd)
+            finally:
+                os.close(root_fd)
+
+        framed("terminal-id-disagreement", lambda r, n: publish_frames(r, n, (
+            (_journal.F_INTENT, dict(txn=n.name, header=dict(
+                kind="import", run_id=n.name, operation_id="op-typed-0001"), ops=[])),
+            (_journal.F_COMPLETE, dict(txn=other_rid)))), "disagrees with the INTENT txn id")
+        framed("identity-mismatch", lambda r, n: publish_frames(r, n, (
+            (_journal.F_INTENT, dict(txn=n.name, header=dict(
+                kind="ingest", run_id=n.name, operation_id="op-typed-0001"), ops=[])),)),
+            "identity does not match")
+
+        # Transported legacy history refuses with the NAMED finding until migration apply ships its
+        # receipt contract (maintainer ruling); a destination path alone admits nothing.
+        tr_root, tr_run = typed_fixture("import")
+        tr_proj = tr_root / _opf_store.txn_record("import", tr_run.name)
+        tr_proj.parent.mkdir(parents=True)
+        tr_proj.write_bytes(_opf_emit.emit(dict(
+            schema=1, format=imp.TRANSACTION_FORMAT, run_id=tr_run.name, state="complete",
+            txn_id="legacy-txn-1", plan_digest="sha256:" + "0" * 64,
+            inventory_digest="sha256:" + "1" * 64, allocation=dict(LF=["LF-1"]),
+            restore_ref=dict(txn_id="legacy-txn-1",
+                             journal_rel=imp.IMPORT_JOURNAL_REL))).encode("utf-8"))
+        _tr_all, tr_ts, tr_tc = txn2(tr_run)
+        expect("typed-transported-refused",
+               tr_ts[0] is False and tr_tc[0] is False
+               and _TRANSPORTED_EVIDENCE_FINDING in tr_ts[1] and "migration receipt" in tr_ts[1]
+               and _TRANSPORTED_EVIDENCE_FINDING in tr_tc[1])
+
+        # Conflicting histories: a COMPLETE attempt beside single-transaction evidence, and more than
+        # one COMPLETE attempt, each a located refusal.
+        cf_root, cf_run = typed_fixture("ingest")
+        typed_journal(cf_root, "ingest", cf_run.name, (_journal.F_INTENT, _journal.F_COMPLETE))
+        cf_jr = cf_root / _opf_store.journal_root("ingest")
+        for cf_attempt in (1, 2):
+            adir = cf_jr / _opf_journal.attempt_txn("ingest", cf_run.name, cf_attempt)
+            adir.mkdir()
+            jfd = os.open(str(cf_jr), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                _journal.publish(jfd, adir, _journal.F_INTENT, dict(
+                    txn=adir.name, header=dict(kind="ingest", run_id=cf_run.name, attempt=cf_attempt,
+                                               operation_id="op-typed-0001"), ops=[]))
+                _journal.publish(jfd, adir, _journal.F_COMPLETE, dict(txn=adir.name))
+            finally:
+                os.close(jfd)
+        _cf_all, _cf_ts, cf_tc = txn2(cf_run)
+        expect("typed-conflicting-histories",
+               cf_tc[0] is False and "more than one COMPLETE attempt" in cf_tc[1]
+               and "conflicting single-transaction and publication-attempt histories" in cf_tc[1])
+
+        # Generation 2 never reads a legacy `.aiqt` control: identical results with the legacy record
+        # absent, valid, or corrupt, and NO attempted `.aiqt` access (the sentinel observes reads and
+        # classifications themselves, not only verdicts).
+        s_root, s_run = typed_fixture("import")
+        typed_journal(s_root, "import", s_run.name, (_journal.F_INTENT, _journal.F_COMPLETE))
+        gate_module = sys.modules[__name__]
+        observed_rels = []
+        real_read_control = _read_store_control
+        real_classify = _classify_import_journal
+
+        def observing_read(fd, rel):
+            observed_rels.append(rel)
+            return real_read_control(fd, rel)
+
+        def observing_classify(fd, rel, what="import journal"):
+            observed_rels.append(rel)
+            return real_classify(fd, rel, what=what)
+
+        sentinel_results = []
+        for legacy_state in ("absent", "valid", "corrupt"):
+            if legacy_state == "valid":
+                write_txn(s_root, s_run.name)
+                write_archived_acceptance(s_root, s_run.name)
+                write_journal(s_root, s_run.name)
+            elif legacy_state == "corrupt":
+                (s_root / imp.IMPORT_OPS_REL / s_run.name / imp.TRANSACTION_NAME).write_bytes(
+                    b"state =\n")
+            observed_rels.clear()
+            with unittest.mock.patch.object(gate_module, "_read_store_control", observing_read), \
+                    unittest.mock.patch.object(gate_module, "_classify_import_journal",
+                                               observing_classify):
+                sentinel_results.append(graded2(s_run))
+            expect("typed-aiqt-unread-" + legacy_state,
+                   bool(observed_rels) and not any(rel.startswith(".aiqt") for rel in observed_rels))
+        expect("typed-aiqt-equal-results",
+               sentinel_results[0] == sentinel_results[1] == sentinel_results[2]
+               and sentinel_results[0]["transaction-consistency"][0] is True)
+
+        # Read-only grading: content, entries and modes unchanged, and the write-capable seams
+        # (projection publication, capability opens, directory creation, locks, recovery, allocation)
+        # never entered. Access time is excluded from the invariant.
+        def tree_snapshot(root):
+            out = {}
+            for top, tdirs, tfiles in os.walk(str(root)):
+                for name in tdirs:
+                    p = os.path.join(top, name)
+                    out[os.path.relpath(p, str(root))] = ("dir", os.lstat(p).st_mode)
+                for name in tfiles:
+                    p = os.path.join(top, name)
+                    with open(p, "rb") as fh:
+                        data = fh.read()
+                    out[os.path.relpath(p, str(root))] = ("file", os.lstat(p).st_mode, data)
+            return out
+
+        ro_root, ro_run = typed_fixture("ingest")
+        typed_journal(ro_root, "ingest", ro_run.name, (_journal.F_INTENT, _journal.F_COMPLETE))
+        ro_before = tree_snapshot(ro_root)
+        ro_clean = graded2(ro_run)
+
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("a write-capable seam was entered during read-only grading")
+
+        with unittest.mock.patch.object(_opf_journal, "_project", side_effect=forbidden), \
+                unittest.mock.patch.object(_opf_journal, "_opened", side_effect=forbidden), \
+                unittest.mock.patch.object(_opf_journal, "attempt_states", side_effect=forbidden), \
+                unittest.mock.patch.object(_journal, "ensure_journal_dirs", side_effect=forbidden), \
+                unittest.mock.patch.object(_journal, "acquire_lock", side_effect=forbidden), \
+                unittest.mock.patch.object(_journal, "recover", side_effect=forbidden), \
+                unittest.mock.patch.object(_journal, "publish", side_effect=forbidden), \
+                unittest.mock.patch.object(_opf_allocation, "reserve_ingest_ids",
+                                           side_effect=forbidden):
+            ro_guarded = graded2(ro_run)
+        expect("typed-read-only-forbidden-seams", ro_guarded == ro_clean)
+        expect("typed-read-only-tree-unchanged", tree_snapshot(ro_root) == ro_before)
+
+        # Generation 1 stays byte-identical beside corrupt TYPED siblings: the same ordered results,
+        # and no typed-control read is even attempted (typed names are ordinary content there).
+        g1_run = stage_clean()
+        g1_root = g1_run.parent.parent.parent
+        g1_before = check_staged_run(g1_run, homes=1)
+        for sib_kind in ("import", "ingest"):
+            sib = g1_root / _opf_store.txn_record(sib_kind, g1_run.name)
+            sib.parent.mkdir(parents=True)
+            sib.write_bytes(b"state =\n")
+        observed_rels.clear()
+        with unittest.mock.patch.object(gate_module, "_read_store_control", observing_read), \
+                unittest.mock.patch.object(gate_module, "_classify_import_journal",
+                                           observing_classify):
+            g1_after = check_staged_run(g1_run, homes=1)
+        expect("typed-gen1-byte-identical-with-corrupt-typed-siblings",
+               list(g1_after.items()) == list(g1_before.items()))
+        expect("typed-gen1-no-typed-reads",
+               bool(observed_rels)
+               and not any(rel.startswith(_opf_store.JOURNALS_REL) for rel in observed_rels)
+               and any(rel.startswith(".aiqt") for rel in observed_rels))
 
         expect("module-self-test", imp.self_test() == 0)
     except OSError as exc:

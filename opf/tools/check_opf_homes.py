@@ -239,6 +239,8 @@ def _staged_root_self_test(check):
     import os
     import shutil
     from unittest.mock import patch
+    import _journal
+    import _opf_journal
     import check_opf_import as gate
     import _opf_import as imp
 
@@ -303,16 +305,17 @@ def _staged_root_self_test(check):
             record = root / imp._txn_record_rel(run.name)
             record.parent.mkdir(parents=True)
             record.write_bytes(b"state =\n")
-            # The depth-three decoy is absent; diagnose the actual root's corruption.
-            check("staged-root-wrong-level-decoy-" + kind, lambda:
-                  not grade(run)["transaction-schema"][0]
-                  and "unreadable/unparseable" in grade(run)["transaction-schema"][1])
+            with_legacy = grade(run)
             record.unlink()
             clean = grade(run)
+            # PR B: generation 2 grades ONLY the typed namespaces; a corrupt legacy `.aiqt` record is
+            # unread there (former legacy state is migration's, receipt-bound), so grading is identical
+            # with the legacy control present-corrupt or absent.
+            check("staged-root-legacy-record-ignored-" + kind, lambda: with_legacy == clean)
             check("staged-root-no-transaction-" + kind, lambda:
                   clean["staged-run-structure"] == (True, "")
                   and all(clean[cid] == (
-                      True, gate._HOMES2_NO_LEGACY_TRANSACTION_DETAIL)
+                      True, gate._HOMES2_TYPED_UNAPPLIED_DETAIL)
                       for cid in gate._TRANSACTION_CHECKS))
             # Inject only after binding: the real constructor has already classified both homes.
             real_bind, real_stage = gate._staged_run_store_fd, store.stage_run
@@ -338,40 +341,83 @@ def _staged_root_self_test(check):
                 check("staged-root-kind-exception-{}-{}".format(error.__name__, kind), lambda:
                       bool(opened) and closed and refused(observed, "kind-check sentinel"))
 
-            # Attempts belong to the coordinator, including open and rolled-back journals.
-            # These real frames pin the standalone gate's deliberately narrower transaction scope.
+            # PR B (maintainer ruling): the standalone gate classifies publication attempts ITSELF,
+            # read-only; this intentionally changes the prior tested exclusion (#346). The coordinator's
+            # own preflight remains defence in depth.
             if kind == "ingest":
-                import _journal
-                import _opf_journal
                 journal = root / store.journal_root(kind)
                 journal.mkdir(parents=True)
                 attempt = journal / _opf_journal.attempt_txn(kind, run.name, 1)
                 attempt.mkdir()
                 jfd = store._open_root_fd(journal)
                 try:
+                    empty_res = grade(run)
+                    # An abandoned pre-INTENT attempt is the coordinator's own aborted resting state:
+                    # a retry is permitted, but the evidence is NAMED, never read as absent.
+                    check("staged-root-attempt-empty", lambda:
+                          empty_res["transaction-consistency"][0] is True
+                          and "abandoned pre-INTENT" in empty_res["transaction-consistency"][1]
+                          and empty_res["transaction-consistency"][1]
+                          != gate._HOMES2_TYPED_UNAPPLIED_DETAIL)
                     _journal.publish(jfd, attempt, _journal.F_INTENT, dict(
                         txn=attempt.name, header=dict(kind=kind, run_id=run.name, attempt=1,
                                                      operation_id="synthetic-operation"), ops=[]))
-                    for state in ("open", "rolled-back"):
-                        if state == "rolled-back":
-                            for frame in (_journal.F_RIP, _journal.F_RC):
-                                _journal.publish(jfd, attempt, frame, {"txn": attempt.name})
-                        check("staged-root-attempt-" + state, lambda:
-                              _journal.classify_state(jfd, attempt) == state
-                              and grade(run) == clean)
+                    opened_res = grade(run)
+                    check("staged-root-attempt-open", lambda:
+                          _journal.classify_state(jfd, attempt) == "open"
+                          and opened_res["transaction-schema"][0] is True
+                          and not opened_res["transaction-consistency"][0]
+                          and "open publication attempt" in opened_res["transaction-consistency"][1]
+                          and all(opened_res[cid] == clean[cid] for cid in gate.EXPECTED_CHECKS
+                                  if cid not in gate._TRANSACTION_CHECKS))
+                    for frame in (_journal.F_RIP, _journal.F_RC):
+                        _journal.publish(jfd, attempt, frame, {"txn": attempt.name})
+                    rolled_res = grade(run)
+                    check("staged-root-attempt-rolled-back", lambda:
+                          _journal.classify_state(jfd, attempt) == "rolled-back"
+                          and rolled_res["transaction-schema"][0] is True
+                          and rolled_res["transaction-consistency"][0] is True
+                          and "rolled back" in rolled_res["transaction-consistency"][1]
+                          and "retry is permitted" in rolled_res["transaction-consistency"][1])
                     _journal.publish(jfd, attempt, _journal.F_INTENT, {"txn": attempt.name})
                     malformed = False
                     try:
                         _journal.classify_state(jfd, attempt)
                     except _journal.JournalError:
                         malformed = True
+                    bad_res = grade(run)
                     check("staged-root-attempt-malformed", lambda:
-                          malformed and grade(run) == clean)
+                          malformed and not bad_res["transaction-consistency"][0]
+                          and "not an accepted terminal sequence" in bad_res["transaction-consistency"][1])
                 finally:
                     os.close(jfd)
                 shutil.rmtree(attempt)
-            # A typed projection/journal is not interchangeable with durable review acceptance.
-            # Probe both namespaces even when the staging kind differs; empty bytes still count.
+                # A COMPLETE attempt requires verified retained completion evidence; the spelling alone
+                # proves nothing.
+                complete = journal / _opf_journal.attempt_txn(kind, run.name, 2)
+                complete.mkdir()
+                jfd = store._open_root_fd(journal)
+                try:
+                    _journal.publish(jfd, complete, _journal.F_INTENT, dict(
+                        txn=complete.name, header=dict(kind=kind, run_id=run.name, attempt=2,
+                                                      operation_id="synthetic-operation"), ops=[]))
+                    _journal.publish(jfd, complete, _journal.F_COMPLETE, {"txn": complete.name})
+                    receiptless = grade(run)
+                    check("staged-root-attempt-complete-receiptless", lambda:
+                          not receiptless["transaction-consistency"][0]
+                          and "completed publication attempt" in receiptless["transaction-consistency"][1])
+                finally:
+                    os.close(jfd)
+                shutil.rmtree(complete)
+                # A reservation alone proves neither publication nor failure: pre-publication
+                # reservation stays admissible.
+                reservation = root / store.allocation_record(kind, run.name)
+                reservation.parent.mkdir(parents=True)
+                reservation.write_bytes(b"reservation-bytes\n")
+                check("staged-root-reservation-only-not-applied", lambda: grade(run) == clean)
+                reservation.unlink()
+            # Typed evidence is GRADED now (PR B): the expected kind reconciles against its journal,
+            # the foreign kind refuses. Probe both namespaces; empty bytes still count.
             for txn_kind in ("import", "ingest"):
                 typed = root / store.txn_record(txn_kind, run.name)
                 typed.parent.mkdir(parents=True)
@@ -380,33 +426,46 @@ def _staged_root_self_test(check):
                 typed_decoy.write_bytes(b"state =\n")
                 check("staged-root-typed-ignore-decoy-{}-{}".format(txn_kind, kind), lambda:
                       grade(run) == clean)
-                projection = imp._emit_bytes(dict(
-                    format="opf.journal.transaction/v1", kind=txn_kind, run_id=run.name,
-                    state="complete", operation_id="synthetic-operation",
-                    journal_rel=store.journal_root(txn_kind)), "typed projection")
-                for label, payload in (("empty", b""), ("malformed", b"state =\n"),
-                                       ("projection", projection)):
+                projection = _opf_journal.projection_payload(txn_kind, run.name, "complete",
+                                                             "synthetic-operation")
+                if txn_kind == kind:
+                    typed_cases = (("empty", b"", "transaction-schema", "producer's fields"),
+                                   ("malformed", b"state =\n", "transaction-schema",
+                                    "unreadable/unparseable"),
+                                   ("projection", projection, "transaction-consistency",
+                                    "has no journal transaction"))
+                else:
+                    typed_cases = tuple(
+                        (label, payload, "transaction-consistency", "foreign-kind typed evidence")
+                        for label, payload in (("empty", b""), ("malformed", b"state =\n"),
+                                               ("projection", projection)))
+                for label, payload, cid, needle in typed_cases:
                     typed.write_bytes(payload)
                     observed = grade(run)
-                    check("staged-root-typed-{}-{}-{}".format(label, txn_kind, kind), lambda:
-                          refused(observed, "typed transaction evidence is not supported")
-                          and all(observed[cid] == clean[cid] for cid in gate.EXPECTED_CHECKS
-                                  if cid not in gate._TRANSACTION_CHECKS))
+                    check("staged-root-typed-{}-{}-{}".format(label, txn_kind, kind),
+                          lambda o=observed, c=cid, n=needle:
+                          not o[c][0] and n in o[c][1]
+                          and all(o[x] == clean[x] for x in gate.EXPECTED_CHECKS
+                                  if x not in gate._TRANSACTION_CHECKS))
                     typed.unlink()
+                located_cid = ("transaction-schema" if txn_kind == kind else "transaction-consistency")
                 typed.symlink_to(root / "absent-typed-target")
                 check("staged-root-typed-symlink-{}-{}".format(txn_kind, kind), lambda:
-                      refused(grade(run), "typed transaction evidence cannot be classified"))
+                      not grade(run)[located_cid][0]
+                      and "not a regular file" in grade(run)[located_cid][1])
                 typed.unlink()
                 os.mkfifo(typed)
                 check("staged-root-typed-fifo-{}-{}".format(txn_kind, kind), lambda:
-                      refused(grade(run), "typed transaction evidence cannot be classified"))
+                      not grade(run)[located_cid][0]
+                      and "not a regular file" in grade(run)[located_cid][1])
                 typed.unlink()
                 parent = typed.parent
                 moved_typed = parent.with_name(parent.name + "-saved")
                 parent.rename(moved_typed)
                 parent.symlink_to(moved_typed, target_is_directory=True)
                 check("staged-root-typed-parent-{}-{}".format(txn_kind, kind), lambda:
-                      refused(grade(run), "typed transaction evidence cannot be classified"))
+                      not grade(run)[located_cid][0]
+                      and "cannot be classified" in grade(run)[located_cid][1])
                 parent.unlink()
                 moved_typed.rename(parent)
                 journal = root / store.journal_root(txn_kind)
@@ -416,8 +475,12 @@ def _staged_root_self_test(check):
                       grade(run) == clean)
                 single = journal / run.name
                 single.mkdir()
-                check("staged-root-typed-journal-{}-{}".format(txn_kind, kind), lambda:
-                      refused(grade(run), "typed transaction evidence is not supported"))
+                single_needle = ("without frames.log" if txn_kind == kind
+                                 else "foreign-kind typed evidence")
+                check("staged-root-typed-journal-{}-{}".format(txn_kind, kind),
+                      lambda n=single_needle:
+                      not grade(run)["transaction-consistency"][0]
+                      and n in grade(run)["transaction-consistency"][1])
                 single.rmdir()
                 # Unreadable typed controls must not collapse into the absent positive above.
                 real_read = gate._read_store_control
@@ -427,30 +490,43 @@ def _staged_root_self_test(check):
                     return real_read(fd, rel)
                 with patch.object(gate, "_read_store_control", side_effect=denied_typed):
                     check("staged-root-typed-unreadable-{}-{}".format(txn_kind, kind), lambda:
-                          refused(grade(run), "typed control denied"))
-            typed.write_bytes(b"state =\n")
+                          not grade(run)[located_cid][0]
+                          and "typed control denied" in grade(run)[located_cid][1])
+            # Generation 2 never touches a legacy `.aiqt` control: observe the ATTEMPTED reads and
+            # journal classifications themselves, not only the verdicts (change-carries-check: with the
+            # legacy Group C dispatch restored, the sentinel observes the forbidden access).
             record.write_bytes(b"state =\n")
-            check("staged-root-typed-retains-legacy-corruption-" + kind, lambda:
-                  refused(grade(run), "typed transaction evidence is not supported")
-                  and "unreadable/unparseable" in grade(run)["transaction-schema"][1])
-            typed.unlink()
+            reads = []
+            real_read = gate._read_store_control
+            real_classify = gate._classify_import_journal
+            def observed_read(fd, rel):
+                reads.append(rel)
+                return real_read(fd, rel)
+            def observed_classify(fd, rel, what="import journal"):
+                reads.append(rel)
+                return real_classify(fd, rel, what=what)
+            with patch.object(gate, "_read_store_control", side_effect=observed_read), \
+                    patch.object(gate, "_classify_import_journal", side_effect=observed_classify):
+                observed = grade(run)
+            check("staged-root-aiqt-unread-" + kind, lambda:
+                  observed == clean and bool(reads)
+                  and not any(rel.startswith(".aiqt") for rel in reads))
             record.unlink()
             decoy = root / ".working" / imp._txn_record_rel(run.name)
             decoy.parent.mkdir(parents=True)
             decoy.write_bytes(b"state =\n")
             check("staged-root-ignore-decoy-" + kind, lambda:
                   grade(run) == clean)
+            # A legacy control in ANY shape (a FIFO, a symlinked parent) is unread at generation 2:
+            # nothing beneath `.aiqt` steers a typed verdict (the sentinel above observes the reads).
             os.mkfifo(record)
-            check("staged-root-fifo-" + kind, lambda:
-                  "not a regular file" in grade(run)["transaction-schema"][1])
+            check("staged-root-legacy-fifo-ignored-" + kind, lambda: grade(run) == clean)
             record.unlink()
             original = record.parent
             moved = root / "moved-control"
             original.rename(moved)
             original.symlink_to(moved, target_is_directory=True)
-            check("staged-root-symlink-control-" + kind, lambda:
-                  not grade(run)["transaction-schema"][0]
-                  and "no-follow" in grade(run)["transaction-schema"][1])
+            check("staged-root-legacy-symlink-ignored-" + kind, lambda: grade(run) == clean)
             original.unlink()
             moved.rename(original)
             # Deny only the physical store ascent, after _bind_run_name has succeeded.
@@ -1344,8 +1420,10 @@ def boundary_self_test():
     header["kind"] = "import"
     header["operation_id"] = "original-operation"
     record_home = ".working/journals/import/runs/" + run
-    with patch.object(home_journal, "_existing_frames", return_value=frames), \
-            patch.object(journal, "classify_state", return_value="complete") as classify, \
+    # PR B: the projection's state derives from the SAME captured frame sequence _existing_frames
+    # validated (state_of_frames), never a separate classify_state re-read.
+    terminal = frames + [(journal.F_COMPLETE, dict(txn=run))]
+    with patch.object(home_journal, "_existing_frames", return_value=terminal) as existing, \
             patch.object(journal, "_lstat_contained", return_value=None) as prior, \
             patch.object(journal, "ensure_journal_dirs") as mkdirs, \
             patch.object(journal, "_open_parent", return_value=(104, "transaction.toml")), \
@@ -1359,10 +1437,12 @@ def boundary_self_test():
         check("internal-projection-typed-record", lambda: record == {
             "format": "opf.journal.transaction/v1", "kind": "import", "run_id": run, "state": "complete",
             "operation_id": "original-operation", "journal_rel": ".working/journals/import/journal"})
-        classify.return_value = "open"
+        check("internal-projection-shared-payload", lambda: payload == home_journal.projection_payload(
+            "import", run, "complete", "original-operation"))
+        existing.return_value = frames
         check("internal-projection-open-refused", lambda: refuses(
             lambda: home_journal._project(100, 103, Path("/unused") / run, "import", run)))
-        classify.return_value = "complete"
+        existing.return_value = terminal
         prior.return_value = object()
         with patch.object(journal, "_read_contained", return_value=(b"corrupt", None)):
             check("internal-projection-conflict-refused", lambda: refuses(
@@ -1370,6 +1450,36 @@ def boundary_self_test():
         with patch.object(journal, "_read_contained", return_value=(payload, None)):
             check("internal-projection-idempotent", lambda: home_journal._project(
                 100, 103, Path("/unused") / run, "import", run) is None and publish.call_count == 1)
+
+    # PR B (maintainer ruling): shared native-journal validation is kind-generic; adoption identities
+    # validate through the same pure validators the adoption executor will bind to.
+    adoption_header = dict(kind="adoption", run_id=adopt_run, operation_id="adopt-op")
+    adoption_frames = [(journal.F_INTENT, dict(txn=adopt_run, header=adoption_header, ops=[])),
+                       (journal.F_COMPLETE, dict(txn=adopt_run))]
+    check("internal-journal-kind-generic-adoption", lambda:
+          home_journal.check_run_frames(adoption_frames, "adoption", adopt_run) is not None
+          and home_journal.state_of_frames(adoption_frames) == "complete"
+          and tomllib.loads(home_journal.projection_payload(
+              "adoption", adopt_run, "complete", "adopt-op").decode()) == {
+              "format": "opf.journal.transaction/v1", "kind": "adoption", "run_id": adopt_run,
+              "state": "complete", "operation_id": "adopt-op",
+              "journal_rel": ".working/journals/adoption/journal"})
+    check("internal-journal-adoption-identity-refused", lambda: refuses(
+        lambda: home_journal.check_run_frames(adoption_frames, "import", adopt_run)))
+    check("internal-journal-adoption-rolled-back", lambda: home_journal.state_of_frames(
+        [(journal.F_INTENT, dict(txn=adopt_run, header=adoption_header, ops=[])),
+         (journal.F_RIP, dict(txn=adopt_run)), (journal.F_RC, dict(txn=adopt_run))]) == "rolled-back")
+    check("internal-attempt-adoption-spelling", lambda:
+          home_journal.attempt_txn("adoption", adopt_run, 3) == adopt_run + ".a0003")
+    adoption_attempt = [(journal.F_INTENT, dict(txn=adopt_run + ".a0001", header=dict(
+        kind="adoption", run_id=adopt_run, attempt=1, operation_id="adopt-op"), ops=[])),
+        (journal.F_COMPLETE, dict(txn=adopt_run + ".a0001"))]
+    check("internal-attempt-adoption-identity", lambda:
+          home_journal.check_attempt_frames(adoption_attempt, "adoption", adopt_run, 1) is not None)
+    check("internal-attempt-adoption-foreign-refused", lambda: refuses(
+        lambda: home_journal.check_attempt_frames(adoption_attempt, "import", adopt_run, 1)))
+    check("internal-projection-adoption-nonterminal-refused", lambda: refuses(
+        lambda: home_journal.projection_payload("adoption", adopt_run, "open", "adopt-op")))
 
     preview = "/store/.working/staging/preview/preview-run"
 
