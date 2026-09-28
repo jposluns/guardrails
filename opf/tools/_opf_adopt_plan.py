@@ -6,8 +6,11 @@ Only explicit source roots, .working, and DETECTION_ROOTS are inventoried.
 are exclusions, recorded in the inventory; foreign content inside those excluded
 subtrees is NOT covered. Companion stores refuse in this slice. Detection is by
 path only: a candidate is neither a parsed registration nor a working pipeline.
-Ancestry marks re-adoption when a pointer or resolved store manifest is present;
-first-adoption only means no live trace, since a committed deletion is not read.
+Ancestry marks re-adoption when a pointer, a resolved store manifest, or unresolved
+content at an OPF-reserved .working name (ANCESTRY_RESERVED) is present, so store
+debris never reads as a zero-seedable first adoption. first-adoption only means none
+of these: git history is not read, and a manifestless store under any other .working
+name reads as foreign content.
 
 VALID means an inert, digest-bound proposal, NEVER permission/readiness to apply.
 No release is trusted, acceptance verified, hook activated, or transaction run.
@@ -42,6 +45,11 @@ DETECTION_ROOTS = (
     ".github/workflows", ".gitlab-ci.yml", "Jenkinsfile", ".circleci", "azure-pipelines.yml",
     "VERSION", "CHANGELOG.md", "release-notes.toml",
 )
+# OPF-reserved .working names, from the store module's own constants: the standard machine
+# subdirectory and every reserved store control subdirectory. Content at any is ancestry.
+ANCESTRY_RESERVED = tuple(sorted(
+    store.WORKING_DIRNAME + "/" + name
+    for name in (store.DEFAULT_MACHINE_SUBDIR,) + store.RESERVED_MACHINE_SUBDIRS))
 RESIDUALS = (
     "Only the enumerated scope is covered; detection is by path, not semantics.",
     "Machine-store and unmanaged exclusions are not inspected for foreign files.",
@@ -50,7 +58,8 @@ RESIDUALS = (
     "Resolver reads retain the resolver limits; inventory caps are not a process sandbox.",
     "No coherent snapshot; apply must recheck inventory, preimages and absences.",
     "No commit, merge, network, journal, import staging, rendering or hook effects.",
-    "Ancestry reads live pointers and the resolved manifest; git history is not read.",
+    "Ancestry reads pointers, the resolved manifest and reserved .working names; git history "
+    "and a manifestless store under another .working name are not read as ancestry.",
 )
 
 
@@ -308,6 +317,11 @@ def _inventory(root, sources, targets):
         for path in sources:
             if entries.get(path, {}).get("kind") in (None, "absent", "excluded"):
                 raise PlanError("declared source is unavailable: {!r}".format(path))
+        if resolution.status != store.RESOLVED:
+            # With no resolved store, content at a reserved name (for example counters and
+            # records, or import runs, left without a manifest) is still prior ancestry.
+            traces += [path for path in ANCESTRY_RESERVED
+                       if entries.get(path, {}).get("kind") in ("file", "directory")]
         # Candidate roots are the explicit sources plus .working outside exclusions.
         candidate_roots = sources + [".working"]
         candidates = [
@@ -354,11 +368,14 @@ def _inventory(root, sources, targets):
                 for path in DETECTION_ROOTS if path in entries
             ],
             # Prior-OPF ancestry, from the same pointer and manifest reads that fixed the
-            # exclusions, so the seeded-versus-zero counters choice is plan-visible.
+            # exclusions plus the walked reserved names, so the seeded-versus-zero counters
+            # choice is plan-visible. Debris is re-adoption, not a third value that a
+            # consumer testing only for re-adoption could zero-seed.
             "ancestry": {
                 "adoption": "re-adoption" if traces else "first-adoption",
                 "traces": traces,
-                "evidence": "live pointers and resolved manifest; git history not read",
+                "evidence": "live pointers, resolved manifest and reserved .working names; "
+                            "git history and other .working names are not ancestry",
             },
             "coverage_residuals": list(RESIDUALS),
         }, homes
@@ -697,7 +714,7 @@ def self_test():
             self.assertEqual((ancestry()["adoption"], ancestry()["traces"]), ("first-adoption", []))
             inventory = tomllib.loads(self.make_plan().inventory.decode())
             self.assertEqual(inventory["observation"]["ancestry"]["adoption"], "first-adoption")
-            # A pointer whose store is gone (foreign .working, no manifest) is still ancestry.
+            # A committed dir:. pointer beside foreign .working content (no manifest) is ancestry.
             (self.root / ".working").mkdir()
             (self.root / ".working/notes.md").write_bytes(b"notes")
             (self.root / ".opf.toml").write_text('[store]\ntarget = "dir:."\n', encoding="utf-8")
@@ -710,6 +727,42 @@ def self_test():
                 _opf_init.build_manifest(), encoding="utf-8")
             self.assertEqual((ancestry()["adoption"], ancestry()["traces"]),
                              ("re-adoption", [".working/toml/manifest.toml"]))
+
+        def test_ancestry_store_debris_is_re_adoption(self):
+            import shutil
+
+            def ancestry():
+                return tomllib.loads(self.observation().observation.decode())["ancestry"]
+            # Oracle derived from the store constants, not from this module's own set.
+            reserved = [store.WORKING_DIRNAME + "/" + name for name in
+                        (store.DEFAULT_MACHINE_SUBDIR,) + store.RESERVED_MACHINE_SUBDIRS]
+            run = ".working/imports/imp-20260102T030405Z-0123456789abcdef"
+            cases = [(".working/toml", [".working/toml/counters.toml"], [".working/toml/records"]),
+                     (".working/imports", [run + "/run.toml"], [])]
+            cases += [(name, [name + "/leftover.toml"], []) for name in reserved
+                      if name not in (".working/toml", ".working/imports")]
+            for name, files, dirs in cases:
+                with self.subTest(reserved=name):
+                    try:
+                        for rel in dirs + [str(Path(rel).parent) for rel in files]:
+                            (self.root / rel).mkdir(parents=True, exist_ok=True)
+                        for rel in files:
+                            (self.root / rel).write_bytes(b"[x]\n")
+                        doc = tomllib.loads(self.observation().observation.decode())
+                        self.assertEqual(doc["resolution"]["status"], store.CANNOT_EVALUATE)
+                        self.assertEqual((doc["ancestry"]["adoption"], doc["ancestry"]["traces"]),
+                                         ("re-adoption", [name]))
+                    finally:
+                        shutil.rmtree(self.root / ".working")
+            # Foreign .working content, even a nested reserved-looking name, stays first-adoption.
+            (self.root / ".working/notes").mkdir(parents=True)
+            (self.root / ".working/notes/toml").write_bytes(b"notes")
+            self.assertEqual((ancestry()["adoption"], ancestry()["traces"]), ("first-adoption", []))
+            # A pointer and debris are both traces, pointer first.
+            (self.root / ".working/toml").mkdir()
+            (self.root / ".working/toml/counters.toml").write_bytes(b"[x]\n")
+            (self.root / ".opf.toml").write_text('[store]\ntarget = "dir:."\n', encoding="utf-8")
+            self.assertEqual(ancestry()["traces"], [".opf.toml", ".working/toml"])
 
         def test_unreadable_declared_source(self):
             with mock.patch.object(sys.modules[__name__], "_read",
