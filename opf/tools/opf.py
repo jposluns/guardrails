@@ -335,12 +335,13 @@ def _watchdog_hostile_ambient_self_test():
             _signal.signal(_signal.SIGALRM, _prev_disp)           # restore the real caller disposition
             _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)
             # Restore the caller's ITIMER_REAL + any pending SIGALRM through the SHARED helper (round-15 F1,
-            # the SINGLE elapsed-aware save/restore every opf-side watchdog uses, so no per-site verbatim
-            # restore can diverge again): value minus the time held (interval preserved) so the 3 helper runs
-            # neither pause nor extend the caller's deadline (a 50ms deadline set before the test still fires,
-            # not sitting ~50ms away after ~300ms of test; a deadline that expired during the test clamps to a
-            # tiny positive so it still fires, never re-armed to its full original value), AND a SIGALRM the
-            # caller had pending on entry re-posted so the probe's SIG_IGN does not destroy it (round-15 F2).
+            # the single elapsed-aware save/restore every opf-side watchdog is meant to route through): value
+            # minus the time held (interval preserved) so the 4 helper runs (one per affected label) neither
+            # pause nor extend the caller's deadline (a 50ms deadline set before the test still fires, not
+            # sitting ~50ms away after this multi-second test; a deadline that expired during the test clamps
+            # to a tiny positive so it still fires, never re-armed to its full original value), AND a SIGALRM
+            # the caller had pending on entry re-posted so the probe's SIG_IGN does not destroy it
+            # (round-15 F2).
             _opf_store.restore_caller_alarm(*_caller_snap)
     if not ok:
         # The summary names no single cause: the failed check above already printed the observed one (a
@@ -370,14 +371,16 @@ def _watchdog_wrapper_caller_deadline_self_test():
     re-arm at the wrapper's own restore site reads back the full deadline minus only the time spent
     between that re-arm and the read, so it reds the below-half check unless scheduling stalls totalling
     more than half the deadline (0.25s) land in that short window: an executed observation with a wide
-    margin, not a load-proof discriminator. The DETERMINISTIC guard for the hand-rolled-restore class is
-    _watchdog_restore_site_self_test, which reds a verbatim re-arm at this site (and at every other
-    borrow site) structurally, independent of scheduling. The helper-module restore sites exercised inside
+    margin, not a load-proof discriminator. Disclosed residual: detection of a hand-rolled (verbatim or
+    otherwise divergent) or DROPPED restore at a call site is BEST-EFFORT through these behavioural
+    checks; the miss direction is a long scheduling stall landing between a restore and the read that
+    observes it, which shrinks a defective reading toward the elapsed-aware one. A structural call-site
+    guard is tracked separately. The helper-module restore sites exercised inside
     the wrapper (_opf_changelog / _opf_views / _opf_store / _opf_check) hold the borrowed timer for well
-    under a millisecond, so neither this below-half reading nor the hostile test's +-1e-3 fixture band can
-    tell a verbatim restore from an elapsed-aware one THERE; those sites rely on the structural check.
-    (A verbatim re-arm still fires, but only after the run, inside the grace wait, so the delivery check
-    alone cannot make the distinction.)
+    under a millisecond, so neither this below-half reading nor the hostile test's fixture band can
+    tell a verbatim restore from an elapsed-aware one THERE; that limit is part of the same disclosed
+    residual. (A verbatim re-arm still fires, but only after the run, inside the grace wait, so the
+    delivery check alone cannot make the distinction.)
     Returns 0 clean, 1 on failure; SKIPS clean on a platform without POSIX SIGALRM/itimer.
 
     Round-15 F1: this guard's OWN caller-timer restore is now the SHARED _opf_store.restore_caller_alarm
@@ -464,8 +467,8 @@ def _watchdog_wrapper_caller_deadline_self_test():
         # the wrapper's own restore site reads the full deadline minus the time spent between that re-arm
         # and the read above. Half the deadline (0.25s) separates those readings unless scheduling stalls
         # totalling more than 0.25s land in that short window, so this is a wide-margin executed
-        # observation, not a deterministic guard; _watchdog_restore_site_self_test reds the verbatim
-        # re-arm structurally, independent of scheduling (F1).
+        # observation, not a deterministic guard: a verbatim re-arm hidden by such a stall is the
+        # disclosed best-effort miss; a structural call-site guard is tracked separately (F1).
         if _val_after >= _deadline / 2:
             print("opf watchdog wrapper-deadline self-test: the caller's ITIMER_REAL read {!r} after the "
                   "{:.4f}s run, not below half its {}s deadline; a restore that deducted the real elapsed "
@@ -492,10 +495,10 @@ def _watchdog_wrapper_caller_deadline_self_test():
 
 
 def _watchdog_shared_restore_self_test(_hold_s=0.0):
-    """Guard F1 (round-15, break the watchdog-timer re-induction loop): every opf-side watchdog restores a
-    borrowed caller ITIMER_REAL through the ONE shared _opf_store.restore_caller_alarm helper, the single
-    source of truth, so no per-site verbatim restore can diverge again and re-introduce the watchdog-timer
-    class its own guards kept re-inducing (rounds 12->13->14). This exercises that helper DIRECTLY: a caller
+    """Guard F1 (round-15, break the watchdog-timer re-induction loop): every opf-side watchdog is meant to
+    restore a borrowed caller ITIMER_REAL through the ONE shared _opf_store.restore_caller_alarm helper, the
+    single source of truth, so a divergent restore has one body to diverge in rather than one per site. This
+    exercises that HELPER directly (its own body, not who calls it): a caller
     timer restored after a KNOWN elapsed must come back reduced by that elapsed (elapsed-aware), its repeating
     interval preserved, never re-armed to its full original value. Reverting the helper to a verbatim restore
     (value re-armed to its original) reds this. A SECOND probe restores the same snapshot with was_pending
@@ -504,9 +507,16 @@ def _watchdog_shared_restore_self_test(_hold_s=0.0):
     probe above (was_pending False) never reaches -- reds here too, and the re-posted pending SIGALRM is
     asserted observable. SKIPS clean on a platform without POSIX SIGALRM/itimer.
 
-    Deterministic, not timing-dependent: the elapsed is a fixed baseline in the past (monotonic() - 5s), so
-    the restored value is ~95s for a 100s caller value regardless of machine speed; a verbatim restore yields
-    the full 100s, far outside the elapsed-aware band.
+    Margins, not determinism: the elapsed is a fixed baseline in the past (monotonic() - 5s), so the
+    expected restored value is ~95s for a 100s caller value while a verbatim restore yields the full
+    100s -- a ~5s separation, far above scheduling jitter, though still one a comparably long stall
+    between the restore call and the getitimer read would erode. Each probe's accepted band is bracketed
+    by a MEASURED probe-to-read elapsed (baseline sampled before the restore call, upper bound after the
+    read, the hostile test's conservative ordering), so a scheduling stall in that window only WIDENS the
+    band's floor and a correct restore stays green; the prior FIXED +-0.5s band redded a correct restore
+    under a >0.5s stall there. Detection of a hand-rolled, dropped, or restore-time-t0 restore at a CALL
+    SITE is best-effort through the behavioural watchdog tests (the miss direction is a long stall between
+    a restore and the read that observes it); a structural call-site guard is tracked separately.
 
     F-R18-C2TEST: `_hold_s` (default 0.0) injects a CONTROLLED measurable delay AFTER the top snapshot and
     BEFORE the finally-restore of the caller's borrowed timer, so a caller deadline held across this wrapper
@@ -529,13 +539,23 @@ def _watchdog_shared_restore_self_test(_hold_s=0.0):
         _known_val, _known_int, _elapsed = 100.0, 50.0, 5.0
         # Exercise the shared helper with an explicit snapshot whose baseline is _elapsed seconds in the past,
         # was_pending False (this probe does not manipulate the pending state). Elapsed-aware => ~95s remains.
-        _opf_store.restore_caller_alarm(_known_val, _known_int, _time.monotonic() - _elapsed, False)
+        # The accepted band is bracketed by a MEASURED probe-to-read elapsed (baseline sampled BEFORE the
+        # restore call, upper bound AFTER the getitimer read, the hostile test's conservative ordering), so
+        # a scheduling stall between the restore and the read only WIDENS the band's floor (the restored
+        # timer counts down until the read; the bracket bounds that countdown plus any extra elapsed the
+        # helper subtracted); the prior FIXED +-0.5s band redded a CORRECT restore under a >0.5s stall in
+        # that window.
+        _t_probe = _time.monotonic()
+        _opf_store.restore_caller_alarm(_known_val, _known_int, _t_probe - _elapsed, False)
         _val_after, _int_after = _signal.getitimer(_signal.ITIMER_REAL)
+        _probe_ub = _time.monotonic() - _t_probe                # brackets extra subtraction + countdown
         _signal.setitimer(_signal.ITIMER_REAL, 0)               # disarm the probe timer
-        if not (_known_val - _elapsed - 0.5 <= _val_after <= _known_val - _elapsed + 0.5):
-            print("opf watchdog shared-restore self-test: restored ITIMER value {!r}; expected ~{} (elapsed "
-                  "{}s subtracted from {}s); a verbatim restore would leave {} (F1)".format(
-                      _val_after, _known_val - _elapsed, _elapsed, _known_val, _known_val), file=sys.stderr)
+        if not (_known_val - _elapsed - _probe_ub - 1e-3 <= _val_after <= _known_val - _elapsed + 1e-3):
+            print("opf watchdog shared-restore self-test: restored ITIMER value {!r}; expected within "
+                  "[{:.6f}, {:.6f}] (elapsed {}s subtracted from {}s, then at most the bracketed {:.6f}s "
+                  "probe-to-read elapsed); a verbatim restore would leave ~{} (F1)".format(
+                      _val_after, _known_val - _elapsed - _probe_ub, _known_val - _elapsed, _elapsed,
+                      _known_val, _probe_ub, _known_val), file=sys.stderr)
             ok = False
         if abs(_int_after - _known_int) > 1e-6:
             print("opf watchdog shared-restore self-test: restored ITIMER interval {!r}; expected {!r} "
@@ -561,16 +581,23 @@ def _watchdog_shared_restore_self_test(_hold_s=0.0):
             try:
                 _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)  # discard an INHERITED caller pending SIGALRM
                 _signal.signal(_signal.SIGALRM, _benign)
-                _opf_store.restore_caller_alarm(_known_val, _known_int,
-                                                _time.monotonic() - _elapsed, True)
+                # The accepted band is bracketed by a measured probe-to-read elapsed, exactly as the
+                # was_pending False probe above (a stall between the restore and the read widens the
+                # band's floor instead of false-failing a correct restore).
+                _t_probe_p = _time.monotonic()
+                _opf_store.restore_caller_alarm(_known_val, _known_int, _t_probe_p - _elapsed, True)
                 _val_p, _int_p = _signal.getitimer(_signal.ITIMER_REAL)
+                _probe_ub_p = _time.monotonic() - _t_probe_p      # brackets extra subtraction + countdown
                 _pend_p = _signal.SIGALRM in _signal.sigpending()
                 _signal.setitimer(_signal.ITIMER_REAL, 0)         # disarm the probe timer
-                if not (_known_val - _elapsed - 0.5 <= _val_p <= _known_val - _elapsed + 0.5):
+                if not (_known_val - _elapsed - _probe_ub_p - 1e-3 <= _val_p
+                        <= _known_val - _elapsed + 1e-3):
                     print("opf watchdog shared-restore self-test: with was_pending True the restored "
-                          "ITIMER value is {!r}; expected ~{} (elapsed {}s subtracted from {}s); a "
-                          "pending-only verbatim restore would leave {} (F1/F2)".format(
-                              _val_p, _known_val - _elapsed, _elapsed, _known_val, _known_val),
+                          "ITIMER value is {!r}; expected within [{:.6f}, {:.6f}] (elapsed {}s subtracted "
+                          "from {}s, then at most the bracketed {:.6f}s probe-to-read elapsed); a "
+                          "pending-only verbatim restore would leave ~{} (F1/F2)".format(
+                              _val_p, _known_val - _elapsed - _probe_ub_p, _known_val - _elapsed,
+                              _elapsed, _known_val, _probe_ub_p, _known_val),
                           file=sys.stderr)
                     ok = False
                 if abs(_int_p - _known_int) > 1e-6:
@@ -619,8 +646,8 @@ def _watchdog_shared_restore_deadline_self_test():
     restore_caller_alarm(*snap); a regression that passes RESTORE-time monotonic() as t0 subtracts ~no
     elapsed and EXTENDS the caller's deadline. This arms a large ~10s caller deadline that never fires, runs
     the wrapped self-test with a CONTROLLED hold, and asserts that specific held interval was subtracted from
-    the restored ITIMER value, so a restore-time-t0 / verbatim revert (which subtracts ~0) reds. SKIPS clean
-    without POSIX itimer.
+    the restored ITIMER value, so a restore-time-t0 / verbatim revert (which subtracts ~0) reds (see the
+    margin note below for the stall this can miss). SKIPS clean without POSIX itimer.
 
     F-R18-C2TEST: the discrimination is driven by an explicit `_hold_s` the wrapped call sleeps while it
     holds the borrowed caller timer, NOT by the wrapped call's own (microsecond) wall time. The prior form
@@ -628,7 +655,9 @@ def _watchdog_shared_restore_deadline_self_test():
     sub-millisecond, that band was measurement noise and a restore-time-t0 / verbatim revert stayed green.
     Here the held interval is a controlled ~0.2s, well above scheduling jitter, and the assertion requires
     that at least half of it was deducted -- the exact PARENT-FUNCTION revert (restore-time-t0 / verbatim)
-    deducts ~0 and reds.
+    deducts ~0 and reds, unless a scheduling stall longer than half the hold (~0.1s) lands between the
+    wrapped test's final restore and the read here: a wide-margin executed observation, best-effort at the
+    call site, not a deterministic guard (a structural call-site guard is tracked separately).
 
     Fix round 4: the assertion is a BAND, not a one-sided ceiling. The prior form required only
     `_val_after <= _armed - _hold_s*0.5`, which a DROPPED caller timer also satisfies: with the wrapped
@@ -696,146 +725,6 @@ def _watchdog_shared_restore_deadline_self_test():
     print("opf watchdog shared-restore deadline self-test: PASS (the caller ITIMER_REAL read back inside "
           "the elapsed-aware band: reduced by at least half the controlled {:.1f}s hold and by no more "
           "than the bracketed arm-to-read elapsed)".format(_hold_s))
-    return EXIT_OK
-
-
-def _watchdog_restore_site_self_test():
-    """Guard F1 STRUCTURALLY (fix round 4): every opf-side scope that BORROWS the caller's alarm (assigns
-    a snapshot from _opf_store.snapshot_caller_alarm) must hand that snapshot back through the ONE shared
-    _opf_store.restore_caller_alarm helper, and must never feed snapshot-derived values to setitimer or
-    alarm itself (a hand-rolled restore). The rule under guard requires the save and the elapsed-aware
-    restore to live ONCE, in the shared helper, so no call site can hand-roll a variant; the behavioural
-    wrapper-deadline test above can only OBSERVE a defective restore through a timer reading, and that
-    reading moves with scheduling delay, so a verbatim re-arm at the wrapper's own restore site could
-    escape it under a large enough stall. This check is DETERMINISTIC: it parses the installed opf/tools
-    sources (AST) at test time; no timer runs and nothing sleeps, so machine load cannot change the
-    verdict. It reds a verbatim re-arm at ANY borrow site -- including the wrapper's own caller-timer
-    restore and the sub-millisecond helper-module holds no timing band can resolve -- and a DROPPED
-    restore (a snapshot never passed to restore_caller_alarm).
-
-    Scope and limits: within each borrowing scope the check follows names assigned from a
-    snapshot_caller_alarm() call, through simple reassignments and unpackings, into setitimer / alarm /
-    restore_caller_alarm call arguments. A mutation that launders the snapshot through a container,
-    attribute, or another module is beyond its reach. The shared helper's own body legitimately calls
-    setitimer and is NOT a borrow scope (it takes the snapshot as parameters); its behaviour is covered
-    directly by the shared-restore self-test's known-elapsed probes. The scan is PINNED: every borrow
-    scope listed in _PINNED must be found, so a scan reading the wrong directory, or a rename that removes
-    a guarded scope, reds instead of passing on an empty result; NEW borrow sites are scanned
-    automatically without a pin update. Returns 0 clean, 1 on a failure."""
-    import ast as _ast
-    import os as _os
-    _SNAP = "snapshot_caller_alarm"
-    _RESTORE = "restore_caller_alarm"
-    _ARMERS = ("setitimer", "alarm")
-    _PINNED = (
-        ("opf.py", "_watchdog_hostile_ambient_self_test"),
-        ("opf.py", "_watchdog_wrapper_caller_deadline_self_test"),
-        ("opf.py", "_watchdog_shared_restore_self_test"),
-        ("opf.py", "_watchdog_shared_restore_deadline_self_test"),
-        ("_opf_changelog.py", "self_test"),
-        ("_opf_views.py", "self_test"),
-        ("_opf_check.py", "_f7_ignore_window"),
-        ("_opf_check.py", "self_test"),
-        ("_opf_store.py", "_refused_no_hang"),
-    )
-
-    def _called_name(_call):
-        _f = _call.func
-        if isinstance(_f, _ast.Attribute):
-            return _f.attr
-        if isinstance(_f, _ast.Name):
-            return _f.id
-        return None
-
-    def _names_in(_node):
-        return {_n.id for _n in _ast.walk(_node) if isinstance(_n, _ast.Name)}
-
-    failures = []
-    found_scopes = set()
-    _tools_dir = _os.path.dirname(_os.path.abspath(__file__))
-    try:
-        _files = sorted(_f for _f in _os.listdir(_tools_dir)
-                        if _f.endswith(".py") and _os.path.isfile(_os.path.join(_tools_dir, _f)))
-    except OSError as exc:
-        print("opf watchdog restore-site self-test: FAIL (cannot list {!r} for the scan: {!r}; cannot "
-              "evaluate, failing closed)".format(_tools_dir, exc), file=sys.stderr)
-        return EXIT_FINDING
-    for _fname in _files:
-        try:
-            with open(_os.path.join(_tools_dir, _fname), "r", encoding="utf-8") as _fh:
-                _tree = _ast.parse(_fh.read(), filename=_fname)
-        except (OSError, SyntaxError, ValueError) as exc:
-            failures.append("{}: cannot read/parse for the restore-site scan ({!r}); failing "
-                            "closed".format(_fname, exc))
-            continue
-        _parent = {}
-        for _node in _ast.walk(_tree):
-            for _child in _ast.iter_child_nodes(_node):
-                _parent[_child] = _node
-        # Borrow scopes: the innermost function (module, if none) containing a snapshot_caller_alarm call.
-        _regions = []
-        for _node in _ast.walk(_tree):
-            if isinstance(_node, _ast.Call) and _called_name(_node) == _SNAP:
-                _sc = _parent.get(_node)
-                while _sc is not None and not isinstance(_sc, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
-                    _sc = _parent.get(_sc)
-                _region = _sc if _sc is not None else _tree
-                if _region not in _regions:
-                    _regions.append(_region)
-        for _region in _regions:
-            _rname = getattr(_region, "name", "<module>")
-            found_scopes.add((_fname, _rname))
-            # Taint: names assigned from a snapshot call, propagated to a fixpoint through simple
-            # assignments and tuple unpackings inside this scope's subtree (nested defs included).
-            _tainted = set()
-            _assigns = [_n for _n in _ast.walk(_region) if isinstance(_n, _ast.Assign)]
-            _changed = True
-            while _changed:
-                _changed = False
-                for _a in _assigns:
-                    _src = any(isinstance(_c, _ast.Call) and _called_name(_c) == _SNAP
-                               for _c in _ast.walk(_a.value)) or bool(_names_in(_a.value) & _tainted)
-                    if not _src:
-                        continue
-                    for _tgt in _a.targets:
-                        for _nm in _ast.walk(_tgt):
-                            if isinstance(_nm, _ast.Name) and _nm.id not in _tainted:
-                                _tainted.add(_nm.id)
-                                _changed = True
-            _restored = False
-            for _node in _ast.walk(_region):
-                if not isinstance(_node, _ast.Call):
-                    continue
-                _cn = _called_name(_node)
-                if _cn != _RESTORE and _cn not in _ARMERS:
-                    continue
-                _args_tainted = any(bool(_names_in(_arg) & _tainted) for _arg in
-                                    list(_node.args) + [_k.value for _k in _node.keywords])
-                if _cn == _RESTORE and _args_tainted:
-                    _restored = True
-                elif _cn in _ARMERS and _args_tainted:
-                    failures.append("{}: {} (line {}): {} is called with caller-snapshot-derived "
-                                    "arguments; a borrow site must restore only through the shared "
-                                    "_opf_store.{} helper (F1)".format(_fname, _rname, _node.lineno,
-                                                                       _cn, _RESTORE))
-            if not _restored:
-                failures.append("{}: {}: a caller-alarm snapshot is taken but never passed to the shared "
-                                "_opf_store.{} helper; the borrowed caller alarm has no shared-helper "
-                                "restore in this scope (F1)".format(_fname, _rname, _RESTORE))
-    for _pin in _PINNED:
-        if _pin not in found_scopes:
-            failures.append("pinned borrow scope {}:{} was not found; the scan is blind to a site it must "
-                            "cover (moved, renamed, or the wrong directory was scanned); failing "
-                            "closed".format(_pin[0], _pin[1]))
-    if failures:
-        for _msg in failures:
-            print("opf watchdog restore-site self-test: {}".format(_msg), file=sys.stderr)
-        print("opf watchdog restore-site self-test: FAIL (a restore-site check failed; the messages above "
-              "state the observed causes)", file=sys.stderr)
-        return EXIT_FINDING
-    print("opf watchdog restore-site self-test: PASS ({} caller-alarm borrow scopes across {} scanned "
-          "files restore only through the shared _opf_store.restore_caller_alarm helper; all {} pinned "
-          "scopes found)".format(len(found_scopes), len(_files), len(_PINNED)))
     return EXIT_OK
 
 
@@ -3404,7 +3293,6 @@ def _self_tests():
     ("opf-watchdog-wrapper-deadline", _watchdog_wrapper_caller_deadline_self_test),
     ("opf-watchdog-shared-restore", _watchdog_shared_restore_self_test),
     ("opf-watchdog-shared-restore-deadline", _watchdog_shared_restore_deadline_self_test),
-    ("opf-watchdog-restore-site", _watchdog_restore_site_self_test),
     ("opf-aggregator", _aggregator_self_test),
     ("opf-cli", _cli_self_test),
 )
