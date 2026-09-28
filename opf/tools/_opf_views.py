@@ -1017,7 +1017,8 @@ _PROJECTION_EXTRA = {
 
 def _projection_row(record, extra):
     """Project one record to a projection row (spec 10.5: "the full base record"): the base envelope fields
-    (including `type`, a self-describing row), a nested `actor` sub-table carrying the string-valued
+    (including `type`, a self-describing row, and `proposed_from` when the record carries it, spec
+    8.3/8.8), a nested `actor` sub-table carrying the string-valued
     kind/id, the type's declared extra fields (`extra`), and `links`/`refs` as NESTED arrays of tables (the
     emitter excludes inline tables, so a link/ref set is projected as an array of tables, not the record
     files' inline-table form). The canonical emitter binds a per-row `actor` sub-table to its own element of
@@ -1025,7 +1026,7 @@ def _projection_row(record, extra):
     rather than a flattened actor_kind/actor_id pair. A field the record does not carry is omitted (a stable
     declared shape)."""
     row = {}
-    for k in ("id", "type", "status", "title", "created_at", "updated_at"):
+    for k in ("id", "type", "status", "proposed_from", "title", "created_at", "updated_at"):
         if k in record:
             row[k] = record[k]
     actor = record.get("actor")
@@ -1392,7 +1393,7 @@ def _registered_vendors_and_kinds(manifest):
     return registered, None
 
 
-def render(argv, observations=None):
+def render(argv, observations=None, accepted=None):
     """`opf render [--root DIR] (--check | --write)`: render every declared view of the store at a PRODUCT
     root. Exactly one of --check / --write is required (a bare `render` is a usage error, exit 2). --check is
     strictly read-only and returns 0 clean, 1 on drift, 2 cannot-evaluate. --write is the MUTATING half and is
@@ -1407,9 +1408,11 @@ def render(argv, observations=None):
     (edit CHANGELOG.md / declare-or-remove VERSION) and NEVER advertising a `render --write` re-run.
     `observations` is the inert git-derived facts object the git-aware caller (opf.py's render --write, via
     _opf_observe.gather) injects for the gate; validate_store reads no git itself, so a write can only ever
-    pass when honest observations are supplied. NOT-ADOPTED reports NOT APPLICABLE and exits 0 (the pack's own
-    `--root .` case). Two-phase like run_generator: every payload is rendered before any target is written, so
-    a fail-closed source aborts before a single file is touched."""
+    pass when honest observations are supplied. `accepted` (default None) is passed to both source-integrity
+    gates: a predicate over CANNOT-EVALUATE messages the caller verified independently (`opf record` names
+    the one transition it checked, spec 8.8; see _opf_check.source_integrity_ok). NOT-ADOPTED reports NOT
+    APPLICABLE and exits 0 (the pack's own `--root .` case). Two-phase like run_generator: every payload is
+    rendered before any target is written, so a fail-closed source aborts before a single file is touched."""
     root = None
     check = None
     i = 0
@@ -1486,7 +1489,7 @@ def render(argv, observations=None):
     # exit 2 and nothing written, printing ONLY the source-attributed messages so the false "regenerate"
     # remedy is never advertised over a store render will not touch (guard-input-soundness; never-advertise).
     pre = _opf_check.validate_store(res, observations=observations)
-    if not _opf_check.source_integrity_ok(pre):
+    if not _opf_check.source_integrity_ok(pre, accepted):
         print("opf render: cannot evaluate: refusing to write; store SOURCE integrity is not sound "
               "(U6 validate_store); nothing written", file=sys.stderr)
         for cid in _opf_check.source_checks(pre):
@@ -1515,7 +1518,7 @@ def render(argv, observations=None):
     # certifies, or fails on, a deliverable it did not and could not regenerate). A miss on an owned check is a
     # render/check DISAGREEMENT: roll back to the captured preimages, name the affected paths, exit 2.
     post = _opf_check.validate_store(res, observations=observations)
-    owned_ok = (_opf_check.source_integrity_ok(post)
+    owned_ok = (_opf_check.source_integrity_ok(post, accepted)
                 and post.checks.get("C-VIEW-DRIFT") == "PASS"
                 and ("VERSION" not in planned_names or post.checks.get("C-VERSION-FILE") == "PASS"))
     if not owned_ok:
@@ -1535,7 +1538,7 @@ def render(argv, observations=None):
         # regression and evidence it from SOURCE_INTEGRITY_CHECKS (the same REQUIRED_CHECKS-ordered, source-
         # filtered print Phase A uses); otherwise keep the owned-deliverable wording and print C-VIEW-DRIFT /
         # C-VERSION-FILE. Either way roll back, print post.unattributed, and exit 2.
-        if not _opf_check.source_integrity_ok(post):
+        if not _opf_check.source_integrity_ok(post, accepted):
             print("opf render: cannot evaluate: post-write validation found a SOURCE-INTEGRITY regression "
                   "after the regenerate; {}".format(rollback), file=sys.stderr)
             for cid in _opf_check.source_checks(post):
@@ -2545,9 +2548,15 @@ def self_test():
         _projd = render_decisions_toml({"pending_decision": [
             {"id": "PD-1", "status": "decided", "title": "t", "decision": "x"},
             {"id": "PD-2", "status": "decided/proposed", "title": "t", "decision": "y",
+             "proposed_from": "open",
              "links": [{"rel": "supersedes", "id": "PD-1"}], "actor": {"kind": "assistant"}}]})
         _pjd = tomllib.loads(_projd)
         check("projection-derived-settled-only", _pjd["derived"] == {"effective": ["PD-1"], "superseded": []})
+        # The proposed_from envelope field (spec 8.3/8.8) is projected like every envelope field, and only
+        # when the record carries it (spec 10.5 "the full base record").
+        check("projection-includes-proposed-from",
+              _pjd["pending_decision"][1].get("proposed_from") == "open"
+              and "proposed_from" not in _pjd["pending_decision"][0])
 
         # F6 (unit-level on join_resolution): duplicate identical supersedes links do not trip the fork
         # check. Both decisions are `decided`, so they source supersedes edges (per join_resolution's

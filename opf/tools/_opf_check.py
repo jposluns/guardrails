@@ -189,19 +189,36 @@ DELIVERABLE_DRIFT_CHECKS = frozenset({"C-VIEW-DRIFT", "C-VERSION-FILE", "C-CHANG
 SOURCE_INTEGRITY_CHECKS = _REQUIRED_SET - DELIVERABLE_DRIFT_CHECKS
 
 
-def source_integrity_ok(result):
+def source_integrity_ok(result, accepted=None):
     """True IFF every SOURCE_INTEGRITY_CHECK graded EXACTLY "PASS" and the report carries no unattributed or
     internal fault. This is the predicate render()'s --write SOURCE gate calls: it EXCLUDES the deliverable-
     drift checks (which render regenerates) while failing CLOSED on a source check that is FINDING,
     CANNOT-EVALUATE, or never ran (result() force-appends CANNOT-EVALUATE for a skipped required check), and
     on ANY internal/unattributed fault (a duplicate ran(), an unknown check id, or a finding/cant emitted
-    with no current check on an early-return path). The predicate reads the per-check verdict MAP and the
-    `unattributed` list, never a message prefix, so the guard's input can genuinely answer the question asked
-    of it (guard-input-soundness). An empty/malformed result reads as not-ok (fail-closed)."""
+    with no current check on an early-return path). Without `accepted` the predicate reads the per-check
+    verdict MAP and the `unattributed` list, never a message, so the guard's input can genuinely answer the
+    question asked of it (guard-input-soundness). An empty/malformed result reads as not-ok (fail-closed).
+
+    `accepted` (default None: no exception) is a predicate over CANNOT-EVALUATE messages that the CALLER has
+    verified independently: `opf record` passes one naming exactly the transition it just checked with the
+    known actor (spec 8.8). A source check graded CANNOT-EVALUATE then counts as passing only when it
+    carries at least one message, every message is a cannot-evaluate (never a finding), and each satisfies
+    `accepted`. A FINDING, a never-run check, and an unattributed fault still fail."""
     if getattr(result, "unattributed", None):
         return False
     checks = getattr(result, "checks", None) or {}
-    return all(checks.get(cid) == "PASS" for cid in source_checks(result))
+    cannot = frozenset(getattr(result, "cannot_evaluate", None) or ())
+    by_check = getattr(result, "by_check", None) or {}
+
+    def passing(cid):
+        if checks.get(cid) == "PASS":
+            return True
+        if accepted is None or checks.get(cid) != "CANNOT-EVALUATE":
+            return False
+        msgs = by_check.get(cid) or []
+        return bool(msgs) and all(m in cannot and accepted(m) for m in msgs)
+
+    return all(passing(cid) for cid in source_checks(result))
 
 
 def source_checks(result):
