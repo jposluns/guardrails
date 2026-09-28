@@ -11,8 +11,9 @@ content at an OPF-reserved .working name (ANCESTRY_RESERVED) is present, so stor
 debris never reads as a zero-seedable first adoption. first-adoption only means none
 of these: git history is not read, and a manifestless store under any other .working
 name reads as foreign content. Durable OPF history outside .working also reads as
-first-adoption on its own: root import-promotion state (.aiqt/import,
-.aiqt/import/journal, .aiqt/import-archive) and the .gitignore opf-managed block.
+first-adoption on its own, including: root import-promotion state (.aiqt/import,
+.aiqt/import/journal, .aiqt/import-archive), the record journal (.aiqt/record/journal)
+and the .gitignore opf-managed block.
 
 VALID means an inert, digest-bound proposal, NEVER permission/readiness to apply.
 No release is trusted, acceptance verified, hook activated, or transaction run.
@@ -62,9 +63,9 @@ RESIDUALS = (
     "No commit, merge, network, journal, import staging, rendering or hook effects.",
     "Ancestry reads pointers, the resolved manifest and reserved .working names; git history "
     "and a manifestless store under another .working name are not read as ancestry. "
-    "Durable OPF history outside .working also reads as first-adoption on its own: "
-    "root import-promotion state (.aiqt/import, .aiqt/import/journal, .aiqt/import-archive) "
-    "and the .gitignore opf-managed block.",
+    "Durable OPF history outside .working also reads as first-adoption on its own, including: "
+    "root import-promotion state (.aiqt/import, .aiqt/import/journal, .aiqt/import-archive), "
+    "the record journal (.aiqt/record/journal) and the .gitignore opf-managed block.",
 )
 
 
@@ -382,9 +383,9 @@ def _inventory(root, sources, targets):
                 "evidence": "live pointers, resolved manifest and reserved .working names; "
                             "git history and other .working names are not ancestry. "
                             "Durable OPF history outside .working also reads as first-adoption "
-                            "on its own: root import-promotion state (.aiqt/import, "
-                            ".aiqt/import/journal, .aiqt/import-archive) and the .gitignore "
-                            "opf-managed block",
+                            "on its own, including: root import-promotion state (.aiqt/import, "
+                            ".aiqt/import/journal, .aiqt/import-archive), the record journal "
+                            "(.aiqt/record/journal) and the .gitignore opf-managed block",
             },
             "coverage_residuals": list(RESIDUALS),
         }, homes
