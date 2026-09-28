@@ -1589,11 +1589,12 @@ unreleased worklog tail MUST NOT rotate. The imported series MUST NOT rotate at 
 their records MUST NOT move to the record archive.
 
 The record-rotation archive under the discovered machine store is distinct from the store-tree
-`archive/` in section 4.2, which retains relocated adopter files and adoption preimages, never
-rotated records. Tooling MUST NOT scan either as the other. Imported originals, acceptance evidence,
-and retire preimages MUST be retained indefinitely by default. Automatic reclamation MUST apply only
-to staging runs, after independent re-read and digest verification of their required evidence in its
-durable home; age alone MUST NOT authorize deletion.
+`archive/` in section 4.2, which retains relocated adopter files, adoption preimages and archived
+occupying sources (section 14.2), never rotated records. Tooling MUST NOT scan either as the
+other. Imported originals, acceptance evidence, retire preimages, and archived occupying sources
+MUST be retained indefinitely by default. Automatic reclamation MUST apply only to staging runs,
+after independent re-read and digest verification of their required evidence in its durable home;
+age alone MUST NOT authorize deletion.
 
 Each rotation MUST write the year's `archive.toml`, enumerating every moved ID (and, for the
 worklog, every moved span) and its destination. Validation MUST confirm that every ID exists in
@@ -1671,7 +1672,8 @@ The clean-start completion check MUST deterministically verify the following ros
 
 1. Authority and freshness: roots, destinations and live preimages still match the approved plan.
 2. Discovery accounting: every inventory entry has a disposition or recorded exclusion.
-3. Preservation and restore: each retirement preimage and each archived occupying source
+3. Preservation and restore: each retirement preimage, preserved at apply for a retire-disposed
+   file and for a non-occupying migrate-disposed source alike, and each archived occupying source
    (section 14.2) exists, digest-matched, under `.working/archive/adoption/<run-id>/`, and a
    restore exercise reproduces its bytes.
 4. Operational readiness: the store resolves to the planned identity, and CI asserts store
@@ -1695,12 +1697,14 @@ MUST also wait for the green check: the file MUST stay frozen, byte-identical in
 bytes MUST still equal the plan digest when the removal or relocation runs, and that removal or
 relocation MUST run as one journaled, recoverable transaction under the section 5.7 consistency
 contract and lease. A completion-check failure or cannot-evaluate MUST report incomplete and MUST
-retire nothing; changing the approved work MUST take a fresh plan. Restoring an archived file to
-the live tree is new approved work, never recovery: it MUST take a fresh plan with its own single
-approval, whose apply copies the archived bytes, digest-verified, to the planned destination, and
-the archived copy MUST stay retained afterward. Green proves preservation, restorability and
-operational coverage, never semantic fidelity or fulfilment of old obligations; the receipt MUST
-disclose that limit.
+retire nothing; changing the approved work MUST take a fresh plan. Once apply commits, restoring
+an archived file to the live tree is new approved work, never recovery: it MUST take a fresh plan
+with its own single approval, whose apply copies the archived bytes, digest-verified, to the
+planned destination, and the archived copy MUST stay retained afterward. Before an apply commits,
+an abort reverses that apply's own uncommitted writes from journaled preimages (section 14.2);
+the reversal is not a restore and MUST NOT be read as one. Green proves preservation,
+restorability and operational coverage, never semantic fidelity or fulfilment of old obligations;
+the receipt MUST disclose that limit.
 
 The enforcement pack MUST freeze each plan-enumerated old file that remains in the live tree
 until its retirement is recorded, MUST deny writes under `.working/archive/adoption/<run-id>/`,
@@ -1731,15 +1735,16 @@ to adoption and the prompt pack when this contract activates.
 
 For each migrate-disposed source, import completion MUST verify the preserved original's digest
 (the archived copy under section 14.2 for a source that occupied a managed destination, the
-frozen live file otherwise), at least one imported record referencing that source or a recorded
-skip under the approved policy, and doctor VALID over both the strict store and the imported
-series, evaluated on the live tree. It MUST record the source's result in the adoption receipt's
-outcome-event chain. A green result records the source's retirement: for a frozen live source one
-journaled transaction MUST record the retirement and remove the file, whose live bytes MUST still
-match the plan digest when that transaction runs, and an archived source is already out of the
-live tree, so its recorded retirement changes no live path. `import_status` MUST become
-`"complete"` only when every migrate source completes on those terms; import is never complete on
-a state that is not doctor-VALID.
+frozen live file and its apply-archived retirement preimage otherwise), at least one imported
+record referencing that source or a recorded skip under the approved policy, and doctor VALID
+over both the strict store and the imported series, evaluated on the live tree. It MUST record
+the source's result in the adoption receipt's outcome-event chain. A green result records the
+source's retirement: for a frozen live source, an imported and a skipped one alike, one journaled
+transaction MUST record the retirement and remove the file, whose live bytes MUST still match the
+plan digest, and hence its apply-archived retirement preimage under completion check 3, when that
+transaction runs, and an archived source is already out of the live tree, so its recorded
+retirement changes no live path. `import_status` MUST become `"complete"` only when every migrate
+source completes on those terms; import is never complete on a state that is not doctor-VALID.
 This proves source accounting and preservation, not byte-level mapping coverage or semantic
 fidelity. No writer-side leftover accounting is required.
 
@@ -1789,9 +1794,11 @@ The plan MUST record one disposition per foreign file from `keep`, `migrate`, `m
   `[unmanaged]` path MUST refuse the same way (section 9.2), so a kept path never becomes an
   occupied destination.
 - **Migrate.** Keep the source for post-adoption import into the separate imported series. Its
-  exact bytes MUST be preserved, and its retirement MUST be recorded only after its source
-  completion check is green (section 14.1). There MUST NOT be an imported view. Import MUST read
-  an occupying source's archived copy and a non-occupying source's frozen live file.
+  exact bytes MUST be preserved at apply, as the archived occupying copy for an occupying source
+  and as a retirement preimage under `.working/archive/adoption/<run-id>/<source-path>` for a
+  non-occupying one (completion check 3), and its retirement MUST be recorded only after its
+  source completion check is green (section 14.1). There MUST NOT be an imported view. Import
+  MUST read an occupying source's archived copy and a non-occupying source's frozen live file.
 - **Move.** Relocate to a named destination outside the managed store, or by default to
   `.working/archive/moved/<source-path>`, preserving substructure. An occupied move destination
   MUST be a collision finding, never an overwrite. An explicit destination inside the store tree
@@ -1809,37 +1816,55 @@ machine-store path alike. Within the one approved apply transaction, apply MUST 
 occupying source byte-identically to `.working/archive/adoption/<run-id>/<source-path>`, MUST
 verify the copy's digest against the plan digest, MUST commit the copy durably, and only then
 MUST remove the source from the live path: verify, then remove, in that order, never reversed
-and never split across transactions. An apply abort takes the ordinary per-operation preimage
-reversal of section 14, so an interruption leaves each source either live and byte-identical or
-archived with its removal journaled, never removed without a durably committed, digest-verified
-archive copy. After the archival the destination is an ordinary managed path: apply initializes
+and never split across transactions. Before apply commits, an abort takes the ordinary
+per-operation preimage reversal of section 14: the reversal MUST restore each removed source to
+its live path from its journaled preimage, MUST verify the restored bytes against the plan
+digest, and only after that verification MAY discard the aborted run's archive copy of that
+source, so an interruption leaves each source either live and byte-identical or archived with its
+removal journaled, never removed without a durably committed, digest-verified archive copy. That
+reversal undoes the uncommitted apply's own writes; it is not the section 14.1 restore, whose
+fresh-plan rule governs an archived file only once apply commits. Recovery of an interrupted
+apply MUST resolve from the apply journal alone and MUST NOT require the live tree to resolve as
+a store: on restart the one transaction either completes forward from its durably committed
+journal or reverses fully as above, so an interruption that removed an occupying machine-store
+file, the manifest included, never leaves the store unresolvable or waiting on a plan it cannot
+form. After the archival the destination is an ordinary managed path: apply initializes
 the machine file or renders the view immediately, and no writer carries an occupied-destination
 obligation afterward. The archived copy is the disposition's preserved original: the retire
 preimage, the source import reads for `migrate`, or the bytes a `move` relocation copies out
 after the green check. Archival is preservation, not retirement: the green completion check of
 section 14.1 remains the one gate that records each disposition's retirement. An old file at no
-managed destination takes no archival at apply, its retire preimage under completion check 3
-aside: it MUST stay frozen, byte-identical in place, and MUST be removed or relocated only after
-the applicable green check, exactly as section 14.1 orders.
+managed destination takes no archival at apply beyond its retirement preimage under completion
+check 3, preserved at apply for a retire-disposed and a migrate-disposed file alike: it MUST stay
+frozen, byte-identical in place, and MUST be removed or relocated only after the applicable green
+check, exactly as section 14.1 orders.
 
-The adoption archive is immutable. Once apply commits, a file under
-`.working/archive/adoption/<run-id>/` MUST NOT be written, rewritten, relocated or removed by any
-OPF operation, and the enforcement pack MUST deny writes there (section 14.1). The completion
-check MUST re-verify every archived copy's digest against the plan (section 14.1, check 3),
-import MUST re-verify an archived source's digest against the plan before reading it, and a
-missing, unreadable or digest-mismatched archived copy MUST fail closed at `required`, naming the
-path. Restoring an archived file to the live tree MUST be a fresh plan with its own single
-approval (section 14.1); no other operation restores it. A frozen source whose live bytes no
-longer match its plan digest is a drifted source: it MUST NOT be archived, retired, moved or
-removed, doctor MUST fail it at `required` (section 11), and the remedy MUST be a fresh plan with
-its own single approval (section 14.1).
+The adoption archive is immutable in each archived file's store-relative identity and bytes. Once
+apply commits, a file under `.working/archive/adoption/<run-id>/` MUST keep that store-relative
+path and those exact bytes: it MUST NOT be written, rewritten, relocated or removed within its
+store by any OPF operation, and the enforcement pack MUST deny writes there (section 14.1). A
+section 5.4 whole-store relocation MAY carry the archive, and only as part of the whole
+`.working/` tree it relocates: every archived file keeps its store-relative path and its exact
+bytes, `opf migrate --store` MUST re-verify every carried archived copy's digest against the plan
+at the destination before the old tree is removed, and the enforcement pack's write denial with
+the completion check 5 probe (section 14.1) binds `.working/archive/adoption/<run-id>/` within
+the resolved store, at the destination after that relocation as before it. The completion check
+MUST re-verify every archived copy's digest against the plan (section 14.1, check 3), import MUST
+re-verify an archived source's digest against the plan before reading it, and a missing,
+unreadable or digest-mismatched archived copy MUST fail closed at `required`, naming the path.
+Once apply commits, restoring an archived file to the live tree MUST be a fresh plan with its own
+single approval (section 14.1); no other operation restores it, and the pre-commit abort reversal
+above is not restoration. A frozen source whose live bytes no longer match its plan digest is a
+drifted source: it MUST NOT be archived, retired, moved or removed, doctor MUST fail it at
+`required` (section 11), and the remedy MUST be a fresh plan with its own single approval
+(section 14.1).
 
 `opf migrate --store` is whole-store relocation (section 5.4), never disposition execution: it
 MUST carry every frozen source, the adoption archive and every evidence bundle byte-identically
-into the destination, MUST NOT execute, advance or end any disposition, and MUST renew the
-approval's bound paths to their relocated equivalents in the same recorded change, the bound
-digests unchanged; any byte difference remains bound-item drift refusing into a fresh plan
-(section 14.1).
+into the destination at unchanged store-relative paths, MUST NOT execute, advance or end any
+disposition, and MUST renew the approval's bound paths to their relocated equivalents in the
+same recorded change, the bound digests unchanged; any byte difference remains bound-item drift
+refusing into a fresh plan (section 14.1).
 
 Detection MUST surface unresolved files in the plan and MUST NOT silently absorb, delete or
 overwrite them. Dispositions are plan data and MUST be covered by the single approval, never by
