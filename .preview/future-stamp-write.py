@@ -3557,14 +3557,28 @@ def _self_test():
         "        times.append(time.monotonic() - t0)\n"
         "    return min(times)\n"
         # round 32: a load spike during one size's runs skewed a growth ratio (one flake at load 34); the sizes
-        # are now INTERLEAVED, best of `reps` each, so a spike lands on both sizes' samples alike
+        # are now INTERLEAVED, best of `reps` each, so a spike lands on both sizes' samples alike. A sample near
+        # the timer's and scheduler's noise floor is still a coin toss on a loaded host (a sibling's ~1 ms
+        # baseline read 2.677x under 24-process contention), so interleaved() first calibrates a repetition
+        # multiplier, the same for every size, until the FASTEST size's sample is at least FLOOR seconds: a
+        # preemption of a few milliseconds then moves a sample by percents, not by a factor
+        "FLOOR = 0.1\n"
+        "def _sample(n, run, mult):\n"
+        "    t0 = time.monotonic()\n"
+        "    for _ in range(mult):\n"
+        "        run(n)\n"
+        "    return time.monotonic() - t0\n"
         "def interleaved(sizes, run, reps=5):\n"
+        "    mult = 1\n"
+        "    while mult < 1 << 20:\n"
+        "        fastest = min(_sample(n, run, mult) for n in sizes)\n"
+        "        if fastest >= FLOOR:\n"
+        "            break\n"
+        "        mult = min(max(mult * 2, int(mult * FLOOR / max(fastest, 1e-9)) + 1), 1 << 20)\n"
         "    times = [[] for _ in sizes]\n"
         "    for _ in range(reps):\n"
         "        for n, out in zip(sizes, times):\n"
-        "            t0 = time.monotonic()\n"
-        "            run(n)\n"
-        "            out.append(time.monotonic() - t0)\n"
+        "            out.append(_sample(n, run, mult))\n"
         "    return [min(t) for t in times]\n"
         "def ratio(n, run, reps=5):\n"
         "    def same_work(k):\n"

@@ -1981,20 +1981,32 @@ def _self_test():
     # in a child, one run at GROWTH * n against GROWTH runs at n, so the two samples do the same work when the
     # pass is linear and span about the same time, and a preemption or load spike lands on both alike (sizes
     # interleaved, best of N); a bound on reading is checked as WORK (the bytes read and the records parsed, see
-    # work()), which takes no timing at all.
-    HANG_TIMEOUT = 120  # seconds: a child's hang guard only, far above any child's own run (about a second)
+    # work()), which takes no timing at all. A sample near the timer's and scheduler's noise floor is still a
+    # coin toss on a loaded host (a ~1 ms baseline read 2.677x under 24-process contention), so growth() first
+    # calibrates a repetition multiplier, the same for both sizes, until the FASTER size's sample is at least
+    # FLOOR seconds: a preemption of a few milliseconds then moves a sample by percents, not by a factor.
+    HANG_TIMEOUT = 120  # seconds: a child's hang guard only, far above any child's own run (a few seconds)
     GROWTH = 8
     LINEAR_LIMIT = 2.0  # GROWTH growth: about 1 when linear, about GROWTH when quadratic
     GROWTH_SRC = ("import json, tempfile\n"
                   "GROWTH = %d\n"
+                  "FLOOR = 0.1\n"
                   "def growth(n, run, reps):\n"
+                  "    def sample(size, mult):\n"
+                  "        t0 = time.monotonic()\n"
+                  "        for _k in range(mult * (GROWTH * n // size)):\n"
+                  "            run(size)\n"
+                  "        return time.monotonic() - t0\n"
+                  "    mult = 1\n"
+                  "    while mult < 1 << 20:\n"
+                  "        fastest = min(sample(n, mult), sample(GROWTH * n, mult))\n"
+                  "        if fastest >= FLOOR:\n"
+                  "            break\n"
+                  "        mult = min(max(mult * 2, int(mult * FLOOR / max(fastest, 1e-9)) + 1), 1 << 20)\n"
                   "    times = ([], [])\n"
                   "    for _ in range(reps):\n"
                   "        for size, out in zip((n, GROWTH * n), times):\n"
-                  "            t0 = time.monotonic()\n"
-                  "            for _k in range(GROWTH * n // size):\n"
-                  "                run(size)\n"
-                  "            out.append(time.monotonic() - t0)\n"
+                  "            out.append(sample(size, mult))\n"
                   "    return min(times[0]), min(times[1])\n") % GROWTH
 
     def growth_in_child(run_src, n, reps=5):
@@ -2802,26 +2814,44 @@ def _self_test():
             self.assertLess(max(parsed), 32 << 20, parsed)
             self.assertLessEqual(max(parsed), MAX_RECORD_BYTES, parsed)
             # the ASSEMBLY of a record under the bound is linear too: no count sees the joining of pieces, so it
-            # is a GROWTH check, one record of GROWTH * n bytes against GROWTH records of n bytes, in a child with
-            # CHUNK cut to 4 KiB so each record spans many pieces (a quadratic assembly then grows by about GROWTH)
+            # is timed in a child with CHUNK cut to 4 KiB (each record spans many pieces) against a LINEAR PEER
+            # at the SAME size: one assembly of the GROWTH * n record versus GROWTH reads of the same file that
+            # pread the same 4 KiB pieces and join them once (what any linear assembly must at least do). The
+            # same-size peer keeps allocator and cache effects out of the ratio, which a small-against-large
+            # growth frame let straddle the limit at these sizes (MAX_RECORD_BYTES caps the record, so the
+            # sizes cannot outgrow those effects); a quadratic assembly still grows the ratio by about the
+            # piece count, hundreds here
             n = 384 << 10
             small, large = growth_in_child(
                 "import os\n"
                 "m.CHUNK = 4096\n"
                 "d = tempfile.mkdtemp(dir=%r)\n"
-                "for size in (%d, GROWTH * %d):\n"
-                "    with open(os.path.join(d, str(size)), 'w') as f:\n"
-                "        f.write(json.dumps({'type': 'user', 'message': {'content': [\n"
-                "            {'type': 'tool_result', 'content': 'x' * size}]}}) + '\\n')\n"
-                "def run(size):\n"
-                "    fd = os.open(os.path.join(d, str(size)), os.O_RDONLY)\n"
+                "p = os.path.join(d, 'big')\n"
+                "with open(p, 'w') as f:\n"
+                "    f.write(json.dumps({'type': 'user', 'message': {'content': [\n"
+                "        {'type': 'tool_result', 'content': 'x' * (GROWTH * %d)}]}}) + '\\n')\n"
+                "size = os.path.getsize(p)\n"
+                "def assemble():\n"
+                "    fd = os.open(p, os.O_RDONLY)\n"
                 "    try:\n"
-                "        recs = list(m._reverse_records(fd, os.fstat(fd).st_size))\n"
+                "        recs = list(m._reverse_records(fd, size))\n"
                 "    finally:\n"
                 "        os.close(fd)\n"
-                "    assert len(recs) == 1 and recs[0][1] is not None and len(recs[0][1]) > size, len(recs)\n"
-                % (self.tmp, n, n), n, 3)
-            self.assertLessEqual(GROWTH * n + 100, MAX_RECORD_BYTES)  # both sizes are assembled, not dropped
+                "    assert len(recs) == 1 and recs[0][1] is not None and len(recs[0][1]) > GROWTH * %d, len(recs)\n"
+                "def linear_peer():\n"
+                "    fd = os.open(p, os.O_RDONLY)\n"
+                "    try:\n"
+                "        pieces, at = [], 0\n"
+                "        while at < size:\n"
+                "            pieces.append(os.pread(fd, m.CHUNK, at))\n"
+                "            at += m.CHUNK\n"
+                "        assert len(b''.join(pieces)) == size\n"
+                "    finally:\n"
+                "        os.close(fd)\n"
+                "def run(k):\n"
+                "    linear_peer() if k == %d else assemble()\n"
+                % (self.tmp, n, n, n), n, 3)
+            self.assertLessEqual(GROWTH * n + 100, MAX_RECORD_BYTES)  # the big record is assembled, not dropped
             self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
         def test_reverse_records_exact_with_offsets(self):

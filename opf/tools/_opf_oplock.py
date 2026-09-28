@@ -7615,7 +7615,16 @@ def _st_f8_1_codex_route(root):
         if event == "line" and frame.f_lineno == build[0] and not sent:
             sent.append(True)
             os.kill(os.getpid(), signal.SIGINT)
-            time.sleep(0.05)              # the kernel delivers it to the unblocked thread
+            # The kernel delivers it to the unblocked thread, and the pending Python-level handler
+            # then runs on this (main) thread mid-wait, still at this traced line; the parent waits
+            # for the handler's recorded fork event rather than a fixed 0.05 s sleep, which lost the
+            # delivery race to scheduling latency on a loaded host. The forked child (a different
+            # pid, no event of its own) leaves at once and continues the acquisition forward. The
+            # deadline is a hang guard only: on expiry the exactly-one-fork assertion reports the
+            # missing delivery; elapsed time never carries the verdict.
+            give_up = time.monotonic() + 10.0
+            while os.getpid() == top and not record["events"] and time.monotonic() < give_up:
+                time.sleep(0.005)
         return local
 
     baseline = _st_open_fds()
