@@ -17,145 +17,279 @@ import _opf_store as store  # noqa: E402
 SPEC = Path(__file__).resolve().parents[1] / "spec" / "OPF-SPEC.md"
 # Scope each wording check to its operative section, never a whole-document negative scan.
 _CONTRACT = {
-    "4.2": ('spec_version = "2.0.0"', "[opf].homes = 2", "until homes 2 is activated", "git common directory",
-            "machine-local", "git add -f", "tracked staging or journals", "layout-", "preview-",
-            "keeps its legacy grading", "inventory-<phase>.toml", "an evidence commit changes only its bundle folder",
-            "claimed by exactly one row", "every payload file", "is itself schema-checked",
-            "A phase inventory never substitutes for a missing inventory.toml",
-            "In homes 2, ordinary transaction operands", "keep their legacy operand handling",
-            "check roster and residuals are unchanged", "byte-exact",
-            "fails closed on a reserved-name match or ambiguity",
-            "Base spec 1.3.0 defines adoption and the separate imported series on homes 1.",
-            "The imported files are registered managed leaves",
-            "<type>.imported.index.toml", "worklog.imported.toml",
-            "provides no views over imported data"),
-    "4.4": ("MUST NOT be used as a machine subdirectory", "legacy content cannot be re-absorbed"),
+    "4.2": (
+        'Base spec 1.3.0 defines adoption and the separate imported series on homes 1.',
+        'The 1.3.0 requirements in sections 4.2, 8, 9.2, 11, and 14 are a target contract; they do not claim that the reference tooling has activated adoption, imported-series validation, or the import writer.',
+        'Activation MUST include the tested upgrade in section 9.2 and deterministic doctor coverage before a writer accepts the new format.',
+        'The homes-2 contract below is for spec_version = "2.0.0" and [opf].homes = 2.',
+        'The imported files are registered managed leaves beside the clean-series files, using the same enabled-type roster; worklog uses worklog.imported.toml instead of an imported index.',
+        'Their manifest, emitter, upgrade and containment registrations MUST agree.',
+        'A 1.3.0 opf init and the section 9.2 upgrade create the imported leaves for every enabled type, create-only and empty; enabling a further type or module later creates its imported leaf in the same act as its clean index.',
+        'The first imported-series release keeps these files inline in either store layout and provides no views over imported data; assistants read the TOML.',
+        'Historical releases remain in version.toml (section 14.3); there is no version.imported.toml or CHANGELOG.toml.',
+        "Under pre-1.3.0 tooling, every store, whatever it declares, keeps its legacy grading: the homes-2 names are ordinary store paths there, graded, detected, and dispositioned exactly as before, and the pre-1.3.0 doctor's check roster and residuals are unchanged.",
+        'Activated 1.3.0 tooling registers on homes 1 the imported managed leaves, the adoption archive .working/archive/adoption/<run-id>/, the Move destination .working/archive/moved/, and the evidence bundles .working/imported/<kind>/<run-id>/, all recognized by containment as OPF control area, and adds the four section 8.3 imported-series checks to the doctor roster.',
+        'C-EVIDENCE-ENUM neither runs nor reads anything until homes 2 is activated; on homes 1 the section 14.1 completion checks carry the evidence digest verification themselves.',
+        'The boundary below applies only to a store that declares both homes = 2 and spec_version = "2.0.0" once the tooling activates that generation.',
+        'In homes 2, OPF writes no state outside .working/ except the operation-lock and coupled-init substrate in the git common directory, and none under .aiqt/.',
+        'A phase inventory never substitutes for a missing inventory.toml: such a bundle cannot evaluate.',
+        'Gitignore is not access control: git add -f can stage ignored state.',
+        'Installation must inspect effective ignore rules and the index first; tracked staging or journals require an explicit reviewed untracking change, never silent index mutation.',
+        'Layout and preview reserve layout- and preview- with the same suffix.',
+        'Each evidence bundle .working/imported/<kind>/<run-id>/ carries its own inventories at its root: inventory.toml, plus a new inventory-<phase>.toml for each later phase, where <phase> is a lowercase letter followed by up to 31 lowercase letters or digits.',
+        'An inventory is never rewritten, so a bundle stays immutable and an evidence commit changes only its bundle folder.',
+        'C-EVIDENCE-ENUM reconciles exact membership, directory structure, regular-file types, sizes and digests: every payload file under .working/imported/ and .working/archive/, meaning every file other than a bundle-root inventory, is claimed by exactly one row, and every inventory is itself schema-checked against the shape above rather than claimed.',
+        "In homes 2, ordinary transaction operands, including those of an open transaction being recovered, cannot equal, descend from, or contain journals/; a legacy store's transactions and recovery keep their legacy operand handling, and no shipped writer targets that home.",
+        'These comparisons are byte-exact: on a case-insensitive or normalizing filesystem, a differently cased or composed spelling can alias a reserved home and is not caught.',
+        'Discovery precedes the manifest, so it cannot know the generation: it examines manifest.toml in every immediate subdirectory, including journals/, and fails closed on a reserved-name match or ambiguity; it reads nothing deeper there.',
+        'At 1.3.0, partial status is receipt-bound under section 11, not inferred from staging.',
+    ),
+    "4.4": (
+        'The names imports, imported, archive, staging, and journals are reserved at the store level for OPF control area and MUST NOT be used as a machine subdirectory name; discovery fails closed on a machine store so named.',
+        'The legacy staging name imports remains reserved so legacy content cannot be re-absorbed.',
+    ),
+    "6.1": (
+        'imported: optional boolean, permitted only as true and only on a historical release recorded under section 14.3.',
+        'On an imported-flagged row, date carries the source-recorded release date rather than a clock read at a witnessed release cut, worklog_span is empty, and the row rests on imported provenance.',
+        'A witnessed release cut never sets the flag, and the flag is never added to or removed from an existing row.',
+    ),
     "9.2": (
-        'The homes-generation upgrade targets spec_version = "2.0.0" with required integer '
-        '[opf].homes = 2.',
+        'The homes-generation upgrade targets spec_version = "2.0.0" with required integer [opf].homes = 2.',
         'Absent or 1 denotes legacy homes for migration; unknown future generations are refused.',
         'The homes-generation target does not itself change the runtime supported version or init format.',
-        'The migration refuses a store resolved outside the product root until a multi-root '
-        'coordinator exists.',
-        'Unproven legacy .archive/ entries remain in place with a standing finding until '
-        'dispositioned.',
+        'The migration refuses a store resolved outside the product root until a multi-root coordinator exists.',
+        'Unproven legacy .archive/ entries remain in place with a standing finding until dispositioned.',
         'A base-schema version bump ships a tested, in-place store-schema upgrade (opf upgrade).',
         'The upgrade is idempotent.',
-        'A purely schema-level bump is additive, using atomic replacement of existing files, '
-        'create-only writes for new index files, and regeneration of declared views through '
-        'exclusively created temporary files followed by atomic rename.',
-        'These writes are sequential, with recovery scope held in memory, not a durable '
-        'transaction journal.',
-        'A homes-generation bump additionally relocates OPF control areas as a versioned, '
-        'journaled, fail-closed relocation.',
+        'A purely schema-level bump is additive, using atomic replacement of existing files, create-only writes for new index files, and regeneration of declared views through exclusively created temporary files followed by atomic rename.',
+        'These writes are sequential, with recovery scope held in memory, not a durable transaction journal.',
+        'A homes-generation bump additionally relocates OPF control areas as a versioned, journaled, fail-closed relocation.',
         'Every destination is digest-verified before its source is removed.',
-        'Both kinds of upgrade run under the store consistency contract and the single-writer lease '
-        '(section 5.7).',
-        'It fails closed on an unresolvable store, a declared spec_version ABOVE the tooling, a '
-        'divergence, a held lease, or any populated state that contradicts its preconditions; it '
-        'never lowers the fail-closed floor.',
-        'Before any write it enforces two fail-closed preconditions: it claims the single-writer '
-        'lease (section 5.7) and holds it across the whole mutation, and it verifies the working '
-        'tree is clean, including ignored files, over the planned schema and render destinations '
-        '(store and product roots) and the index collision candidates, so the committed HEAD is a '
-        'verified restore path for that scope; a held lease or a dirty store refuses, and a dirty '
-        'store is asked to commit its own changes, never restored by the tool.',
-        'After applying the schema delta, it regenerates the declared views and requires a full '
-        "doctor VALID before offering the uncommitted change for the adopter's own "
-        'branch-and-merge.',
+        'Both kinds of upgrade run under the store consistency contract and the single-writer lease (section 5.7).',
+        'It fails closed on an unresolvable store, a declared spec_version ABOVE the tooling, a divergence, a held lease, or any populated state that contradicts its preconditions; it never lowers the fail-closed floor.',
+        'Before any write it enforces two fail-closed preconditions: it claims the single-writer lease (section 5.7) and holds it across the whole mutation, and it verifies the working tree is clean, including ignored files, over the planned schema and render destinations (store and product roots) and the index collision candidates, so the committed HEAD is a verified restore path for that scope; a held lease or a dirty store refuses, and a dirty store is asked to commit its own changes, never restored by the tool.',
+        "After applying the schema delta, it regenerates the declared views and requires a full doctor VALID before offering the uncommitted change for the adopter's own branch-and-merge.",
         'It never stages or commits the change.',
-        'The manifest and counters rewrite is a model regeneration through the canonical '
-        'new-document emitter, never a textual round-trip edit, bounded by two guards: a '
-        'precondition that re-emitting the UNCHANGED parsed model reproduces the on-disk bytes '
-        'exactly (proving the file is canonical and comment-free, so nothing can be lost), failing '
-        'closed otherwise; and a postcondition that the model diff equals exactly the allowed '
-        'delta, failing closed otherwise.',
-        'The allowed delta is expressed as ensure-present and ensure-absent over the whole 1.0.0 '
-        'origin family, so a governance-enabled, a decision_support-enabled, a bare, and a '
-        'view-omitting 1.0.0 store all migrate under one rule and the normative text cannot diverge '
-        'from the tooling.',
-        'For the 1.0.0 to 1.1.0 upgrade the allowed delta is: rename the base table [devprocess] to '
-        '[opf] and its standard discovery token from devprocess to opf (the OPFiles rebrand), '
-        'carrying every other base field over unchanged; bump spec_version to 1.1.0; remove the '
-        'retired decision_support module key where present; add each of the [types] rows for '
-        'contribution, maintainer_decision, and preference_pattern not already declared by an '
-        'enabled 1.0.0 module (a governance-enabled store already declares maintainer_decision and '
-        'a decision_support-enabled store preference_pattern; the row moves from module tier to '
-        'baseline unchanged); add the two new view rows (CONTRIBUTIONS.md and the DECISIONS.toml '
-        "projection); widen the existing DECISIONS.md composed view's sources from the two 1.0.0 "
-        'decision sources (pending_decision, autonomous_decision) to the four required at 1.1.0 by '
-        'adding maintainer_decision and preference_pattern where that view is declared (a 1.0.0 '
-        'store that declares no DECISIONS.md gains none and stays valid, since no composed view is '
-        'required); extend counters.toml with the CN/MD/PP zeros while preserving every existing '
-        'high-water; and create each missing empty *.index.toml file for the three baseline types, '
-        'skipping any that already exist (such as a maintainer_decision.index.toml where governance '
-        'was enabled, whose records are preserved byte-for-byte).',
-        'The upgrade weakens nothing: preference_pattern simply moves to always-on, so a populated '
-        'decision-support index is kept as is.',
-        'Base spec 1.2.0 admits one new managed machine-store file, .working/toml/init.toml: the '
-        'bootstrap provenance a coupled opf init records (its format is frozen in OPF-INIT-D2B).',
-        'It is a managed leaf when present and is never required, so a store without it stays '
-        'valid.',
-        'For the 1.1.0 to 1.2.0 upgrade the allowed schema delta is the spec_version bump alone: no '
-        'other manifest field, schema file, or counter changes, and no provenance is created for an '
-        'existing store (none is ever fabricated).',
+        'The manifest and counters rewrite is a model regeneration through the canonical new-document emitter, never a textual round-trip edit, bounded by two guards: a precondition that re-emitting the UNCHANGED parsed model reproduces the on-disk bytes exactly (proving the file is canonical and comment-free, so nothing can be lost), failing closed otherwise; and a postcondition that the model diff equals exactly the allowed delta, failing closed otherwise.',
+        'The allowed delta is expressed as ensure-present and ensure-absent over the whole 1.0.0 origin family, so a governance-enabled, a decision_support-enabled, a bare, and a view-omitting 1.0.0 store all migrate under one rule and the normative text cannot diverge from the tooling.',
+        "For the 1.0.0 to 1.1.0 upgrade the allowed delta is: rename the base table [devprocess] to [opf] and its standard discovery token from devprocess to opf (the OPFiles rebrand), carrying every other base field over unchanged; bump spec_version to 1.1.0; remove the retired decision_support module key where present; add each of the [types] rows for contribution, maintainer_decision, and preference_pattern not already declared by an enabled 1.0.0 module (a governance-enabled store already declares maintainer_decision and a decision_support-enabled store preference_pattern; the row moves from module tier to baseline unchanged); add the two new view rows (CONTRIBUTIONS.md and the DECISIONS.toml projection); widen the existing DECISIONS.md composed view's sources from the two 1.0.0 decision sources (pending_decision, autonomous_decision) to the four required at 1.1.0 by adding maintainer_decision and preference_pattern where that view is declared (a 1.0.0 store that declares no DECISIONS.md gains none and stays valid, since no composed view is required); extend counters.toml with the CN/MD/PP zeros while preserving every existing high-water; and create each missing empty *.index.toml file for the three baseline types, skipping any that already exist (such as a maintainer_decision.index.toml where governance was enabled, whose records are preserved byte-for-byte).",
+        'The upgrade weakens nothing: preference_pattern simply moves to always-on, so a populated decision-support index is kept as is.',
+        'Base spec 1.2.0 admits one new managed machine-store file, .working/toml/init.toml: the bootstrap provenance a coupled opf init records (its format is frozen in OPF-INIT-D2B).',
+        'It is a managed leaf when present and is never required, so a store without it stays valid.',
+        'For the 1.1.0 to 1.2.0 upgrade the allowed schema delta is the spec_version bump alone: no other manifest field, schema file, or counter changes, and no provenance is created for an existing store (none is ever fabricated).',
         'Declared views are then regenerated, so a stale committed view can change.',
         'A 1.0.0 store takes the 1.0.0 delta above directly to 1.2.0.',
-        'For the 1.2.0 to 1.3.0 upgrade, the allowed schema delta is the version bump, registration '
-        'and create-only initialization of missing imported managed leaves for enabled types, and '
-        'addition of missing imported counter rows at zero only where no imported ancestry exists.',
-        'Existing records, evidence, clean counters and imported high-water values MUST be '
-        'preserved; a populated collision, missing ancestral counter or unprovable prestate refuses.',
-        'The upgrade creates no historical records, adoption approval or provenance, changes no '
-        'posture or import status, and adds no imported views.',
-        'An unresolved legacy import must be reconciled under its original contract before '
-        'upgrading; legacy LF records and evidence remain readable and are never silently converted.',
-        'Earlier stores compose their applicable deltas with this delta; repeated upgrade is a '
-        'verified no-op only after full doctor VALID.',
-        'The 1.3.0 delta remains a target contract until a tested upgrade and its required readers '
-        'activate; import writing is a separate later activation.',
-        'Declaring 1.3.0 with older tooling is refused rather than treated as supported.',
+        'For the 1.2.0 to 1.3.0 upgrade, the allowed schema delta is the version bump, registration and create-only initialization of missing imported managed leaves for enabled types, and addition of missing imported counter rows at zero only where no imported ancestry exists.',
+        'Existing records, evidence, clean counters and imported high-water values MUST be preserved; a populated collision, missing ancestral counter or unprovable prestate refuses.',
+        'The upgrade creates no historical records, adoption approval or provenance, changes no posture or import status, and adds no imported views.',
+        'An unresolved legacy import must be reconciled under its original contract before upgrading; legacy LF records and evidence remain readable and are never silently converted.',
+        'A completed legacy import upgrades in place: its import_status stays "complete", substantiated by its preserved legacy run evidence under section 11, and no adoption approval, receipt or provenance is fabricated for it.',
+        'The bump also activates the homes-1 recognition of the adoption and import control paths and the four imported-series checks of section 4.2; the upgrade itself creates no such folder.',
+        'Earlier stores compose their applicable deltas with this delta; repeated upgrade is a verified no-op only after full doctor VALID.',
+        'The 1.3.0 delta remains a target contract until a tested upgrade and its required readers activate; import writing is a separate later activation.',
+        "Declaring a spec_version above the tooling's supported version, 1.3.0 on older tooling included, is refused at validation rather than treated as supported; only the reserved homes-2 declaration of section 4.2 stays recognized, gated on its own activation.",
     ),
-    "8.1": ("deprecated for new stores as of 1.3.0, not removed",),
-    "8.2": ("imported:<NS>-<n>", '"imported:BI"', '"imported:WL"',
-            "Counters are never reset and IDs are never reused"),
-    "8.3": ("The imported envelope is closed and deterministic",
-            "not_recorded_in_source", "unparsed", "ambiguous", "conflicting", "not_applicable",
-            "import.history", "import.unparsed", "The writer performs no byte-tiling or leftover accounting",
-            "A conforming imported series can reach doctor VALID"),
-    "8.6": ("MUST NOT satisfy a current approval, receipt, actionability or supersession obligation",
-            "Imported-to-clean links are refused by both writer and doctor",
-            "Clean-to-imported links allow only relates, derives_from, follows, and same-type supersedes"),
-    "8.8": ("import --batch FILE [--root DIR]", "opf.record.import-batch/v1",
-            "Replay identity is (source_sha256, batch content digest)",
-            "Import refuses with exit 2", "It never rewrites clean records or clean counters"),
-    "11": ('"partial" means the adoption receipt enumerates migrate-disposed sources',
-           "Import status never weakens posture", "partial status is never a blanket exemption"),
-    "12": ("Neither is scanned as the other", "retained indefinitely", "independent re-read",
-           "age alone never authorizes deletion"),
-    "14.1": (".working/staging/import/<run-id>/", ".working/staging/ingest/<run-id>/",
-             ".working/imported/import/<run-id>/",
-             "Investigation, planning and read-only status commands remove nothing",
-             "Destination durability and digest verification precede source removal",
-             "same recoverable transaction",
-             "exact creations, replacements, removals and consumer repointings",
-             "The attributed approval binds plan_digest and inventory_digest",
-             "old acceptance records describe those runs and never authorize a new adoption or retirement",
-             "Exactly one adopter approval follows each concrete plan",
-             "Any bound-item drift refuses into a fresh plan with its own single approval",
-             "Retirement occurs only on a green completion check",
-             "plan-time cannot-evaluate",
-             "Reclamation is journaled and idempotent", "Read-only commands never clean staging"),
-    "14.2": ("Keep the source frozen now for post-adoption import",
-             "keep, migrate, move, retire", ".working/archive/moved/<source-path>",
-             "collision finding, never an overwrite", "outside the managed store",
-             "only beneath", "multi-root coordinator", "no adoption option selects them",
-             "declaration may equal, contain, or lie within them", ".working/archive/adoption/<run-id>/",
-             ".working/imported/adoption/<run-id>/", ".working/journals/adoption/"),
-    "14.3": ("version.toml as imported-flagged [[release]] rows", "their spans are empty",
-             "its spans never refer to imported:WL IDs"),
-    "15": ("adoption provenance", "OPF operates without it", "Only homes migration",
-           "explicitly inventoried", "without touching unrelated AIQT material"),
+    "8.1": (
+        'Imported history uses the same enabled types in a separate series, not additional record types.',
+        'Imported states describe history and confer no current authority (section 8.6).',
+        'legacy_fragment (LF) is deprecated for new stores as of 1.3.0, not removed: its taxonomy row and legacy validation remain for existing stores and evidence.',
+        'New imports use the imported series and verbatim unparsed text (section 8.3), not LF quarantine.',
+        'done is a durable completion receipt linked one-to-one to a backlog item reaching ratified done; a standalone receipt is legal only for imported history with provenance.',
+    ),
+    "8.2": (
+        'Clean record IDs have the form <NS>-<n>; imported IDs have the form imported:<NS>-<n>, for example imported:BI-7.',
+        "The complete lexical grammar is ^(?:imported:)?[A-Z]{2}-[1-9][0-9]*$, with the namespace additionally required to name the record's enabled type in section 8.1.",
+        'counters.toml holds independent monotonic high-water values per series and namespace: BI for clean backlog items and the quoted TOML key "imported:BI" for imported backlog items.',
+        'The same rule includes "imported:WL"; clean release spans tile only the clean WL number line.',
+        "Uniqueness, counter high-water, contiguity and no-deletion checks evaluate each series independently; allocation increments its counter under the store's lock as one atomic claim, so no gap between choosing and reserving can double-allocate.",
+        'Counters are never reset and IDs are never reused, even when a record is superseded, refuted, or its work reverted.',
+        'Re-adoption seeds both series from a pinned ancestral snapshot and refuses a missing required namespace; it never zero-seeds prior ancestry.',
+        'Only a genuinely first adoption starts its counters at zero.',
+    ),
+    "8.3": (
+        'The imported envelope is closed and deterministic.',
+        'It requires id, type, a one-line title, status from the type\'s legal state set without /proposed, actor.kind = "importer", actor.id naming the importing assistant, and an import provenance table.',
+        'Standalone imported done receipts are legal history.',
+        "Historical created_at, updated_at, date and decided_at are optional; when present they MUST be valid RFC 3339 UTC and no later than the writer's import clock instant.",
+        'Import time MUST NOT stand in for event time.',
+        'Other historical type fields may be absent only with an explicit missingness row.',
+        'Missing historical timestamps and type fields are accounted for in unrecorded = [{field, reason}], with one row per absent field, no duplicate fields and no row claiming a supplied field absent.',
+        'The closed reasons are not_recorded_in_source, unparsed, ambiguous, conflicting, and not_applicable.',
+        'The first means "never recorded historically in the supplied source", not a claim about all history.',
+        'The required imported envelope and provenance fields cannot be waived through missingness.',
+        "The import table requires source (the canonical store-relative path of the preserved original, spelled from .working/), source_sha256 (64 lowercase hexadecimal digits), run (the imp-<YYYYMMDD>T<HHMMSS>Z-<hash16> run ID), and imported_at (RFC 3339 UTC read from the writer's clock).",
+        'Optional import.history retains verbatim source-precision values that cannot be losslessly normalized, such as a date-only string; no UTC midnight is fabricated.',
+        'Optional import.unparsed holds verbatim source text that cannot be mapped.',
+        'The assistant MUST retain such text rather than drop it.',
+        'The writer performs no byte-tiling or leftover accounting: byte-level coverage and semantic fidelity are not machine-proven.',
+        'Imported records and their worklog entries are immutable after publication; corrections are a fresh import run retaining the old evidence.',
+        'A conforming imported series can reach doctor VALID: it MUST NOT enter the legacy importer or module-schema deferral seam.',
+        'C-IMPORTED-PROVENANCE re-reads each preserved original and verifies source_sha256.',
+        'C-CONTAINMENT recognizes the imported managed leaves, C-LINKS resolves the union of both series, and C-IMPORTED-SEGREGATION enforces section 8.6.',
+        'Missing or unreadable evidence fails closed.',
+    ),
+    "8.4": (
+        'Where the superseded record is immutable, including every imported record, its recorded state stands and the link alone records the supersession.',
+    ),
+    "8.5": (
+        'at most one current handoff exists among clean records authored by non-importer actors (section 8.6).',
+        'Actionability: a clean backlog item is actionable when its state is open or active and no clean, unqualified active block authored by a non-importer actor scopes it.',
+        'Imported and importer-authored blocks never enter this join.',
+    ),
+    "8.6": (
+        'Imported history has an authority firewall, enforced by the writer and doctor and keyed on provenance rather than on series alone: it covers every record whose actor.kind is importer, in the imported series or written into the clean series by the pre-1.3.0 legacy importer.',
+        'An importer-authored record MUST NOT satisfy a current approval, receipt, actionability or supersession obligation of any record authored by a non-importer actor.',
+        "A clean done record's receipt_of MUST target a clean backlog item, and a clean backlog item reaching ratified done requires a clean receipt authored by a non-importer actor; a legacy importer-authored receipt satisfies, as recorded history, only the legacy importer-authored backlog item it was recorded with.",
+        'An importer-authored decision is never the current effective resolution of a clean pending_decision chain; resolving such a chain now requires a new clean decision linking back.',
+        'Importer-authored blocks do not grant a current stop, and an importer-authored record cannot discharge a required supersession.',
+        'The firewall covers every state-bearing type: an importer-authored record is never the current handoff, an active waiver, a held session_lease, an active mode, or a ratified active preference_pattern; a state-bearing status on an importer-authored record describes history at its source and confers nothing now, and every current-state join, including the section 8.5 at-most-one-current handoff rule, evaluates only clean records authored by non-importer actors.',
+        'Acting on history requires a new strict clean record at the present time, with a link back to the historical record.',
+        'C-IMPORTED-SEGREGATION enforces this firewall over importer-authored records in both series.',
+        'Clean-to-imported links allow only relates, derives_from, follows, and same-type supersedes; the last records historical continuation without discharging a current supersession obligation, and the immutable imported target keeps its recorded state, the link alone recording the supersession (section 8.4).',
+        'Imported-to-imported links allow every declared relation subject to its type constraints.',
+        'Imported-to-clean links are refused by both writer and doctor.',
+        'Links resolve over the union of both series; a dangling cross-series link is a finding, never silently omitted.',
+        'The imported series cannot supply current authority through a link, an extension, or an adoption approval.',
+    ),
+    "8.8": (
+        'Import is not a flag that relaxes create, and the clean-series subcommands refuse actor.kind = "importer": an importer authors only through import.',
+        'import --batch FILE [--root DIR]: the primary import surface (the import write mode; there is no separate --import flag).',
+        'A single-record import is a one-row batch.',
+        'The canonical TOML batch, opf.record.import-batch/v1, declares one source path, record rows, worklog rows, historical fields, missingness, verbatim unparsed text and batch-local link keys.',
+        'The writer resolves local keys to claimed imported IDs and recomputes source size and SHA-256 from preserved bytes, never trusting caller-supplied measurements.',
+        'One invocation covers one source in one journaled transaction, followed by one render and one full doctor.',
+        'Import preserves that operation sequence, including the one allocation seam, independent model delta check, cleanliness gate, lease and reconcile-first recovery.',
+        'Its atomic operands are the imported counter rows first, the touched <type>.imported.index.toml and worklog.imported.toml files, and the evidence bundle: the exact original at .working/imported/import/<run-id>/originals/<source-path> and inventory.toml in the retained opf.evidence.inventory/v1 format (section 4.2).',
+        'It never rewrites clean records or clean counters.',
+        'Import refuses with exit 2 on a non-importer actor, absent or invalid provenance, a clean-series record operand, an imported-to-clean link, a historical timestamp later than the run clock, an unknown missingness reason, or a type not enabled and supported by the writer.',
+        "It also refuses without an adoption receipt, outside that plan's approved migrate-source scope, or when any section 14.1 bound item, the live source bytes against the plan digest, the tool release identity, or the prompt-pack version and digest included, no longer matches the approved plan.",
+        'Bound-item drift, in this session or a later one after a tool upgrade, requires a fresh plan with its own single approval; import never reinterprets the old approval.',
+        'Replay identity is (source_sha256, batch content digest).',
+        'A completed identical replay re-reads and verifies the published records and evidence, then succeeds as a no-op reporting the existing IDs.',
+        'A partial overlap, including a differing batch against the same source within the run, refuses, names the overlap and directs to journal recovery.',
+        'Each source admits at most one completed batch: a differing batch against a source whose batch already completed refuses and names the completed run.',
+        "A corrected import is a fresh run whose batch declares the completed run it corrects; its records link supersedes or corrects to the imported records they replace, the previous run's immutable evidence is preserved, and source completion (section 14.1) evaluates the correcting run.",
+        'Retry never allocates duplicate IDs.',
+    ),
+    "11": (
+        'import_status = "none" means clean start with no approved migrate-source import.',
+        '"partial" means the adoption receipt enumerates migrate-disposed sources whose completion checks are not yet green; it can persist across assistant sessions without a process running.',
+        '"complete" means every such source has a green completion result under section 14.1, or that a pre-1.3.0 legacy import finished and its preserved legacy run evidence substantiates it; the section 9.2 upgrade preserves that legacy status without fabricating an approval or receipt.',
+        'A partial or complete status that neither an adoption receipt with completion results nor preserved legacy import evidence substantiates fails closed, as does a missing, unreadable or contradictory input.',
+        'Neither elapsed time nor a staging directory proves status.',
+        'From the recorded approval until its disposition executes, a path the approved plan enumerates as an outstanding retire, move or migrate source, and whose live bytes still match its plan digest, is bounded adoption state: containment reports it as migration_incomplete detail rather than failing it, at "none" during a clean start as much as at "partial".',
+        'A digest mismatch or an unenumerated path remains a containment-gate failure at required; the bounded treatment is never a blanket exemption.',
+        'Import status never weakens posture.',
+        "Weakening the posture (required toward warn or off) is a guardrail-configuration change: it takes effect only through the maintainer's explicit, recorded authorization, separate from adoption approval, and is never self-applied by the assistant or by tooling.",
+        'Imported history joins this integrity layer through the deterministic checks in sections 8.3 and 8.6; the authority firewall is never report-only.',
+    ),
+    "12": (
+        'The record-rotation archive under the discovered machine store is distinct from the store-tree archive/ in section 4.2, which retains relocated adopter files and adoption preimages, never rotated records.',
+        'Neither is scanned as the other.',
+        'Imported originals, acceptance evidence, and retire preimages are retained indefinitely by default.',
+        'Automatic reclamation applies only to staging runs, after independent re-read and digest verification of their required evidence in its durable home; age alone never authorizes deletion.',
+        'The imported series never rotates at 1.3.0: <type>.imported.index.toml and worklog.imported.toml sit outside the rotation thresholds and their records never move to the record archive.',
+    ),
+    "14": (
+        'opf adopt guides setup and wiring; opf import is only the post-adoption import activity.',
+        'Clean start is first-class: preserve and retire old operational files, establish the new store and enforcement, and import nothing.',
+        'This makes no claim that historical obligations were fulfilled or converted.',
+        'Adoption follows investigate, plan, one approval, apply, completion, then retirement.',
+        'Every foreign .working/ file has a disposition before init-store; adoption never runs blind init over populated content.',
+        'A bootstrap views-ready milestone alone is not adoption success.',
+    ),
+    "14.1": (
+        'Exactly one adopter approval follows each concrete plan.',
+        'product and store identities and the observed revision;',
+        'every source path, byte digest, disposition and preservation destination;',
+        'exact creations, replacements, removals and consumer repointings;',
+        'tool release identity, including manifest_sha256 checked against an independent anchor;',
+        'the version and digest of the prompt pack;',
+        "enforcement-pack contents per platform and each platform's disclosed residual coverage;",
+        'the completion-check roster and the rule that retirement requires green checks and matching bytes;',
+        'the missingness and unparsed-content policy, the skip policy under which a migrate-disposed source may be recorded as skipped, and the migrate-disposed sources import may touch.',
+        'The attributed approval binds plan_digest and inventory_digest, hence that whole plan.',
+        'There is no per-fragment acceptance or later adopter checkpoint within the approved plan.',
+        'Any bound-item drift refuses into a fresh plan with its own single approval; a changed old file is not retired.',
+        'Approval never absorbs a separate posture-weakening authorization (section 11) or changelog curation (section 7.3).',
+        'Digests establish binding, not actor authenticity or semantic correctness; self-asserted identity and same-user tampering remain disclosed residuals.',
+        'Authority and freshness: roots, destinations and live preimages still match the approved plan.',
+        'Discovery accounting: every inventory entry has a disposition or recorded exclusion.',
+        'Preservation and restore: each retirement preimage exists, digest-matched, under .working/archive/adoption/<run-id>/, and a restore exercise reproduces its bytes.',
+        'Operational readiness: the store resolves to the planned identity, and CI asserts store presence and identity so absence cannot pass as NOT-APPLICABLE.',
+        'Doctor validity and declared-view byte drift are evaluated against the validated prospective poststate in which every plan-enumerated disposition and same-path publication has executed, so a plan-enumerated old file still occupying its planned destination is not a deadlock, and any drift the plan does not account for fails the check.',
+        'Consumer repointings match the plan.',
+        'Wiring: the enforcement pack is installed and probed, with a direct store write denied and sanctioned writer and render paths succeeding.',
+        "Server-side branch protection is adopter-attested, explicitly outside the local probe's guarantee.",
+        'Retirement readiness: each retire-disposed file is present in the live tree and its live bytes still equal its plan digest.',
+        'Retirement occurs only on a green completion check.',
+        'Failure or cannot-evaluate reports incomplete, retires nothing, and requires a fresh plan to change the approved work.',
+        'Green proves preservation, restorability and operational coverage, never semantic fidelity or fulfilment of old obligations; the receipt discloses that limit.',
+        'An occupied view destination uses a validated prospective poststate, preserved preimage and the same journaled transaction for retirement and publication (section 14.2); completion checks gate that cutover before removal or replacement.',
+        'The enforcement pack freezes the plan-enumerated old files until retirement and protects both record series, counters, declared views and evidence.',
+        'Denial claims are verified against official platform documentation at build time.',
+        'Adoption MUST refuse to enable a record type the writer cannot author, and enforcement MUST NOT ship before the writer can perform every operation it forces.',
+        'Post-adoption import uses the approved, versioned prompt pack, with an example for every record type in the section 8.1 roster except the excluded transaction, the unassigned CL namespace, and the deprecated legacy_fragment.',
+        'It directs the assistant to discover old operational files within the approved scope and submit batches through opf record import --batch (section 8.8), never hand-edit store TOML.',
+        'The assistant reports semantic uncertainty without seeking another checkpoint.',
+        'The former --scan, --plan, --review and --apply modes refuse with a pointer to adoption and the prompt pack when this contract activates.',
+        "For each migrate-disposed source, import completion verifies the preserved original's digest, at least one imported record referencing that source or a recorded skip under the approved policy, and doctor VALID over both the strict store and the imported series.",
+        "Only a green result permits that source's retirement through the adoption retirement path; the live preimage must still match the plan.",
+        'When every migrate source is green, import_status becomes "complete".',
+        'This proves source accounting and preservation, not byte-level mapping coverage or semantic fidelity.',
+        'Clean-start adoption and import ship on homes 1 with explicit evidence coverage: their completion checks re-read inventories and payload digests themselves, because C-EVIDENCE-ENUM is inactive until homes 2.',
+        'The evidence-bundle format in section 4.2 is retained, including the import home .working/imported/import/<run-id>/.',
+        'Destination durability and digest verification precede source removal; retirement and any same-path publication share the same recoverable transaction.',
+        'A source outside the participating roots is a plan-time cannot-evaluate naming that source.',
+        'Investigation, planning and read-only status commands remove nothing.',
+        'Legacy runs may occupy .working/staging/import/<run-id>/ or .working/staging/ingest/<run-id>/.',
+        'Their evidence inventories and readers remain available; old acceptance records describe those runs and never authorize a new adoption or retirement.',
+        'A legacy import completed under the pre-1.3.0 contract keeps its recorded status, substantiated by its preserved run evidence (section 11); no retrospective approval or receipt is fabricated.',
+        'Old import and ingest orchestration is retired by staged decoupling only after clean-start adoption ships.',
+        'Required evidence is re-read and digest-matched in its durable home before staging reclamation.',
+        'Reclamation is journaled and idempotent; an unreadable tree holds the run.',
+        'Read-only commands never clean staging.',
+        'Pending legacy review never becomes implicit approval.',
+    ),
+    "14.2": (
+        'opf adopt investigates every file at the target .working/ location that is not OPF-managed: the manifest, ledgers, counters, clean and imported typed indexes, declared views and registered control areas define the managed set.',
+        'A matching pathname alone does not prove OPF ownership: foreign content at a planned managed destination still needs a disposition.',
+        'opf init refuses undispositioned foreign content; post-adoption import uses only its approved source scope and does not authorize an incidental discovery.',
+        'The plan records one disposition per foreign file from keep, migrate, move, retire:',
+        'Leave it untouched and register it under [unmanaged].',
+        'An unmanaged path cannot collide with an OPF-managed file or view.',
+        'Keep the source frozen now for post-adoption import into the separate imported series.',
+        'Preserve its exact bytes and retire it only after its source completion check is green.',
+        'There is no imported view.',
+        'Where an old file occupies a clean generated-view destination, validate the prospective poststate and preserve the preimage, then retire and publish in the same journaled transaction only after the applicable completion check is green.',
+        "A pending migrate source cannot be overwritten to make adoption pass: the occupied destination's publication waits, in that same transaction, for the green check.",
+        'Relocate to a named destination outside the managed store, or by default to .working/archive/moved/<source-path>, preserving substructure.',
+        'An occupied destination is a collision finding, never an overwrite.',
+        'An explicit destination inside the store tree is valid only beneath .working/archive/moved/.',
+        'The default Move refuses a store resolved outside the product root until a multi-root coordinator exists.',
+        'Removal requires the plan-bound green completion check and digest-verified preservation.',
+        'The first-class clean-start choice: preserve the exact preimage under .working/archive/adoption/<run-id>/, prove restore and completion, then remove or replace it without import.',
+        'No old obligation is thereby fulfilled.',
+        'Detection surfaces unresolved files in the plan and never silently absorbs, deletes or overwrites them.',
+        'Dispositions are plan data covered by the single approval, not separate approvals per file.',
+        'Detection never surfaces them as adopter content, no adoption option selects them, and no [unmanaged] declaration may equal, contain, or lie within them.',
+        "Adoption evidence is committed and immutable under .working/imported/adoption/<run-id>/; append-only outcome events retain the receipt's history.",
+        'In homes 2, transaction records live under .working/journals/adoption/; homes 1 retains its legacy journal paths and completion-carried evidence checks.',
+        'After adoption, containment uses the receipt-bound import_status and the bounded treatment of section 11: a plan-enumerated outstanding retire, move or migrate source, digest-matched, is reported rather than failed until its disposition executes, whatever the status.',
+        'An unregistered path outside that enumerated scope fails containment at required.',
+        'No source is implicitly imported and no staging presence grants authority.',
+    ),
+    "14.3": (
+        'An adopter with an existing single-source release pipeline (for example, a release-notes TOML that generates a version file and a changelog) migrates by recording its releases in version.toml as imported-flagged [[release]] rows (the optional imported flag of section 6.1) and its per-release notes as published per-release [[summary]] rows.',
+        'Pre-migration releases have no worklog entries: their spans are empty and their summary digests are recorded as imported facts, flagged as resting on imported provenance rather than on a witnessed release cut.',
+        'This remains the historical-release path at 1.3.0: the ledger is not an imported record type, its spans never refer to imported:WL IDs, and import does not create a separate version or changelog TOML file.',
+        "Changelog prose still requires the curator's act.",
+    ),
+    "15": (
+        "Import and adoption provenance, including originals under imported/ and retired files under archive/, stays inside the adopter's own repositories.",
+        'In homes 2, .aiqt/ is AIQT-owned material, not an OPF state home; OPF operates without it.',
+        'Only homes migration may read explicitly inventoried OPF artefacts from former .aiqt/ locations, without touching unrelated AIQT material.',
+    ),
 }
 
 
@@ -1581,20 +1715,29 @@ def self_test():
     for section, body in _sections(text).items():
         if section in _CONTRACT:
             check("spec-flip-" + section, lambda: bool(contract_findings(text.replace(body, "\n", 1))))
-    # Each target-contract pin must discriminate independently, not merely its whole section.
+    # Each target-contract pin must discriminate independently, not merely its whole section:
+    # every pin occurs exactly once in its section body, and deleting that single operative
+    # occurrence in place (never a replace-all) turns the gate red with the pin's own finding.
+    # Section 9.2 is excluded here only because its exhaustive sentence controls below already
+    # delete each pinned sentence independently and prove the pins tile the whole section.
     for section, fragments in _CONTRACT.items():
-        if section in {"4.2", "4.4", "9.2"}:
-            continue  # Structural formatting above; exhaustive 9.2 sentence controls below.
+        if section == "9.2":
+            continue
         body = _sections(text)[section]
         normalized_body = " ".join(body.replace("`", "").split())
+        pin_prefix = "spec " + section + " missing contract"
         control = text.replace(body, "\n\n" + normalized_body + "\n\n", 1)
-        check("spec-pin-control-" + section, lambda c=control: not contract_findings(c))
+        # Scoped to pin findings: normalizing 4.2 inherently breaks its own structural checks
+        # (the rendered gitignore block), which stay covered by the unmutated spec-contract check.
+        check("spec-pin-control-" + section, lambda c=control, p=pin_prefix: not any(
+            f.startswith(p) for f in contract_findings(c)))
         for fragment in fragments:
-            mutated_body = normalized_body.replace(fragment, "")
+            mutated_body = normalized_body.replace(fragment, "", 1)
             mutated = text.replace(body, "\n\n" + mutated_body + "\n\n", 1)
-            finding = "spec {} missing contract: {}".format(section, fragment)
-            check("spec-pin-flip-{}-{}".format(section, fragment),
-                  lambda f=finding, m=mutated: f in contract_findings(m))
+            finding = "spec " + section + " missing contract: " + fragment
+            check("spec-pin-flip-" + section + "-" + fragment,
+                  lambda f=finding, m=mutated, frag=fragment, nb=normalized_body:
+                  nb.count(frag) == 1 and f in contract_findings(m))
     # Delete the wrapped sentence in place: normalization must not hide a lost requirement.
     body = _sections(text)["9.2"]
     mutated, removed = re.subn(r"The upgrade\s+is idempotent\.", "", body)
