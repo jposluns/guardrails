@@ -34,6 +34,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -81,12 +82,13 @@ def compute_digest(version, members):
 def _read_regular(path, limit, what):
     """Exact bytes of a regular file, never following a final symlink, bounded by limit."""
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     except OSError as exc:
         raise _Refusal(CANNOT_EVALUATE, what + "-read", "{} unreadable: {}".format(what, exc))
     try:
         st = os.fstat(fd)
-        _require(stat.S_ISREG(st.st_mode), what + "-read", what + " is not a regular file",
+        _require(stat.S_ISREG(st.st_mode), what + "-read",
+                 "{} {!s} is not a regular file".format(what, path),
                  CANNOT_EVALUATE)
         _require(st.st_size <= limit, what + "-bound", what + " exceeds the size bound",
                  CANNOT_EVALUATE)
@@ -258,7 +260,19 @@ def _vectors():
     def not_string(pack):
         write(pack, manifest=_manifest_text("1.0.0", good).replace("version = \"1.0.0\"", "version = 1"))
 
+    def oversized_member(pack):
+        data = b"x" * (MAX_MEMBER_BYTES + 1)
+        write(pack, docs={"large.md": data},
+              manifest=_manifest_text("1.0.0", [("large.md", _sha(data))]))
+
+    def too_many_members(pack):
+        docs = {"{:04d}.md".format(i): b"" for i in range(MAX_MEMBERS + 1)}
+        rows = sorted((p, _sha(data)) for p, data in docs.items())
+        write(pack, docs=docs, manifest=_manifest_text("1.0.0", rows))
+
     vectors = [
+        ("member-oversize", CANNOT_EVALUATE, "member-bound", oversized_member),
+        ("members-oversize", CANNOT_EVALUATE, "members-bound", too_many_members),
         ("valid-two-members", VALID, None, std),
         ("valid-empty", VALID, None, lambda p: write(p, docs={}, manifest=_manifest_text("0.1.0", []))),
         ("member-edit-without-digest-update", INVALID, "member-sha256", edited),
@@ -326,6 +340,76 @@ def self_test():
                 if not ok:
                     failures.append("{} (wanted {} {}, got {} {}: {})".format(
                         name, status, guard, got[0], got[1], got[2]))
+            # chmod cannot make a directory unreadable to root. Restore access before snapshot/cleanup.
+            if hasattr(os, "geteuid") and os.geteuid() == 0:
+                print("SKIP unreadable-subdirectory: running as root")
+            else:
+                pack = Path(tmp) / "unreadable" / "prompt-pack"
+                hidden = pack / "hidden"
+                hidden.mkdir(parents=True)
+                (pack / MANIFEST_NAME).write_text(_manifest_text("0.1.0", []), encoding="utf-8")
+                (hidden / "unlisted.md").write_bytes(b"unlisted\n")
+                before = _snapshot(pack)
+                hidden.chmod(0)
+                try:
+                    got = validate_pack(pack)
+                    again = validate_pack(pack)
+                finally:
+                    hidden.chmod(0o700)
+                count += 1
+                ok = (got[:2] == (CANNOT_EVALUATE, "pack-walk") and again == got
+                      and _snapshot(pack) == before)
+                print("{} unreadable-subdirectory: {} {}".format(
+                    "PASS" if ok else "FAIL", got[0], got[1] or "").rstrip())
+                if not ok:
+                    failures.append("unreadable-subdirectory: {!r}".format(got))
+
+            # Use a child timeout so a blocking open is a failed check, never a hung self-test.
+            # Probe member reads directly: the walk's earlier refusal must not mask a lost open guard.
+            probe = """\
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import check_opf_prompt_pack as gate
+path, what = Path(sys.argv[2]), sys.argv[3]
+if what == "manifest":
+    gate.DEFAULT_PACK_DIR = path.parent
+    sys.exit(gate.main([]))
+try:
+    gate._read_regular(path, gate.MAX_MEMBER_BYTES, what)
+except gate._Refusal as exc:
+    print("[{}] {}".format(exc.guard, exc), file=sys.stderr)
+    sys.exit(gate.EXIT_CODES[exc.status])
+sys.exit(0)
+"""
+            for what in ("manifest", "member"):
+                for kind in ("fifo", "symlink"):
+                    name = what + "-" + kind
+                    pack = Path(tmp) / name
+                    pack.mkdir()
+                    path = pack / (MANIFEST_NAME if what == "manifest" else "member.md")
+                    if kind == "fifo":
+                        os.mkfifo(path)
+                    else:
+                        target = pack / "target.md"
+                        target.write_text(_manifest_text("0.1.0", []), encoding="utf-8")
+                        path.symlink_to(target.name)
+                    count += 1
+                    try:
+                        result = subprocess.run(
+                            [sys.executable, "-I", "-B", "-c", probe,
+                             str(Path(__file__).resolve().parent), str(path), what],
+                            capture_output=True, text=True, timeout=5)
+                        ok = (result.returncode == 2 and "[" + what + "-read]" in result.stderr
+                              and str(path) in result.stderr)
+                        if kind == "fifo":
+                            ok = ok and "not a regular file" in result.stderr
+                        detail = "exit {}: {}".format(result.returncode, result.stderr.strip())
+                    except subprocess.TimeoutExpired:
+                        ok, detail = False, "open timed out after 5 seconds"
+                    print("{} {}: {}".format("PASS" if ok else "FAIL", name, detail))
+                    if not ok:
+                        failures.append(name + ": " + detail)
         count += 1
         if compute_digest("1.0.0", []) != "sha256:" + _sha(b"opf.prompt-pack/v1\nversion 1.0.0\n"):
             failures.append("digest-definition")

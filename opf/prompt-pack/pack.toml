@@ -1,7 +1,8 @@
 # opf/prompt-pack/pack.toml: the OPF prompt-pack manifest, verified by opf/tools/check_opf_prompt_pack.py.
 # Every file in this directory other than this manifest must be a [[members]] row (path relative to this
 # directory, sha256 of its exact bytes, rows in ascending path order). The digest binds the version and
-# every member row; a change to any member updates its row, the version and the digest together.
+# every member row. Maintainers must update the row, version and digest when a member changes.
+# The gate checks byte and digest agreement; it does not enforce the version-bump obligation.
 # The pack has no members yet: its documents land in later slices, and nothing consumes the pack until
 # the adoption stage driver binds a plan's prompt_pack version and digest to it.
 format = "opf.prompt-pack/v1"
