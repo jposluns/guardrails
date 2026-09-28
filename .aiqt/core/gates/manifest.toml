@@ -575,9 +575,7 @@ residuals are additions to untiled sections (for example 8.7, 10, 13 and 16), a 
 run without the self-test, and an addition landed together with a matching registry edit,
 which review of registry changes catches. The default entry also runs a section 2 keyword
 lint over every pin of those tiled sections: a pin without MUST, MUST NOT, SHOULD or MAY is red
-unless the registry marks it descriptive (_D) or lists it as a temporary exemption for pending
-decision PD-OPF-OCCUPIED-VIEW-PRESERVE-FIRST (_P, confined to on-hold occupied-destination
-sentences in 8.8, 9.2, 11, 14.1 and 14.2, and red once a marked pin gains a keyword); the
+unless the registry marks it descriptive (_D, red once a marked pin gains a keyword); the
 self-test proves synthetic cases, flips every marker and every keyword pin red, and reverts
 named QA5 rewrites red. The lint reads the registry marker, not the meaning, so a requirement
 wrongly marked descriptive stays green, which review of registry changes catches. The
