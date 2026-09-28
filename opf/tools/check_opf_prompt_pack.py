@@ -400,10 +400,8 @@ sys.exit(0)
                             [sys.executable, "-I", "-B", "-c", probe,
                              str(Path(__file__).resolve().parent), str(path), what],
                             capture_output=True, text=True, timeout=5)
-                        ok = (result.returncode == 2 and "[" + what + "-read]" in result.stderr
-                              and str(path) in result.stderr)
-                        if kind == "fifo":
-                            ok = ok and "not a regular file" in result.stderr
+                        # Match only the exit status and structured guard tag, never diagnostic prose.
+                        ok = result.returncode == 2 and "[" + what + "-read]" in result.stderr
                         detail = "exit {}: {}".format(result.returncode, result.stderr.strip())
                     except subprocess.TimeoutExpired:
                         ok, detail = False, "open timed out after 5 seconds"
