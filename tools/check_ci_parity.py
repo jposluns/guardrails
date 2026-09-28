@@ -3,7 +3,9 @@
 
 The gate reads tools/run_all_checks.sh and .github/workflows/quality.yml as data. It
 does not execute either file. Both paths are absolute and derived from this file's
-resolved repository root.
+resolved repository root. The --self-test alone also runs a scratch copy of the runner
+under bash, with stub python3 and gitleaks executables, to prove a failing gate is named
+(GATE FAILED: <name> (exit <n>)) and listed (FAILED GATES: ...) before RESULT: FAIL.
 
 Identity is the normalized command, including all script arguments. Python and shell
 launcher words are removed. The recognized interpreter-only flags -I, -B, -E, -s,
@@ -167,7 +169,12 @@ SHELLS = frozenset({"bash", "sh"})
 EXPECTED_RUN_GATE_BODY = (
     'local name="$1"; shift',
     'echo "--- ${name} ---"',
-    'if "$@"; then :; else failed=1; fi',
+    'if "$@"; then :; else',
+    "local rc=$?",
+    "failed=1",
+    'failed_names="${failed_names:+${failed_names}, }${name}"',
+    'echo "GATE FAILED: ${name} (exit ${rc})"',
+    "fi",
     "echo",
 )
 
@@ -1573,6 +1580,102 @@ def render(report):
     return "\n".join(lines)
 
 
+# In-memory reversion of the failure-naming change, used only as the vector-26 flip.
+SILENT_RUNNER_REVERT = (
+    ('  if "$@"; then :; else\n'
+     '    local rc=$?\n'
+     '    failed=1\n'
+     '    failed_names="${failed_names:+${failed_names}, }${name}"\n'
+     '    echo "GATE FAILED: ${name} (exit ${rc})"\n'
+     '  fi\n',
+     '  if "$@"; then :; else failed=1; fi\n'),
+    ('    gitleaks_rc=$?\n'
+     '    failed=1\n'
+     '    failed_names="${failed_names:+${failed_names}, }secrets (gitleaks)"\n'
+     '    echo "GATE FAILED: secrets (gitleaks) (exit ${gitleaks_rc})"\n',
+     '    failed=1\n'),
+    ('  echo "FAILED GATES: ${failed_names}"\n', ""),
+)
+
+# Stub gates for runner_naming_problems. python3 records each call and, when asked, fails
+# only the plain leaks gate; gitleaks exits with the requested status.
+_STUB_PYTHON3 = """#!/bin/sh
+printf '%s\\n' "$*" >> "$stub_log" || exit 2
+if [ "$stub_fail" = 1 ] && [ "$#" -eq 3 ] && [ "$3" = tools/check_leaks.py ]; then
+  exit 3
+fi
+exit 0
+"""
+_STUB_GITLEAKS = """#!/bin/sh
+exit "$stub_gitleaks_rc"
+"""
+
+
+def _run_runner_copy(text, fail):
+    """Run text as tools/run_all_checks.sh in a scratch tree; return (rc, stdout lines, calls)."""
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+
+    bash = shutil.which("bash")
+    if bash is None:
+        raise RuntimeError("bash not found")
+    with tempfile.TemporaryDirectory(prefix="ci-parity-runner-") as tmp:
+        root = Path(tmp)
+        (root / "tools").mkdir()
+        (root / "bin").mkdir()
+        runner = root / "tools" / "run_all_checks.sh"
+        runner.write_text(text, encoding="utf-8")
+        for name, body in (("python3", _STUB_PYTHON3), ("gitleaks", _STUB_GITLEAKS)):
+            stub = root / "bin" / name
+            stub.write_text(body, encoding="utf-8")
+            stub.chmod(0o700)
+        log = root / "calls.log"
+        log.write_text("", encoding="utf-8")
+        env = dict(
+            PATH=str(root / "bin") + os.pathsep + os.defpath,
+            HOME=tmp,
+            LC_ALL="C",
+            stub_log=str(log),
+            stub_fail="1" if fail else "0",
+            stub_gitleaks_rc="1" if fail else "0",
+        )
+        proc = subprocess.run(
+            [bash, "--noprofile", "--norc", str(runner)],
+            cwd=tmp, env=env, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=60)
+        calls = log.read_text(encoding="utf-8").splitlines()
+    return proc.returncode, proc.stdout.splitlines(), calls
+
+
+def runner_naming_problems(text):
+    """Return the failure-naming problems of runner text; empty means failures are named."""
+    try:
+        pass_rc, pass_lines, pass_calls = _run_runner_copy(text, False)
+        fail_rc, fail_lines, fail_calls = _run_runner_copy(text, True)
+    except Exception as exc:  # no bash, a scratch-tree error, or a timeout
+        return ["runner copy did not complete: {!r}".format(exc)]
+    problems = []
+    if pass_rc != 0 or pass_lines[-1:] != ["RESULT: PASS"]:
+        problems.append("passing run: exit {}, last line {!r}".format(
+            pass_rc, pass_lines[-1:]))
+    if any(line.startswith(("GATE FAILED:", "FAILED GATES:")) for line in pass_lines):
+        problems.append("passing run names a failure")
+    if fail_rc != 1:
+        problems.append("failing run: exit {}, expected 1".format(fail_rc))
+    named = [line for line in fail_lines if line.startswith("GATE FAILED:")]
+    if named != ["GATE FAILED: secrets (gitleaks) (exit 1)", "GATE FAILED: leaks (exit 3)"]:
+        problems.append("failing run named {!r}".format(named))
+    if fail_lines[-2:] != ["FAILED GATES: secrets (gitleaks), leaks", "RESULT: FAIL"]:
+        problems.append("failing run ended {!r}".format(fail_lines[-2:]))
+    headers = [line for line in pass_lines if line.startswith("--- ")]
+    if (not pass_calls or fail_calls != pass_calls
+            or [line for line in fail_lines if line.startswith("--- ")] != headers):
+        problems.append("the failing run did not run the same gates in the same order")
+    return problems
+
+
 def self_test():
     failures = []
     count = 0
@@ -1591,7 +1694,12 @@ def self_test():
             "run_gate() {",
             '  local name="$1"; shift',
             '  echo "--- ${name} ---"',
-            '  if "$@"; then :; else failed=1; fi',
+            '  if "$@"; then :; else',
+            "    local rc=$?",
+            "    failed=1",
+            '    failed_names="${failed_names:+${failed_names}, }${name}"',
+            '    echo "GATE FAILED: ${name} (exit ${rc})"',
+            "  fi",
             "  echo",
             "}",
         ]
@@ -1811,7 +1919,10 @@ def self_test():
         "--exit-code 1; then",
         '  echo "PASS"',
         "else",
+        "  gitleaks_rc=$?",
         "  failed=1",
+        '  failed_names="${failed_names:+${failed_names}, }secrets (gitleaks)"',
+        '  echo "GATE FAILED: secrets (gitleaks) (exit ${gitleaks_rc})"',
         "fi",
     )
     case(
@@ -1953,7 +2064,12 @@ def self_test():
         '  local name="$1"; shift',
         '  echo "--- ${name} ---"',
         '  eval "$INJECT"',
-        '  if "$@"; then :; else failed=1; fi',
+        '  if "$@"; then :; else',
+        "    local rc=$?",
+        "    failed=1",
+        '    failed_names="${failed_names:+${failed_names}, }${name}"',
+        '    echo "GATE FAILED: ${name} (exit ${rc})"',
+        "  fi",
         "  echo",
         "}",
         "run_gate \"gate1\" python3 tools/a.py",
@@ -1962,6 +2078,28 @@ def self_test():
         "10d tampered run_gate body is cannot-evaluate",
         evaluate(
             tampered_body_local,
+            ci_fixture(common + ("python3 tools/a.py",)),
+            (),
+        ),
+        2,
+    )
+
+    silent_body_local = "\n".join((
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        "failed=0",
+        "run_gate() {",
+        '  local name="$1"; shift',
+        '  echo "--- ${name} ---"',
+        '  if "$@"; then :; else failed=1; fi',
+        "  echo",
+        "}",
+        "run_gate \"gate1\" python3 tools/a.py",
+    )) + "\n"
+    case(
+        "10f silent run_gate body (names no failing gate) is cannot-evaluate",
+        evaluate(
+            silent_body_local,
             ci_fixture(common + ("python3 tools/a.py",)),
             (),
         ),
@@ -2431,6 +2569,28 @@ def self_test():
                 "25 anchored TOOL_RE must still accept {!r} as {!r}, "
                 "got {!r}".format(good, want, extracted)
             )
+
+    # Failure naming (change-carries-check): a scratch copy of the LIVE runner, run with one
+    # failing python3 gate and a failing gitleaks, must name both as they fail and list both
+    # before RESULT: FAIL, with every gate still run and the exit status unchanged. The flip
+    # reverts the naming in memory and must be caught, so this vector fails without the change.
+    count += 1
+    try:
+        live_runner = LOCAL_PATH.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        failures.append("26 cannot read live runner: {!r}".format(exc))
+    else:
+        for problem in runner_naming_problems(live_runner):
+            failures.append("26 live runner: " + problem)
+        silent_runner = live_runner
+        for new, old in SILENT_RUNNER_REVERT:
+            if silent_runner.count(new) != 1:
+                failures.append(
+                    "26 flip fixture drift: {!r} not found exactly once".format(new))
+            silent_runner = silent_runner.replace(new, old, 1)
+        if not runner_naming_problems(silent_runner):
+            failures.append(
+                "26 flip: a runner that names no failing gate was not caught")
 
     if failures:
         print("SELF-TEST FAIL:")
