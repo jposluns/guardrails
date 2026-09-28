@@ -1591,9 +1591,9 @@ their records MUST NOT move to the record archive.
 The record-rotation archive under the discovered machine store is distinct from the store-tree
 `archive/` in section 4.2, which retains relocated adopter files, adoption preimages and archived
 occupying sources (section 14.2), never rotated records. Tooling MUST NOT scan either as the
-other. Imported originals, acceptance evidence, retire preimages, and archived occupying sources
+other. Imported originals, acceptance evidence, retirement preimages, and archived occupying sources
 MUST be retained indefinitely by default, except for the pre-commit abort reversal of archived
-occupying sources and retirement preimages written by that uncommitted apply in section 14.2.
+occupying sources and retirement preimages written by the aborted, uncommitted apply in section 14.2.
 Automatic reclamation MUST apply only to staging runs,
 after independent re-read and digest verification of their required evidence in its durable home;
 age alone MUST NOT authorize deletion.
@@ -1824,7 +1824,10 @@ its live path from its journaled preimage, MUST verify the restored bytes agains
 digest, MUST commit the restored bytes durably, and only then MAY discard the aborted run's
 archive copy of that source, so an interruption leaves each source either live and byte-identical
 or archived with its removal journaled, never removed
-without a durably committed, digest-verified archive copy. That
+without a durably committed, digest-verified archive copy.
+The reversal MAY also discard retirement preimages written by that uncommitted apply for
+non-occupying sources, since each such source remains frozen, live and byte-identical in place
+and is never removed at apply. That
 reversal undoes the uncommitted apply's own writes; it is not the section 14.1 restore, whose
 fresh-plan rule governs an archived file only once apply commits. Recovery of an interrupted
 apply MUST resolve from the apply journal alone and MUST NOT require the live tree to resolve as
