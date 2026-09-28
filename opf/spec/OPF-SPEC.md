@@ -993,36 +993,41 @@ supersession obligation of any record authored by a non-importer actor. The same
 every current obligation, record-level or store-level, including field-borne authority: a
 gate_run verdict, a tier_assessment outcome, an artifact's promoted state, a release's published
 state and a maintainer_action's done on an importer-authored record describe history and
-discharge nothing now. A clean `done` record's
-`receipt_of` MUST target a clean backlog item, and a clean backlog item reaching ratified `done`
-requires a clean receipt authored by a non-importer actor; a legacy importer-authored receipt
-satisfies, as recorded history, only the legacy importer-authored backlog item it was recorded
-with. An importer-authored decision is never the current effective resolution of a clean
-`pending_decision` chain; resolving such a chain now requires a new clean decision linking back.
-Importer-authored blocks do not grant a current stop, and an importer-authored record cannot
-discharge a required supersession. The firewall covers every state-bearing type: an
-importer-authored record is never the current `handoff`, an active `waiver`, a held
-`session_lease`, an active `mode`, or a ratified active `preference_pattern`; a state-bearing
-status on an importer-authored record describes history at its source and confers nothing now,
-and every current-state join, including the section 8.5 at-most-one-current handoff rule,
-evaluates only clean records authored by non-importer actors. After the section 9.2 upgrade an
+discharge nothing now. A clean `done` record's `receipt_of` MUST target a clean backlog item, and a clean backlog item
+reaching ratified `done` MUST hold a clean receipt authored by a non-importer actor; a legacy
+importer-authored receipt satisfies, as recorded history, only the legacy importer-authored
+backlog item it was recorded with. One exception is defined so that the section 9.2 refusal always
+has a writer-performable remedy: where that upgrade withdraws a ratified `done` item's only
+receipt as legacy importer-authored, a maintainer-authored clean `maintainer_decision` that links
+`corrects` to that item and records that its completion stands MUST satisfy the item's receipt
+obligation in place of the withdrawn receipt; `opf record create` authors such a decision, doctor
+and the upgrade MUST accept it, and a maintainer who instead judges the work unfinished MUST
+record a new clean backlog item linking `derives_from` back, never reopen the terminal `done`. An importer-authored decision MUST NOT be treated as the current effective resolution of a clean
+`pending_decision` chain; resolving such a chain now MUST take a new clean decision linking back.
+Importer-authored blocks MUST NOT grant a current stop, and an importer-authored record MUST NOT
+discharge a required supersession. The firewall covers every state-bearing type: an importer-authored record MUST NOT be treated as
+the current `handoff`, an active `waiver`, a held `session_lease`, an active `mode`, or a ratified
+active `preference_pattern`; a state-bearing status on an importer-authored record describes
+history at its source and MUST confer nothing now, and every current-state join, including the
+section 8.5 at-most-one-current handoff rule, MUST evaluate only clean records authored by
+non-importer actors. After the section 9.2 upgrade an
 existing legacy importer-authored clean record keeps its bytes, its recorded state and its place
 in the clean series, and remains readable history there; what the upgrade changes, and its
 report enumerates (section 9.2), is authority alone: such a record leaves every current-state
 join, its open or active backlog items leave actionability, and its blocks stop granting a stop.
-The clean-series writer refuses a transition on an importer-authored record in either series
-(section 8.8). Acting on history requires a new
-strict clean record at the present time, with a link back to the historical record.
+The clean-series writer MUST refuse a transition on an importer-authored record in either series
+(section 8.8). Acting on history MUST take a new strict clean record at the present time, with a
+link back to the historical record.
 C-IMPORTED-SEGREGATION enforces this firewall over importer-authored records in both series.
 
 Clean-to-imported links allow only `relates`, `derives_from`, `follows`, and same-type `supersedes`;
 the last records historical continuation without discharging a current supersession obligation,
 and the immutable imported target keeps its recorded state, the link alone recording the
 supersession (section 8.4). Imported-to-imported links allow every declared relation subject to
-its type constraints. Imported-to-clean links are refused by both writer and doctor. Links
+its type constraints. Imported-to-clean links MUST be refused by both writer and doctor. Links
 resolve over the union of both series; a dangling cross-series link is a finding, never silently
-omitted. The imported series cannot supply current authority through a link, an extension, or an
-adoption approval.
+omitted. The imported series MUST NOT supply current authority through a link, an extension, or an adoption
+approval.
 
 ### 8.7 Extensions
 
@@ -1056,11 +1061,10 @@ history is a new clean record linking back (section 8.6). Its subcommands:
   state, and leaving the `/proposed` status, by rejection or ratification, removes the field. A
   proposed record that carries no `proposed_from` was proposed outside `transition`; that includes
   a record `create` lands directly at a `/proposed` initial state, so the absence establishes no
-  provenance. Such a record cannot be rejected by the verb, which never infers or invents a
-  predecessor; the worklog entry of the proposing transition is informational, never evidence. The
-  verb refuses to act on, or overwrite, a record whose current row is not schema-valid,
-  `proposed_from` included, so a schema-detectable forgery must be repaired by the operator
-  before the verb acts; it is never laundered. The field is an ordinary record field, so a
+  provenance. Such a record cannot be rejected by `transition`, which never infers or invents a predecessor; the
+  worklog entry of the proposing transition is informational, never evidence. `transition` MUST refuse to act on, or overwrite, a record whose current row is not schema-valid,
+  `proposed_from` included, so a schema-detectable forgery must be repaired by the operator before
+  `transition` acts; it is never laundered. The field is an ordinary record field, so a
   canonical hand edit of it that keeps the row schema-valid is not detected, the same as any
   other field (the section 5.7 integration-base rule remains the control). A backlog item
   reaches unqualified `done` only through `done-with-receipt`.
@@ -1091,9 +1095,12 @@ lifecycle line naming the record and its status change (`opf-record create <ID> 
 Every subcommand runs one operation sequence, and an implementation of the verb MUST preserve its
 guarantees:
 
-1. Resolve the store, then reconcile any interrupted authoring transaction first. Reconciliation
-   writes the store, so it runs only under the single-writer lease that publication uses: a held
-   lease refuses before any recovery write and is never seized. An operand changed since the
+1. Resolve the store, then reconcile any interrupted authoring transaction first, and settle any
+   owed adoption or import cutover re-check the same way: while a committed cutover's re-check
+   outcome is unrecorded, every roster command of the section 14.2 matrix MUST, before any store
+   write, either run and record that owed outcome through the section 14.1 journal-led recovery or
+   refuse. Reconciliation writes the store, so it runs only under the single-writer lease that
+   publication uses: a held lease refuses before any recovery write and is never seized. An operand changed since the
    interruption, to bytes that are neither its journaled prestate nor its planned poststate nor a
    write of either torn by the interruption, is reported and refused, never overwritten. A
    reconciled interruption refuses the new operation, so the operator inspects it before anything
@@ -1120,9 +1127,11 @@ guarantees:
 6. Every rewritten file is published in one crash-durable journaled transaction, so an
    interruption leaves the store exactly at its prestate or exactly at its poststate once
    reconciled. The reference tooling keeps that journal under `.aiqt/record/journal` at homes 1.
-7. The declared views are rendered, except that a deferred view destination (section 14.2) is
-   never written and leaves the planned destination set, so the step 5 cleanliness gate does not
-   read it: its bytes are validated prospectively and the occupying source is left in place.
+7. The declared views are rendered, except that an occupied destination in a protective lifecycle
+   state of the section 14.2 matrix, a deferred view destination included, is never written and
+   leaves the planned destination set, so the step 5 cleanliness gate does not read it: its
+   generated bytes are validated prospectively and the occupying source, or the landed postimage
+   of a committed cutover, is left in place.
    Then a full doctor must report VALID, evaluating a deferred destination under the section 11
    bounded treatment; a failure leaves the change for review with recovery advice scoped to the
    planned paths. One exception applies to a status change: doctor compares it with the prior
@@ -1145,7 +1154,7 @@ imported counter rows first, the touched `<type>.imported.index.toml` and
 `worklog.imported.toml` files, and the evidence bundle: the exact original at
 `.working/imported/import/<run-id>/originals/<source-path>` and `inventory.toml` in the retained
 `opf.evidence.inventory/v1` format (section 4.2). The journal remains
-`.aiqt/record/journal` at homes 1. It never rewrites clean records or clean counters.
+`.aiqt/record/journal` at homes 1. It MUST NOT rewrite clean records or clean counters.
 
 Import MUST refuse with exit 2 on a non-importer actor, absent or invalid provenance, a
 clean-series record operand, an imported-to-clean link, a historical timestamp later than the
@@ -1348,13 +1357,17 @@ restore path for that scope; a held lease or a dirty store refuses, and a dirty 
 to commit its own changes, never restored by the tool. After applying the schema delta, it regenerates
 the declared views and requires a full doctor VALID before offering the uncommitted change for the
 adopter's own branch-and-merge. It never stages or commits the change.
-Both upgrade kinds are roster commands under the section 14.2 matrix: an upgrade MUST validate
-a deferred view destination's bytes prospectively, MUST withhold the same-path publication, and
-MUST NOT overwrite or relocate the occupying source, on the schema-level path and the
-homes-generation relocation path, the homes-2 path included, alike; the deferred path sits
-outside its planned schema and render destinations, so the clean-tree precondition does not
-read it, and its required doctor VALID grades that destination under the section 11 bounded
-treatment.
+Both upgrade kinds are roster commands under the section 14.2 matrix, keyed on the destination's
+lifecycle state, on the schema-level path and the homes-generation relocation path, the homes-2
+path included, alike: an upgrade MUST validate an occupied destination's view bytes prospectively,
+MUST withhold the same-path publication, MUST NOT overwrite or relocate the occupying source, and
+MUST NOT write a destination whose committed cutover awaits its recorded re-check outcome or whose
+re-check failed; the protected path sits outside its planned schema and render destinations, so
+the clean-tree precondition does not read it, and its required doctor VALID grades that
+destination under the section 11 bounded treatment. An upgrade delta or manifest change that would
+declare a new view or managed store path at a registered `[unmanaged]` path MUST refuse, naming
+the collision; the remedy is the adopter's own fresh plan re-dispositioning the kept file (section
+14.2).
 
 The manifest and counters rewrite is a model regeneration through the canonical new-document emitter,
 never a textual round-trip edit, bounded by two guards: a precondition that re-emitting the UNCHANGED
@@ -1403,9 +1416,10 @@ granting a stop, each ratified `done` item whose only receipt is legacy importer
 so stops holding a valid receipt, and each record that ceases to be a current state under
 section 8.6, so that authority change is reported, never silent. Where a withdrawn authority
 would leave the post-upgrade doctor below VALID, a receipt-stripped `done` item included, the
-upgrade MUST refuse before any write, naming each such record and the remedy: a
-maintainer-authored clean record that restores or supersedes the withdrawn authority under
-section 8.6, recorded before the upgrade is retried.
+upgrade MUST refuse before any write, naming each such record and the remedy: a maintainer-authored clean record that restores or
+supersedes the withdrawn authority under section 8.6, for a receipt-stripped `done` item the
+section 8.6 `maintainer_decision` route, recorded before the upgrade is retried; every named
+remedy MUST be performable through the sanctioned writer without hand-editing canonical files.
 An unresolved legacy import must be reconciled under its original contract before upgrading;
 legacy LF records and evidence remain readable and are never silently converted.
 A completed legacy import upgrades in place: its `import_status` stays `"complete"`,
@@ -1525,20 +1539,31 @@ section 9.2 upgrade preserves that legacy status without fabricating an approval
 A partial or complete status that neither an adoption receipt with completion results nor
 preserved legacy import evidence substantiates MUST fail closed, as does a missing, unreadable
 or contradictory input. Neither elapsed time nor a staging directory proves status.
-From the recorded approval until its disposition executes, a path the approved plan enumerates
-as an outstanding retire, move or migrate source, and whose live bytes still match its plan
-digest, is bounded adoption state: containment MUST report it as `migration_incomplete` detail
-rather than failing it, at `"none"` during a clean start as much as at `"partial"`.
-A digest mismatch or an unenumerated path MUST remain a containment-gate failure at `required`;
-the bounded treatment is never a blanket exemption.
+From the recorded approval until the section 14.2 matrix records its re-check matched, a path the
+approved plan enumerates as an outstanding retire, move or migrate source is bounded adoption
+state keyed on its section 14.2 lifecycle state, never on bytes alone. In the planned and
+eligible-green states, where its live bytes still match its plan digest, containment MUST report
+it as `migration_incomplete` detail rather than failing it, at `"none"` during a clean start as
+much as at `"partial"`. A digest mismatch in those states (a drifted source) or an unenumerated
+path MUST remain a containment-gate failure at `required`; the bounded treatment is never a
+blanket exemption.
 A deferred view destination (section 14.2), a plan-enumerated migrate, move or retire source
 whose digest-matched live bytes occupy a declared generated-view destination, receives the same
 bounded treatment for view drift: doctor and the render drift gate MUST validate that view's
 generated bytes prospectively, from the store, without reading the occupied path as the view,
 and MUST report the pending cutover as `migration_incomplete` detail rather than a drift
 failure, so a store awaiting its authorized cutover, before or after green eligibility, reaches
-VALID with the source bytes still in place. A digest mismatch at the occupied path MUST remain
-a failure at `required`, exactly as for containment.
+VALID with the source bytes still in place. A digest mismatch at an occupied path in those states MUST remain a failure at `required`, exactly
+as for containment. In the cutover committed state, doctor MUST compare the destination against
+the poststate the cutover journal recorded at commit, MUST report the owed re-check as
+`migration_incomplete` detail, and MUST NOT fail the destination for no longer holding the source
+bytes. In the re-check failed state, doctor MUST fail at `required` naming each mismatched path;
+that recorded standing failure MUST NOT deadlock recovery under `required` posture: the sanctioned
+writer's own final doctor MUST accept exactly those recorded failed-re-check findings, and no
+other finding, as standing rather than caused by its change when the change touches no affected
+destination, and investigation, planning and the recording of the fresh plan's approval MUST
+remain available, so the section 14.1 fresh plan that discharges the failure can always be
+produced and executed without hand-editing canonical files.
 
 Adoption coverage (which types are populated, which modules are wired, how much of the project's
 operational surface has moved into the store) is a report, never a gate: breadth of adoption is a
@@ -1618,8 +1643,9 @@ This makes no claim that historical obligations were fulfilled or converted.
 
 Adoption follows investigate, plan, one approval, apply, completion, then retirement. Investigation
 distinguishes first adoption from re-adoption and records a digest-stamped inventory, including
-governance surfaces for each supported assistant platform. Every foreign `.working/` file MUST
-have a disposition before `init-store`; adoption MUST NOT run blind init over populated content.
+governance surfaces for each supported assistant platform. Every foreign `.working/` file, and every pre-existing file at a declared view or deliverable
+destination outside `.working/`, the product-root `VERSION` included, MUST have a disposition
+before `init-store`; adoption MUST NOT run blind init over populated content.
 Apply composes the coupled-init substrate and the journaled adoption operations, with per-operation
 preimage checks and reversal. It MUST end with rendered views at every declared destination except
 the deferred view destinations of section 14.2, whose occupying sources it MUST leave
@@ -1644,8 +1670,10 @@ Exactly one adopter approval MUST follow each concrete plan. The `opf.adoption.p
 The attributed approval binds `plan_digest` and `inventory_digest`, hence that whole plan.
 There is no per-fragment acceptance or later adopter checkpoint within the approved plan.
 Any bound-item drift MUST refuse into a fresh plan with its own single approval; a changed old
-file MUST NOT be retired. Approval never absorbs a separate posture-weakening authorization
-(section 11) or changelog curation (section 7.3). Digests establish binding, not actor
+file MUST NOT be retired. One renewal is not drift: a section 5.4 whole-store relocation MUST
+rebind the plan's bound paths to their relocated equivalents with the bound digests unchanged
+(section 14.2). Approval MUST NOT absorb a separate posture-weakening authorization (section 11) or changelog
+curation (section 7.3). Digests establish binding, not actor
 authenticity or semantic correctness; self-asserted identity and same-user tampering remain
 disclosed residuals.
 
@@ -1658,9 +1686,8 @@ The clean-start completion check deterministically verifies the following roster
 4. Operational readiness: the store resolves to the planned identity, and CI asserts store
    presence and identity so absence cannot pass as NOT-APPLICABLE. Doctor validity and
    declared-view byte drift are evaluated against the validated prospective poststate in which
-   every disposition and same-path publication this adoption itself executes has run, while a
-   migrate-disposed source, whose cutover belongs to import completion, stays in place and any
-   view destination it occupies stays deferred (section 14.2), so a plan-enumerated
+   every disposition and same-path publication this adoption itself executes has run, while a migrate-disposed source, whose cutover belongs to import completion, stays in place at its
+   original or bootstrap path (section 14.2) and any view destination it occupies stays deferred, so a plan-enumerated
    old file still occupying its planned destination is not a deadlock, and any drift the plan
    does not account for fails the check. Consumer repointings match the plan.
 5. Wiring: the enforcement pack is installed and probed, with a direct store write denied and
@@ -1676,10 +1703,16 @@ The clean-start completion check deterministically verifies the following roster
 
 Retirement MUST occur only on a green completion check, and a green result evaluated against a
 prospective poststate is retirement eligibility, never completed adoption by itself:
-eligibility ends no deferral and authorizes nothing outside the cutover transaction. Sanctioned
-record writes between eligibility and cutover change rendered views without ending eligibility,
-so the cutover transaction MUST re-derive its poststate, every published view byte included,
-from the store under its own held lease. Adoption MUST NOT be recorded complete until the
+eligibility ends no deferral and authorizes nothing outside the cutover transaction. Sanctioned record writes between eligibility and cutover change rendered views without ending
+eligibility, so the cutover transaction MUST re-derive its poststate, every published view byte
+included, from the store under its own held lease, and its journal MUST record the digests of that
+re-derived poststate at commit: that journal-recorded poststate is the one postimage every later
+recovery and re-check compares against. The cutover's lease MUST span from before its commit until
+its re-check outcome is recorded; lease reconciliation (section 5.7) MUST NOT release a dead
+cutover holder's lease without either recording the owed re-check outcome through the journal-led
+recovery below or leaving the destination under its cutover committed protection, and every roster
+command MUST settle an owed re-check outcome, by running and recording it or by refusing, before
+any store write (section 8.8). Adoption MUST NOT be recorded complete until the
 journaled cutover transaction that executes the dispositions and same-path publications this
 adoption itself performs has committed, and a post-commit re-check has found the landed live
 poststate equal to that re-derived poststate, digest for digest, with a live full doctor VALID,
@@ -1688,31 +1721,36 @@ An interrupted or rolled-back cutover leaves adoption incomplete whatever green 
 it; the eligibility stands, the cutover MUST be retried or recovered under the same approved
 plan, and neither the re-check nor the retry needs a new adopter approval. Recovery is
 journal-led: while the journal shows no commit, recovery MUST confirm or restore the prestate,
-and the live preimage MUST still match the plan digest before a retry commits; once the journal
-shows the commit, recovery MUST recognize the landed postimage, run and record the pending
-re-check against the re-derived poststate, and MUST NOT demand the replaced preimage, so a
-crash between the commit and the re-check's recording is resumable, never a deadlock. A
+and the live preimage MUST still match the plan digest before a retry commits; once the journal shows the commit, recovery MUST recognize the landed postimage, run and record
+the pending re-check against the journal-recorded poststate, and MUST NOT demand the replaced
+preimage, so a crash between the commit and the re-check's recording is resumable, never a
+deadlock. A
 completion-check failure or cannot-evaluate MUST report incomplete and MUST retire nothing;
 changing the approved work MUST take a fresh plan. A post-commit re-check that does not match
 is a recorded failed outcome event with a fail-closed result: the landed bytes and every
 preserved preimage MUST be retained, the section 14.2 roster commands MUST NOT write the
 affected destination, doctor MUST fail at `required` naming each mismatched path, and any
 further write toward that destination MUST wait for a fresh plan with its own single approval;
-nothing is silently rolled back or retried. Green proves preservation,
+nothing is silently rolled back or retried, and a failed re-check MUST NOT deadlock recovery:
+section 11 defines how doctor's `required` failure coexists with producing and approving that
+fresh plan, which binds the landed bytes as the preimage its own cutover replaces or confirms. Green proves preservation,
 restorability and operational coverage, never semantic fidelity or fulfilment of old obligations;
 the receipt discloses that limit. An occupied view destination MUST use a validated prospective
 poststate, preserved preimage and the same journaled transaction for retirement and publication
 (section 14.2); completion checks MUST gate that cutover before removal or replacement, and
 only the cutover's own matched landed re-check completes it.
 
-The enforcement pack MUST freeze the plan-enumerated old files until each one's disposition
-has executed under the section 14.2 matrix, and protects both
-record series, counters, declared views and evidence. It provides CI and staged-snapshot
-pre-commit checks, verified deny hooks where each platform supports them, and instructions
-elsewhere, disclosing each residual. Per-clone hook installation and bypass, canonical hand edits,
-shell or interpreter wrapping, same-user tampering and unverified platform denial are not
-eliminated by this pack. Denial claims are verified against official platform documentation at
-build time. Adoption MUST refuse to enable a record type the writer cannot author, and enforcement
+The enforcement pack MUST freeze the plan-enumerated old files until each one's disposition has
+executed under the section 14.2 matrix, and MUST protect both record series, counters, declared
+views and evidence. Its floor is normative: the pack MUST provide CI checks, MUST provide
+staged-snapshot pre-commit checks with the per-clone installation residual disclosed, MUST provide
+a verified deny hook on each supported platform whose official documentation confirms denial
+support, and MUST provide instructions on a platform without verifiable denial, disclosing each
+platform's residual. The supported platform roster is Claude Code, Codex, Gemini CLI and Cursor;
+the pack MUST cover every one of them by one of those two means, per platform. Denial claims MUST
+be verified against official platform documentation at build time. Per-clone hook installation and
+bypass, canonical hand edits, shell or interpreter wrapping, same-user tampering and unverified
+platform denial are not eliminated by this pack and MUST each be disclosed as residuals. Adoption MUST refuse to enable a record type the writer cannot author, and enforcement
 MUST NOT ship before the writer can perform every operation it forces. Curated `CHANGELOG.md`
 edits remain the curator's responsibility.
 
@@ -1735,8 +1773,9 @@ MUST record the source's result in the adoption receipt's outcome-event chain. A
 is that source's retirement eligibility: only it permits the source's retirement through the
 adoption retirement path, in one journaled transaction with any same-path view publication, the
 live preimage MUST still match the plan when that transaction runs, and eligibility ends no
-per-source deferral. That transaction MUST re-derive its poststate, the published view bytes
-included, from the store under its own held lease at cutover time. The source completes only
+per-source deferral. That transaction MUST re-derive its poststate, the published view bytes included, from the store
+under its own held lease at cutover time, MUST record that poststate's digests in its journal at
+commit, and MUST hold that lease until the re-check outcome is recorded, exactly as for adoption. The source completes only
 when its cutover transaction has committed and the post-commit re-check has matched the landed
 bytes, the published view where the source occupied one included, against that re-derived
 poststate, with a live full doctor VALID recorded in the same outcome event. A pre-commit
@@ -1752,14 +1791,14 @@ fidelity. No writer-side leftover accounting is required.
 Clean-start adoption and import ship on homes 1 with explicit evidence coverage: their completion
 checks re-read inventories and payload digests themselves, because C-EVIDENCE-ENUM is inactive
 until homes 2. The evidence-bundle format in section 4.2 is retained, including the import home
-`.working/imported/import/<run-id>/`. Destination durability and digest verification precede
-source removal; retirement and any same-path publication share the same recoverable transaction.
-A source outside the participating roots is a plan-time cannot-evaluate naming that source.
-Investigation, planning and read-only status commands remove nothing.
+`.working/imported/import/<run-id>/`. Destination durability and digest verification MUST precede source removal; retirement and any
+same-path publication MUST share the same recoverable transaction. A source outside the
+participating roots MUST be a plan-time cannot-evaluate naming that source. Investigation,
+planning and read-only status commands MUST remove nothing.
 
 Legacy runs may occupy `.working/staging/import/<run-id>/` or
 `.working/staging/ingest/<run-id>/`. Their evidence inventories and readers remain available;
-old acceptance records describe those runs and never authorize a new adoption or retirement.
+old acceptance records describe those runs and MUST NOT authorize a new adoption or retirement.
 A legacy import completed under the pre-1.3.0 contract keeps its recorded status, substantiated
 by its preserved run evidence (section 11); no retrospective approval or receipt is fabricated.
 Preserved legacy run evidence is that run's durable archive in its recorded legacy home, for
@@ -1768,16 +1807,19 @@ its evidence inventory in the retained legacy format; substantiation re-reads th
 and digest-matches every file it enumerates, and a missing, unreadable or digest-mismatched
 item leaves the status unsubstantiated, failing closed under section 11.
 Old import and ingest orchestration is retired by staged decoupling only after clean-start
-adoption ships. Required evidence is re-read and digest-matched in its durable home before staging
-reclamation. Reclamation is journaled and idempotent; an unreadable tree holds the run.
-Read-only commands never clean staging. Pending legacy review never becomes implicit approval.
+adoption ships. Required evidence MUST be re-read and digest-matched in its durable home before staging
+reclamation. Reclamation MUST be journaled and idempotent; an unreadable tree MUST hold the run.
+Read-only commands MUST NOT clean staging. Pending legacy review MUST NOT become implicit
+approval.
 
 ### 14.2 Pre-existing files at the store location
 
-`opf adopt` investigates every file at the target `.working/` location that is not OPF-managed:
-the manifest, ledgers, counters, clean and imported typed indexes, declared views and registered
-control areas define the managed set. A matching pathname alone does not prove OPF ownership:
-foreign content at a planned managed destination still needs a disposition. A hand-maintained
+`opf adopt` investigates every file at the target `.working/` location that is not OPF-managed,
+and every pre-existing file at a declared view or deliverable destination outside `.working/`, the
+product-root `VERSION` included: the manifest, ledgers, counters, clean and imported typed
+indexes, declared views and registered control areas define the managed set. A matching pathname
+alone does not prove OPF ownership: foreign content at a planned managed destination, a
+machine-store path as much as a view path, still needs a disposition. A hand-maintained
 `TODO.md` belongs to the adopter.
 `opf init` refuses undispositioned foreign content; post-adoption import uses only its approved
 source scope and does not authorize an incidental discovery.
@@ -1785,17 +1827,19 @@ source scope and does not authorize an incidental discovery.
 The plan records one disposition per foreign file from `keep`, `migrate`, `move`, `retire`:
 
 - **Keep.** Leave it untouched and register it under `[unmanaged]`. Ordinary tooling MUST NOT
-  read, rewrite or delete it. An unmanaged path MUST NOT collide with an OPF-managed file or
-  view: a `keep` declaration naming a declared view or managed store path MUST refuse at plan
-  time, so a kept path never becomes an occupied destination.
+  read, rewrite or delete it. An unmanaged path MUST NOT collide with an OPF-managed file or view: a `keep` declaration naming a
+  declared view or managed store path MUST refuse at plan time, and a later manifest change, type
+  enablement or upgrade delta that would declare a view or managed store path at a registered
+  `[unmanaged]` path MUST refuse the same way (section 9.2), so a kept path never becomes an
+  occupied destination.
 - **Migrate.** Keep the source frozen now for post-adoption import into the separate imported
   series. Its exact bytes MUST be preserved, and it MUST be retired only after its source
   completion check is green, through the cutover transaction the matrix below governs.
-  There is no imported view. Where an old file occupies a clean generated-view destination,
-  that path is a deferred view destination for as long as the plan-enumerated source's
-  digest-matched bytes occupy it: deferral MUST last until the authorized cutover transaction
-  has actually replaced the source and its post-commit re-check has matched (section 14.1),
-  never merely until the applicable completion check is green. One
+  There is no imported view. Where an old file occupies a clean generated-view destination, that path is a deferred view
+  destination whose protection is keyed on the matrix's lifecycle states below, never on the
+  occupying bytes alone: deferral MUST last until the authorized cutover transaction has actually
+  replaced the source and its post-commit re-check has matched (section 14.1), never merely until
+  the applicable completion check is green. One
   deferral rule MUST bind every roster command of the matrix below: each validates the view's
   generated bytes
   prospectively and MUST withhold the same-path publication, the deferred path sits outside a
@@ -1811,8 +1855,8 @@ The plan records one disposition per foreign file from `keep`, `migrate`, `move`
 - **Move.** Relocate to a named destination outside the managed store, or by default to
   `.working/archive/moved/<source-path>`, preserving substructure. An occupied destination MUST
   be a collision finding, never an overwrite. An explicit destination inside the store tree is
-  valid only beneath `.working/archive/moved/`. The default Move refuses a store resolved
-  outside the product root until a multi-root coordinator exists. Removal MUST require the
+  valid only beneath `.working/archive/moved/`. The default Move MUST refuse a store resolved outside the product root until a multi-root
+  coordinator exists. Removal MUST require the
   plan-bound green completion check and digest-verified preservation. A move-disposed source at
   a declared view destination defers identically to a migrate source: its relocation and the
   same-path publication share one journaled cutover transaction after the green check, and
@@ -1822,54 +1866,94 @@ The plan records one disposition per foreign file from `keep`, `migrate`, `move`
   or replacement, which runs without import through the adoption cutover transaction. No old
   obligation is thereby fulfilled.
 
-Occupied destinations follow one normative matrix. The occupied-destination writer roster is
-closed: adoption apply, `opf render`, every `opf record` subcommand (`create`, `transition`,
-`done-with-receipt`, `worklog-append`, `import`), `opf import`, `opf upgrade` in both its
-schema-level and homes-generation forms, the homes-2 relocation path included, `opf migrate`,
-`opf sync`, `opf init`, and every check 5 probe. Every command that can publish or regenerate
-a view or write a store path is a roster command and MUST obey the matrix; no such command
-ships outside the roster. `opf init` MUST keep refusing undispositioned foreign content rather
-than write over it, `opf migrate` MUST relocate an occupying source byte-identically with its
-deferral state intact, and `opf sync` MUST NOT publish or regenerate anything at a deferred
-destination.
+A foreign file at a planned machine-store destination (the manifest, a ledger, `counters.toml`, a
+typed index or another required machine file) cannot defer like a view: the store cannot exist
+while foreign bytes occupy a file it must parse. The plan MUST resolve such a collision at plan
+time and MUST NOT leave it to apply: either the adopter re-dispositions the file to `move` or
+`retire` under the ordinary rules, or the plan binds a bootstrap relocation for it. A bound
+bootstrap relocation means apply relocates the source byte-identically, digest-verified, to
+`.working/archive/adoption/<run-id>/bootstrap/<source-path>` in the same journaled apply
+transaction that creates the machine file, and every protection of this section, the freeze, the
+plan digests, the disposition and its lifecycle state, follows the relocated source: it remains
+the frozen source import reads for `migrate`, or the preserved file whose removal or move still
+awaits its green check. A bootstrap relocation is not retirement and completes no disposition; the approval binds both
+paths, and it is the one authorized exception to the planned row's relocation prohibition: only
+apply's journaled transaction MAY perform it, exactly as bound, and no roster command MAY relocate
+the source otherwise. A plan that neither re-dispositions nor binds a bootstrap relocation
+for a machine-store collision MUST refuse at plan time, naming the path and those two remedies; a
+`keep` there already refuses. A view destination never takes a bootstrap relocation: it defers
+under the matrix below, and after a bootstrap relocation the machine-store destination is an
+ordinary managed file while the matrix binds the relocated source at its bootstrap path exactly as
+it binds an occupying source.
 
-An occupied destination is in exactly one lifecycle state: planned (disposition approved, its
-completion check not yet green); eligible-green (check green, cutover transaction not yet
-committed); cutover committed (transaction committed, its post-commit re-check outcome not yet
-recorded); re-check matched (the recorded re-check matched the landed bytes); re-check failed
-(the recorded re-check did not match); and interrupted-recovered (an interrupted cutover
-reconciled from its journal, which returns the state to eligible-green when the journal shows
-no commit, or to cutover committed, with the re-check still owed, when it does). Protection
-MUST last until the authorized cutover transaction has actually replaced the source and its
-re-check has matched, never merely until eligibility. Every cell below binds every roster
-command.
+Occupied destinations follow one normative matrix. The occupied-destination writer roster is
+closed and enumerates every writer this specification names: adoption apply and its journaled
+adoption operations, the section 14.1 adoption and per-source cutover transactions and their
+journal-led recovery, the section 8.8 authoring-transaction reconciliation, `opf render`, every
+`opf record` subcommand (`create`, `transition`, `done-with-receipt`, `worklog-append`, `import`),
+`opf import`, `opf upgrade` in both its schema-level and homes-generation forms, the homes-2
+relocation path included, `opf migrate`, `opf sync`, `opf init`, `opf absorb`, rotation (section
+12), the release cut (section 6.1), staging reclamation (section 14.1), the check 3 restore
+exercise, and every check 5 probe. Every command or recovery path that can publish or regenerate a
+view or write a store path is a roster command and MUST obey the matrix; such a command MUST NOT
+ship outside the roster, and any operation outside the roster MUST NOT publish or regenerate a
+view or write a store path. `opf init` MUST keep refusing undispositioned foreign content rather
+than write over it, and `opf sync` MUST NOT itself publish or regenerate anything at a protected
+destination: a fast-forward whose incoming commits change a protected occupied destination MUST
+refuse and surface the state unless the incoming history carries that destination's own authorized
+cutover and its recorded outcome, and a divergence always halts (section 5.7).
+
+`opf migrate --store` is whole-store relocation (section 5.4), never disposition execution: it
+MUST carry every protected source, preserved preimage, bootstrap relocation and evidence bundle
+byte-identically into the destination with its lifecycle state and deferral intact, MUST NOT
+execute, advance or end any disposition, deferral or owed re-check, and MUST renew the approval's
+bound paths to their relocated equivalents in the same recorded change, the bound digests
+unchanged; any byte difference remains bound-item drift refusing into a fresh plan (section 14.1).
+The matrix's relocation prohibitions bind disposition-scoped and same-path writes, not that
+whole-store carry, and after the carry every cell binds at the relocated paths.
+
+An occupied destination is in exactly one lifecycle state at any observation point: planned
+(disposition approved, its completion check not yet green); eligible-green (check green, cutover
+transaction not yet committed); cutover committed (transaction committed, its post-commit re-check
+outcome not yet recorded); re-check matched (the recorded re-check matched the landed bytes);
+re-check failed (the recorded re-check did not match); and drifted (live bytes at a planned or
+eligible-green destination no longer matching the plan digest). Interrupted-recovered is not a
+further concurrent state but the journal-led reconciliation transition of section 14.1: before any
+other roster write it MUST resolve to eligible-green when the journal shows no commit, or to
+cutover committed, the re-check still owed, when it does, and its row below binds that transition.
+Protection MUST last until the authorized cutover transaction has actually replaced the source and
+its re-check has matched, never merely until eligibility. Every cell below binds every roster
+command of the closed roster above, identically for each command.
 
 | State | Keep | Migrate | Move | Retire |
 |---|---|---|---|---|
-| planned | unreachable: the colliding declaration MUST have refused at plan time, and roster commands MUST NOT touch a kept path | roster commands MUST withhold same-path publication, MUST validate the view prospectively, and MUST NOT overwrite, relocate or remove the source | roster commands MUST withhold same-path publication, MUST validate the view prospectively, and MUST NOT overwrite or relocate the source | roster commands MUST withhold same-path publication, MUST validate the view prospectively, and MUST NOT overwrite or remove the source |
-| eligible-green | unreachable: the plan-time refusal stands, and roster commands MUST NOT touch a kept path | protection MUST persist unchanged, and only the section 14.1 per-source cutover transaction MAY retire the source and publish the view | protection MUST persist unchanged, and only its journaled cutover transaction MAY relocate the source and publish the view | protection MUST persist unchanged, and only the adoption cutover transaction MAY remove or replace the source and publish the view |
-| cutover committed | unreachable: a kept path never enters a cutover, and roster commands MUST NOT touch it | the destination holds the landed postimage, and roster commands MUST NOT write it until the re-check outcome is recorded | the destination holds the landed postimage, roster commands MUST NOT write it until the re-check outcome is recorded, and the relocated source stays digest-verified at its move destination | the destination holds the landed postimage, roster commands MUST NOT write it until the re-check outcome is recorded, and the preimage stays preserved under `.working/archive/adoption/<run-id>/` |
+| planned | unreachable: the colliding declaration MUST have refused at plan time, and roster commands MUST NOT touch a kept path | roster commands MUST withhold same-path publication, MUST validate the view prospectively, and MUST NOT overwrite, relocate or remove the source | roster commands MUST withhold same-path publication, MUST validate the view prospectively, and MUST NOT overwrite, relocate or remove the source | roster commands MUST withhold same-path publication, MUST validate the view prospectively, and MUST NOT overwrite, relocate or remove the source |
+| eligible-green | unreachable: the plan-time refusal stands, and roster commands MUST NOT touch a kept path | protection MUST persist unchanged, and only the section 14.1 per-source cutover transaction MAY remove the completed source, its preserved original retained, and publish the view | protection MUST persist unchanged, and only its journaled cutover transaction MAY relocate the source and publish the view | protection MUST persist unchanged, and only the adoption cutover transaction MAY remove or replace the source and publish the view |
+| cutover committed | unreachable: a kept path never enters a cutover, and roster commands MUST NOT touch it | the destination holds the landed postimage, roster commands MUST NOT write it until the re-check outcome is recorded, and every roster command MUST settle the owed outcome, by recording it or refusing, before any store write (section 14.1) | the destination holds the landed postimage, roster commands MUST NOT write it until the re-check outcome is recorded, the relocated source MUST stay digest-verified at its move destination, and every roster command MUST settle the owed outcome before any store write | the destination holds the landed postimage, roster commands MUST NOT write it until the re-check outcome is recorded, the preimage MUST stay preserved under `.working/archive/adoption/<run-id>/`, and every roster command MUST settle the owed outcome before any store write |
 | re-check matched | unreachable: a kept path never enters a cutover, and roster commands MUST NOT touch it | deferral ends: the destination is an ordinary declared view, ordinary roster behaviour resumes, and the preserved original MUST stay retained | deferral ends: the destination is an ordinary declared view, ordinary roster behaviour resumes, and the relocated file MUST stay at its digest-verified destination | deferral ends: the destination is an ordinary declared view, ordinary roster behaviour resumes, and the preserved preimage MUST stay retained |
-| re-check failed | unreachable: a kept path never enters a cutover, and roster commands MUST NOT touch it | fail-closed: the failed outcome event is recorded, the landed bytes and the preserved original MUST be retained, roster commands MUST NOT write the destination, doctor MUST fail at `required`, and any further write there MUST wait for a fresh plan with its own single approval | fail-closed: the failed outcome event is recorded, the landed bytes and the relocated file MUST be retained, roster commands MUST NOT write the destination, doctor MUST fail at `required`, and any further write there MUST wait for a fresh plan with its own single approval | fail-closed: the failed outcome event is recorded, the landed bytes and the preserved preimage MUST be retained, roster commands MUST NOT write the destination, doctor MUST fail at `required`, and any further write there MUST wait for a fresh plan with its own single approval |
-| interrupted-recovered | unreachable: a kept path never enters a cutover, and roster commands MUST NOT touch it | journal-led: with no recorded commit the prestate is confirmed or restored and the state returns to eligible-green, and with a recorded commit the pending re-check MUST run against the landed postimage, never the replaced preimage | journal-led: with no recorded commit the prestate is confirmed or restored and the state returns to eligible-green, and with a recorded commit the pending re-check MUST run against the landed postimage of the view and the relocated source, never the replaced preimage | journal-led: with no recorded commit the prestate is confirmed or restored and the state returns to eligible-green, and with a recorded commit the pending re-check MUST run against the landed postimage, never the replaced preimage |
+| re-check failed | unreachable: a kept path never enters a cutover, and roster commands MUST NOT touch it | fail-closed: the failed outcome event is recorded, the landed bytes and the preserved original MUST be retained, roster commands MUST NOT write the destination, doctor MUST fail at `required`, any further write there MUST wait for a fresh plan with its own single approval, and that fresh plan remains producible under the section 11 standing-finding treatment | fail-closed: the failed outcome event is recorded, the landed bytes and the relocated file MUST be retained, roster commands MUST NOT write the destination, doctor MUST fail at `required`, any further write there MUST wait for a fresh plan with its own single approval, and that fresh plan remains producible under the section 11 standing-finding treatment | fail-closed: the failed outcome event is recorded, the landed bytes and the preserved preimage MUST be retained, roster commands MUST NOT write the destination, doctor MUST fail at `required`, any further write there MUST wait for a fresh plan with its own single approval, and that fresh plan remains producible under the section 11 standing-finding treatment |
+| drifted | unreachable: a kept path carries no plan digest to drift from, and roster commands MUST NOT touch it | fail-closed: roster commands MUST NOT render over, write or relocate the path, the disposition MUST NOT execute, the changed old file MUST NOT be retired, doctor MUST fail at `required` (section 11), and the remedy MUST be a fresh plan with its own single approval | fail-closed: roster commands MUST NOT render over, write or relocate the path, the disposition MUST NOT execute, the changed old file MUST NOT be moved or removed, doctor MUST fail at `required` (section 11), and the remedy MUST be a fresh plan with its own single approval | fail-closed: roster commands MUST NOT render over, write or relocate the path, the disposition MUST NOT execute, the changed old file MUST NOT be retired or replaced, doctor MUST fail at `required` (section 11), and the remedy MUST be a fresh plan with its own single approval |
+| interrupted-recovered | unreachable: a kept path never enters a cutover, and roster commands MUST NOT touch it | journal-led: with no recorded commit the prestate is confirmed or restored and the state returns to eligible-green, and with a recorded commit the pending re-check MUST compare the landed postimage against the journal-recorded poststate, never demand the replaced preimage | journal-led: with no recorded commit the prestate is confirmed or restored and the state returns to eligible-green, and with a recorded commit the pending re-check MUST compare the landed postimage of the view and the relocated source against the journal-recorded poststate, never demand the replaced preimage | journal-led: with no recorded commit the prestate is confirmed or restored and the state returns to eligible-green, and with a recorded commit the pending re-check MUST compare the landed postimage against the journal-recorded poststate, never demand the replaced preimage |
 
 Detection MUST surface unresolved files in the plan and MUST NOT silently absorb, delete or
-overwrite them. Dispositions are plan data covered by the single approval, not separate
-approvals per file. An unreadable declaration or detected input MUST fail closed. Reports
-retain `migration_incomplete` until the declared work is resolved.
+overwrite them. Dispositions are plan data and MUST be covered by the single approval, never by
+separate approvals per file. An unreadable declaration or detected input MUST fail closed. Reports
+MUST retain `migration_incomplete` until the declared work is resolved.
 
 The reserved children `archive/`, `imported/`, `staging/`, and `journals/` are OPF control area.
-Detection never surfaces them as adopter content, no adoption option selects them, and no
-`[unmanaged]` declaration may equal, contain, or lie within them. Adoption evidence is committed
-and immutable under `.working/imported/adoption/<run-id>/`; append-only outcome events retain
-the receipt's history. In homes 2, transaction records live under `.working/journals/adoption/`;
+Detection MUST NOT surface them as adopter content, an adoption option MUST NOT select them, and
+an `[unmanaged]` declaration MUST NOT equal, contain, or lie within them. Adoption evidence MUST
+be committed and immutable under `.working/imported/adoption/<run-id>/`; append-only outcome
+events retain the receipt's history. In homes 2, transaction records live under `.working/journals/adoption/`;
 homes 1 retains its legacy journal paths and completion-carried evidence checks.
 
 After adoption, containment uses the receipt-bound `import_status` and the bounded treatment of
-section 11: a plan-enumerated outstanding retire, move or migrate source, digest-matched, MUST
-be reported rather than failed until its disposition executes, whatever the status. An
-unregistered path outside that enumerated scope MUST fail containment at `required`. No source
-is implicitly imported and no staging presence grants authority.
+section 11, keyed on the matrix's lifecycle states: a plan-enumerated outstanding retire, move or
+migrate source, digest-matched in the planned or eligible-green state, MUST be reported rather
+than failed until its disposition executes, whatever the status, and a drifted or re-check failed
+state MUST fail at `required` exactly as section 11 defines. An unregistered path outside that
+enumerated scope MUST fail containment at `required`. No source is implicitly imported, and
+staging presence MUST NOT grant authority.
 
 ### 14.3 Migrating an existing release pipeline
 
