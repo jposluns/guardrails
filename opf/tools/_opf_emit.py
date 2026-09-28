@@ -780,27 +780,91 @@ def _fixture_await_ack(fd):
         os.close(fd)
 
 
-def _fixture_escalate_subject(subject, subject_fd):
-    """Kill a receipt-identified subject: the whole group first, then the pinned pidfd
-    target. Safe only once the guardian (the sole process able to reap the subject) is
-    frozen or already dead and collected: the held pidfd then pins the subject's pid --
-    and with it the pgid -- against recycling, so killpg can only address the subject's
-    own group. No liveness probe gates the group kill: a subject the guardian already
-    reaped can leave same-group descendants behind (e.g. missed by a kill/fork race a
-    stalled drain never resolved), and skipping killpg for it would strand them (QA18
-    gemini F1)."""
+def _fixture_group_pinned(group, guardian_pid):
+    """License a dead-leader group kill: True only when a CURRENT member of the
+    group is parented by the caller's own guardian while that guardian provably
+    cannot reap (confirmed stopped, or an unreaped zombie). The guardian is the
+    tree's subreaper, so every orphaned same-group descendant is its child, and
+    a member found under a stopped-or-zombie parent stays unreaped -- live or
+    zombie, it holds the pgid -- for the rest of the kill sequence. A guardian
+    that is running (its stop unconfirmed), gone from /proc, or childless in
+    the group licenses nothing: the group may have emptied and its pgid been
+    recycled by an unrelated process group (QA20 claude F1)."""
+    import os
+    import time
+    from pathlib import Path
+
+    def fields_of(target):
+        try:
+            stat = Path("/proc", str(target), "stat").read_bytes()
+        except (OSError, ValueError):
+            return None
+        return stat.rsplit(b")", 1)[1].split()
+
+    deadline = time.monotonic() + _FIXTURE_CLEANUP_GRACE
+    while True:
+        fields = fields_of(guardian_pid)
+        if fields is None:
+            return False
+        if fields[0] in (b"T", b"Z"):
+            break
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.005)
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return False
+    for name in entries:
+        if not name.isdecimal():
+            continue
+        fields = fields_of(name)
+        if (fields is not None and int(fields[1]) == guardian_pid
+                and int(fields[2]) == group):
+            return True
+    return False
+
+
+def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None):
+    """Kill a receipt-identified subject tree, signalling only OWNERSHIP-PINNED
+    targets (QA20 claude F1: a held pidfd does NOT pin the pid NUMBER against
+    reuse once the process is reaped -- only unreapability does). Pin first:
+    SIGSTOP via the subject's pidfd succeeds only while the leader exists
+    unreaped (a pidfd signal can never address a recycled pid) and freezes a
+    live leader, so the group keeps that member and killpg addresses only the
+    subject's own group. For a leader already reaped, a guardian the caller
+    certifies as frozen (guardian_pid, passed only after a successful freeze)
+    can still pin the group through an adopted member (_fixture_group_pinned):
+    a reaped subject can leave same-group descendants that only the group kill
+    can reach (QA18 gemini F1). With NO pin the group kill is SKIPPED and
+    reported unpinned -- a freed pgid can name an unrelated process group, and
+    signalling it would be a wrong-owner kill; the caller DISCLOSES the
+    skipped kill instead. The pidfd SIGKILL always runs: it addresses the
+    pinned identity, never a recycled number. Returns True when the group
+    kill ran pinned."""
     import os
     import signal
+    pinned = False
     try:
-        os.killpg(subject, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        # A pre-setsid subject is not yet a leader and has run no user code, so
-        # there is nothing in a group to miss; the pidfd kill below still lands.
+        signal.pidfd_send_signal(subject_fd, signal.SIGSTOP)
+        pinned = True  # delivered: the leader exists unreaped and pins its group
+    except (ProcessLookupError, OSError):
         pass
+    if not pinned and guardian_pid is not None:
+        pinned = _fixture_group_pinned(subject, guardian_pid)
+    if pinned:
+        try:
+            os.killpg(subject, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            # A pre-setsid subject is not yet a leader and has run no user
+            # code, so there is nothing in a group to miss; the pidfd kill
+            # below still lands.
+            pass
     try:
         signal.pidfd_send_signal(subject_fd, signal.SIGKILL)
     except (ProcessLookupError, OSError):
         pass
+    return pinned
 
 
 def _fixture_children():
@@ -903,6 +967,30 @@ def _fixture_preload():
         importlib.import_module(name)
 
 
+def _fixture_mask_available():
+    """The masked ownership/collection design (fix 2w) requires per-thread
+    signal masking; without it construction fails CLOSED (an unmasked
+    close()/poll() sequence is never run)."""
+    import signal
+    return hasattr(signal, "pthread_sigmask")
+
+
+def _fixture_mask_cancellation():
+    """Mask the cancellation signals (SIGINT, SIGTERM) on the calling thread
+    for one ownership/collection sequence, returning the EXACT prior mask for
+    the caller's finally to restore with SIG_SETMASK. The kernel keeps a
+    signal raised while masked pending and delivers it only after the restore,
+    so the sequence always completes (or refuses loudly) BEFORE the
+    cancellation lands; the interpreter then raises the KeyboardInterrupt at
+    the first bytecode boundary after delivery. Outside this guarantee (the
+    retained BaseException funnels are their backstop): a signal whose
+    interpreter-level flag tripped before the mask landed, non-signal
+    asynchronous exceptions, and other signals with raising handlers."""
+    import signal
+    return signal.pthread_sigmask(
+        signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+
+
 def _fixture_abort_launch(fixture):
     """Construction failed or was cancelled mid-launch (the object never reached its
     caller): tell the parked launcher to never fork -- the cancelled flag is read
@@ -954,14 +1042,24 @@ class _FixtureProcess:
     loudly and ABANDONS the launch to the launcher, which then collects its own
     fork; construction resources are never disposed while the launcher can still
     use them. A failed construction (e.g. thread exhaustion) aborts the launch,
-    releases every resource, and surfaces the original error. A cancellation
-    raised INSIDE close() itself still leaves an owner (QA19 F2): one landing
-    in the launch coordination (the launcher release or the bounded completion
-    wait) abandons an unrecorded launch to the launcher UNDER THE LAUNCH LOCK
-    before re-raising and keeps a recorded launch with this close(), which
-    finishes the bounded collection before re-raising; one landing inside the
-    collection itself kills the tree and bounded-reaps the guardian before
-    propagating.
+    releases every resource, and surfaces the original error. Cancellation
+    masking (fix 2w): close() runs its ENTIRE ownership decision, transfer,
+    collection and cleanup sequence -- and poll() its collection-to-recording
+    step -- with SIGINT and SIGTERM masked on the calling thread
+    (pthread_sigmask), restoring the exact prior mask in a finally, so an
+    asynchronous cancellation can no longer land BETWEEN guarded regions
+    (QA19 F2, QA20): the kernel keeps it pending and delivers it only after
+    the sequence completed or refused loudly. A host without pthread_sigmask
+    REFUSES construction (fail closed, never an unmasked run). Residuals,
+    covered by the retained BaseException funnels as backstops: a signal whose
+    interpreter-level flag tripped before the mask landed, and non-signal
+    asynchronous exceptions; a cancellation landing before the mask is
+    installed aborts a sequence that has not begun (nothing decided or
+    disposed -- close() can run again). The funnels leave the same owner: an
+    unrecorded launch is abandoned to the launcher UNDER THE LAUNCH LOCK, a
+    recorded one keeps close(), which finishes collecting before re-raising;
+    one landing inside the collection kills the tree and bounded-reaps the
+    guardian before propagating.
 
     Locks: only the launcher thread survives into the guardian, whose
     dependencies are preloaded at construction, so guardian-side imports take no
@@ -979,16 +1077,25 @@ class _FixtureProcess:
     buffered receipt before closing that socket. A guardian that cannot be
     collected within the bounded cleanup budget is frozen (SIGSTOP via its
     pidfd, so the subject's pid/pgid cannot be recycled), then the
-    receipt-identified subject's group and pidfd are SIGKILLed unconditionally
-    (a reaped subject can leave same-group descendants; skipping killpg would
-    strand them), then the guardian itself. On ANY guardian failure, escalated
-    or not -- including a failure FIRST collected by poll(), which records it
-    for close() to act on and re-raise (QA19 F1) -- a receipt-identified
-    subject is killed the same way and its disappearance proven on its pidfd
-    or refused loudly. An escalated refusal names ONLY the steps actually
-    taken (QA19 F3): no receipt is INCOMPLETE subject cleanup, a pid-only
-    receipt (pidfd-absent host) is a guardian-only escalation with UNVERIFIED
-    subject cleanup, and neither is ever reported as a killed tree.
+    receipt-identified subject's group and pidfd are SIGKILLed under the
+    PIN-FIRST rule (QA20 claude F1: only unreapability pins a pid NUMBER
+    against reuse, a held pidfd alone does not): the group kill runs only when
+    the leader is frozen unreaped via its pidfd, or a frozen guardian still
+    parents a group member -- a reaped subject's surviving same-group
+    descendants stay reachable that way (QA18 gemini F1) -- and is otherwise
+    SKIPPED and disclosed, never a wrong-owner kill; the pidfd SIGKILL always
+    runs. Then the guardian itself is SIGKILLed. On ANY guardian failure,
+    escalated or not -- including a failure FIRST collected by poll(), which
+    kills the subject pin-first AT COLLECTION TIME and records the failure for
+    close() to prove and re-raise (QA19 F1), and an UNRESOLVED collection
+    (guardian reaped, status never validated, no failure recorded: treated as
+    a failure of close()'s own, QA20 codex F1) -- a receipt-identified subject
+    is killed the same way and its disappearance proven on its pidfd or
+    refused loudly. A refusal names ONLY the steps actually taken (QA19 F3,
+    QA20 claude F3): no receipt is INCOMPLETE subject cleanup, a pid-only
+    receipt (pidfd-absent host) is UNVERIFIED subject cleanup on both the
+    escalated and the poll-collected paths, a skipped group kill is disclosed
+    as unpinned, and none of these is ever reported as a killed tree.
     Documented residual: descendants that leave the subject's group/session
     survive a WEDGED-guardian escalation (only the subreaper census can find
     them; the honest-guardian drain still covers them). The subject arms
@@ -1002,10 +1109,28 @@ class _FixtureProcess:
         import socket
         import tempfile
         import threading
+        if not _fixture_mask_available():
+            # Fail CLOSED (fix 2w): without pthread_sigmask the ownership and
+            # cleanup sequences would run unmasked and a cancellation could
+            # land between their steps. Documented residual: such hosts cannot
+            # run fixtures at all.
+            raise ChildStatusUnavailable(
+                "cannot mask cancellation signals (signal.pthread_sigmask "
+                "unavailable): refusing fixture launch")
         self.deadline = deadline
         self.pid = self.pidfd = self.status = None
         self.subject_pid = self.subject_pidfd = None
         self.armed = self.collected = self.timed_out = False
+        # Separate explicit states (QA20 codex F1): `collected` says only that
+        # the GUARDIAN was reaped; `unresolved` marks an armed collection whose
+        # receipt was never validated with no failure recorded (close() still
+        # treats it as a failure); `cleaned` says the collected guardian's
+        # subject-cleanup obligation was discharged (validated clean status,
+        # or kill plus disappearance proof). `_subject_kill` records whether
+        # the one group kill ran ownership-pinned.
+        self.unresolved = False
+        self.cleaned = False
+        self._subject_kill = None
         # keep_fds: descriptors the guardian and its subject still need (e.g.
         # run_bounded's pipe). Everything else inherited is closed in the guardian.
         self.keep_fds = tuple(keep_fds)
@@ -1281,23 +1406,47 @@ class _FixtureProcess:
 
     def poll(self):
         import os
+        import signal
         if self.collected:
             return self.status
-        waited, raw = _fixture_wait(self.pid, os.WNOHANG)
-        if waited == 0:
-            return None
-        if waited != self.pid:
-            raise ChildStatusUnavailable("unexpected guardian wait PID")
-        self.collected = True
-        self._read_report(raw)
-        return self.status
+        # The whole collection-to-failure-recording step runs MASKED (fix 2w):
+        # a cancellation can no longer land between reaping the guardian and
+        # recording the outcome (QA20 codex F1 second gap); it stays pending
+        # and is delivered after the restore below. A synchronous failure in
+        # that window still leaves `unresolved` set, which close() treats as a
+        # failure of its own.
+        mask = _fixture_mask_cancellation()
+        try:
+            waited, raw = _fixture_wait(self.pid, os.WNOHANG)
+            if waited == 0:
+                return None
+            if waited != self.pid:
+                raise ChildStatusUnavailable("unexpected guardian wait PID")
+            self.collected = True
+            if self.armed:
+                self.unresolved = True
+            try:
+                self._read_report(raw)
+            except ChildStatusUnavailable:
+                # Address the receipt-identified subject AT COLLECTION time,
+                # while the leader is most likely still alive to pin its own
+                # group (QA20 claude F1); close() still runs the disappearance
+                # proof and re-raises the recorded failure.
+                self._address_failed_subject()
+                raise
+            return self.status
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
 
     def _record_failure(self, failure):
         """Record a supervision failure at COLLECTION time, whichever collector
         observed it first: close() must address the receipt-identified subject
         and re-raise the recorded failure even when poll() or start() was the
-        collector that read the failed report (QA19 F1)."""
+        collector that read the failed report (QA19 F1). A recorded failure
+        is a RESOLVED collection; the subject-cleanup obligation it creates is
+        tracked by `cleaned`, never by `unresolved`."""
         self._failure = failure
+        self.unresolved = False
         return failure
 
     def _read_report(self, raw):
@@ -1322,6 +1471,7 @@ class _FixtureProcess:
             raise self._record_failure(ChildStatusUnavailable(
                 "malformed tree-cleanup receipt; " + termination))
         self.status, self.timed_out = result
+        self.unresolved = False
 
     def _recv_subject(self):
         """Collect the buffered subject receipt, if any. It must be read BEFORE the
@@ -1344,20 +1494,39 @@ class _FixtureProcess:
         except (OSError, ValueError):
             pass
 
+    def _address_failed_subject(self):
+        """Kill (pin-first) the receipt-identified subject of a FAILED or
+        UNRESOLVED guardian, recording whether the one group kill ran
+        ownership-pinned; idempotent -- the kill is sent once, whichever
+        collector gets here first. Callers still prove the subject's
+        disappearance on its pidfd before re-raising."""
+        self._recv_subject()
+        if self.subject_pidfd is not None and self._subject_kill is None:
+            pinned = _fixture_escalate_subject(self.subject_pid, self.subject_pidfd)
+            self._subject_kill = "pinned" if pinned else "unpinned"
+
     def _escalate(self):
-        """Freeze first, then kill: SIGSTOP the guardian via its pidfd (the only
-        process able to reap the subject, so the subject's pid/pgid cannot be
-        recycled for the rest of the sequence), SIGKILL the receipt-identified
-        subject's group and pidfd, then SIGKILL the guardian itself; the caller's
-        bounded reap loop collects it and close() then proves the subject's exit."""
+        """Freeze first, then kill: SIGSTOP the guardian via its pidfd (a
+        frozen guardian exists unreaped and cannot reap, so its adopted
+        same-group members stay pinned for the census), pin-kill the
+        receipt-identified subject's group and pidfd, then SIGKILL the
+        guardian itself; the caller's bounded reap loop collects it and
+        close() then proves the subject's exit. A freeze that FAILED (guardian
+        gone) licenses no census pin: the subject kill then pins only through
+        the subject's own pidfd."""
         import signal
+        frozen = False
         if self.pidfd is not None:
             try:
                 signal.pidfd_send_signal(self.pidfd, signal.SIGSTOP)
+                frozen = True  # delivered: the guardian exists unreaped
             except (ProcessLookupError, OSError):
                 pass  # already exited: the reap loop collects it
-        if self.subject_pidfd is not None:
-            _fixture_escalate_subject(self.subject_pid, self.subject_pidfd)
+        if self.subject_pidfd is not None and self._subject_kill is None:
+            pinned = _fixture_escalate_subject(
+                self.subject_pid, self.subject_pidfd,
+                guardian_pid=self.pid if frozen else None)
+            self._subject_kill = "pinned" if pinned else "unpinned"
         _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
 
     def _abandon_unfinished_launch(self):
@@ -1373,6 +1542,27 @@ class _FixtureProcess:
             return True
 
     def close(self):
+        import signal
+        # DESIGN (fix 2w): the ENTIRE ownership decision and transfer, and the
+        # whole collection and cleanup sequence (receipt kill, disappearance
+        # proof, re-raise preparation), run with the cancellation signals
+        # masked on this thread: an asynchronous cancellation can no longer
+        # land BETWEEN guarded regions (QA20) -- it stays pending and is
+        # delivered only after the EXACT prior mask is restored below, i.e.
+        # after the sequence completed or refused loudly. A cancellation
+        # landing before the mask is installed aborts a sequence that has not
+        # begun: nothing was decided, transferred or disposed, and this
+        # close() can simply run again. The BaseException funnels inside
+        # remain the backstop for a signal whose interpreter-level flag
+        # tripped before the mask landed and for non-signal asynchronous
+        # exceptions, which no mask can stop.
+        mask = _fixture_mask_cancellation()
+        try:
+            self._close_masked()
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+
+    def _close_masked(self):
         # Coordinated launch lifecycle FIRST, before any resource is disposed. The
         # launcher is never joined (its OS thread state is not what decides); its
         # completion event is set on every executed path, and the cancelled flag
@@ -1381,10 +1571,28 @@ class _FixtureProcess:
         # event never fires, the launch is ABANDONED to the launcher, which then
         # collects (or never creates) its own fork; nothing is disposed on that
         # path, because the launcher and its guardian can still use it all. An
-        # exception raised INSIDE this coordination -- a real KeyboardInterrupt
-        # included -- must leave the same owner (QA19 F2): the launcher for an
-        # unrecorded launch (abandoned under the launch lock before re-raising),
-        # or this close(), which finishes collecting before re-raising.
+        # exception raised INSIDE this coordination -- normally impossible for a
+        # masked cancellation, but reachable by a pre-mask interpreter flag or a
+        # non-signal asynchronous exception -- must leave the same owner
+        # (QA19 F2): the launcher for an unrecorded launch (abandoned under the
+        # launch lock before re-raising), or this close(), which finishes
+        # collecting before re-raising.
+        try:
+            self._close_coordinated()
+        except ChildStatusUnavailable:
+            raise
+        except BaseException:
+            # Backstop for an exception landing on a coordination boundary the
+            # inner guards do not cover (a pre-mask interpreter flag, under the
+            # masked design): never escape without an owner.
+            if self._launcher is not None:
+                self._go.set()
+                if self._abandoned or self._abandon_unfinished_launch():
+                    raise
+            self._interrupt_collect()
+            raise
+
+    def _close_coordinated(self):
         if self._launcher is not None:
             with self._launch_lock:
                 self._cancelled = True
@@ -1427,11 +1635,18 @@ class _FixtureProcess:
         read the receipt if it is still pending, kill the whole tree NOW
         (freeze, receipt kill, guardian SIGKILL), and bounded-reap the
         guardian, so the re-raised cancellation never strands a live,
-        owner-less guardian or subject. The cancellation is what propagates; a
-        second cancellation landing here is outside the guarantee."""
+        owner-less guardian or subject. A guardian already collected can still
+        owe its subject cleanup (`collected` and `cleaned` are SEPARATE
+        states, QA20 codex F1): the pin-first subject kill runs here too. The
+        cancellation is what propagates; a second cancellation landing here is
+        outside the guarantee."""
         import os
         import time
-        if self.pid is None or self.collected:
+        if self.pid is None:
+            return
+        if self.collected:
+            if not self.cleaned:
+                self._address_failed_subject()
             return
         self._recv_subject()
         self._escalate()
@@ -1457,9 +1672,15 @@ class _FixtureProcess:
         frozen = ("guardian frozen" if self.pidfd is not None
                   else "guardian not frozen: no pidfd")
         if self.subject_pidfd is not None:
+            if self._subject_kill == "pinned":
+                raise ChildStatusUnavailable(
+                    str(failure) + "; after bounded-close escalation ({}, subject "
+                    "tree killed, guardian SIGKILL)".format(frozen)) from failure
             raise ChildStatusUnavailable(
                 str(failure) + "; after bounded-close escalation ({}, subject "
-                "tree killed, guardian SIGKILL)".format(frozen)) from failure
+                "exit proven on its pidfd, group kill skipped: not "
+                "ownership-pinned, same-group descendants, if any, unaddressed, "
+                "guardian SIGKILL)".format(frozen)) from failure
         if self.subject_pid is not None:
             raise ChildStatusUnavailable(
                 str(failure) + "; after bounded-close guardian-only escalation "
@@ -1469,6 +1690,18 @@ class _FixtureProcess:
             str(failure) + "; after bounded-close escalation WITHOUT a subject "
             "receipt ({}, guardian SIGKILL): subject cleanup "
             "incomplete".format(frozen)) from failure
+
+    def _unverified_refusal(self, failure):
+        """A pid-only receipt (pidfd-absent host) leaves a failed guardian's
+        subject cleanup UNVERIFIABLE on the un-escalated path too (QA20 claude
+        F3): no pidfd can prove the subject's exit and no pin can license a
+        group kill, so the re-raise names the degradation instead of restating
+        the bare failure. The subject-side protections (ack EOF, pdeathsig)
+        remain the documented residual coverage."""
+        raise ChildStatusUnavailable(
+            str(failure) + "; guardian failure WITHOUT a subject pidfd "
+            "(group kill skipped: not ownership-pinned): subject cleanup "
+            "unverified") from failure
 
     def _finish_close(self):
         import os
@@ -1514,6 +1747,7 @@ class _FixtureProcess:
                     if waited != self.pid:
                         raise ChildStatusUnavailable("unexpected guardian cleanup PID")
                     if self.armed:
+                        self.unresolved = True
                         try:
                             self._read_report(raw)
                         except ChildStatusUnavailable:
@@ -1521,15 +1755,21 @@ class _FixtureProcess:
                 # HOISTED out of the not-collected gate (QA19 F1): the subject
                 # kill and exit proof run on ANY guardian failure, including one
                 # FIRST collected by poll() -- the layer's primary collection
-                # path -- which recorded it for this close(). The guardian is
-                # dead and collected here, so the held pidfd pins the subject's
-                # pid/pgid exactly as the escalation freeze does, and the
-                # group+pidfd kill is safe. A startup failure start() already
-                # surfaced (never armed) has no subject and nothing to re-raise.
+                # path, which killed the subject pin-first at collection time
+                # and recorded the failure for this close(). An armed guardian
+                # collected WITHOUT a validated status or recorded failure is
+                # UNRESOLVED (QA20 codex F1): the subject's fate is unknown, so
+                # close() treats it as a failure of its own. A startup failure
+                # start() already surfaced (never armed) has no subject and
+                # nothing to re-raise.
                 failure = self._failure if self.armed else None
+                if failure is None and self.unresolved:
+                    failure = self._record_failure(ChildStatusUnavailable(
+                        "fixture guardian collected without validated status: "
+                        "supervision unresolved"))
                 if (escalated or failure is not None) and self.subject_pidfd is not None:
                     if failure is not None and not escalated:
-                        _fixture_escalate_subject(self.subject_pid, self.subject_pidfd)
+                        self._address_failed_subject()
                     # A pidfd polls readable on exit even for a non-child (init
                     # reaps the orphan): prove the subject disappeared, or refuse
                     # loudly, never silence.
@@ -1540,8 +1780,18 @@ class _FixtureProcess:
                             ("escalation" if escalated else "guardian failure")
                             + " could not confirm subject exit: pid {} may "
                             "survive".format(self.subject_pid))
+                self.cleaned = True
                 if failure is not None:
                     if not escalated:
+                        if (self.subject_pidfd is None and self.subject_pid is not None
+                                and self._subject_kill is None):
+                            self._unverified_refusal(failure)
+                        if self._subject_kill == "unpinned":
+                            raise ChildStatusUnavailable(
+                                str(failure) + "; subject exit proven on its pidfd, "
+                                "group kill skipped (leader already reaped, group not "
+                                "ownership-pinned): same-group descendants, if any, "
+                                "unaddressed") from failure
                         raise failure
                     self._escalation_refusal(failure)
             except ChildStatusUnavailable:
@@ -1905,9 +2155,17 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024, keep_fds=()):
             except ChildStatusUnavailable as exc:
                 # close() re-raises a recorded failure the poll above already
                 # reported (QA19 F1) AFTER addressing the receipt-identified
-                # subject: report each distinct refusal once.
+                # subject, possibly ANNOTATED (unpinned group kill, pid-only
+                # receipt): report each refusal once, keeping the annotated
+                # form when one extends the other.
                 sentinel = _bounded_setup_error(exc)
-                if sentinel not in failures:
+                for index, previous in enumerate(failures):
+                    if sentinel.startswith(previous):
+                        failures[index] = sentinel
+                        break
+                    if previous.startswith(sentinel):
+                        break
+                else:
                     failures.append(sentinel)
     if failures:
         return "; ".join(failures)
