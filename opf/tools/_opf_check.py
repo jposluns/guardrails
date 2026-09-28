@@ -1572,14 +1572,13 @@ def _check_handoff(recs, rep):
                     "store (spec 8.5)".format(len(current)))
 
 
-def _check_decision_chains(recs, by_id, rep):
-    """C-DECISION-CHAINS (R3): exactly one current effective resolution per pending_decision supersession
-    chain THAT HAS A RESOLUTION (OPF-SPEC 8.5). A chain is a connected component over `supersedes` links; a
-    current effective resolution is a decided (unqualified) pending_decision that no other supersedes. For a
-    chain carrying at least one decided member, the count of current resolutions must be exactly one, in
-    BOTH directions: zero (the sole resolution superseded by a withdrawn or still-open successor) is a
-    fail-open the count-only-over-one form missed (F14). A wholly-undecided chain legitimately has zero and
-    is not flagged."""
+def decision_chains(recs, by_id):
+    """The pending_decision supersession chains THAT HAVE A RESOLUTION (OPF-SPEC 8.5), as (members, current)
+    pairs in record order. A chain is a connected component over `supersedes` links, whatever their
+    direction; a current effective resolution is a decided (unqualified) pending_decision that no other
+    supersedes. A wholly-undecided chain has no resolution yet and is not listed. The one derivation shared
+    by C-DECISION-CHAINS and opf record's pre-publication chain check (spec 8.8), so the verb never judges a
+    chain by a rule of its own."""
     pds = [r for r in recs if r.rtype == "pending_decision" and isinstance(r.id, str)]
     parent = {r.id: r.id for r in pds}
 
@@ -1605,12 +1604,24 @@ def _check_decision_chains(recs, by_id, rep):
     components = {}
     for pid in parent:
         components.setdefault(find(pid), []).append(pid)
+    chains = []
     for _root, members in components.items():
         decided = [m for m in members if by_id.get(m) is not None
                    and by_id[m].state == "decided" and by_id[m].qual is None]
         if not decided:
             continue     # a wholly-undecided chain has no resolution yet: zero current is legitimate
-        current = [m for m in decided if m not in superseded]
+        chains.append((members, [m for m in decided if m not in superseded]))
+    return chains
+
+
+def _check_decision_chains(recs, by_id, rep):
+    """C-DECISION-CHAINS (R3): exactly one current effective resolution per pending_decision supersession
+    chain THAT HAS A RESOLUTION (OPF-SPEC 8.5), over the chains decision_chains derives. For a chain
+    carrying at least one decided member, the count of current resolutions must be exactly one, in BOTH
+    directions: zero (the sole resolution superseded by a withdrawn or still-open successor) is a fail-open
+    the count-only-over-one form missed (F14). A wholly-undecided chain legitimately has zero and is not
+    flagged."""
+    for _members, current in decision_chains(recs, by_id):
         if len(current) != 1:
             rep.finding("C-DECISION-CHAINS: a pending_decision supersession chain with a decided resolution "
                         "has {} current effective resolutions; exactly one exists per chain (spec 8.5)".format(

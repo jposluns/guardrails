@@ -931,8 +931,16 @@ it, and it carries no `spec_version` bump. Its subcommands:
   pending_decision already links `supersedes` to it), and its own chain must not lead back to the
   superseding record. The verb refuses the link on every other transition, a `/proposed` landing
   included, because the doctor counts a `supersedes` link from a proposal too and would then find
-  the superseded chain without a current resolution. A backlog item reaches unqualified `done`
-  only through `done-with-receipt`.
+  the superseded chain without a current resolution. Every transition that lands a
+  pending_decision at unqualified `decided`, with or without a supersession, then applies the
+  doctor's chain rule (section 8.5) to the planned index before anything is written: the chain
+  the record belongs to afterwards, a connected component over `supersedes` links in either
+  direction, must have exactly one current effective resolution. So the verb also refuses to
+  decide a record that a pending_decision not at unqualified `decided` already supersedes when no
+  other member of its chain is a current resolution, and a supersession that passes the checks
+  above but still leaves the chain without a current resolution. The rule reads the active index
+  only, so a chain member rotated to the archive (section 12) is left to the final doctor. A
+  backlog item reaches unqualified `done` only through `done-with-receipt`.
 - `done-with-receipt`: maintainer-only. It moves a backlog item to unqualified `done`, from
   `active` or by ratifying `done/proposed`, and in the same act creates its one-to-one `done`
   receipt linked `receipt_of` (section 8.5). An assistant reaching `done` uses `transition` and

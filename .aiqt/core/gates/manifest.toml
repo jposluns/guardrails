@@ -761,8 +761,14 @@ act (a maintainer decide with --supersedes PD-1, doctor-VALID, with DECISIONS li
 effective and PD-1 superseded, and a maintainer ratification of an assistant's decided/proposed carrying
 the link instead), while a --supersedes value that is not a record id (before the store is resolved),
 --supersedes on an assistant decide (a decided/proposed landing), a target still open, a target the
-schema grades invalid, a second successor for a resolution already superseded, and a target whose own
-chain leads back to the record each refuse with every byte untouched, each in its own test; and that a
+schema grades invalid, a target seated in the index as another type, a target that is no record, an
+existing backlog item named as the target, a second successor for a resolution already superseded, and
+a target whose own chain leads back to the record each refuse with every byte untouched, each in its own
+test; that every landing at unqualified decided leaves its chain with exactly one current resolution
+(the doctor's own chain rule, recomputed over the planned index), so a supersession of a chain head that
+would still leave the joined chain with none (the same decide without the link then lands doctor-VALID),
+and the decide of a record already superseded by an open successor, with and without --supersedes, each
+refuse with every byte untouched, each in its own test; and that a
 maintainer files a maintainer_decision linking exemplifies to a preference_pattern (doctor-VALID and
 listed with its link) and an assistant-distilled preference_pattern lands active/proposed and is ratified
 and then retired by the maintainer, doctor-VALID, while the same ruling filed by an assistant refuses
@@ -775,7 +781,7 @@ ordering, the release-failure outcome text, the final doctor, the released-span 
 lease, the intervening-edit check, the --type check before the operand read, the leftover-lock outcome
 text, the record-carried pre-proposal state's flip (the worklog lifecycle line read instead of the
 record's own field), the current-row validation's flip (the row trusted without the schema check,
-applied separately to each of those three invalid-row tests and to the invalid supersession target), the
+applied separately to each of those three invalid-row tests), the
 strict type-aware delta
 comparator's flip (ordinary equality, under which
 true and 1.0 read as 1), the three resolution-bundle flips (the planner writing no bundle, the
@@ -784,9 +790,14 @@ the three option-guard flips (the requires half dropped, the parser's given-toge
 dropped, and the apply-only half dropped, the last applied separately to each of its two tests), and
 the supersession and register flips (the planner writing no supersedes link, which only the
 independent oracle refuses; the parser's record-id check dropped; the landing check, the target-decided
-check, the chain-head check, and the cycle check each dropped, each but the target-decided check
+check, the target's validation call alone (applied separately to the invalid and the wrong-type
+target), the target lookup together with every check after it (the lookup cannot be dropped alone;
+applied separately to the missing and the other-namespace target), and the pre-publication chain rule
+(applied separately to each of its three tests) each dropped, each but the target-decided check
 publishing a store the post-publication render's source gate then refuses on a doctor finding, while
-that one publishes doctor-VALID; the planner dropping the requested links, which only the oracle
+that one publishes doctor-VALID; the chain-head check and the cycle check each dropped, under which the
+chain rule still refuses with every byte untouched, so those two tests assert that their own check
+refused before the chain rule ran; the planner dropping the requested links, which only the oracle
 refuses; and the planner's record validation replaced by a pass-through, publishing the assistant
 ruling))
 is applied in turn and must turn its test red
@@ -798,8 +809,8 @@ rejection and ratification, never read from worklog text, and the current row sc
 it is trusted or overwritten), the resolution bundle (written on a decide by a maintainer, an
 assistant, or automation, kept on ratification,
 removed on rejection, its option refusals, and its postcondition vectors), the supersedes link (appended
-on a decide and on a ratification, its landing, target, chain-head, and cycle refusals, and its
-postcondition vectors), the exact-integer schema
+on a decide and on a ratification, its landing, target, chain-head, and cycle refusals, the chain
+rule's refusals and passes over the planned index, and its postcondition vectors), the exact-integer schema
 markers, the one
 accepted snapshot cannot-evaluate, the leftover-lock outcome bound to its lock's token (a reused pid is
 not attributed), and the postcondition vectors including the strict type-aware comparisons. It arguably

@@ -37,7 +37,13 @@ at unqualified `decided` (so never the record itself, which is not yet decided),
 (no pending_decision already links `supersedes` to it, so the chain never forks), and its own chain must
 not lead back to the record (no cycle). --supersedes is refused on every other transition, a `/proposed`
 landing included: the doctor counts a `supersedes` link from a proposal too, so it would leave the
-superseded chain with no current resolution.
+superseded chain with no current resolution. Every landing at unqualified `decided`, with or without
+--supersedes, then recomputes the doctor's own chain rule (_opf_check.decision_chains, C-DECISION-CHAINS)
+over the planned index: the chain the record belongs to afterwards must have exactly one current effective
+resolution, or the transition refuses with every byte untouched. That also refuses the decide of a record
+already superseded by a pending_decision that is not decided when no other member of its chain is current,
+and a link the target checks pass that still leaves its chain with none. The rule reads the active index
+only, so a chain member rotated to the archive (spec 12) is not seen there and is left to the final doctor.
 `done-with-receipt` is maintainer-only (any other actor is refused before the store is touched): it moves an
 `active` or `done/proposed` backlog item to `done` and mints the one-to-one `done` receipt, linked
 `receipt_of`, in the same transaction (spec 8.5). `transition` never lands a backlog item at unqualified
@@ -852,22 +858,55 @@ def _require_acyclic(rows, rid, target, rel):
                 pending.append(link.get("id"))
 
 
+def _require_valid_target(trow, ctx, target, rel):
+    """The superseded row is trusted only once it is schema-valid as a pending_decision: the same check the
+    record being changed gets (_require_valid_current), applied to the target (its own seam, so the record
+    gate can drop this one call alone)."""
+    _require_valid_current(trow, PENDING_DECISION, ctx, target, rel)
+
+
 def _supersession_link(req, ctx, operand, rid):
     """The `supersedes` link a decision landing unqualified `decided` appends (--supersedes, spec 8.5), or
     None without the option. Checked before publication: the target is a pending_decision seated once in
-    this index (_locate), schema-valid as a pending_decision before it is trusted (_require_valid_current),
+    this index (_locate), schema-valid as a pending_decision before it is trusted (_require_valid_target),
     at unqualified `decided` (_require_superseded_decided), the head of its chain (_require_chain_head),
-    and not a record whose chain leads back to this one (_require_acyclic)."""
+    and not a record whose chain leads back to this one (_require_acyclic). The planned chain as a whole is
+    checked after the row is planned (_require_one_current_resolution)."""
     target = req.values.get("--supersedes")
     if target is None:
         return None
     trow = _locate(operand, target)
-    _require_valid_current(trow, PENDING_DECISION, ctx, target, operand.rel)
+    _require_valid_target(trow, ctx, target, operand.rel)
     _require_superseded_decided(trow, target)
     rows = _index_rows(operand)
     _require_chain_head(rows, target, operand.rel)
     _require_acyclic(rows, rid, target, operand.rel)
     return {"rel": SUPERSEDES, "id": target}
+
+
+def _require_one_current_resolution(rows, rid, rel):
+    """A landing at unqualified `decided` must leave the chain the record belongs to with exactly one
+    current effective resolution (spec 8.5): the doctor's own derivation (_opf_check.decision_chains over
+    _opf_check._make_rec views, the C-DECISION-CHAINS rule) run over `rows`, the planned index, before
+    anything is written. It catches what the target checks cannot see: the record itself already
+    superseded by a pending_decision that is not decided, with no other current member in its chain (its
+    decide leaves the chain with none), and a link to a chain head that still leaves the joined chain with
+    none. Only this index is read, so a chain member rotated to the archive (spec 12) is not seen here and
+    is left to the final doctor."""
+    recs = [_opf_check._make_rec(r, PENDING_DECISION, "active") for r in rows if isinstance(r, dict)]
+    by_id = {}
+    for rec in recs:
+        if isinstance(rec.id, str):
+            by_id.setdefault(rec.id, rec)    # the first seated row, as the doctor's own map keeps it
+    for members, current in _opf_check.decision_chains(recs, by_id):
+        if rid in members and len(current) != 1:
+            held = _superseders(rows, rid)
+            raise RecordError("deciding {} would leave its supersession chain in {} ({}) with {} current effective "
+                              "resolutions ({}); exactly one exists per chain (spec 8.5, C-DECISION-CHAINS){}. "
+                              "Nothing written; fail-closed".format(
+                                  rid, rel, ", ".join(members), len(current), ", ".join(current) or "none",
+                                  "; {} is itself already superseded by {}".format(rid, ", ".join(map(str, held)))
+                                  if held else ""))
 
 
 def _plan_transition(req, ctx, operand, now):
@@ -884,7 +923,9 @@ def _plan_transition(req, ctx, operand, now):
     act). A pending_decision's `open -> decided` also writes its resolution bundle (_resolution_bundle),
     and the rejection of `decided/proposed` removes it (_proposal_keys). A transition that lands a
     pending_decision at unqualified `decided` may also append one `supersedes` link (--supersedes, checked
-    by _require_supersedes_landing and _supersession_link). The change is `status`, `updated_at`, the
+    by _require_supersedes_landing and _supersession_link), and every such landing, the link or not, must
+    leave its chain with exactly one current resolution (_require_one_current_resolution, over the planned
+    index). The change is `status`, `updated_at`, the
     `proposed_from` write or removal, that bundle write or removal, and that link append on that one
     record, plus its own worklog entry."""
     rid, target = req.positionals
@@ -936,6 +977,9 @@ def _plan_transition(req, ctx, operand, now):
     new_row = {key: value for key, value in row.items() if key not in drop}
     new_row.update(fields)
     _validated(new_row, rtype, ctx)
+    if rtype == PENDING_DECISION and to_status == "decided":
+        _require_one_current_resolution([new_row if isinstance(r, dict) and r.get("id") == rid else r
+                                         for r in _index_rows(operand)], rid, operand.rel)
     (wid,) = _claim(ctx, [_opf_release.WL_NAMESPACE])
     detail = "opf-record transition {} {} -> {}".format(rid, current, to_status)
     if "--reason" in req.values:
@@ -2400,7 +2444,33 @@ def _self_test_supersession(check, plan, post, full, now):
     p, c, op = plan(m_argv, rows=odd, counters=counters)
     check("the cycle walk follows string ids only, so a malformed row elsewhere never crashes the plan",
           op.new_model["record"][1]["links"] == [{"rel": SUPERSEDES, "id": "PD-1"}])
+    # The doctor's chain rule over the planned index, on every landing at unqualified decided: the record
+    # already superseded by an open successor (with or without --supersedes, and on a ratification), a
+    # link to a chain head that still leaves the joined chain with none (QA1 Case A), and a plain decide
+    # that would make a second current resolution each refuse; the same shapes keeping one current pass.
     plain = ["transition", "PD-2", "decided", "--actor", "maintainer"] + decide
+    shadowed = [pd(1, "decided"), pd(2, "open"), pd(3, "open", links=[("supersedes", "PD-2")])]
+    joined = [pd(1, "open"), pd(2, "open"), pd(3, "open", links=[("supersedes", "PD-2"), ("supersedes", "PD-1")]),
+              pd(4, "decided", links=[("supersedes", "PD-1")])]
+    for label, argv, rows, needle in (
+            ("a superseded record, with --supersedes", m_argv, shadowed, "PD-2 is itself already superseded by PD-3"),
+            ("a superseded record, without the link", plain, shadowed, "PD-2 is itself already superseded by PD-3"),
+            ("a superseded record, on a ratification", r_argv,
+             [pd(1, "decided"), filed, pd(3, "open", links=[("supersedes", "PD-2")])],
+             "PD-2 is itself already superseded by PD-3"),
+            ("a link to a chain head that leaves the chain none", sup + ["PD-4"], joined,
+             "(PD-1, PD-2, PD-3, PD-4) with 0 current effective resolutions (none)"),
+            ("a second current resolution", plain, [pd(1, "decided"), pd(2, "open", links=[("supersedes", "PD-1")]),
+                                                    pd(3, "decided", links=[("supersedes", "PD-1")])],
+             "with 2 current effective resolutions (PD-2, PD-3)")):
+        check("a decide refuses {} ({})".format(label, needle), _refuses(
+            lambda argv=argv, rows=rows: plan(argv, rows=rows, counters=counters), needle))
+    for label, rows in (("the plain decide of that joined chain's record", joined),
+                        ("a record a decided successor already supersedes",
+                         [pd(1, "decided"), pd(2, "open"), pd(3, "decided", links=[("supersedes", "PD-2")])])):
+        p, c, op = plan(plain, rows=rows, counters=counters)
+        check("a decide that leaves one current resolution passes: {}".format(label),
+              op.new_model["record"][1]["status"] == "decided" and post(p, c, plain) is None)
     for label, argv, mutate in (
             ("a supersede that writes no link", m_argv,
              lambda op: op.new_model["record"][1]["links"].pop()),

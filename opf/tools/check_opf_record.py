@@ -96,14 +96,27 @@ Each case runs on its own copy of that template; the root is removed in a finall
       own flip, every byte untouched: a --supersedes value that is not a record id refuses before the
       store is resolved (flip: drop the parser's record-id check); --supersedes on an assistant decide (a
       decided/proposed landing) refuses (flip: drop the landing check); a target still open refuses (flip:
-      drop the target-decided check); a target the schema grades invalid refuses (flip: trust the target
-      without validating it, the T16 trust flip); a second successor for a resolution already superseded
-      refuses (flip: drop the chain-head check); and a target whose own chain leads back to the record
-      refuses (flip: drop the cycle check). Under each of the landing, fork, cycle, and invalid-target
-      flips the link publishes and the post-publication render's source gate then refuses on a doctor
-      finding: C-DECISION-CHAINS with no current resolution (landing, cycle) or two (fork), or the
-      target's own pre-existing finding (invalid target); under the target-decided flip the link publishes
-      doctor VALID; each exits with bytes changed, so the untouched assertion turns red. The decisions
+      drop the target-decided check); a target the schema grades invalid, and separately a target seated
+      in the index as another type, each refuses (flip, applied to each of the two: drop only the
+      target-validation call); a target that is no record, and separately an existing backlog item in
+      another namespace, each refuses (flip, applied to each of the two: append the link without locating
+      or checking the target, since the lookup cannot be dropped alone); a second successor for a
+      resolution already superseded refuses (flip: drop the chain-head check); and a target whose own
+      chain leads back to the record refuses (flip: drop the cycle check). Under each of the landing,
+      target-validation, and unchecked-target flips the link publishes and the post-publication render's
+      source gate then refuses on a doctor finding: C-DECISION-CHAINS with no current resolution
+      (landing), the target's own pre-existing finding (invalid or wrong-type target), or C-LINKS (a
+      dangling link, or a supersession of another type); under the target-decided flip the link publishes
+      doctor VALID; each exits with bytes changed, so the untouched assertion turns red. The fork and
+      cycle tests assert that their own check refuses before the chain rule runs, because under their
+      flips the chain rule still refuses with every byte untouched (two current resolutions for the fork,
+      none for the cycle). Every landing at unqualified decided must leave its chain with exactly one
+      current resolution (the doctor's own rule, recomputed over the planned index), each case its own
+      test, every byte untouched: QA1 Case A, a --supersedes naming a chain head whose joined chain would
+      still have none (the same decide without the link then lands doctor VALID); QA1 Case B, a record
+      already superseded by an open successor, decided with --supersedes; and that record decided without
+      the link (flip, applied to each of the three: drop the chain rule, under which the decide publishes
+      and the source gate refuses on C-DECISION-CHAINS with no current resolution). The decisions
       register's other two types are driven end to end: a maintainer files a
       maintainer_decision linking exemplifies PP-1, doctor VALID and listed with its link, and an
       assistant distils a preference_pattern to active/proposed that the maintainer ratifies and then
@@ -1041,8 +1054,7 @@ def flip_t16():
 
 def flip_t16_trust():
     """Trust the current row without validating it (the reviewed head's behaviour): the invalid-predecessor
-    rejection, the invalid-predecessor done-with-receipt, and the stray-field proposal must each turn red,
-    and so must T19's invalid supersession target (the same check, applied to the superseded row)."""
+    rejection, the invalid-predecessor done-with-receipt, and the stray-field proposal must each turn red."""
     return patch.object(record, "_require_valid_current", lambda row, rtype, ctx, rid, rel: None)
 
 
@@ -1388,6 +1400,81 @@ def t19_invalid_target(fx):
         refused_untouched(env, root, _supersede("PD-2", "PD-1"), "not schema-valid")
 
 
+def flip_t19_target():
+    """Drop only the target's validation call: the invalid target is trusted, the link publishes, and the
+    final doctor then reports the target's own pre-existing finding."""
+    return patch.object(record, "_require_valid_target", lambda trow, ctx, target, rel: None)
+
+
+def t19_wrong_type_target(fx):
+    """A target seated in the pending_decision index as another type (its `type` rewritten to backlog_item
+    by a canonical hand edit: a doctor finding) is never trusted: the supersede refuses with every byte
+    untouched."""
+    env = fx.env
+    root = fx.case("t19-wrong-type-target")
+    with ticking():
+        _decided(fx, root, "which layout", 1)
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        index = model(root, PD_INDEX)
+        assert index["record"][0]["id"] == "PD-1", index["record"][0]
+        index["record"][0]["type"] = "backlog_item"
+        write_commit(env, root, PD_INDEX, emit.emit_checked(index).encode("utf-8"), "a wrong-type row")
+        rc, out, err = cli(env, ["doctor", "--root", str(root)])
+        assert rc != 0, ("T19 the wrong-type row is a doctor finding", rc, out[-1600:])
+        refused_untouched(env, root, _supersede("PD-2", "PD-1"), "not schema-valid")
+
+
+def t19_missing_target(fx):
+    """A target that is no record at all (PD-9 in a store holding PD-1 and PD-2) refuses with every byte
+    untouched."""
+    root = fx.case("t19-missing-target")
+    with ticking():
+        _decided(fx, root, "which layout", 1)
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        refused_untouched(fx.env, root, _supersede("PD-2", "PD-9"), "PD-9 is not a record in")
+
+
+def t19_wrong_namespace_target(fx):
+    """A target in another namespace (the backlog item BI-1, which exists) is not in the pending_decision
+    index, so the supersede refuses with every byte untouched."""
+    root = fx.case("t19-wrong-namespace-target")
+    with ticking():
+        step(fx, root, ["create", "--type", "backlog_item", "--title", "an item"] + MAINTAINER, "BI-1")
+        step(fx, root, _pd_create("which layout") + MAINTAINER, "PD-1")
+        refused_untouched(fx.env, root, _supersede("PD-1", "BI-1"), "BI-1 is not a record in")
+
+
+def flip_t19_unchecked_target():
+    """Append the link to whatever --supersedes names, never locating or checking the target: the link to a
+    missing record or a backlog item publishes before the doctor finds it dangling or of the wrong type
+    (C-LINKS). The lookup cannot be dropped alone: every later target check reads the row it returns, and
+    a missing row still fails the schema check closed."""
+    def unchecked(req, ctx, operand, rid):
+        target = req.values.get("--supersedes")
+        return None if target is None else {"rel": record.SUPERSEDES, "id": target}
+    return patch.object(record, "_supersession_link", unchecked)
+
+
+def refused_before_chain_rule(env, root, args, needle):
+    """A supersede refused by its own target check, before the planned chain is judged:
+    _require_one_current_resolution is never called, asserted before the bytes and the message, so the
+    check removed under a flip turns this red on the isolated guard even though the chain rule behind it
+    still refuses with every byte untouched."""
+    calls = []
+    original = record._require_one_current_resolution
+
+    def observing(*a):
+        calls.append(a)
+        return original(*a)
+
+    before = snapshot(root)
+    with patch.object(record, "_require_one_current_resolution", observing):
+        result = record_cli(env, root, args)
+    assert calls == [], ("refused before the chain rule runs", args, result[0], result[2][-800:])
+    assert snapshot(root) == before, ("bytes untouched on refusal", args, result[0], result[2][-800:])
+    refused(result, needle)
+
+
 def t19_fork(fx):
     """A second successor for a resolution its chain has already superseded would fork the chain into two
     current resolutions: the supersede refuses with every byte untouched."""
@@ -1397,11 +1484,11 @@ def t19_fork(fx):
         step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
         step(fx, root, _supersede("PD-2", "PD-1"), "PD-2 supersedes PD-1")
         step(fx, root, _pd_create("which layout, third") + MAINTAINER, "PD-3")
-        refused_untouched(fx.env, root, _supersede("PD-3", "PD-1"), "already superseded by PD-2")
+        refused_before_chain_rule(fx.env, root, _supersede("PD-3", "PD-1"), "already superseded by PD-2")
 
 
 def flip_t19_fork():
-    """Drop the chain-head check: the second successor publishes before the doctor finds the fork."""
+    """Drop the chain-head check: the second successor reaches the chain rule, which then refuses the fork."""
     return patch.object(record, "_require_chain_head", lambda rows, target, rel: None)
 
 
@@ -1415,13 +1502,70 @@ def t19_cycle(fx):
         step(fx, root, _pd_create("which layout, again") + ["--link", "supersedes=PD-1"] + MAINTAINER, "PD-2")
         step(fx, root, ["transition", "PD-2", "decided"] + DECIDE + MAINTAINER, "PD-2 decided")
         doctor_valid(fx.env, root)
-        refused_untouched(fx.env, root, _supersede("PD-1", "PD-2"), "close a cycle")
+        refused_before_chain_rule(fx.env, root, _supersede("PD-1", "PD-2"), "close a cycle")
 
 
 def flip_t19_cycle():
-    """Drop the cycle check: the closing link publishes before the doctor finds the chain with no current
-    resolution."""
+    """Drop the cycle check: the closing link reaches the chain rule, which then refuses the chain with no
+    current resolution."""
     return patch.object(record, "_require_acyclic", lambda rows, rid, target, rel: None)
+
+
+def t19_chain_join(fx):
+    """QA1 Case A. PD-3 (open) supersedes PD-2 and PD-1 and PD-4 supersedes PD-1, then PD-4 is decided:
+    the chain's one current resolution, doctor VALID. PD-2 decided with --supersedes PD-4 passes every
+    target check (PD-4 is decided, schema-valid, and the head of its chain, and its own chain never reaches
+    PD-2), but it would leave the chain with none (PD-2 superseded by PD-3, PD-4 by PD-2), so it refuses
+    with every byte untouched; the same decide without the link keeps PD-4 current and lands doctor
+    VALID."""
+    root = fx.case("t19-chain-join")
+    with ticking():
+        step(fx, root, PD_CREATE + MAINTAINER, "PD-1")
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        step(fx, root, _pd_create("which layout, third") + ["--link", "supersedes=PD-2", "--link",
+                                                            "supersedes=PD-1"] + MAINTAINER, "PD-3")
+        step(fx, root, _pd_create("which layout, fourth") + ["--link", "supersedes=PD-1"] + MAINTAINER, "PD-4")
+        step(fx, root, ["transition", "PD-4", "decided"] + DECIDE + MAINTAINER, "PD-4 decided")
+        doctor_valid(fx.env, root)
+        refused_untouched(fx.env, root, _supersede("PD-2", "PD-4"),
+                          "(PD-1, PD-2, PD-3, PD-4) with 0 current effective resolutions")
+        step(fx, root, ["transition", "PD-2", "decided"] + DECIDE + MAINTAINER, "PD-2 decided")
+        doctor_valid(fx.env, root)
+
+
+def _shadowed(fx, root):
+    """PD-1 decided, PD-2 open, and PD-3 created open linking supersedes PD-2: doctor VALID (PD-1's chain
+    has its one resolution, and the PD-2 and PD-3 chain is wholly undecided). Run under ticking()."""
+    _decided(fx, root, "which layout", 1)
+    step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+    step(fx, root, _pd_create("which layout, third") + ["--link", "supersedes=PD-2"] + MAINTAINER, "PD-3")
+    doctor_valid(fx.env, root)
+
+
+def t19_superseded_record(fx):
+    """QA1 Case B. PD-2 is already superseded by the open PD-3, so PD-2 decided with --supersedes PD-1
+    would leave the joined chain with no current resolution (PD-1 superseded by PD-2, PD-2 by PD-3): it
+    refuses with every byte untouched."""
+    root = fx.case("t19-superseded-record")
+    with ticking():
+        _shadowed(fx, root)
+        refused_untouched(fx.env, root, _supersede("PD-2", "PD-1"), "PD-2 is itself already superseded by PD-3")
+
+
+def t19_superseded_record_plain(fx):
+    """QA1 Case B without the link: PD-2's own decide would leave its chain with PD-3 with no current
+    resolution, so it refuses with every byte untouched too."""
+    root = fx.case("t19-superseded-record-plain")
+    with ticking():
+        _shadowed(fx, root)
+        refused_untouched(fx.env, root, ["transition", "PD-2", "decided"] + DECIDE + MAINTAINER,
+                          "PD-2 is itself already superseded by PD-3")
+
+
+def flip_t19_chain():
+    """Drop the pre-publication chain rule: the decide publishes before the doctor finds its chain with no
+    current resolution."""
+    return patch.object(record, "_require_one_current_resolution", lambda rows, rid, rel: None)
 
 
 PATTERN = ["create", "--type", "preference_pattern", "--field", "context=layout choices", "--field",
@@ -1596,9 +1740,15 @@ TESTS = (
     ("T19-supersedes-record-id", t19_record_id, flip_t19_record_id),
     ("T19-supersedes-proposed-landing", t19_proposed_landing, flip_t19_landing),
     ("T19-supersedes-undecided-target", t19_undecided_target, flip_t19_decided),
-    ("T19-supersedes-invalid-target", t19_invalid_target, flip_t16_trust),
+    ("T19-supersedes-invalid-target", t19_invalid_target, flip_t19_target),
+    ("T19-supersedes-wrong-type-target", t19_wrong_type_target, flip_t19_target),
+    ("T19-supersedes-missing-target", t19_missing_target, flip_t19_unchecked_target),
+    ("T19-supersedes-wrong-namespace-target", t19_wrong_namespace_target, flip_t19_unchecked_target),
     ("T19-supersedes-fork", t19_fork, flip_t19_fork),
     ("T19-supersedes-cycle", t19_cycle, flip_t19_cycle),
+    ("T19-decide-chain-join", t19_chain_join, flip_t19_chain),
+    ("T19-decide-superseded-record", t19_superseded_record, flip_t19_chain),
+    ("T19-decide-superseded-record-plain", t19_superseded_record_plain, flip_t19_chain),
     ("T19-register-ruling-and-pattern", t19_register, flip_t19_links),
     ("T19-register-assistant-ruling", t19_assistant_ruling, flip_t19_trust),
 )
