@@ -5763,6 +5763,8 @@ def _cli_self_test():
         expect(["record", "transition", "BI-1", "done"], EXIT_MALFORMED)   # missing --actor
         expect(["record", "transition", "BI-1", "done/proposed", "--actor", "assistant"],
                EXIT_MALFORMED)                                   # the qualifier is derived, never given
+        expect(["record", "transition", "PD-1", "decided", "--actor", "maintainer", "--decision", "x"],
+               EXIT_MALFORMED)                                   # the bundle options come together
         expect(["record", "done-with-receipt", "BI-1"], EXIT_MALFORMED)    # missing --actor
         expect(["record", "done-with-receipt", "BI-1", "--actor", "assistant"],
                EXIT_MALFORMED)                                   # maintainer-only, refused before the store

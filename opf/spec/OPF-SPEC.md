@@ -916,8 +916,14 @@ it, and it carries no `spec_version` bump. Its subcommands:
   `proposed_from` included, so a schema-detectable forgery must be repaired by the operator
   before the verb acts; it is never laundered. The field is an ordinary record field, so a
   canonical hand edit of it that keeps the row schema-valid is not detected, the same as any
-  other field (the section 5.7 integration-base rule remains the control). A backlog item
-  reaches unqualified `done` only through `done-with-receipt`.
+  other field (the section 5.7 integration-base rule remains the control). A pending_decision's
+  `open` > `decided`, landing bare or `/proposed`, writes its resolution bundle (section 8.5) in
+  the same act: the verb requires the `decision` and `decided_by` values there and refuses them
+  on every other transition. `decided_by` is given explicitly, never inferred from the actor,
+  because the recorder of an answer is often not its decider, and `decided_at` is the
+  operation's clock value. A ratification keeps the bundle; a rejection of `decided/proposed`
+  removes it together with `proposed_from`, since an open decision carries none of it. A backlog
+  item reaches unqualified `done` only through `done-with-receipt`.
 - `done-with-receipt`: maintainer-only. It moves a backlog item to unqualified `done`, from
   `active` or by ratifying `done/proposed`, and in the same act creates its one-to-one `done`
   receipt linked `receipt_of` (section 8.5). An assistant reaching `done` uses `transition` and
@@ -954,7 +960,8 @@ guarantees:
    publication (section 4.2).
 4. Postcondition: the model diff of every rewritten file equals exactly the operation's allowed
    delta (the new rows appended, the counters advanced by exactly the claim, and for a transition
-   one status and `updated_at` change plus the `proposed_from` write or removal), value for value
+   one status and `updated_at` change plus the `proposed_from` write or removal and, for a
+   pending_decision, the resolution bundle write or removal), value for value
    and type for type (a boolean or float is never equal to an integer), before anything is
    written. The expected
    delta is derived from the request, the prior bytes of each rewritten file, the claimed IDs, the
