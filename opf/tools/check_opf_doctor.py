@@ -26,7 +26,10 @@ same leg gates real store integrity with no change.
 --self-test builds SYNTHETIC COMMITTED stores in a tempdir and asserts that 0/1/2/0 contract END TO END
 through opf.py: 0 on a clean, validate_store-VALID committed store; 1 after a one-field working-tree mutation
 of an immutable record body (a resurrection finding against the committed prior); 2 on a broken store (an
-unparseable manifest); and 0 (NOT APPLICABLE) on a non-adopter root. Each committed fixture is `git init` +
+unparseable manifest); and 0 (NOT APPLICABLE) on a non-adopter root. The enforcement-pack CI floor rides the
+same fixtures: `doctor --require-store` keeps 0 on the clean store and turns the non-adopter root into 2, and
+the shipped recipe opf/enforcement/ci/opf-ci.sh (doctor --require-store, then render --check) exits 0 on the
+clean store and 2 on the non-adopter root. Each committed fixture is `git init` +
 `git add` + `git commit`ed so the `tracked` and `prior` observations _opf_observe.gather derives from HEAD are
 real. The clean store is built through the OPF helpers' own canonical emitters and digesters (never
 hand-built), the same construction _opf_check's own self-test proves VALID. Offline, stdlib only, fail-closed,
@@ -45,20 +48,21 @@ EXIT_FINDING = 1
 EXIT_ERROR = 2
 
 
-def _run_doctor(root, capture):
+def _run_doctor(root, capture, extra=()):
     """Run `opf.py doctor --root <root>` isolated (-I -B) and forward its exit code UNMASKED: doctor's own
     0/1/2 (0 VALID, 1 INVALID, 2 CANNOT-EVALUATE) IS the verdict. An unexpected non-0/1/2 status (a signal
     death surfacing as a negative return, or any abnormal code) is clamped to a cannot-evaluate (exit 2),
     never read as a verdict. A child-LAUNCH failure (an OS refusal such as BlockingIOError under RLIMIT_NPROC
     pressure) is caught here and mapped to exit 2, never propagated as the gate's own exit 1. In the live leg
     (capture False) the child's stdout and stderr are inherited so the operator sees doctor's report /
-    NOT APPLICABLE; in the self-test leg (capture True) both are discarded so a passing leg stays quiet."""
+    NOT APPLICABLE; in the self-test leg (capture True) both are discarded so a passing leg stays quiet.
+    `extra` appends doctor flags after the root (the self-test's CI-floor `--require-store` vectors)."""
     tools_dir = Path(__file__).resolve().parent
     stdout = subprocess.PIPE if capture else None
     stderr = subprocess.DEVNULL if capture else None
     try:
         proc = subprocess.run(
-            [sys.executable, "-I", "-B", str(tools_dir / "opf.py"), "doctor", "--root", str(root)],
+            [sys.executable, "-I", "-B", str(tools_dir / "opf.py"), "doctor", "--root", str(root), *extra],
             stdout=stdout, stderr=stderr)
     except OSError as exc:
         print("check_opf_doctor: cannot evaluate: could not launch the doctor child for root {} ({}); no "
@@ -263,6 +267,22 @@ def _self_test_isolated():
         _git(root, home, "add", "-A")
         _git(root, home, "commit", "-m", "seed store")
 
+    def _run_ci_recipe(root):
+        """Run the shipped CI recipe (opf/enforcement/ci/opf-ci.sh) over `root` with this interpreter as
+        OPF_PYTHON and its default pack-relative opf.py, returning its exit status unmasked. A missing `sh`,
+        a missing recipe, or a launch failure raises OSError (a harness error, exit 2 via _classify)."""
+        sh = shutil.which("sh")
+        if sh is None:
+            raise OSError("sh not found on PATH; the CI recipe cannot be run")
+        recipe = Path(__file__).resolve().parent.parent / "enforcement" / "ci" / "opf-ci.sh"
+        if not recipe.is_file():
+            raise OSError("the CI recipe {} is missing".format(recipe))
+        env = dict(os.environ, OPF_PYTHON=sys.executable)
+        env.pop("OPF_TOOL", None)
+        proc = subprocess.run([os.path.abspath(sh), str(recipe), str(root)], env=env,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return proc.returncode
+
     def _doctor_suite():
         """Build synthetic COMMITTED stores and assert the 0/1/2/0 doctor contract end to end through opf.py.
         Returns the list of assertion failures; raises OSError if a fixture cannot be built (a harness error,
@@ -305,6 +325,20 @@ def _self_test_isolated():
             empty = base / "empty"
             empty.mkdir()
             expect("not-adopted-root", _run_doctor(empty, capture=True), EXIT_OK)
+
+            # The CI floor (enforcement pack, U16). --require-store leaves the clean store's verdict at 0 (an
+            # over-broad flag that refused every store fails this) and turns the non-adopter root into 2
+            # (reverting the flag's NOT-ADOPTED branch returns 0 there, failing it).
+            expect("clean-store-require-store", _run_doctor(clean, capture=True, extra=("--require-store",)),
+                   EXIT_OK)
+            expect("not-adopted-root-require-store",
+                   _run_doctor(empty, capture=True, extra=("--require-store",)), EXIT_ERROR)
+            # The shipped portable recipe over the same roots, through its default pack-relative opf.py path:
+            # 0 on the clean store (doctor 0, then render --check 0) and 2 on the non-adopter root (the
+            # recipe's doctor step carries --require-store; dropping it lets the recipe reach render --check,
+            # which reports NOT APPLICABLE and exits 0, failing this case).
+            expect("ci-recipe-clean-store", _run_ci_recipe(clean), EXIT_OK)
+            expect("ci-recipe-not-adopted-root", _run_ci_recipe(empty), EXIT_ERROR)
 
             # Child-LAUNCH failure -> exit 2 (cannot-evaluate), never a false verdict. Inject an OSError at the
             # launch call (an OS refusal to fork under RLIMIT_NPROC pressure surfaces as BlockingIOError);
@@ -397,7 +431,8 @@ def _self_test_isolated():
     if rc == EXIT_OK:
         print("check_opf_doctor self-test: PASS (opf doctor returns 0 on a clean committed store / 1 after an "
               "immutable-body mutation vs the committed prior / 2 on a broken store / 0 NOT APPLICABLE, end to "
-              "end; child-launch failure -> 2; no-repo-root -> 2; invalid-git-marker -> 2; "
+              "end; --require-store -> 0 clean / 2 NOT-ADOPTED; CI recipe -> 0 clean / 2 NOT-ADOPTED; "
+              "child-launch failure -> 2; no-repo-root -> 2; invalid-git-marker -> 2; "
               "relative-toplevel probe -> None (exit 2); "
               "git executable absolutized (relative which() -> absolute argv[0]); "
               "status contract 1=assertion 2=harness)")
