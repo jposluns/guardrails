@@ -10,7 +10,9 @@ Ancestry marks re-adoption when a pointer, a resolved store manifest, or unresol
 content at an OPF-reserved .working name (ANCESTRY_RESERVED) is present, so store
 debris never reads as a zero-seedable first adoption. first-adoption only means none
 of these: git history is not read, and a manifestless store under any other .working
-name reads as foreign content.
+name reads as foreign content. Durable OPF history outside .working also reads as
+first-adoption on its own: root import-promotion state (.aiqt/import,
+.aiqt/import/journal, .aiqt/import-archive) and the .gitignore opf-managed block.
 
 VALID means an inert, digest-bound proposal, NEVER permission/readiness to apply.
 No release is trusted, acceptance verified, hook activated, or transaction run.
@@ -59,7 +61,10 @@ RESIDUALS = (
     "No coherent snapshot; apply must recheck inventory, preimages and absences.",
     "No commit, merge, network, journal, import staging, rendering or hook effects.",
     "Ancestry reads pointers, the resolved manifest and reserved .working names; git history "
-    "and a manifestless store under another .working name are not read as ancestry.",
+    "and a manifestless store under another .working name are not read as ancestry. "
+    "Durable OPF history outside .working also reads as first-adoption on its own: "
+    "root import-promotion state (.aiqt/import, .aiqt/import/journal, .aiqt/import-archive) "
+    "and the .gitignore opf-managed block.",
 )
 
 
@@ -375,7 +380,11 @@ def _inventory(root, sources, targets):
                 "adoption": "re-adoption" if traces else "first-adoption",
                 "traces": traces,
                 "evidence": "live pointers, resolved manifest and reserved .working names; "
-                            "git history and other .working names are not ancestry",
+                            "git history and other .working names are not ancestry. "
+                            "Durable OPF history outside .working also reads as first-adoption "
+                            "on its own: root import-promotion state (.aiqt/import, "
+                            ".aiqt/import/journal, .aiqt/import-archive) and the .gitignore "
+                            "opf-managed block",
             },
             "coverage_residuals": list(RESIDUALS),
         }, homes
@@ -750,6 +759,21 @@ def self_test():
                             (self.root / rel).write_bytes(b"[x]\n")
                         doc = tomllib.loads(self.observation().observation.decode())
                         self.assertEqual(doc["resolution"]["status"], store.CANNOT_EVALUATE)
+                        self.assertEqual((doc["ancestry"]["adoption"], doc["ancestry"]["traces"]),
+                                         ("re-adoption", [name]))
+                    finally:
+                        shutil.rmtree(self.root / ".working")
+            # Reserved files, even empty ones, and empty reserved directories are ancestry.
+            name = ".working/toml"
+            for kind, content in (("file", b""), ("file", b"[x]\n"), ("directory", None)):
+                with self.subTest(reserved=name, kind=kind, content=content):
+                    try:
+                        (self.root / ".working").mkdir()
+                        if kind == "file":
+                            (self.root / name).write_bytes(content)
+                        else:
+                            (self.root / name).mkdir()
+                        doc = tomllib.loads(self.observation().observation.decode())
                         self.assertEqual((doc["ancestry"]["adoption"], doc["ancestry"]["traces"]),
                                          ("re-adoption", [name]))
                     finally:
