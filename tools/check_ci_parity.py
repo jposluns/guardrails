@@ -44,6 +44,16 @@ assignment to failed or failed_names other than the top-level initializer before
 first gate or the gitleaks failure branch. A runner line holding $[ ], or naming
 failed or failed_names inside $(( )) or inside a ${ } with a subscript or a colon, is
 treated the same way, because bash can assign there.
+The remaining runner scaffold is an ALLOWLIST of the exact line shapes the two real
+runners use (tools/run_all_checks.sh and the adapted opf/tools/run_all_checks.sh),
+not a blocklist of known-bad spellings. The only recognized [ ] tests are
+if [ "$failed" -ne 0 ]; then, if [ "$notrun" -ne 0 ]; then, and the two exact
+gitleaks lookup lines, so a -v operand (whose subscript can assign), any NAME[...]
+subscript operand, a bare [ ] line, and every unlisted test form are unclassified.
+set -uo pipefail or set -euo pipefail is accepted only at top level before the first
+gate. Every expansion in an assignment or echo must be a plain $NAME, ${NAME} or $?,
+and a ${...:?...} abort expansion is refused on any runner line, because it exits
+the runner mid-roster with a non-zero status when its variable is unset.
 Deeper nested non-gate YAML (under on:, env:, with:, or strategy:) is structurally
 recognized but not exhaustively schema-validated; the shadow scan still prevents a
 tools/ gate from hiding there. Reachability is outside token-parity scope: a gate is
@@ -56,13 +66,18 @@ does not preserve quote type, so a $ inside single quotes is treated as runtime-
 like a double-quoted one; and a duplicate run: key within one step is counted as two
 members although YAML keeps one. The shadow scan has one soft edge: exotic quoting
 outside the supported grammar could hide a tools/ string from comment stripping.
-The runner's failure-state rules are lexical: a reset carried through another
-variable's value (y=failed=0 then x=${PATH:y:0}, or an indirect or prompt-transform
-expansion) passes them. The --self-test backs them at runtime with a scratch copy
+The runner's failure-state rules are lexical and shape-based: they validate each
+line against the allowlist, not reachability or runtime values, so a reset smuggled
+through content the allowlist does accept (a gate script itself, or the environment
+the runner inherits) is outside them; the formerly disclosed offset-carried spelling
+(y=failed=0 then x=${PATH:y:0}) is now refused as an unlisted expansion shape.
+The --self-test backs the rules at runtime with a scratch copy
 of the live runner: no gate failing, gitleaks and leaks failing together, gitleaks failing alone,
 and each registered gate failing alone. Those scenarios run in parallel, so every
-executable stub is written once before they start, never while one could be executing
-it (ETXTBSY). That catches a reset or early exit that fires
+executable stub is written and closed once before they start: a fork on a sibling
+thread inherits every descriptor still open at that moment, and an exec of a stub
+that any process holds open for writing fails ETXTBSY, exactly as _prepare_stubs
+states. That catches a reset or early exit that fires
 unconditionally or on one gate's failure in the stub environment. Residual masks
 include harness detection (stub_* variables, BASH_ENV, or SECONDS), environments the
 stubs do not produce (including gitleaks absent and the NOT RUN branch), and untested
@@ -509,6 +524,19 @@ GITLEAKS_FAILURE_UPDATES = (
 )
 
 
+# The only test lines the two real runners use outside run_gate(); every other
+# [ ... ] test, bare or behind if, is outside the allowlist. This exact-shape set is
+# what rejects a -v operand (whose subscript can assign), any NAME[...] subscript
+# operand, and every unlisted operator or operand form.
+RUNNER_TEST_LINES = frozenset({
+    'if [ "$failed" -ne 0 ]; then',
+    'if [ "$notrun" -ne 0 ]; then',
+    'if ! command -v gitleaks >/dev/null 2>&1 && '
+    '[ -n "${HOME:-}" ] && '
+    '[ -x "$HOME/.local/bin/gitleaks" ]; then',
+    'if command -v gitleaks >/dev/null 2>&1; then',
+})
+
 # Exact executable suffixes that may contain exits. The standalone roster adapter
 # validates and removes its final exit 0 and directory binding before extraction.
 TERMINAL_SUMMARIES = (
@@ -564,6 +592,25 @@ def _failure_state_expansion(code):
         ("[" in span or ":" in span) and FAILURE_STATE_WORD_RE.search(span)
         for span in _expansion_spans(code, "${", "{", "}")
     )
+
+
+def _abort_expansion(code):
+    """Return whether code carries a ${...:?...} abort expansion. When the named
+    variable is unset (the disclosed harness-detection trigger), that expansion exits
+    the runner mid-roster with a non-zero status, losing the remaining gates and the
+    FAILED GATES summary; no line of either real runner uses one."""
+    return any(":?" in span for span in _expansion_spans(code, "${", "{", "}"))
+
+
+# The only expansions the runner allowlist accepts outside exact-shape lines: a plain
+# $NAME, ${NAME} or $?. Subscripts, offsets, case or :? operators, $(( )), $( ), $[ ]
+# and backquotes are all outside it, because bash can assign or abort inside them.
+_PLAIN_EXPANSION_RE = re.compile(
+    r"\$(?:\?|[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})")
+
+
+def _allowed_expansions(code):
+    return "`" not in code and "$" not in _PLAIN_EXPANSION_RE.sub("", code)
 
 
 def extract_local(text):
@@ -689,6 +736,19 @@ def extract_local(text):
             ))
             continue
 
+        # A ${...:?...} abort expansion is refused on ANY runner line, checked on the
+        # quote-removed tokens too; see _abort_expansion. The gitleaks failure updates
+        # carry :+ only, so the exemption above never reaches here.
+        if _abort_expansion(stripped) or _abort_expansion(" ".join(tokens)):
+            diagnostics.append(_diagnostic(
+                source,
+                line_number,
+                "unclassified-line",
+                "{!r} carries a ${{...:?...}} abort expansion, outside the "
+                "disclosed parity grammar".format(stripped),
+            ))
+            continue
+
         if tokens and tokens[0] == "run_gate":
             if len(tokens) < 3:
                 diagnostics.append(_diagnostic(
@@ -732,8 +792,10 @@ def extract_local(text):
 
         # Failure state may be initialized once at top level before any gate, then
         # assigned here only in the gitleaks failure branch (the dispatcher body is
-        # validated whole). These rules are lexical: they reject direct assignments and
-        # the expansion spellings above, not a reset carried through another value. The
+        # validated whole). These rules are lexical and shape-based: together with the
+        # scaffold allowlist below they reject direct assignments, every non-plain
+        # expansion, and every unlisted test shape, not a reset smuggled through
+        # content they accept (a gate script, the inherited environment). The
         # self-test exercises the declared scenarios; harness detection and untested
         # environments or failure combinations remain outside its runtime coverage.
         assignments = tokens[1:] if tokens[:1] == ["export"] else tokens
@@ -762,43 +824,37 @@ def extract_local(text):
                 ))
             continue
 
+        # ALLOWLIST scaffold: a non-gate line must match one of the exact shapes the
+        # two real runners use. Anything else, including any [ ] test outside
+        # RUNNER_TEST_LINES (bare or behind if), a set line anywhere but top level
+        # before the first gate, and an expansion that is not a plain $NAME, ${NAME}
+        # or $?, is unclassified rather than accepted.
         scaffold = False
         if stripped in ("set -uo pipefail", "set -euo pipefail"):
-            scaffold = True
+            # Only where the real runners put it: top level, before any gate, where
+            # a late -e cannot silently end a partially failed roster.
+            scaffold = if_depth == 0 and not members
         elif stripped == 'cd "$(dirname "$0")/.." || exit 2':
             scaffold = True
         elif (tokens and tokens[0] == "export"
                 and len(tokens) == 2
                 and ASSIGN_RE.fullmatch(tokens[1])):
-            scaffold = not _contains_unsafe_substitution(tokens[1])
+            scaffold = (_allowed_expansions(stripped)
+                        and _allowed_expansions(" ".join(tokens)))
         elif len(tokens) == 1 and ASSIGN_RE.fullmatch(tokens[0]):
-            scaffold = not _contains_unsafe_substitution(tokens[0])
+            scaffold = (_allowed_expansions(stripped)
+                        and _allowed_expansions(" ".join(tokens)))
         elif tokens and tokens[0] == "echo":
             scaffold = (
                 _safe_simple(tokens)
-                and not _contains_unsafe_substitution(stripped)
+                and _allowed_expansions(stripped)
+                and _allowed_expansions(" ".join(tokens))
             )
         elif stripped in ("else", "fi", "then"):
             scaffold = True
         elif line_number in terminal_exits and if_depth == 1:
             scaffold = True
-        elif (tokens and tokens[0] == "if"
-                and len(tokens) >= 4
-                and tokens[-2:] == [";", "then"]):
-            if (tokens[1] == "["
-                    and _safe_simple(tokens[:-2])
-                    and not _contains_unsafe_substitution(stripped)):
-                scaffold = True
-            elif stripped in (
-                'if ! command -v gitleaks >/dev/null 2>&1 && '
-                '[ -n "${HOME:-}" ] && '
-                '[ -x "$HOME/.local/bin/gitleaks" ]; then',
-                'if command -v gitleaks >/dev/null 2>&1; then',
-            ):
-                scaffold = True
-        elif (tokens and tokens[0] == "["
-                and _safe_simple(tokens)
-                and not _contains_unsafe_substitution(stripped)):
+        elif stripped in RUNNER_TEST_LINES:
             scaffold = True
 
         if not scaffold:
@@ -1984,7 +2040,12 @@ def _stubs_prepared_before_pool(text, red_command):
     recorder that sees nothing cannot pass; the required-stub and
     every-executable-was-seen legs keep the rest from passing vacuously.
     File-descriptor-only operations (os.fchmod, a write through an inherited
-    descriptor) are outside what these audit events name.
+    descriptor) are outside what these audit events name, as is a write made by a
+    child process (a cp or install run in a subprocess); only the
+    never-seen-written leg catches a stub that no Python code wrote. A dir_fd-
+    relative path in an audit event is resolved through /proc/self/fd where that
+    pseudo-filesystem exists; without it such a path stays working-directory-
+    resolved, the same residual class as the descriptor-only operations.
 
     Returns (pool constructed, scenarios observed, distinct stub directories, required
     stubs missing, executables never seen written, executables in scenario trees, and
@@ -2001,6 +2062,9 @@ def _stubs_prepared_before_pool(text, red_command):
     global _WRITE_AUDIT_INSTALLED
     write_flags = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
     target = {"open": 0, "os.chmod": 0, "os.rename": 1, "os.link": 1, "os.symlink": 1}
+    # Index of the dir_fd argument that scopes each event's recorded path (the dst
+    # path for rename and link); open events carry no dir_fd.
+    dir_fd_index = {"os.chmod": 2, "os.rename": 3, "os.link": 3, "os.symlink": 2}
     main_thread = threading.main_thread().ident
     real_run = subprocess.run
     pool_started = []
@@ -2011,9 +2075,20 @@ def _stubs_prepared_before_pool(text, red_command):
         if event not in target or (event == "open" and not args[2] & write_flags):
             return
         path = args[target[event]]
-        if not isinstance(path, int):
-            events.append((os.path.abspath(os.fsdecode(path)), event,
-                           threading.get_ident() == main_thread and not pool_started))
+        if isinstance(path, int):
+            return
+        path = os.fsdecode(path)
+        index = dir_fd_index.get(event)
+        if not os.path.isabs(path) and index is not None and index < len(args):
+            dir_fd = args[index]
+            if isinstance(dir_fd, int) and dir_fd >= 0:
+                try:
+                    path = os.path.join(
+                        os.readlink("/proc/self/fd/%d" % dir_fd), path)
+                except OSError:
+                    pass  # no /proc: disclosed residual, path stays cwd-resolved
+        events.append((os.path.abspath(path), event,
+                       threading.get_ident() == main_thread and not pool_started))
 
     class MarkedPool(concurrent.futures.ThreadPoolExecutor):
         def __init__(self, *args, **kwargs):
@@ -2993,6 +3068,8 @@ def self_test():
         gate_lines = [line + "\n" for line in live_runner.splitlines()
                       if line.startswith("run_gate ")]
         registered_names = {shlex.split(line, comments=True)[1] for line in gate_lines}
+        registered_commands = {
+            " ".join(shlex.split(line, comments=True)[3:]) for line in gate_lines}
         isolated_names = {name for scenario in _naming_scenarios(live_runner)[3:]
                           for name, status in scenario[3]}
         if isolated_names != registered_names:
@@ -3075,11 +3152,84 @@ def self_test():
             elif not any(item.code == "unclassified-line"
                          for item in extract_local(mutant).diagnostics):
                 failures.append("26 unexpected exit was not rejected: " + name)
+        # qa4 allowlist rejections: each spelling resets failure state, detects the
+        # harness, or ends the run early through a line shape no real runner uses;
+        # the allowlist must refuse every one as unclassified, not accept it.
+        allowlist_fixtures = (
+            ("-v subscript reset in a bare test",
+             mutate((gitleaks, "[ -v 'PATH[failed=0]' ]\n" + gitleaks))),
+            ("-v quote-split subscript reset behind if",
+             mutate((gitleaks,
+                     "if [ -v 'PATH[fai\"\"led=0]' ]; then\n"
+                     "echo masked\n"
+                     "fi\n" + gitleaks))),
+            ("unlisted binary test operand",
+             mutate((gitleaks, "[ 1 -eq 'failed=0' ]\n" + gitleaks))),
+            ("bare test in an allowed if shape",
+             mutate((gitleaks, '[ "$failed" -ne 0 ]\n' + gitleaks))),
+            ("unlisted if test form",
+             mutate((gitleaks,
+                     'if [ -z "${stub_log:-}" ]; then\necho masked\nfi\n'
+                     + gitleaks))),
+            ("set below the first gate",
+             mutate((gitleaks, "set -euo pipefail\n" + gitleaks))),
+            ("set inside a conditional",
+             mutate((summary,
+                     'if [ "$notrun" -ne 0 ]; then\nset -uo pipefail\nfi\n'
+                     + summary))),
+            ("abort expansion in an assignment",
+             mutate((gitleaks, "x=${stub_log:?}\n" + gitleaks))),
+            ("abort expansion with a message",
+             mutate((gitleaks, "x=${stub_log:?harness}\n" + gitleaks))),
+            ("abort expansion in an echo",
+             mutate((gitleaks, 'echo "${stub_log:?}"\n' + gitleaks))),
+            ("offset expansion outside the allowlist",
+             mutate((gitleaks, "x=${PATH:0:1}\n" + gitleaks))),
+        )
+        for name, mutant in allowlist_fixtures:
+            if mutant is None:
+                failures.append("26 allowlist fixture drift: " + name)
+            elif not any(item.code == "unclassified-line"
+                         for item in extract_local(mutant).diagnostics):
+                failures.append("26 allowlist did not reject: " + name)
+        # The offset-carried indirect reset (y=failed=0 then x=${PATH:y:0})
+        # was a disclosed lexical residual; the allowlist now refuses the offset
+        # expansion shape outright.
         indirect = mutate((gitleaks, "y=failed=0\nx=${PATH:y:0}\n" + gitleaks))
-        if indirect is None or extract_local(indirect).diagnostics:
-            failures.append("26 disclosed indirect-reset example no longer passes")
-        for problem in runner_naming_problems(live_runner):
+        if indirect is None or not any(
+                item.code == "unclassified-line"
+                for item in extract_local(indirect).diagnostics):
+            failures.append("26 offset-carried indirect reset was not rejected")
+        # Sweep completeness is asserted on what runner_naming_problems EXECUTES,
+        # through the same subprocess.run seam vector 27 patches, not only on the
+        # _naming_scenarios helper: record each started scenario's
+        # (stub_fail_command, stub_gitleaks_rc) pair and require equality with the
+        # pairs the declared roster demands: a passing run and gitleaks alone
+        # (fail command empty), the fixed combined gitleaks+leaks scenario, and
+        # every distinct registered command failing alone. Truncating or filtering
+        # the scenario list at the call site turns this red.
+        import subprocess
+        from unittest.mock import patch
+        executed = []
+        real_run = subprocess.run
+
+        def recording_run(argv, **kwargs):
+            env = kwargs["env"]
+            executed.append((env["stub_fail_command"], env["stub_gitleaks_rc"]))
+            return real_run(argv, **kwargs)
+
+        with patch.object(subprocess, "run", recording_run):
+            live_problems = runner_naming_problems(live_runner)
+        for problem in live_problems:
             failures.append("26 live runner: " + problem)
+        want_executed = ({("", "0"), ("", "1"),
+                          ("-I -B tools/check_leaks.py", "1")}
+                         | {(command, "0") for command in registered_commands})
+        if set(executed) != want_executed:
+            failures.append(
+                "26 executed sweep incomplete: missing={!r}, extra={!r}".format(
+                    sorted(want_executed - set(executed)),
+                    sorted(set(executed) - want_executed)))
         runtime_fixtures = (
             ("reset right after the first gate",
              mutate(after_gate(0, "failed=0\n", alone=False))),
