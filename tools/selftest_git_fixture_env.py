@@ -484,74 +484,339 @@ def _config_results(roster, env, marker, monitor_marker, system=False):
     Hardcoded absolute executables and descendants replacing PATH are residuals.
     Exact git --version is exempt: it does not discover repository configuration.
     Real-root archives have the exact-command exception documented above.
+    Every file a child process EXECUTES (each observer wrapper, each tripwire,
+    the copied caller hooks and fsmonitor) is fully written and closed in the
+    sequential preparation pass BEFORE the worker pool starts, so no fork can
+    inherit a write descriptor still open on it: execve of a file any process
+    holds open for writing fails ETXTBSY, and CPython's exec PATH search skips
+    a failed candidate and continues, which would run the REAL git in the
+    observer's place and record nothing. A tripwire directory sits directly
+    after each observer on PATH, so a fall-through past the observer (any
+    execve failure, not only ETXTBSY) runs the tripwire, which records the
+    bypass and exits nonzero; _require_wrapper_observed then fails the run
+    closed instead of accepting an unobserved, apparently clean result.
+    _prepared_before_pool_control pins the preparation ordering itself.
     """
     import shlex
     from concurrent.futures import ThreadPoolExecutor
 
-    def run(argv):
-        with tempfile.TemporaryDirectory(prefix="config-member-") as directory:
-            private = Path(directory)
-            caller = private / "caller"
-            shutil.copytree(marker.parent, caller)
-            # Rebind the copied poison's absolute paths, including hook and monitor
-            # outputs. Binary git-control objects are copied unchanged.
-            for path in caller.rglob("*"):
-                if not path.is_file():
-                    continue
-                try:
-                    text = path.read_text(encoding="utf-8")
-                except UnicodeError:
-                    continue
-                replaced = text.replace(str(marker.parent), str(caller))
-                if replaced != text:
-                    path.write_text(replaced, encoding="utf-8")
-            member_env = {k: v.replace(str(marker.parent), str(caller)) for k, v in env.items()}
-            real_git = shutil.which("git", path=member_env.get("PATH", os.defpath))
-            if real_git is None:
-                raise ValueError("config observation requires git")
-            hook_log = caller / marker.name
-            monitor_log = caller / monitor_marker.name
-            exposure = private / "exposure"
-            wrapper = private / "git"
-            wrapper.write_text(
-                '#!/bin/sh\n'
-                'if [ "$#" = 1 ] && [ "$1" = --version ]; then exec {git} "$@"; fi\n'
-                'if [ {archive} = yes ] && [ "$#" = 6 ] && [ "$1" = -C ] && '
-                '[ "$2" = {root} ] && [ "$3" = -c ] && '
-                '[ "$4" = core.attributesFile=/dev/null ] && '
-                '[ "$5" = archive ] && [ "$6" = HEAD ]; then exec {git} "$@"; fi\n'
-                '[ "${{HOME:-}}" != {home} ] || printf "home\\n" >> {log}\n'
-                '[ "${{XDG_CONFIG_HOME:-}}" != {xdg} ] || printf "xdg\\n" >> {log}\n'
-                'if [ {system} = yes ] && [ "${{GIT_CONFIG_NOSYSTEM:-}}" != 1 ] && '
-                '[ "${{GIT_CONFIG_SYSTEM+x}}" != x ]; then printf "system\\n" >> {log}; fi\n'
-                'exec {git} "$@"\n'.format(
-                    git=shlex.quote(real_git),
-                    archive="yes" if _command_identity(argv) in CONFIG_EXCLUSIONS["archive"] else "no",
-                    root=shlex.quote(str(ROOT)), home=shlex.quote(member_env["HOME"]),
-                    xdg=shlex.quote(member_env["XDG_CONFIG_HOME"]), log=shlex.quote(str(exposure)),
-                    system="yes" if system else "no"), encoding="utf-8")
-            wrapper.chmod(0o700)
-            member_env["PATH"] = directory + os.pathsep + member_env.get("PATH", os.defpath)
-            exposure.write_bytes(b"")
-            subprocess.run(["git", "config", "--get", "user.name"], env=member_env,
-                           capture_output=True, timeout=60)
-            live = exposure.read_bytes()
-            if b"home\n" not in live or b"xdg\n" not in live or (system and b"system\n" not in live):
-                raise ValueError("config observer did not detect its positive control")
-            exposure.write_bytes(b"")
-            hook_log.write_bytes(b"")
-            monitor_log.write_bytes(b"")
-            rc = _run_config_member(argv, member_env)
-            result = (rc, hook_log.read_bytes(), monitor_log.read_bytes(), exposure.read_bytes())
-            print("CONFIG RUN {}: rc={}, exposure={}".format(
-                " ".join(argv), rc, sorted(set(result[3].decode().splitlines()))), flush=True)
-            return argv, result
+    def prepare(private, argv):
+        caller = private / "caller"
+        shutil.copytree(marker.parent, caller)
+        # Rebind the copied poison's absolute paths, including hook and monitor
+        # outputs. Binary git-control objects are copied unchanged.
+        for path in caller.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeError:
+                continue
+            replaced = text.replace(str(marker.parent), str(caller))
+            if replaced != text:
+                path.write_text(replaced, encoding="utf-8")
+        member_env = {k: v.replace(str(marker.parent), str(caller)) for k, v in env.items()}
+        real_git = shutil.which("git", path=member_env.get("PATH", os.defpath))
+        if real_git is None:
+            raise ValueError("config observation requires git")
+        exposure = private / "exposure"
+        bypass = private / "bypass"
+        wrapper = private / "git"
+        wrapper.write_text(
+            '#!/bin/sh\n'
+            'if [ "$#" = 1 ] && [ "$1" = --version ]; then exec {git} "$@"; fi\n'
+            'if [ {archive} = yes ] && [ "$#" = 6 ] && [ "$1" = -C ] && '
+            '[ "$2" = {root} ] && [ "$3" = -c ] && '
+            '[ "$4" = core.attributesFile=/dev/null ] && '
+            '[ "$5" = archive ] && [ "$6" = HEAD ]; then exec {git} "$@"; fi\n'
+            '[ "${{HOME:-}}" != {home} ] || printf "home\\n" >> {log}\n'
+            '[ "${{XDG_CONFIG_HOME:-}}" != {xdg} ] || printf "xdg\\n" >> {log}\n'
+            'if [ {system} = yes ] && [ "${{GIT_CONFIG_NOSYSTEM:-}}" != 1 ] && '
+            '[ "${{GIT_CONFIG_SYSTEM+x}}" != x ]; then printf "system\\n" >> {log}; fi\n'
+            'exec {git} "$@"\n'.format(
+                git=shlex.quote(real_git),
+                archive="yes" if _command_identity(argv) in CONFIG_EXCLUSIONS["archive"] else "no",
+                root=shlex.quote(str(ROOT)), home=shlex.quote(member_env["HOME"]),
+                xdg=shlex.quote(member_env["XDG_CONFIG_HOME"]), log=shlex.quote(str(exposure)),
+                system="yes" if system else "no"), encoding="utf-8")
+        wrapper.chmod(0o700)
+        trap = private / "fallback-trap"
+        trap.mkdir()
+        tripwire = trap / "git"
+        tripwire.write_text(
+            '#!/bin/sh\nprintf "bypassed\\n" >> {log}\nexit 66\n'.format(
+                log=shlex.quote(str(bypass))), encoding="utf-8")
+        tripwire.chmod(0o700)
+        member_env["PATH"] = (str(private) + os.pathsep + str(trap) + os.pathsep
+                              + member_env.get("PATH", os.defpath))
+        exposure.write_bytes(b"")
+        bypass.write_bytes(b"")
+        return (argv, member_env, caller / marker.name, caller / monitor_marker.name,
+                exposure, bypass)
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        results = dict(pool.map(run, roster))
+    def run(prepared):
+        argv, member_env, hook_log, monitor_log, exposure, bypass = prepared
+        subprocess.run(["git", "config", "--get", "user.name"], env=member_env,
+                       capture_output=True, timeout=60)
+        _require_wrapper_observed(bypass, "positive control: " + " ".join(argv))
+        live = exposure.read_bytes()
+        if b"home\n" not in live or b"xdg\n" not in live or (system and b"system\n" not in live):
+            raise ValueError("config observer did not detect its positive control")
+        exposure.write_bytes(b"")
+        hook_log.write_bytes(b"")
+        monitor_log.write_bytes(b"")
+        rc = _run_config_member(argv, member_env)
+        _require_wrapper_observed(bypass, "member run: " + " ".join(argv))
+        result = (rc, hook_log.read_bytes(), monitor_log.read_bytes(), exposure.read_bytes())
+        print("CONFIG RUN {}: rc={}, exposure={}".format(
+            " ".join(argv), rc, sorted(set(result[3].decode().splitlines()))), flush=True)
+        return argv, result
+
+    stage = Path(tempfile.mkdtemp(prefix="config-observe-"))
+    try:
+        prepared = []
+        for index, argv in enumerate(roster):
+            private = stage / "member-{:03d}".format(index)
+            private.mkdir()
+            prepared.append(prepare(private, argv))
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = dict(pool.map(run, prepared))
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
     marker.write_bytes(b"")
     monitor_marker.write_bytes(b"")
     return results
+
+
+def _require_wrapper_observed(bypass, what):
+    """FAIL CLOSED on a bypassed observer. The tripwire records every git launch
+    that fell through past the observer wrapper, so a recorded bypass means git
+    ran unobserved and any clean exposure or marker evidence from this run is
+    void; raise instead of returning a result that could read as clean."""
+    recorded = bypass.read_bytes()
+    if recorded:
+        raise ValueError(
+            "config observer wrapper was bypassed ({}): exec fell through past the wrapper "
+            "to the tripwire {} time(s)".format(what, len(recorded.splitlines())))
+
+
+class HolderNotReady(Exception):
+    """The bypass control's write holder never signalled readiness in time."""
+
+
+def _await_holder_ready(holder, seconds=60):
+    """Read the holder's readiness line under a DEADLINE, never an unbounded
+    readline(): return only on exactly b"held\\n", and raise HolderNotReady on
+    the deadline, on EOF, or on any other bytes, so a stalled holder fails the
+    control closed instead of hanging it before its bounded cleanup."""
+    import select
+    import time
+
+    fd = holder.stdout.fileno()
+    deadline = time.monotonic() + seconds
+    line = b""
+    while not line.endswith(b"\n"):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+            raise HolderNotReady("no readiness line within {} s, got {!r}".format(seconds, line))
+        chunk = os.read(fd, 64)
+        if not chunk:
+            raise HolderNotReady("holder closed its output before readiness, got {!r}".format(line))
+        line += chunk
+    if line != b"held\n":
+        raise HolderNotReady("unexpected readiness line {!r}".format(line))
+
+
+def _wrapper_bypass_control(base, env, marker, monitor_marker):
+    """POSITIVE CONTROL for the fall-through tripwire and its fail-closed guard.
+    Mechanism leg: hold an observer-shaped wrapper open for writing from a live
+    child (the ETXTBSY condition a concurrently forked child creates) and exec
+    git through the member-shaped PATH: CPython's exec PATH search skips the
+    busy wrapper and continues, so without the tripwire the REAL git would run
+    unobserved, a false clean. The tripwire must intercept (rc 66, bypass
+    recorded, wrapper silent), _require_wrapper_observed must refuse the
+    recorded bypass, and the released leg must run the wrapper itself with the
+    tripwire silent; this leg's PATH is pinned to the two controlled
+    directories only.
+    Production leg: _config_results itself runs one synthetic member whose
+    member launch holds the REAL observer wrapper open for writing and launches
+    git; the run must fail closed with the bypass diagnostic naming the member,
+    never return a clean result."""
+    import shlex
+    from unittest.mock import patch
+
+    probe = base / "bypass-control"
+    trap = probe / "fallback-trap"
+    trap.mkdir(parents=True)
+    wrapper_log = probe / "wrapper-log"
+    bypass_log = probe / "bypass-log"
+    for path in (wrapper_log, bypass_log):
+        path.write_bytes(b"")
+    wrapper = probe / "git"
+    wrapper.write_text("#!/bin/sh\nprintf 'wrapper\\n' >> {}\n".format(
+        shlex.quote(str(wrapper_log))), encoding="utf-8")
+    wrapper.chmod(0o700)
+    tripwire = trap / "git"
+    tripwire.write_text("#!/bin/sh\nprintf 'bypassed\\n' >> {}\nexit 66\n".format(
+        shlex.quote(str(bypass_log))), encoding="utf-8")
+    tripwire.chmod(0o700)
+    probe_env = {"PATH": str(probe) + os.pathsep + str(trap)}
+
+    def launch():
+        try:
+            done = subprocess.run(["git"], env=probe_env, capture_output=True, timeout=60)
+            rc = done.returncode
+        except (OSError, subprocess.SubprocessError) as exc:
+            rc = "control launch failed: {}".format(exc)
+        return (rc, bypass_log.read_bytes(), wrapper_log.read_bytes())
+
+    holder_code = "\n".join((
+        "import sys",
+        "handle = open(sys.argv[1], 'ab')",
+        "print('held', flush=True)",
+        "sys.stdin.read()",
+        "handle.close()",
+    ))
+    holder = subprocess.Popen([sys.executable, "-I", "-B", "-c", holder_code, str(wrapper)],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    try:
+        try:
+            _await_holder_ready(holder)
+            held = launch()
+        except HolderNotReady as exc:
+            held = "HolderNotReady: {}".format(exc)
+        try:
+            _require_wrapper_observed(bypass_log, "control")
+            refused = "guard accepted a recorded bypass"
+        except ValueError as exc:
+            refused = str(exc).startswith("config observer wrapper was bypassed")
+    finally:
+        holder.stdin.close()
+        holder.stdout.close()
+        try:
+            holder.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            holder.kill()
+            holder.wait(timeout=60)
+    for path in (wrapper_log, bypass_log):
+        path.write_bytes(b"")
+    released = launch()
+
+    def bypassing_member(argv, member_env):
+        busy = Path(member_env["PATH"].split(os.pathsep)[0]) / "git"
+        with open(busy, "ab"):
+            done = subprocess.run(["git", "config", "--get", "user.name"], env=member_env,
+                                  capture_output=True, timeout=60)
+        return done.returncode
+
+    outcome = "member bypass returned a clean result"
+    try:
+        with patch.object(sys.modules[__name__], "_run_config_member", bypassing_member):
+            _config_results((("tools/bypass-control-probe", "--self-test"),),
+                            env, marker, monitor_marker)
+    except ValueError as exc:
+        message = str(exc)
+        outcome = (message.startswith("config observer wrapper was bypassed")
+                   and "member run: tools/bypass-control-probe --self-test" in message)
+    check("config/wrapper-bypass-fails-closed",
+          (held, refused, released, outcome),
+          ((66, b"bypassed\n", b""), True, (0, b"", b"wrapper\n"), True))
+
+
+_WRITE_RECORDERS = []
+_WRITE_AUDIT_INSTALLED = False
+
+
+def _dispatch_write_audit(event, args):
+    """Process-wide audit hook (CPython cannot remove one); inert unless a
+    recorder is registered in _WRITE_RECORDERS."""
+    for recorder in tuple(_WRITE_RECORDERS):
+        recorder(event, args)
+
+
+def _prepared_before_pool_control(env, marker, monitor_marker):
+    """DETERMINISTIC guard for the root-cause ordering in _config_results (no
+    stress, no timing): every file a member will exec (the observer wrapper,
+    the tripwire, the copied hooks and fsmonitor) must be written and chmodded
+    on the MAIN thread before the worker pool is constructed. A CPython audit
+    hook records every open-for-write, chmod, rename, link and symlink with its
+    thread and whether the pool exists yet; each synthetic member snapshots the
+    executable files in its private tree from inside the pool. Moving member
+    preparation back into the pooled body turns this red on every run, whether
+    or not a fork happens to race a write. The red member chmods its own
+    wrapper from inside the pool and must be flagged, so a recorder that sees
+    nothing cannot pass; the required files and the every-executable-was-seen
+    leg keep the clean member from passing vacuously. File-descriptor-only
+    operations (os.fchmod, a write through an inherited descriptor) are outside
+    what these audit events name."""
+    import concurrent.futures
+    import threading
+    from unittest.mock import patch
+
+    global _WRITE_AUDIT_INSTALLED
+    write_flags = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+    target = {"open": 0, "os.chmod": 0, "os.rename": 1, "os.link": 1, "os.symlink": 1}
+    main_thread = threading.main_thread().ident
+    pool_started = []
+    events = []
+    snapshots = {}
+
+    def record(event, args):
+        if event not in target or (event == "open" and not args[2] & write_flags):
+            return
+        path = args[target[event]]
+        if not isinstance(path, int):
+            events.append((os.path.abspath(os.fsdecode(path)), event,
+                           threading.get_ident() == main_thread and not pool_started))
+
+    class MarkedPool(concurrent.futures.ThreadPoolExecutor):
+        def __init__(self, *args, **kwargs):
+            pool_started.append(True)
+            super().__init__(*args, **kwargs)
+
+    def snapshot_member(argv, member_env):
+        private = member_env["PATH"].split(os.pathsep)[0]
+        found = set()
+        for folder, _, names in os.walk(private):
+            for name in names:
+                path = os.path.join(folder, name)
+                if os.path.isfile(path) and os.stat(path).st_mode & 0o111:
+                    found.add(os.path.abspath(path))
+        snapshots[argv[0]] = (private, found)
+        if argv[0].endswith("-red"):
+            os.chmod(os.path.join(private, "git"), 0o700)
+        return 0
+
+    required = ["git", os.path.join("fallback-trap", "git"), os.path.join("caller", "fsmonitor"),
+                os.path.join("caller", "config-hooks", "pre-commit")]
+
+    def verdict(member):
+        if member not in snapshots:
+            return "member did not run: " + member
+        private, found = snapshots[member]
+        written = {path for path, _, _ in events}
+        return (sorted(set(required) - {os.path.relpath(p, private) for p in found}),
+                sorted(os.path.relpath(p, private) for p in found - written),
+                sorted({(os.path.relpath(p, private), event)
+                        for p, event, early in events if p in found and not early}))
+
+    clean, red = "tools/prepared-before-pool-probe", "tools/prepared-before-pool-probe-red"
+    if not _WRITE_AUDIT_INSTALLED:
+        sys.addaudithook(_dispatch_write_audit)
+        _WRITE_AUDIT_INSTALLED = True
+    _WRITE_RECORDERS.append(record)
+    try:
+        with patch.object(concurrent.futures, "ThreadPoolExecutor", MarkedPool), patch.object(
+                sys.modules[__name__], "_run_config_member", snapshot_member):
+            _config_results(((clean, "--self-test"), (red, "--self-test")),
+                            env, marker, monitor_marker)
+        got = (bool(pool_started), verdict(clean), verdict(red))
+    except ValueError as exc:
+        got = "config run raised: {}".format(exc)
+    finally:
+        _WRITE_RECORDERS.remove(record)
+    check("config/executables-prepared-before-pool", got,
+          (True, ([], [], []), ([], [], [("git", "os.chmod")])))
 
 
 def _member_result(results, member, column):
@@ -841,6 +1106,8 @@ def _config_injection_lane(base):
                            capture_output=True, timeout=60)
     check("config/combined-fsmonitor-control", (probe.returncode, bool(monitor_marker.read_bytes())),
           (0, True))
+    _wrapper_bypass_control(base, env, marker, monitor_marker)
+    _prepared_before_pool_control(env, marker, monitor_marker)
     combined = _config_results(roster, env, marker, monitor_marker)
     check("config/registered-combined", [argv for argv, value in combined.items()
                                        if value != (0, b"", b"", b"")], [])
