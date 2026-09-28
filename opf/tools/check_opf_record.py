@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T16)
+  check_opf_record.py --self-test                    the fixture suite (T1-T17)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -33,9 +33,9 @@ Each case runs on its own copy of that template; the root is removed in a finall
       from active) lands unqualified done with exactly one receipt_of receipt and its own worklog entry,
       doctor VALID once committed (flips: derive the bare status for an assistant; drop the
       maintainer-only check; drop the done-only-through-its-receipt guard)
-  T7  a maintainer rejection without --reason, of a proposal the worklog does not record, to another
-      state, or by an assistant refuses with every byte untouched; with a reason it returns to the
-      recorded and committed pre-proposal state and records the reason (flips: the check sees a
+  T7  a maintainer rejection without --reason, of a proposal that does not record its pre-proposal
+      state, to another state, or by an assistant refuses with every byte untouched; with a reason it
+      returns to the recorded pre-proposal state and records the reason (flips: the check sees a
       placeholder reason; guess the pre-proposal state)
   T8  two branches that each create from the same committed counters conflict on the store paths; a
       canonical union resolution with the duplicate BI-1 is doctor INVALID with a C-ID-SPACE finding
@@ -59,15 +59,16 @@ Each case runs on its own copy of that template; the root is removed in a finall
   T15 a run whose journal lock release fails after COMPLETE still renders, runs doctor, and reports, and
       says the lock was left; the next run reconciles the leftover lock and names the COMPLETE
       transaction without claiming render and doctor never ran (flip: the old never-ran outcome text)
-  T16 a rejection whose worklog lifecycle line disagrees with the committed history (the line's FROM state
-      rewritten canonically and committed, doctor VALID; or a history that reached the proposal again from
-      another state), whose committed snapshot before the proposal commit does not parse, whose proposal
-      is not committed, whose repository carries a .git/info/grafts entry substituting the corroborating
-      parent without rewriting the proposal commit (the deprecation warning silenced, so the refusal is
-      the grafts refusal itself, never an incidental one), or whose committed pre-proposal snapshot is an
-      unsupported-schema index carrying an incomplete record refuses with every byte untouched (flips:
-      trust the worklog line alone; resolve the corroborating parent through git's graph with the grafts
-      refusal dropped; use the historical snapshot without index schema or record validation)
+  T16 the proposing transition writes the pre-proposal state into the record's own proposed_from field;
+      a maintainer rejection restores exactly that recorded state and removes the field; a forged
+      proposing worklog line (its FROM state rewritten canonically, committed with its views, doctor
+      VALID) changes nothing in either direction, refused target and restored state alike; a proposal
+      carrying no proposed_from (proposed outside the verb by a canonical hand edit) refuses with every
+      byte untouched; and a reject-and-re-propose cycle merged --no-ff or squash-merged into the mainline
+      behaves exactly the same (flip: read the worklog lifecycle line instead of the record's field)
+  T17 a planner mutation that changes only a value's TYPE (an extension count to true or 1.0, the index
+      schema marker to true, the receipt counter to true) refuses exit 2 before publication with every
+      byte untouched (flip: compare the delta with ordinary equality instead of the strict comparator)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -803,7 +804,7 @@ def t7_rejection(fx):
         assert entry["detail"] == "opf-record transition BI-1 done/proposed -> active\nreason: the fix did not hold"
         assert entry["actor"] == {"kind": "maintainer", "id": "owner"}, entry
         doctor_valid(env, root)
-    # A proposal made outside this verb: the worklog records no pre-proposal state, so it cannot be rejected.
+    # A proposal made outside this verb: the record carries no proposed_from, so it cannot be rejected.
     root = fx.case("t7-unrecorded")
     with ticking():
         step(fx, root, CREATE, "BI-1")
@@ -820,7 +821,7 @@ def flip_t7_reason():
 
 
 def flip_t7_pre():
-    return patch.object(record, "_pre_proposal_state", lambda entries, rid, status: "active")
+    return patch.object(record, "_recorded_pre_proposal", lambda ctx, row, rid, status: "active")
 
 
 def _proposed(fx, root, via):
@@ -838,10 +839,22 @@ def _set_status(fx, root, status, message):
     write_commit(fx.env, root, BI_INDEX, emit.emit_checked(index).encode("utf-8"), message)
 
 
-def t16_corroborated_rejection(fx):
+def t16_recorded_predecessor(fx):
     env = fx.env
-    # The reproduction: only the proposing line's FROM state is rewritten, canonically, and committed with
-    # its re-rendered views, so doctor is VALID and byte reproduction passes.
+    # The proposing transition records the pre-proposal state in the record itself; the rejection restores
+    # exactly it and removes the field.
+    root = fx.case("t16-restore")
+    with ticking():
+        _proposed(fx, root, "dropped")
+        assert row(root, "BI-1").get("proposed_from") == "active", row(root, "BI-1")
+        doctor_valid(env, root)
+        refused_untouched(env, root, ["transition", "BI-1", "open", "--reason", "x"] + MAINTAINER,
+                          "actual pre-proposal state")
+        step(fx, root, ["transition", "BI-1", "active", "--reason", "stale"] + MAINTAINER, "rejected")
+        assert row(root, "BI-1")["status"] == "active" and "proposed_from" not in row(root, "BI-1")
+        doctor_valid(env, root)
+    # A forged proposing line (its FROM state rewritten canonically, committed with its views, doctor
+    # VALID) changes nothing: the attack target still refuses, the genuine rejection still lands.
     root = fx.case("t16-forged-line")
     with ticking():
         _proposed(fx, root, "dropped")
@@ -855,112 +868,124 @@ def t16_corroborated_rejection(fx):
         env.git(root, "add", "-A")
         env.git(root, "commit", "-q", "-m", "views")
         doctor_valid(env, root)
-        for state in ("open", "active"):
-            refused_untouched(env, root, ["transition", "BI-1", state, "--reason", "reject"] + MAINTAINER,
-                              "altered or stale")
-        assert row(root, "BI-1")["status"] == "dropped/proposed"
-    # Stale: the committed history reaches the proposal again from another state after the verb's line.
-    root = fx.case("t16-stale-line")
-    with ticking():
-        _proposed(fx, root, "done")
-        _set_status(fx, root, "open", "BI-1 back to open by hand")
-        _set_status(fx, root, "done/proposed", "BI-1 proposed again by hand")
-        refused_untouched(env, root, ["transition", "BI-1", "active", "--reason", "x"] + MAINTAINER,
-                          "altered or stale")
-    # Malformed: the snapshot immediately before the (latest) proposal commit does not parse.
-    root = fx.case("t16-malformed-history")
-    with ticking():
-        _proposed(fx, root, "done")
-        proposed = read(root, BI_INDEX)
-        write_commit(env, root, BI_INDEX, b"record = [\n", "a torn index")
-        write_commit(env, root, BI_INDEX, proposed, "the proposed index restored")
-        refused_untouched(env, root, ["transition", "BI-1", "active", "--reason", "x"] + MAINTAINER,
-                          "does not parse")
-    # Unverifiable: a proposal left uncommitted has no committed history yet.
-    root = fx.case("t16-uncommitted")
+        refused_untouched(env, root, ["transition", "BI-1", "open", "--reason", "reject"] + MAINTAINER,
+                          "actual pre-proposal state")
+        step(fx, root, ["transition", "BI-1", "active", "--reason", "stale"] + MAINTAINER,
+             "rejected despite the forged line")
+        assert row(root, "BI-1")["status"] == "active" and "proposed_from" not in row(root, "BI-1")
+        doctor_valid(env, root)
+    # A proposal made outside the verb carries no proposed_from and cannot be rejected here.
+    root = fx.case("t16-unrecorded")
     with ticking():
         step(fx, root, CREATE, "BI-1")
         step(fx, root, ["transition", "BI-1", "active"] + ASSISTANT, "BI-1 active")
-        recorded(record_cli(env, root, ["transition", "BI-1", "done"] + ASSISTANT))
+        _set_status(fx, root, "done/proposed", "proposed by hand")
         refused_untouched(env, root, ["transition", "BI-1", "active", "--reason", "x"] + MAINTAINER,
-                          "the proposal is not committed")
-    # Grafted: a .git/info/grafts entry substitutes the proposal commit's parent through git's graph
-    # without rewriting the commit's raw bytes, so the forged line's FROM state reads as corroborated.
-    # The deprecation warning is silenced (advice.graftFileDeprecated=false) so what refuses is the grafts
-    # refusal itself, never an incidental cleanliness refusal that would mask the bypass.
-    root = fx.case("t16-grafted-parent")
-    with ticking():
-        step(fx, root, CREATE, "BI-1")
-        open_commit = env.git(root, "rev-parse", "HEAD").strip()
-        step(fx, root, ["transition", "BI-1", "active"] + ASSISTANT, "BI-1 active")
-        step(fx, root, ["transition", "BI-1", "dropped"] + ASSISTANT, "BI-1 dropped/proposed")
-        proposal_commit = env.git(root, "rev-parse", "HEAD").strip()
-        worklog = model(root, WORKLOG)
-        worklog["entry"][-1]["detail"] = "opf-record transition BI-1 open -> dropped/proposed"
-        write_commit(env, root, WORKLOG, emit.emit_checked(worklog).encode("utf-8"), "a forged proposing line")
-        rc, out, err = cli(env, ["render", "--root", str(root), "--write"])
-        assert rc == 0, ("T16 the views re-render", rc, err[-800:])
-        env.git(root, "add", "-A")
-        env.git(root, "commit", "-q", "-m", "views")
-        doctor_valid(env, root)
-        env.git(root, "config", "advice.graftFileDeprecated", "false")
-        grafts = Path(root) / ".git" / "info" / "grafts"
-        grafts.parent.mkdir(parents=True, exist_ok=True)
-        grafts.write_text("{} {}\n".format(proposal_commit, open_commit), encoding="utf-8")
-        refused_untouched(env, root, ["transition", "BI-1", "open", "--reason", "reject"] + MAINTAINER,
-                          "grafts file is present")
-        assert row(root, "BI-1")["status"] == "dropped/proposed"
-    # Schema-invalid history: the snapshot before the (latest) proposal commit is syntactically valid TOML
-    # whose index schema is unsupported and whose only row is an incomplete envelope; it must never supply
-    # the corroborating status.
-    root = fx.case("t16-invalid-history-schema")
-    with ticking():
-        _proposed(fx, root, "done")
-        proposed = read(root, BI_INDEX)
-        write_commit(env, root, BI_INDEX,
-                     b'schema = 999\n\n[[record]]\nid = "BI-1"\nstatus = "open"\n',
-                     "an unsupported historical index")
-        write_commit(env, root, BI_INDEX, proposed, "the proposed index restored")
-        worklog = model(root, WORKLOG)
-        worklog["entry"][-1]["detail"] = "opf-record transition BI-1 open -> done/proposed"
-        write_commit(env, root, WORKLOG, emit.emit_checked(worklog).encode("utf-8"), "a forged proposing line")
-        rc, out, err = cli(env, ["render", "--root", str(root), "--write"])
-        assert rc == 0, ("T16 the views re-render", rc, err[-800:])
-        env.git(root, "add", "-A")
-        env.git(root, "commit", "-q", "-m", "views")
-        doctor_valid(env, root)
-        refused_untouched(env, root, ["transition", "BI-1", "open", "--reason", "reject"] + MAINTAINER,
-                          "not a supported schema-1")
-        assert row(root, "BI-1")["status"] == "done/proposed"
+                          "no pre-proposal state")
+    # Merge styles of a reject-and-re-propose cycle (the QA3 F1 reproduction): the recorded field rides
+    # the merge, so the rejection still restores the true predecessor and the forged line still fails.
+    for style in ("no-ff", "squash"):
+        root = fx.case("t16-merge-" + style)
+        with ticking():
+            step(fx, root, CREATE, "BI-1")
+            step(fx, root, ["transition", "BI-1", "dropped"] + ASSISTANT, "BI-1 dropped/proposed")
+            env.git(root, "checkout", "-q", "-b", "side")
+            step(fx, root, ["transition", "BI-1", "open", "--reason", "not yet"] + MAINTAINER, "rejected")
+            step(fx, root, ["transition", "BI-1", "active"] + ASSISTANT, "BI-1 active")
+            step(fx, root, ["transition", "BI-1", "dropped"] + ASSISTANT, "BI-1 dropped/proposed again")
+            env.git(root, "checkout", "-q", "main")
+            if style == "no-ff":
+                env.git(root, "merge", "-q", "--no-ff", "--no-edit", "side")
+            else:
+                env.git(root, "merge", "--squash", "-q", "side")
+                env.git(root, "commit", "-q", "-m", "squash side")
+            doctor_valid(env, root)
+            assert row(root, "BI-1").get("proposed_from") == "active", (style, row(root, "BI-1"))
+            worklog = model(root, WORKLOG)
+            worklog["entry"][-1]["detail"] = "opf-record transition BI-1 open -> dropped/proposed"
+            write_commit(env, root, WORKLOG, emit.emit_checked(worklog).encode("utf-8"),
+                         "a forged proposing line")
+            rc, out, err = cli(env, ["render", "--root", str(root), "--write"])
+            assert rc == 0, ("T16 the views re-render", style, rc, err[-800:])
+            env.git(root, "add", "-A")
+            env.git(root, "commit", "-q", "-m", "views")
+            doctor_valid(env, root)
+            refused_untouched(env, root, ["transition", "BI-1", "open", "--reason", "reject"] + MAINTAINER,
+                              "actual pre-proposal state")
+            step(fx, root, ["transition", "BI-1", "active", "--reason", "ok"] + MAINTAINER,
+                 "rejected genuinely after the merge")
+            assert row(root, "BI-1")["status"] == "active" and "proposed_from" not in row(root, "BI-1")
+            doctor_valid(env, root)
 
 
 def flip_t16():
-    """Trust the worklog's lifecycle line alone (the reviewed head's behaviour)."""
-    return patch.object(record, "_corroborated_pre_proposal",
-                        lambda ctx, rel, rid, status, claimed, rtype: (claimed, None))
+    """Read the pre-proposal state from the worklog lifecycle line (the retired corroboration's input,
+    hand-editable text) instead of the record's own field: the forged-line cases must turn red."""
+    def from_worklog(ctx, row, rid, status):
+        for entry in reversed(record._worklog_entries(ctx)):
+            detail = entry.get("detail") if isinstance(entry, dict) else None
+            if not isinstance(detail, str):
+                continue
+            m = record._LIFECYCLE_RE.match(detail.split("\n", 1)[0])
+            if m is None or m.group(2) != rid:
+                continue
+            if m.group(1) == "transition" and m.group(4) == status and m.group(3) and "/" not in m.group(3):
+                return m.group(3)
+            return None
+        return None
+    return patch.object(record, "_recorded_pre_proposal", from_worklog)
 
 
-@contextlib.contextmanager
-def flip_t16_graft():
-    """Resolve the corroborating parent through git's graph with the grafts refusal dropped (the reviewed
-    head's behaviour: an info/grafts entry substitutes the parent without rewriting the proposal commit)."""
-    with patch.object(record, "_require_graftless", lambda git, store_root: None), \
-            patch.object(record, "_raw_first_parent",
-                         lambda git, store_root, commit: record._git_oid(git, store_root,
-                                                                         commit + "^1^{commit}")):
-        yield
+# --- T17: the strict type-aware delta comparison (codex QA3 F2) ----------------------------------------------
+
+MANIFEST = MACH + "/manifest.toml"
 
 
-@contextlib.contextmanager
-def flip_t16_schema():
-    """Use a historical snapshot after TOML parsing plus the id/status checks alone (the reviewed head's
-    behaviour: no index schema or structure validation, no record validation)."""
-    with patch.object(record, "_historical_index_rows",
-                      lambda document, path, commit: [r for r in document.get("record", [])
-                                                      if isinstance(r, dict)]), \
-            patch.object(record, "_validated_historical_record",
-                         lambda row, rid, rtype, vendors, path, commit: None):
-        yield
+def t17_strict_delta(fx):
+    """A planner mutation that changes only a value's TYPE (True for 1, 1.0 for 1) must refuse before
+    publication with every byte untouched: ordinary equality (True == 1, 1.0 == 1) would publish it."""
+    env = fx.env
+    base = fx.case("t17-base")
+    with ticking():
+        step(fx, base, CREATE, "BI-1")
+        step(fx, base, ["transition", "BI-1", "active"] + ASSISTANT, "BI-1 active")
+    manifest = model(base, MANIFEST)
+    manifest["vendors"] = dict(registered=["x-qa"])
+    write_commit(env, base, MANIFEST, emit.emit_checked(manifest).encode("utf-8"), "register x-qa")
+    index = model(base, BI_INDEX)
+    index["record"][0]["x-qa"] = dict(count=1)
+    write_commit(env, base, BI_INDEX, emit.emit_checked(index).encode("utf-8"), "an x-qa extension")
+    rc, out, err = cli(env, ["render", "--root", str(base), "--write"])
+    assert rc == 0, ("T17 the views re-render", rc, err[-800:])
+    env.git(base, "add", "-A")
+    env.git(base, "commit", "-q", "-m", "views")
+    doctor_valid(env, base)
+    for label, sub, args, mutate in (
+            ("bool-extension", "transition", ["transition", "BI-1", "done"] + ASSISTANT,
+             lambda ctx, operand: operand.new_model["record"][0]["x-qa"].__setitem__("count", True)),
+            ("float-extension", "done-with-receipt", ["done-with-receipt", "BI-1"] + MAINTAINER,
+             lambda ctx, operand: operand.new_model["record"][0]["x-qa"].__setitem__("count", 1.0)),
+            ("bool-index-schema", "transition", ["transition", "BI-1", "done"] + ASSISTANT,
+             lambda ctx, operand: operand.new_model.__setitem__("schema", True)),
+            ("bool-receipt-counter", "done-with-receipt", ["done-with-receipt", "BI-1"] + MAINTAINER,
+             lambda ctx, operand: ctx.counters.new_model["counters"].__setitem__("DN", True))):
+        root = fx.case("t17-" + label, base)
+
+        def tampering(req, ctx, operand, now, planner=record._PLANNERS[sub], mutate=mutate):
+            plan = planner(req, ctx, operand, now)
+            mutate(ctx, operand)
+            return plan
+
+        clock = Ticker()
+        clock.now += datetime.timedelta(days=1)   # past the base fixture's recorded timestamps
+        with patch.object(record, "_clock_now", clock), patch.dict(record._PLANNERS, {sub: tampering}):
+            refused_untouched(env, root, args, "postcondition failed")
+
+
+def flip_t17():
+    """Compare the delta with ordinary equality (the reviewed head's behaviour): True == 1 and 1.0 == 1
+    then read as the allowed delta and the mutation publishes."""
+    return patch.object(record, "_strict_equal", lambda a, b: a == b)
 
 
 def t8_collision(fx):
@@ -1065,8 +1090,8 @@ TESTS = (
     ("T13-recovery-intervening-edit", t13_intervening_edit, flip_t13),
     ("T14-create-type-before-read", t14_type_before_read, flip_t14),
     ("T15-leftover-journal-lock", t15_leftover_lock, flip_t15),
-    ("T16-rejection-corroborated-by-history", t16_corroborated_rejection, (flip_t16, flip_t16_graft,
-                                                                          flip_t16_schema)),
+    ("T16-rejection-recorded-predecessor", t16_recorded_predecessor, flip_t16),
+    ("T17-strict-type-aware-delta", t17_strict_delta, flip_t17),
 )
 
 

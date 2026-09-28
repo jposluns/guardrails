@@ -762,6 +762,7 @@ unknown key is a validation failure unless it sits under a registered vendor ext
 | `id` | required | `<NS>-<n>`, matching the type's namespace |
 | `type` | required | the type name; must match the file the record lives in |
 | `status` | required | per the status grammar (section 8.4) |
+| `proposed_from` | optional | the unqualified state held before the current `/proposed` status, written by the authoring verb (section 8.8); legal only on a `/proposed` status, and only naming a legal predecessor state for the type |
 | `title` | required | one line, human-oriented |
 | `created_at` | required | RFC 3339 UTC, read from the clock at creation |
 | `updated_at` | required | RFC 3339 UTC, read from the clock at the last transition |
@@ -895,15 +896,16 @@ shapes this specification already defines, so it adds no store-format change and
   or ACT type (`reference`, `autonomous_decision`, `maintainer_decision`) carries no qualifier
   (section 8.4). `done` receipts and worklog entries are not created this way.
 - `transition`: a status change checked against the type's grammar (section 8.5). An assistant or
-  automation author landing a terminal or gated state takes `/proposed`; only a maintainer
-  ratifies, or rejects with a recorded reason back to the recorded pre-proposal state
-  (section 8.4). The envelope records no prior state (section 8.3), so the pre-proposal state is
-  the one the worklog entry of the proposing transition records, and the verb acts on it only
-  when the committed history agrees: the record's status in the committed snapshot immediately
-  before the commit that landed the proposal must be that same state. A proposal with no such
-  entry, or whose entry the committed history contradicts or cannot establish, cannot be
-  rejected by the verb. A backlog item reaches unqualified `done` only through
-  `done-with-receipt`.
+  automation author landing a terminal or gated state takes `/proposed`, and the verb records the
+  state the record held at that moment in the record's own `proposed_from` field (section 8.3) in
+  the same act; only a maintainer ratifies, or rejects with a recorded reason back to the recorded
+  pre-proposal state (section 8.4). A rejection restores exactly the recorded `proposed_from`
+  state, and leaving the `/proposed` status, by rejection or ratification, removes the field. A
+  proposed record that carries no `proposed_from` was proposed outside the verb and cannot be
+  rejected by it; the worklog entry of the proposing transition is informational, never evidence.
+  The field is an ordinary record field, so a canonical hand edit of it is not detected, the same
+  as any other field (the section 5.7 integration-base rule remains the control). A backlog item
+  reaches unqualified `done` only through `done-with-receipt`.
 - `done-with-receipt`: maintainer-only. It moves a backlog item to unqualified `done`, from
   `active` or by ratifying `done/proposed`, and in the same act creates its one-to-one `done`
   receipt linked `receipt_of` (section 8.5). An assistant reaching `done` uses `transition` and
@@ -940,7 +942,9 @@ guarantees:
    publication (section 4.2).
 4. Postcondition: the model diff of every rewritten file equals exactly the operation's allowed
    delta (the new rows appended, the counters advanced by exactly the claim, and for a transition
-   one status and `updated_at` change), value for value, before anything is written. The expected
+   one status and `updated_at` change plus the `proposed_from` write or removal), value for value
+   and type for type (a boolean or float is never equal to an integer), before anything is
+   written. The expected
    delta is derived from the request, the prior bytes of each rewritten file, the claimed IDs, the
    clock value, and the schema rules, never from the planned rows themselves.
 5. The in-repo store contract (section 5.7): the planned destinations are clean, including ignored
@@ -950,8 +954,8 @@ guarantees:
    reconciled. The reference tooling keeps that journal under `.aiqt/record/journal` at homes 1.
 7. The declared views are rendered, then a full doctor must report VALID; a failure leaves the
    change for review with recovery advice scoped to the planned paths. One exception applies to a
-   status change: doctor compares it with the prior committed snapshot, where the transitioning
-   actor and the pre-proposal state are not identifiable, so it can grade that change
+   status change: doctor compares it with the prior committed snapshot, which does not identify
+   the transitioning actor or supply the pre-proposal state, so it can grade that change
    cannot-evaluate until the change is committed. The verb's render and final doctor accept that
    cannot-evaluate only for exactly the record and the from and to statuses it has just written,
    never a finding and never any other cannot-evaluate, and the verb reports it as pending until

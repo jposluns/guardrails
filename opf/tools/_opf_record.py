@@ -11,14 +11,15 @@
 
 `create`, `transition`, and `done-with-receipt` each append their own worklog entry (spec 6.2: one entry
 per change) in the SAME journaled transaction as the change. The entry's `detail` opens with a fixed
-lifecycle line (`opf-record create ID STATUS` or `opf-record transition ID FROM -> TO`): the record history
-that the envelope does not carry (spec 8.3). `transition` takes the target STATE only: an assistant or
-automation author landing a terminal or gated state gets `/proposed` (spec 8.4). A maintainer rejection of a
-`/proposed` record requires --reason and must return to its pre-proposal state, which is corroborated, never
-taken from worklog text alone: the latest lifecycle line for that record must name the state the committed
-history shows (the record's status in the committed snapshot immediately before the commit that landed the
-proposal, read by git at exact object ids: _committed_pre_proposal). With no such line, with a history that
-cannot establish the state, or with the two disagreeing, the rejection cannot be verified and refuses.
+lifecycle line (`opf-record create ID STATUS` or `opf-record transition ID FROM -> TO`): an informational
+record of the lifecycle (spec 8.3), never rejection evidence. `transition` takes the target STATE only: an
+assistant or automation author landing a terminal or gated state gets `/proposed` (spec 8.4), and the verb
+then writes the state the record held at that moment into the record's own `proposed_from` field (spec
+8.3/8.8), validated by _opf_schema (present only on a `/proposed` status, and only a legal predecessor
+state for the type). A maintainer rejection of a `/proposed` record requires --reason, restores exactly the
+recorded `proposed_from` state, and removes the field; leaving the `/proposed` status by ratification
+removes it too. A proposed record that carries no `proposed_from` was proposed outside this verb: its
+rejection target cannot be verified here, so the rejection refuses, never guesses.
 `done-with-receipt` is maintainer-only (any other actor is refused before the store is touched): it moves an
 `active` or `done/proposed` backlog item to `done` and mints the one-to-one `done` receipt, linked
 `receipt_of`, in the same transaction (spec 8.5). `transition` never lands a backlog item at unqualified
@@ -42,8 +43,10 @@ record authoring (spec 9.2 is the precedent; spec 8.8 is normative):
      validate each record through the _opf_schema primitives (validate_transition for a status change),
      refuse an append into a released span;
   5. POSTCONDITION: each emitted document, reparsed, equals its prior bytes, reparsed, plus exactly the
-     allowed delta, value for value (the new rows appended, the counters advanced by exactly the claim,
-     and for a transition one `status` and `updated_at` change on the one named record). The delta is
+     allowed delta, value for value and TYPE for type (the strict _opf_emit._model_equal comparison, so a
+     True or 1.0 never reads as 1): the new rows appended, the counters advanced by exactly the claim,
+     and for a transition the one named record's `status` and `updated_at` change plus its `proposed_from`
+     write or removal. The delta is
      derived INDEPENDENTLY of the planner's rows, from a pre-planning copy of the request, the allocation
      result, the clock value, the planned-from bytes, and the schema rules;
   6. the planned-destination cleanliness gate and the single-writer lease (the shared _opf_write_guard
@@ -80,18 +83,16 @@ byte prefix of the journaled preimage or planned bytes (read as a torn write), i
 transition changes `status` and `updated_at` only, so a target state that requires further fields (a
 `decided` pending_decision's resolution bundle, a `sent` contribution's delivery bundle) refuses at
 validate_record; posting a new handoff does not supersede the previous one in the same act. The
-pre-proposal state's lifecycle line is read from the active worklog only: a record proposed outside this
-verb, or whose proposing entry has rotated to an archive, cannot be rejected here (refused, never guessed).
-Its committed-history corroboration walks the first-parent chain from HEAD (a proposal merged in from a
-branch is judged by the mainline snapshot before the merge, and refuses when that disagrees), reads at most
-_HISTORY_LIMIT commits that changed the record's index, and runs before the lease is taken. Every git read
-runs with replacement objects and the commit graph disabled, a present .git/info/grafts file REFUSES
-outright, each first parent is derived from the commit object's RAW parent header and must exist locally
-as a commit object, and each historical snapshot is validated before its status is evidence (a supported
-schema-1 index whose uniquely matching record is valid for its type), so grafts and replacement
-substitution are refused rather than followed; the corroboration still trusts the repository's own
-history, and a FULL HISTORY REWRITE that changes the committed commits and statuses themselves is not
-detected. A transition refuses when the clock has not passed the record's recorded timestamps.
+pre-proposal state a rejection restores is read from the record's own `proposed_from` field, which this
+verb wrote in the same journaled transaction that landed the `/proposed` status: a proposed record without
+the field (proposed outside this verb) cannot be rejected here (refused, never guessed), and the worklog
+lifecycle line is INFORMATIONAL, never evidence. The committed-history corroboration this verb once ran
+was RETIRED (UNATTENDED DECISION PR2-REJECTION-PREMISE-REVIEW): it trusted the repository's own committed
+history, and three QA rounds each found a way, ending at routine merge shapes of a reject-and-re-propose
+cycle, to make that history corroborate a forged pre-proposal state. `proposed_from` is an ordinary
+canonical record field, so a canonical hand edit of the record, this field included, is NOT detected,
+exactly the byte-reproduction residual above (spec 5.7's integration-base merge policy remains the
+control). A transition refuses when the clock has not passed the record's recorded timestamps.
 """
 import base64
 import binascii
@@ -154,10 +155,10 @@ BACKLOG = "backlog_item"
 # `create` writes `opf-record create ID STATUS`; `transition` and `done-with-receipt` write
 # `opf-record transition ID FROM -> TO`.
 _LIFECYCLE_RE = re.compile(r"^opf-record (create|transition) ([A-Z]{2}-[1-9][0-9]*) (?:(\S+) -> )?(\S+)\Z")
-# The committed-history walk that corroborates a rejection's pre-proposal state reads at most this many
-# first-parent commits that changed the record's index, and refuses beyond it (never guesses).
-_HISTORY_LIMIT = 1000
-_OID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+# The record field a proposing transition writes its pre-proposal state into (spec 8.3/8.8): what a
+# maintainer rejection restores, and what leaving the `/proposed` status removes. Schema-validated by
+# _opf_schema._validate_proposed_from (legal only on a `/proposed` status, a legal predecessor state).
+PROPOSED_FROM = "proposed_from"
 # The single-writer journal lock of one publication carries `opf-record.<token>` as its session, and the
 # transaction directory it opens ends `.<token>`: a leftover lock names its own transaction by that token.
 _TOKEN_RE = re.compile(r"^[0-9a-f]{32}\Z")
@@ -346,7 +347,7 @@ def _require_canonical(operand):
 class Context:
     """The resolved store and the models this operation plans from."""
     __slots__ = ("res", "root", "root_fd", "machine_rel", "manifest", "homes", "types", "vendors",
-                 "counters", "version", "worklog", "done_index", "history")
+                 "counters", "version", "worklog", "done_index")
 
     def __init__(self, res, root, root_fd):
         self.res = res
@@ -361,9 +362,6 @@ class Context:
         self.version = None
         self.worklog = None        # the worklog operand: every subcommand appends one entry
         self.done_index = None     # the done index operand, read by done-with-receipt only
-        # The committed-history reader a rejection corroborates its pre-proposal state through (a seam).
-        self.history = lambda rel, rid, status, rtype: _committed_pre_proposal(
-            res, rel, rid, status, rtype, self.vendors)
 
     def rel(self, name):
         return "{}/{}".format(self.machine_rel, name)
@@ -468,6 +466,7 @@ def _envelope_extras(req, record):
 def _index_rows(operand):
     model = operand.model
     if not (isinstance(model, dict) and set(model) <= _opf_check.INDEX_TOP_KEYS
+            and type(model.get("schema")) is int    # exact int: True == 1 and 1.0 == 1 must not pass
             and model.get("schema") == _opf_schema.SUPPORTED_SCHEMA
             and isinstance(model.get("record", []), list)):
         raise RecordError("{} is not a schema-1 {{schema, record}} index; fail-closed".format(operand.rel))
@@ -496,6 +495,7 @@ def _require_unseated(rows, rid, rel):
 def _worklog_entries(ctx):
     model = ctx.worklog.model
     if not (isinstance(model, dict) and set(model) <= _opf_release.WORKLOG_TOP_KEYS
+            and type(model.get("schema")) is int    # exact int: True == 1 and 1.0 == 1 must not pass
             and model.get("schema") == _opf_schema.SUPPORTED_SCHEMA
             and isinstance(model.get("entry", []), list)):
         raise RecordError("{} is not a schema-1 worklog ledger; fail-closed".format(ctx.worklog.rel))
@@ -517,232 +517,19 @@ def _append_worklog(ctx, entry):
     ctx.worklog.new_model["entry"] = list(ctx.worklog.new_model.get("entry", [])) + [entry]
 
 
-def _pre_proposal_state(entries, rid, status):
-    """The pre-proposal state the worklog RECORDS for `rid`, now at the `/proposed` `status`: the FROM state
-    of the latest lifecycle line for `rid`, provided that line is the transition that landed exactly `status`
-    from an unqualified state. None when the worklog does not record it (the record was proposed outside
-    this verb, the proposing entry was rotated to an archive, or the latest line is some other change): the
-    rejection target then cannot be verified, and validate_transition grades it CANNOT-EVALUATE. The line
-    is worklog text, which a canonical hand edit can alter, so a rejection never acts on it alone: it must
-    agree with the committed history (_corroborated_pre_proposal)."""
-    for entry in reversed(entries):
-        detail = entry.get("detail") if isinstance(entry, dict) else None
-        if not isinstance(detail, str):
-            continue
-        m = _LIFECYCLE_RE.match(detail.split("\n", 1)[0])
-        if m is None or m.group(2) != rid:
-            continue
-        if m.group(1) == "transition" and m.group(4) == status and m.group(3) and "/" not in m.group(3):
-            return m.group(3)
-        return None
-    return None
-
-
-class _Unverifiable(Exception):
-    """The committed history cannot establish a pre-proposal state; the message says why."""
-
-
-def _git_oid(git, store_root, spec):
-    """The exact object id `spec` names, or None when git reports no such object (an absent path, or no
-    parent). _Unverifiable when git cannot run or answers with something that is not an object id."""
-    out = _opf_observe._run_git(git, store_root, ["rev-parse", "--verify", "--quiet", spec])
-    if not out.completed:
-        raise _Unverifiable("git could not run ({})".format(out.err.strip()))
-    if out.rc != 0:
-        return None
-    oid = out.out.decode("ascii", "replace").strip()
-    if not _OID_RE.match(oid):
-        raise _Unverifiable("git named no object id for {}".format(spec))
-    return oid
-
-
-def _require_graftless(git, store_root):
-    """Refuse a repository carrying $GIT_DIR/info/grafts: a grafts entry substitutes commit parents during
-    every graph traversal (rev-list, ^1) WITHOUT rewriting any commit's raw bytes, so a corroborating
-    parent could be swapped in place. --no-replace-objects and core.commitGraph=false, applied by _run_git
-    to every read in this history reader, do not neutralize grafts, so their presence refuses (the
-    tools/check_release_cut.py stance): even an empty or symlinked grafts file refuses, and one that
-    cannot be inspected is never read as absent. Ancestry is then unverifiable, never guessed."""
-    out = _opf_observe._run_git(git, store_root, ["rev-parse", "--path-format=absolute",
-                                                  "--git-path", "info/grafts"])
-    if not out.completed or out.rc != 0:
-        raise _Unverifiable("git could not locate the grafts path ({})".format(out.err.strip()))
-    path = out.out.decode("utf-8", "replace").strip()
-    if not os.path.isabs(path):
-        raise _Unverifiable("git named a non-absolute grafts path")
-    try:
-        os.lstat(path)
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        raise _Unverifiable("the grafts path cannot be inspected ({})".format(exc))
-    raise _Unverifiable("a grafts file is present ({}), which substitutes commit ancestry without "
-                        "rewriting any commit; remove it before a rejection can be corroborated".format(path))
-
-
-def _raw_first_parent(git, store_root, commit):
-    """The first parent of `commit` (an exact commit id) read from the commit object's RAW parent header
-    (git cat-file commit), never resolved through git's graph: grafts, replacement refs, and the commit
-    graph substitute graph traversal but cannot alter the raw commit bytes (the tools/check_release_cut.py
-    commit_header stance; _run_git already disables replacement objects and the commit graph, and
-    _committed_pre_proposal refuses a present grafts file outright). None for a parentless root commit.
-    The named parent must exist locally as a commit object (a shallow boundary names a parent whose object
-    is absent): _Unverifiable otherwise, or when the object cannot be read or its header is malformed."""
-    out = _opf_observe._run_git(git, store_root, ["cat-file", "commit", commit])
-    if not out.completed or out.rc != 0:
-        raise _Unverifiable("git could not read the commit object {} ({})".format(commit[:12], out.err.strip()))
-    if b"\n\n" not in out.out:
-        raise _Unverifiable("the commit object {} carries no header terminator".format(commit[:12]))
-    headers = out.out.split(b"\n\n", 1)[0].splitlines()
-    if not headers or not headers[0].startswith(b"tree "):
-        raise _Unverifiable("the commit object {} carries no tree header".format(commit[:12]))
-    parents = [line[len(b"parent "):].decode("ascii", "replace") for line in headers
-               if line.startswith(b"parent ")]
-    if not parents:
-        return None
-    parent = parents[0]
-    if not _OID_RE.match(parent):
-        raise _Unverifiable("the commit object {} names a malformed parent id".format(commit[:12]))
-    kind = _opf_observe._run_git(git, store_root, ["cat-file", "-t", parent])
-    if not kind.completed:
-        raise _Unverifiable("git could not type the parent {} of {} ({})".format(
-            parent[:12], commit[:12], kind.err.strip()))
-    if kind.rc != 0 or kind.out.strip() != b"commit":
-        raise _Unverifiable("the first parent {} of {} is not a present commit object (a shallow boundary, "
-                            "or a pruned parent)".format(parent[:12], commit[:12]))
-    return parent
-
-
-def _historical_index_rows(document, path, commit):
-    """The [[record]] rows of a committed historical index snapshot, admitted as evidence only when the
-    document is a supported schema-1 {schema, record} index whose rows are all tables (the _index_rows
-    stance applied to committed history): an unsupported schema, an unknown top-level key, or a non-table
-    row is _Unverifiable, never read through for a status."""
-    if not (isinstance(document, dict) and set(document) <= _opf_check.INDEX_TOP_KEYS
-            and document.get("schema") == _opf_schema.SUPPORTED_SCHEMA
-            and isinstance(document.get("record", []), list)):
-        raise _Unverifiable("{} at {} is not a supported schema-{} {{schema, record}} record index".format(
-            path, commit[:12], _opf_schema.SUPPORTED_SCHEMA))
-    rows = document.get("record", [])
-    if not all(isinstance(row, dict) for row in rows):
-        raise _Unverifiable("{} at {} carries a non-table record row".format(path, commit[:12]))
-    return rows
-
-
-def _validated_historical_record(row, rid, rtype, vendors, path, commit):
-    """The uniquely matching historical record, validated against the type the live index carries through
-    the store's own record validator (validate_record) BEFORE its status is used as evidence: an
-    incomplete envelope, a type mismatch, or any other schema violation is _Unverifiable, never
-    corroboration."""
-    rv = _opf_schema.validate_record(row, expected_type=rtype, registered_vendors=vendors)
-    if rv.status != _opf_store.VALID:
-        raise _Unverifiable("{} in {} at {} is not a valid {} record ({}), so its status is not "
-                            "evidence".format(rid, path, commit[:12], rtype, "; ".join(rv.findings)))
-
-
-def _committed_status(git, store_root, commit, path, rid, rtype, vendors):
-    """The status of `rid` (a `rtype` record) in the index at `path` in `commit` (an exact commit id),
-    read by git from that blob's own object id; None when the index or the record is absent there. The
-    snapshot is evidence, so it is validated before its status is used: the document must be a supported
-    schema-1 record index (_historical_index_rows) seating `rid` exactly once with a string status, and
-    the seated record must be a valid `rtype` record by the store's own validator
-    (_validated_historical_record). _Unverifiable when the blob cannot be read or parsed, or when any of
-    that validation fails."""
-    blob = _git_oid(git, store_root, "{}:{}".format(commit, path))
-    if blob is None:
-        return None
-    out = _opf_observe._run_git(git, store_root, ["cat-file", "blob", blob])
-    if not out.completed or out.rc != 0:
-        raise _Unverifiable("git could not read {} at {} ({})".format(path, commit[:12], out.err.strip()))
-    try:
-        document = tomllib.loads(out.out.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
-        raise _Unverifiable("{} at {} does not parse as TOML ({})".format(path, commit[:12], exc))
-    hits = [r for r in _historical_index_rows(document, path, commit) if r.get("id") == rid]
-    if not hits:
-        return None
-    if len(hits) > 1 or not isinstance(hits[0].get("status"), str):
-        raise _Unverifiable("{} at {} does not seat {} exactly once with a string status".format(
-            path, commit[:12], rid))
-    _validated_historical_record(hits[0], rid, rtype, vendors, path, commit)
-    return hits[0]["status"]
-
-
-def _committed_pre_proposal(res, rel, rid, status, rtype, vendors):
-    """(state, evidence) or (None, why): the committed pre-proposal state of `rid` (a `rtype` record), now
-    at the `/proposed` `status` in the store file `rel`. HEAD must hold that status (the proposal is
-    committed). A present .git/info/grafts file refuses FIRST (_require_graftless): a graft substitutes
-    commit parents during graph traversal without rewriting any commit, so no read below could be trusted
-    (replacement objects and the commit graph are already disabled on every read by _run_git). The walk
-    follows HEAD's first-parent chain through the commits that changed `rel` (git rev-list, newest first) to
-    the newest one whose FIRST PARENT does not hold `status`: that commit landed the proposal, and the
-    record's status in its parent's snapshot, read by git from the store's own path at exact object ids and
-    validated as evidence (_committed_status), is the pre-proposal state; it must be an unqualified state
-    of a record that existed. Each first parent is derived from the commit object's RAW parent header
-    (_raw_first_parent), never resolved through the graph, and must exist locally as a commit object. git
-    absent, an unborn HEAD, an uncommitted proposal, a history that ends (a root commit) with the record
-    already proposed, a shallow boundary (a named parent whose object is absent), a record absent before
-    its proposal (created proposed), an unreadable, malformed, or schema-invalid snapshot, a qualified
-    predecessor, or a walk past _HISTORY_LIMIT each returns (None, why): the state cannot be established,
-    and is never guessed. Git reads only."""
-    git = _opf_observe._git_path()
-    if git is None:
-        return None, "git is not on PATH"
-    root = str(res.store_root)
-    try:
-        _require_graftless(git, root)
-        pfx = _opf_observe._run_git(git, root, ["rev-parse", "--show-prefix"])
-        if not pfx.completed or pfx.rc != 0:
-            return None, "the store root is not in a readable git work tree"
-        path = pfx.out.decode("utf-8", "replace").strip() + rel
-        head = _git_oid(git, root, "HEAD^{commit}")
-        if head is None:
-            return None, "HEAD names no commit"
-        if _committed_status(git, root, head, path, rid, rtype, vendors) != status:
-            return None, "HEAD {} does not hold {} at {!r}, so the proposal is not committed".format(
-                head[:12], rid, status)
-        out = _opf_observe._run_git(git, root, ["--literal-pathspecs", "rev-list", "--first-parent",
-                                                "--max-count={}".format(_HISTORY_LIMIT + 1), head, "--", path])
-        if not out.completed or out.rc != 0:
-            return None, "git could not list the history of {} ({})".format(path, out.err.strip())
-        commits = out.out.decode("ascii", "replace").split()
-        if not all(_OID_RE.match(c) for c in commits):
-            return None, "git listed something other than commit ids for {}".format(path)
-        if len(commits) > _HISTORY_LIMIT:
-            return None, "the proposal lies beyond the {} most recent commits that changed {}".format(
-                _HISTORY_LIMIT, path)
-        for commit in commits:
-            parent = _raw_first_parent(git, root, commit)
-            if parent is None:
-                return None, ("the history ends at the root commit {} with {} already {!r} (created "
-                              "proposed)".format(commit[:12], rid, status))
-            before = _committed_status(git, root, parent, path, rid, rtype, vendors)
-            if before == status:
-                continue
-            if before is None:
-                return None, "{} does not exist in {}, immediately before the proposal commit {}".format(
-                    rid, parent[:12], commit[:12])
-            if "/" in before:
-                return None, ("{} is {!r} in {}, immediately before the proposal commit {}, which is not an "
-                              "unqualified state".format(rid, before, parent[:12], commit[:12]))
-            return before, "the proposal commit {} and its parent {}".format(commit[:12], parent[:12])
-        return None, "no commit that changed {} landed {} at {!r}".format(path, rid, status)
-    except _Unverifiable as exc:
-        return None, str(exc)
-
-
-def _corroborated_pre_proposal(ctx, rel, rid, status, claimed, rtype):
-    """(state, None) when the pre-proposal state the worklog records (`claimed`) agrees with the committed
-    history (ctx.history, _committed_pre_proposal, judging `rid` as a `rtype` record), else (None, why).
-    Worklog text alone never licenses a rejection: altered, stale, malformed, or unverifiable evidence
-    refuses (spec 8.8)."""
-    committed, note = ctx.history(rel, rid, status, rtype)
-    if committed is None:
-        return None, "the committed history cannot establish it ({})".format(note)
-    if committed != claimed:
-        return None, ("the committed history shows {} at {!r} before its proposal ({}), not {!r}: the worklog "
-                      "evidence is altered or stale".format(rid, committed, note, claimed))
-    return claimed, None
+def _recorded_pre_proposal(ctx, row, rid, status):
+    """The pre-proposal state a maintainer rejection restores: the record's OWN `proposed_from` field
+    (spec 8.3/8.8), which this verb wrote in the same journaled transaction that landed the `/proposed`
+    `status`, which the schema validates (present only on a `/proposed` status, a legal predecessor state
+    for the type), and which the rejection or ratification that leaves the proposal removes again. None
+    when the record does not carry a string value there (it was proposed outside this verb): the rejection
+    target then cannot be verified, and the caller refuses, never guesses. The field is an ordinary
+    canonical record field, so a canonical hand edit of it is not detectable (the residual every field
+    shares, see the module docstring); the worklog lifecycle line is informational, never evidence, and is
+    deliberately not read here. `ctx` rides along as the seam the record gate's red-on-revert flip
+    substitutes (a worklog-trusting reader) to prove this reader never consults worklog text."""
+    value = row.get(PROPOSED_FROM)
+    return value if isinstance(value, str) else None
 
 
 def _parse_ts(value):
@@ -781,10 +568,12 @@ def _locate(operand, rid):
     return hits[0]
 
 
-def _change_row(operand, rid, fields):
+def _change_row(operand, rid, fields, drop=()):
     operand.new_model = copy.deepcopy(operand.model)
     for row in operand.new_model["record"]:
         if isinstance(row, dict) and row.get("id") == rid:
+            for key in drop:
+                row.pop(key, None)
             row.update(fields)
 
 
@@ -864,8 +653,8 @@ def _plan_worklog_append(req, ctx, operand, now):
     if "--detail" in req.values:
         if _LIFECYCLE_RE.match(req.values["--detail"].split("\n", 1)[0]):
             raise RecordError("worklog-append --detail may not open with an opf-record lifecycle line; that "
-                              "grammar is reserved for the entries opf record writes for its own changes (it is "
-                              "the recorded pre-proposal state); fail-closed")
+                              "grammar is reserved for the entries opf record writes for its own changes (the "
+                              "informational lifecycle log); fail-closed")
         entry["detail"] = req.values["--detail"]
     _validated(entry, "worklog", ctx)
     _append_worklog(ctx, entry)
@@ -900,11 +689,14 @@ def _require_receipt_path(rtype, to_status):
 def _plan_transition(req, ctx, operand, now):
     """`transition ID STATE`: one status change checked by validate_transition (spec 8.4, 8.5). The target
     status is derived from the actor: an assistant or automation landing a terminal or gated state gets
-    `/proposed`. Leaving a `/proposed` status for another state is a rejection: maintainer-only, --reason
-    required, and it must return to the pre-proposal state the worklog records for this record, corroborated
-    by the committed history (_corroborated_pre_proposal). A
-    backlog item never lands at unqualified `done` here (done-with-receipt mints the receipt in the same
-    act). The change is `status` and `updated_at` on that one record, plus its own worklog entry."""
+    `/proposed`, and the record's pre-proposal state is then written into its own `proposed_from` field in
+    the same act (spec 8.8). Leaving a `/proposed` status is maintainer-only: a rejection (--reason
+    required) must return to exactly the recorded `proposed_from` state, and rejection and ratification
+    each remove the field. A proposed record that carries no `proposed_from` (proposed outside this verb)
+    cannot be rejected here; the worklog lifecycle line is informational, never evidence. A backlog item
+    never lands at unqualified `done` here (done-with-receipt mints the receipt in the same act). The
+    change is `status`, `updated_at`, and the `proposed_from` write or removal on that one record, plus
+    its own worklog entry."""
     rid, target = req.positionals
     row = _locate(operand, rid)
     rtype = row.get("type")
@@ -920,27 +712,29 @@ def _plan_transition(req, ctx, operand, now):
     to_status = _derived_status(kind, spec, cur_state, target)
     _require_receipt_path(rtype, to_status)
     rejection = cur_qual == "proposed" and target != cur_state
-    claimed = _pre_proposal_state(_worklog_entries(ctx), rid, current) if rejection else None
-    pre, uncorroborated = claimed, None
-    if claimed is not None:
-        pre, uncorroborated = _corroborated_pre_proposal(ctx, operand.rel, rid, current, claimed, rtype)
+    pre = _recorded_pre_proposal(ctx, row, rid, current) if rejection else None
     tc = _opf_schema.validate_transition(rtype, current, to_status, kind, pre_proposal_state=pre,
                                          reason=_checked_reason(req))
-    if tc.status != _opf_store.VALID or uncorroborated:
-        if rejection and claimed is None:
-            note = ("; the worklog records no pre-proposal state for {} (no opf-record transition line landed "
-                    "{})".format(rid, current))
-        elif uncorroborated:
-            note = "; the pre-proposal state {!r} the worklog records cannot be corroborated: {}".format(
-                claimed, uncorroborated)
-        else:
-            note = ""
+    if tc.status != _opf_store.VALID:
+        note = ""
+        if rejection and pre is None:
+            note = ("; {} carries no pre-proposal state (no {} field, so it was proposed outside opf "
+                    "record) and the rejection target cannot be verified; the worklog lifecycle line is "
+                    "informational, never evidence".format(rid, PROPOSED_FROM))
         raise RecordError("{} {} -> {} by a {} is {}: {}{} (fail-closed)".format(
             rid, current, to_status, kind, tc.status, "; ".join(tc.findings), note))
     ts = _rfc3339(now)
     _require_later(row, ts)
     fields = {"status": to_status, "updated_at": ts}
-    _validated(dict(row, **fields), rtype, ctx)
+    # Landing a `/proposed` status records the pre-proposal state in the record itself; leaving one (a
+    # rejection or a ratification) removes it. validate_transition proved the two never coincide (a
+    # `/proposed` record only ever moves to an unqualified status).
+    if to_status.endswith("/proposed"):
+        fields[PROPOSED_FROM] = current
+    drop = (PROPOSED_FROM,) if cur_qual == "proposed" else ()
+    new_row = {key: value for key, value in row.items() if key not in drop}
+    new_row.update(fields)
+    _validated(new_row, rtype, ctx)
     (wid,) = _claim(ctx, [_opf_release.WL_NAMESPACE])
     detail = "opf-record transition {} {} -> {}".format(rid, current, to_status)
     if "--reason" in req.values:
@@ -949,7 +743,7 @@ def _plan_transition(req, ctx, operand, now):
     entry = _lifecycle_entry(ctx, wid, now, req.actor, "changed",
                              "{} {} from {} to {}".format(verb, rid, current, to_status), detail,
                              [{"rel": "relates", "id": rid}])
-    _change_row(operand, rid, fields)
+    _change_row(operand, rid, fields, drop=drop)
     _append_worklog(ctx, entry)
     return Plan([ctx.counters, operand, ctx.worklog], [wid], transition=(rid, current, to_status))
 
@@ -979,7 +773,12 @@ def _plan_done_with_receipt(req, ctx, operand, now):
     ts = _rfc3339(now)
     _require_later(row, ts)
     fields = {"status": "done", "updated_at": ts}
-    _validated(dict(row, **fields), BACKLOG, ctx)
+    # Ratifying done/proposed leaves the `/proposed` status, so the recorded pre-proposal state is
+    # removed with it (spec 8.8); from active there is nothing to remove.
+    drop = (PROPOSED_FROM,) if current == "done/proposed" else ()
+    new_row = {key: value for key, value in row.items() if key not in drop}
+    new_row.update(fields)
+    _validated(new_row, BACKLOG, ctx)
     dn_ns = _opf_store.BASELINE_TYPES["done"]
     did, wid = _claim(ctx, [dn_ns, _opf_release.WL_NAMESPACE])
     _require_unseated(done_rows, did, ctx.done_index.rel)
@@ -993,7 +792,7 @@ def _plan_done_with_receipt(req, ctx, operand, now):
                              "{} {} from {} to done with receipt {}".format(verb, rid, current, did),
                              "opf-record transition {} {} -> done\nreceipt: {}".format(rid, current, did),
                              [{"rel": "relates", "id": rid}, {"rel": "relates", "id": did}])
-    _change_row(operand, rid, fields)
+    _change_row(operand, rid, fields, drop=drop)
     ctx.done_index.new_model = copy.deepcopy(ctx.done_index.model)
     ctx.done_index.new_model["record"] = list(ctx.done_index.new_model.get("record", [])) + [receipt]
     _append_worklog(ctx, entry)
@@ -1120,6 +919,12 @@ def _expected_delta(req, ctx, raws, now):
         proposed = (req.actor["kind"] in _opf_schema.PROPOSER_KINDS and target != cur_state
                     and (target in spec.terminal or target in spec.gated))
         to_status = target + ("/proposed" if proposed else "")
+        # The proposed_from rule (spec 8.8), derived here on its own: leaving a `/proposed` status removes
+        # the recorded pre-proposal state; landing one records the prior status in the row.
+        if cur_qual == "proposed":
+            prior.pop(PROPOSED_FROM, None)
+        if proposed:
+            prior[PROPOSED_FROM] = current
         prior.update({"status": to_status, "updated_at": ts})
         verb = ("rejected" if target != cur_state else "ratified") if cur_qual == "proposed" else "transitioned"
         detail = "opf-record transition {} {} -> {}".format(rid, current, to_status)
@@ -1138,6 +943,8 @@ def _expected_delta(req, ctx, raws, now):
                    "links": [{"rel": "receipt_of", "id": rid}]}
         if "--summary" in req.values:
             receipt["summary"] = req.values["--summary"]
+        if current == "done/proposed":
+            prior.pop(PROPOSED_FROM, None)
         prior.update({"status": "done", "updated_at": ts})
         docs[rels[2]]["record"] = list(docs[rels[2]].get("record", [])) + [receipt]
         entry = _expected_entry(wid, ts, req.actor, "changed", "{} {} from {} to done with receipt {}".format(
@@ -1149,13 +956,23 @@ def _expected_delta(req, ctx, raws, now):
     return [(rel, docs[rel]) for rel in rels], ids, transition
 
 
+def _strict_equal(a, b):
+    """The postcondition's comparator: strict, TYPE-AWARE structural equality (_opf_emit._model_equal, the
+    round-trip comparator emit_checked already proves itself with), never Python's ==. Ordinary equality
+    let a mutation that changed only a value's type (True for 1, 1.0 for 1) read as the allowed delta and
+    publish (codex QA3 F2); here bool is never a bare int, int is never a float, and datetime is never a
+    date, so such a mutation refuses before anything is written."""
+    return _opf_emit._model_equal(a, b)
+
+
 def _postcondition(plan, req, ctx, now):
     """POSTCONDITION (the spec 9.2 guard, applied to record authoring): every operand's EMITTED bytes,
     reparsed (a copy sharing nothing with the planner's rows), must equal EXACTLY its prior bytes,
-    reparsed, plus the allowed delta _expected_delta derives on its own, value for value: each new row
-    appended with the requested content (the record or receipt, and the operation's own worklog entry),
-    the initial or target status the schema rules give, the clock's timestamps, and the claimed ids; for a
-    status change exactly `status` and `updated_at` of the one named record; the counters advanced by
+    reparsed, plus the allowed delta _expected_delta derives on its own, value for value and TYPE for type
+    (_strict_equal, so True and 1.0 never read as 1): each new row appended with the requested content
+    (the record or receipt, and the operation's own worklog entry), the initial or target status the
+    schema rules give, the clock's timestamps, and the claimed ids; for a status change exactly `status`,
+    `updated_at`, and the `proposed_from` write or removal of the one named record; the counters advanced by
     exactly the claim; nothing else. A stray mutation of an existing record or of a new row, a lost or
     reordered row, a changed schema marker, a status change touching another field or another record, or
     a counter moved by anything but the claim refuses before anything is written, and so does a plan whose
@@ -1173,7 +990,7 @@ def _postcondition(plan, req, ctx, now):
         raise _postcondition_failed("the plan reports the status change {!r}, not the requested {!r}".format(
             plan.transition, transition))
     for operand, (rel, model) in zip(plan.operands, expected):
-        if operand.new_raw is None or _reparse(operand.new_raw, rel) != model:
+        if operand.new_raw is None or not _strict_equal(_reparse(operand.new_raw, rel), model):
             raise _postcondition_failed("the emitted {} differs from its allowed delta (exactly the requested "
                                         "rows appended, the one requested status change, and the counters "
                                         "advanced by exactly the claim)".format(rel))
@@ -1534,7 +1351,7 @@ def _snapshot_pending(transition):
     every actor kind, and the envelope does not identify the transitioning actor or the pre-proposal state,
     so an actor-dependent or rejection-shaped change is CANNOT-EVALUATE there (C-HISTORY-RESURRECTION) until
     the commit makes it the snapshot. This verb checked that exact change with the known actor, reason, and
-    corroborated pre-proposal state, and `transition` is the triple the postcondition proved equal to the
+    recorded pre-proposal state, and `transition` is the triple the postcondition proved equal to the
     oracle's own derivation of what was written, so it accepts that message, for that record and that
     from/to pair only. Callers also require the message to be a cannot-evaluate, never a finding; doctor's
     own grading is unchanged."""
@@ -1619,7 +1436,7 @@ def _emit_success(report):
               "doctor-VALID" if not pending else "free of doctor findings"))
     for line in pending:
         print("opf record: until this change is committed, opf doctor reports: CANNOT-EVALUATE: {}. This verb "
-              "checked the change with its actor, reason, and corroborated pre-proposal state; the snapshot "
+              "checked the change with its actor, reason, and recorded pre-proposal state; the snapshot "
               "comparison clears once the commit makes it the prior snapshot.".format(line))
     print(json.dumps(report, sort_keys=True))
     print("opf record: review the change, then stage and commit these paths yourself (the journal under {} "
@@ -1883,7 +1700,6 @@ def _self_test_units(check):
         ctx.version = version or {"schema": 1, "release": [], "summary": []}
         ctx.worklog = _model_operand(".working/toml/worklog.toml", {"schema": 1, "entry": []})
         ctx.done_index = _model_operand(".working/toml/done.index.toml", {"schema": 1, "record": []})
-        ctx.history = lambda rel, rid, status, rtype: (None, "the unit leg has no committed history")
         return ctx
 
     full = {ns: 0 for ns in _opf_store.BASELINE_TYPES.values()}
@@ -1893,6 +1709,16 @@ def _self_test_units(check):
     del partial["BI"]
     ctx = ctx_of(partial)
     check("a missing enabled namespace breaks the proof", _counter_state(ctx, ctx.counters.model)[1] != [])
+    # Schema markers are exact integers everywhere this verb reads one (codex QA3 F1's sibling checks):
+    # a bool or float marker (True == 1, 1.0 == 1 under ==) is refused, never read as schema 1.
+    for marker in (True, 1.0):
+        check("a non-integer index schema marker refuses ({!r})".format(marker), _refuses(
+            lambda marker=marker: _index_rows(_model_operand("x", dict(schema=marker, record=[]))),
+            "schema-1"))
+        ctx = ctx_of(full)
+        ctx.worklog = _model_operand(ctx.worklog.rel, dict(schema=marker, entry=[]))
+        check("a non-integer worklog schema marker refuses ({!r})".format(marker),
+              _refuses(lambda ctx=ctx: _worklog_entries(ctx), "schema-1"))
     _self_test_planners(check, ctx_of, full, now)
 
 
@@ -1902,10 +1728,8 @@ def _model_operand(rel, model):
 
 
 def _self_test_planners(check, ctx_of, full, now):
-    def plan(argv, rows=(), counters=None, entries=(), dones=(), history=None):
+    def plan(argv, rows=(), counters=None, entries=(), dones=()):
         c = ctx_of(counters or full)
-        if history is not None:
-            c.history = history
         c.worklog = _model_operand(c.worklog.rel, {"schema": 1, "entry": copy.deepcopy(list(entries))})
         c.done_index = _model_operand(c.done_index.rel, {"schema": 1, "record": copy.deepcopy(list(dones))})
         r = parse_request(argv)
@@ -1990,6 +1814,10 @@ def _self_test_planners(check, ctx_of, full, now):
         ("a changed appended title", lambda p, c, op: op.new_model["record"][-1].__setitem__("title", "x")),
         ("an extra appended field", lambda p, c, op: op.new_model["record"][-1].__setitem__("summary", "x")),
         ("a changed appended id", lambda p, c, op: op.new_model["record"][-1].__setitem__("id", "BI-9")),
+        ("a bool schema marker (True must never read as 1)",
+         lambda p, c, op: op.new_model.__setitem__("schema", True)),
+        ("a float counter (2.0 must never read as 2)",
+         lambda p, c, op: c.counters.new_model["counters"].__setitem__("BI", 2.0)),
         ("a second appended row", lambda p, c, op: op.new_model["record"].append(dict(op.new_model["record"][-1]))))
     for label, mutate in mutations:
         p, c, op = plan(argv, rows=base_rows, counters=dict(full, BI=1))
@@ -2026,10 +1854,6 @@ def _self_test_transitions(check, plan, post, full, now):
         return {"id": "WL-1", "date": earlier, "actor": {"kind": "assistant"}, "kind": "changed", "summary": "s",
                 "detail": "opf-record transition {} {} -> {}".format(rid, frm, to)}
 
-    def committed(state):
-        """A synthetic committed history whose snapshot before the proposal commit holds `state`."""
-        return lambda rel, rid, status, rtype: (state, "a synthetic proposal commit")
-
     counters = dict(full, BI=2, WL=1)
     # -- transition: the derived qualifier, the delta, and its own worklog entry ----------------------------
     p, c, op = plan(["transition", "BI-1", "active", "--actor", "assistant"], rows=[bi("open")], counters=counters)
@@ -2037,8 +1861,10 @@ def _self_test_transitions(check, plan, post, full, now):
           op.new_model["record"][0]["status"] == "active" and p.ids == ["WL-2"])
     two = [bi("active"), bi("open", "BI-2")]
     p, c, op = plan(["transition", "BI-1", "done", "--actor", "assistant"], rows=two, counters=counters)
-    check("an assistant active -> done lands done/proposed with no receipt",
+    check("an assistant active -> done lands done/proposed with no receipt, recording the pre-proposal "
+          "state in the record's own field",
           op.new_model["record"][0]["status"] == "done/proposed"
+          and op.new_model["record"][0][PROPOSED_FROM] == "active"
           and op.new_model["record"][0]["updated_at"] == "2026-09-27T01:02:03Z"
           and op.new_model["record"][1] == bi("open", "BI-2") and c.done_index.new_model is None)
     entry = c.worklog.new_model["entry"][-1]
@@ -2061,6 +1887,10 @@ def _self_test_transitions(check, plan, post, full, now):
             ("a reason the request did not give",
              lambda p, c, op: c.worklog.new_model["entry"][-1].__setitem__(
                  "detail", c.worklog.new_model["entry"][-1]["detail"] + "\nreason: r")),
+            ("a dropped proposed_from on the proposal",
+             lambda p, c, op: op.new_model["record"][0].pop(PROPOSED_FROM)),
+            ("a forged proposed_from on the proposal",
+             lambda p, c, op: op.new_model["record"][0].__setitem__(PROPOSED_FROM, "open")),
             ("a reported status change other than the requested one",
              lambda p, c, op: setattr(p, "transition", ("BI-1", "active", "done"))),
             ("a dropped worklog operand", lambda p, c, op: setattr(p, "operands", p.operands[:2]))):
@@ -2074,66 +1904,65 @@ def _self_test_transitions(check, plan, post, full, now):
                     counters=dict(counters, FN=1))
     check("an automation terminal transition lands /proposed", op.new_model["record"][0]["status"] == "fixed/proposed")
     # -- transition refusals ---------------------------------------------------------------------------------
-    proposed = [line("BI-1", "active", "done/proposed")]
-    for argv, rows, entries, needle in (
-            (["transition", "BI-1", "done", "--actor", "maintainer"], [bi("active")], (), "done-with-receipt"),
-            (["transition", "BI-1", "done", "--actor", "assistant"], [bi("open")], (), "illegal transition"),
-            (["transition", "BI-1", "active", "--actor", "maintainer"], [bi("done/proposed")], proposed,
-             "recorded reason"),
-            (["transition", "BI-1", "active", "--actor", "maintainer", "--reason", "r"], [bi("done/proposed")], (),
+    def pbi(pre="active", status="done/proposed", **kw):
+        """A proposed backlog item carrying the writer-recorded pre-proposal state (spec 8.8)."""
+        return dict(bi(status, **kw), proposed_from=pre)
+
+    for argv, rows, needle in (
+            (["transition", "BI-1", "done", "--actor", "maintainer"], [bi("active")], "done-with-receipt"),
+            (["transition", "BI-1", "done", "--actor", "assistant"], [bi("open")], "illegal transition"),
+            (["transition", "BI-1", "active", "--actor", "maintainer"], [pbi()], "recorded reason"),
+            (["transition", "BI-1", "active", "--actor", "maintainer", "--reason", "r"], [bi("done/proposed")],
              "no pre-proposal state"),
-            (["transition", "BI-1", "open", "--actor", "maintainer", "--reason", "r"], [bi("done/proposed")],
-             proposed, "actual pre-proposal state"),
-            (["transition", "BI-1", "active", "--actor", "assistant", "--reason", "r"], [bi("done/proposed")],
-             proposed, "only a maintainer"),
-            (["transition", "BI-2", "active", "--actor", "maintainer"], [bi("open")], (), "not a record"),
-            (["transition", "BI-1", "active", "--actor", "maintainer"], [bi("open"), bi("open")], (),
+            (["transition", "BI-1", "open", "--actor", "maintainer", "--reason", "r"], [pbi()],
+             "actual pre-proposal state"),
+            (["transition", "BI-1", "active", "--actor", "assistant", "--reason", "r"], [pbi()],
+             "only a maintainer"),
+            (["transition", "BI-2", "active", "--actor", "maintainer"], [bi("open")], "not a record"),
+            (["transition", "BI-1", "active", "--actor", "maintainer"], [bi("open"), bi("open")],
              "seated 2 times"),
-            (["transition", "WL-1", "recorded", "--actor", "maintainer"], [], (), "does not transition"),
+            (["transition", "WL-1", "recorded", "--actor", "maintainer"], [], "does not transition"),
             (["transition", "BI-1", "dropped", "--actor", "maintainer"],
-             [dict(bi("open"), updated_at=_rfc3339(now))], (), "not later than")):
+             [dict(bi("open"), updated_at=_rfc3339(now))], "not later than")):
         check("transition refuses {}".format(needle), _refuses(
-            lambda argv=argv, rows=rows, entries=entries: plan(argv, rows=rows, counters=counters, entries=entries,
-                                                               history=committed("active")),
-            needle))
-    # -- the maintainer rejection, back to the corroborated pre-proposal state ----------------------------------
+            lambda argv=argv, rows=rows: plan(argv, rows=rows, counters=counters), needle))
+    # -- the maintainer rejection, back to the recorded pre-proposal state --------------------------------------
     reject = ["transition", "BI-1", "active", "--actor", "maintainer", "--reason", "not finished"]
     forged = [line("BI-1", "open", "done/proposed")]
-    for label, argv, entries, history, needle in (
-            ("a lifecycle line the committed history contradicts", reject, forged, committed("active"),
-             "altered or stale"),
-            ("the forged line's own target", ["transition", "BI-1", "open", "--actor", "maintainer", "--reason",
-                                              "r"], forged, committed("active"), "altered or stale"),
-            ("a committed history that cannot establish the state", reject, proposed,
-             lambda rel, rid, status, rtype: (None, "HEAD names no commit"), "cannot establish it"),
-            ("the worklog text alone (the unit leg's default history)", reject, proposed, None,
-             "cannot be corroborated")):
-        check("a rejection refuses {}".format(label), _refuses(
-            lambda argv=argv, entries=entries, history=history: plan(
-                argv, rows=[bi("done/proposed")], counters=counters, entries=entries, history=history), needle))
-    seen = []
-    p, c, op = plan(reject, rows=[bi("done/proposed")], counters=counters, entries=proposed,
-                    history=lambda rel, rid, status, rtype: seen.append((rel, rid, status, rtype))
-                    or ("active", "commit"))
-    check("the committed history is read for the rejected record, at its proposed status, in its own index, "
-          "as its index's type",
-          seen == [(op.rel, "BI-1", "done/proposed", "backlog_item")])
-    check("a maintainer rejection with a reason returns to the corroborated pre-proposal state",
-          op.new_model["record"][0]["status"] == "active" and c.worklog.new_model["entry"][-1]["detail"]
+    check("a proposal without the recorded field refuses whatever the worklog line claims (the line is "
+          "informational, never evidence)", _refuses(
+              lambda: plan(reject, rows=[bi("done/proposed")], counters=counters, entries=forged),
+              "no pre-proposal state"))
+    check("the forged line's own target refuses against the recorded field", _refuses(
+        lambda: plan(["transition", "BI-1", "open", "--actor", "maintainer", "--reason", "r"],
+                     rows=[pbi()], counters=counters, entries=forged), "actual pre-proposal state"))
+    p, c, op = plan(reject, rows=[pbi()], counters=counters, entries=forged)
+    check("a maintainer rejection restores exactly the recorded pre-proposal state and removes the field, "
+          "whatever the worklog line claims",
+          op.new_model["record"][0]["status"] == "active"
+          and PROPOSED_FROM not in op.new_model["record"][0]
+          and c.worklog.new_model["entry"][-1]["detail"]
           == "opf-record transition BI-1 done/proposed -> active\nreason: not finished")
-    check("the pre-proposal state is the latest lifecycle line's from-state",
-          _pre_proposal_state([line("BI-1", "open", "dropped/proposed"), line("BI-2", "active", "done/proposed")],
-                              "BI-1", "dropped/proposed") == "open")
-    check("a later lifecycle line for the record withholds the pre-proposal state",
-          _pre_proposal_state([line("BI-1", "active", "done/proposed"), line("BI-1", "open", "active")], "BI-1",
-                              "done/proposed") is None)
+    check("the rejection passes the postcondition (the field's removal is the oracle's own rule)",
+          post(p, c, reject) is None and p.transition == ("BI-1", "done/proposed", "active"))
+    p, c, op = plan(reject, rows=[pbi()], counters=counters)
+    op.new_model["record"][0][PROPOSED_FROM] = "active"
+    check("the postcondition refuses a rejection that keeps proposed_from",
+          _refuses(lambda: post(p, c, reject), "postcondition failed"))
+    check("the recorded pre-proposal state is the record's own field, never worklog text",
+          _recorded_pre_proposal(None, pbi(), "BI-1", "done/proposed") == "active"
+          and _recorded_pre_proposal(None, bi("done/proposed"), "BI-1", "done/proposed") is None
+          and _recorded_pre_proposal(None, dict(bi("done/proposed"), proposed_from=3), "BI-1",
+                                     "done/proposed") is None)
     # -- done-with-receipt -------------------------------------------------------------------------------------
     for frm, kind in (("active", "maintainer"), ("done/proposed", "assistant")):
         d_argv = ["done-with-receipt", "BI-1", "--actor", "maintainer"]
-        p, c, op = plan(d_argv, rows=[bi(frm, kind=kind)], counters=counters)
+        rows = [pbi(kind=kind)] if frm == "done/proposed" else [bi(frm, kind=kind)]
+        p, c, op = plan(d_argv, rows=rows, counters=counters)
         receipt = c.done_index.new_model["record"][-1]
-        check("done-with-receipt from {} lands done with one receipt_of receipt".format(frm),
+        check("done-with-receipt from {} lands done with one receipt_of receipt and no proposed_from".format(frm),
               op.new_model["record"][0]["status"] == "done" and p.ids == ["DN-1", "WL-2"]
+              and PROPOSED_FROM not in op.new_model["record"][0]
               and receipt["links"] == [{"rel": "receipt_of", "id": "BI-1"}] and receipt["status"] == "recorded"
               and c.counters.new_model["counters"] == dict(counters, DN=1, WL=2)
               and post(p, c, d_argv) is None and p.transition == ("BI-1", frm, "done"))
@@ -2149,6 +1978,10 @@ def _self_test_transitions(check, plan, post, full, now):
         mutate(c)
         check("the postcondition refuses {}".format(label),
               _refuses(lambda: post(p, c, d_argv), "postcondition failed"))
+    p, c, op = plan(d_argv, rows=[pbi()], counters=counters)
+    op.new_model["record"][0][PROPOSED_FROM] = "active"
+    check("the postcondition refuses a ratification that keeps proposed_from",
+          _refuses(lambda: post(p, c, d_argv), "postcondition failed"))
     held = [{"id": "DN-1", "type": "done", "status": "recorded", "title": "t", "created_at": earlier,
              "updated_at": earlier, "actor": {"kind": "maintainer"}, "links": [{"rel": "receipt_of", "id": "BI-1"}]}]
     for status, dones, needle in (("open", (), "active or done/proposed"), ("done", (), "active or done/proposed"),
