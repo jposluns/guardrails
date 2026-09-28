@@ -37,9 +37,9 @@ making a harmless reorder fail loud. Coordinated removal of both of this gate's 
 invocations cannot be detected if nobody runs the remaining file manually. The
 extractors implement a disclosed shell and YAML subset; an unknown construct is
 cannot-evaluate rather than a clean pass. Fail-closed cases include an unknown
-top-level or job-level workflow key, a top-level unconditional exit that would strand
-later local gates, unbalanced if/fi nesting in the runner, job content without a job
-mapping, a run_gate() dispatcher body outside its recognized shape, and a runner
+top-level or job-level workflow key, an exit outside the exact terminal summary
+blocks or the directory-binding line, unbalanced if/fi nesting in the runner, job
+content without a job mapping, a run_gate() dispatcher body outside its recognized shape, and a runner
 assignment to failed or failed_names other than the top-level initializer before the
 first gate or the gitleaks failure branch. A runner line holding $[ ], or naming
 failed or failed_names inside $(( )) or inside a ${ } with a subscript or a colon, is
@@ -57,13 +57,15 @@ like a double-quoted one; and a duplicate run: key within one step is counted as
 members although YAML keeps one. The shadow scan has one soft edge: exotic quoting
 outside the supported grammar could hide a tools/ string from comment stripping.
 The runner's failure-state rules are lexical: a reset carried through another
-variable's value (y=failed=0 then $((y)), or an indirect or prompt-transform expansion)
-passes them. The --self-test backs them at runtime with a scratch copy of the live
-runner: no gate failing, gitleaks and leaks failing together, gitleaks failing alone,
+variable's value (y=failed=0 then x=${PATH:y:0}, or an indirect or prompt-transform
+expansion) passes them. The --self-test backs them at runtime with a scratch copy
+of the live runner: no gate failing, gitleaks and leaks failing together, gitleaks failing alone,
 and each registered gate failing alone. That catches a reset or early exit that fires
-unconditionally or on one gate's failure. A mask conditional on a combination of two
-or more failing gates, or on an environment the stubs do not produce (gitleaks absent,
-the NOT RUN branch), is not exercised.
+unconditionally or on one gate's failure in the stub environment. Residual masks
+include harness detection (stub_* variables, BASH_ENV, or SECONDS), environments the
+stubs do not produce (including gitleaks absent and the NOT RUN branch), and untested
+combinations of failing gates. Harness detection can hide even a single-gate reset;
+it does not require a combination of failures or the gitleaks NOT RUN branch.
 """
 import argparse
 import re
@@ -505,6 +507,32 @@ GITLEAKS_FAILURE_UPDATES = (
 )
 
 
+# Exact executable suffixes that may contain exits. The standalone roster adapter
+# validates and removes its final exit 0 and directory binding before extraction.
+TERMINAL_SUMMARIES = (
+    (
+        'if [ "$failed" -ne 0 ]; then',
+        'echo "FAILED GATES: ${failed_names}"',
+        'echo "RESULT: FAIL"',
+        "exit 1",
+        "fi",
+        'if [ "$notrun" -ne 0 ]; then',
+        'echo "RESULT: PASS, but one or more gates did NOT RUN locally (see above)"',
+        "exit 0",
+        "fi",
+        'echo "RESULT: PASS"',
+    ),
+    (
+        'if [ "$failed" -ne 0 ]; then',
+        'echo "FAILED GATES: ${failed_names}"',
+        'echo "OPF STANDALONE SUBSET: FAILED"',
+        "exit 1",
+        "fi",
+        'echo "OPF STANDALONE SUBSET: OK"',
+    ),
+)
+
+
 def _expansion_spans(code, opener, open_char, close_char):
     """Yield each balanced span of code starting with opener; an unclosed one runs to the end."""
     start = code.find(opener)
@@ -558,6 +586,16 @@ def extract_local(text):
             "input contains NUL or carriage-return bytes",
         ))
 
+    code_lines = [(number, _strip_comment(raw).strip())
+                  for number, raw in enumerate(text.splitlines(), 1)]
+    executable = [(number, code) for number, code in code_lines if code]
+    terminal_exits = set()
+    for summary in TERMINAL_SUMMARIES:
+        tail = executable[-len(summary):]
+        if tuple(code for number, code in tail) == summary:
+            terminal_exits.update(number for number, code in tail
+                                  if code.startswith("exit "))
+
     in_function = False
     function_body = []
     if_depth = 0
@@ -599,9 +637,8 @@ def extract_local(text):
             function_body = []
             continue
 
-        # Track if/fi nesting so a bare exit is scaffold only inside a conditional
-        # block; a top-level unconditional exit makes later gates unreachable. A fi
-        # with no open if underflows: record it so the imbalance is not clamped away.
+        # Track nesting for failure-state updates and top-level summary blocks.
+        # A fi with no open if underflows: record it rather than clamp it away.
         if stripped == "fi":
             if if_depth == gitleaks_depth:
                 gitleaks_depth = None
@@ -637,9 +674,11 @@ def extract_local(text):
 
         # bash assigns inside $[ ], $(( )), a ${ } subscript, and a ${ } offset or
         # length, so a line other than a recognized update must not name failure
-        # state there, and $[ ] is refused outright.
+        # state there, and $[ ] is refused outright. Check quote-removed tokens too:
+        # bash removes quotes in arithmetic subscripts and offsets (fai""led=0).
         if (stripped not in GITLEAKS_FAILURE_UPDATES
-                and _failure_state_expansion(stripped)):
+                and (_failure_state_expansion(stripped)
+                     or _failure_state_expansion(" ".join(tokens)))):
             diagnostics.append(_diagnostic(
                 source,
                 line_number,
@@ -693,9 +732,8 @@ def extract_local(text):
         # assigned here only in the gitleaks failure branch (the dispatcher body is
         # validated whole). These rules are lexical: they reject direct assignments and
         # the expansion spellings above, not a reset carried through another value. The
-        # self-test's runtime scenarios catch a reset or exit that fires unconditionally
-        # or on one gate's failure; one conditional on a combination of two or more
-        # failing gates is not exercised.
+        # self-test exercises the declared scenarios; harness detection and untested
+        # environments or failure combinations remain outside its runtime coverage.
         assignments = tokens[1:] if tokens[:1] == ["export"] else tokens
         variable = assignments[0].split("=", 1)[0] if assignments else ""
         if variable in failure_initializers and "=" in assignments[0]:
@@ -740,7 +778,7 @@ def extract_local(text):
             )
         elif stripped in ("else", "fi", "then"):
             scaffold = True
-        elif re.fullmatch(r"exit [0-9]+", stripped) and if_depth > 0:
+        elif line_number in terminal_exits and if_depth == 1:
             scaffold = True
         elif (tokens and tokens[0] == "if"
                 and len(tokens) >= 4
@@ -1785,6 +1823,27 @@ def _run_runner_copy(text, fail_command="", gitleaks_rc=0):
     return proc.returncode, proc.stdout.splitlines(), calls
 
 
+def _naming_scenarios(text):
+    """Build the runtime scenarios; the module docstring discloses residual masks."""
+    registered = []
+    for raw in text.splitlines():
+        tokens = shlex.split(raw, comments=True)
+        if tokens[:1] == ["run_gate"] and len(tokens) >= 3:
+            registered.append((tokens[1], " ".join(tokens[3:])))
+    scenarios = [
+        ("passing", "", 0, ()),
+        ("combined failure", "-I -B tools/check_leaks.py", 1,
+         (("secrets (gitleaks)", 1), ("leaks", 3))),
+        ("gitleaks only", "", 1, (("secrets (gitleaks)", 1),)),
+    ]
+    # Each registered gate fails alone, so a mask conditional on one gate's failure is
+    # exercised wherever it sits. Gates sharing a command fail together.
+    for command in dict.fromkeys(command for name, command in registered):
+        failing = tuple((name, 3) for name, other in registered if other == command)
+        scenarios.append(("{} alone".format(failing[0][0]), command, 0, failing))
+    return scenarios
+
+
 def runner_naming_problems(text, first_only=False):
     """Return the failure-naming problems of runner text; empty means failures are named.
 
@@ -1809,17 +1868,7 @@ def runner_naming_problems(text, first_only=False):
         return ["runner has no registered gates"]
     expected_calls = [command for name, command in roster]
     expected_headers = ["--- {} ---".format(name) for name, command in roster]
-    scenarios = [
-        ("passing", "", 0, ()),
-        ("combined failure", "-I -B tools/check_leaks.py", 1,
-         (("secrets (gitleaks)", 1), ("leaks", 3))),
-        ("gitleaks only", "", 1, (("secrets (gitleaks)", 1),)),
-    ]
-    # Each registered gate fails alone, so a mask conditional on one gate's failure is
-    # exercised wherever it sits. Gates sharing a command fail together.
-    for command in dict.fromkeys(command for name, command in registered):
-        failing = tuple((name, 3) for name, other in registered if other == command)
-        scenarios.append(("{} alone".format(failing[0][0]), command, 0, failing))
+    scenarios = _naming_scenarios(text)
 
     def run(scenario):
         try:
@@ -2799,6 +2848,14 @@ def self_test():
 
         gate_lines = [line + "\n" for line in live_runner.splitlines()
                       if line.startswith("run_gate ")]
+        registered_names = {shlex.split(line, comments=True)[1] for line in gate_lines}
+        isolated_names = {name for scenario in _naming_scenarios(live_runner)[3:]
+                          for name, status in scenario[3]}
+        if isolated_names != registered_names:
+            failures.append(
+                "26 incomplete isolated sweep: missing={!r}, extra={!r}".format(
+                    sorted(registered_names - isolated_names),
+                    sorted(isolated_names - registered_names)))
         if len(gate_lines) < 3:
             # The fixtures below need three gates; each then reports drift.
             gate_lines = ["run_gate missing\n"] * 3
@@ -2833,6 +2890,10 @@ def self_test():
                 "x=$[failed=0]",
                 "x=$[failed_names=0]",
                 "echo ${PATH[failed=0]}",
+                'x=${PATH[fai""led=0]}',
+                'x=${PATH:fai""led=0:0}',
+                'x=${PATH:0:fai""led=0}',
+                'echo ${PATH[fai""led_names=0]}',
                 "export x=${PATH:failed=0:0}",
                 "[ $((failed=0)) -eq 0 ]",
                 "[ $[1] -eq 1 ]",
@@ -2845,6 +2906,34 @@ def self_test():
             diagnostics = extract_local(mutant).diagnostics
             if not any(item.code == "failure-state-assignment" for item in diagnostics):
                 failures.append("26 reset was not rejected: " + name)
+        summary = 'if [ "$failed" -ne 0 ]; then\n'
+        exit_fixtures = (
+            ("stub_log mask",
+             mutate((summary,
+                     'if [ -z "${stub_log:-}" ]; then\n'
+                     '  if [ "$failed" -ne 0 ]; then\n'
+                     '    echo "RESULT: PASS"\n'
+                     '    exit 0\n'
+                     '  fi\n'
+                     'fi\n' + summary))),
+            ("exit inside another if",
+             mutate(after_gate(0, "  exit 0\n"))),
+            ("summary copied before gates finish",
+             mutate((gitleaks, live_runner[live_runner.index(summary):] + gitleaks))),
+            ("wrong terminal exit",
+             mutate(("  exit 1\n", "  exit 0\n"))),
+            ("gate after summary",
+             live_runner + 'run_gate "late" python3 -I -B tools/check_leaks.py\n'),
+        )
+        for name, mutant in exit_fixtures:
+            if mutant is None:
+                failures.append("26 exit fixture drift: " + name)
+            elif not any(item.code == "unclassified-line"
+                         for item in extract_local(mutant).diagnostics):
+                failures.append("26 unexpected exit was not rejected: " + name)
+        indirect = mutate((gitleaks, "y=failed=0\nx=${PATH:y:0}\n" + gitleaks))
+        if indirect is None or extract_local(indirect).diagnostics:
+            failures.append("26 disclosed indirect-reset example no longer passes")
         for problem in runner_naming_problems(live_runner):
             failures.append("26 live runner: " + problem)
         runtime_fixtures = (

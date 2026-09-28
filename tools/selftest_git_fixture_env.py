@@ -844,6 +844,12 @@ def _roster_checks():
     # its own guard rather than the missing-initializer diagnostic.
     state = 'failed=0\nfailed_names=""\n'
 
+    def add_local(command):
+        # Keep the exact terminal summary last so each fixture reaches its own guard.
+        summary = 'if [ "$failed" -ne 0 ]; then\n'
+        assert local_text.count(summary) == 1
+        return local_text.replace(summary, command + "\n" + summary, 1)
+
     def refusal():
         try:
             _registered_selftests()
@@ -856,7 +862,7 @@ def _roster_checks():
     for check_id, relative, text, diagnostic in (
             ("roster/empty-local-refused", local, state, local + ": empty registry"),
             ("roster/unparseable-local-refused", local,
-             local_text + '\nrun_gate "cont" python3 -I -B tools/check_secrets.py \\\n  --self-test\n',
+             add_local('\nrun_gate "cont" python3 -I -B tools/check_secrets.py \\\n  --self-test\n'),
              local + ": registry diagnostics:"),
             ("roster/empty-opf-refused", opf, binding + "\n" + state + "exit 0\n",
              opf + ": empty registry"),
@@ -866,16 +872,16 @@ def _roster_checks():
              ci_text + '\n      - run: python3 -I -B tools/check_secrets.py --self-test | cat\n',
              ci + ": registry diagnostics:"),
             ("roster/dynamic-arguments-refused", local,
-             local_text + '\nrun_gate "dynamic" python3 -I -B tools/check_secrets.py --self-test --base "$MODE"\n',
+             add_local('\nrun_gate "dynamic" python3 -I -B tools/check_secrets.py --self-test --base "$MODE"\n'),
              "dynamic self-test arguments:"),
             ("roster/launcher-refused", local,
-             local_text + '\nrun_gate "launcher" python3 -B -I tools/check_secrets.py --self-test\n',
+             add_local('\nrun_gate "launcher" python3 -B -I tools/check_secrets.py --self-test\n'),
              "unsupported self-test launcher:"),
             ("roster/empty-selftests-refused", local,
              state + 'run_gate "live" python3 -I -B tools/check_secrets.py\n',
              local + ": empty self-test roster"),
             ("roster/prefixed-invalid-suite-refused", local,
-             local_text + '\nrun_gate "bad-suite" python3 -I -B ./tools/check_selftest_execution.py --suite git-fixture-env-selftest --extra\n',
+             add_local('\nrun_gate "bad-suite" python3 -I -B ./tools/check_selftest_execution.py --suite git-fixture-env-selftest --extra\n'),
              "unparseable suite invocation:"),
     ):
         def read(path, *args, **kwargs):
@@ -903,7 +909,7 @@ def _roster_checks():
     extra = '\nrun_gate "argument-probe" python3 -I -B tools/check_secrets.py --self-test --red-on-revert\n'
     def read(path, *args, **kwargs):
         value = original(path, *args, **kwargs)
-        return value + extra if path == ROOT / local else value
+        return add_local(extra) if path == ROOT / local else value
     with patch.object(Path, "read_text", read):
         roster = _registered_selftests()
     check("roster/registered-arguments", ("tools/check_secrets.py", "--self-test",
