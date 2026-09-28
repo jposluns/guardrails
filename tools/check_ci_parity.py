@@ -60,7 +60,9 @@ The runner's failure-state rules are lexical: a reset carried through another
 variable's value (y=failed=0 then x=${PATH:y:0}, or an indirect or prompt-transform
 expansion) passes them. The --self-test backs them at runtime with a scratch copy
 of the live runner: no gate failing, gitleaks and leaks failing together, gitleaks failing alone,
-and each registered gate failing alone. That catches a reset or early exit that fires
+and each registered gate failing alone. Those scenarios run in parallel, so every
+executable stub is written once before they start, never while one could be executing
+it (ETXTBSY). That catches a reset or early exit that fires
 unconditionally or on one gate's failure in the stub environment. Residual masks
 include harness detection (stub_* variables, BASH_ENV, or SECONDS), environments the
 stubs do not produce (including gitleaks absent and the NOT RUN branch), and untested
@@ -1761,6 +1763,7 @@ SILENT_RUNNER_REVERT = (
 # the selected command, and gitleaks exits with the requested status. python3 is also a
 # shell function that bash loads through BASH_ENV before the runner starts; it shadows
 # the executable, saving a process per gate, and the executable remains the fallback.
+# _prepare_stubs writes them once, before the scenario pool starts; vector 27 pins that.
 _STUB_PYTHON3 = """#!/bin/sh
 printf '%s\\n' "python3 $*" >> "$stub_log" || exit 2
 if [ "$*" = "$stub_fail_command" ]; then
@@ -1782,8 +1785,35 @@ exit "$stub_gitleaks_rc"
 """
 
 
-def _run_runner_copy(text, fail_command="", gitleaks_rc=0):
-    """Run text as tools/run_all_checks.sh in a scratch tree; return (rc, stdout lines, calls)."""
+def _prepare_stubs(root):
+    """Write the stub gates once under root; return (bin directory, BASH_ENV file).
+
+    Call this before any scenario thread starts and share the result read-only. execve
+    of a file that any process holds open for writing fails ETXTBSY (bash reports exit
+    126), and a child forked on another thread holds every descriptor open at that
+    moment until it execs, so a stub written while scenarios run can be caught open by
+    a sibling's fork. Scenario trees therefore hold only data that is never executed:
+    the runner, which bash reads as its script argument, and the call log.
+    """
+    functions = root / "stubs.bash"
+    functions.write_text(_STUB_PYTHON3_FUNCTION, encoding="utf-8")
+    functions.chmod(0o400)
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    for name, body in (("python3", _STUB_PYTHON3), ("gitleaks", _STUB_GITLEAKS)):
+        stub = bin_dir / name
+        stub.write_text(body, encoding="utf-8")
+        stub.chmod(0o500)
+    bin_dir.chmod(0o500)
+    return bin_dir, functions
+
+
+def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
+    """Run text as tools/run_all_checks.sh in a scratch tree; return (rc, stdout lines, calls).
+
+    stubs is the shared (bin directory, BASH_ENV file) pair from _prepare_stubs; nothing
+    this writes is executed.
+    """
     import os
     import shutil
     import subprocess
@@ -1792,22 +1822,16 @@ def _run_runner_copy(text, fail_command="", gitleaks_rc=0):
     bash = shutil.which("bash")
     if bash is None:
         raise RuntimeError("bash not found")
+    bin_dir, functions = stubs
     with tempfile.TemporaryDirectory(prefix="ci-parity-runner-") as tmp:
         root = Path(tmp)
         (root / "tools").mkdir()
-        (root / "bin").mkdir()
         runner = root / "tools" / "run_all_checks.sh"
         runner.write_text(text, encoding="utf-8")
-        for name, body in (("python3", _STUB_PYTHON3), ("gitleaks", _STUB_GITLEAKS)):
-            stub = root / "bin" / name
-            stub.write_text(body, encoding="utf-8")
-            stub.chmod(0o700)
-        functions = root / "stubs.bash"
-        functions.write_text(_STUB_PYTHON3_FUNCTION, encoding="utf-8")
         log = root / "calls.log"
         log.write_text("", encoding="utf-8")
         env = dict(
-            PATH=str(root / "bin") + os.pathsep + os.defpath,
+            PATH=str(bin_dir) + os.pathsep + os.defpath,
             BASH_ENV=str(functions),
             HOME=tmp,
             LC_ALL="C",
@@ -1850,6 +1874,7 @@ def runner_naming_problems(text, first_only=False):
     first_only stops after the first batch of scenarios with a problem, for a fixture
     that only needs to be caught.
     """
+    import tempfile
     from concurrent.futures import ThreadPoolExecutor
 
     roster = []
@@ -1869,23 +1894,32 @@ def runner_naming_problems(text, first_only=False):
     expected_calls = [command for name, command in roster]
     expected_headers = ["--- {} ---".format(name) for name, command in roster]
     scenarios = _naming_scenarios(text)
-
-    def run(scenario):
-        try:
-            return _run_runner_copy(text, scenario[1], scenario[2])
-        except Exception as exc:  # no bash, a scratch-tree error, or a timeout
-            return exc
-
     problems = []
     workers = 4
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        for start in range(0, len(scenarios), workers):
-            batch = scenarios[start:start + workers]
-            for scenario, outcome in zip(batch, pool.map(run, batch)):
-                problems.extend(_scenario_problems(
-                    scenario, outcome, expected_calls, expected_headers))
-            if first_only and problems:
-                break
+    with tempfile.TemporaryDirectory(prefix="ci-parity-stubs-") as shared:
+        # Every executable exists, closed, before the pool does; see _prepare_stubs.
+        try:
+            stubs = _prepare_stubs(Path(shared))
+        except OSError as exc:
+            return ["runner stubs could not be prepared: {!r}".format(exc)]
+
+        def run(scenario):
+            try:
+                return _run_runner_copy(text, stubs, scenario[1], scenario[2])
+            except Exception as exc:  # no bash, a scratch-tree error, or a timeout
+                return exc
+
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for start in range(0, len(scenarios), workers):
+                    batch = scenarios[start:start + workers]
+                    for scenario, outcome in zip(batch, pool.map(run, batch)):
+                        problems.extend(_scenario_problems(
+                            scenario, outcome, expected_calls, expected_headers))
+                    if first_only and problems:
+                        break
+        finally:
+            stubs[0].chmod(0o700)  # so the shared directory can be removed
     return problems
 
 
@@ -1921,6 +1955,116 @@ def _scenario_problems(scenario, outcome, expected_calls, expected_headers):
         problems.append("{}: calls or headers differ from the declared roster".format(
             label))
     return problems
+
+
+# Process-wide audit hook (CPython cannot remove one), inert unless a recorder is
+# registered in _WRITE_RECORDERS; the same shape as tools/selftest_git_fixture_env.py.
+_WRITE_RECORDERS = []
+_WRITE_AUDIT_INSTALLED = False
+
+
+def _dispatch_write_audit(event, args):
+    for recorder in tuple(_WRITE_RECORDERS):
+        recorder(event, args)
+
+
+def _stubs_prepared_before_pool(text, red_command):
+    """Return the stub-ordering evidence of one runner_naming_problems(text) call.
+
+    DETERMINISTIC guard for the ETXTBSY ordering in runner_naming_problems (no stress,
+    no timing), in the style of the config/executables-prepared-before-pool control in
+    tools/selftest_git_fixture_env.py: every file a scenario executes must be written
+    and chmodded on the MAIN thread before the scenario pool is constructed. A CPython
+    audit hook records every open-for-write, chmod, rename, link and symlink with its
+    thread and whether the pool exists yet; just before each scenario starts bash,
+    inside the pool, a snapshot lists the executable files in its stub PATH entry and
+    in its scenario tree. Writing stubs per scenario again turns this red on every run,
+    whether or not a fork happens to race a write. The scenario failing red_command
+    chmods the shared gitleaks stub from inside the pool and must be flagged, so a
+    recorder that sees nothing cannot pass; the required-stub and
+    every-executable-was-seen legs keep the rest from passing vacuously.
+    File-descriptor-only operations (os.fchmod, a write through an inherited
+    descriptor) are outside what these audit events name.
+
+    Returns (pool constructed, scenarios observed, distinct stub directories, required
+    stubs missing, executables never seen written, executables in scenario trees, and
+    sorted (name, event, count) writes to an executable after the pool was constructed,
+    counted so the red chmod cannot mask a real one).
+    """
+    import collections
+    import concurrent.futures
+    import os
+    import subprocess
+    import threading
+    from unittest.mock import patch
+
+    global _WRITE_AUDIT_INSTALLED
+    write_flags = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+    target = {"open": 0, "os.chmod": 0, "os.rename": 1, "os.link": 1, "os.symlink": 1}
+    main_thread = threading.main_thread().ident
+    real_run = subprocess.run
+    pool_started = []
+    events = []
+    snapshots = []
+
+    def record(event, args):
+        if event not in target or (event == "open" and not args[2] & write_flags):
+            return
+        path = args[target[event]]
+        if not isinstance(path, int):
+            events.append((os.path.abspath(os.fsdecode(path)), event,
+                           threading.get_ident() == main_thread and not pool_started))
+
+    class MarkedPool(concurrent.futures.ThreadPoolExecutor):
+        def __init__(self, *args, **kwargs):
+            pool_started.append(True)
+            super().__init__(*args, **kwargs)
+
+    def executables(top):
+        found = set()
+        for folder, _, names in os.walk(top):
+            for name in names:
+                path = os.path.join(folder, name)
+                if os.path.isfile(path) and os.stat(path).st_mode & 0o111:
+                    found.add(os.path.abspath(path))
+        return found
+
+    def snapshot_run(argv, **kwargs):
+        env = kwargs["env"]
+        stub_dir = env["PATH"].split(os.pathsep)[0]
+        found = executables(stub_dir)
+        snapshots.append((stub_dir, found, executables(kwargs["cwd"])))
+        if env["stub_fail_command"] == red_command:
+            for path in found:
+                if os.path.basename(path) == "gitleaks":
+                    os.chmod(path, os.stat(path).st_mode & 0o7777)
+        return real_run(argv, **kwargs)
+
+    if not _WRITE_AUDIT_INSTALLED:
+        sys.addaudithook(_dispatch_write_audit)
+        _WRITE_AUDIT_INSTALLED = True
+    _WRITE_RECORDERS.append(record)
+    try:
+        with patch.object(concurrent.futures, "ThreadPoolExecutor", MarkedPool), \
+                patch.object(subprocess, "run", snapshot_run):
+            runner_naming_problems(text)
+    finally:
+        _WRITE_RECORDERS.remove(record)
+    required = {"python3", "gitleaks"}
+    found = set().union(*(item[1] for item in snapshots))
+    written = {path for path, _, _ in events}
+    return (
+        bool(pool_started),
+        len(snapshots),
+        len({item[0] for item in snapshots}),
+        sorted(set().union(*(required - {os.path.basename(p) for p in item[1]}
+                             for item in snapshots))),
+        sorted({os.path.basename(p) for p in found - written}),
+        sorted({os.path.basename(p) for item in snapshots for p in item[2]}),
+        sorted((name, event, n) for (name, event), n in collections.Counter(
+            (os.path.basename(p), event)
+            for p, event, early in events if p in found and not early).items()),
+    )
 
 
 def self_test():
@@ -2965,6 +3109,22 @@ def self_test():
         if not runner_naming_problems(silent_runner, first_only=True):
             failures.append(
                 "26 flip: a runner that names no failing gate was not caught")
+
+    # Stub ordering (ETXTBSY): runner_naming_problems writes every executable stub once,
+    # on the main thread, before its scenario pool exists, into one directory shared by
+    # all five scenarios, and no scenario tree holds an executable. The red scenario's
+    # in-pool chmod must be the only late write, so per-scenario stubs fail this vector.
+    count += 1
+    ordering = _stubs_prepared_before_pool(
+        local_fixture(
+            ("python3 -I -B tools/clean.py", "python3 -I -B tools/red.py"),
+            ("if gitleaks dir . --no-banner; then :; else failed=1; fi",)),
+        "-I -B tools/red.py")
+    want = (True, 5, 1, [], [], [], [("gitleaks", "os.chmod", 1)])
+    if ordering != want:
+        failures.append(
+            "27 executable stubs prepared before the pool: got {!r}, expected {!r}".format(
+                ordering, want))
 
     if failures:
         print("SELF-TEST FAIL:")
