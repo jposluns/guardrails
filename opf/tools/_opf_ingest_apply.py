@@ -55,7 +55,7 @@ KIND = "ingest"
 OPERATION = "ingest-apply"
 PROMOTION_NAME = "promotion.toml"
 PROMOTION_FORMAT = "opf.ingest.promotion/v1"
-EVIDENCE_INVENTORY_FORMAT = "opf.ingest.evidence-inventory/v1"
+EVIDENCE_INVENTORY_FORMAT = _opf_store.EVIDENCE_INVENTORY_FORMAT
 REVIEW_DIRNAME = "review"
 ORIGINALS_DIRNAME = "originals"
 SCHEMA = 1
@@ -476,22 +476,22 @@ def _staging_removals(root_fd, run_rel, frozen, ops):
 def _publication_ops(root_fd, machine_rel, run_rel, run_id, attempt, plan, frozen, live, reservation,
                      acc_raw, binding, roster, vendors):
     """ONE journaled publication, in dependency order: evidence, destinations, source removals, records
-    and manifest, evidence inventory, promotion receipt, then the terminal staging deletion."""
+    and manifest, base evidence inventory, promotion receipt and its phase inventory, then staging deletion."""
     ops = _Ops(root_fd)
     home = plan.evidence_home
-    evidence = [(_opf_import.ACCEPTANCE_NAME, acc_raw)]
+    evidence = [(home + "/" + _opf_import.ACCEPTANCE_NAME, acc_raw)]
     ops.mkdir(home + "/" + REVIEW_DIRNAME)
     for name in sorted((n for n, k in frozen.tree.items() if k == "dir"), key=lambda n: (n.count("/"), n)):
         ops.mkdir(home + "/" + REVIEW_DIRNAME + "/" + name)
     for name in sorted(n for n, k in frozen.tree.items() if k == "file"):
         data = frozen.read_bytes(name)
         ops.create(home + "/" + REVIEW_DIRNAME + "/" + name, data)
-        evidence.append((REVIEW_DIRNAME + "/" + name, data))
+        evidence.append((home + "/" + REVIEW_DIRNAME + "/" + name, data))
     for r in plan.removals:
         data, mode = live[r["path"]]
         ops.create(r["dest"], data, mode, destination=True)
-        if r["disposition"] == "migrate":
-            evidence.append((r["dest"][len(home) + 1:], data))
+        if r["disposition"] == "migrate" or r["dest"].startswith(_opf_store.ARCHIVE_REL + "/moved/"):
+            evidence.append((r["dest"], data))
     for r in plan.removals:
         data, mode = live[r["path"]]
         ops.ops.append(_pinned_remove(r["path"], data, mode))
@@ -510,8 +510,8 @@ def _publication_ops(root_fd, machine_rel, run_rel, run_id, attempt, plan, froze
         ops.publish(rel, data)
         published.append(dict(path=rel, sha256=_sha(data)))
     inventory = _opf_import._emit_bytes(dict(
-        format=EVIDENCE_INVENTORY_FORMAT, schema=SCHEMA, run_id=run_id,
-        entry=[dict(path=p, sha256=_sha(d), size=len(d)) for p, d in sorted(evidence)]), "evidence inventory")
+        format=EVIDENCE_INVENTORY_FORMAT,
+        file=[dict(path=p, sha256=_sha(d), size=len(d)) for p, d in sorted(evidence)]), "evidence inventory")
     ops.create(_opf_store.evidence_inventory("import", run_id), inventory)
     receipt = _opf_import._emit_bytes(dict(
         format=PROMOTION_FORMAT, schema=SCHEMA, run_id=run_id, attempt=attempt,
@@ -523,15 +523,80 @@ def _publication_ops(root_fd, machine_rel, run_rel, run_id, attempt, plan, froze
         removed=[dict(source=r["path"], destination=r["dest"], disposition=r["disposition"])
                  for r in plan.removals]), "promotion receipt")
     ops.create(home + "/" + PROMOTION_NAME, receipt)
+    # The receipt binds the immutable base inventory; a separate immutable phase claims the
+    # receipt, avoiding a receipt/inventory digest cycle. Both inventories are bound by INTENT.
+    phase = _opf_import._emit_bytes(dict(format=EVIDENCE_INVENTORY_FORMAT, file=[
+        dict(path=home + "/" + PROMOTION_NAME, sha256=_sha(receipt), size=len(receipt))]),
+        "promotion evidence inventory")
+    ops.create(_opf_store.evidence_inventory("import", run_id, "promotion"), phase)
     _staging_removals(root_fd, run_rel, frozen, ops)
     return ops
+
+
+def _completed_evidence(root_fd, run_id, intent, receipt):
+    """Verify this bundle only, including exact membership and retained Move destinations.
+    The journal binds both immutable inventories; neither is ever repaired on replay.
+    As with doctor, this is a bounded local snapshot, not authenticated history.
+    """
+    import _opf_check
+    home = _opf_import._ingest_acceptance_home(run_id)
+    inventories = {_opf_store.evidence_inventory("import", run_id, phase)
+                   for phase in (None, "promotion")}
+    expected = {}
+    for phase in (None, "promotion"):
+        rel = _opf_store.evidence_inventory("import", run_id, phase)
+        raw, _st = _journal._read_contained(root_fd, rel, require_single_link=True)
+        rows = _opf_check._evidence_rows(home, "import", run_id, tomllib.loads(raw.decode("utf-8")))
+        if phase is None and _sha(raw) != receipt["evidence_inventory_sha256"]:
+            raise ValueError("the evidence inventory does not match its receipt")
+        problem = _opf_import._txn_record_intent_problem(intent.get("ops"), rel, raw)
+        if problem:
+            raise ValueError(problem)
+        for row in rows:
+            if row["path"] in expected:
+                raise ValueError("evidence path is claimed more than once: " + row["path"])
+            expected[row["path"]] = row
+    # Derive membership from the actual tree and the receipt, not from the inventories themselves.
+    present, directories, pending = set(), set(), [(home, 0)]
+    budget = 0
+    while pending:
+        rel, depth = pending.pop()
+        if depth > _opf_check._CONTAINMENT_MAX_DEPTH:
+            raise ValueError("evidence depth ceiling: " + rel)
+        subdirs, files = _opf_check._list_contained(root_fd, rel)
+        if subdirs is None:
+            raise ValueError("evidence directory vanished: " + rel)
+        budget += len(subdirs) + len(files)
+        if budget > (1 << 20):
+            raise ValueError("evidence entry ceiling")
+        present.update(rel + "/" + name for name in files)
+        directories.update(rel + "/" + name for name in subdirs)
+        pending.extend((rel + "/" + name, depth + 1) for name in subdirs)
+    moved = {r["destination"] for r in receipt["removed"]
+             if r["disposition"] == "move"
+             and r["destination"].startswith(_opf_store.ARCHIVE_REL + "/moved/")}
+    if set(expected) != (present - inventories) | moved:
+        raise ValueError("evidence payload membership differs from its inventories")
+    claimed_dirs = set()
+    for path in expected:
+        if path.startswith(home + "/"):
+            parent = path.rsplit("/", 1)[0]
+            while parent != home:
+                claimed_dirs.add(parent)
+                parent = parent.rsplit("/", 1)[0]
+    if directories != claimed_dirs:
+        raise ValueError("evidence directory membership differs from its inventories")
+    for path, row in expected.items():
+        data, _st = _journal._read_contained(root_fd, path, require_single_link=True)
+        if _sha(data) != row["sha256"] or len(data) != row["size"]:
+            raise ValueError("evidence {} is corrupt".format(path))
 
 
 def _verify_completed(cap, root_fd, run_id, attempt):
     """A completed run is a no-op only while its immutable evidence verifies: the attempt's INTENT binds
     the promotion receipt's exact bytes, the receipt binds the reservation and the evidence inventory,
-    and every inventoried payload still hashes to its entry. Live index bytes are not compared (later
-    legitimate additions must not trigger republishing)."""
+    and both inventories cover exactly the retained payload, whose sizes and digests still match.
+    Live index bytes are not compared (later legitimate additions must not trigger republishing)."""
     intent = _opf_journal.attempt_intent(cap, KIND, run_id, attempt)
     home = _opf_import._ingest_acceptance_home(run_id)
     rec_rel = home + "/" + PROMOTION_NAME
@@ -547,15 +612,9 @@ def _verify_completed(cap, root_fd, run_id, attempt):
                                               require_single_link=True)
         if "sha256:" + _sha(alloc) != receipt["reservation_digest"]:
             raise _cannot("completed run {}: the reservation does not match its receipt".format(run_id))
-        inv_raw, _st = _journal._read_contained(root_fd, _opf_store.evidence_inventory("import", run_id),
-                                                require_single_link=True)
-        if _sha(inv_raw) != receipt["evidence_inventory_sha256"]:
-            raise _cannot("completed run {}: the evidence inventory does not match its receipt".format(run_id))
-        for entry in tomllib.loads(inv_raw.decode("utf-8"))["entry"]:
-            data, _st = _journal._read_contained(root_fd, _canonical(home + "/" + entry["path"], "evidence"),
-                                                 require_single_link=True)
-            if _sha(data) != entry["sha256"] or len(data) != entry["size"]:
-                raise _cannot("completed run {}: evidence {} is corrupt".format(run_id, entry["path"]))
+        _completed_evidence(root_fd, run_id, intent, receipt)
+    except _opf_store.StoreError as exc:
+        raise _cannot("completed run {}: {}".format(run_id, exc))
     except (UnicodeDecodeError, ValueError, RecursionError, KeyError, TypeError) as exc:
         raise _cannot("completed run {}: its retained evidence is malformed ({!r})".format(run_id, exc))
     ref = dict(txn_id=_opf_journal.attempt_txn(KIND, run_id, attempt), journal_rel=_opf_store.journal_root(KIND))
@@ -1828,7 +1887,174 @@ def _t_postlaunch_retain(base, check):
               and "already held" in " ".join(again.findings))
 
 
-TESTS = (("happy-path", _t_happy_path), ("retry-monotonic", _t_retry_monotonic),
+def _st_evidence_report(root):
+    import _opf_check
+    rep = _opf_check._Report()
+    rep.ran("C-EVIDENCE-ENUM")
+    fd = _opf_store._open_root_fd(root)
+    try:
+        _opf_check._check_evidence(fd, 2, rep)
+    finally:
+        os.close(fd)
+    return rep
+
+
+def _t_evidence_composition(base, check):
+    """Real planner/review/apply -> doctor under the existing in-memory homes-2 activation.
+    This does not certify production 2.0.0 admission or migrate the legacy Move planner.
+    """
+    root, rid, run = _st_build(base, "evidence")
+    with _opf_import._self_test_homes2_active(root):
+        result = apply_ingest(root, rid, now=_NOW)
+        check("evidence-promoted", result.verdict == CLEAN and result.promoted is True)
+        rep = _st_evidence_report(root)
+        check("evidence-doctor", rep.checks == {"C-EVIDENCE-ENUM": "PASS"}
+              and not rep.findings and not rep.cannot)
+        before = _st_tree(root)
+        counters = _st_counters(root)
+        again = apply_ingest(root, rid, now=_NOW)
+        check("evidence-noop", again.verdict == CLEAN and again.outcome == "noop_already_complete"
+              and _st_tree(root) == before and _st_counters(root) == counters)
+        home = root / _opf_import._ingest_acceptance_home(rid)
+        inv = home / "inventory.toml"
+        phase = home / "inventory-promotion.toml"
+        base_raw, phase_raw = inv.read_bytes(), phase.read_bytes()
+        old = dict(format="opf.ingest.evidence-inventory/v1", schema=SCHEMA, run_id=rid,
+                   entry=[dict(row, path=row["path"][len(str(home.relative_to(root))) + 1:])
+                          for row in tomllib.loads(base_raw.decode("utf-8")).get("file", [])])
+        cases = (
+            ("receipt-unclaimed", phase, _opf_import._emit_bytes(
+                dict(format=EVIDENCE_INVENTORY_FORMAT, file=[]), "empty phase"),
+             "off-inventory file", PROMOTION_NAME),
+            ("old-format", inv, _opf_import._emit_bytes(old, "old inventory"),
+             "legacy-ingest-inventory", "inventory.toml"),
+            ("old-format-phase", phase, _opf_import._emit_bytes(old, "old phase inventory"),
+             "legacy-ingest-inventory", "inventory-promotion.toml"),
+            ("retained-byte", home / "originals/legacy/mig.md", b"changed",
+             "size or digest mismatch", "originals/legacy/mig.md"),
+            ("extra-payload", home / "unclaimed.txt", b"extra",
+             "off-inventory file", "unclaimed.txt"),
+        )
+        for label, target, data, diagnostic, member in cases:
+            saved = target.read_bytes() if target.exists() else None
+            target.write_bytes(data)
+            damaged = _st_tree(root)
+            rep = _st_evidence_report(root)
+            check("evidence-" + label, rep.checks["C-EVIDENCE-ENUM"] != "PASS"
+                  and any(diagnostic in msg and member in msg for msg in rep.findings + rep.cannot))
+            refused = apply_ingest(root, rid, now=_NOW)
+            check("evidence-" + label + "-replay", refused.verdict == CANNOT_EVALUATE
+                  and refused.outcome != "noop_already_complete"
+                  and _st_tree(root) == damaged and _st_counters(root) == counters)
+            if label in ("old-format", "old-format-phase"):
+                check("evidence-" + label + "-named",
+                      rep.checks == {"C-EVIDENCE-ENUM": "FINDING"} and not rep.cannot
+                      and any("C-EVIDENCE-ENUM: legacy-ingest-inventory:" in msg
+                              and member in msg for msg in rep.findings)
+                      and any("legacy-ingest-inventory" in msg for msg in refused.findings))
+            if saved is None:
+                target.unlink()
+            else:
+                target.write_bytes(saved)
+        check("evidence-fixture-restored", inv.read_bytes() == base_raw and phase.read_bytes() == phase_raw
+              and _st_tree(root) == before)
+
+
+def _t_evidence_entries(base, check):
+    """Replay must form a refusal without changing retained bytes or counters."""
+    import _opf_check
+    root, rid, run = _st_build(base, "evidence-entries")
+    with _opf_import._self_test_homes2_active(root):
+        result = apply_ingest(root, rid, now=_NOW)
+        check("evidence-entries-promoted", result.verdict == CLEAN and result.promoted is True)
+        before, counters = _st_tree(root), _st_counters(root)
+        home = root / _opf_import._ingest_acceptance_home(rid)
+        for kind in ("symlink", "fifo", "mode000", "extra-directory"):
+            target = home / kind
+            if kind == "symlink":
+                target.symlink_to("review", target_is_directory=True)
+            elif kind == "fifo":
+                os.mkfifo(target)
+            else:
+                target.mkdir()
+                if kind == "mode000":
+                    target.chmod(0)
+            try:
+                original_stat = target.lstat()
+                diagnostic = "evidence directory membership differs from its inventories"
+                if kind != "extra-directory":
+                    fd = _opf_store._open_root_fd(root)
+                    try:
+                        rel = target if kind == "mode000" else home
+                        try:
+                            _opf_check._list_contained(fd, str(rel.relative_to(root)))
+                        except _opf_store.StoreError as exc:
+                            diagnostic = str(exc)
+                        else:
+                            raise RuntimeError("fixture did not trigger StoreError: " + kind)
+                    finally:
+                        os.close(fd)
+                refused, escaped = None, None
+                try:
+                    refused = apply_ingest(root, rid, now=_NOW)
+                except Exception as exc:  # turn an escape into the named regression assertion
+                    escaped = exc
+                check("evidence-" + kind + "-replay", escaped is None and refused is not None
+                      and refused.verdict == CANNOT_EVALUATE
+                      and refused.outcome != "noop_already_complete"
+                      and any(diagnostic in msg for msg in refused.findings))
+                current_stat = target.lstat()
+                check("evidence-" + kind + "-entry-unchanged",
+                      (current_stat.st_ino, current_stat.st_mode) ==
+                      (original_stat.st_ino, original_stat.st_mode)
+                      and (kind != "symlink" or os.readlink(target) == "review")
+                      and _st_counters(root) == counters)
+            finally:
+                if kind in ("mode000", "extra-directory"):
+                    target.chmod(0o700)
+                    target.rmdir()
+                else:
+                    target.unlink()
+            # Snapshot after removing the injected FIFO/unreadable entry: never follow or read it.
+            check("evidence-" + kind + "-bytes-unchanged", _st_tree(root) == before
+                  and _st_counters(root) == counters)
+            again = apply_ingest(root, rid, now=_NOW)
+            check("evidence-" + kind + "-restored", again.verdict == CLEAN
+                  and again.outcome == "noop_already_complete" and _st_tree(root) == before
+                  and _st_counters(root) == counters)
+
+
+def _t_evidence_move(base, check):
+    """Composition seam only: a retained Move plan, not admission by the still-legacy Move planner."""
+    from unittest.mock import patch
+    root, rid, run = _st_build(base, "retained-move")
+
+    def retained(**ctx):
+        for removal in ctx["plan"].removals:
+            if removal["disposition"] == "move":
+                removal["dest"] = _opf_store.ARCHIVE_REL + "/moved/legacy/move.md"
+
+    with _opf_import._self_test_homes2_active(root), patch.dict(_HOOKS, {"after-preflight": retained}):
+        result = apply_ingest(root, rid, now=_NOW)
+        rep = _st_evidence_report(root)
+        check("evidence-retained-move", result.verdict == CLEAN and result.promoted is True
+              and rep.checks == {"C-EVIDENCE-ENUM": "PASS"})
+        before = _st_tree(root)
+        again = apply_ingest(root, rid, now=_NOW)
+        check("evidence-retained-move-noop", again.verdict == CLEAN
+              and again.outcome == "noop_already_complete" and _st_tree(root) == before)
+        dest = root / _opf_store.ARCHIVE_REL / "moved/legacy/move.md"
+        dest.write_bytes(b"corrupt")
+        rep = _st_evidence_report(root)
+        refused = apply_ingest(root, rid, now=_NOW)
+        check("evidence-retained-move-corrupt", refused.verdict == CANNOT_EVALUATE
+              and any("size or digest mismatch" in msg and "moved/legacy/move.md" in msg
+                      for msg in rep.findings))
+
+
+TESTS = (("evidence-composition", _t_evidence_composition), ("evidence-move", _t_evidence_move),
+         ("evidence-entries", _t_evidence_entries),
+         ("happy-path", _t_happy_path), ("retry-monotonic", _t_retry_monotonic),
          ("unreviewed-refused", _t_unreviewed_refused), ("traversal-refused", _t_traversal_refused),
          ("mint-move-toctou", _t_mint_move_toctou), ("per-record-refused", _t_per_record_refused),
          ("postverify-committed", _t_postverify_committed),
@@ -3795,6 +4021,95 @@ def _red_on_revert():
     return 0
 
 
+def _evidence_red_on_revert():
+    """Focused composition flips; source mutations stay in fresh in-memory modules."""
+    import tempfile
+    from unittest.mock import patch
+    here = Path(__file__).resolve().parent
+    old_shape = ('format=EVIDENCE_INVENTORY_FORMAT,\n'
+                 '        file=[dict(path=p, sha256=_sha(d), size=len(d)) for p, d in sorted(evidence)]')
+    new_shape = ('format="opf.ingest.evidence-inventory/v1", schema=SCHEMA, run_id=run_id,\n'
+                 '        entry=[dict(path=p[len(home) + 1:], sha256=_sha(d), size=len(d)) '
+                 'for p, d in sorted(evidence)]')
+    legacy_refusal = ('raise _LegacyIngestInventory("legacy-ingest-inventory: old-format ingest inventory is unsupported; "'
+                      '\n                                     "refused without migration or rewrite")')
+    cases = (
+        ("writer-schema", "_opf_ingest_apply", old_shape, new_shape, "evidence-doctor"),
+        ("receipt-claim", "_opf_ingest_apply",
+         'dict(path=home + "/" + PROMOTION_NAME, sha256=_sha(receipt), size=len(receipt))',
+         '*[]', "evidence-doctor"),
+        ("receipt-off-inventory-guard", "_opf_check",
+         'rep.finding("C-EVIDENCE-ENUM: off-inventory file {!r}".format(full))',
+         'pass', "evidence-receipt-unclaimed"),
+        ("old-format-refusal", "_opf_check", legacy_refusal,
+         'doc = dict(format=EVIDENCE_FORMAT, file=[dict(row, path=bundle + "/" + row["path"]) '
+         'for row in doc["entry"]])', "evidence-old-format"),
+        ("exact-replay-membership", "_opf_ingest_apply",
+         'if set(expected) != (present - inventories) | moved:', 'if False:',
+         "evidence-extra-payload-replay"),
+        ("legacy-finding-grade", "_opf_check",
+         'rep.finding("C-EVIDENCE-ENUM: {} (inventory {!r})".format(exc, rel))',
+         'rep.cant("C-EVIDENCE-ENUM: {} (inventory {!r})".format(exc, rel))',
+         "evidence-old-format-named"),
+        ("exact-replay-directories", "_opf_ingest_apply",
+         'if directories != claimed_dirs:', 'if False:', "evidence-extra-directory-replay"),
+        *((kind + "-replay-refusal", "_opf_ingest_apply",
+           ('except _opf_store.StoreError as exc:\n'
+            '        raise _cannot("completed run {}: {}".format(run_id, exc))'),
+           ('except ZeroDivisionError as exc:\n'
+            '        raise _cannot("completed run {}: {}".format(run_id, exc))'),
+           "evidence-" + kind + "-replay") for kind in ("symlink", "fifo", "mode000")),
+        ("retained-digest", "_opf_ingest_apply",
+         'if _sha(data) != row["sha256"] or len(data) != row["size"]:', 'if False:',
+         "evidence-retained-byte-replay"),
+        ("retained-move", "_opf_ingest_apply",
+         'if r["disposition"] == "migrate" or r["dest"].startswith(_opf_store.ARCHIVE_REL + "/moved/"):',
+         'if r["disposition"] == "migrate":', "evidence-retained-move"),
+        ("generation-detail", "check_opf_import",
+         '_HOMES2_NO_LEGACY_TRANSACTION_DETAIL = (\n'
+         '    "no legacy transaction record (publication attempts are not graded by this gate)")',
+         '_HOMES2_NO_LEGACY_TRANSACTION_DETAIL = "changed wording"',
+         "F-OPF-GEN2-DETAIL-UNPINNED"),
+    )
+    with tempfile.TemporaryDirectory(prefix="opf-evidence-flips-") as tmp:
+        for name, module_name, old, new, label in cases:
+            path = here / (module_name + ".py")
+            source = path.read_text(encoding="utf-8")
+            prefix = source.split(_REVERT_MARKER, 1)[0]
+            suffix = source[len(prefix):]
+            if prefix.count(old) != 1:
+                raise RuntimeError("non-unique evidence flip: " + name)
+            for phase, candidate in (("baseline", source),
+                                     ("mutant", prefix.replace(old, new, 1) + suffix),
+                                     ("restored", source)):
+                module = _load_revert_candidate(candidate, "_evidence_flip", str(path))
+                failures, seen = [], []
+                def check(identity, ok):
+                    seen.append(identity)
+                    if not ok:
+                        failures.append(identity)
+                try:
+                    with patch.dict(sys.modules, {module_name: module}):
+                        if module_name == "check_opf_import":
+                            module._self_test_generation_detail(check)
+                        else:
+                            owner = module if module_name == "_opf_ingest_apply" else sys.modules[__name__]
+                            if name == "retained-move":
+                                test = owner._t_evidence_move
+                            elif name == "exact-replay-directories" or name.endswith("-replay-refusal"):
+                                test = owner._t_evidence_entries
+                            else:
+                                test = owner._t_evidence_composition
+                            test(Path(tmp) / name / phase, check)
+                    if label not in seen or (phase == "mutant" and label not in failures):
+                        raise RuntimeError("evidence reversal survived: " + name)
+                    if phase != "mutant" and failures:
+                        raise RuntimeError("evidence control failed: {}: {}".format(name, failures))
+                finally:
+                    sys.modules.pop("_evidence_flip", None)
+            print("EVIDENCE RED-ON-REVERT", name, "baseline=PASS mutant=RED restored=PASS assertion=" + label)
+
+
 def _red_on_revert_main():
     """Wrap `_red_on_revert` with the same fail-closed containment guard and exit contract as self_test:
     0 pass, 1 a discrimination or harness failure (never a silent pass), 2 no containment."""
@@ -3805,6 +4120,7 @@ def _red_on_revert_main():
         return 2
     try:
         _red_on_revert()
+        _evidence_red_on_revert()
     except Exception as exc:  # noqa: BLE001  a discrimination or harness failure is never a silent pass
         print("OPF-INGEST-APPLY RED-ON-REVERT FAILED: {!r}".format(exc), file=sys.stderr)
         return 1
