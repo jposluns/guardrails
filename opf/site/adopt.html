@@ -266,13 +266,16 @@
       <code>transition</code> changes a record's status under its type's rules: an assistant or
       automation that lands a terminal or gated state gets <code>/proposed</code>, and only a
       maintainer ratifies or rejects. A rejection needs <code>--reason</code> and returns the record
-      to the state its worklog records from before the proposal. <code>done-with-receipt</code> is
+      to the state it held before the proposal. The worklog entry of the proposing change must name
+      that state, and the committed history must show it immediately before the proposal commit;
+      otherwise the rejection is refused. <code>done-with-receipt</code> is
       maintainer-only: it moves a backlog item to <code>done</code> and creates its one
       <code>done</code> receipt in the same act. <code>worklog-append</code> adds one worklog entry.
-      The first three also add their own worklog entry. Every run refuses to rewrite a hand-edited
-      or comment-bearing file, requires clean planned paths and the single-writer lease, publishes
-      every changed file in one journaled transaction, renders the declared views, and runs a full
-      doctor.</p>
+      The first three also add their own worklog entry. Every run refuses to rewrite a file that
+      carries comments or is not in canonical form, requires clean planned paths and the
+      single-writer lease, publishes every changed file in one journaled transaction, renders the
+      declared views, and runs a full doctor. The canonical-form check does not detect a hand edit
+      that leaves the file in canonical form.</p>
     <p><b style="color:var(--ink)">Result.</b> The change, left uncommitted in your working tree for
       review; <code>record</code> never stages or commits. Exit 0 means the change is recorded and
       doctor reports no finding; exit 2 means a refusal or cannot-evaluate. Until you commit a status

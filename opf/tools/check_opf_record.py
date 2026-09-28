@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T15)
+  check_opf_record.py --self-test                    the fixture suite (T1-T16)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -21,11 +21,12 @@ Each case runs on its own copy of that template; the root is removed in a finall
   T4  two sequential creates claim BI-1 then BI-2 (and their own worklog entries WL-1, WL-2) with
       monotonic counters; a counters map missing an enabled namespace refuses (flip: drop the
       known-complete proof)
-  T5  a kill at each journal step over the three operands (counters, index, worklog) leaves the killed
-      run's lease, which refuses the next run before any recovery write; once the operator releases it,
-      reconciliation leaves the operands exactly the prestate or exactly the poststate, the poststate iff
-      the transaction is COMPLETE, and no killed run reports an id (flip: write counters outside the
-      journaled transaction)
+  T5  a kill at each journal step of create and of an assistant transition (three operands: counters,
+      index, worklog) and of a maintainer done-with-receipt (four operands: counters, backlog index, done
+      index, worklog) leaves the killed run's lease, which refuses the next run before any recovery write;
+      once the operator releases it, reconciliation leaves the operands exactly the prestate or exactly the
+      poststate, the poststate iff the transaction is COMPLETE, and no killed run reports an id (flip: write
+      counters outside the journaled transaction)
   T6  an assistant `transition BI done` lands done/proposed with zero receipts; an assistant
       done-with-receipt refuses before the store is resolved, and a maintainer `transition BI done`
       refuses, both with every byte untouched; a maintainer done-with-receipt (ratifying done/proposed, or
@@ -34,13 +35,15 @@ Each case runs on its own copy of that template; the root is removed in a finall
       maintainer-only check; drop the done-only-through-its-receipt guard)
   T7  a maintainer rejection without --reason, of a proposal the worklog does not record, to another
       state, or by an assistant refuses with every byte untouched; with a reason it returns to the
-      recorded pre-proposal state and records the reason (flips: the check sees a placeholder reason;
-      guess the pre-proposal state)
+      recorded and committed pre-proposal state and records the reason (flips: the check sees a
+      placeholder reason; guess the pre-proposal state)
   T8  two branches that each create from the same committed counters conflict on the store paths; a
       canonical union resolution with the duplicate BI-1 is doctor INVALID with a C-ID-SPACE finding
       (flip: disable check_unique_ids)
-  T9  a held lease refuses exit 2 and is never seized; success is reported only after the lease release
-      (flip: emit the success report before releasing the lease)
+  T9  a held lease refuses exit 2 and is never seized; success is reported only after the lease release;
+      a failed release reports the final gate's recorded outcome, doctor-VALID after a create and the
+      accepted pending cannot-evaluate after an actor-dependent transition (flips: emit the success report
+      before releasing the lease; the unconditional doctor-VALID release-failure text)
   T10 a store the final doctor grades not VALID exits 2 with scoped recovery text, the change left for
       review and the lease released (flip: skip the final doctor)
   T11 worklog-append claims the next WL id with no status qualifier; an id inside a released span refuses
@@ -56,6 +59,10 @@ Each case runs on its own copy of that template; the root is removed in a finall
   T15 a run whose journal lock release fails after COMPLETE still renders, runs doctor, and reports, and
       says the lock was left; the next run reconciles the leftover lock and names the COMPLETE
       transaction without claiming render and doctor never ran (flip: the old never-ran outcome text)
+  T16 a rejection whose worklog lifecycle line disagrees with the committed history (the line's FROM state
+      rewritten canonically and committed, doctor VALID; or a history that reached the proposal again from
+      another state), whose committed snapshot before the proposal commit does not parse, or whose proposal
+      is not committed refuses with every byte untouched (flip: trust the worklog line alone)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -94,9 +101,15 @@ LEASE = MACH + "/lease.toml"
 RECORDED_EVENT = '"event": "recorded"'
 CREATE = ["create", "--type", "backlog_item", "--title", "an item", "--actor", "assistant:gate"]
 APPEND = ["worklog-append", "--kind", "added", "--summary", "a fact", "--actor", "assistant:gate"]
-KILL_POINTS = ("after-lock", "after-preimage-0", "after-preimage-1", "after-preimage-2", "after-preimages",
-               "torn:INTENT", "after-publish-INTENT", "torn-payload:0", "after-apply-0", "torn-payload:1",
-               "after-apply-1", "torn-payload:2", "after-apply-2", "torn:COMPLETE", "after-publish-COMPLETE")
+
+
+def kill_points(n):
+    """The journal engine's injection hooks, in order, over one transaction of n operands."""
+    points = ["after-lock"] + ["after-preimage-{}".format(i) for i in range(n)]
+    points += ["after-preimages", "torn:INTENT", "after-publish-INTENT"]
+    for i in range(n):
+        points += ["torn-payload:{}".format(i), "after-apply-{}".format(i)]
+    return tuple(points + ["torn:COMPLETE", "after-publish-COMPLETE"])
 
 
 class Harness(Exception):
@@ -205,10 +218,11 @@ class Fixtures:
         if rc != 0:
             raise Harness("the template store is not doctor-VALID: " + out[-800:] + err[-800:])
 
-    def case(self, name):
+    def case(self, name, source=None):
+        """A fresh copy of the template, or of `source` (a case built from it)."""
         self.count += 1
         root = self.base / "{:03d}-{}".format(self.count, name)
-        shutil.copytree(self.template, root, symlinks=True)
+        shutil.copytree(self.template if source is None else source, root, symlinks=True)
         return root
 
     def commit_all(self, root, message):
@@ -414,18 +428,40 @@ def journal_states(root):
         os.close(jr_fd)
 
 
+def _t5_scenarios(fx):
+    """(label, base store or None for the template, args, operands in journal order): create over the
+    template; an assistant transition (three operands) and a maintainer done-with-receipt (four operands)
+    over a committed store whose BI-1 is active."""
+    active = fx.case("t5-base-active")
+    with ticking():
+        step(fx, active, ["create", "--type", "backlog_item", "--title", "k"] + MAINTAINER, "BI-1")
+        step(fx, active, ["transition", "BI-1", "active"] + MAINTAINER, "BI-1 active")
+    return (("create", None, CREATE, (COUNTERS, BI_INDEX, WORKLOG)),
+            ("transition", active, ["transition", "BI-1", "done"] + ASSISTANT, (COUNTERS, BI_INDEX, WORKLOG)),
+            ("done-with-receipt", active, ["done-with-receipt", "BI-1"] + MAINTAINER,
+             (COUNTERS, BI_INDEX, DN_INDEX, WORKLOG)))
+
+
 def t5_crash(fx):
+    for label, base, args, operands in _t5_scenarios(fx):
+        _t5_matrix(fx, label, base, args, operands)
+
+
+def _t5_matrix(fx, label, base, args, operands):
     env = fx.env
     flip = _t5_flip[0]
-    operands = (COUNTERS, BI_INDEX, WORKLOG)
-    reference = fx.case("t5-reference")
-    proc = child(env, reference, CREATE)
-    assert proc.returncode == 0 and '"event": "recorded"' in proc.stdout, (proc.returncode, proc.stderr[-800:])
+    reference = fx.case("t5-{}-reference".format(label), base)
+    proc = child(env, reference, args)
+    assert proc.returncode == 0 and '"event": "recorded"' in proc.stdout, (label, proc.returncode,
+                                                                           proc.stderr[-800:])
     post = {rel: read(reference, rel) for rel in operands}
-    for point in KILL_POINTS:
-        root = fx.case("t5-" + point.replace(":", "-"))
+    for hook in kill_points(len(operands)):
+        point = (label, hook)     # named in every assertion below
+        root = fx.case("t5-{}-{}".format(label, hook.replace(":", "-")), base)
         pre = {rel: read(root, rel) for rel in operands}
-        proc = child(env, root, CREATE, kill=point, flip=flip)
+        assert all(pre[rel] != post[rel] for rel in operands), ("T5 the operation rewrites every operand", point)
+        retained = set(journal_states(root))     # the base's own completed transactions, kept as evidence
+        proc = child(env, root, args, kill=hook, flip=flip)
         assert proc.returncode == 137, ("T5 the child is killed at", point, proc.returncode, proc.stderr[-800:])
         assert '"event": "recorded"' not in proc.stdout, ("T5 a killed run reports no id", point)
         # The killed run leaves its lease, and a held lease refuses the next run before any recovery write.
@@ -441,7 +477,7 @@ def t5_crash(fx):
         assert not any(s == "open" for s in states.values()), ("T5 every transaction terminal", point, states)
         assert not (Path(root) / record.JOURNAL_REL / "lock").exists(), ("T5 the journal lock released", point)
         now = {rel: read(root, rel) for rel in operands}
-        complete = any(s == "complete" for s in states.values())
+        complete = any(s == "complete" for name, s in states.items() if name not in retained)
         assert now == (post if complete else pre), (
             "T5 exactly the prestate or the poststate, the poststate iff COMPLETE", point, states)
 
@@ -482,7 +518,19 @@ def t9_lease(fx):
     with patch.object(guard, "release_lease", failing):
         result = record_cli(env, root, CREATE)
     refused(result, "synthetic release failure")
-    assert "lease release failed" in result[2], result[2][-800:]
+    assert "reached doctor-VALID, but the lease release failed" in result[2], result[2][-800:]
+    # After a transition whose final gate accepted only the pending cannot-evaluate, a failed release reports
+    # that recorded outcome, never doctor-VALID.
+    root = fx.case("t9-release-fails-pending")
+    with ticking():
+        step(fx, root, CREATE, "BI-1")
+        step(fx, root, ["transition", "BI-1", "active"] + ASSISTANT, "BI-1 active")
+        with patch.object(guard, "release_lease", failing):
+            result = record_cli(env, root, ["transition", "BI-1", "done"] + ASSISTANT)
+    refused(result, "synthetic release failure")
+    err = result[2]
+    assert "carrying only the accepted pending cannot-evaluate of BI-1 active -> done/proposed" in err, err[-800:]
+    assert "lease release failed" in err and "doctor-VALID" not in err, err[-800:]
 
 
 def flip_t9():
@@ -490,6 +538,12 @@ def flip_t9():
         record._emit_success(report)
         record._release(ctx, lease)
     return patch.object(record, "_conclude", report_then_release)
+
+
+def flip_t9_outcome():
+    return patch.object(record, "_release_failure_text", lambda report: (
+        "opf record: the store reached doctor-VALID, but the lease release failed; nothing is offered as "
+        "recorded. Confirm no opf run is live (spec 5.7) and reconcile the lease before any further action."))
 
 
 # --- T10: the final doctor -----------------------------------------------------------------------------------
@@ -764,6 +818,74 @@ def flip_t7_pre():
     return patch.object(record, "_pre_proposal_state", lambda entries, rid, status: "active")
 
 
+def _proposed(fx, root, via):
+    """BI-1 created and moved to active by an assistant, then proposed at `via` (done or dropped), each
+    step committed: the proposing lifecycle line is the verb's own."""
+    step(fx, root, CREATE, "BI-1")
+    step(fx, root, ["transition", "BI-1", "active"] + ASSISTANT, "BI-1 active")
+    step(fx, root, ["transition", "BI-1", via] + ASSISTANT, "BI-1 {}/proposed".format(via))
+
+
+def _set_status(fx, root, status, message):
+    """A canonical hand edit of BI-1's status, committed (history the verb did not write)."""
+    index = model(root, BI_INDEX)
+    index["record"][0]["status"] = status
+    write_commit(fx.env, root, BI_INDEX, emit.emit_checked(index).encode("utf-8"), message)
+
+
+def t16_corroborated_rejection(fx):
+    env = fx.env
+    # The reproduction: only the proposing line's FROM state is rewritten, canonically, and committed with
+    # its re-rendered views, so doctor is VALID and byte reproduction passes.
+    root = fx.case("t16-forged-line")
+    with ticking():
+        _proposed(fx, root, "dropped")
+        worklog = model(root, WORKLOG)
+        genuine = "opf-record transition BI-1 active -> dropped/proposed"
+        assert worklog["entry"][-1]["detail"] == genuine, worklog["entry"][-1]
+        worklog["entry"][-1]["detail"] = "opf-record transition BI-1 open -> dropped/proposed"
+        write_commit(env, root, WORKLOG, emit.emit_checked(worklog).encode("utf-8"), "a forged proposing line")
+        rc, out, err = cli(env, ["render", "--root", str(root), "--write"])
+        assert rc == 0, ("T16 the views re-render", rc, err[-800:])
+        env.git(root, "add", "-A")
+        env.git(root, "commit", "-q", "-m", "views")
+        doctor_valid(env, root)
+        for state in ("open", "active"):
+            refused_untouched(env, root, ["transition", "BI-1", state, "--reason", "reject"] + MAINTAINER,
+                              "altered or stale")
+        assert row(root, "BI-1")["status"] == "dropped/proposed"
+    # Stale: the committed history reaches the proposal again from another state after the verb's line.
+    root = fx.case("t16-stale-line")
+    with ticking():
+        _proposed(fx, root, "done")
+        _set_status(fx, root, "open", "BI-1 back to open by hand")
+        _set_status(fx, root, "done/proposed", "BI-1 proposed again by hand")
+        refused_untouched(env, root, ["transition", "BI-1", "active", "--reason", "x"] + MAINTAINER,
+                          "altered or stale")
+    # Malformed: the snapshot immediately before the (latest) proposal commit does not parse.
+    root = fx.case("t16-malformed-history")
+    with ticking():
+        _proposed(fx, root, "done")
+        proposed = read(root, BI_INDEX)
+        write_commit(env, root, BI_INDEX, b"record = [\n", "a torn index")
+        write_commit(env, root, BI_INDEX, proposed, "the proposed index restored")
+        refused_untouched(env, root, ["transition", "BI-1", "active", "--reason", "x"] + MAINTAINER,
+                          "does not parse")
+    # Unverifiable: a proposal left uncommitted has no committed history yet.
+    root = fx.case("t16-uncommitted")
+    with ticking():
+        step(fx, root, CREATE, "BI-1")
+        step(fx, root, ["transition", "BI-1", "active"] + ASSISTANT, "BI-1 active")
+        recorded(record_cli(env, root, ["transition", "BI-1", "done"] + ASSISTANT))
+        refused_untouched(env, root, ["transition", "BI-1", "active", "--reason", "x"] + MAINTAINER,
+                          "the proposal is not committed")
+
+
+def flip_t16():
+    """Trust the worklog's lifecycle line alone (the reviewed head's behaviour)."""
+    return patch.object(record, "_corroborated_pre_proposal", lambda ctx, rel, rid, status, claimed: (claimed, None))
+
+
 def t8_collision(fx):
     env = fx.env
     root = fx.case("t8-collision")
@@ -859,13 +981,14 @@ TESTS = (
                                                                 flip_t6_receipt)),
     ("T7-rejection-reason-and-pre-proposal", t7_rejection, (flip_t7_reason, flip_t7_pre)),
     ("T8-parallel-branch-collision", t8_collision, flip_t8),
-    ("T9-lease-release-before-success", t9_lease, flip_t9),
+    ("T9-lease-release-before-success", t9_lease, (flip_t9, flip_t9_outcome)),
     ("T10-final-doctor", t10_final_doctor, flip_t10),
     ("T11-worklog-released-span", t11_worklog, flip_t11),
     ("T12-recovery-under-the-lease", t12_recovery_lease, flip_t12),
     ("T13-recovery-intervening-edit", t13_intervening_edit, flip_t13),
     ("T14-create-type-before-read", t14_type_before_read, flip_t14),
     ("T15-leftover-journal-lock", t15_leftover_lock, flip_t15),
+    ("T16-rejection-corroborated-by-history", t16_corroborated_rejection, flip_t16),
 )
 
 

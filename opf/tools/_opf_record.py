@@ -14,8 +14,11 @@ per change) in the SAME journaled transaction as the change. The entry's `detail
 lifecycle line (`opf-record create ID STATUS` or `opf-record transition ID FROM -> TO`): the record history
 that the envelope does not carry (spec 8.3). `transition` takes the target STATE only: an assistant or
 automation author landing a terminal or gated state gets `/proposed` (spec 8.4). A maintainer rejection of a
-`/proposed` record requires --reason and must return to the pre-proposal state recorded by the latest
-lifecycle line for that record; with no such line the rejection cannot be verified and refuses.
+`/proposed` record requires --reason and must return to its pre-proposal state, which is corroborated, never
+taken from worklog text alone: the latest lifecycle line for that record must name the state the committed
+history shows (the record's status in the committed snapshot immediately before the commit that landed the
+proposal, read by git at exact object ids: _committed_pre_proposal). With no such line, with a history that
+cannot establish the state, or with the two disagreeing, the rejection cannot be verified and refuses.
 `done-with-receipt` is maintainer-only (any other actor is refused before the store is touched): it moves an
 `active` or `done/proposed` backlog item to `done` and mints the one-to-one `done` receipt, linked
 `receipt_of`, in the same transaction (spec 8.5). `transition` never lands a backlog item at unqualified
@@ -77,9 +80,13 @@ byte prefix of the journaled preimage or planned bytes (read as a torn write), i
 transition changes `status` and `updated_at` only, so a target state that requires further fields (a
 `decided` pending_decision's resolution bundle, a `sent` contribution's delivery bundle) refuses at
 validate_record; posting a new handoff does not supersede the previous one in the same act. The
-pre-proposal state is read from the active worklog only: a record proposed outside this verb, or whose
-proposing entry has rotated to an archive, cannot be rejected here (refused, never guessed). A transition
-refuses when the clock has not passed the record's recorded timestamps.
+pre-proposal state's lifecycle line is read from the active worklog only: a record proposed outside this
+verb, or whose proposing entry has rotated to an archive, cannot be rejected here (refused, never guessed).
+Its committed-history corroboration walks the first-parent chain from HEAD (a proposal merged in from a
+branch is judged by the mainline snapshot before the merge, and refuses when that disagrees), reads at most
+_HISTORY_LIMIT commits that changed the record's index, runs before the lease is taken, and trusts the
+repository's own history: a rewritten history that changes the committed statuses is not detected. A
+transition refuses when the clock has not passed the record's recorded timestamps.
 """
 import base64
 import binascii
@@ -142,6 +149,13 @@ BACKLOG = "backlog_item"
 # `create` writes `opf-record create ID STATUS`; `transition` and `done-with-receipt` write
 # `opf-record transition ID FROM -> TO`.
 _LIFECYCLE_RE = re.compile(r"^opf-record (create|transition) ([A-Z]{2}-[1-9][0-9]*) (?:(\S+) -> )?(\S+)\Z")
+# The committed-history walk that corroborates a rejection's pre-proposal state reads at most this many
+# first-parent commits that changed the record's index, and refuses beyond it (never guesses).
+_HISTORY_LIMIT = 1000
+_OID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+# The single-writer journal lock of one publication carries `opf-record.<token>` as its session, and the
+# transaction directory it opens ends `.<token>`: a leftover lock names its own transaction by that token.
+_TOKEN_RE = re.compile(r"^[0-9a-f]{32}\Z")
 
 
 class RecordError(Exception):
@@ -327,7 +341,7 @@ def _require_canonical(operand):
 class Context:
     """The resolved store and the models this operation plans from."""
     __slots__ = ("res", "root", "root_fd", "machine_rel", "manifest", "homes", "types", "vendors",
-                 "counters", "version", "worklog", "done_index")
+                 "counters", "version", "worklog", "done_index", "history")
 
     def __init__(self, res, root, root_fd):
         self.res = res
@@ -342,6 +356,8 @@ class Context:
         self.version = None
         self.worklog = None        # the worklog operand: every subcommand appends one entry
         self.done_index = None     # the done index operand, read by done-with-receipt only
+        # The committed-history reader a rejection corroborates its pre-proposal state through (a seam).
+        self.history = lambda rel, rid, status: _committed_pre_proposal(res, rel, rid, status)
 
     def rel(self, name):
         return "{}/{}".format(self.machine_rel, name)
@@ -496,11 +512,13 @@ def _append_worklog(ctx, entry):
 
 
 def _pre_proposal_state(entries, rid, status):
-    """The recorded pre-proposal state of `rid`, now at the `/proposed` `status`: the FROM state of the
-    latest lifecycle line for `rid`, provided that line is the transition that landed exactly `status` from
-    an unqualified state. None when the worklog does not record it (the record was proposed outside this
-    verb, the proposing entry was rotated to an archive, or the latest line is some other change): the
-    rejection target then cannot be verified, and validate_transition grades it CANNOT-EVALUATE."""
+    """The pre-proposal state the worklog RECORDS for `rid`, now at the `/proposed` `status`: the FROM state
+    of the latest lifecycle line for `rid`, provided that line is the transition that landed exactly `status`
+    from an unqualified state. None when the worklog does not record it (the record was proposed outside
+    this verb, the proposing entry was rotated to an archive, or the latest line is some other change): the
+    rejection target then cannot be verified, and validate_transition grades it CANNOT-EVALUATE. The line
+    is worklog text, which a canonical hand edit can alter, so a rejection never acts on it alone: it must
+    agree with the committed history (_corroborated_pre_proposal)."""
     for entry in reversed(entries):
         detail = entry.get("detail") if isinstance(entry, dict) else None
         if not isinstance(detail, str):
@@ -512,6 +530,119 @@ def _pre_proposal_state(entries, rid, status):
             return m.group(3)
         return None
     return None
+
+
+class _Unverifiable(Exception):
+    """The committed history cannot establish a pre-proposal state; the message says why."""
+
+
+def _git_oid(git, store_root, spec):
+    """The exact object id `spec` names, or None when git reports no such object (an absent path, or no
+    parent). _Unverifiable when git cannot run or answers with something that is not an object id."""
+    out = _opf_observe._run_git(git, store_root, ["rev-parse", "--verify", "--quiet", spec])
+    if not out.completed:
+        raise _Unverifiable("git could not run ({})".format(out.err.strip()))
+    if out.rc != 0:
+        return None
+    oid = out.out.decode("ascii", "replace").strip()
+    if not _OID_RE.match(oid):
+        raise _Unverifiable("git named no object id for {}".format(spec))
+    return oid
+
+
+def _committed_status(git, store_root, commit, path, rid):
+    """The status of `rid` in the index at `path` in `commit` (an exact commit id), read by git from that
+    blob's own object id; None when the index or the record is absent there. _Unverifiable when the blob
+    cannot be read or parsed, or does not seat `rid` exactly once with a string status."""
+    blob = _git_oid(git, store_root, "{}:{}".format(commit, path))
+    if blob is None:
+        return None
+    out = _opf_observe._run_git(git, store_root, ["cat-file", "blob", blob])
+    if not out.completed or out.rc != 0:
+        raise _Unverifiable("git could not read {} at {} ({})".format(path, commit[:12], out.err.strip()))
+    try:
+        document = tomllib.loads(out.out.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+        raise _Unverifiable("{} at {} does not parse as TOML ({})".format(path, commit[:12], exc))
+    rows = document.get("record", [])
+    if not isinstance(rows, list):
+        raise _Unverifiable("{} at {} is not a record index".format(path, commit[:12]))
+    hits = [r for r in rows if isinstance(r, dict) and r.get("id") == rid]
+    if not hits:
+        return None
+    if len(hits) > 1 or not isinstance(hits[0].get("status"), str):
+        raise _Unverifiable("{} at {} does not seat {} exactly once with a string status".format(
+            path, commit[:12], rid))
+    return hits[0]["status"]
+
+
+def _committed_pre_proposal(res, rel, rid, status):
+    """(state, evidence) or (None, why): the committed pre-proposal state of `rid`, now at the `/proposed`
+    `status` in the store file `rel`. HEAD must hold that status (the proposal is committed). The walk
+    follows HEAD's first-parent chain through the commits that changed `rel` (git rev-list, newest first) to
+    the newest one whose FIRST PARENT does not hold `status`: that commit landed the proposal, and the
+    record's status in its parent's snapshot, read by git from the store's own path at exact object ids, is
+    the pre-proposal state; it must be an unqualified state of a record that existed. git absent, an unborn
+    HEAD, an uncommitted proposal, a history that ends (a root commit or a shallow boundary) with the record
+    already proposed, a record absent before its proposal (created proposed), an unreadable or malformed
+    snapshot, a qualified predecessor, or a walk past _HISTORY_LIMIT each returns (None, why): the state
+    cannot be established, and is never guessed. Git reads only."""
+    git = _opf_observe._git_path()
+    if git is None:
+        return None, "git is not on PATH"
+    root = str(res.store_root)
+    try:
+        pfx = _opf_observe._run_git(git, root, ["rev-parse", "--show-prefix"])
+        if not pfx.completed or pfx.rc != 0:
+            return None, "the store root is not in a readable git work tree"
+        path = pfx.out.decode("utf-8", "replace").strip() + rel
+        head = _git_oid(git, root, "HEAD^{commit}")
+        if head is None:
+            return None, "HEAD names no commit"
+        if _committed_status(git, root, head, path, rid) != status:
+            return None, "HEAD {} does not hold {} at {!r}, so the proposal is not committed".format(
+                head[:12], rid, status)
+        out = _opf_observe._run_git(git, root, ["--literal-pathspecs", "rev-list", "--first-parent",
+                                                "--max-count={}".format(_HISTORY_LIMIT + 1), head, "--", path])
+        if not out.completed or out.rc != 0:
+            return None, "git could not list the history of {} ({})".format(path, out.err.strip())
+        commits = out.out.decode("ascii", "replace").split()
+        if not all(_OID_RE.match(c) for c in commits):
+            return None, "git listed something other than commit ids for {}".format(path)
+        if len(commits) > _HISTORY_LIMIT:
+            return None, "the proposal lies beyond the {} most recent commits that changed {}".format(
+                _HISTORY_LIMIT, path)
+        for commit in commits:
+            parent = _git_oid(git, root, commit + "^1^{commit}")
+            if parent is None:
+                return None, ("the history ends at {} with {} already {!r} (created proposed, or a shallow "
+                              "clone)".format(commit[:12], rid, status))
+            before = _committed_status(git, root, parent, path, rid)
+            if before == status:
+                continue
+            if before is None:
+                return None, "{} does not exist in {}, immediately before the proposal commit {}".format(
+                    rid, parent[:12], commit[:12])
+            if "/" in before:
+                return None, ("{} is {!r} in {}, immediately before the proposal commit {}, which is not an "
+                              "unqualified state".format(rid, before, parent[:12], commit[:12]))
+            return before, "the proposal commit {} and its parent {}".format(commit[:12], parent[:12])
+        return None, "no commit that changed {} landed {} at {!r}".format(path, rid, status)
+    except _Unverifiable as exc:
+        return None, str(exc)
+
+
+def _corroborated_pre_proposal(ctx, rel, rid, status, claimed):
+    """(state, None) when the pre-proposal state the worklog records (`claimed`) agrees with the committed
+    history (ctx.history, _committed_pre_proposal), else (None, why). Worklog text alone never licenses a
+    rejection: altered, stale, malformed, or unverifiable evidence refuses (spec 8.8)."""
+    committed, note = ctx.history(rel, rid, status)
+    if committed is None:
+        return None, "the committed history cannot establish it ({})".format(note)
+    if committed != claimed:
+        return None, ("the committed history shows {} at {!r} before its proposal ({}), not {!r}: the worklog "
+                      "evidence is altered or stale".format(rid, committed, note, claimed))
+    return claimed, None
 
 
 def _parse_ts(value):
@@ -670,7 +801,8 @@ def _plan_transition(req, ctx, operand, now):
     """`transition ID STATE`: one status change checked by validate_transition (spec 8.4, 8.5). The target
     status is derived from the actor: an assistant or automation landing a terminal or gated state gets
     `/proposed`. Leaving a `/proposed` status for another state is a rejection: maintainer-only, --reason
-    required, and it must return to the pre-proposal state the worklog records for this record. A
+    required, and it must return to the pre-proposal state the worklog records for this record, corroborated
+    by the committed history (_corroborated_pre_proposal). A
     backlog item never lands at unqualified `done` here (done-with-receipt mints the receipt in the same
     act). The change is `status` and `updated_at` on that one record, plus its own worklog entry."""
     rid, target = req.positionals
@@ -688,15 +820,23 @@ def _plan_transition(req, ctx, operand, now):
     to_status = _derived_status(kind, spec, cur_state, target)
     _require_receipt_path(rtype, to_status)
     rejection = cur_qual == "proposed" and target != cur_state
-    pre = _pre_proposal_state(_worklog_entries(ctx), rid, current) if rejection else None
+    claimed = _pre_proposal_state(_worklog_entries(ctx), rid, current) if rejection else None
+    pre, uncorroborated = claimed, None
+    if claimed is not None:
+        pre, uncorroborated = _corroborated_pre_proposal(ctx, operand.rel, rid, current, claimed)
     tc = _opf_schema.validate_transition(rtype, current, to_status, kind, pre_proposal_state=pre,
                                          reason=_checked_reason(req))
-    if tc.status != _opf_store.VALID:
-        unrecorded = rejection and pre is None
+    if tc.status != _opf_store.VALID or uncorroborated:
+        if rejection and claimed is None:
+            note = ("; the worklog records no pre-proposal state for {} (no opf-record transition line landed "
+                    "{})".format(rid, current))
+        elif uncorroborated:
+            note = "; the pre-proposal state {!r} the worklog records cannot be corroborated: {}".format(
+                claimed, uncorroborated)
+        else:
+            note = ""
         raise RecordError("{} {} -> {} by a {} is {}: {}{} (fail-closed)".format(
-            rid, current, to_status, kind, tc.status, "; ".join(tc.findings),
-            "; the worklog records no pre-proposal state for {} (no opf-record transition line landed {})".format(
-                rid, current) if unrecorded else ""))
+            rid, current, to_status, kind, tc.status, "; ".join(tc.findings), note))
     ts = _rfc3339(now)
     _require_later(row, ts)
     fields = {"status": to_status, "updated_at": ts}
@@ -1043,25 +1183,23 @@ def _unexplained_operands(root_fd, jr_fd, txns):
 
 def _leftover_lock_outcome(owner, states):
     """The outcome line when a dead run left only its journal lock (every transaction already terminal).
-    _publish names each transaction record-<subcommand>.<pid>.<time_ns>, reading time_ns after it takes
-    the journal lock, so the dead owner's own transaction carries its pid and a stamp no earlier than the
-    lock's utc second; a retained transaction outside that bound belongs to an earlier run."""
+    _publish takes the journal lock under the session `opf-record.<token>`, a fresh random token, and names
+    the one transaction it then opens record-<subcommand>.<pid>.<time_ns>.<token>, so the dead run's own
+    transaction is the one whose name ends with its lock's token: a binding the dead run wrote itself in
+    both places, which a reused pid or a later timestamp cannot reproduce. A lock carrying no such token (one
+    taken by recovery, or by an earlier build) is not attributed, and the line says so."""
     head = "a leftover journal lock of a dead run was released; every transaction was already terminal"
-    try:
-        since = int(datetime.datetime.strptime(owner["utc"], "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=datetime.timezone.utc).timestamp())
-    except (KeyError, TypeError, ValueError):
-        return head + (" (which of them the dead run opened cannot be told from its lock; git status shows "
-                       "whether its record files changed)")
-    own = []
-    for name, state in states.items():
-        parts = name.split(".")
-        if (len(parts) == 3 and parts[0].startswith("record-") and parts[1] == str(owner.get("pid"))
-                and parts[2].isdigit() and int(parts[2]) // 10 ** 9 >= since):
-            own.append((int(parts[2]), name, state))
+    session = owner.get("session") if isinstance(owner, dict) else None
+    prefix, sep, token = session.partition(".") if isinstance(session, str) else ("", "", "")
+    own = [name for name in states if name.startswith("record-") and name.rsplit(".", 1)[-1] == token]
+    if prefix != SESSION_ID or not sep or not _TOKEN_RE.match(token) or len(own) > 1:
+        return head + (" (which of them the dead run opened cannot be told: its lock carries no publication "
+                       "token naming exactly one transaction; git status shows whether its record files "
+                       "changed)")
     if not own:
         return head + " and the dead run had opened none, so it published nothing"
-    _stamp, name, state = max(own)
+    name = own[0]
+    state = states[name]
     if state == "complete":
         return head + (": the dead run's transaction {} is COMPLETE, so its publication is present in the "
                        "working tree; whether its render and final doctor ran, and what they reported, is not "
@@ -1220,11 +1358,13 @@ def _publish(ctx, plan, subcommand):
         raise RecordError("cannot prepare the record journal {} ({}); nothing written (fail-closed)".format(
             JOURNAL_REL, exc))
     held = retain = False
+    # The token binds this run's journal lock to the one transaction it opens (_leftover_lock_outcome).
+    token = os.urandom(16).hex()
     try:
         try:
             if _journal.read_lock_owner(journal_root) is not None:
                 raise RecordError("the record journal lock is held; nothing written (fail-closed)")
-            _journal.acquire_lock(journal_root, SESSION_ID)
+            _journal.acquire_lock(journal_root, "{}.{}".format(SESSION_ID, token))
         except _journal.JournalError as exc:
             raise RecordError("cannot take the record journal lock ({}); nothing written (fail-closed)".format(exc))
         held = True
@@ -1236,7 +1376,7 @@ def _publish(ctx, plan, subcommand):
                         "source-poststate": {"kind": "file", "mode": operand.mode,
                                              "sha256": _sha256(operand.raw)}})
             content[operand.rel] = operand.new_raw
-        txn_id = "record-{}.{}.{}".format(subcommand, os.getpid(), time.time_ns())
+        txn_id = "record-{}.{}.{}.{}".format(subcommand, os.getpid(), time.time_ns(), token)
         header = {"unit": SESSION_ID, "kind": "record-" + subcommand,
                   "staged": [base64.b64encode(operand.new_raw).decode("ascii") for operand in plan.operands]}
         try:
@@ -1294,7 +1434,7 @@ def _snapshot_pending(transition):
     every actor kind, and the envelope does not identify the transitioning actor or the pre-proposal state,
     so an actor-dependent or rejection-shaped change is CANNOT-EVALUATE there (C-HISTORY-RESURRECTION) until
     the commit makes it the snapshot. This verb checked that exact change with the known actor, reason, and
-    recorded pre-proposal state, and `transition` is the triple the postcondition proved equal to the
+    corroborated pre-proposal state, and `transition` is the triple the postcondition proved equal to the
     oracle's own derivation of what was written, so it accepts that message, for that record and that
     from/to pair only. Callers also require the message to be a cannot-evaluate, never a finding; doctor's
     own grading is unchanged."""
@@ -1379,7 +1519,7 @@ def _emit_success(report):
               "doctor-VALID" if not pending else "free of doctor findings"))
     for line in pending:
         print("opf record: until this change is committed, opf doctor reports: CANNOT-EVALUATE: {}. This verb "
-              "checked the change with its actor, reason, and recorded pre-proposal state; the snapshot "
+              "checked the change with its actor, reason, and corroborated pre-proposal state; the snapshot "
               "comparison clears once the commit makes it the prior snapshot.".format(line))
     print(json.dumps(report, sort_keys=True))
     print("opf record: review the change, then stage and commit these paths yourself (the journal under {} "
@@ -1389,6 +1529,20 @@ def _emit_success(report):
     for p in report["product_paths"]:
         print("  git -C {} --literal-pathspecs add -- {}".format(shlex.quote(report["product_root"]),
                                                                  shlex.quote(p)))
+
+
+def _release_failure_text(report):
+    """What a failed lease release after the final gate reports: the final gate's recorded outcome, VALID or
+    free of findings carrying only the accepted pending cannot-evaluate of this change, never a VALID the
+    gate did not return."""
+    pending = report.get("doctor_pending") or []
+    reached = "doctor-VALID" if not pending else (
+        "a doctor result free of findings, carrying only the accepted pending cannot-evaluate of {} until it is "
+        "committed ({} line(s); opf doctor reports CANNOT-EVALUATE until then)".format(report.get("change"),
+                                                                                    len(pending)))
+    return ("opf record: the store reached {}, but the lease release failed; nothing is offered as recorded. "
+            "Confirm no opf run is live (spec 5.7) and reconcile the lease before any further action.".format(
+                reached))
 
 
 def _conclude(ctx, lease, report):
@@ -1498,9 +1652,7 @@ def _run_operation(req):
             try:
                 _conclude(ctx, lease, report)
             except BaseException:
-                print("opf record: the store reached doctor-VALID, but the lease release failed; nothing is "
-                      "offered as recorded. Confirm no opf run is live (spec 5.7) and reconcile the lease "
-                      "before any further action.", file=sys.stderr)
+                print(_release_failure_text(report), file=sys.stderr)
                 raise
         finally:
             if not released:
@@ -1631,6 +1783,7 @@ def _self_test_units(check):
         ctx.version = version or {"schema": 1, "release": [], "summary": []}
         ctx.worklog = _model_operand(".working/toml/worklog.toml", {"schema": 1, "entry": []})
         ctx.done_index = _model_operand(".working/toml/done.index.toml", {"schema": 1, "record": []})
+        ctx.history = lambda rel, rid, status: (None, "the unit leg has no committed history")
         return ctx
 
     full = {ns: 0 for ns in _opf_store.BASELINE_TYPES.values()}
@@ -1649,8 +1802,10 @@ def _model_operand(rel, model):
 
 
 def _self_test_planners(check, ctx_of, full, now):
-    def plan(argv, rows=(), counters=None, entries=(), dones=()):
+    def plan(argv, rows=(), counters=None, entries=(), dones=(), history=None):
         c = ctx_of(counters or full)
+        if history is not None:
+            c.history = history
         c.worklog = _model_operand(c.worklog.rel, {"schema": 1, "entry": copy.deepcopy(list(entries))})
         c.done_index = _model_operand(c.done_index.rel, {"schema": 1, "record": copy.deepcopy(list(dones))})
         r = parse_request(argv)
@@ -1771,6 +1926,10 @@ def _self_test_transitions(check, plan, post, full, now):
         return {"id": "WL-1", "date": earlier, "actor": {"kind": "assistant"}, "kind": "changed", "summary": "s",
                 "detail": "opf-record transition {} {} -> {}".format(rid, frm, to)}
 
+    def committed(state):
+        """A synthetic committed history whose snapshot before the proposal commit holds `state`."""
+        return lambda rel, rid, status: (state, "a synthetic proposal commit")
+
     counters = dict(full, BI=2, WL=1)
     # -- transition: the derived qualifier, the delta, and its own worklog entry ----------------------------
     p, c, op = plan(["transition", "BI-1", "active", "--actor", "assistant"], rows=[bi("open")], counters=counters)
@@ -1834,12 +1993,30 @@ def _self_test_transitions(check, plan, post, full, now):
             (["transition", "BI-1", "dropped", "--actor", "maintainer"],
              [dict(bi("open"), updated_at=_rfc3339(now))], (), "not later than")):
         check("transition refuses {}".format(needle), _refuses(
-            lambda argv=argv, rows=rows, entries=entries: plan(argv, rows=rows, counters=counters, entries=entries),
+            lambda argv=argv, rows=rows, entries=entries: plan(argv, rows=rows, counters=counters, entries=entries,
+                                                               history=committed("active")),
             needle))
-    # -- the maintainer rejection, back to the recorded pre-proposal state -------------------------------------
-    p, c, op = plan(["transition", "BI-1", "active", "--actor", "maintainer", "--reason", "not finished"],
-                    rows=[bi("done/proposed")], counters=counters, entries=proposed)
-    check("a maintainer rejection with a reason returns to the recorded pre-proposal state",
+    # -- the maintainer rejection, back to the corroborated pre-proposal state ----------------------------------
+    reject = ["transition", "BI-1", "active", "--actor", "maintainer", "--reason", "not finished"]
+    forged = [line("BI-1", "open", "done/proposed")]
+    for label, argv, entries, history, needle in (
+            ("a lifecycle line the committed history contradicts", reject, forged, committed("active"),
+             "altered or stale"),
+            ("the forged line's own target", ["transition", "BI-1", "open", "--actor", "maintainer", "--reason",
+                                              "r"], forged, committed("active"), "altered or stale"),
+            ("a committed history that cannot establish the state", reject, proposed,
+             lambda rel, rid, status: (None, "HEAD names no commit"), "cannot establish it"),
+            ("the worklog text alone (the unit leg's default history)", reject, proposed, None,
+             "cannot be corroborated")):
+        check("a rejection refuses {}".format(label), _refuses(
+            lambda argv=argv, entries=entries, history=history: plan(
+                argv, rows=[bi("done/proposed")], counters=counters, entries=entries, history=history), needle))
+    seen = []
+    p, c, op = plan(reject, rows=[bi("done/proposed")], counters=counters, entries=proposed,
+                    history=lambda rel, rid, status: seen.append((rel, rid, status)) or ("active", "commit"))
+    check("the committed history is read for the rejected record at its proposed status in its own index",
+          seen == [(op.rel, "BI-1", "done/proposed")])
+    check("a maintainer rejection with a reason returns to the corroborated pre-proposal state",
           op.new_model["record"][0]["status"] == "active" and c.worklog.new_model["entry"][-1]["detail"]
           == "opf-record transition BI-1 done/proposed -> active\nreason: not finished")
     check("the pre-proposal state is the latest lifecycle line's from-state",
@@ -1917,16 +2094,30 @@ def _self_test_pending(check):
 def _self_test_leftover_lock(check):
     """A dead run's leftover journal lock over its COMPLETE transaction: the outcome states the durable fact
     only, never that render and the final doctor did not run (a run whose lock release failed after
-    COMPLETE went on to render, run doctor, and report)."""
+    COMPLETE went on to render, run doctor, and report). The dead run's transaction is the one carrying its
+    lock's token, never one that merely shares its pid and a later timestamp (a reused pid)."""
     utc = "2026-09-27T00:00:00Z"
     since = int(datetime.datetime(2026, 9, 27, tzinfo=datetime.timezone.utc).timestamp())
-    name = "record-create.4242.{}".format((since + 1) * 10 ** 9)
-    line = _leftover_lock_outcome({"pid": 4242, "utc": utc}, {name: "complete"})
+    token, other = "a" * 32, "b" * 32
+    owner = {"pid": 4242, "utc": utc, "session": "{}.{}".format(SESSION_ID, token)}
+    name = "record-create.4242.{}.{}".format((since + 1) * 10 ** 9, token)
+    line = _leftover_lock_outcome(owner, {name: "complete"})
     check("a leftover lock over a COMPLETE transaction names it and asserts no render or doctor outcome",
           name in line and "COMPLETE" in line and "not recorded" in line and "never run" not in line)
-    line = _leftover_lock_outcome({"pid": 4242, "utc": utc}, {name: "rolled-back"})
+    line = _leftover_lock_outcome(owner, {name: "rolled-back"})
     check("a leftover lock over a rolled-back transaction says nothing was published",
           "published nothing" in line)
+    reused = "record-transition.4242.{}.{}".format((since + 5) * 10 ** 9, other)
+    line = _leftover_lock_outcome(owner, {reused: "complete"})
+    check("a reused pid's later COMPLETE transaction is not attributed to the dead run",
+          reused not in line and "opened none" in line)
+    line = _leftover_lock_outcome(owner, {reused: "complete", name: "rolled-back"})
+    check("the token picks the dead run's own transaction among same-pid ones",
+          name in line and reused not in line and "rolled back" in line)
+    for label, lock in (("a recovery lock with no token", dict(owner, session=SESSION_ID)),
+                        ("a malformed token", dict(owner, session=SESSION_ID + ".xyz"))):
+        line = _leftover_lock_outcome(lock, {name: "complete"})
+        check("{} is not attributed, and says so".format(label), name not in line and "cannot be told" in line)
 
 
 if __name__ == "__main__":

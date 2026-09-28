@@ -898,8 +898,11 @@ shapes this specification already defines, so it adds no store-format change and
   automation author landing a terminal or gated state takes `/proposed`; only a maintainer
   ratifies, or rejects with a recorded reason back to the recorded pre-proposal state
   (section 8.4). The envelope records no prior state (section 8.3), so the pre-proposal state is
-  the one the worklog entry of the proposing transition records; a proposal with no such entry
-  cannot be rejected by the verb. A backlog item reaches unqualified `done` only through
+  the one the worklog entry of the proposing transition records, and the verb acts on it only
+  when the committed history agrees: the record's status in the committed snapshot immediately
+  before the commit that landed the proposal must be that same state. A proposal with no such
+  entry, or whose entry the committed history contradicts or cannot establish, cannot be
+  rejected by the verb. A backlog item reaches unqualified `done` only through
   `done-with-receipt`.
 - `done-with-receipt`: maintainer-only. It moves a backlog item to unqualified `done`, from
   `active` or by ratifying `done/proposed`, and in the same act creates its one-to-one `done`
