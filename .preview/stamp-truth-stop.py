@@ -1981,10 +1981,12 @@ def _self_test():
     # in a child, one run at GROWTH * n against GROWTH runs at n, so the two samples do the same work when the
     # pass is linear and span about the same time, and a preemption or load spike lands on both alike (sizes
     # interleaved, best of N); a bound on reading is checked as WORK (the bytes read and the records parsed, see
-    # work()), which takes no timing at all. A sample near the timer's and scheduler's noise floor is still a
-    # coin toss on a loaded host (a ~1 ms baseline read 2.677x under 24-process contention), so growth() first
-    # calibrates a repetition multiplier, the same for both sizes, until the FASTER size's sample is at least
-    # FLOOR seconds: a preemption of a few milliseconds then moves a sample by percents, not by a factor.
+    # work()), which takes no timing at all. A wall-clock sample is a coin toss on a loaded host (a ~1 ms
+    # baseline read 2.677x on a loaded 16-core host, and sound 0.1 s samples still read 2.7x at load ~50), so
+    # growth() samples CPU time (time.process_time), which a preemption never advances, and retries with a
+    # larger repetition multiplier, the same for both sizes, until every sample of the round it returns is at
+    # least FLOOR seconds of measured work; a floor met only during a separate calibration round could rest
+    # on a stalled clock read while the measured samples stayed in the noise.
     HANG_TIMEOUT = 120  # seconds: a child's hang guard only, far above any child's own run (a few seconds)
     GROWTH = 8
     LINEAR_LIMIT = 2.0  # GROWTH growth: about 1 when linear, about GROWTH when quadratic
@@ -1993,21 +1995,20 @@ def _self_test():
                   "FLOOR = 0.1\n"
                   "def growth(n, run, reps):\n"
                   "    def sample(size, mult):\n"
-                  "        t0 = time.monotonic()\n"
+                  "        t0 = time.process_time()\n"
                   "        for _k in range(mult * (GROWTH * n // size)):\n"
                   "            run(size)\n"
-                  "        return time.monotonic() - t0\n"
+                  "        return time.process_time() - t0\n"
                   "    mult = 1\n"
-                  "    while mult < 1 << 20:\n"
-                  "        fastest = min(sample(n, mult), sample(GROWTH * n, mult))\n"
-                  "        if fastest >= FLOOR:\n"
-                  "            break\n"
-                  "        mult = min(max(mult * 2, int(mult * FLOOR / max(fastest, 1e-9)) + 1), 1 << 20)\n"
-                  "    times = ([], [])\n"
-                  "    for _ in range(reps):\n"
-                  "        for size, out in zip((n, GROWTH * n), times):\n"
-                  "            out.append(sample(size, mult))\n"
-                  "    return min(times[0]), min(times[1])\n") % GROWTH
+                  "    while True:\n"
+                  "        times = ([], [])\n"
+                  "        for _ in range(reps):\n"
+                  "            for size, out in zip((n, GROWTH * n), times):\n"
+                  "                out.append(sample(size, mult))\n"
+                  "        fastest = min(min(times[0]), min(times[1]))\n"
+                  "        if fastest >= FLOOR or mult >= 1 << 20:\n"
+                  "            return min(times[0]), min(times[1])\n"
+                  "        mult = min(max(mult * 2, int(mult * FLOOR / max(fastest, 1e-9)) + 1), 1 << 20)\n") % GROWTH
 
     def growth_in_child(run_src, n, reps=5):
         """Time GROWTH runs of run(n) and one of run(GROWTH * n), where the source `run_src` defines run, in a
@@ -2018,6 +2019,47 @@ def _self_test():
                            timeout=HANG_TIMEOUT)
         if r.returncode != 0:
             raise AssertionError(f"growth child failed ({r.returncode}): {r.stderr}")
+        return json.loads(r.stdout.strip().splitlines()[-1])
+
+    COUNTED_SRC = ("import gc, json, sys, tempfile, tracemalloc\n"
+                   "GROWTH = %d\n"
+                   "def counted(fn):\n"
+                   "    lines, alloc, last = [0], [0], [0]\n"
+                   "    def tracer(frame, event, arg):\n"
+                   "        if frame.f_code.co_filename != m.__file__:\n"
+                   "            return None\n"
+                   "        frame.f_trace_opcodes = True\n"
+                   "        cur = tracemalloc.get_traced_memory()[0]\n"
+                   "        if cur > last[0]:\n"
+                   "            alloc[0] += cur - last[0]\n"
+                   "        last[0] = cur\n"
+                   "        if event == 'line':\n"
+                   "            lines[0] += 1\n"
+                   "        return tracer\n"
+                   "    gc.disable()\n"
+                   "    tracemalloc.start()\n"
+                   "    last[0] = tracemalloc.get_traced_memory()[0]\n"
+                   "    sys.settrace(tracer)\n"
+                   "    try:\n"
+                   "        fn()\n"
+                   "    finally:\n"
+                   "        sys.settrace(None)\n"
+                   "        tracemalloc.stop()\n"
+                   "        gc.enable()\n"
+                   "    return lines[0], alloc[0]\n") % GROWTH
+
+    def counted_in_child(setup_src, n):
+        """Count, in a fresh interpreter, the WORK of one fn(n) and one fn(GROWTH * n), where `setup_src`
+        defines fn: the line events run in this module's frames and the bytes newly allocated (tracemalloc,
+        sampled at every opcode of those frames, so a join's result is counted before its inputs are freed).
+        Returns (lines_small, alloc_small, lines_large, alloc_large); no clock is read, so the counts are the
+        same on a loaded host as on an idle one. A child that fails raises AssertionError with its stderr."""
+        code = CHILD_HEAD + COUNTED_SRC + setup_src + \
+            "print(json.dumps(counted(lambda: fn(%d)) + counted(lambda: fn(GROWTH * %d))))\n" % (n, n)
+        r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                           timeout=HANG_TIMEOUT)
+        if r.returncode != 0:
+            raise AssertionError(f"counted child failed ({r.returncode}): {r.stderr}")
         return json.loads(r.stdout.strip().splitlines()[-1])
 
     def work(fn, *args):
@@ -2813,46 +2855,34 @@ def _self_test():
             self.assertTrue(parsed)
             self.assertLess(max(parsed), 32 << 20, parsed)
             self.assertLessEqual(max(parsed), MAX_RECORD_BYTES, parsed)
-            # the ASSEMBLY of a record under the bound is linear too: no count sees the joining of pieces, so it
-            # is timed in a child with CHUNK cut to 4 KiB (each record spans many pieces) against a LINEAR PEER
-            # at the SAME size: one assembly of the GROWTH * n record versus GROWTH reads of the same file that
-            # pread the same 4 KiB pieces and join them once (what any linear assembly must at least do). The
-            # same-size peer keeps allocator and cache effects out of the ratio, which a small-against-large
-            # growth frame let straddle the limit at these sizes (MAX_RECORD_BYTES caps the record, so the
-            # sizes cannot outgrow those effects); a quadratic assembly still grows the ratio by about the
-            # piece count, hundreds here
+            # the ASSEMBLY of a record under the bound is linear too: no pread or json.loads count sees the
+            # joining of pieces, so it is COUNTED, not timed, in a child with CHUNK cut to 4 KiB (each record
+            # spans many pieces): the line events run in this module's frames and the bytes newly allocated
+            # while _reverse_records assembles one record, at n and at GROWTH * n. The counts are
+            # deterministic, so host speed and load never enter the verdict; a quadratic assembly (one that
+            # re-joins or re-scans the growing tail) grows the GROWTH * n count faster than GROWTH and
+            # leaves the linear band
             n = 384 << 10
-            small, large = growth_in_child(
+            lines_small, alloc_small, lines_large, alloc_large = counted_in_child(
                 "import os\n"
                 "m.CHUNK = 4096\n"
                 "d = tempfile.mkdtemp(dir=%r)\n"
-                "p = os.path.join(d, 'big')\n"
-                "with open(p, 'w') as f:\n"
-                "    f.write(json.dumps({'type': 'user', 'message': {'content': [\n"
-                "        {'type': 'tool_result', 'content': 'x' * (GROWTH * %d)}]}}) + '\\n')\n"
-                "size = os.path.getsize(p)\n"
-                "def assemble():\n"
+                "for size in (%d, GROWTH * %d):\n"
+                "    with open(os.path.join(d, str(size)), 'w') as f:\n"
+                "        f.write(json.dumps({'type': 'user', 'message': {'content': [\n"
+                "            {'type': 'tool_result', 'content': 'x' * size}]}}) + '\\n')\n"
+                "def fn(size):\n"
+                "    p = os.path.join(d, str(size))\n"
                 "    fd = os.open(p, os.O_RDONLY)\n"
                 "    try:\n"
-                "        recs = list(m._reverse_records(fd, size))\n"
+                "        recs = list(m._reverse_records(fd, os.path.getsize(p)))\n"
                 "    finally:\n"
                 "        os.close(fd)\n"
-                "    assert len(recs) == 1 and recs[0][1] is not None and len(recs[0][1]) > GROWTH * %d, len(recs)\n"
-                "def linear_peer():\n"
-                "    fd = os.open(p, os.O_RDONLY)\n"
-                "    try:\n"
-                "        pieces, at = [], 0\n"
-                "        while at < size:\n"
-                "            pieces.append(os.pread(fd, m.CHUNK, at))\n"
-                "            at += m.CHUNK\n"
-                "        assert len(b''.join(pieces)) == size\n"
-                "    finally:\n"
-                "        os.close(fd)\n"
-                "def run(k):\n"
-                "    linear_peer() if k == %d else assemble()\n"
-                % (self.tmp, n, n, n), n, 3)
-            self.assertLessEqual(GROWTH * n + 100, MAX_RECORD_BYTES)  # the big record is assembled, not dropped
-            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
+                "    assert len(recs) == 1 and recs[0][1] is not None and len(recs[0][1]) > size, len(recs)\n"
+                % (self.tmp, n, n), n)
+            self.assertLessEqual(GROWTH * n + 100, MAX_RECORD_BYTES)  # both sizes are assembled, not dropped
+            self.assertLess(lines_large / (GROWTH * lines_small), LINEAR_LIMIT, (lines_small, lines_large))
+            self.assertLess(alloc_large / (GROWTH * alloc_small), LINEAR_LIMIT, (alloc_small, alloc_large))
 
         def test_reverse_records_exact_with_offsets(self):
             lines = [b"a" * n for n in (0, 1, CHUNK - 1, CHUNK, CHUNK + 1, 3 * CHUNK + 7, 5)]
@@ -2982,14 +3012,16 @@ def _self_test():
             self.assertEqual(check_message(line, to_us(self.now), None, "x", BEHIND_US), [])
             r = check_message("next " + "2099-01-01T00:00Z x " * 50000, to_us(self.now), None, "x", BEHIND_US)
             self.assertEqual(len(r), 1)  # deduplicated
-            # linear: the growth from n to GROWTH * n (up to the sizes above), not a 1.0 s wall-clock ceiling
-            small, large = growth_in_child(
+            # linear: the growth of COUNTED work (see counted_in_child) from n to GROWTH * n stamps; the
+            # round-3 defect sliced the growing line prefix per claim, which the allocated-bytes count sees
+            lines_small, alloc_small, lines_large, alloc_large = counted_in_child(
                 "now = m.to_us(datetime.datetime(2026, 9, 23, 17, 45, tzinfo=UTC))\n"
-                "def run(n):\n"
+                "def fn(n):\n"
                 "    assert m.check_message('2026-09-23T17:45Z ' * n, now, None, 'x', m.BEHIND_US) == []\n"
                 "    r = m.check_message('next ' + '2099-01-01T00:00Z x ' * (n // 2), now, None, 'x', m.BEHIND_US)\n"
-                "    assert len(r) == 1, r\n", 12500, 3)
-            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
+                "    assert len(r) == 1, r\n", 12500)
+            self.assertLess(lines_large / (GROWTH * lines_small), LINEAR_LIMIT, (lines_small, lines_large))
+            self.assertLess(alloc_large / (GROWTH * alloc_small), LINEAR_LIMIT, (alloc_small, alloc_large))
 
         def test_r5_many_distinct_violations_linear_and_bounded(self):
             # finding (codex r4): add() scanned the growing violation list (quadratic in distinct violations)
@@ -2998,17 +3030,21 @@ def _self_test():
             self.assertEqual(len(set(lits)), 40000)
             r = self.final(" ".join(lits))
             self.assertEqual(r.count(" in your final message: "), MAX_REPORTED)
-            # linear: the growth from n to GROWTH * n distinct violations (up to 40,000), not a 1.0 s ceiling
-            small, large = growth_in_child(
+            # linear: the growth of COUNTED work (see counted_in_child: line events and allocated bytes in
+            # this module's frames) from n to GROWTH * n distinct violations (up to 40,000); a timed frame here
+            # read 2.744x on a loaded 16-core host with every sample above the floor, an allocator and cache
+            # size effect of the 40,000-entry working set, which counting removes
+            lines_small, alloc_small, lines_large, alloc_large = counted_in_child(
                 "lits = [f'2099-{1 + i %% 12:02d}-{1 + (i // 12) %% 28:02d}T{(i // 336) %% 24:02d}:"
                 "{(i // 8064) %% 60:02d}Z' for i in range(40000)]\n"
                 "now = datetime.datetime(2026, 9, 23, 17, 45, tzinfo=UTC)\n"
                 "start = datetime.datetime(2026, 9, 23, 14, 18, tzinfo=UTC)\n"
-                "def run(n):\n"
+                "def fn(n):\n"
                 "    sd = tempfile.mkdtemp(dir=%r)\n"
                 "    assert m.evaluate({'last_assistant_message': ' '.join(lits[:n])}, now, start, sd)\n"
-                % self.tmp, 5000, 3)
-            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
+                % self.tmp, 5000)
+            self.assertLess(lines_large / (GROWTH * lines_small), LINEAR_LIMIT, (lines_small, lines_large))
+            self.assertLess(alloc_large / (GROWTH * alloc_small), LINEAR_LIMIT, (alloc_small, alloc_large))
             self.assertIn(f"... and {40000 - MAX_REPORTED} more distinct violation(s) not listed", r)
 
         def test_r4_threat_model_stated(self):

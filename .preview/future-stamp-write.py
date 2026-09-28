@@ -3552,34 +3552,36 @@ def _self_test():
         "def best(n, run):\n"
         "    times = []\n"
         "    for _ in range(3):\n"
-        "        t0 = time.monotonic()\n"
+        "        t0 = time.process_time()\n"
         "        run(n)\n"
-        "        times.append(time.monotonic() - t0)\n"
+        "        times.append(time.process_time() - t0)\n"
         "    return min(times)\n"
         # round 32: a load spike during one size's runs skewed a growth ratio (one flake at load 34); the sizes
         # are now INTERLEAVED, best of `reps` each, so a spike lands on both sizes' samples alike. A sample near
         # the timer's and scheduler's noise floor is still a coin toss on a loaded host (a sibling's ~1 ms
-        # baseline read 2.677x under 24-process contention), so interleaved() first calibrates a repetition
-        # multiplier, the same for every size, until the FASTEST size's sample is at least FLOOR seconds: a
-        # preemption of a few milliseconds then moves a sample by percents, not by a factor
+        # baseline read 2.677x on a loaded 16-core host, and sound 0.1 s wall samples still read 2.7x at load
+        # ~50), so the samples are CPU time (time.process_time), which a preemption never advances, and
+        # interleaved() retries with a larger repetition multiplier, the same for every size, until every
+        # sample of the round it returns is at least FLOOR seconds of measured work; a floor met only during
+        # a separate calibration round could rest on a stalled clock read while the measured samples stayed
+        # in the noise
         "FLOOR = 0.1\n"
         "def _sample(n, run, mult):\n"
-        "    t0 = time.monotonic()\n"
+        "    t0 = time.process_time()\n"
         "    for _ in range(mult):\n"
         "        run(n)\n"
-        "    return time.monotonic() - t0\n"
+        "    return time.process_time() - t0\n"
         "def interleaved(sizes, run, reps=5):\n"
         "    mult = 1\n"
-        "    while mult < 1 << 20:\n"
-        "        fastest = min(_sample(n, run, mult) for n in sizes)\n"
-        "        if fastest >= FLOOR:\n"
-        "            break\n"
+        "    while True:\n"
+        "        times = [[] for _ in sizes]\n"
+        "        for _ in range(reps):\n"
+        "            for n, out in zip(sizes, times):\n"
+        "                out.append(_sample(n, run, mult))\n"
+        "        fastest = min(min(t) for t in times)\n"
+        "        if fastest >= FLOOR or mult >= 1 << 20:\n"
+        "            return [min(t) for t in times]\n"
         "        mult = min(max(mult * 2, int(mult * FLOOR / max(fastest, 1e-9)) + 1), 1 << 20)\n"
-        "    times = [[] for _ in sizes]\n"
-        "    for _ in range(reps):\n"
-        "        for n, out in zip(sizes, times):\n"
-        "            out.append(_sample(n, run, mult))\n"
-        "    return [min(t) for t in times]\n"
         "def ratio(n, run, reps=5):\n"
         "    def same_work(k):\n"
         "        for _ in range(GROWTH * n // k):\n"
