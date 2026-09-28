@@ -47,9 +47,12 @@ message rather than reporting NOT APPLICABLE (divergence D7).
 `CHANGELOG.md` when none exists, without git writes or rendering.
 `absorb` HAS landed: `opf absorb [--root DIR] [--covers TOKEN] [--freeze-digest]`
 prints a changelog draft or freeze digest without writing files.
-`record` HAS landed (spec 8.8): `opf record create` and `opf record worklog-append` author one record or
-worklog entry through one journaled publication, then render and require doctor VALID, leaving the change
-uncommitted; `opf record transition` and `opf record done-with-receipt` fail closed as not yet implemented.
+`record` HAS landed (spec 8.8): `opf record create`, `transition`, `done-with-receipt`, and `worklog-append`
+author one change (with its own worklog entry, and for done-with-receipt the one-to-one done receipt)
+through one journaled publication, then render and require doctor VALID, leaving the change uncommitted.
+The one exception to doctor VALID is a status change (transition or done-with-receipt): doctor may then
+report only its cannot-evaluate for exactly that record and from/to pair, never a finding, and it keeps
+reporting that cannot-evaluate until the change is committed.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
 root named by --root (default: the cwd), never on this pack's own tree via `_gen_common.repo_root()`.
@@ -2513,13 +2516,15 @@ def _cmd_import(rest):
 
 
 def _cmd_record(rest):
-    """`opf record <subcommand> ...` (spec 8.8): the record-authoring verb. `create` and `worklog-append`
-    run the shared journaled operation sequence in _opf_record (byte-reproduction precondition, one id claim
-    through the allocation seam, allowed-delta postcondition, cleanliness gate and lease, one journaled
-    publication, render, final doctor VALID, lease release before the report); `transition` and
-    `done-with-receipt` are recognized and fail closed as not yet implemented. Exit 0 recorded (left
-    uncommitted), exit 2 every refusal or cannot-evaluate; exit 1 is not used. Unlike the applicability-probe
-    siblings a NOT-ADOPTED root is a cannot-evaluate (a requested operation, like import)."""
+    """`opf record <subcommand> ...` (spec 8.8): the record-authoring verb. `create`, `transition`,
+    `done-with-receipt`, and `worklog-append` run the shared journaled operation sequence in _opf_record
+    (byte-reproduction precondition, one id claim through the allocation seam, allowed-delta postcondition,
+    cleanliness gate and lease, one journaled publication, render, final doctor VALID, lease release before
+    the report). The final doctor's one exception is a status change (transition or done-with-receipt),
+    which may leave only doctor's cannot-evaluate for exactly that record and from/to pair, never a finding;
+    doctor keeps reporting it until the change is committed. Exit 0 recorded (left uncommitted), exit 2
+    every refusal or cannot-evaluate; exit 1 is not used. Unlike the applicability-probe siblings a
+    NOT-ADOPTED root is a cannot-evaluate (a requested operation, like import)."""
     try:
         return _opf_record.cli(rest)
     except Exception as exc:  # noqa: BLE001  class-width fail-closed backstop, never a false success
@@ -2628,8 +2633,12 @@ def _cli_self_test():
         # discrimination over real stores rides check_opf_record.py --self-test.
         expect(["record"], EXIT_MALFORMED)                       # bare: a subcommand is required
         expect(["record", "frobnicate"], EXIT_MALFORMED)         # unknown subcommand
-        expect(["record", "transition", "BI-1", "done"], EXIT_MALFORMED)   # recognized, not yet implemented
-        expect(["record", "done-with-receipt", "BI-1"], EXIT_MALFORMED)    # recognized, not yet implemented
+        expect(["record", "transition", "BI-1", "done"], EXIT_MALFORMED)   # missing --actor
+        expect(["record", "transition", "BI-1", "done/proposed", "--actor", "assistant"],
+               EXIT_MALFORMED)                                   # the qualifier is derived, never given
+        expect(["record", "done-with-receipt", "BI-1"], EXIT_MALFORMED)    # missing --actor
+        expect(["record", "done-with-receipt", "BI-1", "--actor", "assistant"],
+               EXIT_MALFORMED)                                   # maintainer-only, refused before the store
         expect(["record", "create"], EXIT_MALFORMED)             # missing --type/--title/--actor
         expect(["record", "create", "--root"], EXIT_MALFORMED)   # --root needs a value
         expect(["record", "worklog-append", "--kind", "added", "--summary", "s", "--actor", "importer"],

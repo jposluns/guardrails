@@ -767,6 +767,7 @@ unknown key is a validation failure unless it sits under a registered vendor ext
 | `id` | required | `<NS>-<n>`, matching the type's namespace |
 | `type` | required | the type name; must match the file the record lives in |
 | `status` | required | per the status grammar (section 8.4) |
+| `proposed_from` | optional | the unqualified state held before the current `/proposed` status, written by the authoring verb (section 8.8); legal only on a `/proposed` status, and only naming a legal predecessor state for the type |
 | `title` | required | one line, human-oriented |
 | `created_at` | required | RFC 3339 UTC, read from the clock at creation |
 | `updated_at` | required | RFC 3339 UTC, read from the clock at the last transition |
@@ -891,18 +892,32 @@ inclusion, block actionability, counters, lock ordering, or actor attribution.
 
 ### 8.8 Authoring operations
 
-`opf record` is the reference tooling's record-authoring verb. It writes only record and worklog
-shapes this specification already defines, so it adds no store-format change and no
-`spec_version` bump. Its subcommands:
+`opf record` is the reference tooling's record-authoring verb. It writes the record and worklog
+shapes this specification defines, and it adds one optional envelope key of its own: `proposed_from`
+(section 8.3), which appears only on `/proposed` records written by `opf record transition`. That key
+was added while base `1.2.0` was still unreleased, so no released `1.2.0` store or tooling predates
+it, and it carries no `spec_version` bump. Its subcommands:
 
 - `create`: one new record of an enabled baseline type, in the type's initial state. An assistant
   or automation author entering a gated initial state lands `/proposed`; a created-terminal factual
   or ACT type (`reference`, `autonomous_decision`, `maintainer_decision`) carries no qualifier
   (section 8.4). `done` receipts and worklog entries are not created this way.
 - `transition`: a status change checked against the type's grammar (section 8.5). An assistant or
-  automation author landing a terminal or gated state takes `/proposed`; only a maintainer
-  ratifies, or rejects with a recorded reason back to the recorded pre-proposal state
-  (section 8.4).
+  automation author landing a terminal or gated state takes `/proposed`, and the verb records the
+  state the record held at that moment in the record's own `proposed_from` field (section 8.3) in
+  the same act; only a maintainer ratifies, or rejects with a recorded reason back to the recorded
+  pre-proposal state (section 8.4). A rejection restores exactly the recorded `proposed_from`
+  state, and leaving the `/proposed` status, by rejection or ratification, removes the field. A
+  proposed record that carries no `proposed_from` was proposed outside `transition`; that includes
+  a record `create` lands directly at a `/proposed` initial state, so the absence establishes no
+  provenance. Such a record cannot be rejected by the verb, which never infers or invents a
+  predecessor; the worklog entry of the proposing transition is informational, never evidence. The
+  verb refuses to act on, or overwrite, a record whose current row is not schema-valid,
+  `proposed_from` included, so a schema-detectable forgery must be repaired by the operator
+  before the verb acts; it is never laundered. The field is an ordinary record field, so a
+  canonical hand edit of it that keeps the row schema-valid is not detected, the same as any
+  other field (the section 5.7 integration-base rule remains the control). A backlog item
+  reaches unqualified `done` only through `done-with-receipt`.
 - `done-with-receipt`: maintainer-only. It moves a backlog item to unqualified `done`, from
   `active` or by ratifying `done/proposed`, and in the same act creates its one-to-one `done`
   receipt linked `receipt_of` (section 8.5). An assistant reaching `done` uses `transition` and
@@ -910,6 +925,12 @@ shapes this specification already defines, so it adds no store-format change and
 - `worklog-append`: one entry appended to the unreleased tail of `worklog.toml`, status `recorded`,
   never `/proposed` whatever the actor (sections 6.2 and 8.4). An entry that would fall inside a
   released span is refused.
+
+`create`, `transition`, and `done-with-receipt` each append their own worklog entry, one entry per
+change (section 6.2), in the same journaled transaction as the change. Its `detail` opens with a
+lifecycle line naming the record and its status change (`opf-record create <ID> <status>`, or
+`opf-record transition <ID> <from> -> <to>`); a rejection's entry also records its reason.
+`worklog-append` refuses a `detail` that opens with that lifecycle grammar.
 
 Every subcommand runs one operation sequence, and an implementation of the verb MUST preserve its
 guarantees:
@@ -933,21 +954,31 @@ guarantees:
    publication (section 4.2).
 4. Postcondition: the model diff of every rewritten file equals exactly the operation's allowed
    delta (the new rows appended, the counters advanced by exactly the claim, and for a transition
-   one status and `updated_at` change), value for value, before anything is written. The expected
-   delta is derived from the request, the claimed IDs, the clock value, and the schema rules, never
-   from the planned rows themselves.
+   one status and `updated_at` change plus the `proposed_from` write or removal), value for value
+   and type for type (a boolean or float is never equal to an integer), before anything is
+   written. The expected
+   delta is derived from the request, the prior bytes of each rewritten file, the claimed IDs, the
+   clock value, and the schema rules, never from the planned rows themselves.
 5. The in-repo store contract (section 5.7): the planned destinations are clean, including ignored
    files, and the single-writer lease is held across publication, render, and the final doctor.
 6. Every rewritten file is published in one crash-durable journaled transaction, so an
    interruption leaves the store exactly at its prestate or exactly at its poststate once
    reconciled. The reference tooling keeps that journal under `.aiqt/record/journal` at homes 1.
 7. The declared views are rendered, then a full doctor must report VALID; a failure leaves the
-   change for review with recovery advice scoped to the planned paths.
+   change for review with recovery advice scoped to the planned paths. One exception applies to a
+   status change: doctor compares it with the prior committed snapshot, and doctor's history
+   comparison sees only the prior snapshot's type and status, which identify neither the
+   transitioning actor nor the pre-proposal state; doctor validates `proposed_from` but does not
+   use it as rejection evidence, so doctor can grade that change cannot-evaluate until the change
+   is committed. The verb's render and final doctor accept that
+   cannot-evaluate only for exactly the record and the from and to statuses it has just written,
+   never a finding and never any other cannot-evaluate, and the verb reports it as pending until
+   commit. `opf doctor` itself is unchanged and still reports it until then.
 8. The lease is released, and only then are the claimed IDs and touched files reported. The
    change is left uncommitted in the working tree: the verb never stages or commits it.
 
-The verb exits 0 when the change is recorded and the store is doctor-VALID, and 2 on every refusal
-or cannot-evaluate.
+The verb exits 0 when the change is recorded and the store is doctor-VALID (or carries only the
+pending cannot-evaluate of item 7), and 2 on every refusal or cannot-evaluate.
 
 ## 9. The manifest
 
