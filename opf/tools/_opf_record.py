@@ -1023,10 +1023,11 @@ def _expected_delta(req, ctx, raws, now):
             prior[PROPOSED_FROM] = current
         # The resolution bundle rule (spec 8.5/8.8), derived here on its own, apart from the planner: the
         # rejection that leaves `decided/proposed` removes every key the schema's pending_decision
-        # declaration lists (spec.extra_keys, the only part read from the schema); `open -> decided`, bare
-        # or `/proposed`, writes the three bundle keys named here, decided_at at the clock value and the
-        # other two from the request; a ratification leaves the bundle unchanged. The type name and the
-        # open and decided states are named here too, not read from the schema.
+        # declaration lists (spec.extra_keys); `open -> decided`, bare or `/proposed`, writes the three
+        # bundle keys named here, decided_at at the clock value and the other two from the request; a
+        # ratification leaves the bundle unchanged. spec is the schema entry for the row's type, so the
+        # guard below reads spec.name and compares it with the type-name literal; the open and decided
+        # states are named here, not read from the schema.
         if spec.name == "pending_decision":
             if cur_qual == "proposed" and target != cur_state and cur_state == "decided":
                 for key in spec.extra_keys:
