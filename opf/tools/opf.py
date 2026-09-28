@@ -210,10 +210,17 @@ def _watchdog_hostile_ambient_self_test():
             except BaseException as exc:                          # a watchdog crash is the pre-fix failure
                 _crashed = repr(exc)
                 rc = None
-            _fn_elapsed = _time.monotonic() - _t_arm              # upper bound on the elapsed the watchdog subtracts
             _blocked_after = _signal.SIGALRM in _signal.pthread_sigmask(_signal.SIG_BLOCK, set())
             _disp_after = _signal.getsignal(_signal.SIGALRM)
             _val_after, _int_after = _signal.getitimer(_signal.ITIMER_REAL)
+            # F3 (load-hardening): the elapsed upper bound for the fixture-value band is measured AFTER the
+            # getitimer read, so it BRACKETS everything that reading can have lost: the elapsed the watchdog
+            # subtracted (its snapshot is at or after _t_arm) PLUS the restored timer's live countdown up to
+            # the read. The prior bound was measured BEFORE the read (at fn() return); a scheduler preemption
+            # between that measurement and the read let the restored timer count below the bound, so the band
+            # check redded under machine load with the restore itself correct (a test-hermeticity defect:
+            # the verdict tracked ambient scheduling, not the code under test; fixed at the test).
+            _elapsed_ub = _time.monotonic() - _t_arm
             _pending_after = _signal.SIGALRM in _signal.sigpending()   # F2: caller pending must survive
             if not _pending_ok:
                 print("opf watchdog self-test: {}: setup did not leave SIGALRM pending".format(label),
@@ -227,6 +234,12 @@ def _watchdog_hostile_ambient_self_test():
                 print("opf watchdog self-test: {}: returned {!r} under the hostile ambient (expected "
                       "0)".format(label, rc), file=sys.stderr)
                 ok = False
+            if (_crashed is not None or rc != EXIT_OK) and _buf.getvalue():
+                # The redirect above keeps a passing run quiet, but on a crash or nonzero return the
+                # captured output IS the failure evidence; re-emit it rather than swallow it.
+                print("opf watchdog self-test: {}: captured output of the failing inner run "
+                      "follows".format(label), file=sys.stderr)
+                sys.stderr.write(_buf.getvalue())
             if not _blocked_after:
                 print("opf watchdog self-test: {}: left SIGALRM UNBLOCKED; the caller mask was corrupted "
                       "(F2)".format(label), file=sys.stderr)
@@ -247,15 +260,20 @@ def _watchdog_hostile_ambient_self_test():
                 ok = False
             # F3 (round-12): the watchdog must restore the caller's ITIMER VALUE (elapsed-aware, per F2) AND
             # its REPEATING INTERVAL, not merely leave some positive time. The value lies in
-            # (_FIX_VAL - _fn_elapsed, _FIX_VAL]: the watchdog subtracts an elapsed >= 0 and <= the whole
-            # fn() run, so a restored value below that band means the value was not preserved and one above
-            # _FIX_VAL means the elapsed was not subtracted at all. A small float slack absorbs monotonic
-            # jitter. The interval must be restored exactly to the fixture's _FIX_INT; a dropped
-            # interval-restoration leaves 0 and reds this (the mutant a one-shot fixture hid).
-            if not (_FIX_VAL - _fn_elapsed - 1e-3 <= _val_after <= _FIX_VAL + 1e-3):
+            # [_FIX_VAL - _elapsed_ub, _FIX_VAL]: the watchdog subtracts an elapsed >= 0, and the restored
+            # timer keeps counting down until the getitimer read, so the total deficit at the read is at
+            # most _elapsed_ub, which is measured AFTER that read and therefore brackets both parts. A
+            # restored value below the band means the caller's value was lost or over-reduced; one above
+            # _FIX_VAL means time was ADDED to the caller's deadline (an extended or re-armed-to-full
+            # restore). A small float slack absorbs monotonic jitter. The interval must be restored exactly
+            # to the fixture's _FIX_INT; a dropped interval-restoration leaves 0 and reds this (the mutant
+            # a one-shot fixture hid).
+            if not (_FIX_VAL - _elapsed_ub - 1e-3 <= _val_after <= _FIX_VAL + 1e-3):
                 print("opf watchdog self-test: {}: did not restore the caller's ITIMER_REAL value "
-                      "elapsed-aware (got {!r}, expected within ({:.6f}, {:.6f}]) (F2/F3)".format(
-                          label, _val_after, _FIX_VAL - _fn_elapsed, _FIX_VAL), file=sys.stderr)
+                      "elapsed-aware (got {!r}, expected within [{:.6f}, {:.6f}]; elapsed upper bound "
+                      "{:.6f}s measured after the read) (F2/F3)".format(
+                          label, _val_after, _FIX_VAL - _elapsed_ub, _FIX_VAL, _elapsed_ub),
+                      file=sys.stderr)
                 ok = False
             if abs(_int_after - _FIX_INT) > 1e-6:
                 print("opf watchdog self-test: {}: did not restore the caller's ITIMER_REAL repeating "
@@ -339,6 +357,12 @@ def _watchdog_wrapper_caller_deadline_self_test():
         if _rc != EXIT_OK:
             print("opf watchdog wrapper-deadline self-test: the inner hostile-ambient wrapper returned {!r} "
                   "(expected 0)".format(_rc), file=sys.stderr)
+            if _buf.getvalue():
+                # The redirect keeps a passing run quiet, but on a nonzero inner return the captured
+                # output IS the failure evidence; re-emit it rather than swallow it.
+                print("opf watchdog wrapper-deadline self-test: captured output of the failing inner "
+                      "wrapper follows", file=sys.stderr)
+                sys.stderr.write(_buf.getvalue())
             ok = False
         # The wrapper ran far longer than the deadline, so an elapsed-aware restore drove the deadline below
         # zero: it FIRED during the run (recorder saw it) and reads as expired (~0) afterwards. A verbatim
@@ -369,8 +393,11 @@ def _watchdog_wrapper_caller_deadline_self_test():
             _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)   # restore the caller's exact mask
         _opf_store.restore_caller_alarm(*_caller_snap)          # shared elapsed-aware timer + pending restore (F1)
     if not ok:
-        print("opf watchdog wrapper-deadline self-test: FAIL (the wrapper did not restore the caller's "
-              "ITIMER_REAL elapsed-aware; a caller deadline was paused/extended)", file=sys.stderr)
+        # The summary names no single cause: the failed check above already printed the observed one (an
+        # inner-wrapper failure, a non-discriminating fixture, an unfired deadline, or an unsubtracted
+        # elapsed), and this line must not claim a cause a different check found.
+        print("opf watchdog wrapper-deadline self-test: FAIL (a wrapper-deadline check failed; the message "
+              "above states the observed cause)", file=sys.stderr)
         return EXIT_FINDING
     print("opf watchdog wrapper-deadline self-test: PASS (a caller ITIMER_REAL deadline is honoured "
           "elapsed-aware across the hostile-ambient wrapper, not paused or extended)")
