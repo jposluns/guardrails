@@ -969,6 +969,16 @@ class _Res:
 
 
 def self_test():
+    """Isolate fixture configuration and restore the caller even on failure."""
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
+            return self_test_isolated()
+
+
+def self_test_isolated():
     """Exercise gather over synthetic git repositories built in a tempdir (removed in a finally, for
     test-hermeticity). Covered: tracked vs untracked manifest; zero / one / multiple remotes; a prior
     extracted from a committed HEAD (records and the immutable-body digest matching the engine's own

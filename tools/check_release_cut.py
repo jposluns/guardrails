@@ -1018,6 +1018,14 @@ def check(case_id, condition):
 
 
 def self_test(red_on_revert):
+    """Isolate fixture git calls, including in-process production helpers."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _git_fixture_env import fixture_git_lifecycle
+    with fixture_git_lifecycle():
+        return _self_test_isolated(red_on_revert)
+
+
+def _self_test_isolated(red_on_revert):
     cases = test_cases()
     script = Path(__file__).resolve()
     with tempfile.TemporaryDirectory(prefix="aiqt-release-cut-") as temporary:

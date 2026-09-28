@@ -171,6 +171,12 @@ def run(root):
 def self_test():
     import shutil
     import tempfile
+    # Hermetic git fixtures (test-hermeticity): every fixture git call below inherits
+    # os.environ, where an inherited GIT_INDEX_FILE / GIT_DIR (git exports these to hook
+    # children) would redirect the fixture's init/add/commit into the CALLER's repository.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _git_fixture_env import scrub_git_environment
+    scrub_git_environment()
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-record-drift-"))
     failures = []
 

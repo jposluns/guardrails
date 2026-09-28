@@ -81,6 +81,9 @@ run_gate "opf-homes-selftest" python3 -I -B opf/tools/check_opf_homes.py --self-
 run_gate "opf-homes-migrate-selftest" python3 -I -B opf/tools/check_opf_homes_migrate.py --self-test --red-on-revert
 run_gate "opf-homes-contract" python3 -I -B opf/tools/check_opf_homes.py
 run_gate "opf-tooling-selftest" python3 -I -B opf/tools/opf.py --self-test
+run_gate "opf-import-direct-selftest" python3 -I -B opf/tools/_opf_import.py --self-test
+run_gate "opf-ingest-direct-selftest" python3 -I -B opf/tools/_opf_ingest.py --self-test
+run_gate "opf-observe-direct-selftest" python3 -I -B opf/tools/_opf_observe.py --self-test
 run_gate "opf-drift-selftest" python3 -I -B opf/tools/check_opf_drift.py --self-test
 run_gate "opf-drift" python3 -I -B opf/tools/check_opf_drift.py
 run_gate "opf-doctor-selftest" python3 -I -B opf/tools/check_opf_doctor.py --self-test
@@ -169,6 +172,7 @@ run_gate "hooks-preview" python3 -I -B tools/check_hooks_preview.py
 run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execution.py --self-test
 run_gate "orch-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
 run_gate "ci-status-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
+run_gate "git-fixture-env-selftest" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest
 run_gate "record-drift-selftest" python3 -I -B tools/check_record_drift.py --self-test
 run_gate "record-drift"          python3 -I -B tools/check_record_drift.py
 run_gate "record-sections-selftest" python3 -I -B tools/check_record_sections.py --self-test

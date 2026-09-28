@@ -560,6 +560,16 @@ def _round4_tests(opf, check):
 
 
 def _suite():
+    """Keep caller HOME/XDG out of fixture reads, including in-process production helpers."""
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
+            return _suite_isolated()
+
+
+def _suite_isolated():
     """Build byte-pinned 1.0.0 fixtures and drive `opf upgrade` over them, asserting the spec-9.2 contract."""
     try:
         import tomllib
@@ -708,9 +718,13 @@ def _suite():
             base = Path(temporary).resolve()
             home = base / "home"
             home.mkdir()
-            env_holder["env"] = dict(os.environ, HOME=str(home))
-            env_holder["env"].pop("XDG_CONFIG_HOME", None)
-            env_holder["env"].pop("XDG_CONFIG_DIRS", None)
+            # Hermetic fixture env (test-hermeticity): an inherited GIT_INDEX_FILE / GIT_DIR
+            # (git exports these to hook children) would redirect git_call's init/add/commit
+            # into the CALLER's repository; route through the pack's allowlist scrub, HOME
+            # re-pinned to the fixture home (the scrub carries only PATH and HOME, so the
+            # XDG_CONFIG_HOME / XDG_CONFIG_DIRS drop this fixture needs is kept too).
+            import _opf_observe
+            env_holder["env"] = dict(_opf_observe._scrubbed_env(), HOME=str(home))
 
             # U1) Happy path: 1.0.0 -> 1.2.0, doctor VALID, exact delta applied.
             s1 = base / "u1-happy"

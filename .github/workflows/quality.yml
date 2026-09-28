@@ -142,6 +142,15 @@ jobs:
       - name: OPF tooling self-test
         run: python3 -I -B opf/tools/opf.py --self-test
 
+      - name: OPF import direct self-test
+        run: python3 -I -B opf/tools/_opf_import.py --self-test
+
+      - name: OPF ingest direct self-test
+        run: python3 -I -B opf/tools/_opf_ingest.py --self-test
+
+      - name: OPF observe direct self-test
+        run: python3 -I -B opf/tools/_opf_observe.py --self-test
+
       - name: OPF render-drift gate self-test
         run: python3 -I -B opf/tools/check_opf_drift.py --self-test
 
@@ -423,6 +432,9 @@ jobs:
 
       - name: CI-status behaviour self-test (execution-reconciled)
         run: python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
+
+      - name: Git-fixture-env behaviour self-test (execution-reconciled)
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest
 
       - name: Record-drift self-test
         run: python3 -I -B tools/check_record_drift.py --self-test

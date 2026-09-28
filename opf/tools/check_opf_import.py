@@ -3501,7 +3501,23 @@ def _self_test_gate_generation(expect):
                        and not any(p.called for p in (locate, acceptance, validate, bundle)))
 
 
+def _self_test_generation_detail(expect):
+    expect("F-OPF-GEN2-DETAIL-UNPINNED",
+           _HOMES2_NO_LEGACY_TRANSACTION_DETAIL ==
+           "no legacy transaction record (publication attempts are not graded by this gate)")
+
+
 def _self_test():
+    """Keep caller HOME/XDG out of fixture reads, including in-process production helpers."""
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
+            return _self_test_isolated()
+
+
+def _self_test_isolated():
     """Build synthetic staged runs and assert every registered check PASSes on a clean run and FINDINGs on
     its own discriminator (a single deliberate mutation), plus the scan-layer checks. Returns 0 clean, 1 on
     a failing assertion, 2 on a harness error (a fixture could not be built)."""
@@ -3521,6 +3537,7 @@ def _self_test():
         if not cond:
             failures.append(label)
 
+    _self_test_generation_detail(expect)
     _self_test_gate_generation(expect)
     _self_test_gate_generation_sites(expect)
 

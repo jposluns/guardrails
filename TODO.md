@@ -65,7 +65,7 @@ Tooling: the pack's operational-files framework, migration and adoption machiner
 | OPF-ADOPT-VALIDATE | adoption-validation harness: a standing "does it work" check for adopters (M, M) | `[public]` `[tooling]` |
 | OPF-EARLYCUT | early release exposing OPF migration of existing operational files to first adopters (M, S) | `[public]` `[tooling]` |
 | OPF-CONSUMER | migrate our own tooling to consume the OPF store (M, M) | `[public]` `[tooling]` |
-| OPF-WRITER | OPF round-trip record-append path (M, M) | `[public]` `[BLOCKED: writer licence review]` |
+| OPF-WRITER | OPF record-authoring verb (create, transition, done receipt) on the stdlib emitter (M, M) | `[public]` `[tooling]` |
 | OPF-DECISIONS-REGISTER | OPF decisions register: file answered decisions and preference patterns (M, M) | `[public]` `[BLOCKED: round-trip writer]` |
 | OPF-CONTRIBUTION-TYPE | OPF outbound contribution ledger type: append/write path (M, M) | `[public]` `[BLOCKED: round-trip writer]` |
 | VER-1 | Adoption + versioning umbrella: release/tag process, drift gate, adopter manifest (H, XL) | `[public]` |

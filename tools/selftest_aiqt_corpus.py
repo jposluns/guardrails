@@ -22,6 +22,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _git_fixture_env import git_fixture_env, scrub_git_environment  # noqa: E402
 import aiqt_corpus as ac  # noqa: E402
 from aiqt_corpus import (  # noqa: E402
     DEFAULT_EXEMPT_DIRS,
@@ -301,9 +302,28 @@ class MetadataTests(unittest.TestCase):
 
 
 class GitTests(unittest.TestCase):
+    def setUp(self):
+        # Hermetic fixtures on EVERY invocation surface (test-hermeticity): the git()/git_show()
+        # calls under test read os.environ at CALL time, so an entry-point scrub alone leaves an
+        # importer's inherited GIT_DIR live (run_self_test() called from another module, or
+        # unittest loading GitTests directly, would read the CALLER's repository). Scrub in the
+        # fixture lifecycle itself and restore the caller's environment afterwards (a test leaves
+        # the host as it found it).
+        saved = dict(os.environ)
+
+        def _restore():
+            os.environ.clear()
+            os.environ.update(saved)
+
+        self.addCleanup(_restore)
+        scrub_git_environment()
+
     def _init_repo(self, d):
-        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e",
-                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e")
+        # Hermetic fixture env (test-hermeticity): an inherited GIT_INDEX_FILE / GIT_DIR /
+        # GIT_WORK_TREE (git exports these to hook children) would redirect these writes into
+        # the CALLER's repository; the shared scrub drops them, keeping only what we set.
+        env = git_fixture_env(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e",
+                              GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e")
         subprocess.run(["git", "init", "-q"], cwd=d, check=True, env=env)
         (Path(d) / "f.md").write_text("hello\n", encoding="utf-8")
         subprocess.run(["git", "add", "f.md"], cwd=d, check=True, env=env)
@@ -429,4 +449,8 @@ def run_self_test():
 
 
 if __name__ == "__main__":
+    # Defence-in-depth for the direct run: GitTests.setUp scrubs the fixture lifecycle itself
+    # (covering the imported surfaces, run_self_test() and unittest-loaded GitTests, too); this
+    # entry-point scrub backstops anything outside the unittest lifecycle.
+    scrub_git_environment()
     raise SystemExit(run_self_test())
