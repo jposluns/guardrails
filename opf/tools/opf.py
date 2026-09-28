@@ -1872,11 +1872,12 @@ def _watchdog_completion_case(mode):
                         "numeric killpg is banned: " + repr((pgid, signum)))
 
                 def rec_members(group, signum, anchors, leader=None):
-                    delivered, skipped = real_members(
+                    delivered, skipped, unverifiable = real_members(
                         group, signum, anchors, leader=leader)
                     sequence.append(("members", group, signum, tuple(delivered),
-                                     tuple(skipped or ()), leader))
-                    return delivered, skipped
+                                     tuple(skipped or ()) + tuple(unverifiable),
+                                     leader))
+                    return delivered, skipped, unverifiable
 
                 def rec_escalate(target, target_fd, **license):
                     sequence.append(("escalate", target))
@@ -3184,13 +3185,14 @@ def _watchdog_completion_case(mode):
         # to signal -- ([], [decoy]) -- so no caller can read a refused
         # member as an addressed tree.
         assert emit._fixture_kill_group_members(
-            decoy, signal.SIGKILL, {reaped_leader}) == ([], [decoy]), \
+            decoy, signal.SIGKILL, {reaped_leader}) == ([], [decoy], []), \
             "an unanchored group member was signalled or unaccounted"
         assert state(decoy) not in (None, "Z"), \
             "the census killed a member outside its anchors"
-        delivered, skipped = emit._fixture_kill_group_members(
+        delivered, skipped, unverifiable = emit._fixture_kill_group_members(
             decoy, signal.SIGKILL, {os.getpid()})
-        assert decoy in delivered and skipped == [], (delivered, skipped)
+        assert decoy in delivered and skipped == [] and unverifiable == [], \
+            (delivered, skipped, unverifiable)
         waited, status_raw = os.waitpid(decoy, 0)
         assert waited == decoy and os.WIFSIGNALED(status_raw) \
             and os.WTERMSIG(status_raw) == signal.SIGKILL, (waited, status_raw)
@@ -3409,9 +3411,9 @@ def _watchdog_completion_case(mode):
             assert anchors == {guardian}, \
                 ("the census took a bare numeric subject anchor", member_calls)
             assert excluded == leader, member_calls
-            delivered, skipped = result
+            delivered, skipped, unverifiable = result
             assert grandchild in delivered and leader not in delivered \
-                and skipped == [], member_calls
+                and skipped == [] and unverifiable == [], member_calls
             # The leader dies LAST, through the held pidfd, after the census.
             assert recorded[-1] == ("pidfd", fd, signal.SIGKILL), recorded
             await_state(leader, (None, "Z"), "the leg-7 leader survived")
@@ -3470,10 +3472,14 @@ def _watchdog_completion_case(mode):
         os.waitpid(zombie, 0)
     elif mode == "census-verify":
         import time
-        # Fix 2z (premise change): "subject tree killed: every member
-        # addressed" rests on OBSERVATION -- while the guardian is still
-        # frozen, a bounded post-kill verification census must see NO live,
-        # signalable group member -- never on the kill sends alone. Anything
+        import types
+        # Fix 2z (premise change) + maintainer ruling
+        # PD-335-TREE-CLAIM-STALL: "subject tree killed" rests on
+        # OBSERVATION -- while the guardian is still frozen, a bounded
+        # post-kill verification census must see NO live, signalable group
+        # member in TWO CONSECUTIVE clean passes -- never on the kill sends
+        # alone, and the claim is worded as that observation, never a proof.
+        # Anything
         # the escalation cannot OBSERVE dead downgrades the claim: an
         # unreadable /proc entry is accounted, never read as exited (codex
         # BLOCKER 2 / gemini F2); a leader SIGKILL failing with anything but
@@ -3583,8 +3589,27 @@ def _watchdog_completion_case(mode):
             with patch.object(Path, "read_bytes", unreadable):
                 outcome = emit._fixture_escalate_subject(
                     leader, fd, guardian_pid=guardian)
-            assert outcome == ("partial", [grandchild]), (
-                "an unreadable entry was read as exited", outcome)
+            assert outcome == ("partial", ([], [grandchild])), (
+                "an unreadable entry was read as exited, or accounted as an "
+                "established member (round 24, claude F1)", outcome)
+            # The refusal never asserts membership the census did not
+            # establish: the unreadable entry is disclosed as an
+            # unverifiable POSSIBLE member (round 24, claude F1). The
+            # pre-fix wording claimed "members [pid] unaddressed" for a
+            # possibly-foreign unreadable entry.
+            fake = types.SimpleNamespace(
+                pidfd=None, subject_pidfd=None,
+                _subject_kill="partial", _subject_skipped=outcome[1])
+            try:
+                emit._FixtureProcess._escalation_refusal(
+                    fake, emit.ChildStatusUnavailable("recorded failure"))
+            except emit.ChildStatusUnavailable as exc:
+                named = str(exc)
+            else:
+                raise AssertionError("the refusal did not raise")
+            assert ("entries unverifiable (possible members): [{}]"
+                    .format(grandchild)) in named, named
+            assert "members [" not in named, named
             assert state(grandchild) not in (None, "Z"), (
                 "the unaccounted member was signalled anyway")
             await_state(leader, (None, "Z"), "the leader kill never landed")
@@ -3611,7 +3636,7 @@ def _watchdog_completion_case(mode):
             with patch.object(signal, "pidfd_send_signal", failing_leader_kill):
                 outcome = emit._fixture_escalate_subject(
                     leader, fd, guardian_pid=guardian)
-            assert outcome == ("partial", [leader]), (
+            assert outcome == ("partial", ([leader], [])), (
                 "the failed leader kill was not named", outcome)
             assert state(leader) == "T", (
                 "the frozen leader died without its kill", state(leader))
@@ -3662,7 +3687,7 @@ def _watchdog_completion_case(mode):
                     leader, fd, guardian_pid=guardian)
             forked = int(forked_file.read_text(encoding="ascii"))
             assert (outcome[0] == "partial" and outcome[1]
-                    and forked in outcome[1]), (
+                    and forked in outcome[1][0]), (
                 "the fork-raced member was not observed and named",
                 outcome, forked)
             assert state(forked) not in (None, "Z"), (
@@ -3673,6 +3698,49 @@ def _watchdog_completion_case(mode):
             os.kill(forked, signal.SIGKILL)  # hygiene for the NAMED survivor
             await_state(forked, (None, "Z"), "the leg-3 hygiene did not complete")
             release(guardian)
+
+        # Leg 4 (maintainer ruling PD-335-TREE-CLAIM-STALL): the "tree"
+        # observation needs TWO CONSECUTIVE clean censuses -- a /proc scan
+        # cannot prove the whole tree died, and a survivor missing from one
+        # snapshot can appear in the next. The pre-fix verifier accepted a
+        # single clean pass, so a survivor appearing only on the second
+        # census was claimed dead under ("tree", []).
+        survivor = os.fork()
+        if survivor == 0:
+            os.setsid()
+            time.sleep(3600)
+            os._exit(0)
+        bound = time.monotonic() + 30
+        while True:
+            try:
+                if os.getpgid(survivor) == survivor:
+                    break
+            except ProcessLookupError:
+                pass
+            assert time.monotonic() < bound, "the survivor never took its group"
+            time.sleep(0.005)
+        real_listdir = os.listdir
+        hidden = []
+
+        def hiding_listdir(path="."):
+            listing = real_listdir(path)
+            if str(path) == "/proc" and not hidden:
+                # Only the FIRST census misses the survivor: the second,
+                # back-to-back census must catch it.
+                hidden.append(True)
+                return [name for name in listing if name != str(survivor)]
+            return listing
+
+        with patch.object(emit, "_FIXTURE_CLEANUP_GRACE", 1.0), (
+                patch.object(os, "listdir", hiding_listdir)):
+            outcome = emit._fixture_verify_group_kill(survivor)
+        assert outcome == ("partial", ([survivor], [])), (
+            "a survivor appearing only on the second census was claimed "
+            "dead", outcome)
+        assert state(survivor) not in (None, "Z"), (
+            "the observation-only verifier signalled the survivor")
+        os.kill(survivor, signal.SIGKILL)  # hygiene for the NAMED survivor
+        os.waitpid(survivor, 0)
     elif mode == "census-exception":
         import time
         import types
@@ -3682,7 +3750,11 @@ def _watchdog_completion_case(mode):
         # exception still propagates, and the recorded accounting ("partial",
         # members unknown) makes the refusal name exactly what ran. The
         # pre-fix escalation let an ordinary census failure strand a frozen
-        # guardian and a frozen, unkilled subject.
+        # guardian and a frozen, unkilled subject. Round 24 extends the
+        # contract to the freeze sites (both SIGSTOPs run inside the kill
+        # protection), to cancellations raised by the direct guardian
+        # backstop (they propagate, chaining the helper failure), and to the
+        # double-fault refusal wording ("attempted", never "sent").
         def state(target):
             try:
                 stat = Path("/proc", str(target), "stat").read_bytes()
@@ -3835,6 +3907,224 @@ def _watchdog_completion_case(mode):
             "the recorded census kill was not disclosed", relabel)
         assert "subject-only kill" not in relabel, (
             "the census kill was relabelled subject-only", relabel)
+        # Maintainer ruling PD-335-TREE-CLAIM-STALL: the tree claim is
+        # worded as an observation with its residual, never a proof.
+        assert "an observation, not a proof" in relabel, (
+            "the tree claim was not worded as an observation", relabel)
+
+        # Leg 4 (round 24, codex boundary, subject freeze site): the subject
+        # SIGSTOP runs INSIDE the kill protection, so a raising freeze -- a
+        # non-OSError delivery fault here -- still reaches the held-pidfd
+        # SIGKILL. The pre-fix freeze sat before the try: the exception
+        # skipped the kill and stranded the live subject.
+        with tempfile.TemporaryDirectory(prefix="opf-freeze-") as directory:
+            guardian, leader = frozen_pair(Path(directory))
+            fd = os.pidfd_open(leader)
+            real_pidfd_signal = signal.pidfd_send_signal
+
+            def freeze_fault(target_fd, signum, *args):
+                if target_fd == fd and signum == signal.SIGSTOP:
+                    raise RuntimeError("injected freeze failure")
+                return real_pidfd_signal(target_fd, signum, *args)
+
+            with patch.object(signal, "pidfd_send_signal", freeze_fault):
+                refuses(RuntimeError, lambda: emit._fixture_escalate_subject(
+                    leader, fd, guardian_pid=guardian))
+            await_state(leader, (None, "Z"),
+                        "the freeze exception skipped the held-pidfd "
+                        "subject SIGKILL")
+            os.close(fd)
+            os.kill(guardian, signal.SIGCONT)
+            os.waitpid(guardian, 0)
+
+        # Leg 5 (round 24, codex boundary): at the _escalate tier the same
+        # subject-freeze fault records only what actually ran -- the
+        # held-pidfd SIGKILL now provably runs inside the helper's
+        # protection, so the recorded ("partial", None) is honest and the
+        # guardian still gets its SIGKILL. The pre-fix tier recorded the
+        # partial kill while the freeze exception had SKIPPED the subject
+        # SIGKILL, so the retry gate stranded the unkilled subject.
+        guardian = os.fork()
+        if guardian == 0:
+            time.sleep(3600)
+            os._exit(0)
+        subject = os.fork()
+        if subject == 0:
+            time.sleep(3600)
+            os._exit(0)
+        guardian_fd = os.pidfd_open(guardian)
+        subject_fd = os.pidfd_open(subject)
+        fake = types.SimpleNamespace(
+            pid=guardian, pidfd=guardian_fd,
+            subject_pid=subject, subject_pidfd=subject_fd,
+            _subject_kill=None, _subject_skipped=None)
+        real_pidfd_signal = signal.pidfd_send_signal
+
+        def subject_freeze_fault(target_fd, signum, *args):
+            if target_fd == subject_fd and signum == signal.SIGSTOP:
+                raise RuntimeError("injected freeze failure")
+            return real_pidfd_signal(target_fd, signum, *args)
+
+        with patch.object(signal, "pidfd_send_signal", subject_freeze_fault):
+            refuses(RuntimeError,
+                    lambda: emit._FixtureProcess._escalate(fake))
+        assert (fake._subject_kill == "partial"
+                and fake._subject_skipped is None), (
+            fake._subject_kill, fake._subject_skipped)
+        await_state(subject, (None, "Z"),
+                    "the recorded subject kill never ran (round 24: the "
+                    "freeze fault skipped the held-pidfd SIGKILL)")
+        os.waitpid(subject, 0)
+        bound = time.monotonic() + 30
+        while True:
+            waited, raw = os.waitpid(guardian, os.WNOHANG)
+            if waited == guardian:
+                break
+            assert time.monotonic() < bound, (
+                "the escalate tier stranded the guardian")
+            time.sleep(0.005)
+        assert os.WIFSIGNALED(raw) and os.WTERMSIG(raw) == signal.SIGKILL, raw
+        os.close(guardian_fd)
+        os.close(subject_fd)
+
+        # Leg 6 (round 24, codex boundary, guardian freeze site): the
+        # guardian SIGSTOP runs INSIDE the guardian-kill protection, so a
+        # raising freeze still reaches the finally's guardian SIGKILL --
+        # and records NOTHING, because the subject cleanup never ran and
+        # the retry still owns it. The pre-fix freeze sat before the try:
+        # the exception skipped both kills.
+        guardian = os.fork()
+        if guardian == 0:
+            time.sleep(3600)
+            os._exit(0)
+        subject = os.fork()
+        if subject == 0:
+            time.sleep(3600)
+            os._exit(0)
+        guardian_fd = os.pidfd_open(guardian)
+        subject_fd = os.pidfd_open(subject)
+        fake = types.SimpleNamespace(
+            pid=guardian, pidfd=guardian_fd,
+            subject_pid=subject, subject_pidfd=subject_fd,
+            _subject_kill=None, _subject_skipped=None)
+
+        def guardian_freeze_fault(target_fd, signum, *args):
+            if target_fd == guardian_fd and signum == signal.SIGSTOP:
+                raise RuntimeError("injected freeze failure")
+            return real_pidfd_signal(target_fd, signum, *args)
+
+        with patch.object(signal, "pidfd_send_signal", guardian_freeze_fault):
+            refuses(RuntimeError,
+                    lambda: emit._FixtureProcess._escalate(fake))
+        assert fake._subject_kill is None and fake._subject_skipped is None, (
+            "a cleanup that never ran was recorded",
+            fake._subject_kill, fake._subject_skipped)
+        bound = time.monotonic() + 30
+        while True:
+            waited, raw = os.waitpid(guardian, os.WNOHANG)
+            if waited == guardian:
+                break
+            assert time.monotonic() < bound, (
+                "the freeze exception stranded the unkilled guardian")
+            time.sleep(0.005)
+        assert os.WIFSIGNALED(raw) and os.WTERMSIG(raw) == signal.SIGKILL, (
+            "the guardian was not SIGKILLed", raw)
+        assert state(subject) not in (None, "Z"), (
+            "the subject was addressed by a cleanup that never ran")
+        os.kill(subject, signal.SIGKILL)  # hygiene: the retry owns this subject
+        os.waitpid(subject, 0)
+        os.close(guardian_fd)
+        os.close(subject_fd)
+
+        # Leg 7 (round 24, codex BLOCKER 2): a cancellation raised by the
+        # direct held-pidfd guardian backstop PROPAGATES, chaining the kill
+        # helper's failure as its context. The pre-fix fallback caught every
+        # OSError -- TimeoutError/InterruptedError included -- and discarded
+        # the cancellation, re-raising only the earlier ordinary failure.
+        guardian = os.fork()
+        if guardian == 0:
+            time.sleep(3600)
+            os._exit(0)
+        guardian_fd = os.pidfd_open(guardian)
+        fake = types.SimpleNamespace(
+            pid=guardian, pidfd=guardian_fd,
+            subject_pid=None, subject_pidfd=None,
+            _subject_kill=None, _subject_skipped=None)
+
+        def cancelled_backstop(target_fd, signum, *args):
+            if target_fd == guardian_fd and signum == signal.SIGKILL:
+                raise InterruptedError("injected cancellation")
+            return real_pidfd_signal(target_fd, signum, *args)
+
+        with patch.object(emit, "_fixture_signal",
+                          side_effect=RuntimeError("injected helper failure")), (
+                patch.object(signal, "pidfd_send_signal", cancelled_backstop)):
+            try:
+                emit._FixtureProcess._escalate(fake)
+            except InterruptedError as exc:
+                assert isinstance(exc.__context__, RuntimeError), (
+                    "the helper failure was not chained", exc.__context__)
+            except RuntimeError:
+                raise AssertionError(
+                    "the direct guardian backstop swallowed the "
+                    "cancellation (round 24, codex BLOCKER 2)")
+            else:
+                raise AssertionError("the escalation did not propagate")
+        # Both kill paths were injected to fail: the frozen guardian remains
+        # for this hygiene kill.
+        os.kill(guardian, signal.SIGKILL)
+        os.waitpid(guardian, 0)
+        os.close(guardian_fd)
+
+        # Leg 8 (round 24, claude F2): under a double fault -- the member
+        # census raises AND the held-pidfd subject SIGKILL fails with a
+        # non-lookup error -- the recorded ("partial", None) refusal words
+        # the kill as ATTEMPTED through the held pidfd, never as "sent":
+        # the send failed and the frozen subject survives. The pre-fix
+        # wording claimed "subject SIGKILL sent".
+        with tempfile.TemporaryDirectory(prefix="opf-dfault-") as directory:
+            guardian, leader = frozen_pair(Path(directory))
+            guardian_fd = os.pidfd_open(guardian)
+            leader_fd = os.pidfd_open(leader)
+            fake = types.SimpleNamespace(
+                pid=guardian, pidfd=guardian_fd,
+                subject_pid=leader, subject_pidfd=leader_fd,
+                _subject_kill=None, _subject_skipped=None)
+
+            def denied_subject_kill(target_fd, signum, *args):
+                if target_fd == leader_fd and signum == signal.SIGKILL:
+                    raise PermissionError(1, "injected subject kill failure")
+                return real_pidfd_signal(target_fd, signum, *args)
+
+            with patch.object(emit, "_fixture_kill_group_members",
+                              side_effect=RuntimeError("injected census failure")), (
+                    patch.object(signal, "pidfd_send_signal",
+                                 denied_subject_kill)):
+                refuses(RuntimeError,
+                        lambda: emit._FixtureProcess._escalate(fake))
+            assert (fake._subject_kill == "partial"
+                    and fake._subject_skipped is None), (
+                fake._subject_kill, fake._subject_skipped)
+            assert state(leader) == "T", (
+                "the denied SIGKILL should leave the frozen subject",
+                state(leader))
+            fake.subject_pidfd = None  # a later pidfd-less close re-raises
+            try:
+                emit._FixtureProcess._escalation_refusal(
+                    fake, emit.ChildStatusUnavailable("recorded failure"))
+            except emit.ChildStatusUnavailable as exc:
+                named = str(exc)
+            else:
+                raise AssertionError("the refusal did not raise")
+            assert ("subject SIGKILL attempted through its held "
+                    "pidfd") in named, named
+            assert "SIGKILL sent" not in named, named
+            os.kill(leader, signal.SIGKILL)  # hygiene for the surviving subject
+            await_state(leader, (None, "Z"),
+                        "the leg-8 hygiene did not complete")
+            os.waitpid(guardian, 0)  # SIGKILLed by the escalate finally
+            os.close(guardian_fd)
+            os.close(leader_fd)
     elif mode == "receipt-high-fd":
         import fcntl
         import resource
