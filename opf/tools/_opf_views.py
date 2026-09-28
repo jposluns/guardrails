@@ -978,7 +978,8 @@ _PROJECTION_EXTRA = {
 
 def _projection_row(record, extra):
     """Project one record to a projection row (spec 10.5: "the full base record"): the base envelope fields
-    (including `type`, a self-describing row), a nested `actor` sub-table carrying the string-valued
+    (including `type`, a self-describing row, and `proposed_from` when the record carries it, spec
+    8.3/8.8), a nested `actor` sub-table carrying the string-valued
     kind/id, the type's declared extra fields (`extra`), and `links`/`refs` as NESTED arrays of tables (the
     emitter excludes inline tables, so a link/ref set is projected as an array of tables, not the record
     files' inline-table form). The canonical emitter binds a per-row `actor` sub-table to its own element of
@@ -986,7 +987,7 @@ def _projection_row(record, extra):
     rather than a flattened actor_kind/actor_id pair. A field the record does not carry is omitted (a stable
     declared shape)."""
     row = {}
-    for k in ("id", "type", "status", "title", "created_at", "updated_at"):
+    for k in ("id", "type", "status", "proposed_from", "title", "created_at", "updated_at"):
         if k in record:
             row[k] = record[k]
     actor = record.get("actor")
@@ -2537,9 +2538,15 @@ def self_test():
         _projd = render_decisions_toml({"pending_decision": [
             {"id": "PD-1", "status": "decided", "title": "t", "decision": "x"},
             {"id": "PD-2", "status": "decided/proposed", "title": "t", "decision": "y",
+             "proposed_from": "open",
              "links": [{"rel": "supersedes", "id": "PD-1"}], "actor": {"kind": "assistant"}}]})
         _pjd = tomllib.loads(_projd)
         check("projection-derived-settled-only", _pjd["derived"] == {"effective": ["PD-1"], "superseded": []})
+        # The proposed_from envelope field (spec 8.3/8.8) is projected like every envelope field, and only
+        # when the record carries it (spec 10.5 "the full base record").
+        check("projection-includes-proposed-from",
+              _pjd["pending_decision"][1].get("proposed_from") == "open"
+              and "proposed_from" not in _pjd["pending_decision"][0])
 
         # F6 (unit-level on join_resolution): duplicate identical supersedes links do not trip the fork
         # check. Both decisions are `decided`, so they source supersedes edges (per join_resolution's

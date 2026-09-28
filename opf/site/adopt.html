@@ -268,9 +268,12 @@
       maintainer ratifies or rejects. When it lands a proposed status, <code>transition</code> writes
       the state the record held at that moment into the record's own <code>proposed_from</code>
       field. A rejection needs <code>--reason</code>, restores exactly that recorded state, and
-      removes the field; a record proposed outside the verb carries no such field and cannot be
-      rejected by it. The worklog entry of the proposing change is informational, never evidence. A
-      canonical hand edit of the record, this field included, is not detected, the same as any other
+      removes the field; a record proposed outside <code>transition</code>, including one that
+      <code>create</code> lands directly in a proposed initial state, carries no such field, and the
+      verb refuses to reject it rather than infer or invent a predecessor. The worklog entry of the
+      proposing change is informational, never evidence. The verb never acts on a record whose
+      current row is not schema-valid, this field included; a canonical hand edit that keeps the
+      record schema-valid is not detected, the same as any other
       field. <code>done-with-receipt</code> is
       maintainer-only: it moves a backlog item to <code>done</code> and creates its one
       <code>done</code> receipt in the same act. <code>worklog-append</code> adds one worklog entry.

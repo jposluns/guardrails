@@ -18,8 +18,10 @@ then writes the state the record held at that moment into the record's own `prop
 8.3/8.8), validated by _opf_schema (present only on a `/proposed` status, and only a legal predecessor
 state for the type). A maintainer rejection of a `/proposed` record requires --reason, restores exactly the
 recorded `proposed_from` state, and removes the field; leaving the `/proposed` status by ratification
-removes it too. A proposed record that carries no `proposed_from` was proposed outside this verb: its
-rejection target cannot be verified here, so the rejection refuses, never guesses.
+removes it too. A proposed record that carries no `proposed_from` was proposed outside `transition`
+(`create` itself lands a gated initial state at `/proposed` with no predecessor, and a canonical hand
+edit can propose too, so the absence establishes no provenance): its rejection target cannot be verified
+here, so the rejection refuses, never inventing a predecessor.
 `done-with-receipt` is maintainer-only (any other actor is refused before the store is touched): it moves an
 `active` or `done/proposed` backlog item to `done` and mints the one-to-one `done` receipt, linked
 `receipt_of`, in the same transaction (spec 8.5). `transition` never lands a backlog item at unqualified
@@ -39,9 +41,11 @@ record authoring (spec 9.2 is the precedent; spec 8.8 is normative):
   3. PRECONDITION: re-emitting each operand's UNCHANGED parsed model reproduces its on-disk bytes exactly
      (a file carrying comments or non-canonical serialization refuses, bytes untouched; a hand edit or
      merge that leaves canonical bytes is NOT detectable by this check);
-  4. plan the new models: claim the ids through the ONE allocation seam (claim_ids), compose and
-     validate each record through the _opf_schema primitives (validate_transition for a status change),
-     refuse an append into a released span;
+  4. plan the new models: claim the ids through the ONE allocation seam (claim_ids); require the
+     CURRENT row a transition or done-with-receipt acts on to be schema-valid, its proposed_from
+     included, BEFORE it is trusted or overwritten (_require_valid_current); compose and validate each
+     record through the _opf_schema primitives (validate_transition for a status change); refuse an
+     append into a released span;
   5. POSTCONDITION: each emitted document, reparsed, equals its prior bytes, reparsed, plus exactly the
      allowed delta, value for value and TYPE for type (the strict _opf_emit._model_equal comparison, so a
      True or 1.0 never reads as 1): the new rows appended, the counters advanced by exactly the claim,
@@ -85,14 +89,18 @@ transition changes `status` and `updated_at` only, so a target state that requir
 validate_record; posting a new handoff does not supersede the previous one in the same act. The
 pre-proposal state a rejection restores is read from the record's own `proposed_from` field, which this
 verb wrote in the same journaled transaction that landed the `/proposed` status: a proposed record without
-the field (proposed outside this verb) cannot be rejected here (refused, never guessed), and the worklog
-lifecycle line is INFORMATIONAL, never evidence. The committed-history corroboration this verb once ran
-was RETIRED (UNATTENDED DECISION PR2-REJECTION-PREMISE-REVIEW): it trusted the repository's own committed
-history, and three QA rounds each found a way, ending at routine merge shapes of a reject-and-re-propose
-cycle, to make that history corroborate a forged pre-proposal state. `proposed_from` is an ordinary
-canonical record field, so a canonical hand edit of the record, this field included, is NOT detected,
-exactly the byte-reproduction residual above (spec 5.7's integration-base merge policy remains the
-control). A transition refuses when the clock has not passed the record's recorded timestamps.
+the field (proposed outside `transition`, which includes a record `create` landed at a `/proposed` initial
+state, so the absence establishes no provenance) cannot be rejected here (refused, a predecessor is never
+inferred or invented), and the worklog lifecycle line is INFORMATIONAL, never evidence. The
+committed-history corroboration this verb once ran was RETIRED (UNATTENDED DECISION
+PR2-REJECTION-PREMISE-REVIEW): it trusted the repository's own committed history, and three QA rounds
+each found a way, ending at routine merge shapes of a reject-and-re-propose cycle, to make that history
+corroborate a forged pre-proposal state. `proposed_from` is an ordinary canonical record field, and a
+transition or done-with-receipt refuses to trust or overwrite a CURRENT row the schema grades invalid
+(_require_valid_current), so a canonical hand edit of the record, this field included, is NOT detected
+only while it keeps the row schema-valid (a legal-predecessor swap), exactly the byte-reproduction
+residual above (spec 5.7's integration-base merge policy remains the control). A transition refuses
+when the clock has not passed the record's recorded timestamps.
 """
 import base64
 import binascii
@@ -517,17 +525,34 @@ def _append_worklog(ctx, entry):
     ctx.worklog.new_model["entry"] = list(ctx.worklog.new_model.get("entry", [])) + [entry]
 
 
+def _require_valid_current(row, rtype, ctx, rid, rel):
+    """The CURRENT row a transition or done-with-receipt acts on must itself be schema-valid BEFORE the
+    verb trusts or overwrites it: a rejection restores the row's recorded `proposed_from`, a proposing
+    transition writes the field, and leaving a proposal removes it, so acting on a schema-invalid row (a
+    `proposed_from` naming an illegal predecessor, or a stray one on an unqualified status, each a doctor
+    finding) would launder a doctor-INVALID store into a VALID one and erase the evidence (QA4 F1).
+    Refused with every byte untouched; the operator repairs the record first (spec 5.7)."""
+    rv = _opf_schema.validate_record(row, expected_type=rtype, registered_vendors=ctx.vendors)
+    if rv.status != _opf_store.VALID:
+        raise RecordError("{} in {} is not schema-valid as it stands ({}); a transition never trusts or "
+                          "overwrites an invalid record (repair it under opf doctor first); nothing "
+                          "written (fail-closed)".format(rid, rel, "; ".join(rv.findings)))
+
+
 def _recorded_pre_proposal(ctx, row, rid, status):
     """The pre-proposal state a maintainer rejection restores: the record's OWN `proposed_from` field
     (spec 8.3/8.8), which this verb wrote in the same journaled transaction that landed the `/proposed`
-    `status`, which the schema validates (present only on a `/proposed` status, a legal predecessor state
-    for the type), and which the rejection or ratification that leaves the proposal removes again. None
-    when the record does not carry a string value there (it was proposed outside this verb): the rejection
-    target then cannot be verified, and the caller refuses, never guesses. The field is an ordinary
-    canonical record field, so a canonical hand edit of it is not detectable (the residual every field
-    shares, see the module docstring); the worklog lifecycle line is informational, never evidence, and is
-    deliberately not read here. `ctx` rides along as the seam the record gate's red-on-revert flip
-    substitutes (a worklog-trusting reader) to prove this reader never consults worklog text."""
+    `status`, which _require_valid_current has just proved schema-valid on the current row (present only
+    on a `/proposed` status, a legal predecessor state for the type), and which the rejection or
+    ratification that leaves the proposal removes again. None when the record does not carry a string
+    value there: it was proposed outside `transition` (a record `create` landed at a `/proposed` initial
+    state, or a canonical hand edit), which establishes no provenance, so the rejection target cannot be
+    verified and the caller refuses, never inferring or inventing a predecessor. The field is an ordinary
+    canonical record field, so a canonical hand edit of it that keeps the row schema-valid is not
+    detectable (the residual every field shares, see the module docstring); the worklog lifecycle line is
+    informational, never evidence, and is deliberately not read here. `ctx` rides along as the seam the
+    record gate's red-on-revert flip substitutes (a worklog-trusting reader) to prove this reader never
+    consults worklog text."""
     value = row.get(PROPOSED_FROM)
     return value if isinstance(value, str) else None
 
@@ -690,19 +715,22 @@ def _plan_transition(req, ctx, operand, now):
     """`transition ID STATE`: one status change checked by validate_transition (spec 8.4, 8.5). The target
     status is derived from the actor: an assistant or automation landing a terminal or gated state gets
     `/proposed`, and the record's pre-proposal state is then written into its own `proposed_from` field in
-    the same act (spec 8.8). Leaving a `/proposed` status is maintainer-only: a rejection (--reason
+    the same act (spec 8.8). The current row must be schema-valid before it is trusted or overwritten
+    (_require_valid_current). Leaving a `/proposed` status is maintainer-only: a rejection (--reason
     required) must return to exactly the recorded `proposed_from` state, and rejection and ratification
-    each remove the field. A proposed record that carries no `proposed_from` (proposed outside this verb)
-    cannot be rejected here; the worklog lifecycle line is informational, never evidence. A backlog item
-    never lands at unqualified `done` here (done-with-receipt mints the receipt in the same act). The
-    change is `status`, `updated_at`, and the `proposed_from` write or removal on that one record, plus
-    its own worklog entry."""
+    each remove the field. A proposed record that carries no `proposed_from` (proposed outside
+    `transition`, a record created at a `/proposed` initial state included) cannot be rejected here, and
+    no predecessor is inferred or invented; the worklog lifecycle line is informational, never evidence. A
+    backlog item never lands at unqualified `done` here (done-with-receipt mints the receipt in the same
+    act). The change is `status`, `updated_at`, and the `proposed_from` write or removal on that one
+    record, plus its own worklog entry."""
     rid, target = req.positionals
     row = _locate(operand, rid)
     rtype = row.get("type")
     spec = _opf_schema.BASELINE_SPECS.get(rtype) if isinstance(rtype, str) else None
     if spec is None or ctx.types.get(rtype) != _ID_RE.match(rid).group(1):
         raise RecordError("{} in {} does not carry its index's baseline type; fail-closed".format(rid, operand.rel))
+    _require_valid_current(row, rtype, ctx, rid, operand.rel)
     current = row.get("status")
     parsed, err = _opf_schema.parse_status(current, spec)
     if parsed is None:
@@ -718,8 +746,10 @@ def _plan_transition(req, ctx, operand, now):
     if tc.status != _opf_store.VALID:
         note = ""
         if rejection and pre is None:
-            note = ("; {} carries no pre-proposal state (no {} field, so it was proposed outside opf "
-                    "record) and the rejection target cannot be verified; the worklog lifecycle line is "
+            note = ("; {} carries no pre-proposal state (no {} field: it was proposed outside opf record "
+                    "transition, which includes a record created at a '/proposed' initial state, so "
+                    "the absence establishes no provenance) and the rejection target cannot be verified; "
+                    "no predecessor is inferred or invented, and the worklog lifecycle line is "
                     "informational, never evidence".format(rid, PROPOSED_FROM))
         raise RecordError("{} {} -> {} by a {} is {}: {}{} (fail-closed)".format(
             rid, current, to_status, kind, tc.status, "; ".join(tc.findings), note))
@@ -759,6 +789,7 @@ def _plan_done_with_receipt(req, ctx, operand, now):
     if row.get("type") != BACKLOG or current not in ("active", "done/proposed"):
         raise RecordError("done-with-receipt moves an active or done/proposed backlog item to done; {} is {!r} "
                           "(fail-closed)".format(rid, current))
+    _require_valid_current(row, BACKLOG, ctx, rid, operand.rel)
     tc = _opf_schema.validate_transition(BACKLOG, current, "done", req.actor["kind"])
     if tc.status != _opf_store.VALID:
         raise RecordError("{} {} -> done is {}: {} (fail-closed)".format(rid, current, tc.status,
@@ -1348,8 +1379,9 @@ def _doctor(root):
 def _snapshot_pending(transition):
     """The predicate for the one doctor cannot-evaluate a transition this verb checked may leave until it
     is committed, or None. Doctor judges a status change against the prior committed snapshot (HEAD) over
-    every actor kind, and the envelope does not identify the transitioning actor or the pre-proposal state,
-    so an actor-dependent or rejection-shaped change is CANNOT-EVALUATE there (C-HISTORY-RESURRECTION) until
+    every actor kind, and the envelope does not identify the transitioning actor (doctor deliberately does
+    not read the record's own `proposed_from`, spec 8.8), so an actor-dependent or rejection-shaped
+    change is CANNOT-EVALUATE there (C-HISTORY-RESURRECTION) until
     the commit makes it the snapshot. This verb checked that exact change with the known actor, reason, and
     recorded pre-proposal state, and `transition` is the triple the postcondition proved equal to the
     oracle's own derivation of what was written, so it accepts that message, for that record and that
@@ -1954,6 +1986,15 @@ def _self_test_transitions(check, plan, post, full, now):
           and _recorded_pre_proposal(None, bi("done/proposed"), "BI-1", "done/proposed") is None
           and _recorded_pre_proposal(None, dict(bi("done/proposed"), proposed_from=3), "BI-1",
                                      "done/proposed") is None)
+    # -- the current row is validated before it is trusted or overwritten (QA4 F1) ------------------------------
+    check("a rejection refuses a schema-invalid proposed_from on the current row",
+          _refuses(lambda: plan(reject, rows=[pbi(pre="open")], counters=counters), "not schema-valid"))
+    check("done-with-receipt refuses a schema-invalid proposed_from on the current row",
+          _refuses(lambda: plan(["done-with-receipt", "BI-1", "--actor", "maintainer"],
+                                rows=[pbi(pre="open")], counters=counters), "not schema-valid"))
+    check("a proposing transition refuses a stray proposed_from on an unqualified current row",
+          _refuses(lambda: plan(t_argv, rows=[dict(bi("active"), proposed_from="open"), bi("open", "BI-2")],
+                                counters=counters), "not schema-valid"))
     # -- done-with-receipt -------------------------------------------------------------------------------------
     for frm, kind in (("active", "maintainer"), ("done/proposed", "assistant")):
         d_argv = ["done-with-receipt", "BI-1", "--actor", "maintainer"]

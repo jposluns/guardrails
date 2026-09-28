@@ -887,9 +887,11 @@ inclusion, block actionability, counters, lock ordering, or actor attribution.
 
 ### 8.8 Authoring operations
 
-`opf record` is the reference tooling's record-authoring verb. It writes only record and worklog
-shapes this specification already defines, so it adds no store-format change and no
-`spec_version` bump. Its subcommands:
+`opf record` is the reference tooling's record-authoring verb. It writes the record and worklog
+shapes this specification defines, and it adds one optional envelope key of its own: `proposed_from`
+(section 8.3), which appears only on `/proposed` records written by `opf record transition`. That key
+was added while base `1.2.0` was still unreleased, so no released `1.2.0` store or tooling predates
+it, and it carries no `spec_version` bump. Its subcommands:
 
 - `create`: one new record of an enabled baseline type, in the type's initial state. An assistant
   or automation author entering a gated initial state lands `/proposed`; a created-terminal factual
@@ -901,11 +903,15 @@ shapes this specification already defines, so it adds no store-format change and
   the same act; only a maintainer ratifies, or rejects with a recorded reason back to the recorded
   pre-proposal state (section 8.4). A rejection restores exactly the recorded `proposed_from`
   state, and leaving the `/proposed` status, by rejection or ratification, removes the field. A
-  proposed record that carries no `proposed_from` was proposed outside the verb and cannot be
-  rejected by it; the worklog entry of the proposing transition is informational, never evidence.
-  The field is an ordinary record field, so a canonical hand edit of it is not detected, the same
-  as any other field (the section 5.7 integration-base rule remains the control). A backlog item
-  reaches unqualified `done` only through `done-with-receipt`.
+  proposed record that carries no `proposed_from` was proposed outside `transition`; that includes
+  a record `create` lands directly at a `/proposed` initial state, so the absence establishes no
+  provenance. Such a record cannot be rejected by the verb, which never infers or invents a
+  predecessor; the worklog entry of the proposing transition is informational, never evidence. The
+  verb refuses to act on, or overwrite, a record whose current row is not schema-valid,
+  `proposed_from` included, so a schema-detectable forgery is repaired, never laundered. The field
+  is an ordinary record field, so a canonical hand edit of it that keeps the row schema-valid is
+  not detected, the same as any other field (the section 5.7 integration-base rule remains the
+  control). A backlog item reaches unqualified `done` only through `done-with-receipt`.
 - `done-with-receipt`: maintainer-only. It moves a backlog item to unqualified `done`, from
   `active` or by ratifying `done/proposed`, and in the same act creates its one-to-one `done`
   receipt linked `receipt_of` (section 8.5). An assistant reaching `done` uses `transition` and
@@ -955,7 +961,8 @@ guarantees:
 7. The declared views are rendered, then a full doctor must report VALID; a failure leaves the
    change for review with recovery advice scoped to the planned paths. One exception applies to a
    status change: doctor compares it with the prior committed snapshot, which does not identify
-   the transitioning actor or supply the pre-proposal state, so it can grade that change
+   the transitioning actor, and doctor deliberately does not read the record's own
+   `proposed_from` field, so it can grade that change
    cannot-evaluate until the change is committed. The verb's render and final doctor accept that
    cannot-evaluate only for exactly the record and the from and to statuses it has just written,
    never a finding and never any other cannot-evaluate, and the verb reports it as pending until

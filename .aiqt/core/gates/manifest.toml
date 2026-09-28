@@ -700,8 +700,12 @@ proposed_from field, a rejection restores exactly that recorded state and remove
 proposing worklog line (its FROM state rewritten canonically and committed with its views, doctor VALID)
 changes nothing in either direction (the forged target still refuses, the genuine rejection still lands),
 a proposal that carries no proposed_from (proposed outside the verb by a canonical hand edit) refuses
-with every byte untouched, and a reject-and-re-propose cycle merged --no-ff or squash-merged into the
-mainline behaves exactly the same; that a planner mutation changing only a value's type (an extension
+with every byte untouched, a reject-and-re-propose cycle merged --no-ff or squash-merged into the
+mainline behaves exactly the same, and a current row the schema grades invalid (a proposed_from naming
+an illegal predecessor, or a stray proposed_from on an unqualified status, each a doctor finding) is
+never trusted or overwritten, the rejection, the ratifying done-with-receipt, and the proposing
+transition each refusing with every byte untouched; that a planner mutation changing only a
+value's type (an extension
 count to true or 1.0, the index schema marker to true, the receipt counter to true) refuses before
 publication with every byte untouched; that two branches creating from the same
 committed counters conflict on the store paths and a canonical union resolution carrying a
@@ -724,13 +728,15 @@ check sees, the recorded pre-proposal state, doctor's check_unique_ids, the rele
 ordering, the release-failure outcome text, the final doctor, the released-span check, recovery under the
 lease, the intervening-edit check, the --type check before the operand read, the leftover-lock outcome
 text, the record-carried pre-proposal state's flip (the worklog lifecycle line read instead of the
-record's own field), and the strict type-aware delta comparator's flip (ordinary equality, under which
+record's own field), the current-row validation's flip (the row trusted without the schema check),
+and the strict type-aware delta comparator's flip (ordinary equality, under which
 true and 1.0 read as 1)) is applied in turn and must turn its test red
 with an assertion; where an independent guard would still refuse, the test asserts the written bytes or an
 isolated guard before any message. The unit leg (_opf_record.py, via opf.py --self-test) covers the
 argument grammar, the allocation seam including the homes-2 refusal, the four planners, the
 record-carried pre-proposal state (proposed_from written on a proposal, restored and removed on
-rejection and ratification, never read from worklog text), the exact-integer schema markers, the one
+rejection and ratification, never read from worklog text, and the current row schema-validated before
+it is trusted or overwritten), the exact-integer schema markers, the one
 accepted snapshot cannot-evaluate, the leftover-lock outcome bound to its lock's token (a reused pid is
 not attributed), and the postcondition vectors including the strict type-aware comparisons. It arguably
 serves the change-carries-a-check and check-fails-closed-on-unreadable disciplines, but the linkage to a
@@ -741,7 +747,8 @@ kill points are the journal engine's own injection hooks, not power loss or file
 they drive one create, one assistant transition, and one maintainer done-with-receipt; the
 merge coverage of the recorded pre-proposal state is the --no-ff and squash shapes of one
 reject-and-re-propose cycle, and a canonical hand edit of the record, proposed_from included, is not
-detectable (disclosed in the verb); the collision fixture is one hand-built union merge,
+detectable while it keeps the row schema-valid (a schema-invalid row refuses at the next transition;
+disclosed in the verb); the collision fixture is one hand-built union merge,
 not every merge shape; concurrent writers and live adopter state are outside the fixtures; and any
 harness failure fails closed to 2 rather than a clean skip.
 """
