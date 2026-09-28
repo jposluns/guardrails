@@ -786,6 +786,33 @@ def _fixture_await_ack(fd):
         os.close(fd)
 
 
+# Sentinel for a /proc entry that EXISTS but cannot be read: never proof of
+# exit, never silently equated with an exited process (fix 2z, codex BLOCKER 2
+# / gemini F2). Callers account such entries against any "tree" claim.
+_FIXTURE_UNREADABLE = object()
+
+
+def _fixture_stat_fields(target):
+    """Read the post-comm fields of /proc/<target>/stat. Returns the fields;
+    None ONLY for an ABSENT entry (FileNotFoundError/ProcessLookupError: the
+    process exited or raced away mid-read -- the only OSErrors that read as
+    exited, fix 2z codex BLOCKER 2 / gemini F2); or _FIXTURE_UNREADABLE for
+    an entry that exists but cannot be read (e.g. EACCES/EIO), which is never
+    proof of exit. TimeoutError/InterruptedError are OSError subclasses
+    carrying deadline/cancellation semantics and PROPAGATE (fix 2y, codex
+    F3); non-I/O failures (a parse defect) propagate too."""
+    from pathlib import Path
+    try:
+        stat = Path("/proc", str(target), "stat").read_bytes()
+    except OSError as exc:
+        if isinstance(exc, (TimeoutError, InterruptedError)):
+            raise
+        if isinstance(exc, (FileNotFoundError, ProcessLookupError)):
+            return None
+        return _FIXTURE_UNREADABLE
+    return stat.rsplit(b")", 1)[1].split()
+
+
 def _fixture_group_pinned(group, guardian_pid):
     """License addressing a dead leader's group MEMBERS (each through its own
     verified pidfd, never a numeric kill): True only when a CURRENT member of the
@@ -794,30 +821,20 @@ def _fixture_group_pinned(group, guardian_pid):
     tree's subreaper, so every orphaned same-group descendant is its child, and
     a member found under a stopped-or-zombie parent stays unreaped -- live or
     zombie, it holds the pgid -- for the rest of the kill sequence. A guardian
-    that is running (its stop unconfirmed), gone from /proc, or childless in
-    the group licenses nothing: the group may have emptied and its pgid been
-    recycled by an unrelated process group (QA20 claude F1)."""
+    that is running (its stop unconfirmed), gone from /proc, UNREADABLE in
+    /proc (its state unconfirmable, fix 2z), or childless in the group
+    licenses nothing: the group may have emptied and its pgid been recycled
+    by an unrelated process group (QA20 claude F1). An unreadable candidate
+    entry can never positively match, so it never licenses either; refusing
+    the pin only downgrades toward the disclosed subject-only kill, never
+    toward a claimed tree."""
     import os
     import time
-    from pathlib import Path
-
-    def fields_of(target):
-        try:
-            stat = Path("/proc", str(target), "stat").read_bytes()
-        except OSError as exc:
-            # Narrowed (fix 2y, codex F3): TimeoutError/InterruptedError are
-            # OSError subclasses carrying deadline/cancellation semantics and
-            # PROPAGATE; only a genuinely absent or raced /proc entry reads
-            # as no-fields. Non-I/O failures (a parse defect) propagate too.
-            if isinstance(exc, (TimeoutError, InterruptedError)):
-                raise
-            return None
-        return stat.rsplit(b")", 1)[1].split()
 
     deadline = time.monotonic() + _FIXTURE_CLEANUP_GRACE
     while True:
-        fields = fields_of(guardian_pid)
-        if fields is None:
+        fields = _fixture_stat_fields(guardian_pid)
+        if fields is None or fields is _FIXTURE_UNREADABLE:
             return False
         if fields[0] in (b"T", b"Z"):
             break
@@ -835,8 +852,9 @@ def _fixture_group_pinned(group, guardian_pid):
     for name in entries:
         if not name.isdecimal():
             continue
-        fields = fields_of(name)
-        if (fields is not None and int(fields[1]) == guardian_pid
+        fields = _fixture_stat_fields(name)
+        if (fields is not None and fields is not _FIXTURE_UNREADABLE
+                and int(fields[1]) == guardian_pid
                 and int(fields[2]) == group):
             return True
     return False
@@ -861,42 +879,34 @@ def _fixture_kill_group_members(group, signum, anchors, leader=None):
     the caller strictly AFTER the members, so no member is stranded by its
     leader dying mid-census (fix 2y, codex F2). Exited (zombie) members hold
     their pgid but take no signal and are no longer addressable members;
-    members that cannot be verified are SKIPPED, never guessed at.
+    members that cannot be verified are SKIPPED, never guessed at, and a
+    /proc entry that EXISTS but cannot be READ is never proof of exit: it is
+    accounted as skipped too, so no caller can claim a killed tree past it
+    (fix 2z, codex BLOCKER 2 / gemini F2).
     TimeoutError/InterruptedError (deadline/cancellation semantics) and
     non-I/O failures always PROPAGATE (fix 2y, codex F3). Returns
     (delivered, skipped): the pids signalled, and every pid that still
     looked like a live group member but was not signalled (no pidfd,
-    unanchored, or a non-exit send failure) -- callers account each one and
-    never claim the tree was killed past this census -- with skipped None
-    when the /proc census itself was unreadable (membership unknown). Hosts
-    without pidfd address no members (the degraded-escalation disclosures
-    cover them)."""
+    unanchored, unreadable, or a non-exit send failure) -- callers account
+    each one and never claim the tree was killed past this census -- with
+    skipped None when the /proc census itself was unreadable (membership
+    unknown). Hosts without pidfd address no members (the
+    degraded-escalation disclosures cover them)."""
     import os
     import signal
-    from pathlib import Path
     anchors = {int(anchor) for anchor in anchors}
-
-    def fields_of(target):
-        try:
-            stat = Path("/proc", str(target), "stat").read_bytes()
-        except OSError as exc:
-            # Narrowed (fix 2y, codex F3): deadline/cancellation semantics
-            # propagate; only an absent or raced entry reads as no-fields.
-            if isinstance(exc, (TimeoutError, InterruptedError)):
-                raise
-            return None
-        return stat.rsplit(b")", 1)[1].split()
 
     def anchored(member):
         # Follow the CURRENT parent chain (each hop is kernel-truthful for a
         # live process); only a chain reaching an anchor verifies. A hop that
-        # disappears mid-walk refuses: skipping is always the safe outcome.
+        # disappears or cannot be read mid-walk refuses: skipping is always
+        # the safe outcome.
         hop, depth = member, 0
         while depth < 128:
             if hop in anchors:
                 return True
-            fields = fields_of(hop)
-            if fields is None:
+            fields = _fixture_stat_fields(hop)
+            if fields is None or fields is _FIXTURE_UNREADABLE:
                 return False
             parent = int(fields[1])
             if parent <= 1:
@@ -917,7 +927,14 @@ def _fixture_kill_group_members(group, signum, anchors, leader=None):
         member = int(name)
         if leader is not None and member == int(leader):
             continue  # the caller signals the leader LAST, via its held pidfd
-        fields = fields_of(member)
+        fields = _fixture_stat_fields(member)
+        if fields is _FIXTURE_UNREADABLE:
+            # The entry EXISTS but cannot be read: it may be a live member,
+            # and an unreadable record is never proof of exit. Account it;
+            # no caller may claim the tree past this census (fix 2z, codex
+            # BLOCKER 2 / gemini F2).
+            skipped.append(member)
+            continue
         if fields is None or int(fields[2]) != group or fields[0] == b"Z":
             continue
         fd = _fixture_pidfd(member)
@@ -925,7 +942,10 @@ def _fixture_kill_group_members(group, signum, anchors, leader=None):
             skipped.append(member)  # a live member this host cannot address
             continue
         try:
-            fields = fields_of(member)  # re-verify AFTER the pidfd pinned it
+            fields = _fixture_stat_fields(member)  # re-verify AFTER the pidfd pinned it
+            if fields is _FIXTURE_UNREADABLE:
+                skipped.append(member)  # unverifiable entry: never read as exited
+                continue
             if fields is None or int(fields[2]) != group or fields[0] == b"Z":
                 continue  # exited or left the group: no longer a member
             if not anchored(member):
@@ -945,35 +965,90 @@ def _fixture_kill_group_members(group, signum, anchors, leader=None):
     return delivered, skipped
 
 
+def _fixture_verify_group_kill(group):
+    """OBSERVATION, never delivery, licenses the "tree" claim (fix 2z,
+    premise change): after the member kills and the leader kill, while the
+    frozen guardian still pins the group, poll /proc within the cleanup
+    grace until NO live, signalable member of `group` remains and no
+    candidate entry is unreadable -- only that observation returns
+    ("tree", []). Zombies are dead, not signalable: an unreaped member holds
+    the pgid but cannot run or fork. A member still live when the bound
+    expires (e.g. one forked between the kill census's snapshot and its
+    kills, fix 2z claude F1) is NAMED in ("partial", members); an entry that
+    exists but cannot be read might be such a member, so it prevents the
+    claim too (the live members are named when known, otherwise
+    ("partial", None): membership unknown); an unreadable /proc census is
+    ("partial", None) as well. Reads only: no pidfd is opened and no signal
+    is sent here, so the no-census contract of the guardian-dead paths is
+    untouched. TimeoutError/InterruptedError propagate (fix 2y, codex
+    F3)."""
+    import os
+    import time
+    deadline = time.monotonic() + _FIXTURE_CLEANUP_GRACE
+    while True:
+        survivors, unaccounted = [], []
+        try:
+            entries = os.listdir("/proc")
+        except OSError as exc:
+            if isinstance(exc, (TimeoutError, InterruptedError)):
+                raise
+            return ("partial", None)
+        for name in entries:
+            if not name.isdecimal():
+                continue
+            fields = _fixture_stat_fields(name)
+            if fields is _FIXTURE_UNREADABLE:
+                unaccounted.append(int(name))
+                continue
+            if fields is None or fields[0] == b"Z":
+                continue
+            if int(fields[2]) == group:
+                survivors.append(int(name))
+        if not survivors and not unaccounted:
+            return ("tree", [])
+        if time.monotonic() >= deadline:
+            return ("partial", sorted(set(survivors)) if survivors else None)
+        time.sleep(0.005)
+
+
 def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None):
     """Kill a receipt-identified subject, addressing OWNERSHIP-VERIFIED
     targets only, each through its own pidfd -- NEVER a numeric group kill,
     and NEVER a member census anchored on the subject's bare NUMERIC pid
-    (fix 2y, codex F1: SIGSTOP delivery plus one non-exit probe proves the
-    leader existed unreaped THEN, not that it stays unreaped for the census,
-    so the number can be reaped-and-recycled mid-sequence and a freshly
-    opened member pidfd would identify the wrong process). Freeze first:
-    SIGSTOP through the subject's ALREADY-HELD pidfd is identity-safe and
-    stops a live leader before any kill, so it cannot fork or reap
-    mid-sequence. Member addressing is licensed ONLY by guardian ownership:
-    `guardian_pid` -- the caller's own unreaped child, certified frozen --
-    is the tree's subreaper, so every orphaned same-group descendant is its
-    child and every live member's CURRENT parent chain reaches it;
-    _fixture_group_pinned confirms the guardian stopped-or-zombie and still
-    parenting a group member, and _fixture_kill_group_members then verifies
-    each member against that single guardian anchor AFTER its pidfd is held.
-    Members die BEFORE the leader (the census excludes the leader; its
-    held-pidfd SIGKILL runs last, fix 2y codex F2), and every member the
-    census could not address is accounted in the outcome. With NO guardian
-    ownership (guardian_pid absent -- the guardian is dead -- or the census
-    unpinned) NO census runs at all: no new pidfds are opened and ONLY the
-    subject is signalled through its already-held pidfd; same-group
-    descendants are the documented orphan-escape residual (D2), which the
-    caller DISCLOSES as unaddressed (pdeathsig and the ack-EOF gate are the
-    partial coverage) and never reports as a killed tree. Returns
-    ("tree", []) when the guardian-anchored census addressed EVERY member,
-    ("partial", skipped-pids-or-None) when members were skipped or the
-    census was unreadable, or ("subject-only", None)."""
+    (fix 2y, codex F1: only unreapability pins a pid or pgid number against
+    reuse). Freeze first: SIGSTOP through the subject's ALREADY-HELD pidfd
+    is identity-safe and stops a live leader before any kill, so it cannot
+    fork or reap mid-sequence. Member addressing is licensed ONLY by
+    guardian ownership: `guardian_pid` -- the caller's own unreaped child,
+    certified frozen -- is the tree's subreaper, so every orphaned
+    same-group descendant is its child and every live member's CURRENT
+    parent chain reaches it; _fixture_group_pinned confirms the guardian
+    stopped-or-zombie and still parenting a group member, and
+    _fixture_kill_group_members then verifies each member against that
+    single guardian anchor AFTER its pidfd is held. Members die BEFORE the
+    leader (the census excludes the leader; its held-pidfd SIGKILL runs
+    last, fix 2y codex F2), and the subject SIGKILL is EXCEPTION-SAFE (fix
+    2z, codex BLOCKER 3): a raising census never strands the frozen leader,
+    and the census exception still propagates after the kill. The "tree"
+    outcome rests on OBSERVATION, never on the kill sends alone (fix 2z,
+    premise change): while the guardian stays frozen, a bounded verification
+    census (_fixture_verify_group_kill) must observe NO live, signalable
+    group member -- a member still live at the bound (e.g. forked past the
+    kill snapshot), an unreadable entry, or a leader SIGKILL failing with
+    anything but ProcessLookupError (fix 2z, gemini F1) downgrades the
+    outcome to "partial", naming what remains where it is known, never
+    "tree". With NO guardian ownership (guardian_pid absent -- the guardian
+    is dead -- or the census unpinned) NO census runs at all: no new pidfds
+    are opened and ONLY the subject is signalled through its already-held
+    pidfd; its descendants are the documented orphan-escape residual (D2),
+    which the caller DISCLOSES as unaddressed (pdeathsig and the ack-EOF
+    gate are the partial coverage) and never reports as a killed tree.
+    Returns ("tree", []) ONLY when the guardian-anchored census addressed
+    every member AND the verification census observed none left alive,
+    ("partial", skipped-pids-or-None) when members were skipped,
+    unaccounted, observed surviving or unkillable, or the census or its
+    verification was unreadable (None: membership unknown), or
+    ("subject-only", None)."""
     import signal
     try:
         signal.pidfd_send_signal(subject_fd, signal.SIGSTOP)
@@ -983,15 +1058,35 @@ def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None):
         if isinstance(exc, (TimeoutError, InterruptedError)):
             raise
     outcome = ("subject-only", None)
-    if guardian_pid is not None and _fixture_group_pinned(subject, guardian_pid):
-        delivered, skipped = _fixture_kill_group_members(
-            subject, signal.SIGKILL, {guardian_pid}, leader=subject)
-        outcome = ("tree", []) if skipped == [] else ("partial", skipped)
+    leader_kill_failed = False
     try:
-        signal.pidfd_send_signal(subject_fd, signal.SIGKILL)
-    except (ProcessLookupError, OSError) as exc:
-        if isinstance(exc, (TimeoutError, InterruptedError)):
-            raise
+        if guardian_pid is not None and _fixture_group_pinned(subject, guardian_pid):
+            delivered, skipped = _fixture_kill_group_members(
+                subject, signal.SIGKILL, {guardian_pid}, leader=subject)
+            outcome = ("tree", []) if skipped == [] else ("partial", skipped)
+    finally:
+        # The held-pidfd subject SIGKILL runs even if the census raised (fix
+        # 2z, codex BLOCKER 3); the census exception still propagates, after
+        # the kill.
+        try:
+            signal.pidfd_send_signal(subject_fd, signal.SIGKILL)
+        except (ProcessLookupError, OSError) as exc:
+            if isinstance(exc, (TimeoutError, InterruptedError)):
+                raise
+            if not isinstance(exc, ProcessLookupError):
+                # A leader this escalation could NOT kill is a survivor: the
+                # outcome names it and never claims the tree (fix 2z, gemini
+                # F1). ProcessLookupError alone proves the leader already
+                # exited.
+                leader_kill_failed = True
+    if outcome[0] == "tree":
+        # The kill sends alone never license the claim (fix 2z): observe the
+        # group to quiescence while the guardian stays frozen.
+        outcome = (("partial", [int(subject)]) if leader_kill_failed
+                   else _fixture_verify_group_kill(subject))
+    elif (leader_kill_failed and outcome[0] == "partial"
+            and outcome[1] is not None):
+        outcome = ("partial", sorted({*outcome[1], int(subject)}))
     return outcome
 
 
@@ -1244,7 +1339,13 @@ class _FixtureProcess:
     Members die BEFORE the leader (the census excludes the leader; its
     held-pidfd SIGKILL runs last), so no member is stranded by its leader's
     death, and every member the census could not address is accounted (fix
-    2y codex F2). Then the guardian itself is SIGKILLed. On ANY guardian
+    2y codex F2). The "tree" claim then rests on OBSERVATION, never on the
+    kill sends alone (fix 2z): while the guardian stays frozen, a bounded
+    verification census must observe NO live, signalable group member -- a
+    member still live at the bound (e.g. forked past the kill snapshot), an
+    unreadable /proc entry (never proof of exit), or a leader SIGKILL
+    failing with anything but ProcessLookupError downgrades the outcome to
+    the named partial accounting. Then the guardian itself is SIGKILLed. On ANY guardian
     failure, escalated or not -- including a failure FIRST collected by
     poll(), which kills the subject AT COLLECTION TIME and records the
     failure for close() to prove and re-raise (QA19 F1), an UNRESOLVED
@@ -1267,19 +1368,21 @@ class _FixtureProcess:
       pid-only receipt (no pidfd)  subject cleanup UNVERIFIED (escalated,
                                    poll-collected and lost-ownership paths)
       subject-only (guardian dead  subject exit proven on its pidfd;
-      or census unpinned)          same-group descendants, if any,
-                                   UNADDRESSED (orphan-escape residual,
+      or census unpinned)          descendants, if any, UNADDRESSED
+                                   (orphan-escape residual,
                                    pdeathsig-backed)
       "partial" census (skipped    the unaddressed members, by pid, or
       or unreadable membership)    "unknown (census unreadable)"
       "tree" (guardian-anchored    "subject tree killed: every member
       census, EVERY member         addressed" -- the ONLY state that ever
-      addressed)                   claims a killed tree
+      addressed, then a bounded    claims a killed tree
+      verification census
+      OBSERVED no live member)
 
     Documented residuals: descendants that leave the subject's group/session
     survive a WEDGED-guardian escalation (only the subreaper census can find
-    them; the honest-guardian drain still covers them), and same-group
-    descendants of a subject whose guardian is DEAD survive the subject-only
+    them; the honest-guardian drain still covers them), and ALL descendants
+    of a subject whose guardian is DEAD survive the subject-only
     kill (no process owns the orphans after the subreaper guardian's death,
     so a census there could only trust recyclable numbers and unverifiable
     reparented chains; fix 2y, D2) -- both disclosed in the refusal, never
@@ -1708,7 +1811,13 @@ class _FixtureProcess:
         if not self.armed or self.subject_pid is not None:
             return
         try:
-            if select.select([self.control], [], [], 0.5)[0]:
+            # select.poll, never select.select: a control socket at or above
+            # FD_SETSIZE (1024) must still deliver its buffered receipt
+            # instead of a swallowed ValueError silently losing the subject
+            # (fix 2z, claude F2 / gemini F4).
+            poller = select.poll()
+            poller.register(self.control, select.POLLIN)
+            if poller.poll(500):
                 msg, fds, _flags, _addr = socket.recv_fds(self.control, 32, 1)
                 if msg:
                     self.subject_pid = int(msg)
@@ -1732,10 +1841,11 @@ class _FixtureProcess:
         (identity-safe), NO member census, NO new pidfds (fix 2y, codex
         F1/F2 under D2: after guardian death a census could only trust
         recyclable numbers and reparented chains it cannot verify).
-        Same-group descendants are the documented orphan-escape residual
-        (pdeathsig-backed); callers DISCLOSE them as unaddressed and never
-        report a killed tree here. Idempotent -- the kill is sent once,
-        whichever collector gets here first. Callers still prove the
+        Descendants -- same-group or not: no census runs at all -- are the
+        documented orphan-escape residual (pdeathsig-backed); callers
+        DISCLOSE them as unaddressed and never report a killed tree here.
+        Idempotent -- the kill is sent once, whichever collector gets here
+        first. Callers still prove the
         subject's disappearance on its pidfd before re-raising."""
         self._recv_subject()
         if self.subject_pidfd is not None and self._subject_kill is None:
@@ -1749,11 +1859,21 @@ class _FixtureProcess:
         subreaper-owns stay anchored for the census), kill the
         receipt-identified subject's tree under that guardian ownership
         (verified per-member pidfds, members before the leader, never a
-        numeric killpg), then SIGKILL the guardian itself; the caller's
-        bounded reap loop collects it and close() then proves the subject's
-        exit. A freeze that FAILED (guardian gone) licenses NO census at
-        all: the kill degrades to subject-only through the held receipt
-        pidfd (fix 2y, D2)."""
+        numeric killpg, and the "tree" claim licensed only by the bounded
+        post-kill verification census, fix 2z), then SIGKILL the guardian
+        itself; the caller's bounded reap loop collects it and close() then
+        proves the subject's exit. A freeze that FAILED (guardian gone)
+        licenses NO census at all: the kill degrades to subject-only through
+        the held receipt pidfd (fix 2y, D2). Exception safety (fix 2z, codex
+        BLOCKER 3): the guardian SIGKILL runs even if the subject cleanup
+        raises -- and if the ownership-checked kill helper itself fails, the
+        guardian is still SIGKILLed directly through its held, identity-safe
+        pidfd -- and an ordinary census failure that interrupted the
+        accounting records the kill that DID run ("partial", members
+        unknown), so any later refusal names exactly what ran; the original
+        exception still propagates. Cancellation semantics
+        (TimeoutError/InterruptedError) record nothing: the interrupt owner
+        re-sends the idempotent receipt kill."""
         import signal
         frozen = False
         if self.pidfd is not None:
@@ -1765,13 +1885,39 @@ class _FixtureProcess:
                 # propagate; an exited guardian is collected by the reap loop.
                 if isinstance(exc, (TimeoutError, InterruptedError)):
                     raise
-        if self.subject_pidfd is not None and self._subject_kill is None:
-            outcome = _fixture_escalate_subject(
-                self.subject_pid, self.subject_pidfd,
-                guardian_pid=self.pid if frozen else None)
-            if outcome is not None:
-                self._subject_kill, self._subject_skipped = outcome
-        _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
+        try:
+            if self.subject_pidfd is not None and self._subject_kill is None:
+                try:
+                    outcome = _fixture_escalate_subject(
+                        self.subject_pid, self.subject_pidfd,
+                        guardian_pid=self.pid if frozen else None)
+                except (TimeoutError, InterruptedError):
+                    raise
+                except BaseException:
+                    # The census raised AFTER the exception-safe subject
+                    # SIGKILL: record the kill that DID run -- census
+                    # incomplete, members unknown -- so the refusal names
+                    # exactly what ran (fix 2z, codex BLOCKER 3).
+                    self._subject_kill, self._subject_skipped = "partial", None
+                    raise
+                if outcome is not None:
+                    self._subject_kill, self._subject_skipped = outcome
+        finally:
+            # The guardian SIGKILL is exception-safe (fix 2z, codex BLOCKER
+            # 3): a raising subject cleanup never strands a frozen guardian.
+            try:
+                _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
+            except BaseException:
+                # Even the ownership-checked helper failing (e.g. the same
+                # census fault reaching its own group census) must not strand
+                # the frozen guardian: its held pidfd is identity-safe,
+                # SIGKILL it directly, then let the failure propagate.
+                if self.pidfd is not None:
+                    try:
+                        signal.pidfd_send_signal(self.pidfd, signal.SIGKILL)
+                    except OSError:
+                        pass
+                raise
 
     def _abandon_unfinished_launch(self):
         """Decide, under the launch lock, who owns an unfinished launch: if the
@@ -1915,41 +2061,51 @@ class _FixtureProcess:
             time.sleep(0.005)
 
     def _escalation_refusal(self, failure):
-        """Annotate an escalated refusal with ONLY what the escalation actually
-        did (QA19 F3), accounting every member (fix 2y, codex F2): "subject
-        tree killed" is claimed ONLY when the guardian-anchored census
-        addressed EVERY member; a census with skipped or unknown members
-        names them; a subject-only kill (no guardian ownership) disclosed
-        its unaddressed same-group descendants (the orphan-escape residual,
-        pdeathsig-backed, D2). The freeze needs the guardian's pidfd, and
-        the subject kill with its exit proof needs the receipt's subject
-        pidfd, so a pid-only receipt (pidfd-absent host) is a guardian-only
-        escalation whose subject cleanup is UNVERIFIED, and a missing
-        receipt is INCOMPLETE cleanup -- never a claimed kill this close()
-        could not address (QA18 codex F2)."""
+        """Annotate an escalated refusal with ONLY what the escalation
+        actually did (QA19 F3), accounting every member (fix 2y, codex F2):
+        "subject tree killed" is claimed ONLY when the guardian-anchored
+        census addressed every member AND the bounded post-kill verification
+        census then OBSERVED no live, signalable member left (fix 2z: the
+        claim rests on observation, never on the kill sends alone); a census
+        with skipped, unaccounted or unknown members names them; a
+        subject-only kill (no guardian ownership) disclosed its unaddressed
+        descendants (the orphan-escape residual, pdeathsig-backed, D2). A
+        census kill recorded by a PRIOR interrupted close ("tree"/"partial")
+        is disclosed with the same accounting, claiming the pidfd exit proof
+        only when this close actually ran it (fix 2z, claude F4). The freeze
+        needs the guardian's pidfd, and the subject kill with its exit proof
+        needs the receipt's subject pidfd, so a pid-only receipt
+        (pidfd-absent host) is a guardian-only escalation whose subject
+        cleanup is UNVERIFIED, and a missing receipt is INCOMPLETE cleanup
+        -- never a claimed kill this close() could not address (QA18 codex
+        F2)."""
         frozen = ("guardian frozen" if self.pidfd is not None
                   else "guardian not frozen: no pidfd")
+        if self._subject_kill == "tree":
+            # The ONLY state that claims a killed tree: the guardian-anchored
+            # census addressed EVERY member and the bounded verification
+            # census then OBSERVED no live member (fix 2y, fix 2z).
+            raise ChildStatusUnavailable(
+                str(failure) + "; after bounded-close escalation ({}, subject "
+                "tree killed: every member addressed, guardian "
+                "SIGKILL)".format(frozen)) from failure
+        if self._subject_kill == "partial":
+            members = ("unknown (census unreadable)"
+                       if self._subject_skipped is None
+                       else sorted(self._subject_skipped))
+            proof = ("subject exit proven on its pidfd"
+                     if self.subject_pidfd is not None
+                     else "subject SIGKILL sent on its held pidfd, exit not "
+                     "re-proven by this close")
+            raise ChildStatusUnavailable(
+                str(failure) + "; after bounded-close escalation ({}, {}, "
+                "group census incomplete: members {} unaddressed, guardian "
+                "SIGKILL)".format(frozen, proof, members)) from failure
         if self.subject_pidfd is not None:
-            if self._subject_kill == "tree":
-                # The ONLY state that claims a killed tree: the
-                # guardian-anchored census addressed EVERY member (fix 2y).
-                raise ChildStatusUnavailable(
-                    str(failure) + "; after bounded-close escalation ({}, subject "
-                    "tree killed: every member addressed, guardian "
-                    "SIGKILL)".format(frozen)) from failure
-            if self._subject_kill == "partial":
-                members = ("unknown (census unreadable)"
-                           if self._subject_skipped is None
-                           else sorted(self._subject_skipped))
-                raise ChildStatusUnavailable(
-                    str(failure) + "; after bounded-close escalation ({}, subject "
-                    "exit proven on its pidfd, group census incomplete: members "
-                    "{} unaddressed, guardian SIGKILL)".format(
-                        frozen, members)) from failure
             raise ChildStatusUnavailable(
                 str(failure) + "; after bounded-close escalation ({}, subject "
                 "exit proven on its pidfd, group kill skipped: no guardian "
-                "ownership, same-group descendants, if any, unaddressed "
+                "ownership, descendants, if any, unaddressed "
                 "(orphan-escape residual, pdeathsig-backed), guardian "
                 "SIGKILL)".format(frozen)) from failure
         if self.subject_pid is not None:
@@ -1981,10 +2137,11 @@ class _FixtureProcess:
         is DEAD and its status is gone. The held receipt still identifies the
         subject: kill it SUBJECT-ONLY through its already-held pidfd and
         prove its disappearance the same way, or refuse naming exactly what
-        could not run. Same-group descendants are the documented
-        orphan-escape residual (pdeathsig-backed, D2), disclosed, never
-        claimed killed. Returns the refusal for the caller to raise from the
-        reap's ChildProcessError."""
+        could not run. Descendants -- in ANY group: no census can run
+        without an owning guardian -- are the documented orphan-escape
+        residual (pdeathsig-backed, D2), disclosed, never claimed killed.
+        Returns the refusal for the caller to raise from the reap's
+        ChildProcessError."""
         import select
         if self.subject_pidfd is None:
             if self.subject_pid is not None:
@@ -2006,7 +2163,7 @@ class _FixtureProcess:
         return ChildStatusUnavailable(
             "guardian ownership lost; receipt subject killed on its held "
             "pidfd and exit proven (subject-only: no guardian ownership); "
-            "same-group descendants, if any, unaddressed (orphan-escape "
+            "descendants, if any, unaddressed (orphan-escape "
             "residual, pdeathsig-backed)")
 
     def _finish_close(self):
@@ -2092,7 +2249,7 @@ class _FixtureProcess:
                         if (self.subject_pidfd is None and self.subject_pid is not None
                                 and self._subject_kill is None):
                             self._unverified_refusal(failure)
-                        if self._subject_kill is not None:
+                        if self._subject_kill == "subject-only":
                             # The un-escalated failure paths run with a DEAD
                             # guardian, so the receipt kill was SUBJECT-ONLY
                             # (fix 2y, D2): disclose the residual, never a
@@ -2102,9 +2259,16 @@ class _FixtureProcess:
                                 "pidfd (subject-only kill through the held "
                                 "receipt pidfd: the guardian is dead, no "
                                 "ownership licenses a member census); "
-                                "same-group descendants, if any, unaddressed "
+                                "descendants, if any, unaddressed "
                                 "(orphan-escape residual, "
                                 "pdeathsig-backed)") from failure
+                        if self._subject_kill is not None:
+                            # A PRIOR interrupted close()'s ESCALATION already
+                            # ran the guardian-anchored census kill
+                            # ("tree"/"partial"): disclose THAT accounting,
+                            # never a subject-only proof this close did not
+                            # run (fix 2z, claude F4).
+                            self._escalation_refusal(failure)
                         raise failure
                     self._escalation_refusal(failure)
             except ChildStatusUnavailable:

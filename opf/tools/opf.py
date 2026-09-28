@@ -2131,6 +2131,11 @@ def _watchdog_completion_case(mode):
             assert closed and "guardian failed" in closed[0], \
                 ("close() did not re-raise the poll-recorded failure", closed)
             assert "descendants, if any, unaddressed" in closed[0], closed
+            # Fix 2z (gemini F3): with a dead guardian NO census ran at all,
+            # so the disclosure covers EVERY unaddressed descendant --
+            # narrowing it to "same-group" falsely implied the other-group
+            # ones were addressed or could not exist.
+            assert "same-group" not in closed[0], closed
             assert "tree killed" not in closed[0], closed
             assert child.subject_pid == subject, (child.subject_pid, subject)
             # A dead orphan reparents to the nearest subreaper ancestor (the
@@ -2927,6 +2932,9 @@ def _watchdog_completion_case(mode):
             # disclosed subject-only residual.
             assert "receipt subject killed" in closed[0] \
                 and "exit proven" in closed[0], closed
+            # Fix 2z (gemini F3): the lost-ownership disclosure covers every
+            # unaddressed descendant, never just the same-group ones.
+            assert "same-group" not in closed[0], closed
             await_state(subject, (None, "Z"),
                         "the lost-ownership refusal left the subject running")
             assert state(descendant) not in (None, "Z"), \
@@ -3460,6 +3468,421 @@ def _watchdog_completion_case(mode):
         os.kill(sentinel, signal.SIGKILL)
         os.waitpid(sentinel, 0)
         os.waitpid(zombie, 0)
+    elif mode == "census-verify":
+        import time
+        # Fix 2z (premise change): "subject tree killed: every member
+        # addressed" rests on OBSERVATION -- while the guardian is still
+        # frozen, a bounded post-kill verification census must see NO live,
+        # signalable group member -- never on the kill sends alone. Anything
+        # the escalation cannot OBSERVE dead downgrades the claim: an
+        # unreadable /proc entry is accounted, never read as exited (codex
+        # BLOCKER 2 / gemini F2); a leader SIGKILL failing with anything but
+        # ProcessLookupError names the surviving leader (gemini F1); a
+        # member forked past the kill census's snapshot is observed by the
+        # verification census and named (claude F1).
+        def state(target):
+            try:
+                stat = Path("/proc", str(target), "stat").read_bytes()
+            except (FileNotFoundError, ProcessLookupError):
+                return None
+            return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
+
+        def await_state(target, wanted, note):
+            bound = time.monotonic() + 30
+            while state(target) not in wanted:
+                assert time.monotonic() < bound, note
+                time.sleep(0.005)
+
+        def await_file(path, note):
+            bound = time.monotonic() + 30
+            while not path.exists():
+                assert time.monotonic() < bound, note
+                time.sleep(0.005)
+
+        def frozen_tree(directory, forker):
+            # Frozen subreaper guardian -> setsid leader -> one same-group
+            # grandchild; with `forker`, the grandchild forks one more
+            # same-group child when cued through the cue file.
+            leader_file = Path(directory, "leader")
+            grandchild_file = Path(directory, "grandchild")
+            frozen_file = Path(directory, "frozen")
+            cue = Path(directory, "cue")
+            forked_file = Path(directory, "forked")
+            guardian = os.fork()
+            if guardian == 0:
+                try:
+                    import ctypes
+                    libc = ctypes.CDLL(None, use_errno=True)
+                    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+                        os._exit(125)
+                    leader = os.fork()
+                    if leader == 0:
+                        os.setsid()
+                        grandchild = os.fork()
+                        if grandchild == 0:
+                            if forker:
+                                bound = time.monotonic() + 30
+                                while not cue.exists():
+                                    if time.monotonic() >= bound:
+                                        os._exit(125)
+                                    time.sleep(0.002)
+                                forked = os.fork()
+                                if forked == 0:
+                                    time.sleep(3600)  # forked past the snapshot
+                                    os._exit(0)
+                                scratch = Path(directory, "forked.tmp")
+                                scratch.write_text(str(forked), encoding="ascii")
+                                scratch.rename(forked_file)
+                            time.sleep(3600)          # same-group descendant
+                            os._exit(0)
+                        scratch = Path(directory, "grandchild.tmp")
+                        scratch.write_text(str(grandchild), encoding="ascii")
+                        scratch.rename(grandchild_file)
+                        time.sleep(3600)              # LIVE leader, killed last
+                        os._exit(0)
+                    scratch = Path(directory, "leader.tmp")
+                    scratch.write_text(str(leader), encoding="ascii")
+                    scratch.rename(leader_file)
+                    scratch = Path(directory, "frozen.tmp")
+                    scratch.write_text("stopping", encoding="ascii")
+                    scratch.rename(frozen_file)
+                    os.kill(os.getpid(), signal.SIGSTOP)
+                    os._exit(0)
+                except BaseException:
+                    os._exit(125)
+            await_file(leader_file, "the model leader never appeared")
+            leader = int(leader_file.read_text(encoding="ascii"))
+            await_file(grandchild_file, "the model grandchild never appeared")
+            grandchild = int(grandchild_file.read_text(encoding="ascii"))
+            await_file(frozen_file, "the model guardian never froze")
+            await_state(guardian, ("T",), "the model guardian did not stop")
+            assert state(grandchild) not in (None, "Z"), "the descendant died early"
+            return guardian, leader, grandchild, cue, forked_file
+
+        def release(guardian):
+            os.kill(guardian, signal.SIGCONT)
+            os.waitpid(guardian, 0)
+
+        # Leg 1 (codex BLOCKER 2 / gemini F2): an unreadable /proc entry is
+        # NEVER proof of exit: the member is accounted (named), unsignalled,
+        # and the claim downgrades to "partial". The pre-fix census read the
+        # PermissionError as an exited process and claimed ("tree", []) with
+        # the member alive.
+        with tempfile.TemporaryDirectory(prefix="opf-unread-") as directory:
+            guardian, leader, grandchild, _cue, _forked = frozen_tree(
+                Path(directory), forker=False)
+            fd = os.pidfd_open(leader)
+            real_read_bytes = Path.read_bytes
+            blocked = str(Path("/proc", str(grandchild), "stat"))
+
+            def unreadable(target):
+                if str(target) == blocked:
+                    raise PermissionError(13, "injected unreadable census entry")
+                return real_read_bytes(target)
+
+            with patch.object(Path, "read_bytes", unreadable):
+                outcome = emit._fixture_escalate_subject(
+                    leader, fd, guardian_pid=guardian)
+            assert outcome == ("partial", [grandchild]), (
+                "an unreadable entry was read as exited", outcome)
+            assert state(grandchild) not in (None, "Z"), (
+                "the unaccounted member was signalled anyway")
+            await_state(leader, (None, "Z"), "the leader kill never landed")
+            os.close(fd)
+            os.kill(grandchild, signal.SIGKILL)  # hygiene for the NAMED member
+            await_state(grandchild, (None, "Z"),
+                        "the leg-1 hygiene did not complete")
+            release(guardian)
+        # Leg 2 (gemini F1): a leader SIGKILL failing with anything but
+        # ProcessLookupError NAMES the surviving leader and never claims the
+        # tree. The pre-fix code swallowed the failure and, with a clean
+        # census, still claimed ("tree", []) over the live leader.
+        with tempfile.TemporaryDirectory(prefix="opf-leaderfail-") as directory:
+            guardian, leader, grandchild, _cue, _forked = frozen_tree(
+                Path(directory), forker=False)
+            fd = os.pidfd_open(leader)
+            real_pidfd_signal = signal.pidfd_send_signal
+
+            def failing_leader_kill(target_fd, signum, *args):
+                if target_fd == fd and signum == signal.SIGKILL:
+                    raise PermissionError(1, "injected leader kill failure")
+                return real_pidfd_signal(target_fd, signum, *args)
+
+            with patch.object(signal, "pidfd_send_signal", failing_leader_kill):
+                outcome = emit._fixture_escalate_subject(
+                    leader, fd, guardian_pid=guardian)
+            assert outcome == ("partial", [leader]), (
+                "the failed leader kill was not named", outcome)
+            assert state(leader) == "T", (
+                "the frozen leader died without its kill", state(leader))
+            await_state(grandchild, (None, "Z"),
+                        "the census did not address the grandchild")
+            signal.pidfd_send_signal(fd, signal.SIGKILL)  # hygiene: the real kill
+            await_state(leader, (None, "Z"), "the leg-2 hygiene did not complete")
+            os.close(fd)
+            release(guardian)
+
+        # Leg 3 (claude F1, the fix-2z premise change): a member FORKED
+        # between the kill census's /proc snapshot and its kills is invisible
+        # to the snapshot but OBSERVED by the verification census: the claim
+        # downgrades to "partial" NAMING the live survivor. The
+        # stale-snapshot listdir wrapper makes the ms-scale fork window
+        # deterministic. The pre-fix escalation returned ("tree", []) --
+        # "every member addressed" -- with the forked member alive and
+        # unaccounted.
+        with tempfile.TemporaryDirectory(prefix="opf-forkrace-") as directory:
+            guardian, leader, grandchild, cue, forked_file = frozen_tree(
+                Path(directory), forker=True)
+            fd = os.pidfd_open(leader)
+            real_listdir = os.listdir
+            proc_listings = []
+
+            def stale_listdir(path="."):
+                if str(path) != "/proc":
+                    return real_listdir(path)
+                listing = real_listdir(path)
+                proc_listings.append(True)
+                if len(proc_listings) == 2:
+                    # The kill census's snapshot (the first listing is the
+                    # pin check's): cue the fork AFTER the listing is taken
+                    # and return the pre-fork (stale) snapshot.
+                    scratch = Path(directory, "cue.tmp")
+                    scratch.write_text("go", encoding="ascii")
+                    scratch.rename(cue)
+                    bound = time.monotonic() + 30
+                    while not forked_file.exists():
+                        assert time.monotonic() < bound, (
+                            "the raced fork never appeared")
+                        time.sleep(0.002)
+                return listing
+
+            with patch.object(emit, "_FIXTURE_CLEANUP_GRACE", 1.0), (
+                    patch.object(os, "listdir", stale_listdir)):
+                outcome = emit._fixture_escalate_subject(
+                    leader, fd, guardian_pid=guardian)
+            forked = int(forked_file.read_text(encoding="ascii"))
+            assert (outcome[0] == "partial" and outcome[1]
+                    and forked in outcome[1]), (
+                "the fork-raced member was not observed and named",
+                outcome, forked)
+            assert state(forked) not in (None, "Z"), (
+                "the raced member should survive as the NAMED remains")
+            await_state(leader, (None, "Z"), "the leg-3 leader survived")
+            await_state(grandchild, (None, "Z"), "the leg-3 grandchild survived")
+            os.close(fd)
+            os.kill(forked, signal.SIGKILL)  # hygiene for the NAMED survivor
+            await_state(forked, (None, "Z"), "the leg-3 hygiene did not complete")
+            release(guardian)
+    elif mode == "census-exception":
+        import time
+        import types
+        # Fix 2z (codex BLOCKER 3): cleanup is exception-safe. The subject's
+        # held-pidfd SIGKILL runs even if the member census raises, the
+        # guardian's SIGKILL runs even if the subject cleanup raises, the
+        # exception still propagates, and the recorded accounting ("partial",
+        # members unknown) makes the refusal name exactly what ran. The
+        # pre-fix escalation let an ordinary census failure strand a frozen
+        # guardian and a frozen, unkilled subject.
+        def state(target):
+            try:
+                stat = Path("/proc", str(target), "stat").read_bytes()
+            except (FileNotFoundError, ProcessLookupError):
+                return None
+            return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
+
+        def await_state(target, wanted, note):
+            bound = time.monotonic() + 30
+            while state(target) not in wanted:
+                assert time.monotonic() < bound, note
+                time.sleep(0.005)
+
+        def await_file(path, note):
+            bound = time.monotonic() + 30
+            while not path.exists():
+                assert time.monotonic() < bound, note
+                time.sleep(0.005)
+
+        def frozen_pair(directory):
+            leader_file = Path(directory, "leader")
+            frozen_file = Path(directory, "frozen")
+            guardian = os.fork()
+            if guardian == 0:
+                try:
+                    import ctypes
+                    libc = ctypes.CDLL(None, use_errno=True)
+                    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+                        os._exit(125)
+                    leader = os.fork()
+                    if leader == 0:
+                        os.setsid()
+                        time.sleep(3600)
+                        os._exit(0)
+                    scratch = Path(directory, "leader.tmp")
+                    scratch.write_text(str(leader), encoding="ascii")
+                    scratch.rename(leader_file)
+                    scratch = Path(directory, "frozen.tmp")
+                    scratch.write_text("stopping", encoding="ascii")
+                    scratch.rename(frozen_file)
+                    os.kill(os.getpid(), signal.SIGSTOP)
+                    os._exit(0)
+                except BaseException:
+                    os._exit(125)
+            await_file(leader_file, "the model leader never appeared")
+            await_file(frozen_file, "the model guardian never froze")
+            await_state(guardian, ("T",), "the model guardian did not stop")
+            return guardian, int(leader_file.read_text(encoding="ascii"))
+
+        # Leg 1: the held-pidfd subject SIGKILL survives a raising census;
+        # the census exception still propagates. The pre-fix escalation
+        # propagated BEFORE the kill and stranded the frozen leader.
+        with tempfile.TemporaryDirectory(prefix="opf-cexc-") as directory:
+            guardian, leader = frozen_pair(Path(directory))
+            fd = os.pidfd_open(leader)
+            with patch.object(emit, "_fixture_kill_group_members",
+                              side_effect=RuntimeError("injected census failure")):
+                refuses(RuntimeError, lambda: emit._fixture_escalate_subject(
+                    leader, fd, guardian_pid=guardian))
+            await_state(leader, (None, "Z"),
+                        "the raising census stranded the frozen subject")
+            os.close(fd)
+            os.kill(guardian, signal.SIGCONT)
+            os.waitpid(guardian, 0)
+
+        # Leg 2: at the _escalate tier the guardian SIGKILL survives the
+        # same failure, the kill that DID run is recorded ("partial",
+        # members unknown), and the refusal names it -- never a killed tree.
+        # The pre-fix tier propagated before the guardian SIGKILL and
+        # recorded nothing.
+        with tempfile.TemporaryDirectory(prefix="opf-cexc2-") as directory:
+            guardian, leader = frozen_pair(Path(directory))
+            guardian_fd = os.pidfd_open(guardian)
+            leader_fd = os.pidfd_open(leader)
+            fake = types.SimpleNamespace(
+                pid=guardian, pidfd=guardian_fd,
+                subject_pid=leader, subject_pidfd=leader_fd,
+                _subject_kill=None, _subject_skipped=None)
+            with patch.object(emit, "_fixture_kill_group_members",
+                              side_effect=RuntimeError("injected census failure")):
+                refuses(RuntimeError,
+                        lambda: emit._FixtureProcess._escalate(fake))
+            assert (fake._subject_kill == "partial"
+                    and fake._subject_skipped is None), (
+                "the interrupted accounting was not recorded",
+                fake._subject_kill, fake._subject_skipped)
+            bound = time.monotonic() + 30
+            while True:
+                waited, raw = os.waitpid(guardian, os.WNOHANG)
+                if waited == guardian:
+                    break
+                assert time.monotonic() < bound, (
+                    "the raising cleanup stranded the frozen guardian")
+                time.sleep(0.005)
+            assert os.WIFSIGNALED(raw) and os.WTERMSIG(raw) == signal.SIGKILL, raw
+            await_state(leader, (None, "Z"),
+                        "the escalate tier stranded the frozen subject")
+            try:
+                emit._FixtureProcess._escalation_refusal(
+                    fake, emit.ChildStatusUnavailable("recorded failure"))
+            except emit.ChildStatusUnavailable as exc:
+                named = str(exc)
+            else:
+                raise AssertionError("the refusal did not raise")
+            assert "census incomplete" in named and "unknown" in named, named
+            assert "tree killed" not in named, named
+            os.close(guardian_fd)
+            os.close(leader_fd)
+
+        # Leg 3 (fix 2z, claude F4): a census kill RECORDED by a prior
+        # interrupted close ("tree"/"partial") is disclosed as that census
+        # kill when a later close re-raises the recorded failure -- never as
+        # a subject-only kill this close did not run (the pre-fix branch
+        # keyed only on `_subject_kill is not None` and relabelled the
+        # census kill "subject-only ... no ownership licenses a member
+        # census").
+        import socket
+        import tempfile as tempfile_module
+        dead = os.fork()
+        if dead == 0:
+            os._exit(0)
+        dead_fd = os.pidfd_open(dead)  # polls readable once the child exits
+        control, peer = socket.socketpair()
+        report = tempfile_module.TemporaryFile()
+        fake = types.SimpleNamespace(
+            pid=os.getpid(), pidfd=None, collected=True, armed=True,
+            unresolved=False, cleaned=False, timed_out=False, status=None,
+            subject_pid=dead, subject_pidfd=dead_fd,
+            _subject_kill="tree", _subject_skipped=[],
+            _failure=emit.ChildStatusUnavailable("recorded failure"),
+            control=control, peer=peer, report=report)
+        # The class methods _finish_close consults, bound to the fake: the
+        # receipt is already collected and the recorded kill gates the
+        # idempotent re-kill, so both collection helpers are no-ops here;
+        # the refusal builder is the REAL one -- it is what this leg tests.
+        fake._recv_subject = lambda: None
+        fake._address_failed_subject = lambda: None
+        fake._interrupt_collect = lambda: None
+        fake._escalation_refusal = (
+            lambda failure: emit._FixtureProcess._escalation_refusal(fake, failure))
+        try:
+            emit._FixtureProcess._finish_close(fake)
+        except emit.ChildStatusUnavailable as exc:
+            relabel = str(exc)
+        else:
+            raise AssertionError("the recorded failure was not re-raised")
+        finally:
+            os.waitpid(dead, 0)
+        assert "subject tree killed" in relabel, (
+            "the recorded census kill was not disclosed", relabel)
+        assert "subject-only kill" not in relabel, (
+            "the census kill was relabelled subject-only", relabel)
+    elif mode == "receipt-high-fd":
+        import fcntl
+        import resource
+        import select
+        import socket
+        import time
+        import types
+        # Fix 2z (claude F2 / gemini F4): the buffered subject receipt must
+        # survive a control socket AT OR ABOVE FD_SETSIZE (1024). The layer
+        # polls descriptors with select.poll everywhere; the pre-fix
+        # _recv_subject probed with select.select, whose fd_set raises
+        # ValueError there, and the narrowed handler swallowed it -- the
+        # buffered receipt (pid AND pidfd, queued and readable) was silently
+        # lost, degrading every receipt-based cleanup to the no-receipt path
+        # in exactly the high-descriptor callers the unpinned-kill high-fd
+        # leg commits the layer to support.
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft <= 1024:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (min(4096, hard), hard))
+        subject = os.fork()
+        if subject == 0:
+            time.sleep(3600)
+            os._exit(0)
+        subject_fd = os.pidfd_open(subject)
+        low, peer = socket.socketpair()
+        high = fcntl.fcntl(low.fileno(), fcntl.F_DUPFD, 1024)
+        assert high >= 1024, high
+        control = socket.socket(fileno=high)
+        low.close()
+        emit._fixture_send_subject(peer, subject, subject_fd)
+        # Flip (red-on-revert): the pre-fix probe on the same high
+        # descriptor raises exactly the ValueError the old handler
+        # swallowed.
+        refuses(ValueError, lambda: select.select([control], [], [], 0))
+        fake = types.SimpleNamespace(control=control, armed=True,
+                                     subject_pid=None, subject_pidfd=None)
+        emit._FixtureProcess._recv_subject(fake)
+        assert fake.subject_pid == subject, (
+            "the high-fd receipt was lost", fake.subject_pid)
+        assert fake.subject_pidfd is not None, "the receipt pidfd was lost"
+        os.close(fake.subject_pidfd)
+        os.kill(subject, signal.SIGKILL)
+        waited, raw = os.waitpid(subject, 0)
+        assert (waited == subject and os.WIFSIGNALED(raw)
+                and os.WTERMSIG(raw) == signal.SIGKILL), (waited, raw)
+        os.close(subject_fd)
+        control.close()
+        peer.close()
     else:
         raise AssertionError("unknown completion fixture: " + mode)
     print("opf completion:", mode, "PASS")
@@ -3570,36 +3993,61 @@ def _watchdog_regression_self_test():
         return EXIT_FINDING
     prefix = ("import sys; sys.path.insert(0, " + repr(str(Path(__file__).resolve().parent))
               + "); import opf; ")
+    deadline_modes = ("delayed-start", "stuck-start", "pipe-stall", "exit-stall",
+                      "transient-census")
+    overlap_modes = ("success", "timeout")
+    safety_modes = ("ignored-chld", "reaper-chld", "lost-reap", "lost-cleanup",
+                    "high-fd", "huge-timeout", "fork-error", "poll-error", "missing-reap",
+                    "liveness-permission")
+    launcher_labels = ("isolation", "regression", "shared")
+    launcher_dispositions = ("ignored", "handler")
+    completion_modes = ("audit-ignore", "reaper", "nonce", "fixture-id", "status",
+                        "early-exit", "cleanup-reaped", "cleanup-cancel", "premature-exit",
+                        "nested-timeout", "nested-cancel", "no-signal-echild",
+                        "guardian-error", "empty-children", "bounded-diagnostics",
+                        "cleanup-budget", "deadline-flips", "subject-setup",
+                        "overdue-success", "launch-ownership", "launch-cancel",
+                        "fd-hygiene-total", "nested-keep", "fd-census",
+                        "subject-gc", "guardian-preload", "subject-receipt",
+                        "subject-ack", "subject-orphan", "pdeathsig",
+                        "escalation-subject", "escalate-reaped",
+                        "poll-collected", "close-cancel",
+                        "escalate-degraded", "poll-masked",
+                        "unpinned-kill", "census-verify",
+                        "census-exception", "receipt-high-fd")
+    # Each launcher case's bound DERIVES from its nested callee's sanctioned
+    # budget, following the blocked-isolation convention below (fix 2z,
+    # claude F3 / gemini F5): with _run_fixture_process patched, every nested
+    # case is exactly one 5 s exit-37 launch and the callee runs TWICE
+    # (control + hostile), plus launch margin -- never a flat empirical
+    # constant sitting below what the callee itself is sanctioned to wait
+    # for (the pre-QA kill-timeout-exceeds-callee-wait flake).
+    nested_launches = {
+        "isolation": 5 * 6 + 1,  # the timer matrix: 5 labels x 6 modes + window/expiry
+        "regression": (len(deadline_modes) + len(overlap_modes)
+                       + len(safety_modes)
+                       + len(launcher_labels) * len(launcher_dispositions)
+                       + len(completion_modes) + 1),  # + blocked-isolation
+        "shared": 1,             # a single patched run_status_owned launch
+    }
+    launcher_bounds = {label: 2 * launches * 5 + 30
+                       for label, launches in nested_launches.items()}
     cases = [(mode, prefix + "return opf._watchdog_deadline_case(" + repr(mode) + ")", 10)
-             for mode in ("delayed-start", "stuck-start", "pipe-stall", "exit-stall",
-                          "transient-census")]
+             for mode in deadline_modes]
     cases.extend(("overlap-" + mode,
                   prefix + "return opf._watchdog_overlap_case(" + repr(mode) + ")", 60)
-                 for mode in ("success", "timeout"))
+                 for mode in overlap_modes)
     cases.extend((mode, prefix + "return opf._watchdog_safety_case(" + repr(mode) + ")", 15)
-                 for mode in ("ignored-chld", "reaper-chld", "lost-reap", "lost-cleanup",
-                              "high-fd", "huge-timeout", "fork-error", "poll-error", "missing-reap",
-                              "liveness-permission"))
+                 for mode in safety_modes)
     cases.extend((label + "-" + disposition,
                   prefix + "return opf._watchdog_launcher_case("
-                  + repr(label) + ", " + repr(disposition) + ")", 30)
-                 for label in ("isolation", "regression", "shared")
-                 for disposition in ("ignored", "handler"))
+                  + repr(label) + ", " + repr(disposition) + ")",
+                  launcher_bounds[label])
+                 for label in launcher_labels
+                 for disposition in launcher_dispositions)
     cases.extend(("completion-" + mode,
                   prefix + "return opf._watchdog_completion_case(" + repr(mode) + ")", 40)
-                 for mode in ("audit-ignore", "reaper", "nonce", "fixture-id", "status",
-                              "early-exit", "cleanup-reaped", "cleanup-cancel", "premature-exit",
-                              "nested-timeout", "nested-cancel", "no-signal-echild",
-                              "guardian-error", "empty-children", "bounded-diagnostics",
-                              "cleanup-budget", "deadline-flips", "subject-setup",
-                              "overdue-success", "launch-ownership", "launch-cancel",
-                              "fd-hygiene-total", "nested-keep", "fd-census",
-                              "subject-gc", "guardian-preload", "subject-receipt",
-                              "subject-ack", "subject-orphan", "pdeathsig",
-                              "escalation-subject", "escalate-reaped",
-                              "poll-collected", "close-cancel",
-                              "escalate-degraded", "poll-masked",
-                              "unpinned-kill"))
+                 for mode in completion_modes)
     # Resolve the real registration, without recursively invoking this regression runner.
     # Both inherited disposition and mask are hostile; the outer runner's state is untouched.
     cases.append(("blocked-isolation", prefix
