@@ -55,7 +55,7 @@ KIND = "ingest"
 OPERATION = "ingest-apply"
 PROMOTION_NAME = "promotion.toml"
 PROMOTION_FORMAT = "opf.ingest.promotion/v1"
-EVIDENCE_INVENTORY_FORMAT = "opf.ingest.evidence-inventory/v1"
+EVIDENCE_INVENTORY_FORMAT = _opf_store.EVIDENCE_INVENTORY_FORMAT
 REVIEW_DIRNAME = "review"
 ORIGINALS_DIRNAME = "originals"
 SCHEMA = 1
@@ -476,22 +476,22 @@ def _staging_removals(root_fd, run_rel, frozen, ops):
 def _publication_ops(root_fd, machine_rel, run_rel, run_id, attempt, plan, frozen, live, reservation,
                      acc_raw, binding, roster, vendors):
     """ONE journaled publication, in dependency order: evidence, destinations, source removals, records
-    and manifest, evidence inventory, promotion receipt, then the terminal staging deletion."""
+    and manifest, base evidence inventory, promotion receipt and its phase inventory, then staging deletion."""
     ops = _Ops(root_fd)
     home = plan.evidence_home
-    evidence = [(_opf_import.ACCEPTANCE_NAME, acc_raw)]
+    evidence = [(home + "/" + _opf_import.ACCEPTANCE_NAME, acc_raw)]
     ops.mkdir(home + "/" + REVIEW_DIRNAME)
     for name in sorted((n for n, k in frozen.tree.items() if k == "dir"), key=lambda n: (n.count("/"), n)):
         ops.mkdir(home + "/" + REVIEW_DIRNAME + "/" + name)
     for name in sorted(n for n, k in frozen.tree.items() if k == "file"):
         data = frozen.read_bytes(name)
         ops.create(home + "/" + REVIEW_DIRNAME + "/" + name, data)
-        evidence.append((REVIEW_DIRNAME + "/" + name, data))
+        evidence.append((home + "/" + REVIEW_DIRNAME + "/" + name, data))
     for r in plan.removals:
         data, mode = live[r["path"]]
         ops.create(r["dest"], data, mode, destination=True)
-        if r["disposition"] == "migrate":
-            evidence.append((r["dest"][len(home) + 1:], data))
+        if r["disposition"] == "migrate" or r["dest"].startswith(_opf_store.ARCHIVE_REL + "/moved/"):
+            evidence.append((r["dest"], data))
     for r in plan.removals:
         data, mode = live[r["path"]]
         ops.ops.append(_pinned_remove(r["path"], data, mode))
@@ -510,8 +510,8 @@ def _publication_ops(root_fd, machine_rel, run_rel, run_id, attempt, plan, froze
         ops.publish(rel, data)
         published.append(dict(path=rel, sha256=_sha(data)))
     inventory = _opf_import._emit_bytes(dict(
-        format=EVIDENCE_INVENTORY_FORMAT, schema=SCHEMA, run_id=run_id,
-        entry=[dict(path=p, sha256=_sha(d), size=len(d)) for p, d in sorted(evidence)]), "evidence inventory")
+        format=EVIDENCE_INVENTORY_FORMAT,
+        file=[dict(path=p, sha256=_sha(d), size=len(d)) for p, d in sorted(evidence)]), "evidence inventory")
     ops.create(_opf_store.evidence_inventory("import", run_id), inventory)
     receipt = _opf_import._emit_bytes(dict(
         format=PROMOTION_FORMAT, schema=SCHEMA, run_id=run_id, attempt=attempt,
@@ -523,15 +523,80 @@ def _publication_ops(root_fd, machine_rel, run_rel, run_id, attempt, plan, froze
         removed=[dict(source=r["path"], destination=r["dest"], disposition=r["disposition"])
                  for r in plan.removals]), "promotion receipt")
     ops.create(home + "/" + PROMOTION_NAME, receipt)
+    # The receipt binds the immutable base inventory; a separate immutable phase claims the
+    # receipt, avoiding a receipt/inventory digest cycle. Both inventories are bound by INTENT.
+    phase = _opf_import._emit_bytes(dict(format=EVIDENCE_INVENTORY_FORMAT, file=[
+        dict(path=home + "/" + PROMOTION_NAME, sha256=_sha(receipt), size=len(receipt))]),
+        "promotion evidence inventory")
+    ops.create(_opf_store.evidence_inventory("import", run_id, "promotion"), phase)
     _staging_removals(root_fd, run_rel, frozen, ops)
     return ops
+
+
+def _completed_evidence(root_fd, run_id, intent, receipt):
+    """Verify this bundle only, including exact membership and retained Move destinations.
+    The journal binds both immutable inventories; neither is ever repaired on replay.
+    As with doctor, this is a bounded local snapshot, not authenticated history.
+    """
+    import _opf_check
+    home = _opf_import._ingest_acceptance_home(run_id)
+    inventories = {_opf_store.evidence_inventory("import", run_id, phase)
+                   for phase in (None, "promotion")}
+    expected = {}
+    for phase in (None, "promotion"):
+        rel = _opf_store.evidence_inventory("import", run_id, phase)
+        raw, _st = _journal._read_contained(root_fd, rel, require_single_link=True)
+        rows = _opf_check._evidence_rows(home, "import", run_id, tomllib.loads(raw.decode("utf-8")))
+        if phase is None and _sha(raw) != receipt["evidence_inventory_sha256"]:
+            raise ValueError("the evidence inventory does not match its receipt")
+        problem = _opf_import._txn_record_intent_problem(intent.get("ops"), rel, raw)
+        if problem:
+            raise ValueError(problem)
+        for row in rows:
+            if row["path"] in expected:
+                raise ValueError("evidence path is claimed more than once: " + row["path"])
+            expected[row["path"]] = row
+    # Derive membership from the actual tree and the receipt, not from the inventories themselves.
+    present, directories, pending = set(), set(), [(home, 0)]
+    budget = 0
+    while pending:
+        rel, depth = pending.pop()
+        if depth > _opf_check._CONTAINMENT_MAX_DEPTH:
+            raise ValueError("evidence depth ceiling: " + rel)
+        subdirs, files = _opf_check._list_contained(root_fd, rel)
+        if subdirs is None:
+            raise ValueError("evidence directory vanished: " + rel)
+        budget += len(subdirs) + len(files)
+        if budget > (1 << 20):
+            raise ValueError("evidence entry ceiling")
+        present.update(rel + "/" + name for name in files)
+        directories.update(rel + "/" + name for name in subdirs)
+        pending.extend((rel + "/" + name, depth + 1) for name in subdirs)
+    moved = {r["destination"] for r in receipt["removed"]
+             if r["disposition"] == "move"
+             and r["destination"].startswith(_opf_store.ARCHIVE_REL + "/moved/")}
+    if set(expected) != (present - inventories) | moved:
+        raise ValueError("evidence payload membership differs from its inventories")
+    claimed_dirs = set()
+    for path in expected:
+        if path.startswith(home + "/"):
+            parent = path.rsplit("/", 1)[0]
+            while parent != home:
+                claimed_dirs.add(parent)
+                parent = parent.rsplit("/", 1)[0]
+    if directories != claimed_dirs:
+        raise ValueError("evidence directory membership differs from its inventories")
+    for path, row in expected.items():
+        data, _st = _journal._read_contained(root_fd, path, require_single_link=True)
+        if _sha(data) != row["sha256"] or len(data) != row["size"]:
+            raise ValueError("evidence {} is corrupt".format(path))
 
 
 def _verify_completed(cap, root_fd, run_id, attempt):
     """A completed run is a no-op only while its immutable evidence verifies: the attempt's INTENT binds
     the promotion receipt's exact bytes, the receipt binds the reservation and the evidence inventory,
-    and every inventoried payload still hashes to its entry. Live index bytes are not compared (later
-    legitimate additions must not trigger republishing)."""
+    and both inventories cover exactly the retained payload, whose sizes and digests still match.
+    Live index bytes are not compared (later legitimate additions must not trigger republishing)."""
     intent = _opf_journal.attempt_intent(cap, KIND, run_id, attempt)
     home = _opf_import._ingest_acceptance_home(run_id)
     rec_rel = home + "/" + PROMOTION_NAME
@@ -547,15 +612,9 @@ def _verify_completed(cap, root_fd, run_id, attempt):
                                               require_single_link=True)
         if "sha256:" + _sha(alloc) != receipt["reservation_digest"]:
             raise _cannot("completed run {}: the reservation does not match its receipt".format(run_id))
-        inv_raw, _st = _journal._read_contained(root_fd, _opf_store.evidence_inventory("import", run_id),
-                                                require_single_link=True)
-        if _sha(inv_raw) != receipt["evidence_inventory_sha256"]:
-            raise _cannot("completed run {}: the evidence inventory does not match its receipt".format(run_id))
-        for entry in tomllib.loads(inv_raw.decode("utf-8"))["entry"]:
-            data, _st = _journal._read_contained(root_fd, _canonical(home + "/" + entry["path"], "evidence"),
-                                                 require_single_link=True)
-            if _sha(data) != entry["sha256"] or len(data) != entry["size"]:
-                raise _cannot("completed run {}: evidence {} is corrupt".format(run_id, entry["path"]))
+        _completed_evidence(root_fd, run_id, intent, receipt)
+    except _opf_store.StoreError as exc:
+        raise _cannot("completed run {}: {}".format(run_id, exc))
     except (UnicodeDecodeError, ValueError, RecursionError, KeyError, TypeError) as exc:
         raise _cannot("completed run {}: its retained evidence is malformed ({!r})".format(run_id, exc))
     ref = dict(txn_id=_opf_journal.attempt_txn(KIND, run_id, attempt), journal_rel=_opf_store.journal_root(KIND))
@@ -894,6 +953,84 @@ def _st_counters(root):
 def _st_reservation(root, run_id):
     p = root / _opf_store.allocation_record(KIND, run_id)
     return p.read_bytes() if p.exists() else None
+
+
+def _st_staged_apply(gate, base, kind, case):
+    """Exercise apply_ingest at either depth-four home, observing the actual gate call.
+    Withhold only the gate argument, so the coordinator still locates the run under homes 2."""
+    from unittest.mock import patch
+    root, rid, run = _st_build(base, "staged-{}-{}".format(kind, case))
+    staged = root / _opf_store.stage_run(kind, rid)
+    staged.parent.mkdir(parents=True)
+    run.rename(staged)
+    if case == "corrupt":
+        record = root / _opf_import.IMPORT_OPS_REL / rid / _opf_import.TRANSACTION_NAME
+        record.parent.mkdir(parents=True)
+        record.write_bytes(b"state =\n")
+    before = _st_counters(root)
+    manifest = root / ".working/toml/manifest.toml"
+    manifest_before = manifest.read_bytes()
+    activation = (_opf_store.SUPPORTED_HOMES, _opf_store.HOMES2_SPEC_VERSION, _opf_store.validate_manifest)
+    real_check = gate.check_staged_run
+    seen = []
+
+    def observed(path, homes=None):
+        results = real_check(path, homes=None if case == "withheld" else homes)
+        seen.append((Path(path), homes, results))
+        return results
+
+    with _opf_import._self_test_homes2_active(root), \
+            patch.dict(sys.modules, {"check_opf_import": gate}), \
+            patch.object(gate, "check_staged_run", side_effect=observed):
+        result = apply_ingest(root, rid, now=_NOW)
+    restored = (activation == (_opf_store.SUPPORTED_HOMES, _opf_store.HOMES2_SPEC_VERSION,
+                              _opf_store.validate_manifest)
+                and manifest.read_bytes() == manifest_before and gate.check_staged_run is real_check)
+    if not (restored and len(seen) == 1 and seen[0][:2] == (staged, 2)):
+        return False
+    results = seen[0][2]
+    if case == "clean" and kind == "import":
+        # The fixture is ingest content: the other registered kind binds the same store
+        # but must refuse promotion before reserving ids or changing live content.
+        return (result.verdict == CANNOT_EVALUATE and result.promoted is False
+                and result.outcome == "aborted" and staged.is_dir()
+                and _st_counters(root) == before and _st_reservation(root, rid) is None
+                and set(results) == set(gate.EXPECTED_CHECKS)
+                and results["staged-run-structure"] == (
+                    False, "staging kind does not match ingest run content")
+                and all(results[cid][0] for cid in gate.EXPECTED_CHECKS if cid != "staged-run-structure")
+                and any("import gate failed:" in finding and "staged-run-structure" in finding
+                        for finding in result.findings))
+    if case == "clean":
+        home = root / _opf_import._ingest_acceptance_home(rid)
+        return (result.verdict == CLEAN and result.promoted is True and result.outcome == "promoted"
+                and set(results) == set(gate.EXPECTED_CHECKS)
+                and all(results[cid][0] for cid in gate.EXPECTED_CHECKS)
+                and not staged.exists() and (home / PROMOTION_NAME).is_file()
+                and (root / ".archive/legacy/move.md").read_bytes() == b"moveme\n"
+                and _st_counters(root) == dict(BI=1, LF=3, WL=0))
+    refused = (result.verdict == CANNOT_EVALUATE and result.promoted is False
+               and result.outcome == "aborted" and staged.is_dir()
+               and _st_counters(root) == before and _st_reservation(root, rid) is None
+               and any("import gate failed:" in finding and "transaction-schema" in finding
+                       for finding in result.findings))
+    if case == "corrupt":
+        return (refused and results["transaction-schema"][0] is False
+                and "unreadable/unparseable" in results["transaction-schema"][1])
+    if case == "withheld":
+        error = ("cannot evaluate: {}: the store's homes generation was not supplied to this manifest-free "
+                 "gate".format(staged))
+        # Flip: removing the public generation boundary restores partial grading and unlocated errors.
+        return (refused and tuple(results) == gate.EXPECTED_CHECKS
+                and all(value == (False, error) for value in results.values()))
+    raise ValueError("unknown staged apply case: " + case)
+
+
+def _t_staged_apply(kind, case):
+    def test(base, check):
+        import check_opf_import as gate
+        check("staged-{}-{}".format(kind, case), _st_staged_apply(gate, base, kind, case))
+    return test
 
 
 def _t_happy_path(base, check):
@@ -1750,16 +1887,195 @@ def _t_postlaunch_retain(base, check):
               and "already held" in " ".join(again.findings))
 
 
-TESTS = (("happy-path", _t_happy_path), ("retry-monotonic", _t_retry_monotonic),
+def _st_evidence_report(root):
+    import _opf_check
+    rep = _opf_check._Report()
+    rep.ran("C-EVIDENCE-ENUM")
+    fd = _opf_store._open_root_fd(root)
+    try:
+        _opf_check._check_evidence(fd, 2, rep)
+    finally:
+        os.close(fd)
+    return rep
+
+
+def _t_evidence_composition(base, check):
+    """Real planner/review/apply -> doctor under the existing in-memory homes-2 activation.
+    This does not certify production 2.0.0 admission or migrate the legacy Move planner.
+    """
+    root, rid, run = _st_build(base, "evidence")
+    with _opf_import._self_test_homes2_active(root):
+        result = apply_ingest(root, rid, now=_NOW)
+        check("evidence-promoted", result.verdict == CLEAN and result.promoted is True)
+        rep = _st_evidence_report(root)
+        check("evidence-doctor", rep.checks == {"C-EVIDENCE-ENUM": "PASS"}
+              and not rep.findings and not rep.cannot)
+        before = _st_tree(root)
+        counters = _st_counters(root)
+        again = apply_ingest(root, rid, now=_NOW)
+        check("evidence-noop", again.verdict == CLEAN and again.outcome == "noop_already_complete"
+              and _st_tree(root) == before and _st_counters(root) == counters)
+        home = root / _opf_import._ingest_acceptance_home(rid)
+        inv = home / "inventory.toml"
+        phase = home / "inventory-promotion.toml"
+        base_raw, phase_raw = inv.read_bytes(), phase.read_bytes()
+        old = dict(format="opf.ingest.evidence-inventory/v1", schema=SCHEMA, run_id=rid,
+                   entry=[dict(row, path=row["path"][len(str(home.relative_to(root))) + 1:])
+                          for row in tomllib.loads(base_raw.decode("utf-8")).get("file", [])])
+        cases = (
+            ("receipt-unclaimed", phase, _opf_import._emit_bytes(
+                dict(format=EVIDENCE_INVENTORY_FORMAT, file=[]), "empty phase"),
+             "off-inventory file", PROMOTION_NAME),
+            ("old-format", inv, _opf_import._emit_bytes(old, "old inventory"),
+             "legacy-ingest-inventory", "inventory.toml"),
+            ("old-format-phase", phase, _opf_import._emit_bytes(old, "old phase inventory"),
+             "legacy-ingest-inventory", "inventory-promotion.toml"),
+            ("retained-byte", home / "originals/legacy/mig.md", b"changed",
+             "size or digest mismatch", "originals/legacy/mig.md"),
+            ("extra-payload", home / "unclaimed.txt", b"extra",
+             "off-inventory file", "unclaimed.txt"),
+        )
+        for label, target, data, diagnostic, member in cases:
+            saved = target.read_bytes() if target.exists() else None
+            target.write_bytes(data)
+            damaged = _st_tree(root)
+            rep = _st_evidence_report(root)
+            check("evidence-" + label, rep.checks["C-EVIDENCE-ENUM"] != "PASS"
+                  and any(diagnostic in msg and member in msg for msg in rep.findings + rep.cannot))
+            refused = apply_ingest(root, rid, now=_NOW)
+            check("evidence-" + label + "-replay", refused.verdict == CANNOT_EVALUATE
+                  and refused.outcome != "noop_already_complete"
+                  and _st_tree(root) == damaged and _st_counters(root) == counters)
+            if label in ("old-format", "old-format-phase"):
+                check("evidence-" + label + "-named",
+                      rep.checks == {"C-EVIDENCE-ENUM": "FINDING"} and not rep.cannot
+                      and any("C-EVIDENCE-ENUM: legacy-ingest-inventory:" in msg
+                              and member in msg for msg in rep.findings)
+                      and any("legacy-ingest-inventory" in msg for msg in refused.findings))
+            if saved is None:
+                target.unlink()
+            else:
+                target.write_bytes(saved)
+        check("evidence-fixture-restored", inv.read_bytes() == base_raw and phase.read_bytes() == phase_raw
+              and _st_tree(root) == before)
+
+
+def _t_evidence_entries(base, check):
+    """Replay must form a refusal without changing retained bytes or counters."""
+    import _opf_check
+    root, rid, run = _st_build(base, "evidence-entries")
+    with _opf_import._self_test_homes2_active(root):
+        result = apply_ingest(root, rid, now=_NOW)
+        check("evidence-entries-promoted", result.verdict == CLEAN and result.promoted is True)
+        before, counters = _st_tree(root), _st_counters(root)
+        home = root / _opf_import._ingest_acceptance_home(rid)
+        for kind in ("symlink", "fifo", "mode000", "extra-directory"):
+            target = home / kind
+            if kind == "symlink":
+                target.symlink_to("review", target_is_directory=True)
+            elif kind == "fifo":
+                os.mkfifo(target)
+            else:
+                target.mkdir()
+                if kind == "mode000":
+                    target.chmod(0)
+            try:
+                original_stat = target.lstat()
+                diagnostic = "evidence directory membership differs from its inventories"
+                if kind != "extra-directory":
+                    fd = _opf_store._open_root_fd(root)
+                    try:
+                        rel = target if kind == "mode000" else home
+                        try:
+                            _opf_check._list_contained(fd, str(rel.relative_to(root)))
+                        except _opf_store.StoreError as exc:
+                            diagnostic = str(exc)
+                        else:
+                            raise RuntimeError("fixture did not trigger StoreError: " + kind)
+                    finally:
+                        os.close(fd)
+                refused, escaped = None, None
+                try:
+                    refused = apply_ingest(root, rid, now=_NOW)
+                except Exception as exc:  # turn an escape into the named regression assertion
+                    escaped = exc
+                check("evidence-" + kind + "-replay", escaped is None and refused is not None
+                      and refused.verdict == CANNOT_EVALUATE
+                      and refused.outcome != "noop_already_complete"
+                      and any(diagnostic in msg for msg in refused.findings))
+                current_stat = target.lstat()
+                check("evidence-" + kind + "-entry-unchanged",
+                      (current_stat.st_ino, current_stat.st_mode) ==
+                      (original_stat.st_ino, original_stat.st_mode)
+                      and (kind != "symlink" or os.readlink(target) == "review")
+                      and _st_counters(root) == counters)
+            finally:
+                if kind in ("mode000", "extra-directory"):
+                    target.chmod(0o700)
+                    target.rmdir()
+                else:
+                    target.unlink()
+            # Snapshot after removing the injected FIFO/unreadable entry: never follow or read it.
+            check("evidence-" + kind + "-bytes-unchanged", _st_tree(root) == before
+                  and _st_counters(root) == counters)
+            again = apply_ingest(root, rid, now=_NOW)
+            check("evidence-" + kind + "-restored", again.verdict == CLEAN
+                  and again.outcome == "noop_already_complete" and _st_tree(root) == before
+                  and _st_counters(root) == counters)
+
+
+def _t_evidence_move(base, check):
+    """Composition seam only: a retained Move plan, not admission by the still-legacy Move planner."""
+    from unittest.mock import patch
+    root, rid, run = _st_build(base, "retained-move")
+
+    def retained(**ctx):
+        for removal in ctx["plan"].removals:
+            if removal["disposition"] == "move":
+                removal["dest"] = _opf_store.ARCHIVE_REL + "/moved/legacy/move.md"
+
+    with _opf_import._self_test_homes2_active(root), patch.dict(_HOOKS, {"after-preflight": retained}):
+        result = apply_ingest(root, rid, now=_NOW)
+        rep = _st_evidence_report(root)
+        check("evidence-retained-move", result.verdict == CLEAN and result.promoted is True
+              and rep.checks == {"C-EVIDENCE-ENUM": "PASS"})
+        before = _st_tree(root)
+        again = apply_ingest(root, rid, now=_NOW)
+        check("evidence-retained-move-noop", again.verdict == CLEAN
+              and again.outcome == "noop_already_complete" and _st_tree(root) == before)
+        dest = root / _opf_store.ARCHIVE_REL / "moved/legacy/move.md"
+        dest.write_bytes(b"corrupt")
+        rep = _st_evidence_report(root)
+        refused = apply_ingest(root, rid, now=_NOW)
+        check("evidence-retained-move-corrupt", refused.verdict == CANNOT_EVALUATE
+              and any("size or digest mismatch" in msg and "moved/legacy/move.md" in msg
+                      for msg in rep.findings))
+
+
+TESTS = (("evidence-composition", _t_evidence_composition), ("evidence-move", _t_evidence_move),
+         ("evidence-entries", _t_evidence_entries),
+         ("happy-path", _t_happy_path), ("retry-monotonic", _t_retry_monotonic),
          ("unreviewed-refused", _t_unreviewed_refused), ("traversal-refused", _t_traversal_refused),
          ("mint-move-toctou", _t_mint_move_toctou), ("per-record-refused", _t_per_record_refused),
          ("postverify-committed", _t_postverify_committed),
          ("postcommit-journal-fault", _t_postcommit_journal_fault),
          ("postlaunch-indeterminate", _t_postlaunch_indeterminate), ("postlaunch-total", _t_postlaunch_total),
-         ("postlaunch-retain", _t_postlaunch_retain))
+         ("postlaunch-retain", _t_postlaunch_retain)) + tuple(
+             ("staged-{}-{}".format(kind, case), _t_staged_apply(kind, case))
+             for kind in ("import", "ingest") for case in ("clean", "corrupt", "withheld"))
 
 
 def self_test(only=None):
+    """Keep caller HOME/XDG out of fixture reads, including in-process production helpers."""
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
+            return self_test_isolated(only)
+
+
+def self_test_isolated(only=None):
     """Run the slice-1 vectors in a private temporary tree, report the executed test identities and the
     check count, and return 0 (pass), 1 (a failed check), or 2 (a harness error)."""
     import shutil
@@ -1811,11 +2127,13 @@ def self_test(only=None):
 # Every row carries a declared class. A "safety" row's mutant returns a wrong result at the outcome boundary
 # (a false abort, a false promotion or completed no-op, a released lock, an escape or lost result, or a
 # confirmed commit or genuine rollback misreported as indeterminate), or, for a unit-level guard, breaks that
-# guard's own contract.
-# A "guard-execution" row's mutant still returns the right outcome, because an overlapping layer beneath the
-# reverted guard holds it; its RED shows only that the guard executed (its diagnostic, or the probe firing),
-# and a sibling "/isolated" row proves the safety property instead. An isolated row strips the named
-# overlapping layers in the CANDIDATE only (never in this file): its baseline, the stripped source, must PASS
+# guard's own contract. Each row declares its asserted Boolean outcomes in _REVERT_ASSERTED; the harness
+# requires a flip inside that set. Diagnostics and flips outside the declaration cannot qualify a safety row.
+# A "guard-execution" row proves execution (its diagnostic, or the probe firing), not a change to its
+# asserted safety outcome. Other checks may change incidentally; they do not upgrade this claim,
+# and a sibling "/isolated" row proves the safety property instead. An isolated row tests the guard's
+# unit contract directly, removes an overlapping finding from its fixture, or strips the named layers in the
+# CANDIDATE only (never in this file): its baseline, the stripped source, must PASS
 # with the guard alone, its mutant (the baseline plus the guard's reversal) must go RED, and the full pristine
 # source must still PASS.
 
@@ -1902,6 +2220,875 @@ def _d_inline_required(module, base_dir):
         result = module.apply_ingest(root, rid, now=module._NOW)
     _revert_check(result.promoted is False and result.verdict == module.CANNOT_EVALUATE,
                   "per-record/inline-required")
+
+
+def _d_staged_run_store_depth(kind):
+    """Reverting the locator must fail the end-to-end corrupt case's own assertion, for each home."""
+    def test(module, base_dir):
+        _revert_check(_st_staged_apply(module, base_dir, kind, "corrupt"),
+                      "gate/staged-run-store-depth/" + kind)
+    return test
+
+
+def _d_staging_generation_mismatch(kind):
+    """A registered but inadmissible shape is never detached, with or without a .working decoy."""
+    def test(module, base_dir):
+        from unittest.mock import patch
+        root, rid, run = _st_build(base_dir, "staging-generation-" + kind)
+        staged = root / _opf_store.stage_run(kind, rid)
+        staged.parent.mkdir(parents=True)
+        run.rename(staged)
+        decoy = root / ".working" / _opf_import.IMPORT_OPS_REL / rid / _opf_import.TRANSACTION_NAME
+        error = ("cannot evaluate: cannot open the store root beneath the run dir no-follow "
+                 "(run path is registered outside homes generation 1)")
+        outcomes = []
+        for with_decoy in (False, True):
+            if with_decoy:
+                decoy.parent.mkdir(parents=True)
+                decoy.write_bytes(b"state =\n")
+            for supported, supplied in ((1, 1), (1, None), (2, 1)):
+                with patch.object(_opf_store, "SUPPORTED_HOMES", supported):
+                    result = module.check_staged_run(staged, homes=supplied)
+                outcomes.append(all(result[cid] == (False, error) for cid in
+                                    ("transaction-schema", "transaction-consistency")))
+        _revert_check(all(outcomes), "gate/staging-generation-mismatch/" + kind)
+    return test
+
+
+def _d_staging_alias(kind):
+    """An alias of a registered run (a dotdot, relative, or ancestor-symlink spelling) is located by descriptor
+    identity: it refuses the generation mismatch, reads the true store-root record, and ignores a .working decoy.
+    Restoring a literal-suffix match on the physical walk loses every alias's located home."""
+    def test(module, base_dir):
+        from unittest.mock import patch
+        root, rid, run = _st_build(base_dir, "staging-alias-" + kind)
+        staged = root / _opf_store.stage_run(kind, rid)
+        staged.parent.mkdir(parents=True)
+        run.rename(staged)
+        link = base_dir / ("staging-alias-link-" + kind)
+        link.symlink_to(staged.parent)
+        record = root / _opf_import.IMPORT_OPS_REL / rid / _opf_import.TRANSACTION_NAME
+        decoy = root / ".working" / _opf_import.IMPORT_OPS_REL / rid / _opf_import.TRANSACTION_NAME
+        record.parent.mkdir(parents=True)
+        decoy.parent.mkdir(parents=True)
+        error = ("cannot evaluate: cannot open the store root beneath the run dir no-follow "
+                 "(run path is registered outside homes generation 1)")
+        outcomes = []
+        for corrupt in (record, decoy):
+            corrupt.write_bytes(b"state =\n")
+            for spelling, cwd in ((staged / ".." / rid, None), (Path(rid), staged.parent), (link / rid, None)):
+                cwd_fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    if cwd is not None:
+                        os.chdir(str(cwd))
+                    with patch.object(_opf_store, "SUPPORTED_HOMES", 1):
+                        legacy = module.check_staged_run(spelling, homes=1)
+                    with _opf_import._self_test_homes2_active(root):
+                        located = module.check_staged_run(spelling, homes=2)
+                finally:
+                    os.fchdir(cwd_fd)
+                    os.close(cwd_fd)
+                outcomes.append(all(legacy[cid] == (False, error) for cid in
+                                    ("transaction-schema", "transaction-consistency")))
+                outcomes.append(located["transaction-schema"][0] is (corrupt is decoy))
+            corrupt.unlink()
+        _revert_check(all(outcomes), "gate/staging-alias/" + kind)
+    return test
+
+
+_ST_TXN = ("transaction-schema", "transaction-consistency")
+
+# R1's exact fail-closed diagnostic, shared by the symlink-route and unheld-relative fixtures.
+_ST_HOME_REFUSED = "name a run not held by a store by an absolute, symlink-free path"
+_ST_DETACHED = (True, "no transaction record (run not yet applied)")
+_ST_NO_BINDING = (False, "cannot evaluate: store binding refused "
+                   "(no registered store binding for homes generation 2)")
+
+
+def _st_staged(base_dir, name, kind, corrupt=True):
+    """An _st_build run moved to its `kind` staging home, beside a corrupt store-root transaction record when
+    `corrupt`. Returns (root, rid, staged)."""
+    root, rid, run = _st_build(base_dir, name)
+    staged = root / _opf_store.stage_run(kind, rid)
+    staged.parent.mkdir(parents=True)
+    run.rename(staged)
+    if corrupt:
+        record = root / _opf_import.IMPORT_OPS_REL / rid / _opf_import.TRANSACTION_NAME
+        record.parent.mkdir(parents=True)
+        record.write_bytes(b"state =\n")
+    return root, rid, staged
+
+
+def _st_graded(module, root, spelling, homes, cwd=None):
+    """The candidate gate's verdict on `spelling` (from `cwd` when given) under homes generation `homes`."""
+    from unittest.mock import patch
+    cwd_fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        if cwd is not None:
+            os.chdir(str(cwd))
+        if homes == 1:
+            with patch.object(_opf_store, "SUPPORTED_HOMES", 1):
+                return module.check_staged_run(spelling, homes=1)
+        with _opf_import._self_test_homes2_active(root):
+            return module.check_staged_run(spelling, homes=2)
+    finally:
+        os.fchdir(cwd_fd)
+        os.close(cwd_fd)
+
+
+def _st_located(detail):
+    return "cannot evaluate: cannot open the store root beneath the run dir no-follow ({})".format(detail)
+
+
+def _d_run_name_bound(kind):
+    """A registered run renamed to a non-run-id entry and spelled `link/.` or `link/` through a symlink named
+    as the run is refused whole (the spelled name is not its own entry). Removing the name binding grades the
+    staged checks under the link's name, so staged-run-structure passes a directory whose entry is no run id."""
+    def test(module, base_dir):
+        root, rid, staged = _st_staged(base_dir, "name-bound-" + kind, kind)
+        moved = staged.parent / "renamed"
+        staged.rename(moved)
+        link = base_dir / ("name-bound-link-" + kind) / rid
+        link.parent.mkdir()
+        link.symlink_to(moved)
+        unbound = ("cannot evaluate: the staged run dir's spelled name {!r} is not its own directory entry (a "
+                   "symlink reached through a '/.' or trailing '/' spelling, or a renamed run)".format(rid))
+        outcomes = [_st_graded(module, root, str(link) + suffix, homes) ==
+                    dict((cid, (False, unbound)) for cid in module.EXPECTED_CHECKS)
+                    for suffix in ("/.", "/") for homes in (1, 2)]
+        _revert_check(all(outcomes), "gate/run-name-bound/" + kind)
+    return test
+
+
+def _d_home_symlink_route(kind):
+    """A symlinked staging home refuses whatever the spelling (canonical, dotdot, "/.", trailing "/", an ancestor
+    symlink). Removing the spelled-route provenance probe grades each as detached instead of refusing."""
+    def test(module, base_dir):
+        root, rid, staged = _st_staged(base_dir, "symlink-route-" + kind, kind, corrupt=False)
+        link = base_dir / ("symlink-route-link-" + kind)
+        link.symlink_to(staged.parent)
+        staging = root / _opf_store.STAGING_REL
+        elsewhere = base_dir / ("symlink-route-elsewhere-" + kind)
+        staging.rename(elsewhere)
+        staging.symlink_to(elsewhere)
+        error = _st_located(_ST_HOME_REFUSED)
+        outcomes = []
+        for spelling in (staged, staged / ".." / rid, str(staged) + "/.", str(staged) + "/", link / rid):
+            for homes in (1, 2):
+                result = _st_graded(module, root, spelling, homes)
+                outcomes.append(all(result[cid] == (False, error) for cid in _ST_TXN))
+        _revert_check(all(outcomes), "gate/home-symlink-route/" + kind)
+    return test
+
+
+
+def _d_home_relative(kind, homes, case):
+    """R1 refuses a relative symlink-bearing unheld route from every generated starting depth."""
+    def test(module, base_dir):
+        root, rid, staged = _st_staged(base_dir, "relative-" + kind, kind, corrupt=False)
+        if case.startswith("legacy"):
+            run = root / _opf_import._import_run_locations(rid, 1)[0]
+            staged.rename(run)
+        else:
+            run = staged
+        if case.endswith("entry"):
+            link = run
+            elsewhere = base_dir / "elsewhere" / rid
+            elsewhere.parent.mkdir()
+            cwd = run.parent / "w1" / "w2" / "w3"
+        else:
+            link = run.parent if case.startswith("legacy") else root / _opf_store.STAGING_REL
+            elsewhere = base_dir / "elsewhere"
+            cwd = root / ".working" / "w1" / "w2" / "w3"
+        cwd.mkdir(parents=True)
+        spelling = os.path.relpath(str(run), str(cwd)) + ("/" if case.endswith("entry") else "")
+        link.rename(elsewhere)
+        link.symlink_to(elsewhere)
+        rel = str(run.relative_to(root))
+        error = _st_located(_ST_HOME_REFUSED)
+        absolute = _st_graded(module, root, str(run) + "/", homes)
+        relative = _st_graded(module, root, spelling, homes, cwd)
+        _revert_check(all(result[cid] == (False, error) for result in (absolute, relative)
+                          for cid in _ST_TXN),
+                      "gate/home-relative/{}/{}/homes-{}".format(case, kind, homes))
+    return test
+
+
+def _st_route_facts(cwd, spelling, depth):
+    """Fixture oracle in string space, independent of the gate's descriptor walk and claim probes.
+    Fixture links have absolute physical targets; procfs may use relative targets. Claimants come from
+    fixture construction, never from the classifier. Include starting/per-edge physical ancestors."""
+    parts = spelling.split("/")
+    cur = "/" if spelling.startswith("/") else os.path.realpath(cwd)
+    links, visited = 0, {cur}
+
+    def ancestors(path):
+        for _ in range(depth):
+            path = os.path.dirname(path.rstrip("/")) or "/"
+            visited.add(path)
+
+    if not spelling.startswith("/"):
+        ancestors(cur)
+    while parts:
+        comp = parts.pop(0)
+        if comp in ("", "."):
+            continue
+        if comp == "..":
+            cur = os.path.dirname(cur.rstrip("/")) or "/"
+            visited.add(cur)
+            continue
+        step = cur.rstrip("/") + "/" + comp
+        if os.path.islink(step):
+            ancestors(cur)
+            links += 1
+            if links > 40:
+                raise RuntimeError("fixture route loops")
+            target = os.readlink(step)
+            parts[:0] = target.split("/")
+            if target.startswith("/"):
+                cur = "/"
+        else:
+            cur = step
+        visited.add(cur)
+    return links, visited
+
+
+def _st_home_verdict(result, reads, root, rid, corrupt=True):
+    """Registered requires the expected transaction read at the physical store identity.
+    Neither a schema failure nor an absent-record verdict alone proves a registered read."""
+    schema = result["transaction-schema"]
+    if schema[1].startswith("cannot evaluate:"):
+        return "refused"
+    st = root.stat()
+    txn = str(Path(_opf_import.IMPORT_OPS_REL) / rid / _opf_import.TRANSACTION_NAME)
+    body = b"state =\n" if corrupt else None
+    if schema[0] is (not corrupt) and ((st.st_dev, st.st_ino), txn, body) in reads:
+        return "registered"
+    if schema == _ST_DETACHED:
+        return "detached"
+    return "unexpected:" + repr(schema)
+
+
+# This registry defines the generated matrix. Holder/claimant facts come from construction below.
+_ST_HOME_PLACEMENTS = ("none", "staging", "legacy", "entry", "ancestor-alias", "in-store-alias",
+                       "external-link", "shared-ancestor", "detached", "chained", "nested-shared",
+                       "external-root-out", "external-target", "proc-fd", "detached-alias",
+                       "same-root-alias", "cwd-alias", "held-cwd-alias", "detached-relative", "detached-absolute")
+_ST_HOME_HELD = ("none", "ancestor-alias", "external-link", "shared-ancestor", "nested-shared",
+                "same-root-alias", "held-cwd-alias")
+
+
+def _st_home_topology(base_dir, kind, placement, corrupt=True):
+    """Return root, canonical, physical, aliases, inside cwds, physical holder, second-claim roots.
+    The caller owns proc-fd lifetime; the proc spelling is added after construction."""
+    import shutil
+    name = "prop-{}-{}".format(placement, kind)
+    root, rid, staged = _st_staged(base_dir, name, kind, corrupt=corrupt)
+    legacy = root / _opf_import._import_run_locations(rid, 1)[0]
+    aliases, inside, claimants = [], [], []
+    held = placement in _ST_HOME_HELD
+    if held:
+        staged.rename(legacy)
+        canonical = physical = legacy
+        if placement == "ancestor-alias":
+            link = base_dir / (name + "-link")
+            link.symlink_to(root)
+            aliases.append(str(link / legacy.relative_to(root)))
+        if placement == "same-root-alias":
+            staged.symlink_to(legacy)
+            aliases.append(str(staged) + "/")
+        if placement == "held-cwd-alias":
+            claimant = base_dir / (name + "-claimant")
+            link = (claimant / _opf_import._import_run_locations(rid, 1)[0]).parent
+            link.parent.mkdir(parents=True)
+            link.symlink_to(legacy.parent)
+            claimants.append(claimant)
+            inside.append(link)
+        if placement == "external-link":
+            claimant = base_dir / (name + "-x")
+            link = claimant / _opf_import._import_run_locations(rid, 1)[0]
+            link.parent.mkdir(parents=True)
+            link.symlink_to(legacy)
+            claimants.append(claimant)
+            aliases.extend([str(link), str(link) + "/"])
+        if placement in ("shared-ancestor", "nested-shared"):
+            ancestor = base_dir / (name + "-A")
+            (ancestor / "imports").mkdir(parents=True)
+            destination = ancestor / ("imports/S" if placement == "nested-shared" else "S")
+            root.rename(destination)
+            root = destination
+            canonical = physical = root / _opf_import._import_run_locations(rid, 1)[0]
+            (ancestor / "imports" / rid).symlink_to(canonical)
+            shared = base_dir / (name + "-C")
+            shared.mkdir()
+            (shared / ".working").symlink_to(ancestor)
+            claimants.append(shared)
+            aliases.append(str(shared / ".working" / root.relative_to(ancestor)
+                               / canonical.relative_to(root)))
+    elif placement in ("detached", "detached-alias", "detached-relative", "detached-absolute"):
+        canonical = physical = base_dir / (name + "-copy") / "a" / "b" / rid
+        canonical.parent.mkdir(parents=True)
+        shutil.copytree(str(staged), str(canonical))
+        if placement == "detached-alias":
+            link = base_dir / (name + "-tmp")
+            link.symlink_to(canonical.parent)
+            aliases.append(str(link / rid))
+    elif placement == "entry":
+        elsewhere = base_dir / (name + "-elsewhere") / rid
+        elsewhere.parent.mkdir()
+        staged.rename(elsewhere)
+        staged.symlink_to(elsewhere)
+        canonical, physical = staged, elsewhere
+        inside.append(elsewhere.parent)
+    else:
+        component = legacy.parent if placement == "legacy" else root / _opf_store.STAGING_REL
+        if placement == "legacy":
+            staged.rename(legacy)
+            staged = legacy
+        elsewhere = base_dir / (name + "-elsewhere")
+        component.rename(elsewhere)
+        component.symlink_to(elsewhere)
+        canonical = staged
+        physical = elsewhere / canonical.relative_to(component)
+        inside.append(physical.parent)
+        if placement == "cwd-alias":
+            # The chdir traverses a link; the supplied run name records none of that history.
+            link = base_dir / (name + "-cwd")
+            link.symlink_to(physical.parent)
+            inside[:] = [link]
+        if placement == "in-store-alias":
+            (root / ".working" / "alt").symlink_to(elsewhere)
+            aliases.append(str(root / ".working" / "alt" / canonical.relative_to(component)))
+        if placement == "chained":
+            target = base_dir / (name + "-Z")
+            physical.parent.rename(target)
+            (elsewhere / kind).symlink_to(target)
+            physical = target / rid
+            deep = elsewhere / "d1" / "d2" / "d3" / "d4"
+            deep.mkdir(parents=True)
+            inside[:] = [deep, target]
+            # From deep, this traverses only the second registered-component link (codex F1).
+            aliases.append(str(elsewhere / kind / rid))
+        if placement == "external-root-out":
+            link = base_dir / (name + "-LR")
+            link.symlink_to(root)
+            aliases.append(str(link) + "/../" + str(physical.relative_to(root.parent)))
+        if placement == "external-target":
+            link = base_dir / (name + "-L")
+            link.symlink_to(physical.parent)
+            aliases.append(str(link / rid))
+    return root, canonical, physical, aliases, inside, held, claimants
+
+
+def _st_home_property(module, base_dir, kind, placements=_ST_HOME_PLACEMENTS, deep_only=False, corrupt=True,
+                      asserted_identity=None):
+    """Every matrix cell is independently classified from absolute spelling, links, holder, and second claim.
+    No canonical-verdict equivalence substitutes for the structural expectation. Count each mismatching
+    cell once. Proc magic links keep their descriptor live for the entire placement."""
+    from unittest.mock import patch
+    mismatches, count = [], 0
+    protected_calls = []
+    for placement in placements:
+        root, canonical, physical, aliases, inside, held, claimants = _st_home_topology(
+            base_dir, kind, placement, corrupt=corrupt)
+        rid = physical.name
+        depth = max(len(rel.split("/")) for gen in (1, 2)
+                    for rel in _opf_import._import_run_locations(rid, gen)) - 1
+        if placement in ("cwd-alias", "held-cwd-alias"):
+            cwds = inside
+        elif placement in ("detached-relative", "detached-absolute"):
+            cwds = [canonical.parent]
+        elif placement not in ("detached", "detached-alias"):
+            deep = root / ".working" / "w2" / "w3" / "w4" / "w5" / "w6"
+            deep.mkdir(parents=True)
+            cwds = [base_dir, root] + [Path(*deep.parts[:len(root.parts) + n]) for n in range(1, 7)]
+        else:
+            cwds = [base_dir, canonical.parents[1], canonical.parent]
+        if placement not in ("cwd-alias", "held-cwd-alias"):
+            cwds += inside
+        if deep_only:
+            cwds = [cwd for cwd in cwds if len(cwd.parts) - len(root.parts) >= 4]
+        proc_fd = None
+        try:
+            if placement == "proc-fd":
+                proc_fd = os.open(str(physical.parent), os.O_RDONLY | os.O_DIRECTORY)
+                aliases.append("/proc/self/fd/{}/{}".format(proc_fd, rid))
+            for homes in (1, 2):
+                for cwd in cwds:
+                    spellings = [("canonical", str(canonical)), ("canonical-slash", str(canonical) + "/"),
+                                 ("canonical-dot", str(canonical) + "/."),
+                                 ("relative", os.path.relpath(str(canonical), str(cwd)))]
+                    physical_rel = os.path.relpath(str(physical), str(cwd))
+                    if physical_rel != spellings[-1][1]:
+                        spellings.append(("relative-physical", physical_rel))
+                    spellings += [("alias-{}".format(i), a) for i, a in enumerate(aliases)]
+                    if placement == "chained":
+                        spellings.append(("relative-chain", os.path.relpath(aliases[0], str(cwd))))
+                    if placement in ("cwd-alias", "held-cwd-alias", "detached-relative", "detached-absolute"):
+                        spelling = str(physical) if placement == "detached-absolute" else rid
+                        spellings = [("bare", spelling), ("slash", spelling + "/"),
+                                     ("dot", spelling + "/.")]
+                    if physical != canonical:
+                        # Pin the untraversed-home-link residual, including the earlier-chdir placement.
+                        spellings.append(("physical", str(physical)))
+                    for label, spelling in spellings:
+                        if (placement, homes, cwd, label) == ("shared-ancestor", 1, base_dir, "alias-0"):
+                            protected_calls.append(count)
+                        links, visited = _st_route_facts(cwd, spelling, depth)
+                        second = any(str(claimant) in visited for claimant in claimants)
+                        if placement == "held-cwd-alias":
+                            # chdir consumed the claimant's registered-component link before grading.
+                            # Its history is unavailable to R2; the relative run stays physically held.
+                            if not held or links or second or spelling.startswith("/"):
+                                raise RuntimeError("held earlier-chdir residual fixture is not isolated")
+                        expected = ("refused" if second else "registered") if held else (
+                            "refused" if homes == 2 or links or not spelling.startswith("/") else "detached")
+                        reads = []
+                        read_control = module._read_store_control
+
+                        def read(fd, rel):
+                            body = read_control(fd, rel)
+                            st = os.fstat(fd)
+                            reads.append(((st.st_dev, st.st_ino), rel, body))
+                            return body
+
+                        with patch.object(module, "_read_store_control", read):
+                            result = _st_graded(module, root, spelling, homes, cwd)
+                        got = _st_home_verdict(result, reads, root, rid, corrupt=corrupt)
+                        count += 1
+                        case = "{}/{}/homes-{}/{}/{}".format(placement, kind, homes, cwd, label)
+                        if got != expected:
+                            mismatches.append("{}: expected {}, got {}".format(case, expected, got))
+        finally:
+            if proc_fd is not None:
+                os.close(proc_fd)
+    # Bind the declared ordinal to the actual matrix cell, even when corrupt bits all stay False.
+    if asserted_identity is not None and (asserted_identity.rsplit("/", 1)[-1] != kind
+            or len(protected_calls) != 1 or any(
+            ordinal != protected_calls[0]
+            for ordinal, _cid, _expected in _REVERT_ASSERTED[asserted_identity])):
+        raise RuntimeError("asserted home call identity drift: " + asserted_identity)
+    return count, mismatches
+
+
+def _t_home_property(base, check):
+    """The enumerative spelling-equivalence property over the generated topology matrix, both kinds."""
+    import check_opf_import as gate
+    total = 0
+    for kind in ("import", "ingest"):
+        count, mismatches = _st_home_property(gate, base / ("home-property-" + kind), kind)
+        total += count
+        if mismatches:
+            print("HOME-PROPERTY MISMATCHES ({}):\n  {}".format(kind, "\n  ".join(mismatches[:20])),
+                  file=sys.stderr)
+        check("home-property-" + kind, not mismatches)
+    print("OPF-INGEST-APPLY HOME-PROPERTY: {} generated cases".format(total))
+
+
+# The enumerative property runs in the plain self-test over the full declared matrix.
+TESTS += (("home-property", _t_home_property),)
+
+
+def _d_home_claim_ancestors(kind, starting=False):
+    """R2 needs both ancestor probes: the foreign claim is reached only by the selected probe."""
+    def test(module, base_dir):
+        from unittest.mock import patch
+        root, rid, staged = _st_staged(base_dir, "claim-" + kind, kind, corrupt=False)
+        run = root / _opf_import._import_run_locations(rid, 1)[0]
+        staged.rename(run)
+        foreign = base_dir / "foreign"
+        working = foreign / ".working"
+        deep = working / "d1" / "d2" / "d3" / "d4"
+        deep.mkdir(parents=True)
+        (working / "imports").symlink_to(run.parent)
+        link = deep / "L" if starting else working / "alt"
+        link.symlink_to(run.parent)
+        cwd = working if starting else deep
+        spelling = ("d1/d2/d3/d4/L/" if starting else "../../../../alt/") + rid
+        outcomes = []
+        read_control = module._read_store_control
+        st = root.stat()
+        txn = str(Path(_opf_import.IMPORT_OPS_REL) / rid / _opf_import.TRANSACTION_NAME)
+        for homes in (1, 2):
+            reads = []
+
+            def read(fd, rel):
+                body = read_control(fd, rel)
+                opened = os.fstat(fd)
+                reads.append(((opened.st_dev, opened.st_ino), rel, body))
+                return body
+
+            with patch.object(module, "_read_store_control", read):
+                clean = _st_graded(module, root, run, homes)
+            result = _st_graded(module, root, spelling, homes, cwd)
+            outcomes.append(((st.st_dev, st.st_ino), txn, None) in reads
+                            and all(clean[cid][0] for cid in _ST_TXN)
+                            and all(not result[cid][0] and "ambiguous second store claim" in result[cid][1]
+                                    for cid in _ST_TXN))
+        identity = "gate/home-start-ancestors/" if starting else "gate/home-property-ancestors/"
+        _revert_check(all(outcomes), identity + kind)
+    return test
+
+
+def _d_home_property_ancestors(kind):
+    return _d_home_claim_ancestors(kind)
+
+
+def _d_home_start_ancestors(kind):
+    return _d_home_claim_ancestors(kind, starting=True)
+
+
+def _d_home_property_holding(kind):
+    """The old seen-set restriction misses a second claim through the shared-ancestor alias."""
+    def test(module, base_dir):
+        count, mismatches = _st_home_property(
+            module, base_dir, kind,
+            placements=("none", "same-root-alias", "shared-ancestor", "nested-shared"),
+            asserted_identity="gate/home-property-holding/" + kind)
+        _revert_check(count and not mismatches, "gate/home-property-holding/" + kind)
+    return test
+
+
+def _d_home_rule(kind, rule):
+    def test(module, base_dir):
+        placements = (("chained", "external-root-out", "external-target", "proc-fd", "detached-alias")
+                      if rule == "unheld-link" else ("shared-ancestor", "nested-shared"))
+        count, mismatches = _st_home_property(
+            module, base_dir, kind, placements=placements, corrupt=(rule != "unheld-link"),
+            asserted_identity="gate/home-second-claim/" + kind if rule == "second-claim" else None)
+        _revert_check(count and not mismatches, "gate/home-" + rule + "/" + kind)
+    return test
+
+
+def _d_home_second_claim_isolated(kind, rule):
+    """A clean held store isolates second-claim refusal from corrupt-record findings."""
+    def test(module, base_dir):
+        root, canonical, _physical, aliases, _inside, held, claimants = _st_home_topology(
+            base_dir, kind, "shared-ancestor", corrupt=False)
+        if not held or len(claimants) != 1 or len(aliases) != 1:
+            raise RuntimeError("second-claim isolation fixture is malformed")
+        outcomes = []
+        for homes in (1, 2):
+            clean = _st_graded(module, root, canonical, homes)
+            claimed = _st_graded(module, root, aliases[0], homes)
+            outcomes.append(all(clean[cid][0] for cid in _ST_TXN)
+                            and all(not claimed[cid][0] and "ambiguous second store claim" in claimed[cid][1]
+                                    for cid in _ST_TXN))
+        _revert_check(all(outcomes), "gate/home-" + rule + "/" + kind + "/isolated")
+    return test
+
+
+def _d_home_unheld_relative(kind):
+    """Earlier chdir links and genuinely detached relative names both refuse; absolute twins still grade."""
+    def test(module, base_dir):
+        outcomes = []
+        for placement in ("cwd-alias", "detached-relative", "detached-absolute"):
+            root, _canonical, physical, _aliases, inside, _held, _claims = _st_home_topology(
+                base_dir, kind, placement, corrupt=False)
+            cwd = inside[0] if placement == "cwd-alias" else physical.parent
+            for homes in (1, 2):
+                relative = _st_graded(module, root, physical.name, homes, cwd)
+                absolute = _st_graded(module, root, physical, homes, cwd)
+                outcomes.append(all(relative[cid] == (False, _st_located(_ST_HOME_REFUSED))
+                                    and absolute[cid] == (_ST_DETACHED if homes == 1 else _ST_NO_BINDING)
+                                    for cid in _ST_TXN))
+        _revert_check(all(outcomes), "gate/home-unheld-relative/" + kind)
+    return test
+
+
+def _d_home_search_only(kind, homes, case):
+    """Real 0311 permissions, restored even on failure; never accept an ineffective chmod fixture."""
+    def test(module, base_dir):
+        import shutil
+        import stat
+        from unittest.mock import patch
+        root, rid, staged = _st_staged(base_dir, "search-" + kind, kind, corrupt=False)
+        if homes == 1 and case != "detached":
+            run = root / _opf_import._import_run_locations(rid, 1)[0]
+            staged.rename(run)
+        else:
+            run = staged
+        if case == "detached":
+            run = base_dir / "copy" / "a" / "b" / rid
+            run.parent.mkdir(parents=True)
+            shutil.copytree(staged, run)
+            restricted = run.parent
+        elif case == "physical":
+            restricted = run.parent
+        else:
+            restricted = root.parent
+        clean = _st_graded(module, root, run, homes)
+        mode = stat.S_IMODE(restricted.stat().st_mode)
+        restricted.chmod(0o311)
+        try:
+            try:
+                fd = os.open(str(restricted), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            except PermissionError:
+                pass
+            else:
+                os.close(fd)
+                raise RuntimeError("search-only fixture still permits directory reads")
+            restricted_result = _st_graded(module, root, run, homes)
+            restricted.chmod(0)
+            with patch.object(_opf_store, "SUPPORTED_HOMES", homes):
+                unreachable = module.check_staged_run(run, homes=homes)
+        finally:
+            restricted.chmod(mode)
+        # The pristine homes-2 detached case refuses binding; its isolated O_PATH baseline
+        # removes only that overlapping refusal. Both must preserve search-only traversal.
+        clean_expected = all(clean[cid][0] for cid in _ST_TXN) or (
+            homes == 2 and case == "detached"
+            and all(clean[cid] == _ST_NO_BINDING for cid in _ST_TXN))
+        _revert_check(restricted_result == clean and clean_expected
+                      and all(not unreachable[cid][0] for cid in _ST_TXN),
+                      "gate/home-search-only/{}/{}/homes-{}".format(case, kind, homes))
+    return test
+
+
+def _d_home_external_symlink(kind, homes):
+    """A visited second claimant refuses even without threading its registered location (literal R2)."""
+    def test(module, base_dir):
+        root, rid, run = _st_staged(base_dir, "external-" + kind, kind, corrupt=False)
+        if homes == 1:
+            legacy = root / _opf_import._import_run_locations(rid, 1)[0]
+            run.rename(legacy)
+            run = legacy
+        clean = _st_graded(module, root, run, homes)
+        link = base_dir / _opf_import._import_run_locations(rid, 1)[0]
+        link.parent.mkdir(parents=True)
+        link.symlink_to(run)
+        absolute = _st_graded(module, root, run, homes)
+        relative = _st_graded(module, root, rid, homes, run.parent)
+        through_link = _st_graded(module, root, str(link) + "/", homes)
+        depth = max(len(rel.split("/")) for gen in (1, 2)
+                    for rel in _opf_import._import_run_locations(rid, gen)) - 1
+        relative_claimed = len(run.parent.relative_to(base_dir).parts) <= depth
+        _revert_check(all(clean[cid][0] for cid in _ST_TXN)
+                      and all(not result[cid][0] for result in (absolute, through_link) for cid in _ST_TXN)
+                      and (all(not relative[cid][0] for cid in _ST_TXN) if relative_claimed
+                           else relative == clean),
+                      "gate/home-external-symlink/{}/homes-{}".format(kind, homes))
+    return test
+
+
+def _d_home_cwd_bound(kind, homes):
+    """Reclassification of a relative spelling uses the same starting descriptor after ambient chdir."""
+    def test(module, base_dir):
+        from unittest.mock import patch
+        root, rid, run = _st_staged(base_dir, "cwd-" + kind, kind, corrupt=False)
+        if homes == 1:
+            legacy = root / _opf_import._import_run_locations(rid, 1)[0]
+            run.rename(legacy)
+            run = legacy
+        clean = _st_graded(module, root, rid, homes, run.parent)
+        classify, calls = module._classify_run_homes, []
+
+        def shifted(rd):
+            calls.append(True)
+            if len(calls) == 2:
+                os.chdir(str(base_dir))
+            return classify(rd)
+
+        with patch.object(module, "_classify_run_homes", shifted):
+            shifted_result = _st_graded(module, root, rid, homes, run.parent)
+        _revert_check(all(clean[cid][0] for cid in _ST_TXN)
+                      and len(calls) > 1 and shifted_result == clean,
+                      "gate/home-cwd-bound/{}/homes-{}".format(kind, homes))
+    return test
+
+
+def _st_route_while_renamed(module, component, moved):
+    """Resolve the absolute spelling during a brief restoration, then leave the ancestry renamed.
+    This non-atomic schedule isolates retained binding from R1's refusal of unheld relative names."""
+    route = module._spelled_route
+
+    def restored(rd, visit, depth):
+        moved.rename(component)
+        try:
+            return route(rd, visit, depth)
+        finally:
+            component.rename(moved)
+    return restored
+
+
+def _d_home_restore(kind, homes):
+    """A component restored after initial detached classification refuses at the next classification."""
+    def test(module, base_dir):
+        from unittest.mock import patch
+        root, rid, run = _st_staged(base_dir, "restore-" + kind, kind, corrupt=False)
+        component = root / _opf_store.STAGING_REL
+        if homes == 1:
+            legacy = root / _opf_import._import_run_locations(rid, 1)[0]
+            run.rename(legacy)
+            run = legacy
+            component = run.parent
+        clean = _st_graded(module, root, run, homes)
+        moved = component.with_name("renamed-home")
+        classify, calls = module._classify_run_homes, []
+
+        def renamed(rd):
+            calls.append(True)
+            if len(calls) == 1:
+                component.rename(moved)
+                try:
+                    return classify(rd)
+                finally:
+                    moved.rename(component)
+            return classify(rd)
+
+        error = _st_located("the run's registered home changed during grading (the run or a store component "
+                            "was renamed or replaced); fail-closed, never re-read as detached")
+        route = module._spelled_route
+
+        # Construct the wrapper before patching, so it retains the real route resolver.
+        restoring_route = _st_route_while_renamed(module, component, moved)
+
+        def first_route(rd, visit, depth):
+            return restoring_route(rd, visit, depth) if len(calls) == 1 else route(rd, visit, depth)
+
+        with patch.object(module, "_classify_run_homes", renamed), \
+                patch.object(module, "_spelled_route", first_route):
+            result = _st_graded(module, root, run, homes)
+        _revert_check(all(clean[cid][0] for cid in _ST_TXN)
+                      and len(calls) > 1 and all(result[cid] == (False, error) for cid in _ST_TXN),
+                      "gate/home-restore/{}/homes-{}".format(kind, homes))
+    return test
+
+
+def _d_home_speculative(kind):
+    """An unrelated <store>/.working/.working file changes no result of a canonical staged run. Making a
+    speculative candidate's unresolvable probe fatal refuses the run on that obstruction."""
+    def test(module, base_dir):
+        root, _rid, staged = _st_staged(base_dir, "speculative-" + kind, kind, corrupt=False)
+        clean = [_st_graded(module, root, staged, homes) for homes in (1, 2)]
+        (root / ".working" / ".working").write_bytes(b"unrelated\n")
+        obstructed = [_st_graded(module, root, staged, homes) for homes in (1, 2)]
+        _revert_check(obstructed == clean, "gate/home-speculative/" + kind)
+    return test
+
+
+def _d_home_rename_at_lookup(kind):
+    """Guard execution: a renamed run refuses on its own entry, both at transaction lookup (an empty
+    directory at its former name) and before first classification (a symlink at its bound name). The route
+    identity check and R1 still refuse the mutant; the /isolated sibling tests this guard's contract."""
+    def test(module, base_dir):
+        from unittest.mock import patch
+        root, rid, staged = _st_staged(base_dir, "rename-lookup-" + kind, kind)
+        moved = staged.parent / "moved"
+        error = _st_located("the bound run name {!r} no longer names the opened run directory (renamed or "
+                            "replaced during grading); fail-closed, never classified as detached".format(rid))
+        real_store_fd, real_tree = module._staged_run_store_fd, module._list_run_tree
+
+        def renaming(rd, homes):
+            staged.rename(moved)
+            staged.mkdir()
+            return real_store_fd(rd, homes)
+
+        def swapping(fd):
+            staged.rename(moved)
+            staged.symlink_to("moved")
+            return real_tree(fd)
+        outcomes = []
+        for homes in (1, 2):
+            with patch.object(module, "_staged_run_store_fd", side_effect=renaming):
+                result = _st_graded(module, root, staged / ".." / rid, homes)
+            staged.rmdir()
+            moved.rename(staged)
+            outcomes.append(all(result[cid] == (False, error) for cid in _ST_TXN))
+            with patch.object(module, "_list_run_tree", side_effect=swapping):
+                result = _st_graded(module, root, rid + "/.", homes, cwd=staged.parent)
+            staged.unlink()
+            moved.rename(staged)
+            outcomes.append(all(result[cid] == (False, error) for cid in _ST_TXN))
+        _revert_check(all(outcomes), "gate/home-rename-at-lookup/" + kind)
+    return test
+
+
+def _d_home_rename_at_lookup_isolated(kind):
+    """Unit safety: a bound-name mismatch must raise, never return None ("not held"). Call the physical
+    probe directly so route identity, R1 and retained-binding refusals cannot mask an unsafe fallback."""
+    def test(module, base_dir):
+        root, _rid, staged = _st_staged(base_dir, "rename-isolated-" + kind, kind, corrupt=False)
+        rel = str(staged.relative_to(root))
+        moved = staged.parent / "moved"
+        rd = module._RunDir(staged)
+        outcomes = []
+        try:
+            if rd.home_error is not None or rel not in (rd.home_binding or {}):
+                raise RuntimeError("isolated bound-name fixture has no initial staging binding")
+            for replacement in ("directory", "symlink"):
+                staged.rename(moved)
+                if replacement == "directory":
+                    staged.mkdir()
+                else:
+                    staged.symlink_to("moved")
+                fd, refused = None, False
+                try:
+                    try:
+                        fd = module._physical_home(rd, rel)
+                    except module._GateError:
+                        refused = True
+                    outcomes.append(refused)
+                finally:
+                    if fd is not None:
+                        os.close(fd)
+                    if replacement == "directory":
+                        staged.rmdir()
+                    else:
+                        staged.unlink()
+                    moved.rename(staged)
+        finally:
+            rd.close()
+        _revert_check(all(outcomes), "gate/home-rename-at-lookup/" + kind + "/isolated")
+    return test
+
+
+def _d_home_retained(kind):
+    """A store component renamed at lookup, briefly restored for absolute-route resolution, leaves the run
+    physically unregistered at each ancestry probe. Retained binding refuses; serving only the fresh
+    classification instead downgrades to detached instead of refusing the changed home."""
+    def test(module, base_dir):
+        from unittest.mock import patch
+        root, rid, staged = _st_staged(base_dir, "retained-" + kind, kind, corrupt=False)
+        staging = root / _opf_store.STAGING_REL
+        error = _st_located("the run's registered home changed during grading (the run or a store component was "
+                            "renamed or replaced); fail-closed, never re-read as detached")
+        real_store_fd = module._staged_run_store_fd
+
+        def moving(rd, homes):
+            staging.rename(staging.parent / "moved")
+            return real_store_fd(rd, homes)
+        outcomes = []
+        for homes in (1, 2):
+            route = _st_route_while_renamed(module, staging, staging.parent / "moved")
+            # The first classification precedes the move; subsequent route resolutions see a brief restore.
+            def resolving(rd, visit, depth):
+                return route(rd, visit, depth) if (staging.parent / "moved").exists() else real_route(rd, visit, depth)
+
+            real_route = module._spelled_route
+            with patch.object(module, "_staged_run_store_fd", side_effect=moving), \
+                    patch.object(module, "_spelled_route", resolving):
+                result = _st_graded(module, root, staged, homes)
+            (staging.parent / "moved").rename(staging)
+            outcomes.append(all(result[cid] == (False, error) for cid in _ST_TXN))
+        _revert_check(all(outcomes), "gate/home-retained/" + kind)
+    return test
+
+
+def _d_transaction_generation_required(module, base_dir):
+    """The internal reader must refuse invalid generations independently of the public boundary."""
+    from unittest.mock import patch
+    _root, _rid, run = _st_build(base_dir, "transaction-generation")
+    rd = module._RunDir(run)
+    try:
+        with patch.object(_opf_store, "SUPPORTED_HOMES", 1):
+            result = module._check_staged_run(rd, homes=3)
+    finally:
+        rd.close()
+    error = "the supplied homes generation 3 is not 1 or 2, or is above the tooling's supported generation 1"
+    _revert_check(all(result[cid] == (False, error) for cid in
+                      ("transaction-schema", "transaction-consistency")),
+                  "gate/transaction-generation-required")
 
 
 # Post-launch probes: each drives one sibling of the committed-reported-as-aborted class (or the genuine
@@ -2215,15 +3402,23 @@ _STRIPS = dict((("helper-guard", (_HELPER_GUARD, _HELPER_REVERTED.replace("rever
                  (_DIAG_CALL_GUARD, _DIAG_CALL_REVERTED.replace("reverted", "stripped"))))
                + tuple((label + "-call", (_CALL_GUARDS[label], _call_reverted(label, "stripped")))
                        for label in _CALL_GUARDS))
+# Keep the O_PATH and R1 discriminators observable beneath the detached homes-2 refusal.
+# Full-source refusal is independently required by the unstripped home-property matrix.
+_STRIPS["detached-homes2-binding"] = (
+    '        if homes == 2:\n            raise _BindingRefusal("no registered store binding for homes generation 2")\n',
+    "        pass  # stripped: detached homes-2 binding refusal\n")
 _LAUNCHED_LAYERS = ("helper-guard", "launch-boundary")
-# The rows whose mutant still returns the right outcome (an overlapping layer holds it): guard-execution
-# tests, each paired with an "/isolated" safety row. Every other row is a safety discriminator.
+# Rows whose mutant changes no declared asserted Boolean outcome claim only guard execution, even if
+# other checks flip. Each has an "/isolated" safety row; safety requires a flip inside _REVERT_ASSERTED.
 _GUARD_EXECUTION = frozenset((
     "postlaunch/complete-fault-not-aborted", "postlaunch/reread-fault-not-aborted",
     "postlaunch/complete-lost-not-aborted", "postlaunch/foreign-txn-not-escaped", "postlaunch/reread-guarded",
     "postlaunch/helper-failure-not-aborted", "cleanup/root-close-not-aborted", "cleanup/lock-release-not-escaped",
     "cleanup/op-release-not-escaped", "cleanup/diagnostic-call-not-escaped",
-    "cleanup/diagnostic-not-escaped"))
+    "cleanup/diagnostic-not-escaped",
+    "gate/home-rename-at-lookup/import", "gate/home-rename-at-lookup/ingest",
+    "gate/home-property-holding/import", "gate/home-property-holding/ingest",
+    "gate/home-second-claim/import", "gate/home-second-claim/ingest"))
 
 # (identity, probe, unique old, new). The class width first: every sibling re-exposed by reverting the ONE
 # post-launch guard. Then each decision branch of `_post_launch_result` by its own mutation, including the
@@ -2312,8 +3507,45 @@ _POST_LAUNCH = (
 
 # (identity, source-key, focused test, unique old, new). source-key selects which module's source is
 # mutated: "apply" is this file, "alloc" is _opf_allocation.py (a dependency guard, mutated at source the
-# same way the observer gate mutates its shared _opf_observe.py).
-_DISCRIMINATORS = (
+# same way the observer gate mutates its shared _opf_observe.py); "gate" is check_opf_import.py.
+_DISCRIMINATORS = tuple(
+    ("gate/staged-run-store-depth/" + kind, "gate", _d_staged_run_store_depth(kind),
+     "store_fd = _staged_run_store_fd(rd, gen)",
+     'store_fd = os.open("../../..", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rd.fd)')
+    for kind in ("import", "ingest")) + tuple(
+    ("gate/staging-generation-mismatch/" + kind, "gate", _d_staging_generation_mismatch(kind),
+     "if other is not None:", "if False:")
+    for kind in ("import", "ingest")) + tuple(
+    ("gate/staging-alias/" + kind, "gate", _d_staging_alias(kind),
+     "            fd = _physical_home(rd, rel)\n",
+     '            fd = _physical_home(rd, rel) if rd.path.parts[-len(rel.split("/")):] == tuple(rel.split("/")) '
+     "else None\n")
+    for kind in ("import", "ingest")) + tuple(
+    ("gate/run-name-bound/" + kind, "gate", _d_run_name_bound(kind),
+     "            _bind_run_name(self.fd, self.name)\n", "            pass  # reverted: _bind_run_name\n")
+    for kind in ("import", "ingest")) + tuple(
+    ("gate/home-symlink-route/" + kind, "gate", _d_home_symlink_route(kind),
+     '        traversed, expanded = _spelled_route(rd, visit, max(len(rel.split("/")) for rel in rels) - 1)\n',
+     "        traversed, expanded = set(), 0\n")
+    for kind in ("import", "ingest")) + tuple(
+    ("gate/home-speculative/" + kind, "gate", _d_home_speculative(kind),
+     "                except (OSError, ValueError):\n                    continue\n",
+     "                except FileNotFoundError:\n                    continue\n")
+    for kind in ("import", "ingest")) + tuple(
+    ("gate/home-rename-at-lookup/" + kind, "gate", _d_home_rename_at_lookup(kind),
+     '                if depth == 0:\n                    raise _GateError("the bound run name',
+     '                if False:\n                    raise _GateError("the bound run name')
+    for kind in ("import", "ingest")) + tuple(
+    ("gate/home-rename-at-lookup/" + kind + "/isolated", "gate", _d_home_rename_at_lookup_isolated(kind),
+     '                if depth == 0:\n                    raise _GateError("the bound run name',
+     '                if False:\n                    raise _GateError("the bound run name')
+    for kind in ("import", "ingest")) + tuple(
+    ("gate/home-retained/" + kind, "gate", _d_home_retained(kind),
+     "        bound = _retained_homes(rd, fresh)\n", "        bound = fresh\n")
+    for kind in ("import", "ingest")) + (
+    ("gate/transaction-generation-required", "gate", _d_transaction_generation_required,
+     "if gen is None:\n        for cid in _TRANSACTION_CHECKS:\n            record(cid, False, gen_error)",
+     "if False:\n        for cid in _TRANSACTION_CHECKS:\n            record(cid, False, gen_error)"),
     ("acceptance/reject-refused", "apply", _d_reject_refused, "if rejected:", "if False:"),
     ("path/canonical-contained", "apply", _d_canonical_contained,
      "return _opf_store._home_file(path)", "return path"),
@@ -2325,19 +3557,409 @@ _DISCRIMINATORS = (
 ) + tuple(_probe_row(*row) for row in _POST_LAUNCH)
 
 
+# Round-4 cases remain; R1 now guards unheld relative paths independently of ancestor visits.
+_DISCRIMINATORS += tuple(
+    ("gate/home-relative/{}/{}/homes-{}".format(case, kind, homes), "gate",
+     _d_home_relative(kind, homes, case),
+     '        if not held and (expanded or not rd.spelling.startswith("/")):\n', "        if False:  # reverted R1\n",
+     ("detached-homes2-binding",) if homes == 2 else ())
+    for kind in ("import", "ingest") for homes in (1, 2)
+    for case in ("staging", "staging-entry", "legacy", "legacy-entry")) + tuple(
+    ("gate/home-search-only/{}/{}/homes-{}".format(case, kind, homes), "gate",
+     _d_home_search_only(kind, homes, case),
+     'getattr(os, "O_PATH", os.O_RDONLY)', "os.O_RDONLY",
+     ("detached-homes2-binding",) if homes == 2 and case == "detached" else ())
+    for kind in ("import", "ingest") for homes in (1, 2)
+    for case in ("detached", "canonical", "physical")) + tuple(
+    ("gate/home-external-symlink/{}/homes-{}".format(kind, homes), "gate",
+     _d_home_external_symlink(kind, homes),
+     "        if held and reached:\n", "        if False:  # reverted R2\n")
+    for kind in ("import", "ingest") for homes in (1, 2)) + tuple(
+    ("gate/home-cwd-bound/{}/homes-{}".format(kind, homes), "gate",
+     _d_home_cwd_bound(kind, homes), "else os.dup(rd.cwd_fd)", 'else os.open(".", flags)')
+    for kind in ("import", "ingest") for homes in (1, 2)) + tuple(
+    ("gate/home-restore/{}/homes-{}".format(kind, homes), "gate",
+     _d_home_restore(kind, homes), "        bound = _retained_homes(rd, fresh)\n", "        bound = fresh\n")
+    for kind in ("import", "ingest") for homes in (1, 2))
+
+
+# Reintroduce the exact round-5 unordered threading condition. Under literal R2 its defect is that it
+# can suppress a real second claim; F2 already has a second claim and refuses under either policy.
+_ST_SEEN_SET_REVERTED = '''        seen, old_reached = set(), []
+
+        def old_visit(dfd, edges):
+            seen.add(_fd_identity(dfd))
+            if _fd_identity(dfd) in roots:
+                return
+            for rel in rels:
+                route = []
+                try:
+                    parts = rel.split("/")
+                    for index in range(1, len(parts) + 1):
+                        st = os.stat("/".join(parts[:index]), dir_fd=dfd)
+                        route.append((st.st_dev, st.st_ino))
+                except (OSError, ValueError):
+                    continue
+                if route[-1] == run:
+                    old_reached.append((edges, tuple(route[:-1])))
+
+        _old_edges, old_total = _spelled_route(rd, old_visit, max(len(r.split("/")) for r in rels) - 1)
+        if held and any(e < old_total and all(step in seen for step in route)
+                        for e, route in old_reached):
+'''
+
+# Ancestor visits now discriminate held runs with second claims, not R1's unheld paths.
+_DISCRIMINATORS += tuple(
+    ("gate/home-property-ancestors/" + kind, "gate", _d_home_property_ancestors(kind),
+     "                    visit_ancestors(cur, expanded)\n",
+     "                    pass  # reverted: per-edge ancestor visits\n")
+    for kind in ("import", "ingest")) + tuple(
+    ("gate/home-property-holding/" + kind, "gate", _d_home_property_holding(kind),
+     "        if held and reached:\n", _ST_SEEN_SET_REVERTED)
+    for kind in ("import", "ingest")) + tuple(
+    ("gate/home-start-ancestors/" + kind, "gate", _d_home_start_ancestors(kind),
+     "\n            visit_ancestors(cur, expanded)\n",
+     "\n            pass  # reverted: starting-ancestor visits\n")
+    for kind in ("import", "ingest")) + tuple(
+    ("gate/home-" + rule + "/" + kind, "gate", _d_home_rule(kind, rule),
+     '        if not held and (expanded or not rd.spelling.startswith("/")):\n' if rule == "unheld-link" else "        if held and reached:\n",
+     "        if False:  # reverted fail-closed rule\n")
+    for kind in ("import", "ingest") for rule in ("unheld-link", "second-claim")) + tuple(
+    ("gate/home-unheld-relative/" + kind, "gate", _d_home_unheld_relative(kind),
+     '        if not held and (expanded or not rd.spelling.startswith("/")):\n',
+     "        if not held and expanded:\n")
+    for kind in ("import", "ingest"))
+
+_DISCRIMINATORS += tuple(
+    ("gate/home-" + rule + "/" + kind + "/isolated", "gate", _d_home_second_claim_isolated(kind, rule),
+     "        if held and reached:\n",
+     _ST_SEEN_SET_REVERTED if rule == "property-holding" else "        if False:  # reverted fail-closed rule\n")
+    for kind in ("import", "ingest") for rule in ("property-holding", "second-claim"))
+
+
+# Unit rows observe the named contract directly; transaction-generation-required observes the internal
+# reader's registry; every other row observes the public outcome.
+# The property-holding/second-claim /isolated rows deliberately use the public boundary: corrupt=False
+# removes the overlapping record finding, so their declared transaction bits measure R2 refusal itself.
+_REVERT_UNIT_BOUNDARIES = {
+    "path/canonical-contained": ("_canonical", "_StageError"),
+    "allocation/journal-lock-required": ("reserve_ingest_ids", "AllocationError"),
+    **{"gate/home-rename-at-lookup/" + kind + "/isolated": ("_physical_home", "_GateError")
+       for kind in ("import", "ingest")},
+}
+
+
+# Declared outcome sets, independent of observed flips: (call ordinal, check id, expected baseline bit).
+# Each gate row names a protected call, never a clean setup/control call. None/wildcard ordinals are
+# forbidden. One representative protected call suffices; this does not prove every fixture assertion
+# discriminates. The fixture's oracle, representative selection and call alignment still need review.
+_REVERT_ASSERTED = {
+    "gate/transaction-generation-required": tuple((0, cid, False) for cid in _ST_TXN),
+    "path/canonical-contained": ((0, "refused", True),),
+    "allocation/journal-lock-required": ((0, "refused", True),),
+}
+for _kind in ("import", "ingest"):
+    for _case, _call, _expected, _checks in (
+        ("staged-run-store-depth", 0, False, ("transaction-schema",)),
+        ("staging-generation-mismatch", 0, False, _ST_TXN),
+        ("staging-alias", 0, False, _ST_TXN),  # legacy alias refusal
+        ("run-name-bound", 0, False, ("staged-run-structure",)),
+        ("home-symlink-route", 0, False, _ST_TXN),
+        ("home-speculative", 3, True, _ST_TXN),  # obstructed homes-2, after clean calls
+        ("home-rename-at-lookup", 0, False, _ST_TXN),
+        ("home-retained", 0, False, _ST_TXN),
+        ("home-property-ancestors", 1, False, _ST_TXN),  # claimed spelling after clean
+        # _st_home_property checks these ordinals against shared-ancestor/homes-1/base_dir/alias-0.
+        ("home-property-holding", 148, False, _ST_TXN),
+        ("home-start-ancestors", 1, False, _ST_TXN),
+        ("home-unheld-link", 0, False, _ST_TXN),  # chained canonical route
+        ("home-second-claim", 4, False, _ST_TXN),  # shared-ancestor's first alias
+        ("home-unheld-relative", 0, False, _ST_TXN),
+    ):
+        _REVERT_ASSERTED["gate/" + _case + "/" + _kind] = tuple(
+            (_call, cid, _expected) for cid in _checks)
+    # _RunDir setup makes physical-home calls 0..2; call 3 is the direct mismatch probe.
+    _REVERT_ASSERTED["gate/home-rename-at-lookup/" + _kind + "/isolated"] = ((3, "refused", True),)
+    for _rule in ("property-holding", "second-claim"):
+        _REVERT_ASSERTED["gate/home-" + _rule + "/" + _kind + "/isolated"] = tuple(
+            (1, cid, False) for cid in _ST_TXN)
+    for _homes in (1, 2):
+        for _case in ("staging", "staging-entry", "legacy", "legacy-entry"):
+            _REVERT_ASSERTED["gate/home-relative/{}/{}/homes-{}".format(_case, _kind, _homes)] = tuple(
+                (1, cid, False) for cid in _ST_TXN)  # relative refused spelling
+        for _case in ("detached", "canonical", "physical"):
+            _REVERT_ASSERTED["gate/home-search-only/{}/{}/homes-{}".format(_case, _kind, _homes)] = tuple(
+                (1, cid, True) for cid in _ST_TXN)  # restricted call, not clean control
+        for _case, _expected in (("external-symlink", False), ("cwd-bound", True), ("restore", False)):
+            _REVERT_ASSERTED["gate/home-{}/{}/homes-{}".format(_case, _kind, _homes)] = tuple(
+                (1, cid, _expected) for cid in _ST_TXN)
+_REVERT_ASSERTED.update({
+    "acceptance/reject-refused": ((0, "promoted=False", True), (0, "outcome=rejected", True)),
+    "per-record/inline-required": ((0, "promoted=False", True), (0, "verdict=" + str(CANNOT_EVALUATE), True)),
+})
+# Each listed apply row asserts this outcome on this call; incidental flips on setup or earlier
+# interrupted calls cannot stand in for the re-apply/no-op contract.
+for _call, _outcome, _identities in (
+    (0, "promoted", (
+        "postverify/committed-not-aborted", "postverify/foreign-class-not-aborted",
+        "postlaunch/returned-is-committed", "postlaunch/unprintable-not-aborted",
+        "cleanup/root-close-not-aborted", "cleanup/lock-release-not-escaped",
+        "cleanup/op-release-not-escaped", "cleanup/diagnostic-not-escaped",
+        "cleanup/writer-release-call-not-escaped", "cleanup/op-release-call-not-escaped",
+        "cleanup/writer-release-call-diagnostic-not-escaped", "cleanup/op-release-call-diagnostic-not-escaped")),
+    (0, "indeterminate", (
+        "postlaunch/complete-fault-not-aborted", "postlaunch/reread-fault-not-aborted",
+        "postlaunch/complete-lost-not-aborted", "postlaunch/foreign-txn-not-escaped",
+        "postlaunch/reread-guarded", "postlaunch/indeterminate-not-aborted",
+        "postcommit/complete-unconfirmed-not-promoted", "postlaunch/helper-failure-not-aborted",
+        "postlaunch/nested-failure-not-aborted", "cleanup/diagnostic-call-not-escaped")),
+    (0, "aborted", ("postlaunch/rollback-still-aborted",)),
+    (1, "aborted", (
+        "postcommit/complete-unconfirmed-reapply-refused", "postlaunch/interrupt-retains-lock",
+        "postlaunch/exit-retains-lock", "postlaunch/interrupting-format-retains-lock")),
+    (1, "noop_already_complete", (
+        "cleanup/root-close-call-not-aborted", "cleanup/root-close-call-diagnostic-not-aborted")),
+):
+    for _identity in _identities:
+        _REVERT_ASSERTED[_identity] = ((_call, "returned", True), (_call, "outcome=" + _outcome, True))
+        if _identity in _GUARD_EXECUTION:
+            _REVERT_ASSERTED[_identity + "/isolated"] = _REVERT_ASSERTED[_identity]
+
+
+def _revert_trace(module, key, identity, trace):
+    """Record actual Boolean outcomes, never the test's diagnostic predicate.
+    Gate checks retain only their pass/fail bit. Apply outcomes project returned/promoted/verdict/outcome
+    into Boolean checks; unit contracts record refusal. Messages, findings and probe firing are excluded.
+    Calls are paired by invocation ordinal within the same deterministic fixture, then by check id.
+    This proves a flip at these boundaries, not the completeness or correctness of the fixture's oracle.
+    An unobserved boundary cannot supply safety evidence.
+    """
+    from unittest.mock import patch
+    unit = _REVERT_UNIT_BOUNDARIES.get(identity)
+    method = unit[0] if unit else {"gate": "check_staged_run", "apply": "apply_ingest"}[key]
+    # Observe the inner guard directly so the public refusal cannot mask its reversal.
+    if identity == "gate/transaction-generation-required":
+        method = "_check_staged_run"
+    actual = getattr(module, method)
+
+    def observed(*args, **kwargs):
+        bits = {}
+        trace.append(bits)
+        if unit:
+            try:
+                result = actual(*args, **kwargs)
+            except getattr(module, unit[1]):
+                bits["refused"] = True
+                raise
+            bits["refused"] = False
+            return result
+        if key == "gate":
+            result = actual(*args, **kwargs)
+            if (not isinstance(result, dict) or set(result) != set(module.EXPECTED_CHECKS)
+                    or any(not isinstance(v, tuple) or len(v) != 2 or type(v[0]) is not bool
+                           for v in result.values())):
+                raise RuntimeError("unreadable Boolean check outcomes: " + identity)
+            bits.update((cid, value[0]) for cid, value in result.items())
+            return result
+        try:
+            result = actual(*args, **kwargs)
+        except BaseException:
+            bits["returned"] = False
+            raise
+        bits["returned"] = True
+        bits.update(("promoted=" + str(value), result.promoted is value) for value in (True, False, None))
+        bits.update(("verdict=" + str(value), result.verdict == value)
+                    for value in (CLEAN, FINDING, CANNOT_EVALUATE))
+        bits.update(("outcome=" + value, result.outcome == value)
+                    for value in ("promoted", "aborted", "rejected", "indeterminate", "noop_already_complete"))
+        return result
+
+    return patch.object(module, method, observed)
+
+
+def _revert_boolean_witness(identity, baseline, mutant, safety, asserted):
+    """Safety requires the declared call/direction; guard-execution forbids declared ids at any call.
+    Missing calls/checks are not flips; fixture call alignment still needs review.
+    """
+    if (not isinstance(asserted, tuple) or not asserted
+            or any(not isinstance(item, tuple) or len(item) != 3
+                   or type(item[0]) is not int or item[0] < 0
+                   or not isinstance(item[1], str) or not item[1]
+                   or type(item[2]) is not bool for item in asserted)
+            or len({item[:2] for item in asserted}) != len(asserted)):
+        raise RuntimeError("malformed asserted outcome set: " + identity)
+    for trace in (baseline, mutant):
+        if any(type(bit) is not bool for call in trace for bit in call.values()):
+            raise RuntimeError("non-Boolean outcome evidence: " + identity)
+    if any(not any(ordinal == index and call.get(cid) is expected
+                   for index, call in enumerate(baseline)) for ordinal, cid, expected in asserted):
+        raise RuntimeError("unobserved asserted baseline outcome: " + identity)
+    changed = [(index, cid, before[cid], after[cid])
+               for index, (before, after) in enumerate(zip(baseline, mutant))
+               for cid in sorted(before.keys() & after.keys()) if before[cid] is not after[cid]]
+    flips = ["{}:{}:{}->{}".format(*item) for item in changed]
+    witnesses = [flip for flip, (index, cid, before, _after) in zip(flips, changed)
+                 if (index, cid, before) in asserted]
+    if safety and not witnesses:
+        raise RuntimeError("safety row has no asserted Boolean outcome flip: {}; all_flips={}".format(
+            identity, ",".join(flips) or "none"))
+    declared_ids = {cid for _ordinal, cid, _expected in asserted}
+    if not safety and any(cid in declared_ids for _index, cid, _before, _after in changed):
+        raise RuntimeError("guard-execution row has an asserted Boolean outcome flip; reclassify as safety: "
+                           + identity)
+    return flips, witnesses
+
+
+def _t_revert_boolean_guard(base, check):
+    """Negative controls use the same observer and refusing gate as the real mutation harness."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    import check_opf_import as gate
+    traces = []
+    asserted = ((0, "check", False),)
+    for ok, unrelated, detail in ((False, False, "guard diagnostic"),
+                                  (False, False, "different diagnostic"),
+                                  (True, False, "different diagnostic"),
+                                  (False, True, "different diagnostic")):
+        module = SimpleNamespace(EXPECTED_CHECKS=("check", "unrelated"),
+                                 check_staged_run=lambda: {"check": (ok, detail),
+                                                          "unrelated": (unrelated, "other check")})
+        trace = []
+        with _revert_trace(module, "gate", "control", trace):
+            module.check_staged_run()
+        traces.append(trace)
+    check("Boolean-flip-control", bool(_revert_boolean_witness(
+        "control", traces[0], traces[2], True, asserted)[1]))
+    for label, baseline, mutant, safety, declaration in (
+        ("diagnostic-only", traces[0], traces[1], True, asserted),
+        ("incidental-only", traces[0], traces[3], True, asserted),
+        ("extra-call", traces[0], traces[0] + traces[2], True, asserted),
+        ("wrong-call", traces[0] + traces[0], traces[0] + traces[2], True, asserted),
+        ("clean-control-only", traces[2] + traces[0], traces[0] + traces[0],
+         True, ((1, "check", False),)),
+        ("wrong-direction", traces[2], traces[0], True, asserted),
+        ("guard-execution-flip", traces[0], traces[2], False, asserted),
+        ("guard-execution-other-call", traces[0] + traces[0], traces[0] + traces[2], False, asserted),
+        ("guard-execution-other-direction", traces[0] + traces[2], traces[0] + traces[0], False, asserted),
+        ("guard-execution-other-check-call", traces[0] + traces[0], traces[0] + traces[3],
+         False, asserted + ((0, "unrelated", False),)),
+        ("missing", traces[0], [], True, asserted),
+        ("missing-check", traces[0], [{}], True, asserted),
+        ("non-Boolean", traces[0], [{"check": 0}], True, asserted),
+    ):
+        refused = False
+        try:
+            _revert_boolean_witness("control", baseline, mutant, safety, declaration)
+        except RuntimeError as exc:
+            refused = True
+            if label == "incidental-only":
+                check("Boolean-incidental-flip-reported", "0:unrelated:False->True" in str(exc))
+                print("BOOLEAN NEGATIVE CONTROL:", exc)
+        check("Boolean-refuses-" + label, refused)
+    check("Boolean-guard-execution", not _revert_boolean_witness(
+        "control", traces[0], traces[1], False, asserted)[1])
+    for declaration, reason in (
+        ((), "malformed"),
+        (((0, "absent", False),), "unobserved"),
+        (((1, "check", False),), "unobserved"),
+        (((None, "check", False),), "malformed"),
+        (((True, "check", False),), "malformed"),
+        (((-1, "check", False),), "malformed"),
+        (((0, "check"),), "malformed"),
+        (((0, "check", 0),), "malformed"),
+        (((0, "check", False), (0, "check", True)), "malformed"),
+    ):
+        refused = False
+        try:
+            _revert_boolean_witness("control", traces[0], traces[2], True, declaration)
+        except RuntimeError as exc:
+            refused = str(exc).startswith(reason + " asserted")
+        check("Boolean-refuses-declaration-" + repr(declaration), refused)
+    for bad in ({}, {"check": (0, "diagnostic")}, {"check": False}):
+        module = SimpleNamespace(EXPECTED_CHECKS=("check",), check_staged_run=lambda: bad)
+        refused = False
+        try:
+            with _revert_trace(module, "gate", "control", []):
+                module.check_staged_run()
+        except RuntimeError:
+            refused = True
+        check("Boolean-refuses-malformed-" + repr(bad), refused)
+
+    # Drift to another corrupt call with the same baseline bits; only matrix identity can refuse it.
+    for kind in ("import", "ingest"):
+        for rule in ("property-holding", "second-claim"):
+            identity = "gate/home-" + rule + "/" + kind
+            drifted = tuple((ordinal + 1, cid, expected)
+                            for ordinal, cid, expected in _REVERT_ASSERTED[identity])
+            test = _d_home_property_holding(kind) if rule == "property-holding" else _d_home_rule(kind, rule)
+            refused = False
+            with patch.dict(_REVERT_ASSERTED, {identity: drifted}):
+                try:
+                    test(gate, base / ("ordinal-drift-" + rule + "-" + kind))
+                except RuntimeError as exc:
+                    refused = str(exc) == "asserted home call identity drift: " + identity
+            check("Boolean-refuses-ordinal-drift-" + rule + "-" + kind, refused)
+
+    # Exercise apply's real projection, including an escape that supplies only the returned bit.
+    apply_traces = []
+    for outcome in ("rejected", "promoted", "escape"):
+        def apply():
+            if outcome == "escape":
+                raise RuntimeError("control escape")
+            return SimpleNamespace(promoted=outcome == "promoted",
+                                   verdict=FINDING if outcome == "rejected" else CLEAN, outcome=outcome)
+
+        module = SimpleNamespace(apply_ingest=apply)
+        trace = []
+        with _revert_trace(module, "apply", "control", trace):
+            try:
+                module.apply_ingest()
+            except RuntimeError as exc:
+                if outcome != "escape" or str(exc) != "control escape":
+                    raise
+        apply_traces.append(trace)
+    check("Boolean-apply-projection", apply_traces[0] == [{
+        "returned": True, "promoted=True": False, "promoted=False": True, "promoted=None": False,
+        "verdict=" + str(CLEAN): False, "verdict=" + str(FINDING): True,
+        "verdict=" + str(CANNOT_EVALUATE): False,
+        "outcome=promoted": False, "outcome=aborted": False, "outcome=rejected": True,
+        "outcome=indeterminate": False, "outcome=noop_already_complete": False,
+    }])
+    check("Boolean-apply-witness", _revert_boolean_witness(
+        "control", apply_traces[0], apply_traces[1], True, ((0, "outcome=rejected", True),))[1]
+        == ["0:outcome=rejected:True->False"])
+    check("Boolean-apply-escape-projection", apply_traces[2] == [{"returned": False}])
+    check("Boolean-apply-escape-witness", _revert_boolean_witness(
+        "control", apply_traces[0], apply_traces[2], True, ((0, "returned", True),))[1]
+        == ["0:returned:True->False"])
+
+
+TESTS += (("revert-boolean-guard", _t_revert_boolean_guard),)
+
+
 def _red_on_revert():
     """Run the discriminators in a private temporary tree. Return 0 when every guard reverts to RED and
-    restores to PASS; raise on a survived reversal, a wrong assertion, or a non-unique mutation target."""
+    restores to PASS; refuse a safety row without an asserted Boolean flip, a guard-execution row with one,
+    a survived reversal, a wrong assertion, or a non-unique mutation target."""
     import shutil
     import tempfile
     here = Path(__file__).resolve().parent
-    sources = {"apply": here.joinpath("_opf_ingest_apply.py"), "alloc": here.joinpath("_opf_allocation.py")}
+    sources = {"apply": here.joinpath("_opf_ingest_apply.py"), "alloc": here.joinpath("_opf_allocation.py"),
+               "gate": here.joinpath("check_opf_import.py")}
     read = dict((key, path.read_text(encoding="utf-8")) for key, path in sources.items())
     ids = [d[0] for d in _DISCRIMINATORS]
     if len(ids) != len(set(ids)):
         raise RuntimeError("duplicate declared discriminator identity")
-    if not _GUARD_EXECUTION <= set(ids) or any(i + "/isolated" not in ids for i in _GUARD_EXECUTION):
+    if (not _GUARD_EXECUTION <= set(ids)
+            or any(i + "/isolated" not in ids or i + "/isolated" in _GUARD_EXECUTION for i in _GUARD_EXECUTION)):
         raise RuntimeError("a guard-execution row is undeclared or has no /isolated safety row")
+    rows = {row[0]: row for row in _DISCRIMINATORS}
+    if set(_REVERT_ASSERTED) != set(ids):
+        raise RuntimeError("asserted outcome declarations differ from discriminator registry")
+    for identity in _GUARD_EXECUTION:
+        parent, isolated = rows[identity], rows[identity + "/isolated"]
+        if (parent[1], parent[3], parent[4]) != (isolated[1], isolated[3], isolated[4]):
+            raise RuntimeError("isolated row has a different mutation target: " + identity)
     base = Path(tempfile.mkdtemp(prefix="opf-ingest-apply-revert-")).resolve()
     ran, classes = [], dict(safety=0, guard_execution=0)
     try:
@@ -2361,7 +3983,9 @@ def _red_on_revert():
                 prefix = prefix.replace(strip_old, strip_new, 1)
             pristine = _load_revert_candidate(prefix + suffix, "_revert_pristine_{}".format(number), file_path)
             try:
-                test(pristine, base / "p{}".format(number))
+                baseline_bits = []
+                with _revert_trace(pristine, key, identity, baseline_bits):
+                    test(pristine, base / "p{}".format(number))
             finally:
                 sys.modules.pop(pristine.__name__, None)
             if prefix.count(old) != 1:
@@ -2369,7 +3993,9 @@ def _red_on_revert():
             mutant = _load_revert_candidate(prefix.replace(old, new, 1) + suffix,
                                             "_revert_mutant_{}".format(number), file_path)
             try:
-                test(mutant, base / "m{}".format(number))
+                mutant_bits = []
+                with _revert_trace(mutant, key, identity, mutant_bits):
+                    test(mutant, base / "m{}".format(number))
             except AssertionError as exc:
                 if str(exc) != identity:
                     raise RuntimeError("wrong assertion for " + identity) from exc
@@ -2377,22 +4003,121 @@ def _red_on_revert():
                 raise RuntimeError("reversal survived: " + identity)
             finally:
                 sys.modules.pop(mutant.__name__, None)
+            kind = "guard-execution" if identity in _GUARD_EXECUTION else "safety"
+            asserted = _REVERT_ASSERTED[identity]
+            flips, witnesses = _revert_boolean_witness(
+                identity, baseline_bits, mutant_bits, kind == "safety", asserted)
             restored = _load_revert_candidate(source, "_revert_restored_{}".format(number), file_path)
             try:
-                test(restored, base / "r{}".format(number))
+                restored_bits = []
+                with _revert_trace(restored, key, identity, restored_bits):
+                    test(restored, base / "r{}".format(number))
+                if not strips and restored_bits != baseline_bits:
+                    raise RuntimeError("Boolean outcomes did not restore: " + identity)
             finally:
                 sys.modules.pop(restored.__name__, None)
-            kind = "guard-execution" if identity in _GUARD_EXECUTION else "safety"
             classes[kind.replace("-", "_")] += 1
             print("RED-ON-REVERT", identity, "assertion=" + identity, "class=" + kind,
                   "baseline=" + ("stripped:" + "+".join(strips) if strips else "pristine"), "restored=PASS",
-                  "candidate_sha256=" + digest)
+                  "boolean_flip=" + ("yes" if flips else "no"),
+                  "asserted=" + ",".join("{}:{}:{}".format(i, cid, expected) for i, cid, expected in asserted),
+                  "boolean_flips=" + (",".join(flips) or "none"),
+                  "boolean_witness=" + (",".join(witnesses) or "none"), "candidate_sha256=" + digest)
             ran.append(identity)
     finally:
         shutil.rmtree(str(base), ignore_errors=True)
     print("OPF-INGEST-APPLY RED-ON-REVERT: {} discriminators, {} safety and {} guard-execution ({})".format(
         len(ran), classes["safety"], classes["guard_execution"], ", ".join(ran)))
     return 0
+
+
+def _evidence_red_on_revert():
+    """Focused composition flips; source mutations stay in fresh in-memory modules."""
+    import tempfile
+    from unittest.mock import patch
+    here = Path(__file__).resolve().parent
+    old_shape = ('format=EVIDENCE_INVENTORY_FORMAT,\n'
+                 '        file=[dict(path=p, sha256=_sha(d), size=len(d)) for p, d in sorted(evidence)]')
+    new_shape = ('format="opf.ingest.evidence-inventory/v1", schema=SCHEMA, run_id=run_id,\n'
+                 '        entry=[dict(path=p[len(home) + 1:], sha256=_sha(d), size=len(d)) '
+                 'for p, d in sorted(evidence)]')
+    legacy_refusal = ('raise _LegacyIngestInventory("legacy-ingest-inventory: old-format ingest inventory is unsupported; "'
+                      '\n                                     "refused without migration or rewrite")')
+    cases = (
+        ("writer-schema", "_opf_ingest_apply", old_shape, new_shape, "evidence-doctor"),
+        ("receipt-claim", "_opf_ingest_apply",
+         'dict(path=home + "/" + PROMOTION_NAME, sha256=_sha(receipt), size=len(receipt))',
+         '*[]', "evidence-doctor"),
+        ("receipt-off-inventory-guard", "_opf_check",
+         'rep.finding("C-EVIDENCE-ENUM: off-inventory file {!r}".format(full))',
+         'pass', "evidence-receipt-unclaimed"),
+        ("old-format-refusal", "_opf_check", legacy_refusal,
+         'doc = dict(format=EVIDENCE_FORMAT, file=[dict(row, path=bundle + "/" + row["path"]) '
+         'for row in doc["entry"]])', "evidence-old-format"),
+        ("exact-replay-membership", "_opf_ingest_apply",
+         'if set(expected) != (present - inventories) | moved:', 'if False:',
+         "evidence-extra-payload-replay"),
+        ("legacy-finding-grade", "_opf_check",
+         'rep.finding("C-EVIDENCE-ENUM: {} (inventory {!r})".format(exc, rel))',
+         'rep.cant("C-EVIDENCE-ENUM: {} (inventory {!r})".format(exc, rel))',
+         "evidence-old-format-named"),
+        ("exact-replay-directories", "_opf_ingest_apply",
+         'if directories != claimed_dirs:', 'if False:', "evidence-extra-directory-replay"),
+        *((kind + "-replay-refusal", "_opf_ingest_apply",
+           ('except _opf_store.StoreError as exc:\n'
+            '        raise _cannot("completed run {}: {}".format(run_id, exc))'),
+           ('except ZeroDivisionError as exc:\n'
+            '        raise _cannot("completed run {}: {}".format(run_id, exc))'),
+           "evidence-" + kind + "-replay") for kind in ("symlink", "fifo", "mode000")),
+        ("retained-digest", "_opf_ingest_apply",
+         'if _sha(data) != row["sha256"] or len(data) != row["size"]:', 'if False:',
+         "evidence-retained-byte-replay"),
+        ("retained-move", "_opf_ingest_apply",
+         'if r["disposition"] == "migrate" or r["dest"].startswith(_opf_store.ARCHIVE_REL + "/moved/"):',
+         'if r["disposition"] == "migrate":', "evidence-retained-move"),
+        ("generation-detail", "check_opf_import",
+         '_HOMES2_NO_LEGACY_TRANSACTION_DETAIL = (\n'
+         '    "no legacy transaction record (publication attempts are not graded by this gate)")',
+         '_HOMES2_NO_LEGACY_TRANSACTION_DETAIL = "changed wording"',
+         "F-OPF-GEN2-DETAIL-UNPINNED"),
+    )
+    with tempfile.TemporaryDirectory(prefix="opf-evidence-flips-") as tmp:
+        for name, module_name, old, new, label in cases:
+            path = here / (module_name + ".py")
+            source = path.read_text(encoding="utf-8")
+            prefix = source.split(_REVERT_MARKER, 1)[0]
+            suffix = source[len(prefix):]
+            if prefix.count(old) != 1:
+                raise RuntimeError("non-unique evidence flip: " + name)
+            for phase, candidate in (("baseline", source),
+                                     ("mutant", prefix.replace(old, new, 1) + suffix),
+                                     ("restored", source)):
+                module = _load_revert_candidate(candidate, "_evidence_flip", str(path))
+                failures, seen = [], []
+                def check(identity, ok):
+                    seen.append(identity)
+                    if not ok:
+                        failures.append(identity)
+                try:
+                    with patch.dict(sys.modules, {module_name: module}):
+                        if module_name == "check_opf_import":
+                            module._self_test_generation_detail(check)
+                        else:
+                            owner = module if module_name == "_opf_ingest_apply" else sys.modules[__name__]
+                            if name == "retained-move":
+                                test = owner._t_evidence_move
+                            elif name == "exact-replay-directories" or name.endswith("-replay-refusal"):
+                                test = owner._t_evidence_entries
+                            else:
+                                test = owner._t_evidence_composition
+                            test(Path(tmp) / name / phase, check)
+                    if label not in seen or (phase == "mutant" and label not in failures):
+                        raise RuntimeError("evidence reversal survived: " + name)
+                    if phase != "mutant" and failures:
+                        raise RuntimeError("evidence control failed: {}: {}".format(name, failures))
+                finally:
+                    sys.modules.pop("_evidence_flip", None)
+            print("EVIDENCE RED-ON-REVERT", name, "baseline=PASS mutant=RED restored=PASS assertion=" + label)
 
 
 def _red_on_revert_main():
@@ -2405,6 +4130,7 @@ def _red_on_revert_main():
         return 2
     try:
         _red_on_revert()
+        _evidence_red_on_revert()
     except Exception as exc:  # noqa: BLE001  a discrimination or harness failure is never a silent pass
         print("OPF-INGEST-APPLY RED-ON-REVERT FAILED: {!r}".format(exc), file=sys.stderr)
         return 1
@@ -2412,13 +4138,25 @@ def _red_on_revert_main():
     return 0
 
 
+def _self_test_main(args):
+    """Keep both registered self-test legs inside the same isolation boundary."""
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
+            return _self_test_main_isolated(args)
+
+
+def _self_test_main_isolated(args):
+    rc = self_test()
+    return rc if rc != 0 or "--red-on-revert" not in args else _red_on_revert_main()
+
+
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
-    if args == ["--self-test"]:
-        return self_test()
-    if args == ["--self-test", "--red-on-revert"]:
-        rc = self_test()
-        return rc if rc != 0 else _red_on_revert_main()
+    if args in (["--self-test"], ["--self-test", "--red-on-revert"]):
+        return _self_test_main(args)
     print("_opf_ingest_apply: the ingest promotion coordinator; run with --self-test (add --red-on-revert "
           "for the guard-discrimination harness; no verb is wired in this slice).",
           file=sys.stderr if args else sys.stdout)

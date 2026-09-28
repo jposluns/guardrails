@@ -51,7 +51,7 @@
   <p class="eyebrow">Adopt it</p>
   <h1>Adopt OPFiles</h1>
   <p class="lead">There are two ways in. The recommended path is to let your AI development assistant do
-    the adoption; adopting by hand is the fallback for when you cannot. Both reach the same gated store:
+    the adoption; adopting by hand is the fallback for when you cannot. Both paths target the same store format:
     machine-written TOML sources, generated human-readable views, and a drift gate that re-renders the
     views and compares them. This page walks the paths, then documents each <code>opf</code> command
     one by one, then lays out the manual steps.</p>
@@ -70,31 +70,31 @@
 <section id="paths" class="section-alt">
   <div class="wrap">
     <p class="eyebrow">Two paths</p>
-    <h2>Two ways in, one gated store</h2>
+    <h2>Two ways in, one store format</h2>
     <div class="grid">
       <div class="card">
         <h3>Assistant-driven (recommended)</h3>
-        <p>Point your AI development assistant at this site or the repository and tell it to adopt
-          OPFiles. It reads the standard, inspects your project, proposes a plan, and, on your yes,
-          scaffolds and validates the store for you. This path needs no particular tool.</p>
+        <p>Ask your AI development assistant to read the standard, inspect your project, and propose an
+          adoption plan. Review the plan before authorizing scaffolding and validation. The standard
+          requires no particular assistant or tool.</p>
       </div>
       <div class="card">
         <h3>By hand (fallback)</h3>
         <p>Create the plain-TOML store, configure your own checks, and work records-first. The standard
-          requires no particular tool, so a hand adopter reaches the same store format and can move to
-          the reference tooling later without changing it.</p>
+          requires no particular tool. The reference tooling validates spec 1.2.0 stores in either
+          layout, with limits: it does not render or drift-check per-record views, and the baseline
+          validator reports module-tier and importer record content schemas as cannot-evaluate.
+          For a store with module-tier or importer records, or a per-record store that declares views,
+          doctor's overall verdict is cannot-evaluate (exit 2).</p>
       </div>
     </div>
-    <p>On the assistant-driven path, your assistant reads the standard, investigates your project, and
-      presents a short plan: what it will create, import, or retire, and how the pieces wire together.
-      It asks one question, yes, no, or let us discuss. On your yes it carries out the adoption,
-      scaffolds and validates the store, wires the records-first process into your project's assistant
-      instructions, and leaves the <code>.working/</code> store for your review.</p>
-    <p>The machine-readable entry point it follows, an <a href="/llms.txt"><code>/llms.txt</code></a>
-      index, a machine-readable <a href="/adopt.md"><code>/adopt.md</code></a>, and a link on the root
-      page, lets an assistant find and follow the adoption steps. Adopting AIQT this way brings OPFiles
-      with it and migrates your existing operational files into the store; adopting OPFiles alone is
-      also supported.</p>
+    <p>On the assistant-driven path, ask for a plan naming what to create, import, or retire and how the
+      pieces fit together. Authorize the reviewed changes, then inspect the <code>.working/</code> store,
+      validation results, and the records-first instructions added to your project.</p>
+    <p>Provide the machine-readable <a href="/llms.txt"><code>/llms.txt</code></a> index and
+      <a href="/adopt.md"><code>/adopt.md</code></a> guide as starting material. If adopting AIQT,
+      include OPFiles and any existing operational files in the plan; review imports before applying
+      them. You can also adopt OPFiles alone.</p>
   </div>
 </section>
 
@@ -105,23 +105,24 @@
     <p class="lead">OPFiles names a standard command vocabulary; the <code>opf</code> reference CLI is
       one implementation of it. A base adopter can use their own tooling instead, or adopt by hand. The
       standard and the reference suite are both a draft, so this reference documents each command by
-      what it does at source today.</p>
-    <p>Every command shares one exit contract, which is what makes it usable as a commit or CI check:
-      <b style="color:var(--ink)">0</b> clean, <b style="color:var(--ink)">1</b> a finding or drift, and
-      <b style="color:var(--ink)">2</b> cannot-evaluate, a fail-closed "I could not tell" that is never
-      read as a pass. One command-specific exception sits on top of this: <code>render --write</code>
-      refuses a source-integrity violation with exit 2 and writes nothing, so a source defect that
-      <code>doctor</code> reports as a finding (exit 1) makes <code>render --write</code> exit 2, declining
-      to write over an unsound source rather than exiting 1. Where a command is aimed at a directory that
-      has not adopted OPFiles, the
-      applicability probes (<code>render</code>, <code>doctor</code>, <code>upgrade</code>) report NOT
-      APPLICABLE and exit 0. The seven commands, documented one by one below, are <code>init</code>,
+      what it does at source today, except where marked Planned.</p>
+    <p><code>doctor</code> distinguishes <b style="color:var(--ink)">0</b> clean,
+      <b style="color:var(--ink)">1</b> a finding, and <b style="color:var(--ink)">2</b> cannot-evaluate.
+      <code>render --check</code> uses exit 1 for drift; <code>render --write</code> and
+      <code>import</code> can also exit 1 on a finding. Mutating commands can also exit 2 on a refusal
+      or an unsuccessful operation: <code>render --write</code> requires passing source-integrity
+      checks, with no internal or unattributed faults; otherwise it exits 2 and writes nothing.
+      <code>upgrade</code> exits 2 when its doctor result is not VALID; after a schema rewrite,
+      failure at render or doctor leaves the changes in place for recovery.
+      Where a command is aimed at a directory that has not adopted OPFiles, the
+      applicability probes (<code>render</code>, <code>doctor</code>, <code>upgrade</code>,
+      <code>absorb</code>) report NOT APPLICABLE and exit 0. The eight commands, documented one by one below, are <code>init</code>,
       <code>render</code>, <code>doctor</code>, <code>import</code>, <code>upgrade</code>,
-      <code>migrate</code>, and <code>sync</code>.</p>
+      <code>migrate</code>, <code>sync</code>, and <code>absorb</code>.</p>
 
     <h3 id="cmd-init"><code>opf init</code></h3>
-    <p><b style="color:var(--ink)">Purpose.</b> Create a fresh, validated store and its committed
-      pointer in a project that has none, without any git write and without rendering.</p>
+    <p><b style="color:var(--ink)">Purpose.</b> Create validated source documents and a
+      committed-store pointer for a project with no store, without git writes or rendering.</p>
     <p><b style="color:var(--ink)">How it works.</b> A read-only preflight runs first: it inspects the
       target for an existing store, an existing pointer, or foreign content already under
       <code>.working/</code>, and refuses rather than absorbing what it finds. It then builds the machine
@@ -132,7 +133,9 @@
     <p><b style="color:var(--ink)">Result.</b> A scaffolded store, a committed-store pointer, and a
       starter changelog if you had none, all left untracked for your review; <code>init</code> does not
       stage or commit them. See <a href="./core-files">core store files</a> for what the scaffold writes
-      into the manifest.</p>
+      into the manifest. Publication is create-only but not transactional: a later failure can leave
+      partial output for review. The initializer takes no lock or lease and does not serialize
+      concurrent writers; a successful scaffold is not a whole-store validity verdict.</p>
     <p class="refchips"><code>opf init</code> <code>opf init --root .</code></p>
 
     <h3 id="cmd-render"><code>opf render</code></h3>
@@ -145,12 +148,14 @@
       drifted, or cannot be evaluated, and writing nothing. <code>--write</code> gates on source integrity, not
       on the whole-store verdict: it gathers the git-derived observations, and a drifted or missing view is
       its output to regenerate rather than a reason to refuse, so it rewrites the declared views from their
-      sources. Only a source violation (a duplicate id, an untracked store, missing or malformed
-      observations, or an unreadable required input) refuses with exit 2 and writes nothing, printing the
-      source-attributed findings, so a write never reads as a silent no-op.</p>
-    <p><b style="color:var(--ink)">Result.</b> Under <code>--check</code>, a verdict and no change; under
-      <code>--write</code>, the regenerated view files on disk when source integrity holds, or no change
-      and a source-attributed report of why it withheld.</p>
+      sources. A source-integrity check that fails or reports cannot-evaluate refuses with exit 2
+      before writing. Planning errors can also refuse before writing; a later I/O failure can leave
+      partial output and is reported.</p>
+    <p><b style="color:var(--ink)">Result.</b> Under <code>--check</code>, a verdict and no change.
+      Under <code>--write</code>, post-write validation checks source integrity and the regenerated
+      outputs. A disagreement triggers a rollback attempt and exit 2; an incomplete rollback is
+      reported. Other deliverable failures remain visible and can produce a nonzero exit after
+      successful regeneration.</p>
     <p class="refchips"><code>opf render --check</code> <code>opf render --write</code></p>
 
     <h3 id="cmd-doctor"><code>opf doctor</code></h3>
@@ -161,9 +166,19 @@
       them. It makes no store change, and its report is a structured per-check verdict map, the findings
       and cannot-evaluates, and a residual count, never a wall of diff lines. Its coverage spans schema
       validity, ID uniqueness and counter monotonicity, bidirectional index reconciliation, transition
-      legality, the all-or-none resolution bundle, byte drift for every deterministic view, worklog span
-      tiling and frozen digests, changelog coverage and freeze, archive integrity, the tracked-store
+      legality where observations suffice, the all-or-none resolution bundle, byte drift for declared
+      baseline views in an inline-layout store, the root <code>VERSION</code> deliverable (required
+      whenever releases exist, absent before the first release), worklog span tiling and frozen digests,
+      changelog coverage and freeze, archive
+      integrity, the tracked-store
       requirement, pointer and sync-target agreement, and path containment.</p>
+    <p>Doctor reports per-record view drift and the content schemas of module-tier and importer
+      records, including <code>legacy_fragment</code>, as cannot-evaluate. Baseline view coverage includes
+      composed views and projections. A declared view outside the baseline set, such as a module-type
+      index mirror, makes the whole drift check cannot-evaluate. Transition checks also report
+      cannot-evaluate when legality depends on an unidentified last-transition actor or a rejection
+      requires unavailable pre-proposal state. Doctor does not check behind, ahead, or divergence
+      against a sync target.</p>
     <p><b style="color:var(--ink)">Result.</b> A valid, invalid, or cannot-evaluate verdict with the
       per-check breakdown, exiting 0, 1, or 2 to match.</p>
     <p class="refchips"><code>opf doctor</code> <code>opf doctor --root .</code></p>
@@ -190,29 +205,61 @@
     <p><b style="color:var(--ink)">Result.</b> An inventory, a staged run id and report, an acceptance
       record, or a promoted store, one per mode; everything not confidently mapped is quarantined rather
       than dropped, and the originals stay in place until an <code>--apply</code> promotes a fully
-      reviewed run.</p>
+      reviewed run. An import that promotes quarantined <code>legacy_fragment</code> records can succeed,
+      but afterwards doctor reports cannot-evaluate, <code>opf render --write</code> refuses, and
+      <code>opf upgrade</code> exits 2 without offering the change, because the baseline validator does
+      not validate those records' content schemas. Module-tier records have the same effect. If an
+      upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before failing at render,
+      leaving the changes in place for recovery.</p>
     <p class="refchips"><code>opf import --scan --set sources.toml</code> <code>opf import --plan --set sources.toml</code> <code>opf import --review R --actor "you" --decisions d.toml</code> <code>opf import --apply R</code></p>
 
     <h3 id="cmd-upgrade"><code>opf upgrade</code></h3>
-    <p><b style="color:var(--ink)">Purpose.</b> Apply the in-place base-schema upgrade (from spec 1.0.0
-      to 1.1.0), staged for your own review and merge.</p>
+    <p><b style="color:var(--ink)">Purpose.</b> Apply the in-place base-schema upgrade from spec 1.0.0
+      or 1.1.0 to 1.2.0, left uncommitted for your own review and merge.</p>
+    <p>The schema delta for a 1.1.0 store changes only <code>spec_version</code>; a 1.0.0 store also
+      receives the earlier schema delta. Declared views are then regenerated, so a stale committed
+      view can change. Neither path creates bootstrap provenance for an existing store.</p>
     <p><b style="color:var(--ink)">How it works.</b> The upgrade is additive and idempotent. It resolves
-      the store and refuses fail-closed on a store above the tooling's spec version, on a hand-edited or
-      comment-bearing manifest or counters, on a held lease, or on a store that is unclean over the paths
-      it will write. Before any write it claims a single-writer lease and holds it across the change,
-      applies exactly the allowed schema delta as a canonical model regeneration (not a textual edit),
-      renders the declared views, and requires a full doctor-valid before offering the change. It never
-      commits: you review and merge. A store already at the target version is a byte no-op, still
-      requiring doctor-valid.</p>
-    <p><b style="color:var(--ink)">Result.</b> The upgraded store staged in your working tree and left
-      uncommitted for your branch-and-merge; a preflight refusal (the fail-closed checks above: a store above
-      the tooling's spec, a hand-edited or comment-bearing manifest or counters, a held lease, or a store
-      unclean over the paths it writes) stops before any write and changes nothing, while a failure once the
-      additive rewrite has begun (at the render or the final doctor) leaves the staged changes in place for a
-      recorded, store-subtree-scoped recovery against the committed HEAD, not a no-op.</p>
+      the store and refuses a store above the tooling's spec version. A store already at the target
+      version returns a byte no-op if doctor is VALID, or exits 2 without writing otherwise.
+      When migrating a 1.0.0 or 1.1.0 store, its preconditions include readable, canonical manifest
+      and counters files matching a recognised origin shape, cleanliness over planned schema and
+      render destinations and index collision candidates (including ignored files there), and
+      acquisition of its single-writer lease. An untracked or ignored lease is excepted from the
+      cleanliness check and handled separately by lease acquisition. A manifest or counters
+      file with noncanonical formatting or comments, or a held lease, prevents that migration.
+      It holds the lease across the change, applies the allowed
+      schema delta as a canonical model regeneration, renders the declared views, and requires a full
+      doctor-valid before offering the change. It never commits: you review and merge.</p>
+    <p><b style="color:var(--ink)">Result.</b> A successful migration leaves the upgraded store
+      uncommitted in your working tree for review and merge. A preflight refusal, including a
+      newer-than-supported store or an older store failing the migration preconditions above, stops
+      before writing the schema delta. A failure after the additive rewrite begins exits 2 and
+      leaves changes already made in place. If view generation fails, the final doctor check does
+      not report VALID, or the run stops with any other error or interruption (including a safety
+      refusal) after the lease is taken and before doctor reports VALID, upgrade prints recovery
+      commands using the committed HEAD, limited to the
+      planned store and product paths. Once doctor reports VALID, no recovery commands are printed;
+      if the lease then fails to release, upgrade prints advice to confirm no OPF run is active and
+      resolve the leftover lease before taking further action.</p>
     <p class="refchips"><code>opf upgrade</code> <code>opf upgrade --root .</code></p>
 
+    <h3 id="cmd-absorb"><code>opf absorb</code></h3>
+    <p><b style="color:var(--ink)">Purpose.</b> Draft a candidate changelog entry for human curation,
+      or compute the freeze digest of an already-curated entry, without writing files.</p>
+    <p><b style="color:var(--ink)">How it works.</b> <code>--covers</code> selects
+      <code>unreleased</code> (the default), a released version, or a contiguous version range.
+      A per-release draft draws on its worklog span; a range rollup draws on the existing per-release
+      changelog entries. <code>--freeze-digest</code> computes the selected curated entry's digest.
+      Both modes validate the ledger inputs and coverage token before producing output.</p>
+    <p><b style="color:var(--ink)">Result.</b> Draft text or a digest on stdout, diagnostics on stderr,
+      and no store changes. Exit 0 means success or not applicable; exit 2 means cannot-evaluate.
+      Drafts still require human curation and the reviewed publication flow.</p>
+    <p class="refchips"><code>opf absorb</code> <code>opf absorb --covers 1.2.3</code> <code>opf absorb --covers 1.2.3 --freeze-digest</code></p>
+
     <h3 id="cmd-migrate"><code>opf migrate</code></h3>
+    <p><b style="color:var(--ink)">Status.</b> Planned; the reference CLI currently exits 2
+      (not yet implemented). The following describes the standard's intended operation.</p>
     <p><b style="color:var(--ink)">Purpose.</b> Relocate the whole tracked store to a target location,
       its git history and worklog preserved, as one recorded, verified operation.</p>
     <p><b style="color:var(--ink)">How it works.</b> It runs under the store consistency contract and the
@@ -234,6 +281,8 @@
     <p class="refchips"><code>opf migrate --store dir:../product-ops-store</code> <code>opf migrate --store github:acme/product-ops</code></p>
 
     <h3 id="cmd-sync"><code>opf sync</code></h3>
+    <p><b style="color:var(--ink)">Status.</b> Planned; the reference CLI currently exits 2
+      (not yet implemented). The following describes the standard's intended operation.</p>
     <p><b style="color:var(--ink)">Purpose.</b> Reconcile the store with its sync target, the surfaced
       pull-and-push step of the store consistency contract.</p>
     <p><b style="color:var(--ink)">How it works.</b> The consistency contract holds the store
@@ -258,11 +307,15 @@
     <h2>The manual path, step by step</h2>
     <p class="lead">OPFiles specifies formats, layout, naming, lifecycle, and enforcement posture, and
       requires no particular tool: the specification states that a project can conform with
-      hand-maintained files and its own checks. Adopting by hand gives you the records-first discipline
-      today, and you can move to the reference tooling later without changing the store format.</p>
+      hand-maintained files and its own checks. The reference tooling validates spec 1.2.0 stores in
+      either layout, with limits: it does not render or drift-check per-record views, and the baseline
+      validator reports module-tier and importer record content schemas as cannot-evaluate.
+      For a store with module-tier or importer records, or a per-record store that declares views,
+      doctor's overall verdict is cannot-evaluate (exit 2).</p>
     <p>The shape of the manual path is short: create the store (either run <code>opf init</code> to
-      scaffold it, or write the files by hand from the templates below), commit it, run
-      <code>opf render --write</code> to generate the views, and then work records-first. Conformance you
+      scaffold it, or write the files from the specification and schemas), commit it, generate the views
+      with <code>opf render --write</code> for a supported store or your own renderer, and then work
+      records-first. Conformance you
       assert by hand is self-asserted, and you should say so wherever you claim it, because no validator
       has checked it for you yet. The steps below fill that in.</p>
   </div>
@@ -277,13 +330,16 @@
       <li><b style="color:var(--ink)"><code>manifest.toml</code></b>: the control document and
         discovery marker. It declares <code>standard = "opf"</code> (the exact discovery token) in
         its <code>[opf]</code> table, along with the base <code>spec_version</code> you conform to,
-        the storage <code>layout</code>, and the enforcement <code>posture</code>.</li>
+        the storage <code>layout</code>, the enforcement <code>posture</code>, and
+        <code>import_status</code>. Register each enabled type in <code>[types.&lt;name&gt;]</code>,
+        declare <code>[views]</code>, and supply the other tables the standard defines.</li>
       <li><b style="color:var(--ink)"><code>counters.toml</code></b>: the per-namespace ID
         high-water marks, so an ID is never reused.</li>
       <li><b style="color:var(--ink)"><code>version.toml</code></b>: the version and release ledger
-        (numbers and digests only, never prose).</li>
-      <li><b style="color:var(--ink)"><code>worklog.toml</code></b>: the durable, append-only
-        operational record. It is the exempt ledger, not a typed index.</li>
+        (numbers, dates, spans, and digests, never release prose).</li>
+      <li><b style="color:var(--ink)"><code>worklog.toml</code></b>: the durable operational record:
+        one entry per change, correctable in place until a release freezes its span, never deleted.
+        It is the exempt ledger, not a typed index.</li>
       <li><b style="color:var(--ink)">Eleven typed indexes</b>, one per baseline record type:
         <code>backlog_item</code>, <code>done</code>, <code>finding</code>,
         <code>pending_decision</code>, <code>autonomous_decision</code>,
@@ -294,16 +350,17 @@
     <p>Then write the committed pointer <code>.opf.toml</code> at your product repository root, so
       the store resolves from a stable location. A <code>[profiles.aiqt]</code> table is optional and
       is ignored by base-only tooling; a base adopter need not add it.</p>
-    <p>A minimal manifest, illustrative and drawn from the specification's own example (see
+    <p>The illustrative base <code>[opf]</code> table of a manifest, not a complete manifest:
+      also register enabled types in <code>[types]</code> and declare views and other settings (see
       <a href="./standard">the standard</a> for the normative shape, and
       <a href="./core-files">core store files</a> for every table it can carry):</p>
     <div class="codecard src">
       <div class="codecard-bar">.working/toml/manifest.toml</div>
       <div class="codebody"><span class="tok-tbl">[opf]</span>
 <span class="tok-key">standard</span> = <span class="tok-str">"opf"</span>          # discovery token; exact value required
-<span class="tok-key">spec_version</span> = <span class="tok-str">"1.1.0"</span>    # the base spec version this store conforms to
+<span class="tok-key">spec_version</span> = <span class="tok-str">"1.2.0"</span>    # the base spec version this store conforms to
 <span class="tok-key">layout</span> = <span class="tok-str">"inline"</span>         # "inline" or "per-record"
-<span class="tok-key">posture</span> = <span class="tok-str">"warn"</span>          # "off", "warn", or "required" (section 11)
+<span class="tok-key">posture</span> = <span class="tok-str">"required"</span>      # "off", "warn", or "required" (section 11)
 <span class="tok-key">import_status</span> = <span class="tok-str">"none"</span>    # "none", "partial", or "complete"</div>
     </div>
   </div>
@@ -314,13 +371,16 @@
     <p class="eyebrow">Step 2</p>
     <h2>The layout, and the one rule of adoption</h2>
     <p>Machine source lives under <code>.working/toml/</code>; generated human-readable views live at
-      <code>.working/</code> top level; the curated <code>CHANGELOG.md</code> and the generated
-      <code>VERSION</code> live at the product repository root.</p>
+      <code>.working/</code> top level; the curated <code>CHANGELOG.md</code> lives at the product
+      repository root. A generated root <code>VERSION</code> is required whenever releases exist.
+      The initial scaffold omits its view declaration; add that declaration when recording the first
+      release so the reference renderer can produce the file. Doctor checks <code>VERSION</code>
+      whenever releases exist, even if its view is undeclared.</p>
     <div class="tree"><pre>
 <span class="dir">&lt;product repository root&gt;/</span>
   <span class="yours">.opf.toml</span>                 committed store pointer
   CHANGELOG.md              curated public changelog
-  VERSION                   rendered from version.toml
+  VERSION                   rendered from version.toml when declared as a view; required once releases exist
   <span class="dir">.working/</span>
     BACKLOG.md FINDINGS.md DECISIONS.md WORKLOG.md ...   generated views (UPPERCASE)
     <span class="dir">toml/</span>
@@ -330,8 +390,8 @@
     <p>One rule of adoption carries the whole convention: lowercase files are machine source you change
       through tooling or review; UPPERCASE files are generated or published deliverables you read and
       never hand-edit. The curated <code>CHANGELOG.md</code> is the one you edit, and only through its
-      publish flow. Once the files exist, commit them, then run <code>opf render --write</code> (or your
-      own generator) to produce the views from their sources.</p>
+      publish flow. Once the files exist, commit them, then run <code>opf render --write</code> for an
+      inline-layout store (or your own generator) to produce the views from their sources.</p>
   </div>
 </section>
 
@@ -341,10 +401,13 @@
     <h2>Working records-first</h2>
     <p>Treat the store as the source of truth: a decision, finding, or completion that is not
       recorded did not happen. Append a worklog entry per change; keep the backlog, findings, and
-      decisions in their typed files; and regenerate the views rather than editing them. Records
-      carry a typed envelope (an ID, type, status, title, timestamps read from the clock, an actor,
-      links, and captured references), IDs are never reused, and records are corrected before release
-      and frozen after it, superseded by new records that link the old rather than deleted.</p>
+      decisions in their typed files; and regenerate the views rather than editing them. Typed index
+      records carry an ID, type, status, title, timestamps, and an actor; links and captured references
+      are optional envelope fields. An importer may omit an unknown creation timestamp with provenance.
+      Capture references for claims that depend on external sources. IDs are never reused and records
+      are never deleted. Worklog entries may be corrected before their span is released and are frozen
+      afterward; post-release corrections are new linking entries. Other types follow their own
+      lifecycles: completion receipts and autonomous decisions are immutable from creation.</p>
   </div>
 </section>
 
@@ -355,8 +418,8 @@
     <p>At a release, record the release and the worklog span it covers as a <code>[[release]]</code>
       row in <code>version.toml</code>; draft the summary from that span; curate it by hand; publish
       it into <code>CHANGELOG.md</code>; and record the freeze digest for the published entry. Old
-      summaries can be rolled up into range summaries later, because the details always survive in the
-      worklog, so re-rolling or re-wording stays safe.</p>
+      summaries can be replaced by range summaries through the reviewed rollup flow; preserve the
+      underlying worklog entries and publication digests.</p>
   </div>
 </section>
 
@@ -366,11 +429,12 @@
     <h2>Bring your own checks</h2>
     <p>Even before you run the reference validator, you can assert the standard's key invariants
       yourself. A hand adopter can check that the store is a tracked git repository (an untracked
-      store is a hard failure, not a warning); that generated views match a fresh render; that worklog
-      spans tile the released versions with no gap or overlap; and that the changelog range
-      tiles every released version, with published entries unchanged since their recorded digest. These
-      are the checks the integrity layer performs when the tooling runs; asserting them by hand keeps
-      you honest in the meantime.</p>
+      store is a hard failure, not a warning); that generated views match a fresh render; that release
+      worklog spans tile the released worklog entries in ID order without gaps or overlaps; and that
+      changelog summary ranges, among non-superseded summaries and excluding <code>unreleased</code>,
+      tile the released versions without gaps or overlaps, with published entries unchanged since their
+      recorded digest. These
+      are integrity checks specified by OPFiles. Record the scope and results of your manual checks.</p>
   </div>
 </section>
 

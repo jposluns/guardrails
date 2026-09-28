@@ -277,8 +277,10 @@ BASELINE_SPECS = {
         "reference", initial="recorded", working=set(), terminal={"recorded"},
         transitions={}, proposable=set()),
     "contribution": TypeSpec(
-        # The OUTWARD counterpart to `reference`: an artifact/fix/proposal this project SENT to a peer
-        # project, with a delivery receipt (spec 8.5). `sent` is a gated non-terminal state: an
+        # The OUTWARD counterpart to `reference`: an artifact/fix/proposal this project proposes or
+        # sends to a peer (spec 8.5). Proposed/withdrawn records need no delivery bundle; once sent,
+        # channel/ref/sent_at are required, with optional receipt fields only at acknowledged.
+        # `sent` is a gated non-terminal state: an
         # assistant/automation lands `sent/proposed`, a maintainer ratifies to `sent`; a valid standing
         # authorization for the declared recipient may deactivate that per-send gating (see
         # _validate_gated_snapshot). `acknowledged` is the single positive terminal (responded/adopted/
@@ -766,8 +768,9 @@ def _validate_type_specific(record, spec, findings, standing_auth=None):
             findings.append("a reference must carry at least one {kind, locator, note} ref (spec 8.6)")
 
     elif spec.name == "contribution":
-        # The outward record of what this project SENT to a peer (spec 8.5). Its identity fields are each
-        # a required non-empty string; its delivery bundle is state-conditional (modelled on the
+        # The outward record of what this project proposes or sends to a peer (spec 8.5). Its identity
+        # fields are required non-empty strings; proposed/withdrawn records need no delivery bundle and
+        # forbid sent_at. Once sent, channel/ref/sent_at are required (modelled on the
         # pending_decision all-or-none idiom). The `sent` creation-gating snapshot is handled generically
         # by _validate_gated_snapshot above.
         for k in ("recipient", "dedup_class", "content_digest"):

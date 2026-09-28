@@ -84,8 +84,8 @@
       <div class="codebody"><span class="tok-tbl">[store]</span>
   <span class="tok-key">target</span> = <span class="tok-str">"dir:."</span></div>
     </div>
-    <p>A single <code>[store]</code> table. <code>target = "dir:."</code> is the default written by <code>opf init</code>. A target names the store repository in one of four forms: <code>dir:&lt;path&gt;</code> or a bare path (a directory that is, or will be, its own git repository); <code>git:&lt;url&gt;</code> or a bare git URL (any git remote on any host); <code>github:&lt;owner/repo&gt;</code> (a creation convenience that resolves to an ordinary git URL); and <code>gitlab:&lt;owner/repo&gt;</code> (the same, for GitLab). A relative <code>dir:</code> path resolves against the product repository root, the named fixed root for this file; any other path in a pointer must be absolute.</p>
-    <p>Resolution takes the local override first, then the committed pointer, then, where neither exists, the default location, where a valid manifest resolves as the store. No pointer and no default store is the not-adopted state, and <code>opf init</code> is the remedy. Store relocation re-points the committed pointer and the manifest's recorded sync target in the same change, so the pointer, the manifest, and the actual remote never disagree across a landed state; the integrity layer checks that agreement. The pointer has no generated view of its own: it is lowercase machine source, never a deliverable and never hand-authored truth a human is meant to read first.</p>
+    <p>A single <code>[store]</code> table. <code>target = "dir:."</code> is the default written by <code>opf init</code>. The standard defines four target forms: <code>dir:&lt;path&gt;</code> or an absolute bare path; <code>git:&lt;url&gt;</code> or a bare git URL; <code>github:&lt;owner/repo&gt;</code>; and <code>gitlab:&lt;owner/repo&gt;</code>. The host forms are specified creation conveniences that resolve to ordinary git URLs. The reference resolver recognizes remote forms but cannot resolve them without clone or sync support; it currently resolves local stores only. Relative <code>dir:</code> paths resolve against the product repository root; other filesystem paths must be absolute.</p>
+    <p>Resolution tries the local override, then the committed pointer, then the default location when neither pointer exists. No pointer and no default store is the not-adopted state, and <code>opf init</code> is the remedy. The standard requires relocation to update the pointer and recorded sync target together; <code>opf migrate</code> is planned in the reference CLI. The pointer is control data and has no generated view.</p>
 
     <h3>The problem it solves</h3>
     <blockquote class="refpull">The store's location is configuration, not architecture.</blockquote>
@@ -104,7 +104,7 @@
           <span class="chip"><code>opf init</code></span>
           <span class="chip"><code>opf render</code></span>
           <span class="chip"><code>opf doctor</code></span>
-          <p>Created by <code>opf init</code> with <code>target = "dir:."</code> (it refuses to run where any pointer already exists); updated by <code>opf migrate</code>, as part of the single recorded relocation change; read by every verb at every store resolution, and by <code>opf doctor</code> for pointer and sync-target agreement.</p>
+          <p>Created by <code>opf init</code> with <code>target = "dir:."</code>, refusing an existing pointer; updated by <code>opf migrate</code> (planned; not yet implemented in the reference CLI) in the specified relocation flow. Implemented store readers use it for resolution; <code>opf doctor</code> checks pointer and sync-target agreement.</p>
         </dd>
       </div>
       <div>
@@ -118,8 +118,8 @@
     <h3>What it protects</h3>
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s6-5.2 6-10a6 6 0 1 0-12 0c0 4.8 6 10 6 10z"/><circle cx="12" cy="11" r="2.4"/></svg></span>
-      <h4>The right store, every time</h4>
-      <p>A store that can live anywhere, resolved the same way by every tool, with private topologies possible without weakening tracking. Fail-closed resolution helps prevent a tool from operating on a different store than the one intended.</p>
+      <h4>Explicit store resolution</h4>
+      <p>The intended benefit is an explicit store location. A pointer that fails resolution stops the reader; resolving a valid pointer does not establish that its author chose the intended store.</p>
     </div>
   </div>
 </section>
@@ -151,11 +151,11 @@
   <span class="tok-key">span</span>        = <span class="tok-str">"2026"</span>
   <span class="tok-key">destination</span> = <span class="tok-str">"archive/2026/worklog.toml"</span></div>
     </div>
-    <p>A closed three-key shape: <code>schema</code>, <code>moved</code> (rows of <code>{id, type, destination}</code>), and <code>worklog_moved</code> (rows of <code>{span, destination}</code>). The archive directory also carries the rotated record and worklog files themselves, preserved byte for byte. Coverage gates read active and archive together, so rotation never changes any gate's answer, and <code>counters.toml</code> is untouched, preserving ID permanence. Retention is indefinite by default; an adopter bound by a retention policy applies it as a recorded maintainer decision governing archival, never as deletion of a record. Archived records have no generated view of their own; they surface through the same gates and coverage checks as active ones, read together.</p>
+    <p>A closed three-key shape: <code>schema</code>, <code>moved</code> (rows of <code>{id, type, destination}</code>), and <code>worklog_moved</code> (rows of <code>{span, destination}</code>). Rotated records and worklog entries remain in the archive. Coverage checks read active and archived entries together; rotation must preserve released coverage and counter high-water marks. The standard requires indefinite retention by default, with archival policy recorded as a maintainer decision rather than record deletion. Archived records remain inputs to integrity and coverage checks.</p>
 
     <h3>The problem it solves</h3>
     <blockquote class="refpull">Active indexes should stay small without history getting quietly thinner.</blockquote>
-    <p>The enumeration is what makes a silent removal detectable: every movement is recorded, so a record cannot vanish under the name of rotation, and validation can confirm that every ID exists in exactly one active or archived location.</p>
+    <p>Rotation records enumerate moved IDs. Validation checks their destinations and the active/archive partition; these checks are intended to expose missing or duplicated records within their observed inputs.</p>
 
     <dl class="refstrip">
       <div>
@@ -188,8 +188,8 @@
     <h3>What it protects</h3>
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16v3.2H4z"/><path d="M5.4 10.4v8.1h13.2v-8.1"/><path d="M9.8 14h4.4"/></svg></span>
-      <h4>History that stays fast, and never forgets</h4>
-      <p>A store that stays fast to read without ever forgetting, with rotation that is provably lossless: the enumeration plus the one-location invariant helps prevent quiet disappearance of history.</p>
+      <h4>Retain history while reducing active indexes</h4>
+      <p>Rotation is intended to keep active indexes smaller while preserving history. Enumeration and partition checks validate the recorded movement; they do not measure read performance.</p>
     </div>
   </div>
 </section>
@@ -255,7 +255,7 @@
         <dd>
           <span class="chip"><code>opf render</code></span>
           <span class="chip"><code>opf doctor</code></span>
-          <p>Created by <code>opf render --write</code>, gated on a valid whole-store verdict; regenerated only, so hand edits are drift, reported by <code>opf render --check</code> and <code>opf doctor</code>; read by machine consumers of the decision record and by the byte drift gate.</p>
+          <p>Created by <code>opf render --write</code> after source-integrity checks. Post-write validation checks source integrity and regenerated outputs; disagreements trigger a rollback attempt, with failures reported. Other deliverable failures can still cause a nonzero exit. Hand edits are byte drift checked by <code>opf render --check</code> and <code>opf doctor</code>; machine consumers read the generated projection.</p>
         </dd>
       </div>
     </dl>
@@ -264,7 +264,7 @@
     <div class="benefit">
       <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="m10.5 12.5-2 2 2 2"/><path d="m13.5 12.5 2 2-2 2"/></svg></span>
       <h4>One resolution, not many divergent ones</h4>
-      <p>A stable machine interface to the decision record with the current effective resolution precomputed, which helps prevent each consumer from re-implementing, and diverging on, the supersession walk.</p>
+      <p>The projection provides the decision-resolution join in a machine-readable file. Its intended benefit is to let consumers reuse that result instead of implementing the supersession walk themselves.</p>
     </div>
   </div>
 </section>

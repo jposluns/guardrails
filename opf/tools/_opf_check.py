@@ -93,7 +93,7 @@ LEASE_NAME = "lease.toml"                  # present only while the single-write
 INIT_PROVENANCE_NAME = "init.toml"
 ARCHIVE_DIRNAME = "archive"
 ARCHIVE_MANIFEST_NAME = "archive.toml"
-EVIDENCE_FORMAT = "opf.evidence.inventory/v1"   # homes-2 per-bundle inventory format (spec 4.2)
+EVIDENCE_FORMAT = _opf_store.EVIDENCE_INVENTORY_FORMAT
 INDEX_SUFFIX = ".index.toml"
 
 # The containment walk is bounded by an explicit depth ceiling so a pathologically deep directory chain
@@ -1785,8 +1785,9 @@ def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep):
 
 # Homes-2 durable evidence (C-EVIDENCE-ENUM, spec 4.2). Each imported/<kind>/<run-id>/ bundle carries
 # its own immutable inventories, which its writer derives from the run's transaction record or receipt,
-# so an evidence commit changes only its bundle folder. No shipped writer publishes one yet. Inventories
-# establish membership, not authenticated actor history, and no journal is read to reconcile them.
+# so an evidence commit changes only its bundle folder. Ingest publication writes the base inventory
+# and a promotion phase inventory claiming its receipt. Inventories establish membership, not
+# authenticated actor history, and doctor reads no journal to reconcile them.
 
 def _evidence_claim(bundle, kind, run_id, path):
     """Validate one inventory row path against what its bundle may claim: a member of the bundle itself
@@ -1805,6 +1806,29 @@ def _evidence_claim(bundle, kind, run_id, path):
     raise ValueError("bundle {!r} cannot claim {!r}".format(bundle, path))
 
 
+class _LegacyIngestInventory(ValueError):
+    """Recognized unsupported format: a named finding, not an unreadable inventory."""
+
+
+def _evidence_rows(bundle, kind, run_id, doc):
+    """Shared schema/path validation for doctor and completed-ingest replay; never upgrades old bytes."""
+    if isinstance(doc, dict) and doc.get("format") == "opf.ingest.evidence-inventory/v1":
+        raise _LegacyIngestInventory("legacy-ingest-inventory: old-format ingest inventory is unsupported; "
+                                     "refused without migration or rewrite")
+    if (not isinstance(doc, dict) or set(doc) != {"format", "file"}
+            or doc["format"] != EVIDENCE_FORMAT or not isinstance(doc["file"], list)):
+        raise ValueError("an inventory holds exactly format {!r} and a file array".format(EVIDENCE_FORMAT))
+    for row in doc["file"]:
+        if not isinstance(row, dict) or set(row) != {"path", "size", "sha256"}:
+            raise ValueError("file rows require exactly path, size and sha256")
+        _evidence_claim(bundle, kind, run_id, row["path"])
+        if type(row["size"]) is not int or row["size"] < 0:
+            raise ValueError("size must be a nonnegative integer")
+        if not isinstance(row["sha256"], str) or not _opf_import._HEX64_RE.fullmatch(row["sha256"]):
+            raise ValueError("sha256 must be 64 lowercase hex digits")
+    return doc["file"]
+
+
 def _check_evidence(root_fd, homes, rep):
     """C-EVIDENCE-ENUM: reconcile the homes-2 evidence homes against their per-bundle inventories.
 
@@ -1812,7 +1836,8 @@ def _check_evidence(root_fd, homes, rep):
     paths as before. In homes 2 every payload file under imported/ and archive/ (every file other than a
     bundle-root inventory) must be claimed by exactly one inventory row and match its recorded size and
     digest; each inventory is itself schema-checked. Unlisted or unclaimed entries, a bundle with no
-    inventory, and missing listed files are findings. An unreadable or malformed input, and a bundle with
+    inventory, missing listed files, and a recognized legacy ingest inventory are findings.
+    An unreadable or malformed input, and a bundle with
     a phase inventory but no inventory.toml, cannot evaluate; a malformed inventory stops the
     reconciliation, since its claims are unknown. Deleting a whole bundle, inventory and payload
     together, is outside this local snapshot check; history coverage is separate. Reads use the contained
@@ -1858,21 +1883,13 @@ def _check_evidence(root_fd, homes, rep):
             failed[0] = True
             return
         try:
-            if (not isinstance(doc, dict) or set(doc) != {"format", "file"}
-                    or doc["format"] != EVIDENCE_FORMAT or not isinstance(doc["file"], list)):
-                raise ValueError("an inventory holds exactly format {!r} and a file array".format(
-                    EVIDENCE_FORMAT))
-            for row in doc["file"]:
-                if not isinstance(row, dict) or set(row) != {"path", "size", "sha256"}:
-                    raise ValueError("file rows require exactly path, size and sha256")
-                _evidence_claim(bundle, kind, run_id, row["path"])
-                if type(row["size"]) is not int or row["size"] < 0:
-                    raise ValueError("size must be a nonnegative integer")
-                if not isinstance(row["sha256"], str) or not _opf_import._HEX64_RE.fullmatch(row["sha256"]):
-                    raise ValueError("sha256 must be 64 lowercase hex digits")
+            for row in _evidence_rows(bundle, kind, run_id, doc):
                 if row["path"] in expected:
                     raise ValueError("{!r} is claimed more than once".format(row["path"]))
                 expected[row["path"]] = row
+        except _LegacyIngestInventory as exc:
+            rep.finding("C-EVIDENCE-ENUM: {} (inventory {!r})".format(exc, rel))
+            failed[0] = True
         except (TypeError, ValueError) as exc:
             rep.cant("C-EVIDENCE-ENUM: malformed inventory {!r}: {}".format(rel, exc))
             failed[0] = True
@@ -1909,7 +1926,7 @@ def _check_evidence(root_fd, homes, rep):
                 read_inventory(bundle, kind, run_id, _rel(bundle, name))
             bundles.append((bundle, subdirs, [name for name in files if name not in inventories]))
     if failed[0]:
-        return    # the claims are unknown: the recorded cannot-evaluate stands, never a partial grade
+        return    # refused inventories have unknown claims; keep their recorded grade, never reconcile partially
     directories = set()
     for path in expected:
         parent = path.rsplit("/", 1)[0]

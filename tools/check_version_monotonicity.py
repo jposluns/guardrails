@@ -541,6 +541,12 @@ def _run_quiet(root, base):
 
 
 def self_test_main():
+    # Hermetic git fixtures (test-hermeticity): every fixture git call below inherits
+    # os.environ, where an inherited GIT_INDEX_FILE / GIT_DIR (git exports these to hook
+    # children) would redirect the fixture's init/add/commit into the CALLER's repository.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _git_fixture_env import scrub_git_environment
+    scrub_git_environment()
     failures = []
 
     # F-TOML-BARE-VALUEERROR-CLASS: a 1200-deep nested array makes tomllib raise RecursionError (a

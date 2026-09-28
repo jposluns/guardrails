@@ -98,6 +98,7 @@ STORE_ROOT_CONTROL_DIRS = (".git", ".aiqt")
 SUPPORTED_HOMES = 1
 # Worklog 2 remains test-only until schema, doctor, and release support land.
 SUPPORTED_WORKLOG = 1
+EVIDENCE_INVENTORY_FORMAT = "opf.evidence.inventory/v1"  # spec 4.2
 IMPORTED_DIRNAME = "imported"
 ARCHIVE_DIRNAME_STORE = "archive"       # distinct from the machine-store record archive
 STAGING_DIRNAME = "staging"

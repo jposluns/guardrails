@@ -74,6 +74,16 @@ EXIT_ERROR = 2
 
 
 def _self_test():
+    """Keep caller HOME/XDG out of fixture reads, including in-process production helpers."""
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
+            return _self_test_isolated()
+
+
+def _self_test_isolated():
     """Build synthetic stores and assert every registered check PASSes on a clean detection and FINDINGs on
     its own discriminator, plus delegate to the engine's own unit suite. Returns 0 clean, 1 on a failing
     assertion, 2 on a harness error (a fixture could not be built)."""

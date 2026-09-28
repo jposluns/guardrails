@@ -29,6 +29,7 @@ import _opf_ingest
 import _opf_store
 import _opf_views
 import _opf_worklog as wl
+import _opf_write_guard
 
 M = "m"
 LEGACY = "m/worklog.toml"
@@ -547,7 +548,8 @@ def _entry_point_census(check):
                 or path.stem.endswith("_regressions")):
             continue
         for node in ast.parse(path.read_text(encoding="utf-8")).body:
-            if isinstance(node, ast.FunctionDef) and node.name not in ("self_test", "main"):
+            if (isinstance(node, ast.FunctionDef) and node.name != "main"
+                    and not node.name.startswith("self_test")):
                 nodes[path.stem + "." + node.name] = node
     reverse = {}
     for key, node in nodes.items():
@@ -1062,7 +1064,7 @@ def _upgrade_preflight_regressions(check, fence):
                 before, index_before = snapshot(root)
                 if unsupported:
                     with patch.dict(os.environ, env, clear=True), \
-                            patch.object(opf, "_upgrade_acquire_lease",
+                            patch.object(_opf_write_guard, "acquire_lease",
                                          side_effect=opf._UpgradeError("lease reached")) as lease, \
                             contextlib.redirect_stdout(io.StringIO()), \
                             contextlib.redirect_stderr(io.StringIO()):

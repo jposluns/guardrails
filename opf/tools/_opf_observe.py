@@ -114,7 +114,7 @@ def _scrubbed_env():
 
 
 def _run_git(git, store_root, args, timeout=_GIT_TIMEOUT_S, allow_lazy_fetch=False, config_overrides=None,
-             max_output_bytes=8 << 20):
+             max_output_bytes=8 << 20, input_bytes=None):
     """Run `git --no-pager --no-replace-objects -c core.fsmonitor=false -C <store_root> <args>` under the
     scrubbed environment, bounded by a
     timeout. Returns a _GitOutcome: `completed` is True only when the process ran to completion (then `rc`,
@@ -150,7 +150,8 @@ def _run_git(git, store_root, args, timeout=_GIT_TIMEOUT_S, allow_lazy_fetch=Fal
     starts from PATH+HOME only), so a hostile environment can neither smuggle in its own GIT_CONFIG_* override
     nor pre-set a conflicting GIT_CONFIG_COUNT to defeat the neutralization: the count and pairs written here
     are the authoritative ones. An env override is command-level precedence, so (like `-c core.fsmonitor=false`
-    above) it overrides repository AND worktree config."""
+    above) it overrides repository AND worktree config. Optional input_bytes is sent on stdin within
+    the same timeout while stdout/stderr are drained; callers supply bytes, never shell text."""
     cmd = [git, "--no-pager", "--no-replace-objects", "-c", "core.fsmonitor=false",
            "-c", "core.commitGraph=false", "-C", str(store_root)] + list(args)
     env = _scrubbed_env()
@@ -164,17 +165,19 @@ def _run_git(git, store_root, args, timeout=_GIT_TIMEOUT_S, allow_lazy_fetch=Fal
         for i, (key, value) in enumerate(config_overrides):
             env["GIT_CONFIG_KEY_{}".format(i)] = key
             env["GIT_CONFIG_VALUE_{}".format(i)] = value
-    return _capture_bounded(cmd, env, timeout, max_output_bytes)
+    return _capture_bounded(cmd, env, timeout, max_output_bytes, input_bytes=input_bytes)
 
 
-def _capture_bounded(cmd, env, timeout, max_output_bytes):
+def _capture_bounded(cmd, env, timeout, max_output_bytes, input_bytes=None):
     """Capture stdout AND stderr incrementally; cap and timeout never return partial success."""
     import math
     import selectors
     import time
     if (type(max_output_bytes) is not int or not 0 < max_output_bytes <= (64 << 20)
             or type(timeout) not in (int, float) or not math.isfinite(timeout)
-            or not 0 < timeout <= 300):
+            or not 0 < timeout <= 300
+            or (input_bytes is not None and (not isinstance(input_bytes, bytes)
+                                              or len(input_bytes) > (64 << 20)))):
         return _GitOutcome(False, None, b"", "invalid bounded-read control")
     deadline = time.monotonic() + timeout
     proc = None
@@ -182,8 +185,13 @@ def _capture_bounded(cmd, env, timeout, max_output_bytes):
     chunks = [bytearray(), bytearray()]
     total = 0
     try:
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE if input_bytes else subprocess.DEVNULL,
+                                stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, env=env)
+        sent = 0
+        if input_bytes:
+            os.set_blocking(proc.stdin.fileno(), False)
+            selector.register(proc.stdin, selectors.EVENT_WRITE, "stdin")
         for i, stream in enumerate((proc.stdout, proc.stderr)):
             os.set_blocking(stream.fileno(), False)
             selector.register(stream, selectors.EVENT_READ, i)
@@ -195,6 +203,12 @@ def _capture_bounded(cmd, env, timeout, max_output_bytes):
             if not ready:
                 raise TimeoutError("git read timed out")
             for key, _event in ready:
+                if key.data == "stdin":
+                    sent += os.write(key.fileobj.fileno(), input_bytes[sent:sent + 65536])
+                    if sent == len(input_bytes):
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                    continue
                 block = os.read(key.fileobj.fileno(), min(65536, max_output_bytes - total + 1))
                 if not block:
                     selector.unregister(key.fileobj)
@@ -219,7 +233,7 @@ def _capture_bounded(cmd, env, timeout, max_output_bytes):
                 proc.wait(timeout=1)
             except subprocess.TimeoutExpired:
                 pass  # No success is reported; an uninterruptible kernel wait is a platform residual.
-            for stream in (proc.stdout, proc.stderr):
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
                 if stream is not None:
                     stream.close()
 
@@ -276,9 +290,9 @@ def _filter_neutralizing_config(git, store_root, timeout=_GIT_TIMEOUT_S):
     (normal post-add / checkout / clone state) `git status` re-hashes the RAW worktree bytes, which differ
     from the index blob, and reports a genuinely-CLEAN store as DIRTY. This is inherent to driver
     neutralization (the mirror of why a raw --no-filters reimplementation was rejected for its text=auto
-    regression) and is FAIL-CLOSED (it over-refuses the upgrade; it is NEVER a false-clean and NEVER a filter
-    exec). _upgrade_probe_dirty / _upgrade_check_clean surface this to the operator with clear guidance to
-    settle the worktree before upgrading (F-OPF-STATUSFILTER-LFS-FALSEPOS).
+    regression) and is FAIL-CLOSED (it over-refuses the in-place write; it is NEVER a false-clean and NEVER a
+    filter exec). _opf_write_guard.probe_dirty / check_clean surface this to the operator with clear guidance
+    to settle the worktree before re-running the operation (F-OPF-STATUSFILTER-LFS-FALSEPOS).
 
     FAIL-CLOSED (guard-input-soundness, check-fails-closed-on-unreadable): neutralization completeness rests
     entirely on this enumeration, so any state where the exec-able set cannot be proven is a cannot-evaluate
@@ -955,6 +969,16 @@ class _Res:
 
 
 def self_test():
+    """Isolate fixture configuration and restore the caller even on failure."""
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
+            return self_test_isolated()
+
+
+def self_test_isolated():
     """Exercise gather over synthetic git repositories built in a tempdir (removed in a finally, for
     test-hermeticity). Covered: tracked vs untracked manifest; zero / one / multiple remotes; a prior
     extracted from a committed HEAD (records and the immutable-body digest matching the engine's own

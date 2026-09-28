@@ -1013,8 +1013,8 @@ def _git_available():
 def _git_init_commit(repo, msg, init=True):
     """Init (once) and commit a fixture repo with a fixed, neutralized identity so a self-test commit is
     deterministic and independent of the host git config (test hermeticity)."""
-    import os
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    from _git_fixture_env import git_fixture_env
+    env = git_fixture_env()
     env.update({"GIT_AUTHOR_NAME": "AIQT Self-Test", "GIT_AUTHOR_EMAIL": "selftest@example.invalid",
                 "GIT_COMMITTER_NAME": "AIQT Self-Test", "GIT_COMMITTER_EMAIL": "selftest@example.invalid",
                 "GIT_AUTHOR_DATE": "2000-01-01T00:00:00", "GIT_COMMITTER_DATE": "2000-01-01T00:00:00"})
@@ -1026,17 +1026,21 @@ def _git_init_commit(repo, msg, init=True):
 
 
 def _selftest_env():
-    import os
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    from _git_fixture_env import git_fixture_env
+    env = git_fixture_env()
     env.update({"GIT_AUTHOR_NAME": "AIQT Self-Test", "GIT_AUTHOR_EMAIL": "selftest@example.invalid",
                 "GIT_COMMITTER_NAME": "AIQT Self-Test", "GIT_COMMITTER_EMAIL": "selftest@example.invalid",
-                "GIT_AUTHOR_DATE": "2000-01-01T00:00:00", "GIT_COMMITTER_DATE": "2000-01-01T00:00:00",
-                "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull})
+                "GIT_AUTHOR_DATE": "2000-01-01T00:00:00", "GIT_COMMITTER_DATE": "2000-01-01T00:00:00"})
     return env
 
 
 def _archive_head(real):
-    arch = subprocess.run(["git", "-C", str(real), "archive", "HEAD"], capture_output=True)
+    # A REAL-repository read reached from the scrubbed self-test: the caller's env (minus GIT_*)
+    # keeps the safe.directory trust the in-place fixture scrub drops, so a foreign-owned checkout
+    # does not silently skip the real full-pack cases.
+    from _git_fixture_env import caller_env_without_git
+    arch = subprocess.run(["git", "-C", str(real), "-c", "core.attributesFile=/dev/null", "archive", "HEAD"], capture_output=True,
+                          env=caller_env_without_git())
     return arch.stdout if arch.returncode == 0 and arch.stdout else None
 
 
@@ -1244,9 +1248,8 @@ def _real_pack_e2e(tmp, failures):
 
     def _spy_index(dest, label):
         _orig_index(dest, label)
-        senv = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-        senv["GIT_CONFIG_GLOBAL"] = os.devnull
-        senv["GIT_CONFIG_SYSTEM"] = os.devnull
+        from _git_fixture_env import git_fixture_env
+        senv = git_fixture_env()
         ls = subprocess.run(["git", "-C", str(dest), "ls-files", "-z"], capture_output=True, env=senv)
         _captured_index.extend(p for p in ls.stdout.decode("utf-8", "replace").split("\x00") if p)
     globals()["_index_materialized_tree"] = _spy_index
@@ -1937,7 +1940,20 @@ def _real_pack_e2e(tmp, failures):
     return True
 
 
-def self_test_main():  # noqa: C901  a flat sequence of independent classification cases
+def self_test_main():
+    from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
+    scrub_git_environment()
+    with fixture_git_lifecycle():
+        return _self_test_main_isolated()
+
+
+def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent classification cases
+    # Hermetic git fixtures (test-hermeticity): every fixture git call below inherits
+    # os.environ, where an inherited GIT_INDEX_FILE / GIT_DIR (git exports these to hook
+    # children) would redirect the fixture's init/add/commit into the CALLER's repository.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _git_fixture_env import scrub_git_environment
+    scrub_git_environment()
     failures = []
 
     # F-TOML-BARE-VALUEERROR-CLASS: a predecessor TOML carrying an over-long integer literal (a BARE

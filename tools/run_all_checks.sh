@@ -81,6 +81,9 @@ run_gate "opf-homes-selftest" python3 -I -B opf/tools/check_opf_homes.py --self-
 run_gate "opf-homes-migrate-selftest" python3 -I -B opf/tools/check_opf_homes_migrate.py --self-test --red-on-revert
 run_gate "opf-homes-contract" python3 -I -B opf/tools/check_opf_homes.py
 run_gate "opf-tooling-selftest" python3 -I -B opf/tools/opf.py --self-test
+run_gate "opf-import-direct-selftest" python3 -I -B opf/tools/_opf_import.py --self-test
+run_gate "opf-ingest-direct-selftest" python3 -I -B opf/tools/_opf_ingest.py --self-test
+run_gate "opf-observe-direct-selftest" python3 -I -B opf/tools/_opf_observe.py --self-test
 run_gate "opf-drift-selftest" python3 -I -B opf/tools/check_opf_drift.py --self-test
 run_gate "opf-drift" python3 -I -B opf/tools/check_opf_drift.py
 run_gate "opf-doctor-selftest" python3 -I -B opf/tools/check_opf_doctor.py --self-test
@@ -92,6 +95,7 @@ run_gate "opf-init-contract-check-selftest" python3 -I -B opf/tools/check_opf_in
 run_gate "opf-init-contract-check" python3 -I -B opf/tools/check_opf_init_contract.py
 run_gate "opf-upgrade-selftest" python3 -I -B opf/tools/check_opf_upgrade.py --self-test
 run_gate "opf-upgrade" python3 -I -B opf/tools/check_opf_upgrade.py
+run_gate "opf-record-selftest" python3 -I -B opf/tools/check_opf_record.py --self-test --red-on-revert
 run_gate "opf-import-selftest" python3 -I -B opf/tools/check_opf_import.py --self-test
 run_gate "opf-import" python3 -I -B opf/tools/check_opf_import.py
 run_gate "opf-ingest-selftest" python3 -I -B opf/tools/check_opf_ingest.py --self-test
@@ -110,6 +114,8 @@ run_gate "aiqt-corpus-selftest" python3 -I -B tools/selftest_aiqt_corpus.py
 run_gate "roadmap-drift"   python3 -I -B tools/gen_roadmap.py --check
 run_gate "changelog-drift" python3 -I -B tools/gen_changelog.py --check
 run_gate "versions"        python3 -I -B tools/check_versions.py
+run_gate "release-cut-selftest" python3 -I -B tools/check_release_cut.py --self-test --red-on-revert
+run_gate "release-cut"          python3 -I -B tools/check_release_cut.py
 run_gate "version-monotonicity-selftest" python3 -I -B tools/check_version_monotonicity.py --self-test
 run_gate "version-monotonicity" python3 -I -B tools/check_version_monotonicity.py
 run_gate "branch-root-selftest" python3 -I -B tools/check_branch_root.py --self-test
@@ -166,6 +172,7 @@ run_gate "hooks-preview" python3 -I -B tools/check_hooks_preview.py
 run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execution.py --self-test
 run_gate "orch-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
 run_gate "ci-status-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
+run_gate "git-fixture-env-selftest" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest
 run_gate "record-drift-selftest" python3 -I -B tools/check_record_drift.py --self-test
 run_gate "record-drift"          python3 -I -B tools/check_record_drift.py
 run_gate "record-sections-selftest" python3 -I -B tools/check_record_sections.py --self-test

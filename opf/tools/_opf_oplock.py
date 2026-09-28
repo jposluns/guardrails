@@ -3935,6 +3935,30 @@ def release_init_holder(holder):
 # --- self-test --------------------------------------------------------------------------------------
 
 
+def _st_with_git_lifecycle(callback):
+    """Self-test only: reassert system pins after production helpers strip GIT_*.
+    Absolute executables not resolved through this PATH remain outside coverage.
+    Keep this helper within OPF so standalone self-tests need no authoring tools.
+    """
+    import shlex
+    import tempfile
+    from unittest.mock import patch
+    git = shutil.which("git")
+    if git is None:
+        raise RuntimeError("self-test requires git")
+    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+        wrapper = Path(home) / "git"
+        wrapper.write_text(
+            "#!/bin/sh\nexport GIT_CONFIG_NOSYSTEM=1\n"
+            "export GIT_CONFIG_SYSTEM={}\nexec {} \"$@\"\n".format(
+                shlex.quote(os.devnull), shlex.quote(os.path.abspath(git))), encoding="utf-8")
+        wrapper.chmod(0o700)
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1",
+                        PATH=home + os.pathsep + os.environ.get("PATH", os.defpath)):
+            return callback()
+
+
 def _st_git_env(home):
     """A pinned, hermetic environment for FIXTURE git commands: ambient GIT_* dropped, then HOME,
     XDG_CONFIG_HOME, and the global/system config files bound into the fixture so no ambient user
@@ -9156,6 +9180,10 @@ def _t_i5_holder_identity_bound(d, env):
 
 
 def self_test():
+    return _st_with_git_lifecycle(self_test_isolated)
+
+
+def self_test_isolated():
     """Regression roster (plan section (e)): the resolving-roster check T-named,
     the PR2 T-c/T-crit/T-med/T-low roster PLUS the PR2
     round-3 recovery-liveness witnesses (T-r3-live-recover-refuses, T-r3-dead-recover-proceeds,
