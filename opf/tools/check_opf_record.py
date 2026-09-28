@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T18)
+  check_opf_record.py --self-test                    the fixture suite (T1-T19)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -88,6 +88,29 @@ Each case runs on its own copy of that template; the root is removed in a finall
       options on open -> withdrawn, and on the ratification of decided/proposed, each refuse in its own
       test (flip, applied to each of the two: drop the apply-only half of the option guard, under which
       the options are silently ignored)
+  T19 a decision that lands unqualified decided supersedes its chain's current resolution in the same act:
+      a maintainer decides PD-2 with --supersedes PD-1, doctor VALID, and DECISIONS lists PD-2 effective
+      and PD-1 superseded; the maintainer's ratification of an assistant's decided/proposed PD-3 with
+      --supersedes PD-2 makes PD-3 the one effective resolution, doctor VALID (flip: the planner writes no
+      link, which only the independent oracle refuses). Each supersession refusal is its own test with its
+      own flip, every byte untouched: a --supersedes value that is not a record id refuses before the
+      store is resolved (flip: drop the parser's record-id check); --supersedes on an assistant decide (a
+      decided/proposed landing) refuses (flip: drop the landing check); a target still open refuses (flip:
+      drop the target-decided check); a target the schema grades invalid refuses (flip: trust the target
+      without validating it, the T16 trust flip); a second successor for a resolution already superseded
+      refuses (flip: drop the chain-head check); and a target whose own chain leads back to the record
+      refuses (flip: drop the cycle check). Under each of the landing, fork, cycle, and invalid-target
+      flips the link publishes and the post-publication render's source gate then refuses on a doctor
+      finding: C-DECISION-CHAINS with no current resolution (landing, cycle) or two (fork), or the
+      target's own pre-existing finding (invalid target); under the target-decided flip the link publishes
+      doctor VALID; each exits with bytes changed, so the untouched assertion turns red. The decisions
+      register's other two types are driven end to end: a maintainer files a
+      maintainer_decision linking exemplifies PP-1, doctor VALID and listed with its link, and an
+      assistant distils a preference_pattern to active/proposed that the maintainer ratifies and then
+      retires, doctor VALID (flip: the planner drops the requested links, which only the independent
+      oracle refuses); the same ruling filed by an assistant refuses with every byte untouched in its own
+      test (flip: the planner's record validation replaced by a pass-through, so the ruling publishes and
+      that gate reports its actor finding)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -120,6 +143,9 @@ MACH = ".working/toml"
 COUNTERS = MACH + "/counters.toml"
 BI_INDEX = MACH + "/backlog_item.index.toml"
 PD_INDEX = MACH + "/pending_decision.index.toml"
+MD_INDEX = MACH + "/maintainer_decision.index.toml"
+PP_INDEX = MACH + "/preference_pattern.index.toml"
+DECISIONS_VIEW = ".working/DECISIONS.md"
 DN_INDEX = MACH + "/done.index.toml"
 WORKLOG = MACH + "/worklog.toml"
 VERSION = MACH + "/version.toml"
@@ -1015,7 +1041,8 @@ def flip_t16():
 
 def flip_t16_trust():
     """Trust the current row without validating it (the reviewed head's behaviour): the invalid-predecessor
-    rejection, the invalid-predecessor done-with-receipt, and the stray-field proposal must each turn red."""
+    rejection, the invalid-predecessor done-with-receipt, and the stray-field proposal must each turn red,
+    and so must T19's invalid supersession target (the same check, applied to the superseded row)."""
     return patch.object(record, "_require_valid_current", lambda row, rtype, ctx, rid, rel: None)
 
 
@@ -1234,6 +1261,224 @@ def flip_t18_apply_only():
     return patch.object(record, "_require_decision_options", requires_only)
 
 
+# --- T19: supersession when a decision is decided, and the rest of the decisions register ---------------
+
+def _section(root, heading):
+    """The entry lines of one section of the rendered DECISIONS view."""
+    text = read(root, DECISIONS_VIEW).decode("utf-8")
+    assert "## " + heading + "\n" in text, (heading, text)
+    return text.split("## " + heading + "\n", 1)[1].split("\n## ", 1)[0].strip().splitlines()
+
+
+def _pd_create(title):
+    return ["create", "--type", "pending_decision", "--title", title]
+
+
+def _decided(fx, root, title, n):
+    """PD-n created and decided by a maintainer, each step committed. Run under ticking()."""
+    rid = "PD-{}".format(n)
+    step(fx, root, _pd_create(title) + MAINTAINER, rid)
+    step(fx, root, ["transition", rid, "decided"] + DECIDE + MAINTAINER, rid + " decided")
+
+
+def _supersede(rid, target, actor=MAINTAINER):
+    return ["transition", rid, "decided"] + DECIDE + ["--supersedes", target] + actor
+
+
+def t19_supersession(fx):
+    env = fx.env
+    root = fx.case("t19-supersedes")
+    with ticking():
+        _decided(fx, root, "which layout", 1)
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        step(fx, root, ["transition", "PD-2", "decided", "--decision", "the split layout", "--decided-by",
+                        "the architecture board", "--supersedes", "PD-1"] + MAINTAINER, "PD-2 supersedes PD-1")
+        rec = row(root, "PD-2", PD_INDEX)
+        assert rec["status"] == "decided" and rec["links"] == [{"rel": "supersedes", "id": "PD-1"}], rec
+        assert "links" not in row(root, "PD-1", PD_INDEX), row(root, "PD-1", PD_INDEX)
+        entry = model(root, WORKLOG)["entry"][-1]
+        assert entry["detail"] == "opf-record transition PD-2 open -> decided\nsupersedes: PD-1", entry
+        assert entry["links"] == [{"rel": "relates", "id": "PD-2"}, {"rel": "relates", "id": "PD-1"}], entry
+        doctor_valid(env, root)
+        assert _section(root, "Effective resolutions") == ["- PD-2 which layout, again (supersedes PD-1)"], (
+            read(root, DECISIONS_VIEW))
+        assert _section(root, "Superseded resolutions") == ["- PD-1 which layout"], read(root, DECISIONS_VIEW)
+        # An assistant files PD-3's answer at decided/proposed; the maintainer's ratification carries the link.
+        step(fx, root, _pd_create("which layout, third") + ASSISTANT, "PD-3")
+        step(fx, root, ["transition", "PD-3", "decided"] + DECIDE + ASSISTANT, "PD-3 decided/proposed")
+        step(fx, root, ["transition", "PD-3", "decided", "--supersedes", "PD-2"] + MAINTAINER, "PD-3 ratified")
+        rec = row(root, "PD-3", PD_INDEX)
+        assert rec["status"] == "decided" and "proposed_from" not in rec, rec
+        assert rec["links"] == [{"rel": "supersedes", "id": "PD-2"}] and _bundle(rec)[0] == "the inline layout", rec
+        assert lifecycle(root)[-1] == ("opf-record transition PD-3 decided/proposed -> decided\n"
+                                       "supersedes: PD-2"), lifecycle(root)
+        doctor_valid(env, root)
+        assert _section(root, "Effective resolutions") == ["- PD-3 which layout, third (supersedes PD-2)"], (
+            read(root, DECISIONS_VIEW))
+        assert _section(root, "Superseded resolutions") == ["- PD-1 which layout", "- PD-2 which layout, again"]
+
+
+def flip_t19_link():
+    """The planner writes no link: only the independent oracle, which reads --supersedes, refuses it."""
+    return patch.object(record, "_supersession_link", lambda req, ctx, operand, rid: None)
+
+
+# Each supersession refusal is its own test, so its own flip must turn it red (the PR2 fix 5 rule).
+
+def t19_record_id(fx):
+    """A --supersedes value that is not a record id refuses in the parser, before the store is resolved."""
+    root = fx.case("t19-record-id")
+    with ticking():
+        _decided(fx, root, "which layout", 1)
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        refused_before_store(fx.env, root, _supersede("PD-2", "layout"), "is not a record id")
+
+
+def flip_t19_record_id():
+    """Drop the parser's record-id check: the malformed value reaches the store."""
+    return patch.object(record, "_require_supersedes_id", lambda values: None)
+
+
+def t19_proposed_landing(fx):
+    """--supersedes on an assistant decide (a decided/proposed landing) refuses with every byte untouched:
+    the doctor counts the link from a proposal, which would leave PD-1's chain with no current resolution."""
+    root = fx.case("t19-proposed-landing")
+    with ticking():
+        _decided(fx, root, "which layout", 1)
+        step(fx, root, _pd_create("which layout, again") + ASSISTANT, "PD-2")
+        refused_untouched(fx.env, root, _supersede("PD-2", "PD-1", ASSISTANT),
+                          "applies only to a transition that lands")
+
+
+def flip_t19_landing():
+    """Drop the landing check: the proposal's link publishes before the doctor finds the chain with no
+    current resolution."""
+    return patch.object(record, "_require_supersedes_landing", lambda req, rid, rtype, current, to_status: None)
+
+
+def t19_undecided_target(fx):
+    """A target that is still open is not a current resolution: the supersede refuses with every byte
+    untouched."""
+    root = fx.case("t19-undecided-target")
+    with ticking():
+        step(fx, root, PD_CREATE + MAINTAINER, "PD-1")
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        refused_untouched(fx.env, root, _supersede("PD-2", "PD-1"), "not an unqualified decided")
+
+
+def flip_t19_decided():
+    """Drop the target-decided check: the link to an open decision publishes (doctor VALID)."""
+    return patch.object(record, "_require_superseded_decided", lambda trow, target: None)
+
+
+def t19_invalid_target(fx):
+    """A target the schema grades invalid (a whitespace decision, committed by a canonical hand edit: a
+    doctor finding) is never trusted: the supersede refuses with every byte untouched."""
+    env = fx.env
+    root = fx.case("t19-invalid-target")
+    with ticking():
+        _decided(fx, root, "which layout", 1)
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        index = model(root, PD_INDEX)
+        assert index["record"][0]["id"] == "PD-1", index["record"][0]
+        index["record"][0]["decision"] = "   "
+        write_commit(env, root, PD_INDEX, emit.emit_checked(index).encode("utf-8"), "a blank decision")
+        rc, out, err = cli(env, ["doctor", "--root", str(root)])
+        assert rc != 0 and "PD-1" in out, ("T19 the blank decision is a doctor finding", rc, out[-1600:])
+        refused_untouched(env, root, _supersede("PD-2", "PD-1"), "not schema-valid")
+
+
+def t19_fork(fx):
+    """A second successor for a resolution its chain has already superseded would fork the chain into two
+    current resolutions: the supersede refuses with every byte untouched."""
+    root = fx.case("t19-fork")
+    with ticking():
+        _decided(fx, root, "which layout", 1)
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        step(fx, root, _supersede("PD-2", "PD-1"), "PD-2 supersedes PD-1")
+        step(fx, root, _pd_create("which layout, third") + MAINTAINER, "PD-3")
+        refused_untouched(fx.env, root, _supersede("PD-3", "PD-1"), "already superseded by PD-2")
+
+
+def flip_t19_fork():
+    """Drop the chain-head check: the second successor publishes before the doctor finds the fork."""
+    return patch.object(record, "_require_chain_head", lambda rows, target, rel: None)
+
+
+def t19_cycle(fx):
+    """PD-2 was created linking supersedes PD-1 while both were open, then decided: PD-1 superseding PD-2
+    would close a cycle and leave the chain with no current resolution, so it refuses with every byte
+    untouched."""
+    root = fx.case("t19-cycle")
+    with ticking():
+        step(fx, root, PD_CREATE + MAINTAINER, "PD-1")
+        step(fx, root, _pd_create("which layout, again") + ["--link", "supersedes=PD-1"] + MAINTAINER, "PD-2")
+        step(fx, root, ["transition", "PD-2", "decided"] + DECIDE + MAINTAINER, "PD-2 decided")
+        doctor_valid(fx.env, root)
+        refused_untouched(fx.env, root, _supersede("PD-1", "PD-2"), "close a cycle")
+
+
+def flip_t19_cycle():
+    """Drop the cycle check: the closing link publishes before the doctor finds the chain with no current
+    resolution."""
+    return patch.object(record, "_require_acyclic", lambda rows, rid, target, rel: None)
+
+
+PATTERN = ["create", "--type", "preference_pattern", "--field", "context=layout choices", "--field",
+           "rationale=fewer files to keep in sync"]
+RULING = ["create", "--type", "maintainer_decision", "--title", "inline for the site", "--field",
+          "decision=use the inline layout for the site", "--link", "exemplifies=PP-1"]
+
+
+def t19_register(fx):
+    env = fx.env
+    root = fx.case("t19-register")
+    with ticking():
+        step(fx, root, PATTERN + ["--title", "prefer inline layouts"] + MAINTAINER, "PP-1")
+        assert row(root, "PP-1", PP_INDEX)["status"] == "active", row(root, "PP-1", PP_INDEX)
+        step(fx, root, RULING + MAINTAINER, "MD-1")
+        rec = row(root, "MD-1", MD_INDEX)
+        assert rec["status"] == "recorded" and rec["links"] == [{"rel": "exemplifies", "id": "PP-1"}], rec
+        assert rec["decision"] == "use the inline layout for the site", rec
+        doctor_valid(env, root)
+        assert _section(root, "Maintainer decisions") == ["- MD-1 inline for the site (exemplifies PP-1)"], (
+            read(root, DECISIONS_VIEW))
+        step(fx, root, PATTERN + ["--title", "prefer short titles"] + ASSISTANT, "PP-2")
+        assert row(root, "PP-2", PP_INDEX)["status"] == "active/proposed", row(root, "PP-2", PP_INDEX)
+        doctor_valid(env, root)
+        step(fx, root, ["transition", "PP-2", "active"] + MAINTAINER, "PP-2 ratified")
+        assert row(root, "PP-2", PP_INDEX)["status"] == "active", row(root, "PP-2", PP_INDEX)
+        step(fx, root, ["transition", "PP-2", "retired"] + MAINTAINER, "PP-2 retired")
+        rec = row(root, "PP-2", PP_INDEX)
+        assert rec["status"] == "retired" and "proposed_from" not in rec, rec
+        doctor_valid(env, root)
+
+
+def flip_t19_links():
+    """The planner drops the requested links: only the independent oracle, which reads --link, refuses the
+    ruling's missing exemplifies link."""
+    original = record._envelope_extras
+
+    def no_links(req, rec):
+        original(req, rec)
+        rec.pop("links", None)
+    return patch.object(record, "_envelope_extras", no_links)
+
+
+def t19_assistant_ruling(fx):
+    """A maintainer_decision is a maintainer act: the same ruling filed by an assistant refuses with every
+    byte untouched."""
+    root = fx.case("t19-assistant-ruling")
+    with ticking():
+        step(fx, root, PATTERN + ["--title", "prefer inline layouts"] + MAINTAINER, "PP-1")
+        refused_untouched(fx.env, root, RULING + ASSISTANT, "not valid")
+
+
+def flip_t19_trust():
+    """The planner's record validation replaced by a pass-through: the assistant ruling publishes."""
+    return patch.object(record, "_validated", lambda rec, expected_type, ctx: rec)
+
+
 def t8_collision(fx):
     env = fx.env
     root = fx.case("t8-collision")
@@ -1347,6 +1592,15 @@ TESTS = (
     ("T18-options-given-together", t18_given_together, flip_t18_together),
     ("T18-options-apply-only-withdrawn", t18_apply_only_withdrawn, flip_t18_apply_only),
     ("T18-options-apply-only-ratification", t18_apply_only_ratification, flip_t18_apply_only),
+    ("T19-decision-supersession", t19_supersession, flip_t19_link),
+    ("T19-supersedes-record-id", t19_record_id, flip_t19_record_id),
+    ("T19-supersedes-proposed-landing", t19_proposed_landing, flip_t19_landing),
+    ("T19-supersedes-undecided-target", t19_undecided_target, flip_t19_decided),
+    ("T19-supersedes-invalid-target", t19_invalid_target, flip_t16_trust),
+    ("T19-supersedes-fork", t19_fork, flip_t19_fork),
+    ("T19-supersedes-cycle", t19_cycle, flip_t19_cycle),
+    ("T19-register-ruling-and-pattern", t19_register, flip_t19_links),
+    ("T19-register-assistant-ruling", t19_assistant_ruling, flip_t19_trust),
 )
 
 

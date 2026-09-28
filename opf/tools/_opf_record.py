@@ -3,7 +3,8 @@
 
   opf record create --type T --title S --actor KIND[:ID] [--summary S] [--link REL=ID]...
                     [--ref KIND LOCATOR NOTE]... [--field NAME=VALUE]... [--scope ID]... [--root DIR]
-  opf record transition ID STATE --actor KIND[:ID] [--reason S] [--decision S --decided-by S] [--root DIR]
+  opf record transition ID STATE --actor KIND[:ID] [--reason S] [--decision S --decided-by S]
+                    [--supersedes PD-ID] [--root DIR]
   opf record done-with-receipt BI-ID --actor maintainer[:ID] [--summary S] [--root DIR]
   opf record worklog-append --kind K --summary S --actor KIND[:ID] [--detail S] [--link REL=ID]...
                     [--ref KIND LOCATOR NOTE]... [--root DIR]
@@ -28,6 +29,15 @@ transition, `decided_by` is the operator's value (never inferred from --actor, s
 answer is often not its decider), and `decided_at` is the operation's clock value. A ratification keeps
 the bundle; a rejection of `decided/proposed` removes it with `proposed_from` (an open decision carries
 none of it).
+A transition that lands a pending_decision at unqualified `decided` (a maintainer's `open -> decided`, or a
+maintainer's ratification of `decided/proposed`) may supersede the current resolution of a chain in the
+same act: --supersedes PD-n appends the `supersedes` link to the record's `links` (spec 8.5). Before
+anything is planned further, the target must be a pending_decision seated once in the index, schema-valid,
+at unqualified `decided` (so never the record itself, which is not yet decided), and the head of its chain
+(no pending_decision already links `supersedes` to it, so the chain never forks), and its own chain must
+not lead back to the record (no cycle). --supersedes is refused on every other transition, a `/proposed`
+landing included: the doctor counts a `supersedes` link from a proposal too, so it would leave the
+superseded chain with no current resolution.
 `done-with-receipt` is maintainer-only (any other actor is refused before the store is touched): it moves an
 `active` or `done/proposed` backlog item to `done` and mints the one-to-one `done` receipt, linked
 `receipt_of`, in the same transaction (spec 8.5). `transition` never lands a backlog item at unqualified
@@ -56,7 +66,8 @@ record authoring (spec 9.2 is the precedent; spec 8.8 is normative):
      allowed delta, value for value and TYPE for type (the strict _opf_emit._model_equal comparison, so a
      True or 1.0 never reads as 1): the new rows appended, the counters advanced by exactly the claim,
      and for a transition the one named record's `status` and `updated_at` change plus its `proposed_from`
-     write or removal and a pending_decision's resolution bundle write or removal. The delta is
+     write or removal, a pending_decision's resolution bundle write or removal, and the `supersedes` link a
+     decision landing unqualified `decided` appends. The delta is
      derived INDEPENDENTLY of the planner's rows, from a pre-planning copy of the request, the allocation
      result, the clock value, the planned-from bytes, and the schema rules;
   6. the planned-destination cleanliness gate and the single-writer lease (the shared _opf_write_guard
@@ -92,9 +103,10 @@ restore then rewrites without re-checking, so an edit landing in that window, or
 byte prefix of the journaled preimage or planned bytes (read as a torn write), is not detected. A
 transition changes `status` and `updated_at` only, plus `proposed_from` (written when it lands a
 `/proposed` status, removed when it leaves one) and a pending_decision's resolution bundle (written by
-`open -> decided`, removed by the rejection of `decided/proposed`), so a target state that requires
-further fields (a `sent` contribution's delivery bundle) refuses at validate_record; posting a new
-handoff does not supersede the previous one in the same act. The
+`open -> decided`, removed by the rejection of `decided/proposed`) and the `supersedes` link a decision
+landing unqualified `decided` appends, so a target state that requires further fields (a `sent`
+contribution's delivery bundle) refuses at validate_record; posting a new handoff does not supersede the
+previous one in the same act. The
 pre-proposal state a rejection restores is read from the record's own `proposed_from` field, which this
 verb wrote in the same journaled transaction that landed the `/proposed` status: a proposed record without
 the field (proposed outside `transition`, which includes a record `create` landed at a `/proposed` initial
@@ -155,7 +167,7 @@ _NON_STRING_FIELDS = frozenset(("scopes", "delivery"))
 
 _OPTIONS = {
     "create": ("--root", "--type", "--title", "--summary", "--actor", "--link", "--ref", "--field", "--scope"),
-    "transition": ("--root", "--actor", "--reason", "--decision", "--decided-by"),
+    "transition": ("--root", "--actor", "--reason", "--decision", "--decided-by", "--supersedes"),
     "done-with-receipt": ("--root", "--actor", "--summary"),
     "worklog-append": ("--root", "--kind", "--summary", "--actor", "--detail", "--link", "--ref"),
 }
@@ -179,6 +191,8 @@ PENDING_DECISION = "pending_decision"
 # The resolution bundle a pending_decision's `open -> decided` writes (spec 8.5, 8.8): all-or-none, all
 # three keys on `decided`, none on `open` or `withdrawn`.
 DECISION_BUNDLE = ("decision", "decided_at", "decided_by")
+# The link relation --supersedes appends when a decision lands unqualified `decided` (spec 8.5, 8.6).
+SUPERSEDES = "supersedes"
 # The single-writer journal lock of one publication carries `opf-record.<token>` as its session, and the
 # transaction directory it opens ends `.<token>`: a leftover lock names its own transaction by that token.
 _TOKEN_RE = re.compile(r"^[0-9a-f]{32}\Z")
@@ -250,6 +264,13 @@ def _require_decision_pair(seen):
                           "spec 8.5), never one without the other")
 
 
+def _require_supersedes_id(values):
+    """--supersedes names a record id (<NS>-<n>, spec 8.2): a usage refusal, before any store is touched."""
+    if "--supersedes" in values and not _ID_RE.match(values["--supersedes"]):
+        raise RecordError("transition: --supersedes {!r} is not a record id (<NS>-<n>, spec 8.2)".format(
+            values["--supersedes"]))
+
+
 def parse_request(argv):
     """Parse `opf record <subcommand> ...` into a Request, or raise RecordError (a usage refusal, exit 2).
     Every option value must be present, non-empty, and must not start with `--` (so a swallowed next
@@ -309,6 +330,7 @@ def parse_request(argv):
                           "the actor (spec 8.4)".format(req.positionals[1]))
     if sub == "transition":
         _require_decision_pair(seen)
+        _require_supersedes_id(req.values)
     if sub == "done-with-receipt":
         _require_maintainer(req.actor)
         if _ID_RE.match(req.positionals[0]).group(1) != _opf_store.BASELINE_TYPES[BACKLOG]:
@@ -770,6 +792,84 @@ def _proposal_keys(rtype, cur_state, rejection):
     return (PROPOSED_FROM,)
 
 
+def _require_supersedes_landing(req, rid, rtype, current, to_status):
+    """--supersedes is legal only on a transition that lands a pending_decision at unqualified `decided`: a
+    maintainer's `open -> decided`, or a maintainer's ratification of `decided/proposed`. The doctor counts
+    a `supersedes` link from every pending_decision, a proposal included (C-DECISION-CHAINS, spec 8.5), so
+    a link written at `decided/proposed` would leave the chain it supersedes with no current resolution.
+    Refused before anything is planned."""
+    if "--supersedes" in req.values and not (rtype == PENDING_DECISION and to_status == "decided"):
+        raise RecordError("--supersedes applies only to a transition that lands a pending_decision at unqualified "
+                          "decided (a maintainer's open -> decided, or a maintainer's ratification of "
+                          "decided/proposed), not {} {} -> {}: a supersedes link on a proposal would leave the "
+                          "chain it supersedes with no current resolution (spec 8.5); fail-closed".format(
+                              rid, current, to_status))
+
+
+def _require_superseded_decided(trow, target):
+    """Only a current resolution is superseded: the target is at unqualified `decided` (spec 8.5). The
+    record being decided is never at `decided` itself, so this also refuses a record superseding itself."""
+    if trow.get("status") != "decided":
+        raise RecordError("{} is {!r}, not an unqualified decided resolution; only a current resolution is "
+                          "superseded (spec 8.5); fail-closed".format(target, trow.get("status")))
+
+
+def _superseders(rows, target):
+    """The ids of the rows that already link `supersedes` to `target`, whatever their status (the doctor
+    counts every one)."""
+    return [r.get("id") for r in rows if isinstance(r, dict) and any(
+        isinstance(link, dict) and link.get("rel") == SUPERSEDES and link.get("id") == target
+        for link in (r.get("links") if isinstance(r.get("links"), list) else []))]
+
+
+def _require_chain_head(rows, target, rel):
+    """The superseded resolution must be the head of its chain: no pending_decision already supersedes it,
+    so the new link never forks the chain into two current resolutions (spec 8.5, C-DECISION-CHAINS)."""
+    held = _superseders(rows, target)
+    if held:
+        raise RecordError("{} in {} is already superseded by {}; exactly one current effective resolution exists "
+                          "per chain, so a second successor would fork it (spec 8.5). Supersede the chain's "
+                          "current resolution instead; fail-closed".format(target, rel, ", ".join(map(str, held))))
+
+
+def _require_acyclic(rows, rid, target, rel):
+    """The target's own supersession chain must not lead back to the record: the link would close a cycle,
+    and a cycle leaves its chain with no current resolution (spec 8.5). Only string ids are followed, so a
+    malformed row elsewhere in the index (the doctor's finding) never escapes as a crash."""
+    by_id = {r.get("id"): r for r in rows if isinstance(r, dict) and isinstance(r.get("id"), str)}
+    seen, pending = set(), [target]
+    while pending:
+        node = pending.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        links = by_id.get(node, {}).get("links")
+        for link in links if isinstance(links, list) else []:
+            if isinstance(link, dict) and link.get("rel") == SUPERSEDES and isinstance(link.get("id"), str):
+                if link.get("id") == rid:
+                    raise RecordError("{} in {} already leads back to {} through its supersedes chain, so the link "
+                                      "would close a cycle (spec 8.5); fail-closed".format(target, rel, rid))
+                pending.append(link.get("id"))
+
+
+def _supersession_link(req, ctx, operand, rid):
+    """The `supersedes` link a decision landing unqualified `decided` appends (--supersedes, spec 8.5), or
+    None without the option. Checked before publication: the target is a pending_decision seated once in
+    this index (_locate), schema-valid as a pending_decision before it is trusted (_require_valid_current),
+    at unqualified `decided` (_require_superseded_decided), the head of its chain (_require_chain_head),
+    and not a record whose chain leads back to this one (_require_acyclic)."""
+    target = req.values.get("--supersedes")
+    if target is None:
+        return None
+    trow = _locate(operand, target)
+    _require_valid_current(trow, PENDING_DECISION, ctx, target, operand.rel)
+    _require_superseded_decided(trow, target)
+    rows = _index_rows(operand)
+    _require_chain_head(rows, target, operand.rel)
+    _require_acyclic(rows, rid, target, operand.rel)
+    return {"rel": SUPERSEDES, "id": target}
+
+
 def _plan_transition(req, ctx, operand, now):
     """`transition ID STATE`: one status change checked by validate_transition (spec 8.4, 8.5). The target
     status is derived from the actor: an assistant or automation landing a terminal or gated state gets
@@ -782,8 +882,10 @@ def _plan_transition(req, ctx, operand, now):
     no predecessor is inferred or invented; the worklog lifecycle line is informational, never evidence. A
     backlog item never lands at unqualified `done` here (done-with-receipt mints the receipt in the same
     act). A pending_decision's `open -> decided` also writes its resolution bundle (_resolution_bundle),
-    and the rejection of `decided/proposed` removes it (_proposal_keys). The change is `status`,
-    `updated_at`, the `proposed_from` write or removal, and that bundle write or removal on that one
+    and the rejection of `decided/proposed` removes it (_proposal_keys). A transition that lands a
+    pending_decision at unqualified `decided` may also append one `supersedes` link (--supersedes, checked
+    by _require_supersedes_landing and _supersession_link). The change is `status`, `updated_at`, the
+    `proposed_from` write or removal, that bundle write or removal, and that link append on that one
     record, plus its own worklog entry."""
     rid, target = req.positionals
     row = _locate(operand, rid)
@@ -801,6 +903,7 @@ def _plan_transition(req, ctx, operand, now):
     kind = req.actor["kind"]
     to_status = _derived_status(kind, spec, cur_state, target)
     _require_receipt_path(rtype, to_status)
+    _require_supersedes_landing(req, rid, rtype, current, to_status)
     rejection = cur_qual == "proposed" and target != cur_state
     pre = _recorded_pre_proposal(ctx, row, rid, current) if rejection else None
     tc = _opf_schema.validate_transition(rtype, current, to_status, kind, pre_proposal_state=pre,
@@ -820,6 +923,9 @@ def _plan_transition(req, ctx, operand, now):
     fields = {"status": to_status, "updated_at": ts}
     if _decides(rtype, cur_state, target):
         fields.update(_resolution_bundle(req, ts))
+    link = _supersession_link(req, ctx, operand, rid)
+    if link is not None:
+        fields["links"] = [dict(existing) for existing in row.get("links", [])] + [link]
     # Landing a `/proposed` status records the pre-proposal state in the record itself; leaving one (a
     # rejection or a ratification) removes it, and a rejection also removes the bundle its proposal
     # wrote. validate_transition proved the two never coincide (a `/proposed` record only ever moves to
@@ -834,10 +940,13 @@ def _plan_transition(req, ctx, operand, now):
     detail = "opf-record transition {} {} -> {}".format(rid, current, to_status)
     if "--reason" in req.values:
         detail += "\nreason: " + req.values["--reason"]
+    related = [{"rel": "relates", "id": rid}]
+    if link is not None:
+        detail += "\nsupersedes: " + link["id"]
+        related.append({"rel": "relates", "id": link["id"]})
     verb = "rejected" if rejection else "ratified" if cur_qual == "proposed" else "transitioned"
     entry = _lifecycle_entry(ctx, wid, now, req.actor, "changed",
-                             "{} {} from {} to {}".format(verb, rid, current, to_status), detail,
-                             [{"rel": "relates", "id": rid}])
+                             "{} {} from {} to {}".format(verb, rid, current, to_status), detail, related)
     _change_row(operand, rid, fields, drop=drop)
     _append_worklog(ctx, entry)
     return Plan([ctx.counters, operand, ctx.worklog], [wid], transition=(rid, current, to_status))
@@ -1035,13 +1144,24 @@ def _expected_delta(req, ctx, raws, now):
             if cur_state == "open" and target == "decided":
                 prior.update({"decision": req.values.get("--decision"), "decided_at": ts,
                               "decided_by": req.values.get("--decided-by")})
+        # The supersession rule (spec 8.5/8.8), derived here on its own, apart from the planner:
+        # --supersedes appends exactly one link, rel `supersedes` (the literal named here) to the requested
+        # id, after the row's prior links, and the worklog entry adds a `supersedes:` detail line and a
+        # `relates` link to that id. Whether the link is legal (the landing, the target, the chain) is the
+        # planner's refusal and is not judged again here.
+        superseded = req.values.get("--supersedes")
+        if superseded is not None:
+            prior["links"] = list(prior.get("links", [])) + [{"rel": "supersedes", "id": superseded}]
         prior.update({"status": to_status, "updated_at": ts})
         verb = ("rejected" if target != cur_state else "ratified") if cur_qual == "proposed" else "transitioned"
         detail = "opf-record transition {} {} -> {}".format(rid, current, to_status)
         if "--reason" in req.values:
             detail += "\nreason: " + req.values["--reason"]
+        if superseded is not None:
+            detail += "\nsupersedes: " + superseded
         entry = _expected_entry(wid, ts, req.actor, "changed",
-                                "{} {} from {} to {}".format(verb, rid, current, to_status), detail, [rid])
+                                "{} {} from {} to {}".format(verb, rid, current, to_status), detail,
+                                [rid] + ([superseded] if superseded is not None else []))
         transition = (rid, current, to_status)
     else:
         (rid,) = req.positionals
@@ -1082,8 +1202,8 @@ def _postcondition(plan, req, ctx, now):
     (_strict_equal, so True and 1.0 never read as 1): each new row appended with the requested content
     (the record or receipt, and the operation's own worklog entry), the initial or target status the
     schema rules give, the clock's timestamps, and the claimed ids; for a status change exactly `status`,
-    `updated_at`, the `proposed_from` write or removal, and a pending_decision's resolution bundle write or
-    removal of the one named record; the counters advanced by
+    `updated_at`, the `proposed_from` write or removal, a pending_decision's resolution bundle write or
+    removal, and its `supersedes` link append of the one named record; the counters advanced by
     exactly the claim; nothing else. A stray mutation of an existing record or of a new row, a lost or
     reordered row, a changed schema marker, a status change touching another field or another record, or
     a counter moved by anything but the claim refuses before anything is written, and so does a plan whose
@@ -1745,8 +1865,8 @@ def self_test():
             print("  - " + f, file=sys.stderr)
         return 1
     print("opf-record self-test: PASS ({} checks: grammar, allocation seam, completeness proof, planners, "
-          "transitions, resolution bundle, receipts, released span, precondition, postcondition)".format(
-              checked[0]))
+          "transitions, resolution bundle, supersession, receipts, released span, precondition, "
+          "postcondition)".format(checked[0]))
     return EXIT_OK
 
 
@@ -1779,6 +1899,10 @@ def _self_test_units(check):
                          "given together"),
                         (["create", "--type", "pending_decision", "--title", "t", "--actor", "maintainer",
                           "--decision", "x"], "unrecognized argument"),
+                        (["transition", "PD-2", "decided", "--actor", "maintainer", "--supersedes", "bogus"],
+                         "--supersedes 'bogus' is not a record id"),
+                        (["create", "--type", "pending_decision", "--title", "t", "--actor", "maintainer",
+                          "--supersedes", "PD-1"], "unrecognized argument"),
                         (["transition", "BI-1", "done", "--actor", "maintainer", "--kind", "x"],
                          "unrecognized argument"),
                         (["done-with-receipt", "BI-1"], "missing required"),
@@ -2121,6 +2245,7 @@ def _self_test_transitions(check, plan, post, full, now):
                                                     rows=[bi(status)], counters=dict(counters, DN=1), dones=dones),
             needle))
     _self_test_decisions(check, plan, post, full, now)
+    _self_test_supersession(check, plan, post, full, now)
     _self_test_pending(check)
     _self_test_leftover_lock(check)
 
@@ -2200,6 +2325,93 @@ def _self_test_decisions(check, plan, post, full, now):
             ("a rejection that keeps the decision", j_argv, [filed],
              lambda op: op.new_model["record"][0].__setitem__("decision", "use X"))):
         p, c, op = plan(argv, rows=rows, counters=counters)
+        mutate(op)
+        check("the postcondition refuses {}".format(label),
+              _refuses(lambda argv=argv, p=p, c=c: post(p, c, argv), "postcondition failed"))
+
+
+def _self_test_supersession(check, plan, post, full, now):
+    """The `supersedes` link a decision landing unqualified `decided` appends (--supersedes, on a bare
+    decide and on a ratification), its landing, target, and chain refusals, and its postcondition
+    vectors."""
+    earlier = "2026-09-26T00:00:00Z"
+    ts = _rfc3339(now)
+    counters = dict(full, PD=4, WL=1, BI=1)
+
+    def pd(n, status, links=(), **kw):
+        rec = dict({"id": "PD-{}".format(n), "type": PENDING_DECISION, "status": status, "title": "t",
+                    "created_at": earlier, "updated_at": earlier, "actor": {"kind": "assistant"}}, **kw)
+        if status.startswith("decided"):
+            rec = dict({"decision": "use X", "decided_at": earlier, "decided_by": "the board"}, **rec)
+        if links:
+            rec["links"] = [{"rel": rel, "id": tid} for rel, tid in links]
+        return rec
+
+    decide = ["--decision", "use Y", "--decided-by", "the board"]
+    m_argv = ["transition", "PD-2", "decided", "--actor", "maintainer"] + decide + ["--supersedes", "PD-1"]
+    rows = [pd(1, "decided"), pd(2, "open", links=[("relates", "BI-1")])]
+    p, c, op = plan(m_argv, rows=rows, counters=counters)
+    got = op.new_model["record"][1]
+    entry = c.worklog.new_model["entry"][-1]
+    check("a decide with --supersedes appends the link after the row's own links, the target untouched",
+          got["links"] == [{"rel": "relates", "id": "BI-1"}, {"rel": SUPERSEDES, "id": "PD-1"}]
+          and got["status"] == "decided" and op.new_model["record"][0] == rows[0] and post(p, c, m_argv) is None)
+    check("the supersede's worklog entry names and relates the superseded resolution",
+          entry["detail"] == "opf-record transition PD-2 open -> decided\nsupersedes: PD-1"
+          and entry["links"] == [{"rel": "relates", "id": "PD-2"}, {"rel": "relates", "id": "PD-1"}])
+    filed = pd(2, "decided/proposed", proposed_from="open")
+    r_argv = ["transition", "PD-2", "decided", "--actor", "maintainer", "--supersedes", "PD-1"]
+    p, c, op = plan(r_argv, rows=[pd(1, "decided"), filed], counters=counters)
+    check("a ratification with --supersedes keeps the bundle and appends the link",
+          op.new_model["record"][1] == dict({k: v for k, v in filed.items() if k != PROPOSED_FROM}, status="decided",
+                                            updated_at=ts, links=[{"rel": SUPERSEDES, "id": "PD-1"}])
+          and post(p, c, r_argv) is None)
+    sup = m_argv[:-1]
+    base = [pd(1, "decided"), pd(2, "open")]
+    bi = {"id": "BI-1", "type": "backlog_item", "status": "open", "title": "t", "created_at": earlier,
+          "updated_at": earlier, "actor": {"kind": "maintainer"}}
+    for argv, rows, needle in (
+            (["transition", "PD-2", "decided", "--actor", "assistant"] + decide + ["--supersedes", "PD-1"], base,
+             "applies only to a transition that lands"),
+            (["transition", "PD-2", "decided", "--actor", "automation"] + decide + ["--supersedes", "PD-1"], base,
+             "applies only to a transition that lands"),
+            (["transition", "PD-2", "withdrawn", "--actor", "maintainer", "--supersedes", "PD-1"], base,
+             "applies only to a transition that lands"),
+            (["transition", "PD-2", "open", "--actor", "maintainer", "--reason", "r", "--supersedes", "PD-1"],
+             [pd(1, "decided"), filed], "applies only to a transition that lands"),
+            (["transition", "BI-1", "active", "--actor", "maintainer", "--supersedes", "PD-1"], [bi],
+             "applies only to a transition that lands"),
+            (sup + ["PD-2"], base, "PD-2 is 'open', not an unqualified decided"),
+            (sup + ["BI-1"], base, "BI-1 is not a record in"),
+            (sup + ["PD-9"], base, "PD-9 is not a record in"),
+            (sup + ["PD-3"], base + [pd(3, "open")], "not an unqualified decided"),
+            (sup + ["PD-3"], base + [pd(3, "decided/proposed", proposed_from="open")], "not an unqualified decided"),
+            (sup + ["PD-3"], base + [dict(pd(3, "decided"), decision="   ")], "not schema-valid"),
+            (sup + ["PD-3"], base + [dict(pd(3, "decided"), type=BACKLOG)], "not schema-valid"),
+            (m_argv, base + [pd(3, "decided", links=[("supersedes", "PD-1")])], "already superseded by PD-3"),
+            (m_argv, base + [pd(3, "open", links=[("supersedes", "PD-1")])], "already superseded by PD-3"),
+            (sup + ["PD-3"], base + [pd(3, "decided", links=[("supersedes", "PD-2")])], "close a cycle"),
+            (sup + ["PD-3"], [pd(1, "decided", links=[("supersedes", "PD-2")]), pd(2, "open"),
+                              pd(3, "decided", links=[("supersedes", "PD-1")])], "close a cycle")):
+        check("a supersede refuses {} ({})".format(needle, " ".join(argv[1:4] + argv[-1:])), _refuses(
+            lambda argv=argv, rows=rows: plan(argv, rows=rows, counters=counters), needle))
+    odd = [pd(1, "decided", links=[("supersedes", "PD-4")]), pd(2, "open"),
+           dict(pd(4, "open"), id=["PD-4"], links=[{"rel": SUPERSEDES, "id": ["PD-2"]}])]
+    p, c, op = plan(m_argv, rows=odd, counters=counters)
+    check("the cycle walk follows string ids only, so a malformed row elsewhere never crashes the plan",
+          op.new_model["record"][1]["links"] == [{"rel": SUPERSEDES, "id": "PD-1"}])
+    plain = ["transition", "PD-2", "decided", "--actor", "maintainer"] + decide
+    for label, argv, mutate in (
+            ("a supersede that writes no link", m_argv,
+             lambda op: op.new_model["record"][1]["links"].pop()),
+            ("a link to another resolution", m_argv,
+             lambda op: op.new_model["record"][1]["links"][-1].__setitem__("id", "PD-3")),
+            ("a link written on the superseded record", m_argv,
+             lambda op: op.new_model["record"][0].__setitem__("links", [{"rel": SUPERSEDES, "id": "PD-2"}])),
+            ("a link written without --supersedes", plain,
+             lambda op: op.new_model["record"][1].__setitem__("links", [{"rel": SUPERSEDES, "id": "PD-1"}]))):
+        p, c, op = plan(argv, rows=[pd(1, "decided"), pd(2, "open", links=[("relates", "BI-1")])],
+                        counters=counters)
         mutate(op)
         check("the postcondition refuses {}".format(label),
               _refuses(lambda argv=argv, p=p, c=c: post(p, c, argv), "postcondition failed"))

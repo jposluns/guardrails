@@ -922,8 +922,17 @@ it, and it carries no `spec_version` bump. Its subcommands:
   on every other transition. `decided_by` is given explicitly, never inferred from the actor,
   because the recorder of an answer is often not its decider, and `decided_at` is the
   operation's clock value. A ratification keeps the bundle; a rejection of `decided/proposed`
-  removes it together with `proposed_from`, since an open decision carries none of it. A backlog
-  item reaches unqualified `done` only through `done-with-receipt`.
+  removes it together with `proposed_from`, since an open decision carries none of it. A
+  transition that lands a pending_decision at unqualified `decided`, a maintainer's `open` >
+  `decided` or a maintainer's ratification of `decided/proposed`, may supersede the current
+  resolution of a chain in the same act: the verb appends the `supersedes` link (section 8.5) to
+  the record's `links`. Before anything is written, the superseded record must be another
+  pending_decision at unqualified `decided`, schema-valid, and the head of its chain (no
+  pending_decision already links `supersedes` to it), and its own chain must not lead back to the
+  superseding record. The verb refuses the link on every other transition, a `/proposed` landing
+  included, because the doctor counts a `supersedes` link from a proposal too and would then find
+  the superseded chain without a current resolution. A backlog item reaches unqualified `done`
+  only through `done-with-receipt`.
 - `done-with-receipt`: maintainer-only. It moves a backlog item to unqualified `done`, from
   `active` or by ratifying `done/proposed`, and in the same act creates its one-to-one `done`
   receipt linked `receipt_of` (section 8.5). An assistant reaching `done` uses `transition` and
@@ -961,7 +970,8 @@ guarantees:
 4. Postcondition: the model diff of every rewritten file equals exactly the operation's allowed
    delta (the new rows appended, the counters advanced by exactly the claim, and for a transition
    one status and `updated_at` change plus the `proposed_from` write or removal and, for a
-   pending_decision, the resolution bundle write or removal), value for value
+   pending_decision, the resolution bundle write or removal and the `supersedes` link append),
+   value for value
    and type for type (a boolean or float is never equal to an integer), before anything is
    written. The expected
    delta is derived from the request, the prior bytes of each rewritten file, the claimed IDs, the
