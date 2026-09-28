@@ -698,7 +698,8 @@ platform = "ci"
 default = "block"
 class = "c"
 residue = """
-It runs the OPF record-authoring gate (opf/tools/check_opf_record.py, OPF-RECORD PR1 and PR2) via its
+It runs the OPF record-authoring gate (opf/tools/check_opf_record.py, OPF-RECORD PR1 and PR2, and the
+decisions PR1 resolution bundle) via its
 --self-test --red-on-revert: there is no live-adopter leg (this repository is not an OPFiles adopter), so
 the whole assurance rides the self-test. Each case copies a doctor-VALID template store built beneath the
 gate's own temporary root (opf init, a commit, opf render --write, a commit) and drives opf record
@@ -747,7 +748,13 @@ the upgrade verb; that an operand edited after the interruption, on the prestate
 refuses naming the path with every byte untouched and reconciles once the edit is undone; that an unknown
 or path-like create --type refuses with the enabled-baseline-types message before any operand read; and
 that a run whose journal lock release fails after COMPLETE reports the retained lock, and the next run
-reconciles it naming the COMPLETE transaction without claiming its render and doctor never ran. Under
+reconciles it naming the COMPLETE transaction without claiming its render and doctor never ran; and
+that a pending_decision's open -> decided carries its resolution bundle (a maintainer lands decided with
+decided_by from --decided-by, never from --actor, and decided_at the clock value, doctor-VALID once
+committed; an assistant lands decided/proposed with the bundle and proposed_from open; a ratification
+keeps the bundle unchanged; a rejection with a reason restores open with no bundle and no
+proposed_from), while a decide without the bundle options, one option alone, the options on open ->
+withdrawn, and the options on a ratification each refuse with every byte untouched. Under
 --red-on-revert each test's flip (the byte-reproduction precondition, emit_checked, the allowed-delta
 postcondition, the known-complete proof, the in-transaction counters operand, the derived '/proposed'
 qualifier, the maintainer-only check, the done-only-through-its-receipt guard, the rejection reason the
@@ -758,19 +765,24 @@ text, the record-carried pre-proposal state's flip (the worklog lifecycle line r
 record's own field), the current-row validation's flip (the row trusted without the schema check,
 applied separately to each of those three invalid-row tests), and the strict type-aware delta
 comparator's flip (ordinary equality, under which
-true and 1.0 read as 1)) is applied in turn and must turn its test red
+true and 1.0 read as 1), and the three resolution-bundle flips (the planner writing no bundle, the
+rejection keeping it, and decided_by taken from --actor, which only the independent oracle refuses))
+is applied in turn and must turn its test red
 with an assertion; where an independent guard would still refuse, the test asserts the written bytes or an
 isolated guard before any message. The unit leg (_opf_record.py, via opf.py --self-test) covers the
 argument grammar, the allocation seam including the homes-2 refusal, the four planners, the
 record-carried pre-proposal state (proposed_from written on a proposal, restored and removed on
 rejection and ratification, never read from worklog text, and the current row schema-validated before
-it is trusted or overwritten), the exact-integer schema markers, the one
+it is trusted or overwritten), the resolution bundle (written on a decide, kept on ratification,
+removed on rejection, its option refusals, and its postcondition vectors), the exact-integer schema
+markers, the one
 accepted snapshot cannot-evaluate, the leftover-lock outcome bound to its lock's token (a reused pid is
 not attributed), and the postcondition vectors including the strict type-aware comparisons. It arguably
 serves the change-carries-a-check and check-fails-closed-on-unreadable disciplines, but the linkage to a
 single corpus rule is not undeniable, so none is claimed here. Class c: coverage is representative, so it
 asserts these enumerated scenarios over synthetic stores rather than the verb's whole input space;
-transitions are driven end to end for backlog items only, with other types covered by the unit leg; the
+transitions are driven end to end for backlog items and, for the resolution bundle, pending
+decisions, with other types covered by the unit leg; the
 kill points are the journal engine's own injection hooks, not power loss or filesystem I/O failures, and
 they drive one create, one assistant transition, and one maintainer done-with-receipt; the
 merge coverage of the recorded pre-proposal state is the --no-ff and squash shapes of one

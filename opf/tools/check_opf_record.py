@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T17)
+  check_opf_record.py --self-test                    the fixture suite (T1-T18)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -74,6 +74,14 @@ Each case runs on its own copy of that template; the root is removed in a finall
   T17 a planner mutation that changes only a value's TYPE (an extension count to true or 1.0, the index
       schema marker to true, the receipt counter to true) refuses exit 2 before publication with every
       byte untouched (flip: compare the delta with ordinary equality instead of the strict comparator)
+  T18 a pending_decision's open -> decided carries its resolution bundle: a maintainer lands decided with
+      the bundle (decided_by from --decided-by, not from --actor; decided_at the clock value), doctor
+      VALID once committed; an assistant lands decided/proposed with the bundle and proposed_from open; a
+      maintainer ratification keeps the bundle unchanged; a maintainer rejection with --reason restores
+      open with no bundle and no proposed_from; a decide without --decision and --decided-by, one of the
+      two alone, --decision on open -> withdrawn, and --decision on a ratification each refuse with every
+      byte untouched (flips: the planner writes no bundle; the rejection keeps the bundle; the planner
+      takes decided_by from --actor, which only the independent oracle refuses)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -105,6 +113,7 @@ TOOLS = Path(__file__).resolve().parent
 MACH = ".working/toml"
 COUNTERS = MACH + "/counters.toml"
 BI_INDEX = MACH + "/backlog_item.index.toml"
+PD_INDEX = MACH + "/pending_decision.index.toml"
 DN_INDEX = MACH + "/done.index.toml"
 WORKLOG = MACH + "/worklog.toml"
 VERSION = MACH + "/version.toml"
@@ -699,8 +708,8 @@ def step(fx, root, args, message):
     return out
 
 
-def row(root, rid):
-    rows = [r for r in model(root, BI_INDEX)["record"] if r["id"] == rid]
+def row(root, rid, index=BI_INDEX):
+    rows = [r for r in model(root, index)["record"] if r["id"] == rid]
     assert len(rows) == 1, (rid, rows)
     return rows[0]
 
@@ -1054,6 +1063,86 @@ def flip_t17():
     return patch.object(record, "_strict_equal", lambda a, b: a == b)
 
 
+# --- T18: the resolution bundle on a decision transition ----------------------------------------------------
+
+PD_CREATE = ["create", "--type", "pending_decision", "--title", "which layout"]
+# The decider is named apart from every --actor below, so a planner that takes decided_by from --actor
+# writes a value the request never gave.
+DECIDE = ["--decision", "the inline layout", "--decided-by", "the architecture board"]
+BUNDLE_KEYS = ("decision", "decided_at", "decided_by")
+
+
+def _bundle(rec):
+    return tuple(rec.get(key) for key in BUNDLE_KEYS)
+
+
+def _filed(fx, root):
+    """PD-1 created by an assistant, then its answer filed by the assistant at decided/proposed, each step
+    committed. Run under ticking()."""
+    step(fx, root, PD_CREATE + ASSISTANT, "PD-1")
+    step(fx, root, ["transition", "PD-1", "decided"] + DECIDE + ASSISTANT, "PD-1 decided/proposed")
+    rec = row(root, "PD-1", PD_INDEX)
+    assert rec["status"] == "decided/proposed" and rec.get("proposed_from") == "open", rec
+    assert _bundle(rec) == ("the inline layout", rec["updated_at"], "the architecture board"), rec
+    return rec
+
+
+def t18_decision_bundle(fx):
+    env = fx.env
+    root = fx.case("t18-maintainer-decides")
+    with ticking():
+        step(fx, root, PD_CREATE + MAINTAINER, "PD-1")
+        refused_untouched(env, root, ["transition", "PD-1", "decided"] + MAINTAINER, "requires --decision")
+        refused_untouched(env, root, ["transition", "PD-1", "decided", "--decision", "the inline layout"]
+                          + MAINTAINER, "given together")
+        refused_untouched(env, root, ["transition", "PD-1", "withdrawn"] + DECIDE + MAINTAINER, "apply only")
+        step(fx, root, ["transition", "PD-1", "decided"] + DECIDE + MAINTAINER, "PD-1 decided")
+        rec = row(root, "PD-1", PD_INDEX)
+        assert rec["status"] == "decided" and "proposed_from" not in rec, rec
+        assert _bundle(rec) == ("the inline layout", rec["updated_at"], "the architecture board"), rec
+        assert lifecycle(root)[-1] == "opf-record transition PD-1 open -> decided", lifecycle(root)
+        doctor_valid(env, root)
+    root = fx.case("t18-assistant-ratified")
+    with ticking():
+        proposed = _filed(fx, root)
+        doctor_valid(env, root)
+        refused_untouched(env, root, ["transition", "PD-1", "decided"] + DECIDE + MAINTAINER, "apply only")
+        step(fx, root, ["transition", "PD-1", "decided"] + MAINTAINER, "PD-1 decided")
+        rec = row(root, "PD-1", PD_INDEX)
+        assert rec["status"] == "decided" and "proposed_from" not in rec, rec
+        assert _bundle(rec) == _bundle(proposed), ("T18 the ratification keeps the bundle", rec, proposed)
+        doctor_valid(env, root)
+    root = fx.case("t18-rejected")
+    with ticking():
+        _filed(fx, root)
+        step(fx, root, ["transition", "PD-1", "open", "--reason", "not the board's answer"] + MAINTAINER,
+             "rejected")
+        rec = row(root, "PD-1", PD_INDEX)
+        assert rec["status"] == "open" and not any(k in rec for k in BUNDLE_KEYS + ("proposed_from",)), rec
+        assert model(root, WORKLOG)["entry"][-1]["detail"] == (
+            "opf-record transition PD-1 decided/proposed -> open\nreason: not the board's answer")
+        doctor_valid(env, root)
+
+
+def flip_t18_bundle():
+    """The planner writes no bundle (the reviewed head's behaviour): every decide is refused."""
+    return patch.object(record, "_resolution_bundle", lambda req, ts: {})
+
+
+def flip_t18_rejection():
+    """The rejection removes proposed_from only and keeps the bundle, which an open decision may not carry."""
+    return patch.object(record, "_proposal_keys", lambda rtype, cur_state, rejection: (record.PROPOSED_FROM,))
+
+
+def flip_t18_decider():
+    """The planner takes decided_by from --actor: the row stays schema-valid, so only the independent
+    oracle, which reads --decided-by, refuses it."""
+    def from_actor(req, ts):
+        actor = req.actor["kind"] + (":" + req.actor["id"] if "id" in req.actor else "")
+        return {"decision": req.values["--decision"], "decided_at": ts, "decided_by": actor}
+    return patch.object(record, "_resolution_bundle", from_actor)
+
+
 def t8_collision(fx):
     env = fx.env
     root = fx.case("t8-collision")
@@ -1161,6 +1250,8 @@ TESTS = (
     ("T16-invalid-predecessor-receipt", t16_invalid_predecessor_receipt, flip_t16_trust),
     ("T16-stray-field-proposal", t16_stray_field, flip_t16_trust),
     ("T17-strict-type-aware-delta", t17_strict_delta, flip_t17),
+    ("T18-decision-resolution-bundle", t18_decision_bundle, (flip_t18_bundle, flip_t18_rejection,
+                                                             flip_t18_decider)),
 )
 
 
