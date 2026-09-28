@@ -495,6 +495,7 @@ def _config_results(roster, env, marker, monitor_marker, system=False):
     execve failure, not only ETXTBSY) runs the tripwire, which records the
     bypass and exits nonzero; _require_wrapper_observed then fails the run
     closed instead of accepting an unobserved, apparently clean result.
+    _prepared_before_pool_control pins the preparation ordering itself.
     """
     import shlex
     from concurrent.futures import ThreadPoolExecutor
@@ -599,6 +600,33 @@ def _require_wrapper_observed(bypass, what):
             "to the tripwire {} time(s)".format(what, len(recorded.splitlines())))
 
 
+class HolderNotReady(Exception):
+    """The bypass control's write holder never signalled readiness in time."""
+
+
+def _await_holder_ready(holder, seconds=60):
+    """Read the holder's readiness line under a DEADLINE, never an unbounded
+    readline(): return only on exactly b"held\\n", and raise HolderNotReady on
+    the deadline, on EOF, or on any other bytes, so a stalled holder fails the
+    control closed instead of hanging it before its bounded cleanup."""
+    import select
+    import time
+
+    fd = holder.stdout.fileno()
+    deadline = time.monotonic() + seconds
+    line = b""
+    while not line.endswith(b"\n"):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+            raise HolderNotReady("no readiness line within {} s, got {!r}".format(seconds, line))
+        chunk = os.read(fd, 64)
+        if not chunk:
+            raise HolderNotReady("holder closed its output before readiness, got {!r}".format(line))
+        line += chunk
+    if line != b"held\n":
+        raise HolderNotReady("unexpected readiness line {!r}".format(line))
+
+
 def _wrapper_bypass_control(base, env, marker, monitor_marker):
     """POSITIVE CONTROL for the fall-through tripwire and its fail-closed guard.
     Mechanism leg: hold an observer-shaped wrapper open for writing from a live
@@ -652,7 +680,11 @@ def _wrapper_bypass_control(base, env, marker, monitor_marker):
     holder = subprocess.Popen([sys.executable, "-I", "-B", "-c", holder_code, str(wrapper)],
                               stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     try:
-        held = launch() if holder.stdout.readline() == b"held\n" else "holder not ready"
+        try:
+            _await_holder_ready(holder)
+            held = launch()
+        except HolderNotReady as exc:
+            held = "HolderNotReady: {}".format(exc)
         try:
             _require_wrapper_observed(bypass_log, "control")
             refused = "guard accepted a recorded bypass"
@@ -689,6 +721,102 @@ def _wrapper_bypass_control(base, env, marker, monitor_marker):
     check("config/wrapper-bypass-fails-closed",
           (held, refused, released, outcome),
           ((66, b"bypassed\n", b""), True, (0, b"", b"wrapper\n"), True))
+
+
+_WRITE_RECORDERS = []
+_WRITE_AUDIT_INSTALLED = False
+
+
+def _dispatch_write_audit(event, args):
+    """Process-wide audit hook (CPython cannot remove one); inert unless a
+    recorder is registered in _WRITE_RECORDERS."""
+    for recorder in tuple(_WRITE_RECORDERS):
+        recorder(event, args)
+
+
+def _prepared_before_pool_control(env, marker, monitor_marker):
+    """DETERMINISTIC guard for the root-cause ordering in _config_results (no
+    stress, no timing): every file a member will exec (the observer wrapper,
+    the tripwire, the copied hooks and fsmonitor) must be written and chmodded
+    on the MAIN thread before the worker pool is constructed. A CPython audit
+    hook records every open-for-write, chmod, rename, link and symlink with its
+    thread and whether the pool exists yet; each synthetic member snapshots the
+    executable files in its private tree from inside the pool. Moving member
+    preparation back into the pooled body turns this red on every run, whether
+    or not a fork happens to race a write. The red member chmods its own
+    wrapper from inside the pool and must be flagged, so a recorder that sees
+    nothing cannot pass; the required files and the every-executable-was-seen
+    leg keep the clean member from passing vacuously. File-descriptor-only
+    operations (os.fchmod, a write through an inherited descriptor) are outside
+    what these audit events name."""
+    import concurrent.futures
+    import threading
+    from unittest.mock import patch
+
+    global _WRITE_AUDIT_INSTALLED
+    write_flags = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+    target = {"open": 0, "os.chmod": 0, "os.rename": 1, "os.link": 1, "os.symlink": 1}
+    main_thread = threading.main_thread().ident
+    pool_started = []
+    events = []
+    snapshots = {}
+
+    def record(event, args):
+        if event not in target or (event == "open" and not args[2] & write_flags):
+            return
+        path = args[target[event]]
+        if not isinstance(path, int):
+            events.append((os.path.abspath(os.fsdecode(path)), event,
+                           threading.get_ident() == main_thread and not pool_started))
+
+    class MarkedPool(concurrent.futures.ThreadPoolExecutor):
+        def __init__(self, *args, **kwargs):
+            pool_started.append(True)
+            super().__init__(*args, **kwargs)
+
+    def snapshot_member(argv, member_env):
+        private = member_env["PATH"].split(os.pathsep)[0]
+        found = set()
+        for folder, _, names in os.walk(private):
+            for name in names:
+                path = os.path.join(folder, name)
+                if os.path.isfile(path) and os.stat(path).st_mode & 0o111:
+                    found.add(os.path.abspath(path))
+        snapshots[argv[0]] = (private, found)
+        if argv[0].endswith("-red"):
+            os.chmod(os.path.join(private, "git"), 0o700)
+        return 0
+
+    required = ["git", os.path.join("fallback-trap", "git"), os.path.join("caller", "fsmonitor"),
+                os.path.join("caller", "config-hooks", "pre-commit")]
+
+    def verdict(member):
+        if member not in snapshots:
+            return "member did not run: " + member
+        private, found = snapshots[member]
+        written = {path for path, _, _ in events}
+        return (sorted(set(required) - {os.path.relpath(p, private) for p in found}),
+                sorted(os.path.relpath(p, private) for p in found - written),
+                sorted({(os.path.relpath(p, private), event)
+                        for p, event, early in events if p in found and not early}))
+
+    clean, red = "tools/prepared-before-pool-probe", "tools/prepared-before-pool-probe-red"
+    if not _WRITE_AUDIT_INSTALLED:
+        sys.addaudithook(_dispatch_write_audit)
+        _WRITE_AUDIT_INSTALLED = True
+    _WRITE_RECORDERS.append(record)
+    try:
+        with patch.object(concurrent.futures, "ThreadPoolExecutor", MarkedPool), patch.object(
+                sys.modules[__name__], "_run_config_member", snapshot_member):
+            _config_results(((clean, "--self-test"), (red, "--self-test")),
+                            env, marker, monitor_marker)
+        got = (bool(pool_started), verdict(clean), verdict(red))
+    except ValueError as exc:
+        got = "config run raised: {}".format(exc)
+    finally:
+        _WRITE_RECORDERS.remove(record)
+    check("config/executables-prepared-before-pool", got,
+          (True, ([], [], []), ([], [], [("git", "os.chmod")])))
 
 
 def _member_result(results, member, column):
@@ -979,6 +1107,7 @@ def _config_injection_lane(base):
     check("config/combined-fsmonitor-control", (probe.returncode, bool(monitor_marker.read_bytes())),
           (0, True))
     _wrapper_bypass_control(base, env, marker, monitor_marker)
+    _prepared_before_pool_control(env, marker, monitor_marker)
     combined = _config_results(roster, env, marker, monitor_marker)
     check("config/registered-combined", [argv for argv, value in combined.items()
                                        if value != (0, b"", b"", b"")], [])

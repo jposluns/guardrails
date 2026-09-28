@@ -449,6 +449,7 @@ expected-check-ids = [
   "config/archive-attributes-neutralized",
   "config/combined-fsmonitor-control",
   "config/wrapper-bypass-fails-closed",
+  "config/executables-prepared-before-pool",
   "config/check_opf_import/rc",
   "config/check_opf_import/hooks",
   "config/check_opf_ingest/rc",
