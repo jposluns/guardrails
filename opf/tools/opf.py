@@ -266,6 +266,7 @@ def _watchdog_deadline_case(mode):
 
     real_fork, real_pipe = os.fork, os.pipe
     started_r, started_w = real_pipe()
+    caller = os.getpid()
     # The enclosing run_status_owned deadline rescues a regressed run_bounded.
     # It owns the full tree, so this fixture never races it with another signal.
     child, pipe = [], []
@@ -277,8 +278,12 @@ def _watchdog_deadline_case(mode):
         return pid
 
     def capture_pipe():
+        # Caller-side only: the guardian also calls os.pipe (the subject
+        # acknowledgment pipe), and capturing that pair in the guardian's copy
+        # would hand the thunk the ack descriptors instead of run_bounded's pipe.
         pair = real_pipe()
-        pipe[:] = pair
+        if os.getpid() == caller:
+            pipe[:] = pair
         return pair
 
     def stall():
@@ -975,16 +980,18 @@ def _watchdog_completion_case(mode):
                 recorded.append(deadline)
                 return real_init(child, deadline, **kwargs)
 
-            real_pidfd = emit._fixture_pidfd
+            real_ack = emit._fixture_ack_subject
 
-            def stop_guardian(target):
-                fd = real_pidfd(target)
+            def stop_guardian(fd):
+                # The subject is RELEASED (receipt sent, ownership acknowledged)
+                # before the guardian stops, so it can complete while the guardian
+                # is not supervising.
+                real_ack(fd)
                 if os.getpid() != caller:
                     scratch = Path(directory, "guardian.tmp")
                     scratch.write_text(str(os.getpid()), encoding="ascii")
                     scratch.rename(guardian_file)  # atomic: never a partial PID
                     os.kill(os.getpid(), signal.SIGSTOP)
-                return fd
 
             gate = threading.Event()
             real_poll = emit._FixtureProcess.poll
@@ -1026,7 +1033,7 @@ def _watchdog_completion_case(mode):
             worker = threading.Thread(target=run, daemon=True)
             with patch.object(emit._FixtureProcess, "__init__", record_init), \
                     patch.object(emit._FixtureProcess, "poll", gated_poll), \
-                    patch.object(emit, "_fixture_pidfd", stop_guardian):
+                    patch.object(emit, "_fixture_ack_subject", stop_guardian):
                 worker.start()
                 try:
                     bound = time.monotonic() + 30
@@ -1096,26 +1103,14 @@ def _watchdog_completion_case(mode):
         gpid = injected[0]
         assert emit._fixture_child_reaped(gpid) is True, "cancellation leaked the guardian"
 
-        # Flip: run the launcher body INLINE on the caller thread and the old
-        # interruptible fork-to-store window comes back -- a cancellation between
-        # the fork and its store leaks a guardian that close() can never know.
-        class InlineThread:
-            def __init__(self, target=None, **kwargs):
-                self._target = target
-
-            def start(self):
-                self._target()
-
-            def join(self, timeout=None):
-                return None
-
-            def is_alive(self):
-                return False
-
+        # Flip: run the fork INLINE on the caller thread (bypassing the parked
+        # launcher) and the old interruptible fork-to-store window comes back --
+        # a cancellation between the fork and its store leaks a guardian that
+        # close() can never know.
         forked = []
 
         def inline_interrupt(frame, event, arg):
-            if event != "call" or frame.f_code.co_name != "_launch":
+            if event != "call" or frame.f_code.co_name != "_launch_fork":
                 return None
 
             def local(frame, event, arg):
@@ -1129,12 +1124,11 @@ def _watchdog_completion_case(mode):
             return local
 
         flip_child = emit._FixtureProcess(time.monotonic() + 30, subject=lambda: None)
-        with patch.object(threading, "Thread", InlineThread):
-            sys.settrace(inline_interrupt)
-            try:
-                refuses(KeyboardInterrupt, flip_child.start)
-            finally:
-                sys.settrace(None)
+        sys.settrace(inline_interrupt)
+        try:
+            refuses(KeyboardInterrupt, flip_child._launch_fork)
+        finally:
+            sys.settrace(None)
         assert forked, "the inline flip never reached the fork boundary"
         leaked_pid = forked[0]
         assert flip_child.pid is None, "the inline flip still recorded ownership"
@@ -1148,6 +1142,85 @@ def _watchdog_completion_case(mode):
             os.waitpid(leaked_pid, 0)
         assert leaked, "the inline flip did not reproduce the interruptible window"
         flip_child.close()
+    elif mode == "launch-cancel":
+        import time
+        # QA18 codex F1: a cancellation delivered while the launcher thread is
+        # being CREATED (inside threading.Thread.start, before its bootstrap runs)
+        # must neither be replaced by a cleanup RuntimeError, nor leak the control
+        # sockets, nor leak a guardian. The launcher is parked at construction and
+        # released by flags, so close() never joins an unstarted thread, and a
+        # cancelled construction aborts the launch and re-raises the cancellation.
+        real_start = threading.Thread.start
+
+        def open_fds():
+            live = set()
+            for name in os.listdir("/proc/self/fd"):
+                try:
+                    os.fstat(int(name))
+                except OSError:
+                    continue
+                live.add(int(name))
+            return live
+
+        def no_children():
+            try:
+                os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            except ChildProcessError:
+                return True
+            return False
+
+        def interrupted_start(thread):
+            if thread.name == "opf-fixture-launcher":
+                # A REAL SIGINT: the pending KeyboardInterrupt materializes on the
+                # next main-thread bytecode, at launcher-creation time.
+                signal.raise_signal(signal.SIGINT)
+            return real_start(thread)
+
+        def cancelled_run():
+            # The caught exception is RETURNED (its traceback pins the half-built
+            # fixture), so descriptor parity below proves the machinery itself
+            # released everything, not a later refcount finalizer.
+            try:
+                emit.run_bounded(lambda: "UNREACHED", timeout_s=5)
+            except KeyboardInterrupt as exc:
+                return exc
+            except BaseException as exc:  # noqa: BLE001 - the verdict channel
+                raise AssertionError("the cancellation was replaced: " + repr(exc))
+            raise AssertionError("the cancellation was swallowed")
+
+        assert no_children(), "children live before the launch-cancel probe"
+        # Prime the one-time guardian-dependency preload (a first ctypes import
+        # keeps a libffi mapping descriptor open for the process's life) so the
+        # descriptor parity below measures ONLY what a cancelled launch leaks.
+        emit._fixture_preload()
+        before = open_fds()
+        with patch.object(threading.Thread, "start", interrupted_start):
+            held = cancelled_run()
+        assert open_fds() == before, "a cancelled launch leaked descriptors"
+        assert no_children(), "a cancelled launch leaked a child"
+        held = None
+
+        # Thread exhaustion is the SETUP-ERROR sentinel (the launcher analog of
+        # the pinned fork-error discipline), never a raw cleanup RuntimeError.
+        def exhausted_start(thread):
+            if thread.name == "opf-fixture-launcher":
+                raise RuntimeError("can't start new thread")
+            return real_start(thread)
+
+        with patch.object(threading.Thread, "start", exhausted_start):
+            result = emit.run_bounded(lambda: "UNREACHED", timeout_s=5)
+        assert result == "SETUP-ERROR:RuntimeError:can't start new thread", result
+        assert open_fds() == before and no_children(), "thread exhaustion leaked"
+
+        # Flip: without the construction abort, the cancellation leaks this
+        # call's control sockets and report.
+        with patch.object(emit, "_fixture_abort_launch", lambda fixture: None):
+            with patch.object(threading.Thread, "start", interrupted_start):
+                held = cancelled_run()
+        leaked = sorted(open_fds() - before)
+        assert leaked, "the flip did not reproduce the construction leak"
+        held = None  # hygiene: releasing the fixture reclaims the demonstrated leak
+        assert open_fds() == before, "the flip hygiene did not complete"
     elif mode == "fd-hygiene-total":
         import errno
         import time
@@ -1238,6 +1311,46 @@ def _watchdog_completion_case(mode):
             with patch.object(emit, "_fixture_close_all_except", lambda keep: None):
                 leaked = emit.run_bounded(lambda: outer(False), timeout_s=30)
             assert leaked == "OPEN", leaked
+    elif mode == "fd-census":
+        import errno
+        caller = os.getpid()
+        # QA18 codex F4: without an authoritative /proc/self/fd census the sweep
+        # cannot be proven complete (a soft-RLIMIT bound does not enumerate
+        # descriptors already open above it), so the guardian must REFUSE startup,
+        # never run the subject behind a partial sweep.
+        spare = os.open(os.devnull, os.O_RDONLY)
+        try:
+            identity = (os.fstat(spare).st_dev, os.fstat(spare).st_ino)
+
+            def probe():
+                try:
+                    stat = os.fstat(spare)
+                except OSError:
+                    return "SWEPT"
+                return "LEAKED" if (stat.st_dev, stat.st_ino) == identity else "SWEPT"
+
+            real_listdir = os.listdir
+
+            def denied(path="."):
+                # Guardian-side only: the caller's own censuses stay usable.
+                if os.getpid() != caller and str(path) == "/proc/self/fd":
+                    raise PermissionError(errno.EACCES, "injected census denial")
+                return real_listdir(path)
+
+            with patch.object(os, "listdir", denied):
+                result = emit.run_bounded(probe, timeout_s=10)
+                assert result.startswith("SETUP-ERROR:ChildStatusUnavailable:"), result
+                assert "descriptor census unavailable" in result, result
+                # Flip: sweeping past the failed census runs the subject with the
+                # caller's descriptors intact.
+                with patch.object(emit, "_fixture_close_all_except", lambda keep: None):
+                    flipped = emit.run_bounded(probe, timeout_s=10)
+                assert flipped == "LEAKED", flipped
+            # Positive control: with the census available the same undeclared
+            # descriptor never reaches the subject.
+            assert emit.run_bounded(probe, timeout_s=10) == "SWEPT"
+        finally:
+            os.close(spare)
     elif mode == "pdeathsig":
         # D2: the subject arms PR_SET_PDEATHSIG(SIGKILL) before any subject code
         # runs (partial coverage for the wedged-guardian residual; the behavioral
@@ -1255,6 +1368,54 @@ def _watchdog_completion_case(mode):
         # flag is cleared on fork, so an inherited value can never mask the flip).
         with patch.object(emit, "_fixture_pdeathsig", lambda: None):
             assert emit.run_bounded(query, timeout_s=10) == "0"
+    elif mode == "subject-gc":
+        # QA18 gemini F3: the guardian disables gc for its own forked-heap safety,
+        # but the SUBJECT runs arbitrary test code and must get the collector back
+        # before its callable runs, or every cycle it builds leaks for the
+        # callable's whole life.
+        def probe():
+            import gc
+            return "GC-ON" if gc.isenabled() else "GC-OFF"
+
+        assert emit.run_bounded(probe, timeout_s=10) == "GC-ON"
+        # Flip: without the re-enable the subject inherits the disabled collector.
+        with patch.object(emit, "_fixture_enable_gc", lambda: None):
+            assert emit.run_bounded(probe, timeout_s=10) == "GC-OFF"
+    elif mode == "guardian-preload":
+        import time
+        # QA18 codex F5: the guardian forks from the launcher thread, so a cold
+        # guardian-side import could block on an import or module lock some other
+        # caller thread held at fork time. Construction preloads the whole guardian
+        # dependency set, making every guardian-side import a lock-free
+        # sys.modules hit; the documented restriction that remains is thunk-side.
+        def pop_ctypes():
+            popped = dict()
+            for name in list(sys.modules):
+                if name == "ctypes" or name.startswith("ctypes."):
+                    popped[name] = sys.modules.pop(name)
+            return popped
+
+        popped = pop_ctypes()
+        try:
+            child = emit._FixtureProcess(time.monotonic() + 5, subject=lambda: None)
+            try:
+                missing = [name for name in emit._FIXTURE_GUARDIAN_MODULES
+                           if name not in sys.modules]
+                assert not missing, missing
+            finally:
+                child.close()
+            # Flip: without the preload the guardian dependency set stays cold.
+            pop_ctypes()
+            with patch.object(emit, "_fixture_preload", lambda: None):
+                flip_child = emit._FixtureProcess(time.monotonic() + 5,
+                                                  subject=lambda: None)
+                try:
+                    assert "ctypes" not in sys.modules, "the flip still preloaded"
+                finally:
+                    flip_child.close()
+        finally:
+            for name, module in popped.items():
+                sys.modules.setdefault(name, module)
     elif mode == "subject-receipt":
         import time
         caller = os.getpid()
@@ -1307,7 +1468,8 @@ def _watchdog_completion_case(mode):
                 return child, subject
 
             # Leg 1: guardian SIGKILLed while wedged -> the buffered receipt still
-            # arrives, and pdeathsig kills the orphaned subject (D2, behavioral).
+            # arrives, and the subject dies without running its callable (pdeathsig,
+            # and independently the acknowledgment EOF refusal).
             child, subject = launch_wedged(wedge)
             os.kill(child.pid, signal.SIGKILL)
             failures = []
@@ -1324,7 +1486,10 @@ def _watchdog_completion_case(mode):
             await_state(subject, (None, "Z"), "pdeathsig did not kill the orphaned subject")
 
             # Flip: skip the send -> escalation degrades to guardian-only and the
-            # subject (its pdeathsig coverage also removed) survives the cancel.
+            # refusal must say the subject cleanup is INCOMPLETE, never claim a
+            # killed tree. The unacknowledged subject (pdeathsig coverage also
+            # removed) still refuses by ITSELF on the acknowledgment EOF once the
+            # escalation SIGKILLs the wedged guardian: no manual hygiene remains.
             def skip_send(peer, subject, subject_fd):
                 wedge(peer, subject, subject_fd, send=False)
 
@@ -1338,10 +1503,236 @@ def _watchdog_completion_case(mode):
                     failures.append(str(exc))
             assert child.subject_pid is None, "a skipped send still delivered a receipt"
             assert failures and "escalat" in failures[0], failures
+            assert "incomplete" in failures[0].lower(), failures
+            await_state(subject, (None, "Z"),
+                        "the unacknowledged subject outlived its guardian")
+    elif mode == "subject-ack":
+        import time
+        caller = os.getpid()
+        # QA18 codex F2: the subject may not run user code (so cannot create
+        # descendants) before the guardian has delivered its receipt and
+        # acknowledged ownership; a guardian that dies before the acknowledgment
+        # must yield a subject that refuses to run, even without pdeathsig.
+        with tempfile.TemporaryDirectory(prefix="opf-ack-") as directory:
+            guardian_file = Path(directory, "guardian")
+            marker = Path(directory, "marker")
+            real_ack = emit._fixture_ack_subject
+
+            def wedge_ack(fd):
+                # Wedge AFTER the receipt send, BEFORE the acknowledgment.
+                if os.getpid() != caller:
+                    scratch = Path(directory, "guardian.tmp")
+                    scratch.write_text(str(os.getpid()), encoding="ascii")
+                    scratch.rename(guardian_file)  # atomic: never a partial PID
+                    os.kill(os.getpid(), signal.SIGSTOP)
+                real_ack(fd)
+
+            def subject_body():
+                marker.write_text("ran", encoding="ascii")
+                import time as clock
+                clock.sleep(3600)
+
+            def state(target):
+                try:
+                    stat = Path("/proc", str(target), "stat").read_bytes()
+                except (FileNotFoundError, ProcessLookupError):
+                    return None
+                return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
+
+            def await_state(target, wanted, note):
+                bound = time.monotonic() + 30
+                while state(target) not in wanted:
+                    assert time.monotonic() < bound, note
+                    time.sleep(0.005)
+
+            def launch_wedged():
+                guardian_file.unlink(missing_ok=True)
+                marker.unlink(missing_ok=True)
+                child = emit._FixtureProcess(time.monotonic() + 3600,
+                                             subject=subject_body)
+                with patch.object(emit, "_fixture_ack_subject", wedge_ack):
+                    child.start()
+                bound = time.monotonic() + 30
+                while not guardian_file.exists():
+                    assert time.monotonic() < bound, "the guardian never stopped"
+                    time.sleep(0.005)
+                gpid = int(guardian_file.read_text(encoding="ascii"))
+                assert gpid == child.pid, "the hook stopped an unexpected process"
+                await_state(gpid, ("T",), "the guardian did not stop")
+                subject = int(Path("/proc", str(gpid), "task", str(gpid), "children")
+                              .read_text(encoding="ascii").split()[0])
+                return child, subject
+
+            # An unacknowledged subject refuses on guardian death by ITSELF:
+            # pdeathsig is removed so only the acknowledgment EOF can end it.
+            with patch.object(emit, "_fixture_pdeathsig", lambda: None):
+                child, subject = launch_wedged()
+                os.kill(child.pid, signal.SIGKILL)
+                await_state(subject, (None, "Z"),
+                            "an unacknowledged subject survived its guardian")
+                assert not marker.exists(), "the subject ran before the ack"
+                failures = []
+                with patch.object(emit, "_FIXTURE_CLEANUP_GRACE", 1.0):
+                    try:
+                        child.close()
+                    except emit.ChildStatusUnavailable as exc:
+                        failures.append(str(exc))
+                assert child.subject_pid == subject, (child.subject_pid, subject)
+                assert failures, "a SIGKILLed guardian was read as clean"
+
+            # Flip: bypass the subject-side gate and the pre-receipt window is
+            # back: the subject runs its callable while the guardian is wedged
+            # short of the acknowledgment.
+            with patch.object(emit, "_fixture_pdeathsig", lambda: None), \
+                    patch.object(emit, "_fixture_await_ack", lambda fd: None):
+                child, subject = launch_wedged()
+                bound = time.monotonic() + 30
+                while not marker.exists():
+                    assert time.monotonic() < bound, "the flip subject never ran"
+                    time.sleep(0.005)
+                os.kill(child.pid, signal.SIGKILL)
+                failures = []
+                with patch.object(emit, "_FIXTURE_CLEANUP_GRACE", 1.0):
+                    try:
+                        child.close()
+                    except emit.ChildStatusUnavailable as exc:
+                        failures.append(str(exc))
+                assert failures, "the flip close was read as clean"
+                await_state(subject, (None, "Z"), "the flip cleanup did not complete")
+    elif mode == "subject-orphan":
+        import time
+        # QA18 codex F3: pdeathsig is not retroactive, so a subject first scheduled
+        # after its guardian died arms too late; it must detect the reparenting and
+        # refuse to run. Independently, close() must kill and prove a
+        # receipt-identified subject on ANY guardian failure, not only after an
+        # escalation. The delayed schedule is modeled as a file-gated wait, not a
+        # SIGSTOP: a pre-setsid subject stopped in the dying guardian's group would
+        # get the kernel's orphaned-group SIGHUP+SIGCONT, an environment-dependent
+        # coincidence (hosts ignoring SIGHUP keep the orphan alive) that this
+        # regression must not depend on.
+        with tempfile.TemporaryDirectory(prefix="opf-orphan-") as directory:
+            waiting = Path(directory, "waiting")
+            release = Path(directory, "release")
+            marker = Path(directory, "marker")
+            real_pdeathsig = emit._fixture_pdeathsig
+
+            def hold(arm):
+                # Subject-side: publish the pid, wait for the release gate BEFORE
+                # the (optional) arm, arm only after the gate opens.
+                import time as clock
+                scratch = Path(directory, "waiting.tmp")
+                scratch.write_text(str(os.getpid()), encoding="ascii")
+                scratch.rename(waiting)  # atomic: never a partial PID
+                bound = clock.monotonic() + 120
+                while not release.exists():
+                    if clock.monotonic() >= bound:
+                        os._exit(96)  # the gate never opened: fail loudly
+                    clock.sleep(0.005)
+                if arm:
+                    real_pdeathsig()
+
+            def subject_body():
+                marker.write_text("ran", encoding="ascii")
+                import time as clock
+                clock.sleep(3600)
+
+            def state(target):
+                try:
+                    stat = Path("/proc", str(target), "stat").read_bytes()
+                except (FileNotFoundError, ProcessLookupError):
+                    return None
+                return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
+
+            def await_state(target, wanted, note):
+                bound = time.monotonic() + 30
+                while state(target) not in wanted:
+                    assert time.monotonic() < bound, note
+                    time.sleep(0.005)
+
+            def launch_held(arm=True):
+                import select
+                waiting.unlink(missing_ok=True)
+                release.unlink(missing_ok=True)
+                marker.unlink(missing_ok=True)
+                child = emit._FixtureProcess(time.monotonic() + 3600,
+                                             subject=subject_body)
+                with patch.object(emit, "_fixture_pdeathsig", lambda: hold(arm)):
+                    child.start()
+                bound = time.monotonic() + 30
+                while not waiting.exists():
+                    assert time.monotonic() < bound, "the subject never reached its gate"
+                    time.sleep(0.005)
+                subject = int(waiting.read_text(encoding="ascii"))
+                # The gated subject publishes its pid BEFORE the guardian sends the
+                # receipt: wait for the receipt to be buffered on the control socket
+                # before any leg kills the guardian, so every leg exercises a
+                # DELIVERED receipt (the no-receipt path is subject-receipt's leg).
+                assert select.select([child.control], [], [], 30)[0], \
+                    "the subject receipt never arrived"
+                return child, subject
+
+            def cancel(child, failures):
+                with patch.object(emit, "_FIXTURE_CLEANUP_GRACE", 1.0):
+                    try:
+                        child.close()
+                    except emit.ChildStatusUnavailable as exc:
+                        failures.append(str(exc))
+
+            # Leg 1: the guardian dies while the subject is still gated pre-arm;
+            # the released subject arms, sees a changed parent, and refuses.
+            child, subject = launch_held()
+            os.kill(child.pid, signal.SIGKILL)
+            await_state(child.pid, ("Z",), "the killed guardian did not exit")
+            release.write_text("go", encoding="ascii")
+            await_state(subject, (None, "Z"), "the orphaned subject kept running")
+            assert not marker.exists(), "an orphaned subject ran its callable"
+            failures = []
+            cancel(child, failures)
+            assert child.subject_pid == subject, (child.subject_pid, subject)
+            assert failures, "a SIGKILLed guardian was read as clean"
+
+            # Leg 2: same stimulus, subject NEVER released: the guardian failure is
+            # collected without an escalation, and close() itself must kill the
+            # receipt-identified subject and prove its exit.
+            child, subject = launch_held()
+            os.kill(child.pid, signal.SIGKILL)
+            failures = []
+            cancel(child, failures)
+            assert failures, "a SIGKILLed guardian was read as clean"
+            await_state(subject, (None, "Z"),
+                        "close() left the live subject on a guardian failure")
+            assert not marker.exists(), "the gated subject ran its callable"
+
+            # Flip A: without the parent check (and with pdeathsig disarmed, which
+            # a post-death arm cannot help anyway) the released orphan runs its
+            # callable: the QA18 codex F3 defect, reproduced.
+            with patch.object(emit, "_fixture_check_parent", lambda expected: None):
+                child, subject = launch_held(arm=False)
+                os.kill(child.pid, signal.SIGKILL)
+                await_state(child.pid, ("Z",), "the killed guardian did not exit")
+                release.write_text("go", encoding="ascii")
+                bound = time.monotonic() + 30
+                while not marker.exists():
+                    assert time.monotonic() < bound, "the flip orphan never ran"
+                    time.sleep(0.005)
+                failures = []
+                cancel(child, failures)  # close() still kills the receipt subject
+                assert failures, "the flip close was read as clean"
+                await_state(subject, (None, "Z"), "the flip cleanup did not complete")
+
+            # Flip B: without the close-side subject kill, a live subject survives
+            # a guardian failure and close() names the surviving pid.
+            child, subject = launch_held()
+            os.kill(child.pid, signal.SIGKILL)
+            failures = []
+            with patch.object(emit, "_fixture_escalate_subject",
+                              lambda subject, fd: None):
+                cancel(child, failures)
+            assert failures and "could not confirm subject exit" in failures[0], failures
             assert state(subject) not in (None, "Z"), \
-                "flip: the subject died without a receipt"
-            os.kill(subject, signal.SIGKILL)  # clean up the deliberately-leaked subject
-            await_state(subject, (None, "Z"), "the flip cleanup did not complete")
+                "flip: the subject died without its kill"
+            os.kill(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
+            await_state(subject, (None, "Z"), "the flip hygiene did not complete")
     elif mode == "escalation-subject":
         import time
         # QA16 MINOR-2 + QA17 F1: cancelling a wedged guardian is bounded AND kills
@@ -1472,6 +1863,98 @@ def _watchdog_completion_case(mode):
         while state(subject) not in dead or state(descendant) not in dead:
             assert time.monotonic() < bound, "the flip cleanup did not complete"
             time.sleep(0.005)
+    elif mode == "escalate-reaped":
+        import time
+        from contextlib import ExitStack
+        caller = os.getpid()
+        # QA18 gemini F1: escalation must killpg the receipt-identified subject
+        # group even when the guardian already REAPED the subject: the held pidfd
+        # pins the pid (and so the pgid) against recycling, and a reaped subject
+        # can leave same-group descendants that only the group kill can reach.
+        with tempfile.TemporaryDirectory(prefix="opf-reaped-") as directory:
+            wedged = Path(directory, "wedged")
+            grandchild_file = Path(directory, "grandchild")
+
+            def subject_body():
+                # Fork a same-group descendant, then exit: the guardian reaps this
+                # subject while the descendant lives on.
+                pid = os.fork()
+                if pid == 0:
+                    import time as clock
+                    clock.sleep(3600)
+                scratch = Path(directory, "grandchild.tmp")
+                scratch.write_text(str(pid), encoding="ascii")
+                scratch.rename(grandchild_file)  # atomic: never a partial PID
+
+            real_drain = emit._fixture_drain
+
+            def reap_then_wedge(subject, subject_fd=None, *, deadline=None):
+                # Guardian-side: reap the exited subject, then wedge BEFORE any
+                # group kill: the state a drain stalled mid-cleanup leaves behind.
+                if os.getpid() != caller:
+                    os.waitpid(subject, 0)
+                    scratch = Path(directory, "wedged.tmp")
+                    scratch.write_text(str(os.getpid()), encoding="ascii")
+                    scratch.rename(wedged)  # atomic: never a partial PID
+                    os.kill(os.getpid(), signal.SIGSTOP)
+                return real_drain(subject, subject_fd, deadline=deadline)
+
+            def state(target):
+                try:
+                    stat = Path("/proc", str(target), "stat").read_bytes()
+                except (FileNotFoundError, ProcessLookupError):
+                    return None
+                return stat.rsplit(b")", 1)[1].split()[0].decode("ascii")
+
+            def await_state(target, wanted, note):
+                bound = time.monotonic() + 30
+                while state(target) not in wanted:
+                    assert time.monotonic() < bound, note
+                    time.sleep(0.005)
+
+            def exercise(flip):
+                wedged.unlink(missing_ok=True)
+                grandchild_file.unlink(missing_ok=True)
+                child = emit._FixtureProcess(time.monotonic() + 3600,
+                                             subject=subject_body)
+                with patch.object(emit, "_fixture_drain", reap_then_wedge):
+                    child.start()
+                bound = time.monotonic() + 30
+                while not (wedged.exists() and grandchild_file.exists()):
+                    assert time.monotonic() < bound, "the drain wedge was not reached"
+                    time.sleep(0.005)
+                gpid = int(wedged.read_text(encoding="ascii"))
+                assert gpid == child.pid, "the hook stopped an unexpected process"
+                await_state(gpid, ("T",), "the guardian did not stop")
+                grandchild = int(grandchild_file.read_text(encoding="ascii"))
+                assert state(grandchild) not in (None, "Z"), "the descendant died early"
+                failures = []
+                with ExitStack() as stack:
+                    stack.enter_context(
+                        patch.object(emit, "_FIXTURE_CLEANUP_GRACE", 1.0))
+                    if flip:
+                        # Flip: skip the group kill for the already-reaped subject
+                        # (the old probe-gated early return): the descendant must
+                        # survive again.
+                        stack.enter_context(patch.object(
+                            emit, "_fixture_escalate_subject",
+                            lambda subject, fd: None))
+                    try:
+                        child.close()
+                    except emit.ChildStatusUnavailable as exc:
+                        failures.append(str(exc))
+                assert failures and "escalat" in failures[0], failures
+                assert child.subject_pid is not None, "the subject receipt was lost"
+                return child.subject_pid, grandchild
+
+            subject, grandchild = exercise(flip=False)
+            await_state(grandchild, (None, "Z"),
+                        "escalation stranded the reaped subject's same-group descendant")
+            subject, grandchild = exercise(flip=True)
+            assert state(grandchild) not in (None, "Z"), \
+                "flip: the descendant died without the group kill"
+            os.killpg(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
+            await_state(grandchild, (None, "Z"), "the flip hygiene did not complete")
     else:
         raise AssertionError("unknown completion fixture: " + mode)
     print("opf completion:", mode, "PASS")
@@ -1604,9 +2087,11 @@ def _watchdog_regression_self_test():
                               "nested-timeout", "nested-cancel", "no-signal-echild",
                               "guardian-error", "empty-children", "bounded-diagnostics",
                               "cleanup-budget", "deadline-flips", "subject-setup",
-                              "overdue-success", "launch-ownership", "fd-hygiene-total",
-                              "nested-keep", "subject-receipt", "pdeathsig",
-                              "escalation-subject"))
+                              "overdue-success", "launch-ownership", "launch-cancel",
+                              "fd-hygiene-total", "nested-keep", "fd-census",
+                              "subject-gc", "guardian-preload", "subject-receipt",
+                              "subject-ack", "subject-orphan", "pdeathsig",
+                              "escalation-subject", "escalate-reaped"))
     # Resolve the real registration, without recursively invoking this regression runner.
     # Both inherited disposition and mask are hostile; the outer runner's state is untouched.
     cases.append(("blocked-isolation", prefix

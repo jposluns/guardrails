@@ -683,48 +683,65 @@ def _fixture_pdeathsig():
         pass
 
 
+def _fixture_check_parent(expected):
+    """Immediately after arming pdeathsig, prove the parent is still the expected
+    guardian: pdeathsig is not retroactive, so a subject first scheduled after its
+    guardian already died would arm too late and run orphaned (QA18 codex F3). A
+    reparented subject refuses HERE, before any user code, so an orphan can never
+    run its callable; the refusal lands on fd 2 / exit 125 like any subject error."""
+    import os
+    if os.getppid() != expected:
+        raise ChildStatusUnavailable(
+            "subject orphaned before supervision: guardian {} is gone".format(expected))
+
+
 def _fixture_close_all_except(keep):
     """First act of a new guardian: close EVERY inherited descriptor not in {0,1,2} | keep.
-    The /proc/self/fd scan is exact (the layer already requires Linux; os.close_range is
-    absent from this interpreter build); os.closerange over the gaps is the fallback when
-    the scan is unavailable. There is no parent-side registry to publish to or go stale:
-    an undeclared caller descriptor is closed here unconditionally, so a subject using one
-    fails loudly (EBADF), never a sometimes-working leak, and a sibling call's endpoints
-    (constructed or still under construction) never survive into an unrelated guardian."""
+    The /proc/self/fd scan is the only authoritative census of the open-descriptor
+    namespace (the layer already requires Linux; os.close_range is absent from this
+    interpreter build). A failed census is a startup REFUSAL (recorded, exit 125),
+    never a partial sweep: a soft-RLIMIT_NOFILE bound does not enumerate descriptors
+    already open above it, so sweeping up to it would silently preserve them (QA18
+    codex F4). There is no parent-side registry to publish to or go stale: an
+    undeclared caller descriptor is closed here unconditionally, so a subject using
+    one fails loudly (EBADF), never a sometimes-working leak, and a sibling call's
+    endpoints (constructed or still under construction) never survive into an
+    unrelated guardian."""
     import os
     kept = {0, 1, 2}
     kept.update(int(fd) for fd in keep)
     try:
         fds = sorted(int(name) for name in os.listdir("/proc/self/fd"))
-    except (OSError, ValueError):
-        fds = None
-    if fds is not None:
-        for fd in fds:
-            if fd not in kept:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-        return
-    import resource
-    bound = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
-    if bound == resource.RLIM_INFINITY or bound > (1 << 20):
-        bound = 1 << 20
-    previous = 2
-    for fd in sorted(kept):
-        if fd > previous + 1:
-            os.closerange(previous + 1, fd)
-        previous = max(previous, fd)
-    os.closerange(previous + 1, bound)
+    except (OSError, ValueError) as exc:
+        raise ChildStatusUnavailable(
+            "authoritative descriptor census unavailable: " + str(exc)) from exc
+    for fd in fds:
+        if fd not in kept:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def _fixture_enable_gc():
+    """Last subject-side setup step: the guardian runs with gc disabled (the forked
+    heap is the caller's, and a collection could close descriptor numbers the guardian
+    legitimately reuses), but the SUBJECT runs arbitrary test code, and inheriting a
+    disabled collector would leak reference cycles for the callable's whole life (QA18
+    gemini F3). Re-enable it just before the callable runs."""
+    import gc
+    gc.enable()
 
 
 def _fixture_send_subject(peer, subject, subject_fd):
-    """Deliver the subject receipt on the control socket: no subject exists without a
-    delivered receipt of it. The one-byte-plus-cmsg send on an empty socketpair cannot
-    block, and the receipt stays buffered for the caller even if the guardian is later
-    SIGKILLed. The guardian treats a send failure as fatal (recorded, subject drained,
-    exit 125). Without a pidfd only the pid is sent and escalation stays guardian-only:
-    a bare pid cannot exclude the reaped-before-freeze recycling window."""
+    """Deliver the subject receipt on the control socket: no subject RUNS USER CODE
+    without a delivered receipt of it (the acknowledgment that releases the subject is
+    written only after this send returns). The one-byte-plus-cmsg send on an empty
+    socketpair cannot block, and the receipt stays buffered for the caller even if the
+    guardian is later SIGKILLed. The guardian treats a send failure as fatal (recorded,
+    subject drained, exit 125). Without a pidfd only the pid is sent and escalation
+    stays guardian-only: a bare pid cannot exclude the reaped-before-freeze recycling
+    window."""
     import socket
     payload = str(subject).encode("ascii")
     if subject_fd is not None:
@@ -733,17 +750,47 @@ def _fixture_send_subject(peer, subject, subject_fd):
         peer.send(payload)
 
 
+def _fixture_ack_subject(fd):
+    """Release the subject, strictly AFTER the receipt send returned: an acknowledged
+    subject is always addressable through its delivered receipt (QA18 codex F2). A
+    subject that already died is tolerated (its wait status is authoritative), and the
+    write end closes either way, so a guardian that dies before acknowledging always
+    hands the blocked subject an EOF."""
+    import os
+    try:
+        os.write(fd, b"A")
+    except OSError:
+        pass  # the subject is already gone: supervision reads its status
+    finally:
+        os.close(fd)
+
+
+def _fixture_await_ack(fd):
+    """Block the subject until the guardian acknowledges ownership. Until this byte
+    arrives the subject runs no user code and cannot create descendants, so a guardian
+    wedged before the receipt send strands at most one blocked, pdeathsig-covered
+    process with no tree (QA18 codex F2). EOF -- every write end died with the
+    guardian -- is a refusal: an unowned subject never runs its callable."""
+    import os
+    try:
+        if os.read(fd, 1) != b"A":
+            raise ChildStatusUnavailable(
+                "guardian gone before ownership acknowledgment: subject refuses to run")
+    finally:
+        os.close(fd)
+
+
 def _fixture_escalate_subject(subject, subject_fd):
-    """Kill a receipt-identified subject during escalation: liveness-probe the pidfd,
-    then the whole group, then the pinned pidfd target. Safe only after the guardian
-    (the sole process able to reap the subject) is frozen, so the subject's pid/pgid
-    cannot be recycled for the rest of the sequence."""
+    """Kill a receipt-identified subject: the whole group first, then the pinned pidfd
+    target. Safe only once the guardian (the sole process able to reap the subject) is
+    frozen or already dead and collected: the held pidfd then pins the subject's pid --
+    and with it the pgid -- against recycling, so killpg can only address the subject's
+    own group. No liveness probe gates the group kill: a subject the guardian already
+    reaped can leave same-group descendants behind (e.g. missed by a kill/fork race a
+    stalled drain never resolved), and skipping killpg for it would strand them (QA18
+    gemini F1)."""
     import os
     import signal
-    try:
-        signal.pidfd_send_signal(subject_fd, 0)
-    except (ProcessLookupError, OSError):
-        return  # already gone (init reaped the orphan): nothing to address
     try:
         os.killpg(subject, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
@@ -836,6 +883,41 @@ def _fixture_drain(subject, subject_fd=None, *, deadline=None):
         time.sleep(0.005)
 
 
+_FIXTURE_GUARDIAN_MODULES = (
+    "ctypes", "errno", "gc", "json", "pathlib", "resource", "select", "signal",
+    "socket", "time", "traceback")
+
+
+def _fixture_preload():
+    """Import, in the caller and BEFORE any fork, every module the guardian tree's
+    function-local imports touch. Only the launcher thread survives into the guardian,
+    so a cold post-fork import could block forever on an import or module lock some
+    OTHER caller thread held at fork time; preloading makes every guardian-side import
+    a lock-free sys.modules hit. The remaining documented restriction is thunk-side
+    only: a subject callable must not depend on reacquiring locks (including a cold
+    import's module lock) that caller threads hold at call time (QA18 codex F5)."""
+    import importlib
+    for name in _FIXTURE_GUARDIAN_MODULES:
+        importlib.import_module(name)
+
+
+def _fixture_abort_launch(fixture):
+    """Construction failed or was cancelled mid-launch (the object never reached its
+    caller): tell the parked launcher to never fork -- the cancelled flag is read
+    before any fork -- and release every construction resource. A launcher already
+    past that check remains the owner of its own fork (_launch collects abandoned
+    launches), so nothing here can dispose state a live guardian still uses."""
+    with fixture._launch_lock:
+        fixture._cancelled = True
+    fixture._go.set()
+    for resource in (fixture.control, fixture.peer, getattr(fixture, "report", None)):
+        if resource is not None:
+            try:
+                resource.close()
+            except OSError:
+                pass
+
+
 class _FixtureProcess:
     """Shared fork/exec tree owner. No caller signal state is borrowed.
 
@@ -856,23 +938,47 @@ class _FixtureProcess:
     and a sibling call's endpoints -- constructed or still under construction --
     can never survive into an unrelated guardian.
 
-    Launch ownership: start() forks on a private launcher thread. CPython raises
-    asynchronous signal exceptions (e.g. a real SIGINT's KeyboardInterrupt) only
-    in the MAIN thread, so no bytecode boundary on that thread can lose the fork
-    result; a cancellation delivered at ANY caller-side point still lets close()
-    -- which joins the launcher (bounded) before deciding -- reap the guardian to
-    ECHILD.
+    Launch ownership: the guardian is forked on a private launcher thread that
+    exists from CONSTRUCTION, parked until start() releases it, so start() and
+    close() only flip events: no caller-side bytecode boundary -- including the
+    inside of threading.Thread.start -- can lose a fork or leave a thread that
+    close() cannot decide about. CPython raises asynchronous signal exceptions
+    (e.g. a real SIGINT's KeyboardInterrupt) only in the MAIN thread, so the
+    launcher always records its fork; close() never joins the launcher, it waits
+    on the launcher's completion event and decides by the recorded ownership. A
+    cancellation at ANY caller-side point therefore either prevents the fork
+    (the cancelled flag is read before forking), reaps the guardian to ECHILD,
+    or -- if the launch never completes inside the bounded budget -- refuses
+    loudly and ABANDONS the launch to the launcher, which then collects its own
+    fork; construction resources are never disposed while the launcher can still
+    use them. A failed construction (e.g. thread exhaustion) aborts the launch,
+    releases every resource, and surfaces the original error.
 
-    Escalation: immediately after forking the subject the guardian delivers a
-    (pid, pidfd) receipt on the control socket -- no subject exists without a
-    delivered receipt -- and close() collects it before closing that socket. A
-    guardian that cannot be collected within the bounded cleanup budget is frozen
-    (SIGSTOP via its pidfd, so the subject's pid/pgid cannot be recycled), then
-    the receipt-identified subject's group and pidfd are SIGKILLed, then the
-    guardian itself, and the subject's disappearance is proven on its pidfd or
-    refused loudly. Documented residual: descendants that leave the subject's
-    group/session survive a WEDGED-guardian escalation (only the subreaper census
-    can find them; the honest-guardian drain still covers them). The subject arms
+    Locks: only the launcher thread survives into the guardian, whose
+    dependencies are preloaded at construction, so guardian-side imports take no
+    locks. Documented thunk restriction: a subject callable must not depend on
+    reacquiring a lock (including a cold import's module lock) that a caller
+    thread held at call time; such a thunk deadlocks in the child and is
+    collected as a loud TIMEOUT, never silently.
+
+    Escalation: after forking the subject the guardian delivers a (pid, pidfd)
+    receipt on the control socket and only THEN releases the subject through an
+    acknowledgment pipe: no subject runs user code or creates descendants
+    without a delivered receipt, and a subject whose guardian dies before the
+    acknowledgment (EOF), or whose parent is no longer the expected guardian
+    when pdeathsig is armed, refuses to run at all. close() collects the
+    buffered receipt before closing that socket. A guardian that cannot be
+    collected within the bounded cleanup budget is frozen (SIGSTOP via its
+    pidfd, so the subject's pid/pgid cannot be recycled), then the
+    receipt-identified subject's group and pidfd are SIGKILLed unconditionally
+    (a reaped subject can leave same-group descendants; skipping killpg would
+    strand them), then the guardian itself. On ANY guardian failure, escalated
+    or not, a receipt-identified subject is killed the same way and its
+    disappearance proven on its pidfd or refused loudly; an escalation with NO
+    receipt is reported as INCOMPLETE subject cleanup, never as a killed tree.
+    Documented residual: descendants that leave the subject's group/session
+    survive a WEDGED-guardian escalation (only the subreaper census can find
+    them; the honest-guardian drain still covers them). The subject arms
     PR_SET_PDEATHSIG(SIGKILL) as partial extra coverage, failing closed to that
     residual where unavailable. Hosts without pidfd degrade escalation to
     guardian-only with the same residual.
@@ -882,6 +988,7 @@ class _FixtureProcess:
     def __init__(self, deadline, keep_fds=(), subject=None):
         import socket
         import tempfile
+        import threading
         self.deadline = deadline
         self.pid = self.pidfd = self.status = None
         self.subject_pid = self.subject_pidfd = None
@@ -891,14 +998,26 @@ class _FixtureProcess:
         self.keep_fds = tuple(keep_fds)
         self.subject = subject
         self._launcher = None
-        self._launched = None
         self._launch_error = None
+        self._launch_lock = threading.Lock()
+        self._go = threading.Event()          # start()/close() release the launcher
+        self._launched = threading.Event()    # set by the launcher on every path
+        self._cancelled = self._abandoned = False
+        # Guardian dependencies are imported HERE, pre-fork, so every
+        # guardian-side function-local import is a lock-free sys.modules hit.
+        _fixture_preload()
         self.control, self.peer = socket.socketpair()  # non-inheritable across exec
         try:
             self.report = tempfile.TemporaryFile()
+            # The launcher exists from construction, parked until released:
+            # start() only sets an event, so no caller-side bytecode boundary
+            # sits between creating the launcher and owning what it forks.
+            launcher = threading.Thread(
+                target=self._launch, name="opf-fixture-launcher", daemon=True)
+            launcher.start()
+            self._launcher = launcher
         except BaseException:
-            self.control.close()
-            self.peer.close()
+            _fixture_abort_launch(self)
             raise
 
     def start(self):
@@ -909,28 +1028,69 @@ class _FixtureProcess:
             raise
 
     def _launch(self):
-        """Launcher-thread body: fork, then record ownership. Runs only on the private
-        launcher thread, where CPython never raises asynchronous signal exceptions, so
-        no bytecode boundary here can lose the fork result between the fork and its
-        store -- by interpreter construction, not by statement packing."""
-        import os
+        """Launcher-thread body: parked from construction, released by start() (fork)
+        or close() (refuse). Runs only on the private launcher thread, where CPython
+        never raises asynchronous signal exceptions, so no bytecode boundary here can
+        lose the fork result between the fork and its store -- by interpreter
+        construction, not by statement packing. A launch close() gave up on is
+        collected HERE: the launcher is then the fork's last owner."""
         try:
-            pid = os.fork()
-            if pid == 0:
-                self._guardian()  # never returns: every guardian path ends in os._exit
-            self.pid = pid
-            self.pidfd = _fixture_pidfd(pid)
+            self._go.wait()
+            with self._launch_lock:
+                cancelled = self._cancelled
+            if cancelled:
+                raise ChildStatusUnavailable("fixture launch cancelled before fork")
+            self._launch_fork()
         except BaseException as exc:  # parent-side only; surfaced by _start
             self._launch_error = exc
         finally:
-            self._launched.set()
+            with self._launch_lock:
+                self._launched.set()
+                abandoned = self._abandoned
+        if abandoned:
+            self._collect_abandoned()
+
+    def _launch_fork(self):
+        import os
+        pid = os.fork()
+        if pid == 0:
+            self._guardian()  # never returns: every guardian path ends in os._exit
+        self.pid = pid
+        self.pidfd = _fixture_pidfd(pid)
+
+    def _collect_abandoned(self):
+        """close() already refused with ownership-unknown and disposed nothing: kill
+        and reap any guardian this launch produced (it is pre-GO, so no subject can
+        exist), then release the construction resources close() left untouched."""
+        import os
+        import signal
+        try:
+            if self.pid is not None and not self.collected:
+                _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
+                os.waitpid(self.pid, 0)
+                self.collected = True
+        except OSError:
+            pass
+        finally:
+            for resource in (self.control, self.peer, self.report):
+                try:
+                    resource.close()
+                except OSError:
+                    pass
+            for name in ("pidfd", "subject_pidfd"):
+                fd = getattr(self, name)
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                    setattr(self, name, None)
 
     def _start(self):
         import os
         import select
         import signal
         import sys
-        import threading
         import time
         if sys.platform != "linux" or not all(
                 hasattr(os, name) for name in ("fork", "waitid", "WNOWAIT", "P_ALL")):
@@ -939,12 +1099,10 @@ class _FixtureProcess:
             raise ChildStatusUnavailable("unowned SIGCHLD disposition")
         if not callable(self.subject):
             raise ChildStatusUnavailable("fixture subject must be a callable")
-        self._launched = threading.Event()
-        self._launcher = threading.Thread(
-            target=self._launch, name="opf-fixture-launcher", daemon=True)
-        self._launcher.start()
-        # Bounded wait: a fork wedged in the kernel or an at-fork hook is a
-        # cannot-evaluate; close() joins the launcher again before deciding.
+        # Release the launcher parked since construction. Bounded wait: a fork
+        # wedged in the kernel or an at-fork hook is a cannot-evaluate; close()
+        # re-checks the same completion event before deciding.
+        self._go.set()
         if not self._launched.wait(max(self.deadline - time.monotonic(),
                                        _FIXTURE_CLEANUP_GRACE)):
             raise TimeoutError("fixture launch deadline")
@@ -996,13 +1154,19 @@ class _FixtureProcess:
             os.write(self.peer.fileno(), b"R")
             if os.read(self.peer.fileno(), 1) != b"G":
                 os._exit(0)  # cancelled before GO: no subject exists
+            guardian = os.getpid()
+            ack_r, ack_w = os.pipe()
             subject = os.fork()
             if subject == 0:
                 try:
                     self.peer.close()
                     self.report.close()
+                    os.close(ack_w)
                     _fixture_pdeathsig()
+                    _fixture_check_parent(guardian)
                     os.setsid()  # before any subject code, and before any exec
+                    _fixture_await_ack(ack_r)
+                    _fixture_enable_gc()
                     self.subject()
                     os._exit(0)
                 except BaseException:
@@ -1014,9 +1178,11 @@ class _FixtureProcess:
                             traceback.print_exc(file=diagnostic)
                     finally:
                         os._exit(125)
+            os.close(ack_r)
             stage = "subject-receipt"
             subject_fd = _fixture_pidfd(subject)
             _fixture_send_subject(self.peer, subject, subject_fd)
+            _fixture_ack_subject(ack_w)
             self.peer.setblocking(False)
             timed_out = False
             stage = "supervision"
@@ -1172,15 +1338,30 @@ class _FixtureProcess:
         import select
         import signal
         import time
+        # Coordinated launch lifecycle FIRST, before any resource is disposed. The
+        # launcher is never joined (its OS thread state is not what decides); its
+        # completion event is set on every executed path, and the cancelled flag
+        # is read before any fork, so a cancellation here either prevents a fork
+        # that has not happened yet or finds its result recorded below. If the
+        # event never fires, the launch is ABANDONED to the launcher, which then
+        # collects (or never creates) its own fork; nothing is disposed on that
+        # path, because the launcher and its guardian can still use it all.
+        if self._launcher is not None:
+            with self._launch_lock:
+                self._cancelled = True
+                abandoned = self._abandoned
+            if not abandoned:
+                self._go.set()
+                if not self._launched.wait(2 * _FIXTURE_CLEANUP_GRACE):
+                    with self._launch_lock:
+                        if not self._launched.is_set():
+                            self._abandoned = True
+                            abandoned = True
+            if abandoned:
+                raise ChildStatusUnavailable(
+                    "fixture launch did not complete: guardian ownership unknown")
+            self._launcher = None
         try:
-            # The launcher owns the fork result: join it (bounded) before deciding,
-            # so cancellation at ANY caller-side point still reaps to ECHILD.
-            if self._launcher is not None:
-                self._launcher.join(2 * _FIXTURE_CLEANUP_GRACE)
-                if self._launcher.is_alive():
-                    raise ChildStatusUnavailable(
-                        "fixture launch did not complete: guardian ownership unknown")
-                self._launcher = None
             # Read the buffered subject receipt BEFORE closing the control socket;
             # closing it is what requests tree cleanup (EOF), and cancellation
             # addresses this guardian and its receipt, never a stale PID.
@@ -1217,7 +1398,21 @@ class _FixtureProcess:
                 self.collected = True
                 if waited != self.pid:
                     raise ChildStatusUnavailable("unexpected guardian cleanup PID")
-                if escalated and self.subject_pidfd is not None:
+                failure = None
+                if self.armed:
+                    try:
+                        self._read_report(raw)
+                    except ChildStatusUnavailable as exc:
+                        failure = exc
+                # The subject-exit proof runs on ANY guardian failure, not only
+                # after an escalation: a guardian killed before its drain finished
+                # (QA18 codex F3) leaves a receipt-identified subject this close()
+                # must still address. The guardian is dead and collected here, so
+                # the held pidfd pins the subject's pid/pgid exactly as the
+                # escalation freeze does, and the group+pidfd kill is safe.
+                if (escalated or failure is not None) and self.subject_pidfd is not None:
+                    if failure is not None and not escalated:
+                        _fixture_escalate_subject(self.subject_pid, self.subject_pidfd)
                     # A pidfd polls readable on exit even for a non-child (init
                     # reaps the orphan): prove the subject disappeared, or refuse
                     # loudly, never silence.
@@ -1225,17 +1420,24 @@ class _FixtureProcess:
                     poller.register(self.subject_pidfd, select.POLLIN)
                     if not poller.poll(int(_FIXTURE_CLEANUP_GRACE * 1000)):
                         raise ChildStatusUnavailable(
-                            "escalation could not confirm subject exit: pid {} may "
+                            ("escalation" if escalated else "guardian failure")
+                            + " could not confirm subject exit: pid {} may "
                             "survive".format(self.subject_pid))
-                if self.armed:
-                    try:
-                        self._read_report(raw)
-                    except ChildStatusUnavailable as exc:
-                        if escalated:
-                            raise ChildStatusUnavailable(
-                                str(exc) + "; after bounded-close escalation (guardian "
-                                "frozen, subject tree killed, guardian SIGKILL)") from exc
-                        raise
+                if failure is not None:
+                    if not escalated:
+                        raise failure
+                    if self.subject_pid is not None:
+                        raise ChildStatusUnavailable(
+                            str(failure) + "; after bounded-close escalation (guardian "
+                            "frozen, subject tree killed, guardian SIGKILL)") from failure
+                    # No receipt was ever delivered: an unacknowledged subject never
+                    # runs its callable and refuses on guardian death, but its exit
+                    # cannot be receipt-verified, so say so instead of claiming a
+                    # kill this close() could not address (QA18 codex F2).
+                    raise ChildStatusUnavailable(
+                        str(failure) + "; after bounded-close escalation WITHOUT a "
+                        "subject receipt (guardian frozen, guardian SIGKILL): subject "
+                        "cleanup incomplete") from failure
         finally:
             for name in ("pidfd", "subject_pidfd"):
                 fd = getattr(self, name)
@@ -1422,7 +1624,12 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024, keep_fds=()):
     caller-declared keep_fds -- the guardian closes every other inherited descriptor before the thunk
     can run. A thunk relying on an undeclared caller descriptor fails loudly and deterministically
     (typically ERROR:OSError from EBADF), never a sometimes-working leak; keep_fds is the sanctioned
-    path for a pre-opened descriptor the thunk needs (see _FixtureProcess).
+    path for a pre-opened descriptor the thunk needs (see _FixtureProcess). A guardian that cannot
+    obtain an authoritative /proc/self/fd census REFUSES startup (a SETUP-ERROR sentinel), never
+    sweeps partially. Lock contract: the fork runs on a private launcher thread, so the thunk must
+    not depend on reacquiring locks (including cold-import module locks) held by caller threads at
+    call time; only the launcher thread survives into the child, and such a thunk deadlocks there
+    and is collected as a loud TIMEOUT (guardian dependencies themselves are preloaded pre-fork).
 
     Hardening: (fork-less) a host without os.fork returns SETUP-ERROR WITHOUT running the thunk, never the
     thunk's own result run unbounded. (child) the child resets SIGALRM to SIG_DFL AND UNBLOCKS it in its
