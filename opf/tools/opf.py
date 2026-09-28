@@ -50,6 +50,9 @@ prints a changelog draft or freeze digest without writing files.
 `record` HAS landed (spec 8.8): `opf record create`, `transition`, `done-with-receipt`, and `worklog-append`
 author one change (with its own worklog entry, and for done-with-receipt the one-to-one done receipt)
 through one journaled publication, then render and require doctor VALID, leaving the change uncommitted.
+The one exception to doctor VALID is a status change (transition or done-with-receipt): doctor may then
+report only its cannot-evaluate for exactly that record and from/to pair, never a finding, and it keeps
+reporting that cannot-evaluate until the change is committed.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
 root named by --root (default: the cwd), never on this pack's own tree via `_gen_common.repo_root()`.
@@ -2517,9 +2520,11 @@ def _cmd_record(rest):
     `done-with-receipt`, and `worklog-append` run the shared journaled operation sequence in _opf_record
     (byte-reproduction precondition, one id claim through the allocation seam, allowed-delta postcondition,
     cleanliness gate and lease, one journaled publication, render, final doctor VALID, lease release before
-    the report). Exit 0 recorded (left uncommitted), exit 2 every refusal or cannot-evaluate; exit 1 is not
-    used. Unlike the applicability-probe siblings a NOT-ADOPTED root is a cannot-evaluate (a requested
-    operation, like import)."""
+    the report). The final doctor's one exception is a status change (transition or done-with-receipt),
+    which may leave only doctor's cannot-evaluate for exactly that record and from/to pair, never a finding;
+    doctor keeps reporting it until the change is committed. Exit 0 recorded (left uncommitted), exit 2
+    every refusal or cannot-evaluate; exit 1 is not used. Unlike the applicability-probe siblings a
+    NOT-ADOPTED root is a cannot-evaluate (a requested operation, like import)."""
     try:
         return _opf_record.cli(rest)
     except Exception as exc:  # noqa: BLE001  class-width fail-closed backstop, never a false success

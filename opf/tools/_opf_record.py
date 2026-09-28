@@ -84,7 +84,8 @@ a hand edit or hand merge that leaves canonical bytes passes it and spec 5.7's i
 a separate requirement; recovery proves each operand's state under the lease, but the journal engine's
 restore then rewrites without re-checking, so an edit landing in that window, or one that leaves an exact
 byte prefix of the journaled preimage or planned bytes (read as a torn write), is not detected. A
-transition changes `status` and `updated_at` only, so a target state that requires further fields (a
+transition changes `status` and `updated_at` only, plus `proposed_from` (written when it lands a
+`/proposed` status, removed when it leaves one), so a target state that requires further fields (a
 `decided` pending_decision's resolution bundle, a `sent` contribution's delivery bundle) refuses at
 validate_record; posting a new handoff does not supersede the previous one in the same act. The
 pre-proposal state a rejection restores is read from the record's own `proposed_from` field, which this
@@ -1379,8 +1380,9 @@ def _doctor(root):
 def _snapshot_pending(transition):
     """The predicate for the one doctor cannot-evaluate a transition this verb checked may leave until it
     is committed, or None. Doctor judges a status change against the prior committed snapshot (HEAD) over
-    every actor kind, and the envelope does not identify the transitioning actor (doctor deliberately does
-    not read the record's own `proposed_from`, spec 8.8), so an actor-dependent or rejection-shaped
+    every actor kind: doctor's history comparison sees only the prior snapshot's type and status, which
+    identify neither the transitioning actor nor the pre-proposal state; doctor validates `proposed_from`
+    but does not use it as rejection evidence (spec 8.8), so an actor-dependent or rejection-shaped
     change is CANNOT-EVALUATE there (C-HISTORY-RESURRECTION) until
     the commit makes it the snapshot. This verb checked that exact change with the known actor, reason, and
     recorded pre-proposal state, and `transition` is the triple the postcondition proved equal to the

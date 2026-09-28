@@ -65,10 +65,11 @@ Each case runs on its own copy of that template; the root is removed in a finall
       VALID) changes nothing in either direction, refused target and restored state alike; a proposal
       carrying no proposed_from (proposed outside the verb by a canonical hand edit) refuses with every
       byte untouched; a reject-and-re-propose cycle merged --no-ff or squash-merged into the mainline
-      behaves exactly the same; and a current row the schema grades invalid, a proposed_from naming an
-      illegal predecessor or a stray proposed_from on an unqualified status (each a doctor finding), is
-      never trusted or overwritten: rejection, done-with-receipt, and the proposing transition refuse
-      with every byte untouched (flips: read the worklog lifecycle line instead of the record's field;
+      behaves exactly the same (flip: read the worklog lifecycle line instead of the record's field);
+      and a current row the schema grades invalid, a proposed_from naming an illegal predecessor or a
+      stray proposed_from on an unqualified status (each a doctor finding), is never trusted or
+      overwritten, in three separate tests: the rejection, the ratifying done-with-receipt, and the
+      proposing transition each refuse with every byte untouched (flip, applied to each of the three:
       trust the current row without validating it)
   T17 a planner mutation that changes only a value's TYPE (an extension count to true or 1.0, the index
       schema marker to true, the receipt counter to true) refuses exit 2 before publication with every
@@ -920,27 +921,50 @@ def t16_recorded_predecessor(fx):
                  "rejected genuinely after the merge")
             assert row(root, "BI-1")["status"] == "active" and "proposed_from" not in row(root, "BI-1")
             doctor_valid(env, root)
-    # A schema-invalid proposed_from (an illegal predecessor, a doctor finding) is never trusted: the
-    # rejection (to the forged target and to the truthful one alike) and the ratifying done-with-receipt
-    # refuse with every byte untouched, so the verb never launders a doctor-INVALID store into a VALID
-    # one (QA4 F1).
-    root = fx.case("t16-invalid-predecessor")
+
+
+# A schema-invalid current row (a doctor finding) is never trusted or overwritten, so the verb never launders
+# a doctor-INVALID store into a VALID one (QA4 F1). Each refusal is its own test, so flip_t16_trust must turn
+# EACH one red, not only the first.
+
+def _forged_predecessor(fx, name):
+    """BI-1 proposed at done by an assistant, then its proposed_from forged canonically to open (not a
+    legal predecessor of done) and committed: a doctor finding. Run under ticking()."""
+    root = fx.case(name)
+    _proposed(fx, root, "done")
+    index = model(root, BI_INDEX)
+    assert index["record"][0]["proposed_from"] == "active", index["record"][0]
+    index["record"][0]["proposed_from"] = "open"    # open is not a legal predecessor of done
+    write_commit(fx.env, root, BI_INDEX, emit.emit_checked(index).encode("utf-8"), "a forged predecessor")
+    rc, out, err = cli(fx.env, ["doctor", "--root", str(root)])
+    assert rc != 0 and "not a legal predecessor" in out, ("T16 the forged predecessor is a doctor finding",
+                                                          rc, out[-1600:])
+    return root
+
+
+def t16_invalid_predecessor_rejection(fx):
+    """The rejection of a row with an illegal proposed_from, to the forged target and to the truthful one
+    alike, refuses with every byte untouched."""
     with ticking():
-        _proposed(fx, root, "done")
-        index = model(root, BI_INDEX)
-        assert index["record"][0]["proposed_from"] == "active", index["record"][0]
-        index["record"][0]["proposed_from"] = "open"    # open is not a legal predecessor of done
-        write_commit(env, root, BI_INDEX, emit.emit_checked(index).encode("utf-8"), "a forged predecessor")
-        rc, out, err = cli(env, ["doctor", "--root", str(root)])
-        assert rc != 0 and "not a legal predecessor" in out, ("T16 the forged predecessor is a doctor "
-                                                              "finding", rc, out[-1600:])
-        refused_untouched(env, root, ["transition", "BI-1", "open", "--reason", "x"] + MAINTAINER,
+        root = _forged_predecessor(fx, "t16-invalid-predecessor-rejection")
+        refused_untouched(fx.env, root, ["transition", "BI-1", "open", "--reason", "x"] + MAINTAINER,
                           "not schema-valid")
-        refused_untouched(env, root, ["transition", "BI-1", "active", "--reason", "x"] + MAINTAINER,
+        refused_untouched(fx.env, root, ["transition", "BI-1", "active", "--reason", "x"] + MAINTAINER,
                           "not schema-valid")
-        refused_untouched(env, root, ["done-with-receipt", "BI-1"] + MAINTAINER, "not schema-valid")
-    # A stray proposed_from on an unqualified record (a doctor finding) is never silently overwritten:
-    # the proposing transition refuses with every byte untouched (QA4 F1).
+
+
+def t16_invalid_predecessor_receipt(fx):
+    """The ratifying done-with-receipt of a row with an illegal proposed_from refuses with every byte
+    untouched."""
+    with ticking():
+        root = _forged_predecessor(fx, "t16-invalid-predecessor-receipt")
+        refused_untouched(fx.env, root, ["done-with-receipt", "BI-1"] + MAINTAINER, "not schema-valid")
+
+
+def t16_stray_field(fx):
+    """A stray proposed_from on an unqualified record (a doctor finding) is never silently overwritten: the
+    proposing transition refuses with every byte untouched."""
+    env = fx.env
     root = fx.case("t16-stray-field")
     with ticking():
         step(fx, root, CREATE, "BI-1")
@@ -973,8 +997,8 @@ def flip_t16():
 
 
 def flip_t16_trust():
-    """Trust the current row without validating it (the reviewed head's behaviour): the schema-invalid
-    proposed_from and stray-field cases must turn red."""
+    """Trust the current row without validating it (the reviewed head's behaviour): the invalid-predecessor
+    rejection, the invalid-predecessor done-with-receipt, and the stray-field proposal must each turn red."""
     return patch.object(record, "_require_valid_current", lambda row, rtype, ctx, rid, rel: None)
 
 
@@ -1132,7 +1156,10 @@ TESTS = (
     ("T13-recovery-intervening-edit", t13_intervening_edit, flip_t13),
     ("T14-create-type-before-read", t14_type_before_read, flip_t14),
     ("T15-leftover-journal-lock", t15_leftover_lock, flip_t15),
-    ("T16-rejection-recorded-predecessor", t16_recorded_predecessor, (flip_t16, flip_t16_trust)),
+    ("T16-rejection-recorded-predecessor", t16_recorded_predecessor, flip_t16),
+    ("T16-invalid-predecessor-rejection", t16_invalid_predecessor_rejection, flip_t16_trust),
+    ("T16-invalid-predecessor-receipt", t16_invalid_predecessor_receipt, flip_t16_trust),
+    ("T16-stray-field-proposal", t16_stray_field, flip_t16_trust),
     ("T17-strict-type-aware-delta", t17_strict_delta, flip_t17),
 )
 

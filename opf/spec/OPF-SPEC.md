@@ -908,10 +908,11 @@ it, and it carries no `spec_version` bump. Its subcommands:
   provenance. Such a record cannot be rejected by the verb, which never infers or invents a
   predecessor; the worklog entry of the proposing transition is informational, never evidence. The
   verb refuses to act on, or overwrite, a record whose current row is not schema-valid,
-  `proposed_from` included, so a schema-detectable forgery is repaired, never laundered. The field
-  is an ordinary record field, so a canonical hand edit of it that keeps the row schema-valid is
-  not detected, the same as any other field (the section 5.7 integration-base rule remains the
-  control). A backlog item reaches unqualified `done` only through `done-with-receipt`.
+  `proposed_from` included, so a schema-detectable forgery must be repaired by the operator
+  before the verb acts; it is never laundered. The field is an ordinary record field, so a
+  canonical hand edit of it that keeps the row schema-valid is not detected, the same as any
+  other field (the section 5.7 integration-base rule remains the control). A backlog item
+  reaches unqualified `done` only through `done-with-receipt`.
 - `done-with-receipt`: maintainer-only. It moves a backlog item to unqualified `done`, from
   `active` or by ratifying `done/proposed`, and in the same act creates its one-to-one `done`
   receipt linked `receipt_of` (section 8.5). An assistant reaching `done` uses `transition` and
@@ -960,10 +961,11 @@ guarantees:
    reconciled. The reference tooling keeps that journal under `.aiqt/record/journal` at homes 1.
 7. The declared views are rendered, then a full doctor must report VALID; a failure leaves the
    change for review with recovery advice scoped to the planned paths. One exception applies to a
-   status change: doctor compares it with the prior committed snapshot, which does not identify
-   the transitioning actor, and doctor deliberately does not read the record's own
-   `proposed_from` field, so it can grade that change
-   cannot-evaluate until the change is committed. The verb's render and final doctor accept that
+   status change: doctor compares it with the prior committed snapshot, and doctor's history
+   comparison sees only the prior snapshot's type and status, which identify neither the
+   transitioning actor nor the pre-proposal state; doctor validates `proposed_from` but does not
+   use it as rejection evidence, so doctor can grade that change cannot-evaluate until the change
+   is committed. The verb's render and final doctor accept that
    cannot-evaluate only for exactly the record and the from and to statuses it has just written,
    never a finding and never any other cannot-evaluate, and the verb reports it as pending until
    commit. `opf doctor` itself is unchanged and still reports it until then.

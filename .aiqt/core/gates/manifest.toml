@@ -704,8 +704,8 @@ with every byte untouched, a reject-and-re-propose cycle merged --no-ff or squas
 mainline behaves exactly the same, and a current row the schema grades invalid (a proposed_from naming
 an illegal predecessor, or a stray proposed_from on an unqualified status, each a doctor finding) is
 never trusted or overwritten, the rejection, the ratifying done-with-receipt, and the proposing
-transition each refusing with every byte untouched; that a planner mutation changing only a
-value's type (an extension
+transition each refusing with every byte untouched in its own test; that a planner mutation
+changing only a value's type (an extension
 count to true or 1.0, the index schema marker to true, the receipt counter to true) refuses before
 publication with every byte untouched; that two branches creating from the same
 committed counters conflict on the store paths and a canonical union resolution carrying a
@@ -728,8 +728,9 @@ check sees, the recorded pre-proposal state, doctor's check_unique_ids, the rele
 ordering, the release-failure outcome text, the final doctor, the released-span check, recovery under the
 lease, the intervening-edit check, the --type check before the operand read, the leftover-lock outcome
 text, the record-carried pre-proposal state's flip (the worklog lifecycle line read instead of the
-record's own field), the current-row validation's flip (the row trusted without the schema check),
-and the strict type-aware delta comparator's flip (ordinary equality, under which
+record's own field), the current-row validation's flip (the row trusted without the schema check,
+applied separately to each of those three invalid-row tests), and the strict type-aware delta
+comparator's flip (ordinary equality, under which
 true and 1.0 read as 1)) is applied in turn and must turn its test red
 with an assertion; where an independent guard would still refuse, the test asserts the written bytes or an
 isolated guard before any message. The unit leg (_opf_record.py, via opf.py --self-test) covers the
