@@ -872,7 +872,7 @@ def _roster_checks():
              ci_text + '\n      - run: python3 -I -B tools/check_secrets.py --self-test | cat\n',
              ci + ": registry diagnostics:"),
             ("roster/dynamic-arguments-refused", local,
-             add_local('\nrun_gate "dynamic" python3 -I -B tools/check_secrets.py --self-test --base "$MODE"\n'),
+             add_local('\nrun_gate "dynamic" python3 -I -B tools/check_secrets.py --self-test --base "$PUSH_BEFORE"\n'),
              "dynamic self-test arguments:"),
             ("roster/launcher-refused", local,
              add_local('\nrun_gate "launcher" python3 -B -I tools/check_secrets.py --self-test\n'),
