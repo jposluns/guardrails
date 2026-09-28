@@ -109,9 +109,10 @@ Checks (each with a fail-without-it discriminator exercised by --self-test):
   - transaction-consistency : GENERATION 1: the transaction record's state machine, and that the attributed acceptance is
                            archived (`.aiqt/import-archive/<run-id>/acceptance.json`) once state >= published.
                            GENERATION 2: the typed history's consistency, over one captured frame sequence
-                           per transaction: an open, pre-INTENT, torn, or identity-mismatched single
-                           transaction or attempt refuses (present, incomplete evidence is never read as
-                           absent); a terminal journal requires its exactly-reconciling projection and a
+                           per transaction: an open, torn, or identity-mismatched transaction or attempt
+                           refuses, as does a pre-INTENT single transaction. A pre-INTENT attempt passes
+                           unless durable completion evidence lacks its COMPLETE journal; a terminal
+                           single-transaction journal requires its exactly-reconciling projection and a
                            projection requires its journal (journals are machine-local, so a clone refuses
                            here rather than trusting an unverifiable history); a terminal rollback permits a
                            pre-publication retry; a COMPLETE ingest attempt requires its verified retained
@@ -167,8 +168,10 @@ not admit it; that is refused. Generation 2 requires a registered store binding 
 transaction evidence only (projection, single-transaction journal, publication attempts), classifying
 open ingest publication attempts itself, read-only; the coordinator's own preflight remains defence in
 depth. Generation-2 residuals (disclosed): journals are machine-local, so a clone without them refuses a
-projection-bearing run rather than proving anything; descriptor-based observation is not an atomic
-snapshot; the journal's checksum/state-machine model does not authenticate a deliberately forged,
+projection-bearing or promotion-receipt-bearing run rather than proving anything. If both the journal
+and its projection or durable completion receipt are lost, this gate cannot distinguish the run from
+one never applied; descriptor-based observation is not an atomic snapshot; the journal's checksum/state-machine
+model does not authenticate a deliberately forged,
 internally consistent history; and a reservation is not graded (it proves neither publication nor
 failure). Transported legacy history refuses with the named transported-legacy-evidence finding until
 migration apply ships its receipt contract.
@@ -1971,7 +1974,7 @@ def _typed_single_transaction(store_fd, jfd, kind, run_name, raw, doc, schema_pr
     import _opf_store
     notes = []
     txn_rel = _opf_store.journal_root(kind) + "/" + run_name
-    valid_projection = raw is not None and doc is not None and not schema_problems
+    valid_projection = raw is not None and doc is not None  # doc passed its own schema validation
     clone_note = ("typed projection has no journal transaction (journals are machine-local, so a clone "
                   "cannot verify this history locally; fail-closed, never read as absent)")
     if jfd is None:
@@ -2038,8 +2041,9 @@ def _typed_single_transaction(store_fd, jfd, kind, run_name, raw, doc, schema_pr
 
 def _typed_attempts(store_fd, jfd, kind, run_name, attempts, cons_problems):
     """Classify this run's publication attempts, READ-ONLY (never the create-capable attempt_states):
-    an open, pre-INTENT, torn, or identity-mismatched attempt refuses; a terminal rollback permits a
-    pre-publication retry; a COMPLETE attempt requires its verified retained completion evidence
+    an open, torn, or identity-mismatched attempt refuses; a pre-INTENT attempt or terminal rollback
+    permits a pre-publication retry unless durable completion evidence lacks its COMPLETE journal.
+    A COMPLETE attempt requires its verified retained completion evidence
     (_opf_ingest_apply._verify_completed_evidence, the corrected PR A verifier). A reservation alone
     proves neither publication nor failure, so it is not read here. Returns (the notes passing attempts
     earn, whether a COMPLETE attempt exists)."""
@@ -2066,10 +2070,9 @@ def _typed_attempts(store_fd, jfd, kind, run_name, attempts, cons_problems):
             continue
         state = _opf_journal.state_of_frames(frames)
         if state == "nothing-opened":
-            # The coordinator's own aborted-before-INTENT resting state: nothing was applied, and a
-            # retry takes a fresh attempt. Distinct from absence, never a refusal.
-            notes.append("publication attempt {} was abandoned pre-INTENT (nothing applied; a "
-                         "pre-publication retry is permitted)".format(txn))
+            # This journal records no INTENT; it cannot establish that nothing was applied.
+            # The durable receipt probe below covers completion evidence without a journal.
+            notes.append("publication attempt {} is pre-INTENT (no INTENT recorded)".format(txn))
         elif state == "open":
             cons_problems.append("open publication attempt {}; recovery is required before "
                                  "grading".format(txn))
@@ -2099,6 +2102,18 @@ def _typed_attempts(store_fd, jfd, kind, run_name, attempts, cons_problems):
         else:
             notes.append("publication attempt {} complete; retained completion evidence "
                          "verified".format(txn))
+    elif kind == "ingest":
+        import _opf_ingest_apply
+        receipt_rel = imp._ingest_acceptance_home(run_name) + "/" + _opf_ingest_apply.PROMOTION_NAME
+        try:
+            receipt = _read_store_control(store_fd, receipt_rel)
+        except _GateError as exc:
+            cons_problems.append("cannot evaluate: durable completion receipt ({})".format(exc))
+        else:
+            if receipt is not None:
+                cons_problems.append("completion-receipt-without-journal: durable completion evidence "
+                                     "{} has no COMPLETE attempt journal (machine-local history is "
+                                     "required; never read as unapplied)".format(receipt_rel))
     return notes, bool(completed)
 
 
@@ -2184,7 +2199,7 @@ def _typed_transaction_checks(store_fd, run_name, kind):
         if not transported:
             notes += _typed_single_transaction(store_fd, jfd, kind, run_name, raw, doc,
                                                schema_problems, cons_problems)
-            if jfd is not None and attempts:
+            if kind == "ingest" or (jfd is not None and attempts):
                 attempt_notes, completed = _typed_attempts(store_fd, jfd, kind, run_name, attempts,
                                                            cons_problems)
                 notes += attempt_notes
@@ -5784,6 +5799,60 @@ def _self_test_isolated():
         expect("typed-projection-canonical-bytes",
                c_ts[0] is False and "canonical emission" in c_ts[1])
 
+        bad_spelling = m_root / _opf_store.journal_root("import") / (m_run.name + ".a123")
+        bad_spelling.mkdir()
+        _sp_all, sp_ts, sp_tc = txn2(m_run)
+        expect("typed-projection-unrelated-spelling",
+               sp_ts[0] is False and sp_tc[0] is False
+               and "is not an attempt of run" in sp_ts[1] and sp_tc[1] == sp_ts[1]
+               and "malformed" not in sp_tc[1])
+        bad_spelling.rmdir()
+
+        # A durable receipt survives loss of the local journal. Reproduce the COMPLETE
+        # refusal first, then delete frames.log, its directory, and the journal root.
+        import _opf_ingest_apply
+        receipt_root, receipt_run = typed_fixture("ingest")
+        attempt_dir = (receipt_root / _opf_store.journal_root("ingest")
+                       / _opf_journal.attempt_txn("ingest", receipt_run.name, 1))
+        attempt_dir.mkdir(parents=True)
+        jfd = os.open(str(attempt_dir.parent), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            _journal.publish(jfd, attempt_dir, _journal.F_INTENT, dict(
+                txn=attempt_dir.name, header=dict(kind="ingest", run_id=receipt_run.name,
+                                                 attempt=1, operation_id="op"), ops=[]))
+            _journal.publish(jfd, attempt_dir, _journal.F_COMPLETE, dict(txn=attempt_dir.name))
+        finally:
+            os.close(jfd)
+        receipt = (receipt_root / imp._ingest_acceptance_home(receipt_run.name)
+                   / _opf_ingest_apply.PROMOTION_NAME)
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_bytes(b'format = "opf.ingest.promotion/v1"\n')
+        expect("typed-receipt-complete-unbound", txn2(receipt_run)[2][0] is False)
+        for missing in ("log", "attempt", "journal"):
+            if missing == "log":
+                (attempt_dir / "frames.log").unlink()
+            elif missing == "attempt":
+                attempt_dir.rmdir()
+            else:
+                attempt_dir.parent.rmdir()
+            _r_all, _r_ts, r_tc = txn2(receipt_run)
+            expect("typed-receipt-missing-" + missing,
+                   r_tc[0] is False and "completion-receipt-without-journal" in r_tc[1])
+        receipt.unlink()
+        receipt.symlink_to("missing")
+        r_tc = txn2(receipt_run)[2]
+        expect("typed-receipt-unreadable",
+               r_tc[0] is False and "cannot evaluate: durable completion receipt" in r_tc[1])
+        receipt.unlink()
+        attempt_dir.mkdir(parents=True)
+        for pre_intent in ("directory", "empty-log"):
+            if pre_intent == "empty-log":
+                (attempt_dir / "frames.log").write_bytes(b"")
+            _p_all, p_ts, p_tc = txn2(receipt_run)
+            expect("typed-pre-intent-no-receipt-" + pre_intent,
+                   p_ts[0] is True and p_tc[0] is True and "pre-INTENT" in p_tc[1]
+                   and "nothing applied" not in p_tc[1])
+
         # Frame-state machine: present incomplete evidence refuses, never reads as absent.
         def framed(f_label, f_build, f_needle, schema_ok=True):
             f_root, f_run = typed_fixture("import")
@@ -5940,24 +6009,41 @@ def _self_test_isolated():
 
         ro_root, ro_run = typed_fixture("ingest")
         typed_journal(ro_root, "ingest", ro_run.name, (_journal.F_INTENT, _journal.F_COMPLETE))
-        ro_before = tree_snapshot(ro_root)
-        ro_clean = graded2(ro_run)
+        # Use the coordinator's genuine promoted fixture so retained receipt, reservation,
+        # inventories and payload all verify while the same sentinels are installed.
+        complete_root, rid, complete_run = _opf_ingest_apply._st_build(base, "typed-ro-complete")
+        keep = base / "typed-ro-complete-keep"
+        shutil.copytree(str(complete_run), str(keep))
+        with imp._self_test_homes2_active(complete_root):
+            promoted = _opf_ingest_apply.apply_ingest(complete_root, rid, now=_opf_ingest_apply._NOW)
+        expect("typed-read-only-complete-promoted", promoted.promoted is True)
+        shutil.copytree(str(keep), str(complete_run))
 
         def forbidden(*_args, **_kwargs):
             raise AssertionError("a write-capable seam was entered during read-only grading")
 
-        with unittest.mock.patch.object(_opf_journal, "_project", side_effect=forbidden), \
-                unittest.mock.patch.object(_opf_journal, "_opened", side_effect=forbidden), \
-                unittest.mock.patch.object(_opf_journal, "attempt_states", side_effect=forbidden), \
-                unittest.mock.patch.object(_journal, "ensure_journal_dirs", side_effect=forbidden), \
-                unittest.mock.patch.object(_journal, "acquire_lock", side_effect=forbidden), \
-                unittest.mock.patch.object(_journal, "recover", side_effect=forbidden), \
-                unittest.mock.patch.object(_journal, "publish", side_effect=forbidden), \
-                unittest.mock.patch.object(_opf_allocation, "reserve_ingest_ids",
-                                           side_effect=forbidden):
-            ro_guarded = graded2(ro_run)
-        expect("typed-read-only-forbidden-seams", ro_guarded == ro_clean)
-        expect("typed-read-only-tree-unchanged", tree_snapshot(ro_root) == ro_before)
+        for ro_label, fixture_root, fixture_run in (
+                ("single", ro_root, ro_run), ("complete-attempt", complete_root, complete_run)):
+            ro_before = tree_snapshot(fixture_root)
+            ro_clean = graded2(fixture_run)
+            with unittest.mock.patch.object(_opf_journal, "_project", side_effect=forbidden), \
+                    unittest.mock.patch.object(_opf_journal, "_opened", side_effect=forbidden), \
+                    unittest.mock.patch.object(_opf_journal, "attempt_states", side_effect=forbidden), \
+                    unittest.mock.patch.object(_journal, "ensure_journal_dirs", side_effect=forbidden), \
+                    unittest.mock.patch.object(_journal, "acquire_lock", side_effect=forbidden), \
+                    unittest.mock.patch.object(_journal, "recover", side_effect=forbidden), \
+                    unittest.mock.patch.object(_journal, "publish", side_effect=forbidden), \
+                    unittest.mock.patch.object(_opf_allocation, "reserve_ingest_ids",
+                                               side_effect=forbidden), \
+                    unittest.mock.patch.object(_opf_ingest_apply, "_verify_completed_evidence",
+                                               wraps=_opf_ingest_apply._verify_completed_evidence) as verify:
+                ro_guarded = graded2(fixture_run)
+            expect("typed-read-only-forbidden-seams-" + ro_label,
+                   ro_guarded == ro_clean and ro_guarded["transaction-consistency"][0] is True)
+            expect("typed-read-only-tree-unchanged-" + ro_label,
+                   tree_snapshot(fixture_root) == ro_before)
+            expect("typed-read-only-verifier-path-" + ro_label,
+                   verify.call_count == (1 if ro_label == "complete-attempt" else 0))
 
         # Generation 1 stays byte-identical beside corrupt TYPED siblings: the same ordered results,
         # and no typed-control read is even attempted (typed names are ordinary content there).

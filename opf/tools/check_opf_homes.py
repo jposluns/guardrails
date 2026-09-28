@@ -352,11 +352,11 @@ def _staged_root_self_test(check):
                 jfd = store._open_root_fd(journal)
                 try:
                     empty_res = grade(run)
-                    # An abandoned pre-INTENT attempt is the coordinator's own aborted resting state:
-                    # a retry is permitted, but the evidence is NAMED, never read as absent.
+                    # A pre-INTENT attempt without a receipt permits retry; the note describes
+                    # only the journal's observation, never proof that nothing was applied.
                     check("staged-root-attempt-empty", lambda:
                           empty_res["transaction-consistency"][0] is True
-                          and "abandoned pre-INTENT" in empty_res["transaction-consistency"][1]
+                          and "pre-INTENT (no INTENT recorded)" in empty_res["transaction-consistency"][1]
                           and empty_res["transaction-consistency"][1]
                           != gate._HOMES2_TYPED_UNAPPLIED_DETAIL)
                     _journal.publish(jfd, attempt, _journal.F_INTENT, dict(
@@ -1480,6 +1480,32 @@ def boundary_self_test():
         lambda: home_journal.check_attempt_frames(adoption_attempt, "import", adopt_run, 1)))
     check("internal-projection-adoption-nonterminal-refused", lambda: refuses(
         lambda: home_journal.projection_payload("adoption", adopt_run, "open", "adopt-op")))
+
+    # A matching header cannot legitimize an invalid constructor identity. Require the
+    # public JournalError contract, including for empty frame sequences and projections.
+    def journal_refuses(thunk):
+        try:
+            thunk()
+        except journal.JournalError:
+            return True
+        return False
+
+    for label, bad_kind, bad_run in (("traversal", "adoption", "../escape"),
+                                      ("kind", "bogus", adopt_run)):
+        bad_header = dict(kind=bad_kind, run_id=bad_run, operation_id="op")
+        bad_frames = [(journal.F_INTENT, dict(txn=bad_run, header=bad_header))]
+        bad_attempt = [(journal.F_INTENT, dict(txn=bad_run + ".a0001",
+                                             header=dict(bad_header, attempt=1)))]
+        for validator, call in (
+                ("run", lambda: home_journal.check_run_frames(bad_frames, bad_kind, bad_run)),
+                ("empty-run", lambda: home_journal.check_run_frames([], bad_kind, bad_run)),
+                ("attempt", lambda: home_journal.check_attempt_frames(
+                    bad_attempt, bad_kind, bad_run, 1)),
+                ("empty-attempt", lambda: home_journal.check_attempt_frames([], bad_kind, bad_run, 1)),
+                ("attempt-name", lambda: home_journal.attempt_txn(bad_kind, bad_run, 1)),
+                ("record", lambda: home_journal.projection_record(bad_kind, bad_run, "complete", "op")),
+                ("payload", lambda: home_journal.projection_payload(bad_kind, bad_run, "complete", "op"))):
+            check("internal-identity-{}-{}".format(label, validator), lambda: journal_refuses(call))
 
     preview = "/store/.working/staging/preview/preview-run"
 

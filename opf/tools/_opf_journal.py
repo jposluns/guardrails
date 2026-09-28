@@ -91,10 +91,17 @@ PROJECTION_STATES = ("complete", "rolled-back")
 _RUN_HEADER_KEYS = frozenset(("kind", "run_id", "operation_id"))
 
 
+def _validate_identity(kind, run_id):
+    try:
+        _opf_store.txn_record(kind, run_id)
+    except ValueError as exc:
+        raise _journal.JournalError(str(exc)) from exc
+
+
 def projection_record(kind, run_id, state, operation_id):
     """The terminal transaction projection's exact model (the producer's only shape). Pure; raises
     JournalError on a non-terminal state, an invalid identity, or a malformed operation id."""
-    _opf_store.txn_record(kind, run_id)  # validate both identity components (kind-generic)
+    _validate_identity(kind, run_id)
     if state not in PROJECTION_STATES:
         raise _journal.JournalError("a transaction projection requires terminal journal evidence")
     if not isinstance(operation_id, str) or not operation_id:
@@ -125,6 +132,7 @@ def check_run_frames(frames, kind, run_id):
     """Pure validation of one single-transaction frame sequence against the requested identity: the C2
     accepted-sequence state machine, then the exact {kind, run_id, operation_id} header binding. Raises
     JournalError; returns the INTENT frame object (None for an empty sequence)."""
+    _validate_identity(kind, run_id)
     _journal._validate_terminal_agreement(frames)
     intent = _journal._first(frames, _journal.F_INTENT)
     if intent is not None:
@@ -212,7 +220,7 @@ _ATTEMPT_HEADER_KEYS = frozenset(("kind", "run_id", "attempt", "operation_id"))
 def attempt_txn(kind, run_id, attempt):
     """The journal transaction name of one publication attempt of a stable logical run. A retry after a
     terminal rollback takes a fresh attempt; what the run reserved stays with the run, not the attempt."""
-    _opf_store.txn_record(kind, run_id)  # validate both identity components
+    _validate_identity(kind, run_id)
     if type(attempt) is not int or not 1 <= attempt <= _ATTEMPT_MAX:
         raise _journal.JournalError("attempt must be an int in 1..{}".format(_ATTEMPT_MAX))
     return "{}.a{:04d}".format(run_id, attempt)

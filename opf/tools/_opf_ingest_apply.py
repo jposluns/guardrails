@@ -2714,7 +2714,6 @@ def _t_gate_typed_grading(base, check):
     a tampered reservation, and the old-format ingest inventory (refused, never translated)."""
     import shutil
     import tomllib as _tl
-    from unittest.mock import patch
     import check_opf_import as gate
     root, rid, run = _st_build(base, "gate-typed")
     keep = base / "gate-typed-keep"
