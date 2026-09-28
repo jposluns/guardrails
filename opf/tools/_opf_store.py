@@ -96,6 +96,7 @@ STORE_ROOT_CONTROL_DIRS = (".git", ".aiqt")
 # SUPPORTED_HOMES is the highest homes generation this tooling activates; homes 2 activates with the
 # migration, so until then every store, whatever it declares, keeps its legacy grading (generation 1).
 SUPPORTED_HOMES = 1
+EVIDENCE_INVENTORY_FORMAT = "opf.evidence.inventory/v1"  # spec 4.2
 IMPORTED_DIRNAME = "imported"
 ARCHIVE_DIRNAME_STORE = "archive"       # distinct from the machine-store record archive
 STAGING_DIRNAME = "staging"

@@ -4,8 +4,9 @@ Formal name: AIQT Development Operational Standard. Public brand: OPFiles
 (opfiles.ai). Base discovery token: `opf`. Status: draft (specification only;
 schemas and the reference tooling, the scaffolder `opf init`, the importer `opf import`, the
 validator `opf doctor`, the renderer `opf render`, the relocator `opf migrate`, the
-synchronizer `opf sync`, and the schema-upgrader `opf upgrade`, ship in later releases).
-Date: 2026-09-14 (UTC).
+synchronizer `opf sync`, the schema-upgrader `opf upgrade`, and the record author `opf record`,
+ship in later releases).
+Date: 2026-09-27 (UTC).
 
 OPFiles is a neutral, self-contained operational-files standard published under the Apache
 License 2.0 (except vendored third-party material, which remains under its own terms). AIQT and AIQT Guardrails are trademarks (registration pending); AIQT is a brand,
@@ -37,7 +38,7 @@ can name, with history and the durable worklog preserved (section 5).
 
 OPF specifies formats, layout, naming, lifecycle, and enforcement posture, and names the standard
 command vocabulary of the reference tooling (`opf init`, `opf import`, `opf doctor`, `opf render`,
-`opf migrate`, `opf sync`, `opf upgrade`, `opf absorb`). It does not specify tooling internals; a reference implementation
+`opf migrate`, `opf sync`, `opf upgrade`, `opf absorb`, `opf record`). It does not specify tooling internals; a reference implementation
 follows in later releases of the AIQT Guardrails reference suite. A project can conform to this
 specification with hand-maintained files and its own checks.
 
@@ -203,13 +204,18 @@ The owning writer or migration derives each inventory from the run's transaction
 receipt and publishes it exclusively with the retained bytes. An inventory is never rewritten, so
 a bundle stays immutable and an evidence commit changes only its bundle folder. An inventory is
 not a journal projection and remains available in a clone without journals.
+A phase inventory may be published in the same transaction as the base inventory to claim the
+promotion receipt without creating a receipt/inventory digest cycle.
 
 C-EVIDENCE-ENUM reconciles exact membership, directory structure, regular-file types, sizes and
 digests: every payload file under `.working/imported/` and `.working/archive/`, meaning every file
 other than a bundle-root inventory, is claimed by exactly one row, and every inventory is itself
 schema-checked against the shape above rather than claimed. Unlisted or unclaimed entries, a bundle
 without an inventory, and missing listed files are findings; unreadable or malformed inputs,
-including a path claimed twice, cannot evaluate. A phase inventory never substitutes for a missing
+including a path claimed twice, cannot evaluate. The recognized legacy format
+`opf.ingest.evidence-inventory/v1` is refused as the named `legacy-ingest-inventory` finding under
+C-EVIDENCE-ENUM, without migration or rewriting; completed-ingest replay cannot evaluate that bundle.
+A phase inventory never substitutes for a missing
 `inventory.toml`: such a bundle cannot evaluate. Deleting a whole bundle, inventory and payload
 together, is outside this local snapshot check; independent history is required to detect that
 loss. Inventories assert membership, not authenticated actor history. The contained reader's size
@@ -502,6 +508,19 @@ Scope of the contract by pattern:
 - **A local-only store** has no sync target, so the behind/ahead axis does not exist; the lease
   still guards concurrent runs on the one system, and durability is the adopter's recorded backup
   responsibility (section 5.3).
+
+**Parallel branches allocate against the integration base.** The lease serializes writers on one
+store, but two branches of a store that rides the product repository each start from the same
+committed `counters.toml`, so each can claim the same record ID. Store files are therefore never
+hand-merged: after a merge conflict on a store path, take the integration base's version of the
+conflicted store files and redo the authoring operation on that base, which claims the next ID
+afresh (section 8.8). The byte-reproduction precondition of `opf record` and `opf upgrade` refuses
+only a store file whose bytes are not the canonical serialization of its content, such as one
+carrying comments or non-canonical formatting. A hand edit or hand merge that leaves canonical bytes
+passes it undetected, so this integration-base rule is a separate requirement that the precondition
+does not enforce. A merge that resolves without a conflict yet duplicates an ID is caught by
+`opf doctor`, which checks store-wide ID uniqueness and that every ID lies within its counter
+(section 8.2). A collision is never resolved by decrementing a counter or reusing an ID.
 
 ### 5.8 The public deliverables are identical across topologies
 
@@ -869,6 +888,66 @@ Experimental or adopter-specific fields ride only under `x-<vendor>` tables, wit
 registered in the manifest; an unregistered prefix is a validation failure. An extension may add
 metadata but MUST NOT override identity, state, transitions, resolution completeness, publication
 inclusion, block actionability, counters, lock ordering, or actor attribution.
+
+### 8.8 Authoring operations
+
+`opf record` is the reference tooling's record-authoring verb. It writes only record and worklog
+shapes this specification already defines, so it adds no store-format change and no
+`spec_version` bump. Its subcommands:
+
+- `create`: one new record of an enabled baseline type, in the type's initial state. An assistant
+  or automation author entering a gated initial state lands `/proposed`; a created-terminal factual
+  or ACT type (`reference`, `autonomous_decision`, `maintainer_decision`) carries no qualifier
+  (section 8.4). `done` receipts and worklog entries are not created this way.
+- `transition`: a status change checked against the type's grammar (section 8.5). An assistant or
+  automation author landing a terminal or gated state takes `/proposed`; only a maintainer
+  ratifies, or rejects with a recorded reason back to the recorded pre-proposal state
+  (section 8.4).
+- `done-with-receipt`: maintainer-only. It moves a backlog item to unqualified `done`, from
+  `active` or by ratifying `done/proposed`, and in the same act creates its one-to-one `done`
+  receipt linked `receipt_of` (section 8.5). An assistant reaching `done` uses `transition` and
+  lands `done/proposed`; no receipt exists until a maintainer ratifies.
+- `worklog-append`: one entry appended to the unreleased tail of `worklog.toml`, status `recorded`,
+  never `/proposed` whatever the actor (sections 6.2 and 8.4). An entry that would fall inside a
+  released span is refused.
+
+Every subcommand runs one operation sequence, and an implementation of the verb MUST preserve its
+guarantees:
+
+1. Resolve the store, then reconcile any interrupted authoring transaction first. Reconciliation
+   writes the store, so it runs only under the single-writer lease that publication uses: a held
+   lease refuses before any recovery write and is never seized. An operand changed since the
+   interruption, to bytes that are neither its journaled prestate nor its planned poststate nor a
+   write of either torn by the interruption, is reported and refused, never overwritten. A
+   reconciled interruption refuses the new operation, so the operator inspects it before anything
+   new is written.
+2. Precondition: re-emitting the unchanged parsed model of every file the operation rewrites
+   reproduces its on-disk bytes exactly (the section 9.2 rule). A file carrying comments or
+   non-canonical serialization refuses and is left untouched. The check proves serialization only:
+   a hand edit or hand merge that leaves canonical bytes is not detectable by it, and the
+   integration-base merge policy of section 5.7 remains a separate requirement.
+3. Claim each new ID as one atomic act (section 8.2). At homes 1 the `counters.toml` advance is an
+   operand of the same journaled transaction, under the held lease, and IDs are reported only once
+   that transaction has completed, so a rollback never withdraws an ID anyone has seen. At homes 2
+   the claim is an irrevocable reservation in the journal home, made before the reversible
+   publication (section 4.2).
+4. Postcondition: the model diff of every rewritten file equals exactly the operation's allowed
+   delta (the new rows appended, the counters advanced by exactly the claim, and for a transition
+   one status and `updated_at` change), value for value, before anything is written. The expected
+   delta is derived from the request, the claimed IDs, the clock value, and the schema rules, never
+   from the planned rows themselves.
+5. The in-repo store contract (section 5.7): the planned destinations are clean, including ignored
+   files, and the single-writer lease is held across publication, render, and the final doctor.
+6. Every rewritten file is published in one crash-durable journaled transaction, so an
+   interruption leaves the store exactly at its prestate or exactly at its poststate once
+   reconciled. The reference tooling keeps that journal under `.aiqt/record/journal` at homes 1.
+7. The declared views are rendered, then a full doctor must report VALID; a failure leaves the
+   change for review with recovery advice scoped to the planned paths.
+8. The lease is released, and only then are the claimed IDs and touched files reported. The
+   change is left uncommitted in the working tree: the verb never stages or commits it.
+
+The verb exits 0 when the change is recorded and the store is doctor-VALID, and 2 on every refusal
+or cannot-evaluate.
 
 ## 9. The manifest
 
