@@ -76,12 +76,18 @@ Each case runs on its own copy of that template; the root is removed in a finall
       byte untouched (flip: compare the delta with ordinary equality instead of the strict comparator)
   T18 a pending_decision's open -> decided carries its resolution bundle: a maintainer lands decided with
       the bundle (decided_by from --decided-by, not from --actor; decided_at the clock value), doctor
-      VALID once committed; an assistant lands decided/proposed with the bundle and proposed_from open; a
-      maintainer ratification keeps the bundle unchanged; a maintainer rejection with --reason restores
-      open with no bundle and no proposed_from; a decide without --decision and --decided-by, one of the
-      two alone, --decision on open -> withdrawn, and --decision on a ratification each refuse with every
-      byte untouched (flips: the planner writes no bundle; the rejection keeps the bundle; the planner
-      takes decided_by from --actor, which only the independent oracle refuses)
+      VALID once committed; an assistant, and separately automation, lands decided/proposed with the
+      bundle and proposed_from open, doctor VALID once committed; a maintainer ratification keeps the
+      bundle unchanged; a maintainer rejection with --reason restores open with no bundle and no
+      proposed_from (flips: the planner writes no bundle; the rejection keeps the bundle; the planner
+      takes decided_by from --actor, which only the independent oracle refuses). Each option refusal is
+      its own test with its own flip, every byte untouched: a decide without --decision and --decided-by
+      refuses before its bundle is planned (flip: drop the requires half of the option guard, where the
+      planner's own lookup of the absent option still fails closed); --decision without --decided-by
+      refuses before the store is resolved (flip: drop the parser's given-together check); and the
+      options on open -> withdrawn, and on the ratification of decided/proposed, each refuse in its own
+      test (flip, applied to each of the two: drop the apply-only half of the option guard, under which
+      the options are silently ignored)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -737,9 +743,9 @@ def refused_untouched(env, root, args, needle):
     refused(result, needle)
 
 
-def refused_before_store(env, root, args):
+def refused_before_store(env, root, args, needle=None):
     """A usage refusal that happens before the store is resolved at all: the resolver is never called and
-    no byte changes (asserted before any message)."""
+    no byte changes (asserted before any message), and the refusal names needle when one is given."""
     before = snapshot(root)
     calls = []
     original = record._opf_store.resolve_store
@@ -753,6 +759,8 @@ def refused_before_store(env, root, args):
     assert calls == [], ("refused before the store is resolved", args, rc, err[-800:])
     assert snapshot(root) == before and rc == 2, ("refused with nothing written", args, rc)
     assert '"event": "recorded"' not in out, out[-800:]
+    if needle is not None:
+        assert needle in err, ("refusal text", needle, err[-1200:])
 
 
 def t6_done_with_receipt(fx):
@@ -1070,17 +1078,18 @@ PD_CREATE = ["create", "--type", "pending_decision", "--title", "which layout"]
 # writes a value the request never gave.
 DECIDE = ["--decision", "the inline layout", "--decided-by", "the architecture board"]
 BUNDLE_KEYS = ("decision", "decided_at", "decided_by")
+AUTOMATION = ["--actor", "automation:gate"]
 
 
 def _bundle(rec):
     return tuple(rec.get(key) for key in BUNDLE_KEYS)
 
 
-def _filed(fx, root):
-    """PD-1 created by an assistant, then its answer filed by the assistant at decided/proposed, each step
-    committed. Run under ticking()."""
+def _filed(fx, root, actor=ASSISTANT):
+    """PD-1 created by an assistant, then its answer filed by `actor` (an assistant or automation) at
+    decided/proposed, each step committed. Run under ticking()."""
     step(fx, root, PD_CREATE + ASSISTANT, "PD-1")
-    step(fx, root, ["transition", "PD-1", "decided"] + DECIDE + ASSISTANT, "PD-1 decided/proposed")
+    step(fx, root, ["transition", "PD-1", "decided"] + DECIDE + actor, "PD-1 decided/proposed")
     rec = row(root, "PD-1", PD_INDEX)
     assert rec["status"] == "decided/proposed" and rec.get("proposed_from") == "open", rec
     assert _bundle(rec) == ("the inline layout", rec["updated_at"], "the architecture board"), rec
@@ -1092,10 +1101,6 @@ def t18_decision_bundle(fx):
     root = fx.case("t18-maintainer-decides")
     with ticking():
         step(fx, root, PD_CREATE + MAINTAINER, "PD-1")
-        refused_untouched(env, root, ["transition", "PD-1", "decided"] + MAINTAINER, "requires --decision")
-        refused_untouched(env, root, ["transition", "PD-1", "decided", "--decision", "the inline layout"]
-                          + MAINTAINER, "given together")
-        refused_untouched(env, root, ["transition", "PD-1", "withdrawn"] + DECIDE + MAINTAINER, "apply only")
         step(fx, root, ["transition", "PD-1", "decided"] + DECIDE + MAINTAINER, "PD-1 decided")
         rec = row(root, "PD-1", PD_INDEX)
         assert rec["status"] == "decided" and "proposed_from" not in rec, rec
@@ -1106,7 +1111,6 @@ def t18_decision_bundle(fx):
     with ticking():
         proposed = _filed(fx, root)
         doctor_valid(env, root)
-        refused_untouched(env, root, ["transition", "PD-1", "decided"] + DECIDE + MAINTAINER, "apply only")
         step(fx, root, ["transition", "PD-1", "decided"] + MAINTAINER, "PD-1 decided")
         rec = row(root, "PD-1", PD_INDEX)
         assert rec["status"] == "decided" and "proposed_from" not in rec, rec
@@ -1122,6 +1126,34 @@ def t18_decision_bundle(fx):
         assert model(root, WORKLOG)["entry"][-1]["detail"] == (
             "opf-record transition PD-1 decided/proposed -> open\nreason: not the board's answer")
         doctor_valid(env, root)
+    root = fx.case("t18-automation-filed")
+    with ticking():
+        _filed(fx, root, AUTOMATION)
+        entry = model(root, WORKLOG)["entry"][-1]
+        assert entry["actor"] == {"kind": "automation", "id": "gate"}, entry
+        assert entry["detail"] == "opf-record transition PD-1 open -> decided/proposed", entry
+        doctor_valid(env, root)
+
+
+# Each option refusal is its own test, so its own flip must turn it red (the PR2 fix 5 rule).
+
+def refused_unplanned(env, root, args, needle):
+    """A decide refused before its bundle is planned: _resolution_bundle is never called, asserted before
+    the bytes and the message, so the requires half removed under a flip turns this red on the isolated
+    guard even though the planner's own lookup of the absent option still fails closed."""
+    calls = []
+    original = record._resolution_bundle
+
+    def observing(*a):
+        calls.append(a)
+        return original(*a)
+
+    before = snapshot(root)
+    with patch.object(record, "_resolution_bundle", observing):
+        result = record_cli(env, root, args)
+    assert calls == [], ("refused before the bundle is planned", args, result[0], result[2][-800:])
+    assert snapshot(root) == before, ("bytes untouched on refusal", args, result[0], result[2][-800:])
+    refused(result, needle)
 
 
 def flip_t18_bundle():
@@ -1141,6 +1173,65 @@ def flip_t18_decider():
         actor = req.actor["kind"] + (":" + req.actor["id"] if "id" in req.actor else "")
         return {"decision": req.values["--decision"], "decided_at": ts, "decided_by": actor}
     return patch.object(record, "_resolution_bundle", from_actor)
+
+
+def t18_requires_options(fx):
+    """A maintainer decide without --decision and --decided-by refuses before its bundle is planned."""
+    root = fx.case("t18-requires-options")
+    with ticking():
+        step(fx, root, PD_CREATE + MAINTAINER, "PD-1")
+        refused_unplanned(fx.env, root, ["transition", "PD-1", "decided"] + MAINTAINER, "requires --decision")
+
+
+def flip_t18_requires():
+    """Drop the requires half of the option guard: a decide without the options is planned."""
+    original = record._require_decision_options
+
+    def apply_only(req, rid, rtype, cur_state, target):
+        if "--decision" in req.values:
+            original(req, rid, rtype, cur_state, target)
+    return patch.object(record, "_require_decision_options", apply_only)
+
+
+def t18_given_together(fx):
+    """--decision without --decided-by refuses in the parser, before the store is resolved."""
+    root = fx.case("t18-given-together")
+    with ticking():
+        step(fx, root, PD_CREATE + MAINTAINER, "PD-1")
+        refused_before_store(fx.env, root, ["transition", "PD-1", "decided", "--decision", "the inline layout"]
+                             + MAINTAINER, "given together")
+
+
+def flip_t18_together():
+    """Drop the parser's given-together check: one option alone reaches the store."""
+    return patch.object(record, "_require_decision_pair", lambda seen: None)
+
+
+def t18_apply_only_withdrawn(fx):
+    """The bundle options on open -> withdrawn refuse with every byte untouched."""
+    root = fx.case("t18-apply-only-withdrawn")
+    with ticking():
+        step(fx, root, PD_CREATE + MAINTAINER, "PD-1")
+        refused_untouched(fx.env, root, ["transition", "PD-1", "withdrawn"] + DECIDE + MAINTAINER, "apply only")
+
+
+def t18_apply_only_ratification(fx):
+    """The bundle options on the ratification of decided/proposed refuse with every byte untouched (a
+    ratification keeps the bundle its proposal wrote)."""
+    root = fx.case("t18-apply-only-ratification")
+    with ticking():
+        _filed(fx, root)
+        refused_untouched(fx.env, root, ["transition", "PD-1", "decided"] + DECIDE + MAINTAINER, "apply only")
+
+
+def flip_t18_apply_only():
+    """Drop the apply-only half of the option guard: the options on any other transition are ignored."""
+    original = record._require_decision_options
+
+    def requires_only(req, rid, rtype, cur_state, target):
+        if record._decides(rtype, cur_state, target):
+            original(req, rid, rtype, cur_state, target)
+    return patch.object(record, "_require_decision_options", requires_only)
 
 
 def t8_collision(fx):
@@ -1252,6 +1343,10 @@ TESTS = (
     ("T17-strict-type-aware-delta", t17_strict_delta, flip_t17),
     ("T18-decision-resolution-bundle", t18_decision_bundle, (flip_t18_bundle, flip_t18_rejection,
                                                              flip_t18_decider)),
+    ("T18-decide-requires-options", t18_requires_options, flip_t18_requires),
+    ("T18-options-given-together", t18_given_together, flip_t18_together),
+    ("T18-options-apply-only-withdrawn", t18_apply_only_withdrawn, flip_t18_apply_only),
+    ("T18-options-apply-only-ratification", t18_apply_only_ratification, flip_t18_apply_only),
 )
 
 

@@ -751,10 +751,12 @@ that a run whose journal lock release fails after COMPLETE reports the retained 
 reconciles it naming the COMPLETE transaction without claiming its render and doctor never ran; and
 that a pending_decision's open -> decided carries its resolution bundle (a maintainer lands decided with
 decided_by from --decided-by, never from --actor, and decided_at the clock value, doctor-VALID once
-committed; an assistant lands decided/proposed with the bundle and proposed_from open; a ratification
-keeps the bundle unchanged; a rejection with a reason restores open with no bundle and no
-proposed_from), while a decide without the bundle options, one option alone, the options on open ->
-withdrawn, and the options on a ratification each refuse with every byte untouched. Under
+committed; an assistant, and separately automation, lands decided/proposed with the bundle and
+proposed_from open; a ratification keeps the bundle unchanged; a rejection with a reason restores open
+with no bundle and no proposed_from), while a decide without the bundle options (before its bundle is
+planned), --decision without --decided-by (before the store is resolved), the options on open ->
+withdrawn, and the options on a ratification each refuse with every byte untouched, each in its own
+test. Under
 --red-on-revert each test's flip (the byte-reproduction precondition, emit_checked, the allowed-delta
 postcondition, the known-complete proof, the in-transaction counters operand, the derived '/proposed'
 qualifier, the maintainer-only check, the done-only-through-its-receipt guard, the rejection reason the
@@ -763,17 +765,20 @@ ordering, the release-failure outcome text, the final doctor, the released-span 
 lease, the intervening-edit check, the --type check before the operand read, the leftover-lock outcome
 text, the record-carried pre-proposal state's flip (the worklog lifecycle line read instead of the
 record's own field), the current-row validation's flip (the row trusted without the schema check,
-applied separately to each of those three invalid-row tests), and the strict type-aware delta
+applied separately to each of those three invalid-row tests), the strict type-aware delta
 comparator's flip (ordinary equality, under which
-true and 1.0 read as 1), and the three resolution-bundle flips (the planner writing no bundle, the
-rejection keeping it, and decided_by taken from --actor, which only the independent oracle refuses))
+true and 1.0 read as 1), the three resolution-bundle flips (the planner writing no bundle, the
+rejection keeping it, and decided_by taken from --actor, which only the independent oracle refuses),
+and the three option-guard flips (the requires half dropped, the parser's given-together check
+dropped, and the apply-only half dropped, the last applied separately to each of its two tests))
 is applied in turn and must turn its test red
 with an assertion; where an independent guard would still refuse, the test asserts the written bytes or an
 isolated guard before any message. The unit leg (_opf_record.py, via opf.py --self-test) covers the
 argument grammar, the allocation seam including the homes-2 refusal, the four planners, the
 record-carried pre-proposal state (proposed_from written on a proposal, restored and removed on
 rejection and ratification, never read from worklog text, and the current row schema-validated before
-it is trusted or overwritten), the resolution bundle (written on a decide, kept on ratification,
+it is trusted or overwritten), the resolution bundle (written on a decide by a maintainer, an
+assistant, or automation, kept on ratification,
 removed on rejection, its option refusals, and its postcondition vectors), the exact-integer schema
 markers, the one
 accepted snapshot cannot-evaluate, the leftover-lock outcome bound to its lock's token (a reused pid is

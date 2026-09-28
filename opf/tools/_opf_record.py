@@ -242,6 +242,14 @@ def _require_maintainer(actor):
                           "ratifies".format(actor["kind"]))
 
 
+def _require_decision_pair(seen):
+    """--decision and --decided-by come together (the resolution bundle, spec 8.5), never one without the
+    other: a usage refusal, before any store is touched."""
+    if ("--decision" in seen) != ("--decided-by" in seen):
+        raise RecordError("transition: --decision and --decided-by are given together (the resolution bundle, "
+                          "spec 8.5), never one without the other")
+
+
 def parse_request(argv):
     """Parse `opf record <subcommand> ...` into a Request, or raise RecordError (a usage refusal, exit 2).
     Every option value must be present, non-empty, and must not start with `--` (so a swallowed next
@@ -299,9 +307,8 @@ def parse_request(argv):
     if sub == "transition" and "/" in req.positionals[1]:
         raise RecordError("transition: give the target STATE, not {!r}; the '/proposed' qualifier follows from "
                           "the actor (spec 8.4)".format(req.positionals[1]))
-    if sub == "transition" and ("--decision" in seen) != ("--decided-by" in seen):
-        raise RecordError("transition: --decision and --decided-by are given together (the resolution bundle, "
-                          "spec 8.5), never one without the other")
+    if sub == "transition":
+        _require_decision_pair(seen)
     if sub == "done-with-receipt":
         _require_maintainer(req.actor)
         if _ID_RE.match(req.positionals[0]).group(1) != _opf_store.BASELINE_TYPES[BACKLOG]:
@@ -1014,10 +1021,12 @@ def _expected_delta(req, ctx, raws, now):
             prior.pop(PROPOSED_FROM, None)
         if proposed:
             prior[PROPOSED_FROM] = current
-        # The resolution bundle rule (spec 8.5/8.8), derived here on its own from the schema's
-        # pending_decision declaration: `open -> decided`, bare or `/proposed`, writes the bundle with
-        # decided_at at the clock value and the other two keys from the request; the rejection that
-        # leaves `decided/proposed` removes every key of it; a ratification leaves it unchanged.
+        # The resolution bundle rule (spec 8.5/8.8), derived here on its own, apart from the planner: the
+        # rejection that leaves `decided/proposed` removes every key the schema's pending_decision
+        # declaration lists (spec.extra_keys, the only part read from the schema); `open -> decided`, bare
+        # or `/proposed`, writes the three bundle keys named here, decided_at at the clock value and the
+        # other two from the request; a ratification leaves the bundle unchanged. The type name and the
+        # open and decided states are named here too, not read from the schema.
         if spec.name == "pending_decision":
             if cur_qual == "proposed" and target != cur_state and cur_state == "decided":
                 for key in spec.extra_keys:
@@ -2140,6 +2149,12 @@ def _self_test_decisions(check, plan, post, full, now):
     check("an assistant decide lands decided/proposed with the bundle and proposed_from open",
           proposed == dict(pd("open"), status="decided/proposed", updated_at=ts, proposed_from="open", **bundle)
           and post(p, c, a_argv) is None)
+    u_argv = ["transition", "PD-1", "decided", "--actor", "automation:ci"] + decide
+    p, c, op = plan(u_argv, rows=[pd("open")], counters=counters)
+    check("an automation decide lands decided/proposed with the bundle and proposed_from open",
+          op.new_model["record"][0] == dict(pd("open"), status="decided/proposed", updated_at=ts,
+                                            proposed_from="open", **bundle)
+          and post(p, c, u_argv) is None and p.transition == ("PD-1", "open", "decided/proposed"))
     filed = dict(pd("decided/proposed", proposed_from="open"), decision="use X", decided_at=earlier,
                  decided_by="the board")
     r_argv = ["transition", "PD-1", "decided", "--actor", "maintainer"]
@@ -2161,6 +2176,7 @@ def _self_test_decisions(check, plan, post, full, now):
     for argv, rows, needle in (
             (["transition", "PD-1", "decided", "--actor", "maintainer"], [pd("open")], "requires --decision"),
             (["transition", "PD-1", "decided", "--actor", "assistant"], [pd("open")], "requires --decision"),
+            (["transition", "PD-1", "decided", "--actor", "automation"], [pd("open")], "requires --decision"),
             (["transition", "PD-1", "withdrawn", "--actor", "maintainer"] + decide, [pd("open")], "apply only"),
             (r_argv + decide, [filed], "apply only"),
             (j_argv + decide, [filed], "apply only"),
