@@ -608,8 +608,9 @@ def _fixture_wait(pid, flags):
 def _fixture_signal(pid, signum, pidfd=None, *, group=True):
     """The sole numeric signal boundary. ECHILD never licenses a signal.
 
-    pidfds pin individual targets. Group signals need an unreaped leader and
-    WNOWAIT; concurrent foreign waiters remain outside this trusted test contract.
+    pidfds pin individual targets. Group members are addressed one by one
+    through verified per-member pidfds, never a numeric killpg (QA21 codex
+    F3); concurrent foreign waiters remain outside this trusted test contract.
     """
     import os
     import signal
@@ -624,11 +625,13 @@ def _fixture_signal(pid, signum, pidfd=None, *, group=True):
     if not owned():
         return False
     if group and os.getpgid(pid) == pid:
-        try:
-            os.killpg(pid, signum)
-        except ProcessLookupError:
-            pass
-    if not owned():  # a hook/foreign reaper may have run during killpg
+        # Never a numeric os.killpg (QA21 codex F3: a freed pgid can name an
+        # unrelated group): the members are signalled through their own
+        # pidfds, each re-verified against /proc after its open. `pid` is
+        # owned-unreaped (above) and this process is an ancestor of every
+        # tree member, so both anchor the census.
+        _fixture_kill_group_members(pid, signum, {os.getpid(), pid})
+    if not owned():  # a hook/foreign reaper may have run during the member kills
         return False
     try:
         if pidfd is not None:
@@ -781,7 +784,8 @@ def _fixture_await_ack(fd):
 
 
 def _fixture_group_pinned(group, guardian_pid):
-    """License a dead-leader group kill: True only when a CURRENT member of the
+    """License addressing a dead leader's group MEMBERS (each through its own
+    verified pidfd, never a numeric kill): True only when a CURRENT member of the
     group is parented by the caller's own guardian while that guardian provably
     cannot reap (confirmed stopped, or an unreaped zombie). The guardian is the
     tree's subreaper, so every orphaned same-group descendant is its child, and
@@ -825,45 +829,138 @@ def _fixture_group_pinned(group, guardian_pid):
     return False
 
 
-def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None):
-    """Kill a receipt-identified subject tree, signalling only OWNERSHIP-PINNED
-    targets (QA20 claude F1: a held pidfd does NOT pin the pid NUMBER against
-    reuse once the process is reaped -- only unreapability does). Pin first:
-    SIGSTOP via the subject's pidfd succeeds only while the leader exists
-    unreaped (a pidfd signal can never address a recycled pid) and freezes a
-    live leader, so the group keeps that member and killpg addresses only the
-    subject's own group. For a leader already reaped, a guardian the caller
-    certifies as frozen (guardian_pid, passed only after a successful freeze)
-    can still pin the group through an adopted member (_fixture_group_pinned):
-    a reaped subject can leave same-group descendants that only the group kill
-    can reach (QA18 gemini F1). With NO pin the group kill is SKIPPED and
-    reported unpinned -- a freed pgid can name an unrelated process group, and
-    signalling it would be a wrong-owner kill; the caller DISCLOSES the
-    skipped kill instead. The pidfd SIGKILL always runs: it addresses the
-    pinned identity, never a recycled number. Returns True when the group
-    kill ran pinned."""
+def _fixture_kill_group_members(group, signum, anchors):
+    """Signal every verified CURRENT member of process group `group`, each
+    through its own pidfd -- NEVER a numeric os.killpg (QA21 codex F3: once a
+    group's leader is reaped, and SIGSTOP delivery to a ZOMBIE leader cannot
+    prevent its parent reaping it, the numeric pgid is free for reuse, so a
+    numeric group kill can address an unrelated process group). A member is
+    signalled only when, with its pidfd ALREADY HELD, /proc still shows the
+    group AND a live parent chain reaching one of `anchors` (pids the caller
+    proved unreaped: a frozen live leader, an unreaped owned guardian, or the
+    calling process itself). That order makes recycling harmless: a live
+    process the held pidfd references is exactly the process /proc describes,
+    so a pid recycled after the census either fails the re-check (a foreign
+    process is never parented under an anchor) or has exited and ESRCHes on
+    the held pidfd -- no signal can reach a foreign process. Exited (zombie)
+    members hold their pgid but take no signal and are skipped; members that
+    cannot be verified are SKIPPED, never guessed at (callers disclose
+    unaddressed descendants). Hosts without pidfd address no members (the
+    degraded-escalation disclosures cover them). Returns the pids signalled."""
     import os
     import signal
+    from pathlib import Path
+    anchors = {int(anchor) for anchor in anchors}
+
+    def fields_of(target):
+        try:
+            stat = Path("/proc", str(target), "stat").read_bytes()
+        except (OSError, ValueError):
+            return None
+        return stat.rsplit(b")", 1)[1].split()
+
+    def anchored(member):
+        # Follow the CURRENT parent chain (each hop is kernel-truthful for a
+        # live process); only a chain reaching an anchor verifies. A hop that
+        # disappears mid-walk refuses: skipping is always the safe outcome.
+        hop, depth = member, 0
+        while depth < 128:
+            if hop in anchors:
+                return True
+            fields = fields_of(hop)
+            if fields is None:
+                return False
+            parent = int(fields[1])
+            if parent <= 1:
+                return False
+            hop, depth = parent, depth + 1
+        return False
+
+    delivered = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return delivered
+    for name in entries:
+        if not name.isdecimal():
+            continue
+        member = int(name)
+        fields = fields_of(member)
+        if fields is None or int(fields[2]) != group or fields[0] == b"Z":
+            continue
+        fd = _fixture_pidfd(member)
+        if fd is None:
+            continue
+        try:
+            fields = fields_of(member)  # re-verify AFTER the pidfd pinned it
+            if (fields is None or int(fields[2]) != group
+                    or fields[0] == b"Z" or not anchored(member)):
+                continue
+            try:
+                signal.pidfd_send_signal(fd, signum)
+            except (ProcessLookupError, OSError) as exc:
+                if isinstance(exc, (TimeoutError, InterruptedError)):
+                    raise
+                continue
+            delivered.append(member)
+        finally:
+            os.close(fd)
+    return delivered
+
+
+def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None):
+    """Kill a receipt-identified subject tree, addressing OWNERSHIP-VERIFIED
+    targets only, each through its own pidfd -- NEVER a numeric group kill
+    (QA20 claude F1: a held pidfd does NOT pin the pid NUMBER against reuse
+    once the process is reaped, only unreapability does; QA21 codex F3:
+    SIGSTOP delivery alone does not pin a ZOMBIE leader either, whose parent
+    can still reap it and free the pgid for reuse, so numeric killpg is
+    removed outright). Pin first: SIGSTOP via the subject's pidfd proves the
+    leader existed unreaped, and the pidfd then polling NOT-exited proves the
+    freeze landed on a LIVE leader -- only that pins the pid and pgid for the
+    sequence. For a dead leader, a guardian the caller certifies as frozen
+    (guardian_pid, passed only after a successful freeze, and an unreaped
+    child of the caller either way) can still pin the group through an
+    adopted member (_fixture_group_pinned): a reaped subject can leave
+    same-group descendants that only the member kill can reach (QA18 gemini
+    F1). Every member is then signalled through its own pidfd, re-verified
+    against /proc (group AND a parent chain reaching a pinned anchor) AFTER
+    the pidfd is opened (_fixture_kill_group_members), so a reaped leader or
+    recycled pgid can never route a signal to a foreign process. With NO pin
+    the members are SKIPPED and reported unpinned -- the caller DISCLOSES the
+    skipped kill instead. The subject's own pidfd SIGKILL always runs: it
+    addresses the pinned identity, never a recycled number. Returns True
+    when the member kill ran pinned."""
+    import select
+    import signal
     pinned = False
+    anchors = set()
     try:
         signal.pidfd_send_signal(subject_fd, signal.SIGSTOP)
-        pinned = True  # delivered: the leader exists unreaped and pins its group
-    except (ProcessLookupError, OSError):
-        pass
-    if not pinned and guardian_pid is not None:
-        pinned = _fixture_group_pinned(subject, guardian_pid)
-    if pinned:
-        try:
-            os.killpg(subject, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            # A pre-setsid subject is not yet a leader and has run no user
-            # code, so there is nothing in a group to miss; the pidfd kill
-            # below still lands.
-            pass
+    except (ProcessLookupError, OSError) as exc:
+        # Narrowed (QA21 gemini F2): TimeoutError/InterruptedError are OSError
+        # subclasses carrying deadline/cancellation semantics, never swallowed.
+        if isinstance(exc, (TimeoutError, InterruptedError)):
+            raise
+    else:
+        # Delivery proves the leader existed unreaped THEN; only a leader that
+        # has not EXITED was actually frozen by it. A pidfd polls readable
+        # once its process exits (zombie or reaped), so an UNREADABLE pidfd
+        # after the freeze proves a live, stopped leader: the pid and pgid
+        # stay pinned for the rest of this sequence (QA21 codex F3).
+        if not select.select([subject_fd], [], [], 0)[0]:
+            pinned = True
+            anchors.add(subject)
+    if guardian_pid is not None and _fixture_group_pinned(subject, guardian_pid):
+        pinned = True
+        anchors.add(guardian_pid)
+    if anchors:
+        _fixture_kill_group_members(subject, signal.SIGKILL, anchors)
     try:
         signal.pidfd_send_signal(subject_fd, signal.SIGKILL)
-    except (ProcessLookupError, OSError):
-        pass
+    except (ProcessLookupError, OSError) as exc:
+        if isinstance(exc, (TimeoutError, InterruptedError)):
+            raise
     return pinned
 
 
@@ -976,16 +1073,26 @@ def _fixture_mask_available():
 
 
 def _fixture_mask_cancellation():
-    """Mask the cancellation signals (SIGINT, SIGTERM) on the calling thread
-    for one ownership/collection sequence, returning the EXACT prior mask for
-    the caller's finally to restore with SIG_SETMASK. The kernel keeps a
-    signal raised while masked pending and delivers it only after the restore,
-    so the sequence always completes (or refuses loudly) BEFORE the
-    cancellation lands; the interpreter then raises the KeyboardInterrupt at
-    the first bytecode boundary after delivery. Outside this guarantee (the
-    retained BaseException funnels are their backstop): a signal whose
-    interpreter-level flag tripped before the mask landed, non-signal
-    asynchronous exceptions, and other signals with raising handlers."""
+    """Block the cancellation signals (SIGINT, SIGTERM) on the calling thread
+    for one ownership/collection sequence. The kernel keeps a signal raised
+    while every thread blocks it pending and delivers it only at the caller's
+    SIG_SETMASK restore, so the sequence always completes (or refuses loudly)
+    BEFORE the cancellation lands; the interpreter then raises the
+    KeyboardInterrupt at the restore's own bytecode boundary -- INSIDE the
+    caller's finally (QA21 claude F4) -- so close()/poll() raise the interrupt
+    themselves, with any in-flight refusal preserved as the interrupt's
+    context. Callers capture the prior mask by QUERY before their try and
+    call this as the try's FIRST statement, so an exception during the
+    installation itself still restores exactly (QA21 claude F3 / codex F1 /
+    gemini F1: the block syscall can land and the interpreter raise before
+    the return value reaches the caller). Outside this guarantee (the
+    retained BaseException funnels and the subject-side protections are the
+    backstop): a signal whose interpreter-level flag tripped before the mask
+    landed, a PROCESS-directed signal delivered to a CALLER-created thread
+    that leaves the pair unblocked (the layer's own launcher is created with
+    the pair blocked, so single-threaded callers are airtight, QA21 claude
+    F1), non-signal asynchronous exceptions, and other signals with raising
+    handlers."""
     import signal
     return signal.pthread_sigmask(
         signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
@@ -1043,19 +1150,37 @@ class _FixtureProcess:
     fork; construction resources are never disposed while the launcher can still
     use them. A failed construction (e.g. thread exhaustion) aborts the launch,
     releases every resource, and surfaces the original error. Cancellation
-    masking (fix 2w): close() runs its ENTIRE ownership decision, transfer,
+    masking (fix 2w/2x): close() runs its ENTIRE ownership decision, transfer,
     collection and cleanup sequence -- and poll() its collection-to-recording
     step -- with SIGINT and SIGTERM masked on the calling thread
-    (pthread_sigmask), restoring the exact prior mask in a finally, so an
-    asynchronous cancellation can no longer land BETWEEN guarded regions
-    (QA19 F2, QA20): the kernel keeps it pending and delivers it only after
-    the sequence completed or refused loudly. A host without pthread_sigmask
-    REFUSES construction (fail closed, never an unmasked run). Residuals,
-    covered by the retained BaseException funnels as backstops: a signal whose
-    interpreter-level flag tripped before the mask landed, and non-signal
-    asynchronous exceptions; a cancellation landing before the mask is
-    installed aborts a sequence that has not begun (nothing decided or
-    disposed -- close() can run again). The funnels leave the same owner: an
+    (pthread_sigmask), and the LAUNCHER is created with the same pair blocked
+    (a thread inherits its creator's mask; the guardian undoes exactly that
+    block so the subject sees the caller's original mask), so with a
+    single-threaded caller EVERY thread blocks the pair during the sequence
+    and even a PROCESS-directed cancellation -- the real Ctrl-C delivery
+    shape, which the kernel may hand to ANY thread with it unblocked -- stays
+    kernel-pending (QA19 F2, QA20, QA21 claude F1). The prior mask is
+    captured by QUERY before the restoring try and the block is the try's
+    FIRST statement, restored exactly in the finally (QA21 claude F3): a
+    cancellation landing before the block installs disposes NOTHING, not
+    even the thread's signal state, and close() can simply run again. The
+    pending cancellation is delivered AT the restore, inside close()/poll()'s
+    own finally (QA21 claude F4): close() then raises the KeyboardInterrupt
+    itself, with any in-flight refusal preserved on the exception chain
+    (callers walk __context__). The deferral is BOUNDED (QA21 gemini F3, an
+    accepted trade-off: guaranteed ownership and cleanup over immediate
+    termination): every masked wait carries its own deadline, so a pending
+    cancellation -- including a job supervisor's SIGTERM -- is delayed at
+    most the bounded cleanup budget (worst case about two grace periods plus
+    the escalation grace), never indefinitely. A host without pthread_sigmask
+    REFUSES construction (fail closed, never an unmasked run). Residuals, covered by
+    the retained BaseException funnels (and the subject-side ack EOF and
+    pdeathsig) as backstops: a signal whose interpreter-level flag tripped
+    before the mask landed; a PROCESS-directed signal delivered to a
+    CALLER-created thread that leaves the pair unblocked, which the
+    interpreter then raises inside the masked sequence (the layer cannot
+    mask threads it does not own); and non-signal asynchronous exceptions,
+    which no mask can stop. The funnels leave the same owner: an
     unrecorded launch is abandoned to the launcher UNDER THE LAUNCH LOCK, a
     recorded one keeps close(), which finishes collecting before re-raising;
     one landing inside the collection kills the tree and bounded-reaps the
@@ -1076,15 +1201,19 @@ class _FixtureProcess:
     when pdeathsig is armed, refuses to run at all. close() collects the
     buffered receipt before closing that socket. A guardian that cannot be
     collected within the bounded cleanup budget is frozen (SIGSTOP via its
-    pidfd, so the subject's pid/pgid cannot be recycled), then the
-    receipt-identified subject's group and pidfd are SIGKILLed under the
-    PIN-FIRST rule (QA20 claude F1: only unreapability pins a pid NUMBER
-    against reuse, a held pidfd alone does not): the group kill runs only when
-    the leader is frozen unreaped via its pidfd, or a frozen guardian still
-    parents a group member -- a reaped subject's surviving same-group
-    descendants stay reachable that way (QA18 gemini F1) -- and is otherwise
-    SKIPPED and disclosed, never a wrong-owner kill; the pidfd SIGKILL always
-    runs. Then the guardian itself is SIGKILLed. On ANY guardian failure,
+    pidfd, so a live guardian's pid/pgid cannot be recycled), then the
+    receipt-identified subject's tree is SIGKILLed under the PIN-FIRST rule,
+    every target through its OWN pidfd, re-verified against /proc (group
+    membership and a parent chain reaching a pinned anchor) AFTER the pidfd
+    is opened -- NEVER a numeric killpg (QA20 claude F1 and QA21 codex F3:
+    only unreapability pins a pid or pgid NUMBER against reuse; neither a
+    held pidfd nor SIGSTOP delivery to a zombie leader does): members are
+    addressed only when the leader is frozen ALIVE via its pidfd (proven
+    unexited after the freeze), or a frozen guardian still parents a group
+    member -- a reaped subject's surviving same-group descendants stay
+    reachable that way (QA18 gemini F1) -- and are otherwise SKIPPED and
+    disclosed, never a wrong-owner kill; the subject's own pidfd SIGKILL
+    always runs. Then the guardian itself is SIGKILLed. On ANY guardian failure,
     escalated or not -- including a failure FIRST collected by poll(), which
     kills the subject pin-first AT COLLECTION TIME and records the failure for
     close() to prove and re-raise (QA19 F1), and an UNRESOLVED collection
@@ -1106,6 +1235,7 @@ class _FixtureProcess:
     Parent-side fork callbacks and uninterruptible kernel waits remain unbounded.
     """
     def __init__(self, deadline, keep_fds=(), subject=None):
+        import signal
         import socket
         import tempfile
         import threading
@@ -1153,10 +1283,24 @@ class _FixtureProcess:
             self.report = tempfile.TemporaryFile()
             # The launcher exists from construction, parked until released:
             # start() only sets an event, so no caller-side bytecode boundary
-            # sits between creating the launcher and owning what it forks.
-            launcher = threading.Thread(
-                target=self._launch, name="opf-fixture-launcher", daemon=True)
-            launcher.start()
+            # sits between creating the launcher and owning what it forks. It
+            # is STARTED with {SIGINT, SIGTERM} blocked -- a thread inherits
+            # its creator's mask -- so the layer never adds a thread the
+            # kernel could pick for a PROCESS-directed cancellation (QA21
+            # claude F1): with a single-threaded caller, every thread then
+            # blocks the pair inside close()/poll() and a real Ctrl-C stays
+            # kernel-pending until the restore. The guardian undoes exactly
+            # this block (`_launch_masked`), so the subject still sees the
+            # caller's original mask.
+            prior = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+            self._launch_masked = {signal.SIGINT, signal.SIGTERM} - prior
+            try:
+                _fixture_mask_cancellation()
+                launcher = threading.Thread(
+                    target=self._launch, name="opf-fixture-launcher", daemon=True)
+                launcher.start()
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, prior)
             self._launcher = launcher
         except BaseException:
             _fixture_abort_launch(self)
@@ -1277,10 +1421,18 @@ class _FixtureProcess:
         import gc
         import json
         import os
+        import signal
         import time
         subject = subject_fd = cleanup_deadline = None
         stage = "startup"
         try:
+            # The launcher forked this guardian with the cancellation signals
+            # blocked (a construction-time inheritance, see __init__): undo
+            # exactly that block, so the guardian tree -- and the SUBJECT it
+            # forks -- sees the caller's original SIGINT/SIGTERM disposition.
+            # Guardian cleanup itself is driven by pidfd SIGSTOP/SIGKILL,
+            # which no mask stops.
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, self._launch_masked)
             # The forked heap is the caller's: a collection here could run
             # caller-object finalizers whose fd closes would hit numbers this
             # guardian legitimately reuses after the sweep below. Keep collection
@@ -1412,19 +1564,29 @@ class _FixtureProcess:
         # The whole collection-to-failure-recording step runs MASKED (fix 2w):
         # a cancellation can no longer land between reaping the guardian and
         # recording the outcome (QA20 codex F1 second gap); it stays pending
-        # and is delivered after the restore below. A synchronous failure in
-        # that window still leaves `unresolved` set, which close() treats as a
-        # failure of its own.
-        mask = _fixture_mask_cancellation()
+        # and is delivered AT the restore below, inside this finally. The
+        # prior mask is captured by QUERY before the try and the block is the
+        # try's FIRST statement (QA21 claude F3 / codex F1 / gemini F1), so
+        # an exception raised during the installation itself still reaches
+        # the restoring finally and the caller's mask can never leak blocked.
+        # `unresolved` is written BEFORE `collected` (QA21 claude F2): an
+        # asynchronous exception between the two writes leaves close() OWNING
+        # the collection -- its own reap then refuses loudly ("guardian
+        # ownership lost") -- never the half-recorded silent state (collected
+        # recorded, unresolved lost, no failure) the pre-fix order allowed. A
+        # synchronous failure in the window still leaves `unresolved` set,
+        # which close() treats as a failure of its own.
+        prior = signal.pthread_sigmask(signal.SIG_BLOCK, set())
         try:
+            _fixture_mask_cancellation()
             waited, raw = _fixture_wait(self.pid, os.WNOHANG)
             if waited == 0:
                 return None
             if waited != self.pid:
                 raise ChildStatusUnavailable("unexpected guardian wait PID")
-            self.collected = True
             if self.armed:
                 self.unresolved = True
+            self.collected = True
             try:
                 self._read_report(raw)
             except ChildStatusUnavailable:
@@ -1436,7 +1598,7 @@ class _FixtureProcess:
                 raise
             return self.status
         finally:
-            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+            signal.pthread_sigmask(signal.SIG_SETMASK, prior)
 
     def _record_failure(self, failure):
         """Record a supervision failure at COLLECTION time, whichever collector
@@ -1491,8 +1653,13 @@ class _FixtureProcess:
                     self.subject_pidfd = fds[0]
                     for extra in fds[1:]:
                         os.close(extra)
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            # Narrowed (QA21 gemini F2): TimeoutError/InterruptedError are
+            # OSError subclasses carrying deadline/cancellation semantics a
+            # receipt read must never swallow; only genuine I/O or parse
+            # failures degrade to the documented no-receipt path.
+            if isinstance(exc, (TimeoutError, InterruptedError)):
+                raise
 
     def _address_failed_subject(self):
         """Kill (pin-first) the receipt-identified subject of a FAILED or
@@ -1508,20 +1675,24 @@ class _FixtureProcess:
     def _escalate(self):
         """Freeze first, then kill: SIGSTOP the guardian via its pidfd (a
         frozen guardian exists unreaped and cannot reap, so its adopted
-        same-group members stay pinned for the census), pin-kill the
-        receipt-identified subject's group and pidfd, then SIGKILL the
-        guardian itself; the caller's bounded reap loop collects it and
-        close() then proves the subject's exit. A freeze that FAILED (guardian
-        gone) licenses no census pin: the subject kill then pins only through
-        the subject's own pidfd."""
+        same-group members stay pinned for the census), pin-first kill the
+        receipt-identified subject's tree (verified per-member pidfds, never
+        a numeric killpg) and its own pidfd, then SIGKILL the guardian
+        itself; the caller's bounded reap loop collects it and close() then
+        proves the subject's exit. A freeze that FAILED (guardian gone)
+        licenses no census pin: the subject kill then pins only through the
+        subject's own live-frozen leader."""
         import signal
         frozen = False
         if self.pidfd is not None:
             try:
                 signal.pidfd_send_signal(self.pidfd, signal.SIGSTOP)
                 frozen = True  # delivered: the guardian exists unreaped
-            except (ProcessLookupError, OSError):
-                pass  # already exited: the reap loop collects it
+            except (ProcessLookupError, OSError) as exc:
+                # Narrowed (QA21 gemini F2): deadline/cancellation semantics
+                # propagate; an exited guardian is collected by the reap loop.
+                if isinstance(exc, (TimeoutError, InterruptedError)):
+                    raise
         if self.subject_pidfd is not None and self._subject_kill is None:
             pinned = _fixture_escalate_subject(
                 self.subject_pid, self.subject_pidfd,
@@ -1543,24 +1714,32 @@ class _FixtureProcess:
 
     def close(self):
         import signal
-        # DESIGN (fix 2w): the ENTIRE ownership decision and transfer, and the
-        # whole collection and cleanup sequence (receipt kill, disappearance
-        # proof, re-raise preparation), run with the cancellation signals
-        # masked on this thread: an asynchronous cancellation can no longer
-        # land BETWEEN guarded regions (QA20) -- it stays pending and is
-        # delivered only after the EXACT prior mask is restored below, i.e.
-        # after the sequence completed or refused loudly. A cancellation
-        # landing before the mask is installed aborts a sequence that has not
-        # begun: nothing was decided, transferred or disposed, and this
-        # close() can simply run again. The BaseException funnels inside
-        # remain the backstop for a signal whose interpreter-level flag
-        # tripped before the mask landed and for non-signal asynchronous
-        # exceptions, which no mask can stop.
-        mask = _fixture_mask_cancellation()
+        # DESIGN (fix 2w/2x): the ENTIRE ownership decision and transfer, and
+        # the whole collection and cleanup sequence (receipt kill,
+        # disappearance proof, re-raise preparation), run with the
+        # cancellation signals masked on this thread: an asynchronous
+        # cancellation can no longer land BETWEEN guarded regions (QA20). The
+        # EXACT prior mask is captured by QUERY before the try and the block
+        # itself is the try's FIRST statement (QA21 claude F3 / codex F1 /
+        # gemini F1), so an exception raised during the installation still
+        # restores: a cancellation landing before the block genuinely
+        # disposes NOTHING -- not even this thread's signal state -- and this
+        # close() can simply run again. A cancellation raised inside the
+        # sequence stays kernel-pending and is delivered AT the restore below
+        # -- i.e. inside this finally (QA21 claude F4) -- so close() then
+        # raises the KeyboardInterrupt itself, with any in-flight refusal
+        # preserved on the exception chain (callers walk __context__). The
+        # BaseException funnels inside remain the backstop for a signal whose
+        # interpreter-level flag tripped before the mask landed, for a
+        # PROCESS-directed signal surfaced through a caller-created unblocked
+        # thread, and for non-signal asynchronous exceptions, which no mask
+        # can stop.
+        prior = signal.pthread_sigmask(signal.SIG_BLOCK, set())
         try:
+            _fixture_mask_cancellation()
             self._close_masked()
         finally:
-            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+            signal.pthread_sigmask(signal.SIG_SETMASK, prior)
 
     def _close_masked(self):
         # Coordinated launch lifecycle FIRST, before any resource is disposed. The

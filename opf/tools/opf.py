@@ -1210,8 +1210,11 @@ def _watchdog_completion_case(mode):
 
         def interrupted_start(thread):
             if thread.name == "opf-fixture-launcher":
-                # A REAL SIGINT: the pending KeyboardInterrupt materializes on the
-                # next main-thread bytecode, at launcher-creation time.
+                # A REAL SIGINT: the launcher is created under the masked
+                # bracket (fix 2x), so the KeyboardInterrupt stays pending
+                # through Thread.start and materializes at the bracket's
+                # restore -- still inside construction, which must abort the
+                # launch and re-raise the cancellation unreplaced.
                 signal.raise_signal(signal.SIGINT)
             return real_start(thread)
 
@@ -1253,12 +1256,19 @@ def _watchdog_completion_case(mode):
 
         # Flip: without the construction abort, the cancellation leaks this
         # call's control sockets and report.
-        with patch.object(emit, "_fixture_abort_launch", lambda fixture: None):
+        flipped = []
+        with patch.object(emit, "_fixture_abort_launch", flipped.append):
             with patch.object(threading.Thread, "start", interrupted_start):
                 held = cancelled_run()
         leaked = sorted(open_fds() - before)
         assert leaked, "the flip did not reproduce the construction leak"
-        held = None  # hygiene: releasing the fixture reclaims the demonstrated leak
+        held = None
+        # Hygiene: under the masked launcher-creation bracket the cancellation
+        # lands only after Thread.start returned, so the flip strands a PARKED
+        # launcher whose bound target pins the fixture (and its descriptors)
+        # beyond any refcount release; the real abort releases both.
+        for fixture in flipped:
+            emit._fixture_abort_launch(fixture)
         assert open_fds() == before, "the flip hygiene did not complete"
     elif mode == "fd-hygiene-total":
         import errno
@@ -1846,15 +1856,29 @@ def _watchdog_completion_case(mode):
                     assert time.monotonic() < bound, "the guardian did not stop"
                     time.sleep(0.005)
                 sequence, failures = [], []
-                real_pidfd_signal, real_killpg = signal.pidfd_send_signal, os.killpg
+                real_pidfd_signal = signal.pidfd_send_signal
+                real_escalate = emit._fixture_escalate_subject
+                real_members = emit._fixture_kill_group_members
+                guardian_fd = child.pidfd
 
                 def rec_pidfd(fd, signum, *args):
                     sequence.append(("pidfd", fd, signum))
                     return real_pidfd_signal(fd, signum, *args)
 
                 def rec_killpg(pgid, signum):
-                    sequence.append(("killpg", pgid, signum))
-                    return real_killpg(pgid, signum)
+                    # The layer must never issue a numeric group kill (QA21
+                    # codex F3); any call is a loud wrong-owner-class failure.
+                    raise AssertionError(
+                        "numeric killpg is banned: " + repr((pgid, signum)))
+
+                def rec_members(group, signum, anchors):
+                    delivered = real_members(group, signum, anchors)
+                    sequence.append(("members", group, signum, tuple(delivered)))
+                    return delivered
+
+                def rec_escalate(target, target_fd, **license):
+                    sequence.append(("escalate", target))
+                    return real_escalate(target, target_fd, **license)
 
                 def cancel():
                     try:
@@ -1867,7 +1891,11 @@ def _watchdog_completion_case(mode):
                 worker = threading.Thread(target=cancel, daemon=True)
                 begun = time.monotonic()
                 with patch.object(signal, "pidfd_send_signal", rec_pidfd), \
-                        patch.object(os, "killpg", rec_killpg):
+                        patch.object(os, "killpg", rec_killpg), \
+                        patch.object(emit, "_fixture_escalate_subject",
+                                     rec_escalate), \
+                        patch.object(emit, "_fixture_kill_group_members",
+                                     rec_members):
                     worker.start()
                     worker.join(20)
                     blocked = worker.is_alive()
@@ -1879,16 +1907,21 @@ def _watchdog_completion_case(mode):
                 assert failures and "escalat" in failures[0], failures
                 assert emit._fixture_child_reaped(pid) is True
                 assert elapsed < 15, elapsed
-                return pid, subject, descendant, sequence, failures
+                return pid, guardian_fd, subject, descendant, sequence, failures
 
-        pid, subject, descendant, sequence, failures = exercise(flip=False)
-        # Kill order: freeze first, then the subject's group, then the guardian's.
+        pid, guardian_fd, subject, descendant, sequence, failures = exercise(flip=False)
+        # Kill order: freeze first, then the subject's tree (per-member
+        # verified pidfds -- the banned-killpg recorder proves no numeric
+        # group kill ran, QA21 codex F3), then the guardian.
         assert sequence and sequence[0][0] == "pidfd" and sequence[0][2] == signal.SIGSTOP, sequence
-        killpg_kills = [(target, index) for index, (op, target, signum) in enumerate(sequence)
-                        if op == "killpg" and signum == signal.SIGKILL]
-        subject_kills = [index for target, index in killpg_kills if target == subject]
-        guardian_kills = [index for target, index in killpg_kills if target == pid]
+        subject_kills = [index for index, entry in enumerate(sequence)
+                         if entry[0] == "members" and entry[1] == subject
+                         and entry[2] == signal.SIGKILL]
+        guardian_kills = [index for index, entry in enumerate(sequence)
+                          if entry[0] == "pidfd" and entry[1] == guardian_fd
+                          and entry[2] == signal.SIGKILL]
         assert subject_kills, (sequence, subject)
+        assert descendant in sequence[subject_kills[0]][3], (sequence, descendant)
         assert not guardian_kills or subject_kills[0] < guardian_kills[0], sequence
         # The whole tree is observed dead: no manual sleeper hygiene remains in
         # this test. A dead orphan reparents to the nearest subreaper ancestor
@@ -1901,7 +1934,7 @@ def _watchdog_completion_case(mode):
             time.sleep(0.005)
         # Flip: with the subject-kill step removed the subject tree survives and
         # close() itself names the surviving pid.
-        pid, subject, descendant, sequence, failures = exercise(flip=True)
+        pid, guardian_fd, subject, descendant, sequence, failures = exercise(flip=True)
         assert state(subject) not in dead, "flip: the subject died without its kill step"
         assert "could not confirm subject exit" in failures[0], failures
         os.killpg(subject, signal.SIGKILL)  # clean up the deliberately-leaked tree
@@ -1913,10 +1946,12 @@ def _watchdog_completion_case(mode):
         import time
         from contextlib import ExitStack
         caller = os.getpid()
-        # QA18 gemini F1: escalation must killpg the receipt-identified subject
-        # group even when the guardian already REAPED the subject: the held pidfd
-        # pins the pid (and so the pgid) against recycling, and a reaped subject
-        # can leave same-group descendants that only the group kill can reach.
+        # QA18 gemini F1: escalation must reach the receipt-identified
+        # subject's same-group members even when the guardian already REAPED
+        # the subject: the frozen subreaper guardian still parents the
+        # surviving descendant (the census pin), which is then addressed
+        # through its OWN verified pidfd -- never a numeric killpg of the
+        # freed, recyclable pgid (QA21 codex F3).
         with tempfile.TemporaryDirectory(prefix="opf-reaped-") as directory:
             wedged = Path(directory, "wedged")
             grandchild_file = Path(directory, "grandchild")
@@ -2115,17 +2150,24 @@ def _watchdog_completion_case(mode):
             await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
     elif mode == "close-cancel":
         import time
-        # QA19 F2 + QA20 codex F2 / gemini / claude F2 (masked design, fix 2w):
-        # a real SIGINT landing anywhere inside close()'s ownership decision,
-        # transfer, collection or cleanup stays PENDING (SIGINT and SIGTERM are
-        # masked from close()'s first statement) and is delivered only after
-        # the sequence completes: close() never raises the interrupt itself,
-        # the guardian and subject tree are cleaned or handed to a live owner
-        # FIRST, a refusal survives (directly or as the delivered interrupt's
-        # context), and the caller's prior mask is restored exactly. Windows:
-        # (1) the completion wait, fork unrecorded; (2) the gap before the
-        # launcher release; (3) entering the ownership transfer; (4) the
-        # collection's bounded reap wait; (5) the collection entry boundary.
+        # QA19 F2 + QA20 codex F2 / gemini / claude F2 + QA21 claude
+        # F1/F3/F4 (masked design, fix 2w/2x): a real SIGINT landing anywhere
+        # inside close()'s ownership decision, transfer, collection or
+        # cleanup stays PENDING (SIGINT and SIGTERM are blocked as the FIRST
+        # statement of close()'s restoring try, and the launcher thread is
+        # created with the pair blocked, so a single-threaded caller has no
+        # thread the kernel could deliver to) and is delivered AT the restore
+        # inside close()'s own finally: the guardian and subject tree are
+        # cleaned or handed to a live owner FIRST, then close() raises the
+        # delivered KeyboardInterrupt itself with a refusal surviving on its
+        # context chain (or the refusal propagates directly when no interrupt
+        # is pending), and the caller's prior mask is restored exactly.
+        # Windows: (1) the completion wait, fork unrecorded; (2) the gap
+        # before the launcher release; (3) entering the ownership transfer;
+        # (4) the collection's bounded reap wait; (5) the collection entry
+        # boundary; (6) a PROCESS-directed SIGINT (the real Ctrl-C delivery
+        # shape) during the wedged completion wait; (7) a cancellation raised
+        # during the mask installation itself.
         real_fork = os.fork
         cancellation = {signal.SIGINT, signal.SIGTERM}
         masked_at = {}
@@ -2222,9 +2264,12 @@ def _watchdog_completion_case(mode):
             return refusals
 
         gate = threading.Event()
+        launcher_masks = []
 
         def wedged_fork():
             if threading.current_thread().name == "opf-fixture-launcher":
+                launcher_masks.append(
+                    signal.pthread_sigmask(signal.SIG_BLOCK, set()))
                 assert gate.wait(60), "the fork gate was never released"
             return real_fork()
 
@@ -2353,6 +2398,86 @@ def _watchdog_completion_case(mode):
             assert emit._fixture_child_reaped(child.pid) is True, \
                 "the abandoned launcher did not collect its own fork"
         assert open_fds() == before and no_children(), "the transfer interrupt leaked"
+
+        # Leg 6 (QA21 claude F1): a PROCESS-directed SIGINT -- the real
+        # Ctrl-C delivery shape, os.kill(getpid()), which the kernel may hand
+        # to ANY thread with it unblocked -- injected during the wedged-fork
+        # window. The launcher is created with the pair blocked, so with this
+        # single-threaded caller NO thread can take the delivery: the signal
+        # stays kernel-pending through the whole masked sequence (the
+        # observation spin completes uninterrupted), the abandonment is
+        # recorded, the refusal survives on the delivered interrupt's chain,
+        # and the launcher's own mask provably holds the pair.
+        gate.clear()
+        survived = []
+
+        def process_interrupt_wait(child):
+            real_wait, fired = child._launched.wait, []
+
+            def wait(timeout=None):
+                if not fired:
+                    fired.append(True)
+                    os.kill(os.getpid(), signal.SIGINT)  # process-directed
+                    spin = time.monotonic() + 2.0
+                    while time.monotonic() < spin:
+                        pass
+                    survived.append(True)
+                return real_wait(timeout)
+
+            child._launched.wait = wait
+
+        with patch.object(os, "fork", wedged_fork), \
+                patch.object(emit, "_FIXTURE_CLEANUP_GRACE", 1.0):
+            child = emit._FixtureProcess(time.monotonic() + 0.1, subject=lambda: None)
+            refuses(TimeoutError, child._start)
+            process_interrupt_wait(child)
+            launcher = child._launcher
+            refusals = drive(child)
+            assert survived, \
+                "the process-directed interrupt materialized inside the masked close"
+            assert refusals and "ownership unknown" in refusals[0], refusals
+            assert child._abandoned, \
+                "the process-directed interrupt lost the abandonment record"
+            assert launcher_masks and all(cancellation <= mask
+                                          for mask in launcher_masks), \
+                ("the launcher thread leaves the cancellation signals "
+                 "unblocked", launcher_masks)
+            gate.set()
+            launcher.join(30)
+            assert not launcher.is_alive(), "the abandoned launcher never finished"
+            assert emit._fixture_child_reaped(child.pid) is True, \
+                "the abandoned launcher did not collect its own fork"
+        assert open_fds() == before and no_children(), \
+            "the process-directed leg leaked"
+
+        # Leg 7 (QA21 claude F3 / codex F1 / gemini F1): a cancellation whose
+        # interpreter flag trips during the mask INSTALLATION itself (modeled:
+        # the seam installs the real block, then raises). The prior mask is
+        # captured by query before the restoring try and the block is the
+        # try's first statement, so the aborted close() restores the caller's
+        # exact mask and disposes nothing: a second close() still owns and
+        # collects the guardian.
+        real_mask = emit._fixture_mask_cancellation
+
+        def mask_then_cancel():
+            real_mask()
+            raise KeyboardInterrupt("cancelled during the mask installation")
+
+        premask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        child = emit._FixtureProcess(time.monotonic() + 30,
+                                     subject=lambda: time.sleep(3600))
+        child.start()
+        gpid = child.pid
+        with patch.object(emit, "_fixture_mask_cancellation", mask_then_cancel):
+            refuses(KeyboardInterrupt, child.close)
+        assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == premask, \
+            "the aborted mask installation leaked the cancellation block"
+        assert not child.collected, "the aborted close decided the collection"
+        child.close()
+        assert child.collected and child.status is not None \
+            and emit._fixture_child_reaped(gpid) is True, \
+            "the rerun close did not collect the guardian"
+        assert open_fds() == before and no_children(), "the mask-abort leg leaked"
 
         # Flip A: report the abandonment WITHOUT recording it under the launch
         # lock (the pre-fix close left _abandoned unset) -> the launcher
@@ -2685,6 +2810,80 @@ def _watchdog_completion_case(mode):
             await_state(subject, (None, "Z"), "the flip hygiene did not complete")
             await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
 
+            # Leg 2b (QA21 claude F2): an asynchronous exception landing
+            # BETWEEN poll()'s two collection-state writes -- after the reap,
+            # at the SECOND write's line, located from the live source so the
+            # injection tracks the code -- must leave close() OWNING the
+            # collection: `unresolved` is written FIRST, so the interruption
+            # leaves collected=False and close()'s own reap refuses loudly
+            # ("guardian ownership lost"), never the pre-fix silent state
+            # (collected recorded, unresolved lost, no failure recorded, the
+            # subject surviving a silent close()).
+            import inspect
+
+            class TraceCancelled(BaseException):
+                pass
+
+            poll_code = emit._FixtureProcess.poll.__code__
+            source, start_line = inspect.getsourcelines(emit._FixtureProcess.poll)
+            writes = [start_line + index for index, line in enumerate(source)
+                      if line.strip() in ("self.collected = True",
+                                          "self.unresolved = True")]
+            assert len(writes) == 2, writes
+            target_line = max(writes)  # the second of the two adjacent writes
+
+            def line_tracer(frame, event, arg):
+                if event == "line" and frame.f_lineno == target_line:
+                    sys.settrace(None)
+                    frame.f_trace = None
+                    raise TraceCancelled
+                return line_tracer
+
+            def call_tracer(frame, event, arg):
+                if event == "call" and frame.f_code is poll_code:
+                    return line_tracer
+                return None
+
+            def poll_trace_cancelled(child):
+                await_state(child.pid, ("Z",), "the killed guardian did not exit")
+                cancelled = []
+                sys.settrace(call_tracer)
+                try:
+                    child.poll()
+                except TraceCancelled:
+                    cancelled.append(True)
+                finally:
+                    sys.settrace(None)
+                assert cancelled, "the trace injection never fired"
+
+            child, subject, descendant = launch_killed()
+            poll_trace_cancelled(child)
+            assert child.unresolved and not child.collected, \
+                ("the interrupted state writes lost close()'s ownership",
+                 child.collected, child.unresolved)
+            closed = close_grace(child)
+            assert closed and "guardian ownership lost" in closed[0], \
+                ("close() did not refuse the half-recorded collection loudly",
+                 closed)
+            # The loud refusal is the contract here; the tree is test hygiene.
+            os.killpg(subject, signal.SIGKILL)
+            await_state(subject, (None, "Z"), "the 2b hygiene did not complete")
+            await_state(descendant, (None, "Z"), "the 2b hygiene did not complete")
+
+            # Flip: forge the pre-fix write order's post-interruption state
+            # (collected recorded, unresolved lost, nothing else) -> close()
+            # is silent and the subject tree survives.
+            child, subject, descendant = launch_killed()
+            poll_trace_cancelled(child)
+            child.collected, child.unresolved = True, False
+            closed = close_grace(child)
+            assert not closed, closed
+            assert state(subject) not in (None, "Z"), \
+                "flip: the subject died without close()'s kill"
+            os.killpg(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
+            await_state(subject, (None, "Z"), "the flip hygiene did not complete")
+            await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
+
             # Leg 3 (QA20 claude F3): pidfd-absent host -- a pid-only receipt's
             # poll-collected failure re-raises through close() NAMING the
             # unverifiable cleanup, and the known subject pid is never
@@ -2728,20 +2927,28 @@ def _watchdog_completion_case(mode):
             await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
     elif mode == "unpinned-kill":
         import time
-        # QA20 claude F1: NEVER signal a pid or group whose ownership is not
-        # pinned -- a held pidfd does not pin the pid NUMBER once the process
-        # is reaped, only unreapability does. Pin-first: a live leader is
-        # frozen through its pidfd and only then group-killed; a reaped leader
-        # licenses NO group kill unless a frozen subreaper guardian still
-        # parents a group member (the census pin, which keeps QA18 gemini F1's
-        # reaped-subject descendants reachable); the pidfd SIGKILL always
-        # runs; a skipped group kill is reported unpinned for disclosure.
+        # QA20 claude F1 + QA21 codex F3: NEVER signal a numeric pid or pgid
+        # whose ownership is not pinned -- a held pidfd does not pin the
+        # NUMBER once the process is reaped, and SIGSTOP delivery to a ZOMBIE
+        # leader cannot stop its parent reaping it and the freed pgid being
+        # recycled. The layer therefore issues NO numeric killpg at all (the
+        # recorder below turns any into a loud failure): group members are
+        # addressed one by one through per-member pidfds, each verified
+        # against /proc (group AND an anchored parent chain) AFTER the pidfd
+        # is opened. Pin-first: only a leader frozen ALIVE (its pidfd
+        # unreadable after the freeze) or a frozen subreaper guardian still
+        # parenting a member (the census pin, QA18 gemini F1) anchors the
+        # member kill; a reaped or ZOMBIE leader with no census license is
+        # reported unpinned and its group members are left disclosed, never
+        # guessed at. The subject's own pidfd SIGKILL always runs against the
+        # pinned identity.
         recorded = []
-        real_killpg, real_pidfd_signal = os.killpg, signal.pidfd_send_signal
+        real_pidfd_signal = signal.pidfd_send_signal
 
         def rec_killpg(pgid, signum):
             recorded.append(("killpg", pgid, signum))
-            return real_killpg(pgid, signum)
+            raise AssertionError(
+                "numeric killpg is banned: " + repr((pgid, signum)))
 
         def rec_pidfd(fd, signum, *args):
             recorded.append(("pidfd", fd, signum))
@@ -2760,8 +2967,10 @@ def _watchdog_completion_case(mode):
                 assert time.monotonic() < bound, note
                 time.sleep(0.005)
 
-        # Leg 1: LIVE leader -> the freeze pins pid AND pgid; the group kill
-        # runs pinned, and the freeze strictly precedes it.
+        # Leg 1: LIVE leader -> the freeze pins pid AND pgid (the pidfd stays
+        # unreadable: the leader is stopped, not exited); the member kill runs
+        # pinned through per-member pidfds, the freeze strictly precedes it,
+        # and no numeric killpg ever runs.
         leader = os.fork()
         if leader == 0:
             os.setsid()
@@ -2782,13 +2991,18 @@ def _watchdog_completion_case(mode):
             assert emit._fixture_escalate_subject(leader, fd) is True, \
                 "a live leader did not pin its group"
         assert recorded[0] == ("pidfd", fd, signal.SIGSTOP), recorded
-        assert ("killpg", leader, signal.SIGKILL) in recorded, recorded
-        os.waitpid(leader, 0)
+        assert not [entry for entry in recorded if entry[0] == "killpg"], recorded
+        assert [entry for entry in recorded
+                if entry[0] == "pidfd" and entry[2] == signal.SIGKILL], \
+            ("the pinned member kill never ran", recorded)
+        waited, status_raw = os.waitpid(leader, 0)
+        assert waited == leader and os.WIFSIGNALED(status_raw) \
+            and os.WTERMSIG(status_raw) == signal.SIGKILL, (waited, status_raw)
         os.close(fd)
 
-        # Leg 2: REAPED leader, no census license -> the group kill is SKIPPED
-        # (nothing pins the freed number against reuse) and reported unpinned;
-        # the pidfd kill still runs against the pinned identity.
+        # Leg 2: REAPED leader -> nothing pins the freed number against
+        # reuse: the member kill is SKIPPED and reported unpinned; the pidfd
+        # kill still runs against the pinned identity.
         leader = os.fork()
         if leader == 0:
             os._exit(0)
@@ -2802,31 +3016,89 @@ def _watchdog_completion_case(mode):
         assert not [entry for entry in recorded if entry[0] == "killpg"], \
             ("an unpinned group was signalled", recorded)
         assert ("pidfd", fd, signal.SIGKILL) in recorded, recorded
-
-        # Flip: the pre-fix unconditional kill signals the FREED number (the
-        # wrong-owner defect), demonstrated against a record-only killpg.
-        def unconditional(subject, subject_fd):
-            try:
-                os.killpg(subject, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            try:
-                signal.pidfd_send_signal(subject_fd, signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                pass
-
-        recorded.clear()
-        with patch.object(os, "killpg",
-                          lambda pgid, signum: recorded.append(("killpg", pgid, signum))):
-            unconditional(leader, fd)
-        assert ("killpg", leader, signal.SIGKILL) in recorded, \
-            "the flip did not reproduce the unpinned group kill"
         os.close(fd)
+        reaped_leader = leader
 
-        # Leg 3: reaped leader, frozen-guardian census -> a surviving
+        # Leg 3 (QA21 codex F3): a ZOMBIE leader accepts the pidfd SIGSTOP --
+        # delivery proves only that it exists unreaped NOW -- but its parent
+        # can still reap it and the freed pgid can be recycled mid-sequence,
+        # so a zombie leader licenses NO member kill: escalation reports
+        # unpinned and the surviving same-group descendant is left disclosed
+        # (the documented residual), never reached through the recyclable
+        # number. The pre-fix code took bare SIGSTOP delivery as the pin and
+        # killpg'd the number; the revert flip is the banned-killpg recorder
+        # firing and the descendant dying without a pin.
+        with tempfile.TemporaryDirectory(prefix="opf-zombie-") as directory:
+            descendant_file = Path(directory, "descendant")
+            leader = os.fork()
+            if leader == 0:
+                os.setsid()
+                pid = os.fork()
+                if pid == 0:
+                    time.sleep(3600)           # same-group descendant
+                    os._exit(0)
+                scratch = Path(directory, "descendant.tmp")
+                scratch.write_text(str(pid), encoding="ascii")
+                scratch.rename(descendant_file)  # atomic: never a partial PID
+                os._exit(0)                    # dies UNREAPED: a zombie leader
+            bound = time.monotonic() + 30
+            while not descendant_file.exists():
+                assert time.monotonic() < bound, "the zombie-leg tree never appeared"
+                time.sleep(0.005)
+            descendant = int(descendant_file.read_text(encoding="ascii"))
+            fd = os.pidfd_open(leader)
+            await_state(leader, ("Z",), "the leader never became a zombie")
+            assert state(descendant) not in (None, "Z"), "the descendant died early"
+            recorded.clear()
+            with patch.object(os, "killpg", rec_killpg), \
+                    patch.object(signal, "pidfd_send_signal", rec_pidfd):
+                assert emit._fixture_escalate_subject(leader, fd) is False, \
+                    "a zombie leader was taken as a pin"
+            assert not [entry for entry in recorded if entry[0] == "killpg"], \
+                ("the recyclable freed number was signalled", recorded)
+            assert recorded and recorded[0] == ("pidfd", fd, signal.SIGSTOP), recorded
+            assert state(descendant) not in (None, "Z"), \
+                "an unpinned zombie-leader group was signalled anyway"
+            os.kill(descendant, signal.SIGKILL)  # hygiene for the disclosed residual
+            os.waitpid(leader, 0)
+            os.close(fd)
+            await_state(descendant, (None, "Z"),
+                        "the zombie-leg hygiene did not complete")
+
+        # Leg 4: the per-member census itself refuses foreign parentage: a
+        # live group whose members' parent chains reach NO anchor is never
+        # signalled (a recycled pgid names exactly such a group), while the
+        # same member dies once the true owner anchors the census.
+        decoy = os.fork()
+        if decoy == 0:
+            os.setsid()
+            time.sleep(3600)
+            os._exit(0)
+        bound = time.monotonic() + 30
+        while True:
+            try:
+                if os.getpgid(decoy) == decoy:
+                    break
+            except ProcessLookupError:
+                pass
+            assert time.monotonic() < bound, "the decoy never took its group"
+            time.sleep(0.005)
+        assert emit._fixture_kill_group_members(
+            decoy, signal.SIGKILL, {reaped_leader}) == [], \
+            "an unanchored group member was signalled"
+        assert state(decoy) not in (None, "Z"), \
+            "the census killed a member outside its anchors"
+        delivered = emit._fixture_kill_group_members(
+            decoy, signal.SIGKILL, {os.getpid()})
+        assert decoy in delivered, delivered
+        waited, status_raw = os.waitpid(decoy, 0)
+        assert waited == decoy and os.WIFSIGNALED(status_raw) \
+            and os.WTERMSIG(status_raw) == signal.SIGKILL, (waited, status_raw)
+
+        # Leg 5: reaped leader, frozen-guardian census -> a surviving
         # same-group descendant, adopted by the stopped subreaper guardian,
-        # pins the group and the kill still reaches it (QA18 gemini F1
-        # preserved under the pin rule).
+        # pins the group and the member kill still reaches it through its own
+        # verified pidfd (QA18 gemini F1 preserved under the pin rule).
         with tempfile.TemporaryDirectory(prefix="opf-pin-") as directory:
             leader_file = Path(directory, "leader")
             grandchild_file = Path(directory, "grandchild")
@@ -2893,7 +3165,10 @@ def _watchdog_completion_case(mode):
                 assert emit._fixture_escalate_subject(
                     leader, fd, guardian_pid=guardian) is True, \
                     "the frozen-guardian census did not pin the group"
-            assert ("killpg", leader, signal.SIGKILL) in recorded, recorded
+            assert not [entry for entry in recorded if entry[0] == "killpg"], recorded
+            assert [entry for entry in recorded
+                    if entry[0] == "pidfd" and entry[2] == signal.SIGKILL], \
+                ("the census-pinned member kill never ran", recorded)
             await_state(grandchild, (None, "Z"),
                         "the census-pinned kill stranded the descendant")
             os.close(fd)
