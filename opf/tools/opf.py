@@ -3754,7 +3754,10 @@ def _watchdog_completion_case(mode):
         # contract to the freeze sites (both SIGSTOPs run inside the kill
         # protection), to cancellations raised by the direct guardian
         # backstop (they propagate, chaining the helper failure), and to the
-        # double-fault refusal wording ("attempted", never "sent").
+        # double-fault refusal wording ("attempted", never "sent"). QA25
+        # (codex) adds pending-cancellation priority: a cancellation ALREADY
+        # propagating into the guardian-kill finally stays the outward
+        # exception, an ordinary kill-helper failure chained beneath it.
         def state(target):
             try:
                 stat = Path("/proc", str(target), "stat").read_bytes()
@@ -4125,6 +4128,58 @@ def _watchdog_completion_case(mode):
             os.waitpid(guardian, 0)  # SIGKILLed by the escalate finally
             os.close(guardian_fd)
             os.close(leader_fd)
+
+        # Leg 9 (QA25 codex): a cancellation ALREADY propagating into the
+        # guardian-kill finally stays the OUTWARD exception when the
+        # ownership-checked kill helper fails with an ordinary error: the
+        # helper failure is chained beneath it, never promoted over it. The
+        # pre-fix finally re-raised the ordinary helper failure, demoting
+        # the pending cancellation to its __context__.
+        guardian = os.fork()
+        if guardian == 0:
+            time.sleep(3600)
+            os._exit(0)
+        guardian_fd = os.pidfd_open(guardian)
+        fake = types.SimpleNamespace(
+            pid=guardian, pidfd=guardian_fd,
+            subject_pid=None, subject_pidfd=None,
+            _subject_kill=None, _subject_skipped=None)
+
+        def cancelled_freeze(target_fd, signum, *args):
+            if target_fd == guardian_fd and signum == signal.SIGSTOP:
+                raise TimeoutError("injected pending cancellation")
+            return real_pidfd_signal(target_fd, signum, *args)
+
+        with patch.object(emit, "_fixture_signal",
+                          side_effect=RuntimeError("injected helper failure")), (
+                patch.object(signal, "pidfd_send_signal", cancelled_freeze)):
+            try:
+                emit._FixtureProcess._escalate(fake)
+            except TimeoutError as exc:
+                assert isinstance(exc.__cause__, RuntimeError), (
+                    "the helper failure was not chained beneath the "
+                    "pending cancellation", exc.__cause__)
+            except RuntimeError:
+                raise AssertionError(
+                    "an ordinary helper failure displaced the pending "
+                    "cancellation (QA25 codex)")
+            else:
+                raise AssertionError("the escalation did not propagate")
+        assert fake._subject_kill is None and fake._subject_skipped is None, (
+            "a pending cancellation recorded accounting",
+            fake._subject_kill, fake._subject_skipped)
+        # The direct held-pidfd backstop ran unpatched for SIGKILL: collect
+        # the killed guardian.
+        bound = time.monotonic() + 30
+        while True:
+            waited, raw = os.waitpid(guardian, os.WNOHANG)
+            if waited == guardian:
+                break
+            assert time.monotonic() < bound, (
+                "the direct guardian backstop never delivered its SIGKILL")
+            time.sleep(0.005)
+        assert os.WIFSIGNALED(raw) and os.WTERMSIG(raw) == signal.SIGKILL, raw
+        os.close(guardian_fd)
     elif mode == "receipt-high-fd":
         import fcntl
         import resource

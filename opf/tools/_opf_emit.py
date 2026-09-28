@@ -1071,8 +1071,9 @@ def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None):
     which the caller DISCLOSES as unaddressed (pdeathsig and the ack-EOF
     gate are the partial coverage) and never reports as a killed tree.
     Returns ("tree", []) ONLY when the guardian-anchored census addressed
-    every member AND the verification census observed none left alive in
-    two consecutive clean passes (an observation, never a proof),
+    every OBSERVED member (a census can only address members it observed)
+    AND the verification census observed none left alive in two
+    consecutive clean passes (an observation, never a proof),
     ("partial", (member-pids, unverifiable-pids) or None) when members were
     skipped, observed surviving or unkillable, entries were unverifiable
     (possible members), or the census or its verification was unreadable
@@ -1418,13 +1419,13 @@ class _FixtureProcess:
       "partial" census (skipped    the unaddressed members and the
       or unreadable membership)    unverifiable entries (possible members),
                                    by pid, or "unknown (census unreadable)"
-      "tree" (guardian-anchored    "subject tree killed: every member
-      census, EVERY member         addressed, none observed in two
-      addressed, then a bounded    consecutive clean censuses" -- the ONLY
-      verification census          state that ever claims a killed tree,
-      OBSERVED no live member,     and even it is worded as an observation
-      twice consecutively)         with its residual (a forking chain or
-                                   pid wraparound can evade the censuses),
+      "tree" (guardian-anchored    "subject tree killed: every observed
+      census, every OBSERVED       member addressed, none observed in two
+      member addressed, then a     consecutive clean censuses" -- the ONLY
+      bounded verification         state that ever claims a killed tree,
+      census OBSERVED no live      and even it is worded as an observation
+      member, twice                with its residual (a forking chain or
+      consecutively)               pid wraparound can evade the censuses),
                                    never a proof
 
     Documented residuals: descendants that leave the subject's group/session
@@ -1465,8 +1466,9 @@ class _FixtureProcess:
         # subject-cleanup obligation was discharged (validated clean status,
         # or kill plus disappearance proof). `_subject_kill` records the one
         # receipt kill's accounting state: "tree" (guardian-anchored census,
-        # EVERY member addressed, none observed in two consecutive clean
-        # verification censuses -- an observation, never a proof), "partial"
+        # every OBSERVED member addressed, none observed in two consecutive
+        # clean verification censuses -- an observation, never a proof),
+        # "partial"
         # (census ran; the (members, unverifiable-entries) it could not
         # address are in `_subject_skipped`, None when the census was
         # unreadable), or "subject-only" (no guardian ownership: the
@@ -1922,7 +1924,10 @@ class _FixtureProcess:
         ownership-checked kill helper itself fails, the guardian is still
         SIGKILLed directly through its held, identity-safe pidfd, where a
         cancellation propagates with the helper's failure chained as its
-        context (round 24, codex BLOCKER 2) -- and an ordinary census
+        context (round 24, codex BLOCKER 2), and a cancellation ALREADY
+        propagating into that cleanup stays the OUTWARD exception, any
+        ordinary cleanup failure chained beneath it, never promoted over
+        it (QA25 codex) -- and an ordinary census
         failure that escaped the escalation helper records the kill that
         DID run ("partial", members unknown; the helper's own protection
         ran the held-pidfd SIGKILL, whose delivery is only ever worded as
@@ -1934,6 +1939,7 @@ class _FixtureProcess:
         kill."""
         import signal
         frozen = False
+        pending = None
         try:
             # The freeze runs INSIDE the guardian-kill protection (round 24,
             # codex boundary): an exception here must still reach the
@@ -1967,12 +1973,19 @@ class _FixtureProcess:
                     raise
                 if outcome is not None:
                     self._subject_kill, self._subject_skipped = outcome
+        except BaseException as exc:
+            # Capture the exception ALREADY propagating into the
+            # guardian-kill finally: a pending cancellation must stay the
+            # outward exception even when the cleanup below fails (QA25
+            # codex).
+            pending = exc
+            raise
         finally:
             # The guardian SIGKILL is exception-safe (fix 2z, codex BLOCKER
             # 3): a raising subject cleanup never strands a frozen guardian.
             try:
                 _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
-            except BaseException:
+            except BaseException as cleanup_exc:
                 # Even the ownership-checked helper failing (e.g. the same
                 # census fault reaching its own group census) must not strand
                 # the frozen guardian: its held pidfd is identity-safe,
@@ -1983,11 +1996,23 @@ class _FixtureProcess:
                     except OSError as exc:
                         # A cancellation during the direct backstop must
                         # propagate, carrying the helper's failure as its
-                        # __context__ (round 24, codex BLOCKER 2); any other
-                        # delivery failure is out of moves and the original
-                        # failure propagates below.
+                        # __context__ (round 24, codex BLOCKER 2), beneath a
+                        # pending cancellation where one is already
+                        # propagating (QA25 codex); any other delivery
+                        # failure is out of moves and the original failure
+                        # propagates below.
                         if isinstance(exc, (TimeoutError, InterruptedError)):
+                            if isinstance(pending,
+                                          (TimeoutError, InterruptedError)):
+                                raise pending from exc
                             raise
+                # A cancellation ALREADY propagating into this finally stays
+                # the OUTWARD exception: an ordinary cleanup failure is
+                # chained beneath it, never promoted over it (QA25 codex).
+                if (isinstance(pending, (TimeoutError, InterruptedError))
+                        and not isinstance(
+                            cleanup_exc, (TimeoutError, InterruptedError))):
+                    raise pending from cleanup_exc
                 raise
 
     def _abandon_unfinished_launch(self):
@@ -2135,7 +2160,8 @@ class _FixtureProcess:
         """Annotate an escalated refusal with ONLY what the escalation
         actually did (QA19 F3), accounting every member (fix 2y, codex F2):
         "subject tree killed" is claimed ONLY when the guardian-anchored
-        census addressed every member AND the bounded post-kill verification
+        census addressed every OBSERVED member (a census can only address
+        members it observed) AND the bounded post-kill verification
         census then OBSERVED no live, signalable member left in two
         consecutive clean passes (fix 2z: the claim rests on observation,
         never on the kill sends alone; the maintainer ruling
@@ -2158,17 +2184,17 @@ class _FixtureProcess:
                   else "guardian not frozen: no pidfd")
         if self._subject_kill == "tree":
             # The ONLY state that claims a killed tree: the guardian-anchored
-            # census addressed EVERY member and the bounded verification
-            # census then OBSERVED no live member in two consecutive clean
-            # passes (fix 2y, fix 2z, maintainer ruling
+            # census addressed EVERY observed member and the bounded
+            # verification census then OBSERVED no live member in two
+            # consecutive clean passes (fix 2y, fix 2z, maintainer ruling
             # PD-335-TREE-CLAIM-STALL) -- and the claim is worded as that
             # observation with its residual, never as proof.
             raise ChildStatusUnavailable(
                 str(failure) + "; after bounded-close escalation ({}, subject "
-                "tree killed: every member addressed, none observed in two "
-                "consecutive clean censuses -- an observation, not a proof: "
-                "a continuously forking chain or pid wraparound can evade "
-                "it -- guardian SIGKILL)".format(frozen)) from failure
+                "tree killed: every observed member addressed, none observed "
+                "in two consecutive clean censuses -- an observation, not a "
+                "proof: a continuously forking chain or pid wraparound can "
+                "evade it -- guardian SIGKILL)".format(frozen)) from failure
         if self._subject_kill == "partial":
             if self._subject_skipped is None:
                 accounting = "members unknown (census unreadable)"
