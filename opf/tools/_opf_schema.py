@@ -171,8 +171,12 @@ REF_KEYS = frozenset({"kind", "locator", "note"})
 DELIVERY_KEYS = frozenset({"channel", "ref", "sent_at", "receipt_ref", "receipted_at"})
 
 # The full (non-worklog) envelope keyset; types add their own extra keys on top (EXTRA_KEYS below).
+# `proposed_from` is the writer-recorded pre-proposal state (spec 8.3/8.8): the authoring verb writes it
+# when a transition lands a `/proposed` status, a maintainer rejection restores exactly it, and leaving
+# the `/proposed` status removes it. It is validated by _validate_proposed_from: legal only on a
+# `/proposed` status, and only naming a legal predecessor state for the type.
 ENVELOPE_KEYS = frozenset({"id", "type", "status", "title", "created_at", "updated_at",
-                           "actor", "summary", "links", "refs"})
+                           "actor", "summary", "links", "refs", "proposed_from"})
 # The reduced worklog envelope keyset (spec 8.3, 6.2): no status/title/created_at/updated_at; `date`
 # replaces the creation/update timestamps. Per spec 8.3 (the reduced-envelope list) `type` is NOT a
 # member of the reduced envelope, so under the closed-schema rule a `type` key on a worklog entry is a
@@ -896,6 +900,29 @@ def _validate_worklog(record, spec, registered_vendors, findings, registered_kin
 
 # --- the record validator (spec 8.3) -----------------------------------------------------------------
 
+def _validate_proposed_from(record, spec, findings):
+    """`proposed_from` (spec 8.3/8.8): the pre-proposal state the authoring verb recorded when it landed
+    the current `/proposed` status, and the state a maintainer rejection restores. Legal ONLY on a
+    `/proposed` status, and its value must be an unqualified state of this type from which the proposed
+    state is reachable under the transition table (a legal predecessor); anything else is INVALID,
+    fail-closed. An absent field is legal (a record proposed outside the transition subcommand carries
+    none: one created at a `/proposed` initial state, or one proposed by a canonical hand edit; the
+    absence establishes no provenance, and the verb then refuses its rejection rather than inferring or
+    inventing a predecessor)."""
+    if "proposed_from" not in record:
+        return
+    value = record.get("proposed_from")
+    parsed, _err = parse_status(record.get("status"), spec)
+    if parsed is None or parsed[1] != "proposed":
+        findings.append("proposed_from is legal only on a '/proposed' status (spec 8.8)")
+        return
+    # isinstance first: a TOML-valid non-string (a list/dict) is unhashable and would raise on the
+    # transitions dict lookup (guard-input-soundness).
+    if not isinstance(value, str) or parsed[0] not in spec.transitions.get(value, frozenset()):
+        findings.append("proposed_from {} is not a legal predecessor state of {!r} for a {} "
+                        "(spec 8.5/8.8)".format(_safe_display(value), record.get("status"), spec.name))
+
+
 def validate_record(record, expected_type=None, specs=None, registered_vendors=frozenset(),
                     registered_kinds=None, standing_auth=None):
     """Validate one parsed record against its baseline type schema. Returns a RecordValidation.
@@ -1040,6 +1067,7 @@ def validate_record(record, expected_type=None, specs=None, registered_vendors=f
 
     _validate_links(record, findings)
     _validate_refs(record, findings)
+    _validate_proposed_from(record, spec, findings)
     _validate_type_specific(record, spec, findings, standing_auth)
 
     return RecordValidation(INVALID if findings else VALID, findings, rtype, rid)
@@ -1061,11 +1089,12 @@ def validate_transition(type_name, from_status, to_status, actor_kind, pre_propo
         A rejection returns the record to its ACTUAL pre-proposal state, so it is legal iff `to_state ==
         pre_proposal_state`, `to_qual is None`, `to_state` is a non-terminal (working/initial) state, the
         actor is a maintainer, AND a recorded rejection `reason` is supplied (spec 8.4: a rejection
-        returns the record to a working state "with a recorded reason"). The envelope records no prior
-        state (spec 8.3), so the caller supplies `pre_proposal_state` and `reason` from the record's
-        history; when the pre-proposal state is not supplied the rejection target cannot be verified and
-        the result is CANNOT-EVALUATE, never a permissive VALID (M1); a rejection with no recorded reason
-        is INVALID.
+        returns the record to a working state "with a recorded reason"). This validator sees statuses
+        only, so the caller supplies `pre_proposal_state` and `reason` as evidence it holds: the
+        authoring verb reads `pre_proposal_state` from the record's own `proposed_from` envelope field
+        (spec 8.3/8.8), written by the proposing transition; when the pre-proposal state is not supplied
+        the rejection target cannot be verified and the result is CANNOT-EVALUATE, never a permissive
+        VALID (M1); a rejection with no recorded reason is INVALID.
       - An unqualified TERMINAL state does not transition at all (no resurrection, spec 8.4); a revived
         concern is a new record, and supersession is a link, not a state edit.
     """
@@ -1127,7 +1156,8 @@ def validate_transition(type_name, from_status, to_status, actor_kind, pre_propo
     elif from_qual == "proposed":
         # From a proposed record only a maintainer rejection back to a non-terminal state is legal (spec
         # 8.4). A rejection restores the ACTUAL pre-proposal state, so it must land on exactly that state,
-        # supplied by the caller from the record's history (the envelope carries no prior state, spec 8.3).
+        # supplied by the caller (the authoring verb reads it from the record's own proposed_from field,
+        # spec 8.3/8.8; this validator sees statuses only).
         # The removed matrix-predecessor heuristic (land on any state whence the proposed state was
         # reachable) let active -> dropped/proposed -> open slip through, an effective active -> open that
         # is absent from the 8.5 matrix; without the pre-proposal state the target cannot be verified, so
@@ -1141,7 +1171,7 @@ def validate_transition(type_name, from_status, to_status, actor_kind, pre_propo
         elif pre_proposal_state is None:
             return TransitionCheck(CANNOT_EVALUATE, findings + [
                 "a rejection target cannot be verified without the pre-proposal state; supply it from the "
-                "record's history (spec 8.4)"])
+                "record's own proposed_from field (spec 8.4/8.8)"])
         elif to_state != pre_proposal_state:
             findings.append("a rejection must return to the record's actual pre-proposal state {}, not "
                             "{!r} (a rejection may not restore a state the record was never in, spec "
@@ -1598,6 +1628,29 @@ def self_test():
     check("unknown-state-invalid",
           validate_record(envelope("finding", 1, "frozen")).status == INVALID)
 
+    # 8b: proposed_from (spec 8.8): the writer-recorded pre-proposal state a rejection restores. Legal
+    # only on a '/proposed' status, and only naming a legal predecessor state under the type's table.
+    proposer = dict(kind="assistant")
+    check("proposed-from-on-proposed-ok",
+          validate_record(envelope("backlog_item", 3, "done/proposed", actor=proposer,
+                                   proposed_from="active")).status == VALID)
+    check("proposed-from-on-unqualified-invalid",
+          validate_record(envelope("backlog_item", 3, "active", proposed_from="open")).status == INVALID)
+    check("proposed-from-illegal-predecessor-invalid",   # open -> done is not in the backlog table
+          validate_record(envelope("backlog_item", 3, "done/proposed", actor=proposer,
+                                   proposed_from="open")).status == INVALID)
+    check("proposed-from-qualified-value-invalid",
+          validate_record(envelope("finding", 2, "fixed/proposed", actor=proposer,
+                                   proposed_from="open/proposed")).status == INVALID)
+    check("proposed-from-non-string-clean-invalid",   # unhashable value: clean INVALID, never a TypeError
+          validate_record(envelope("finding", 2, "fixed/proposed", actor=proposer,
+                                   proposed_from=["open"])).status == INVALID)
+    check("proposed-from-legal-predecessor-ok",
+          validate_record(envelope("finding", 2, "fixed/proposed", actor=proposer,
+                                   proposed_from="open")).status == VALID)
+    check("proposed-from-on-worklog-invalid",   # not in the reduced envelope (closed keyset)
+          validate_record(dict(wl, proposed_from="open"), expected_type="worklog").status == INVALID)
+
     # 9: transitions. Legal forward, illegal target, and the /proposed landing rules.
     check("txn-forward-legal",
           validate_transition("backlog_item", "open", "active", "assistant").status == VALID)
@@ -1973,8 +2026,9 @@ def self_test():
           validate_record(envelope("finding", 27, "open",
                                    refs=[{"kind": "path", "locator": "x", "note": "n"}])).status == VALID)
 
-    # M1: a rejection restores the ACTUAL pre-proposal state (spec 8.4), supplied by the caller from the
-    # record's history. The matrix-predecessor heuristic is REMOVED: it blessed active -> dropped/proposed
+    # M1: a rejection restores the ACTUAL pre-proposal state (spec 8.4), supplied by the caller (the
+    # authoring verb reads it from the record's own proposed_from field, spec 8.8). The
+    # matrix-predecessor heuristic is REMOVED: it blessed active -> dropped/proposed
     # -> open (an effective active -> open, absent from the 8.5 matrix). dropped/proposed -> open is VALID
     # only when the record was in `open` before it was proposed, and INVALID when it was in `active` (the
     # exact codex M1 vector).

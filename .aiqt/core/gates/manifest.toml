@@ -489,7 +489,7 @@ rules = []
 platform = "ci"
 default = "block"
 class = "a"
-residue = "It exercises the OPF core-tooling dispatcher (opf/tools/opf.py --self-test) end to end: it runs every registered helper self-test in order (the store, schema, release, and emitter helpers over synthetic stores) and the aggregator's own fail-closed return-vocabulary guard, under which a helper returning a bool, a float, or an out-of-range int fails the aggregate closed rather than reading as clean, and the worst outcome wins so one degraded helper is never masked by a later clean one. It arguably serves the change-carries-a-check discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here. It asserts representative synthetic scenarios with exact exit-code matches, not each helper's whole input space; it now exercises the render, doctor, upgrade, and import verbs' dispatch and argument handling via the opf-cli routing leg (usage errors fail closed; render --check/--write forwards to the U4 engine over synthetic and non-adopter stores; doctor and upgrade resolve and route over synthetic and non-adopter stores; and import wires scan/plan/review/apply onto the U7 operation layer, an unresolved store failing cannot-evaluate, --scan writing nothing, --plan staging a run, --review capturing acceptance, and the deferred --apply stub failing cannot-evaluate mutating nothing; and record refuses its usage errors before any store resolution, with transition and done-with-receipt failing closed as not-yet-implemented, while the record unit self-test covers the verb's argument grammar, allocation seam, planners, and postcondition), while the remaining store verbs (migrate, sync) stay recognized names that fail closed as not-yet-implemented until their unit lands; and it runs over synthetic stores rather than a real adopter --root, so it does not verify behaviour against a live product repository."
+residue = "It exercises the OPF core-tooling dispatcher (opf/tools/opf.py --self-test) end to end: it runs every registered helper self-test in order (the store, schema, release, and emitter helpers over synthetic stores) and the aggregator's own fail-closed return-vocabulary guard, under which a helper returning a bool, a float, or an out-of-range int fails the aggregate closed rather than reading as clean, and the worst outcome wins so one degraded helper is never masked by a later clean one. It arguably serves the change-carries-a-check discipline, but the linkage to a single corpus rule is not undeniable, so none is claimed here. It asserts representative synthetic scenarios with exact exit-code matches, not each helper's whole input space; it now exercises the render, doctor, upgrade, and import verbs' dispatch and argument handling via the opf-cli routing leg (usage errors fail closed; render --check/--write forwards to the U4 engine over synthetic and non-adopter stores; doctor and upgrade resolve and route over synthetic and non-adopter stores; and import wires scan/plan/review/apply onto the U7 operation layer, an unresolved store failing cannot-evaluate, --scan writing nothing, --plan staging a run, --review capturing acceptance, and the deferred --apply stub failing cannot-evaluate mutating nothing; and record refuses its usage errors before any store resolution, including a given '/proposed' qualifier and a non-maintainer done-with-receipt, while the record unit self-test covers the verb's argument grammar, allocation seam, the four planners, the record-carried pre-proposal state (proposed_from written, restored, and removed), the one accepted snapshot cannot-evaluate, and postcondition), while the remaining store verbs (migrate, sync) stay recognized names that fail closed as not-yet-implemented until their unit lands; and it runs over synthetic stores rather than a real adopter --root, so it does not verify behaviour against a live product repository."
 
 [[gate]]
 id = "opf-import-direct-selftest"
@@ -710,41 +710,87 @@ platform = "ci"
 default = "block"
 class = "c"
 residue = """
-It runs the OPF record-authoring gate (opf/tools/check_opf_record.py, OPF-RECORD PR1) via its
---self-test --red-on-revert: there is no live-adopter leg (this repository is not an OPFiles adopter),
-so the whole assurance rides the self-test. Each case copies a doctor-VALID template store built beneath
-the gate's own temporary root (opf init, a commit, opf render --write, a commit) and drives opf record
-create and worklog-append in-process, plus isolated child processes for the crash cases. It asserts that
-a comment-bearing index, counters, or worklog refuses with every byte untouched; that create with links
-and refs publishes canonical bytes that reparse to the planned record, while a lossy emitter is refused
-before any write; that a plan mutating one extra field of an existing record, or the initial status or
-requested title of the new record, or the requested summary of a new worklog entry, refuses; that two
-sequential creates claim BI-1 then BI-2 with monotonic counters and that a counters map missing an
-enabled namespace refuses; that a kill at each of twelve journal steps leaves the killed run's lease,
-which refuses the next run before any recovery write, and that once the operator releases it the next
-run's reconciliation leaves the operands exactly the prestate or exactly the poststate, the poststate
-only when the transaction completed, and no killed run reports an id; that a held lease refuses and is
-never seized, and success is reported only after the lease release; that a store the final doctor
-grades not VALID exits 2 with scoped recovery text, the change left for review and the lease released;
-that worklog-append claims the next WL id with no status qualifier while an id inside a released span
-refuses; that an interrupted journal refuses with every byte untouched while a live peer holds the
-shared lease through the upgrade verb; that an operand edited after the interruption, on the prestate
-or the poststate side, refuses naming the path with every byte untouched and reconciles once the edit
-is undone; and that an unknown or path-like create --type refuses with the enabled-baseline-types
-message before any operand read. Under --red-on-revert each test's flip (the byte-reproduction
-precondition, emit_checked, the allowed-delta postcondition, the known-complete proof, the
-in-transaction counters operand, the release-before-report ordering, the final doctor, the
-released-span check, recovery under the lease, the intervening-edit check, and the --type check before
-the operand read) is applied in turn and must turn its test red with an assertion. The unit leg
-(_opf_record.py, via opf.py --self-test) covers the argument grammar, the allocation seam including the
-homes-2 refusal, the planners, and the postcondition vectors. It arguably serves the
-change-carries-a-check and check-fails-closed-on-unreadable disciplines, but the linkage to a single
-corpus rule is not undeniable, so none is claimed here. Class c: coverage is representative, so it
+It runs the OPF record-authoring gate (opf/tools/check_opf_record.py, OPF-RECORD PR1 and PR2) via its
+--self-test --red-on-revert: there is no live-adopter leg (this repository is not an OPFiles adopter), so
+the whole assurance rides the self-test. Each case copies a doctor-VALID template store built beneath the
+gate's own temporary root (opf init, a commit, opf render --write, a commit) and drives opf record
+create, transition, done-with-receipt, and worklog-append in-process, plus isolated child processes for
+the crash and leftover-lock cases. It asserts that a comment-bearing index, counters, or worklog refuses
+with every byte untouched; that create with links and refs publishes canonical bytes that reparse to the
+planned record, while the verb's serializer itself refuses a lossy emitter and the whole run then refuses
+with every byte untouched; that a plan mutating one extra field of an existing record, or the initial
+status or requested title of the new record, or the requested summary of a new worklog entry, refuses;
+that two sequential creates claim BI-1 then BI-2, each with its own worklog entry, with monotonic
+counters, and that a counters map missing an enabled namespace refuses; that a kill at each journal step
+(fifteen over the counters, index, and worklog operands of a create and of an assistant transition, and
+eighteen over the counters, backlog index, done index, and worklog operands of a maintainer
+done-with-receipt) leaves the killed run's lease, which refuses the next run before any recovery write,
+and that once the operator releases it the next run's reconciliation leaves the operands exactly the
+prestate or exactly the poststate, the poststate only when the transaction completed, and no killed run
+reports an id; that an assistant transition of a backlog item to done lands done/proposed with no
+receipt, an assistant done-with-receipt refuses before the store is resolved, a maintainer transition to
+done refuses with every byte untouched, and a maintainer done-with-receipt (ratifying done/proposed, or
+from active) lands done with exactly one receipt_of receipt and the store doctor-VALID once committed;
+that a maintainer rejection without a reason, to a state other than the recorded pre-proposal state, or
+of a proposal that does not record its pre-proposal state, and an assistant rejection, refuse with every
+byte untouched, while a rejection with a reason returns to the recorded pre-proposal state and records
+the reason; that the proposing transition writes the pre-proposal state into the record's own
+proposed_from field, a rejection restores exactly that recorded state and removes the field, a forged
+proposing worklog line (its FROM state rewritten canonically and committed with its views, doctor VALID)
+changes nothing in either direction (the forged target still refuses, the genuine rejection still lands),
+a proposal that carries no proposed_from (proposed outside the verb by a canonical hand edit) refuses
+with every byte untouched, a reject-and-re-propose cycle merged --no-ff or squash-merged into the
+mainline behaves exactly the same, and a current row the schema grades invalid (a proposed_from naming
+an illegal predecessor, or a stray proposed_from on an unqualified status, each a doctor finding) is
+never trusted or overwritten, the rejection, the ratifying done-with-receipt, and the proposing
+transition each refusing with every byte untouched in its own test; that a planner mutation
+changing only a value's type (an extension
+count to true or 1.0, the index schema marker to true, the receipt counter to true) refuses before
+publication with every byte untouched; that two branches creating from the same
+committed counters conflict on the store paths and a canonical union resolution carrying a
+duplicate BI-1 is doctor INVALID with a C-ID-SPACE finding; that a
+held lease refuses and is never seized, success is reported only after the lease release, and a failed
+release reports the final gate's recorded outcome (doctor-VALID after a create, the accepted pending
+cannot-evaluate after an actor-dependent transition); that a store the final doctor grades not VALID
+exits 2 with scoped recovery text, the change left for review and the lease released; that worklog-append
+claims the next WL id with no status qualifier while an id inside a released span refuses; that an
+interrupted journal refuses with every byte untouched while a live peer holds the shared lease through
+the upgrade verb; that an operand edited after the interruption, on the prestate or the poststate side,
+refuses naming the path with every byte untouched and reconciles once the edit is undone; that an unknown
+or path-like create --type refuses with the enabled-baseline-types message before any operand read; and
+that a run whose journal lock release fails after COMPLETE reports the retained lock, and the next run
+reconciles it naming the COMPLETE transaction without claiming its render and doctor never ran. Under
+--red-on-revert each test's flip (the byte-reproduction precondition, emit_checked, the allowed-delta
+postcondition, the known-complete proof, the in-transaction counters operand, the derived '/proposed'
+qualifier, the maintainer-only check, the done-only-through-its-receipt guard, the rejection reason the
+check sees, the recorded pre-proposal state, doctor's check_unique_ids, the release-before-report
+ordering, the release-failure outcome text, the final doctor, the released-span check, recovery under the
+lease, the intervening-edit check, the --type check before the operand read, the leftover-lock outcome
+text, the record-carried pre-proposal state's flip (the worklog lifecycle line read instead of the
+record's own field), the current-row validation's flip (the row trusted without the schema check,
+applied separately to each of those three invalid-row tests), and the strict type-aware delta
+comparator's flip (ordinary equality, under which
+true and 1.0 read as 1)) is applied in turn and must turn its test red
+with an assertion; where an independent guard would still refuse, the test asserts the written bytes or an
+isolated guard before any message. The unit leg (_opf_record.py, via opf.py --self-test) covers the
+argument grammar, the allocation seam including the homes-2 refusal, the four planners, the
+record-carried pre-proposal state (proposed_from written on a proposal, restored and removed on
+rejection and ratification, never read from worklog text, and the current row schema-validated before
+it is trusted or overwritten), the exact-integer schema markers, the one
+accepted snapshot cannot-evaluate, the leftover-lock outcome bound to its lock's token (a reused pid is
+not attributed), and the postcondition vectors including the strict type-aware comparisons. It arguably
+serves the change-carries-a-check and check-fails-closed-on-unreadable disciplines, but the linkage to a
+single corpus rule is not undeniable, so none is claimed here. Class c: coverage is representative, so it
 asserts these enumerated scenarios over synthetic stores rather than the verb's whole input space;
-transition and done-with-receipt are not implemented in this build and are exercised only as fail-closed
-stubs; the kill points are the journal engine's own injection hooks, not power loss or filesystem I/O
-failures; concurrent writers, cross-branch id collisions, and live adopter state are outside the
-fixtures; and any harness failure fails closed to 2 rather than a clean skip.
+transitions are driven end to end for backlog items only, with other types covered by the unit leg; the
+kill points are the journal engine's own injection hooks, not power loss or filesystem I/O failures, and
+they drive one create, one assistant transition, and one maintainer done-with-receipt; the
+merge coverage of the recorded pre-proposal state is the --no-ff and squash shapes of one
+reject-and-re-propose cycle, and a canonical hand edit of the record, proposed_from included, is not
+detectable while it keeps the row schema-valid (a schema-invalid row refuses at the next transition;
+disclosed in the verb); the collision fixture is one hand-built union merge,
+not every merge shape; concurrent writers and live adopter state are outside the fixtures; and any
+harness failure fails closed to 2 rather than a clean skip.
 """
 
 [[gate]]
