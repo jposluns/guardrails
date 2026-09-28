@@ -6,6 +6,8 @@ Only explicit source roots, .working, and DETECTION_ROOTS are inventoried.
 are exclusions, recorded in the inventory; foreign content inside those excluded
 subtrees is NOT covered. Companion stores refuse in this slice. Detection is by
 path only: a candidate is neither a parsed registration nor a working pipeline.
+Ancestry marks re-adoption when a pointer or resolved store manifest is present;
+first-adoption only means no live trace, since a committed deletion is not read.
 
 VALID means an inert, digest-bound proposal, NEVER permission/readiness to apply.
 No release is trusted, acceptance verified, hook activated, or transaction run.
@@ -36,8 +38,8 @@ MAX_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 DETECTION_ROOTS = (
     ".opf.toml", ".opf.local.toml", ".working",
-    "AGENTS.md", "CLAUDE.md", ".claude", ".cursor", ".github/workflows",
-    ".gitlab-ci.yml", "Jenkinsfile", ".circleci", "azure-pipelines.yml",
+    "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".claude", ".cursor", ".gemini", ".codex",
+    ".github/workflows", ".gitlab-ci.yml", "Jenkinsfile", ".circleci", "azure-pipelines.yml",
     "VERSION", "CHANGELOG.md", "release-notes.toml",
 )
 RESIDUALS = (
@@ -48,6 +50,7 @@ RESIDUALS = (
     "Resolver reads retain the resolver limits; inventory caps are not a process sandbox.",
     "No coherent snapshot; apply must recheck inventory, preimages and absences.",
     "No commit, merge, network, journal, import staging, rendering or hook effects.",
+    "Ancestry reads live pointers and the resolved manifest; git history is not read.",
 )
 
 
@@ -164,10 +167,13 @@ def _inventory(root, sources, targets):
         root_stat = os.fstat(root_fd)
         # Bind discovery to this product only. Inspect BOTH pointers, even when
         # the local override would hide a malformed committed pointer.
+        traces = []
         for pointer in (store.POINTER_REL, store.LOCAL_POINTER_REL):
             target = store._read_pointer_target(root_fd, pointer)
             if target is not None and store._target_store_root(target, root) != root:
                 raise PlanError("companion/remote store requires separately scoped investigation")
+            if target is not None:
+                traces.append(pointer)
         resolution = store.resolve_store(root)
         excluded = []
         if resolution.status == store.CANNOT_EVALUATE:
@@ -221,6 +227,7 @@ def _inventory(root, sources, targets):
             if homes >= 2:
                 excluded.extend({"path": path, "reason": "store-control"} for path in control)
             manifest_digest = _digest(raw)
+            traces.append(manifest_path)
         else:
             homes = 1
             manifest_path = ""
@@ -346,6 +353,13 @@ def _inventory(root, sources, targets):
                  "evidence": "filesystem-entry; candidate only"}
                 for path in DETECTION_ROOTS if path in entries
             ],
+            # Prior-OPF ancestry, from the same pointer and manifest reads that fixed the
+            # exclusions, so the seeded-versus-zero counters choice is plan-visible.
+            "ancestry": {
+                "adoption": "re-adoption" if traces else "first-adoption",
+                "traces": traces,
+                "evidence": "live pointers and resolved manifest; git history not read",
+            },
             "coverage_residuals": list(RESIDUALS),
         }, homes
     finally:
@@ -660,6 +674,42 @@ def self_test():
             self.assertIn(".working/notes.md", doc["candidates"])
             planned = self.make_plan(result)
             self.assertEqual(planned.unresolved, (".working/notes.md",))
+
+        def test_platform_detection_roots(self):
+            (self.root / "GEMINI.md").write_bytes(b"gemini\n")
+            (self.root / ".gemini").mkdir()
+            (self.root / ".gemini/settings.json").write_bytes(b"{}\n")
+            (self.root / ".codex").mkdir()
+            (self.root / ".codex/config.toml").write_bytes(b"")
+            doc = tomllib.loads(self.observation().observation.decode())
+            detected = {row["path"]: row["kind"] for row in doc["detections"]}
+            self.assertEqual(detected.get(".gemini"), "directory")
+            self.assertEqual(detected.get("GEMINI.md"), "file")
+            self.assertEqual(detected.get(".codex"), "directory")
+            self.assertIn(".gemini/settings.json", [row["path"] for row in doc["entries"]])
+            # Detection by path only: a platform surface is not an adoption candidate.
+            self.assertNotIn(".gemini/settings.json", doc["candidates"])
+            self.assertEqual(self.make_plan().status, store.VALID)
+
+        def test_ancestry_marks_re_adoption(self):
+            def ancestry():
+                return tomllib.loads(self.observation().observation.decode())["ancestry"]
+            self.assertEqual((ancestry()["adoption"], ancestry()["traces"]), ("first-adoption", []))
+            inventory = tomllib.loads(self.make_plan().inventory.decode())
+            self.assertEqual(inventory["observation"]["ancestry"]["adoption"], "first-adoption")
+            # A pointer whose store is gone (foreign .working, no manifest) is still ancestry.
+            (self.root / ".working").mkdir()
+            (self.root / ".working/notes.md").write_bytes(b"notes")
+            (self.root / ".opf.toml").write_text('[store]\ntarget = "dir:."\n', encoding="utf-8")
+            self.assertEqual((ancestry()["adoption"], ancestry()["traces"]),
+                             ("re-adoption", [".opf.toml"]))
+            (self.root / ".opf.toml").unlink()
+            import _opf_init
+            (self.root / ".working/toml").mkdir()
+            (self.root / ".working/toml/manifest.toml").write_text(
+                _opf_init.build_manifest(), encoding="utf-8")
+            self.assertEqual((ancestry()["adoption"], ancestry()["traces"]),
+                             ("re-adoption", [".working/toml/manifest.toml"]))
 
         def test_unreadable_declared_source(self):
             with mock.patch.object(sys.modules[__name__], "_read",
