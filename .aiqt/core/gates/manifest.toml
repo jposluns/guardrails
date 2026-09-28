@@ -569,8 +569,11 @@ space-joined concatenation must equal each section's normalized text, so deletin
 there, prose, list row, table row or fenced block included, turns the gate red; the self-test
 proves that tiling equality and a dropped-pin flip per section, proves each pin unique in its
 section, and deletes each pinned operative occurrence independently (never a replace-all),
-including in 4.2. Added contradictions and pin-preserving rewordings that only append or wrap
-text remain review's to catch. The
+including in 4.2. Under the default entry alone added text stays green, but the self-test's
+per-section tiling equality turns red on any addition inside a tiled section, so the live
+residuals are additions to untiled sections (for example 8.7, 10, 13 and 16), a default-gate
+run without the self-test, and an addition landed together with a matching registry edit,
+which review of registry changes catches. The
 self-test also checks
 constructors, discovery reservations and inert writer defaults, plus in-memory boundary fixtures:
 legacy (homes 1) behaviour kept for every store until activation (grading, detect rows, messages,
