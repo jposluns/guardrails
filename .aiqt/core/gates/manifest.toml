@@ -573,7 +573,14 @@ including in 4.2. Under the default entry alone added text stays green, but the 
 per-section tiling equality turns red on any addition inside a tiled section, so the live
 residuals are additions to untiled sections (for example 8.7, 10, 13 and 16), a default-gate
 run without the self-test, and an addition landed together with a matching registry edit,
-which review of registry changes catches. The
+which review of registry changes catches. The default entry also runs a section 2 keyword
+lint over every pin of those tiled sections: a pin without MUST, MUST NOT, SHOULD or MAY is red
+unless the registry marks it descriptive (_D) or lists it as a temporary exemption for pending
+decision PD-OPF-OCCUPIED-VIEW-PRESERVE-FIRST (_P, confined to on-hold occupied-destination
+sentences in 8.8, 9.2, 11, 14.1 and 14.2, and red once a marked pin gains a keyword); the
+self-test proves synthetic cases, flips every marker and every keyword pin red, and reverts
+named QA5 rewrites red. The lint reads the registry marker, not the meaning, so a requirement
+wrongly marked descriptive stays green, which review of registry changes catches. The
 self-test also checks
 constructors, discovery reservations and inert writer defaults, plus in-memory boundary fixtures:
 legacy (homes 1) behaviour kept for every store until activation (grading, detect rows, messages,

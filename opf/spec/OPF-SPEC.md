@@ -171,28 +171,28 @@ per-record layout (section 9) additionally places one file per record under
 The imported files are registered managed leaves beside the clean-series files, using the same
 enabled-type roster; `worklog` uses `worklog.imported.toml` instead of an imported index.
 Their manifest, emitter, upgrade and containment registrations MUST agree. A 1.3.0 `opf init`
-and the section 9.2 upgrade create the imported leaves for every enabled type, create-only and
-empty; enabling a further type or module later creates its imported leaf in the same act as its
+and the section 9.2 upgrade MUST create the imported leaves for every enabled type, create-only and
+empty; enabling a further type or module later MUST create its imported leaf in the same act as its
 clean index. They are machine
 records, distinct from the original-source evidence under `.working/imported/`. The first
-imported-series release keeps these files inline in either store layout and provides no views
-over imported data; assistants read the TOML. Historical releases remain in `version.toml`
+imported-series release MUST keep these files inline in either store layout and MUST NOT provide
+views over imported data; assistants read the TOML. Historical releases remain in `version.toml`
 (section 14.3); there is no `version.imported.toml` or `CHANGELOG.toml`.
 
 The reserved children `archive/`, `imported/`, `staging/`, and `journals/` are store-tree control
 area, neither machine-store records nor adopter content; they relocate with the machine store.
-In homes 2, OPF writes no state outside `.working/` except the operation-lock and coupled-init
-substrate in the git common directory, and none under `.aiqt/`. The record archive remains
-inside the discovered machine store; the example name `toml` is not hardcoded.
+In homes 2, OPF MUST NOT write state outside `.working/` except the operation-lock and coupled-init
+substrate in the git common directory, and MUST NOT write any under `.aiqt/`. The record archive
+MUST remain inside the discovered machine store, and the example name `toml` MUST NOT be hardcoded.
 
 The closed kind vocabulary is `import`, `ingest`, `adoption`, `layout`, `preview`. Import and
 ingest run IDs use `imp-<YYYYMMDD>T<HHMMSS>Z-<hash16>`; adoption uses `adopt-` with that
 suffix. Layout and preview reserve `layout-` and `preview-` with the same suffix. Here
 `hash16` is 16 lowercase hexadecimal characters; constructors check lexical shape, not calendar
-validity or filesystem safety. File operands use canonical contained relative paths: no empty,
+validity or filesystem safety. File operands MUST use canonical contained relative paths: no empty,
 dot, or parent components, absolute/drive/backslash forms, control characters, or line separators.
 
-Homes-2 init and upgrade render this managed block into `.working/.gitignore` from the topology
+Homes-2 init and upgrade MUST render this managed block into `.working/.gitignore` from the topology
 constants; the reference tooling provides the renderer and drift gate but installs no block:
 
 ```gitignore
@@ -202,12 +202,12 @@ constants; the reference tooling provides the renderer and drift gate but instal
 # <<< opf-managed <<<
 ```
 
-Durable `imported/` and `archive/` evidence stays tracked. Installation must inspect effective
-ignore rules and the index first; tracked staging or journals require an explicit reviewed
+Durable `imported/` and `archive/` evidence MUST stay tracked. Installation MUST inspect effective
+ignore rules and the index first; tracked staging or journals MUST require an explicit reviewed
 untracking change, never silent index mutation. The block travels with the store and joins the
 indexed-ignore candidate set. Gitignore is not access control: `git add -f` can stage ignored
 state. Journals are machine-local even after completion; a clone without them cannot recover those
-transactions, and requested recovery fails closed on a missing journal. Containment and doctor
+transactions, and requested recovery MUST fail closed on a missing journal. Containment and doctor
 exclude journals and make no recovery claim; a rogue file there is outside their coverage.
 
 Under pre-1.3.0 tooling, every store within that tooling's own version ceiling keeps its legacy
@@ -216,12 +216,12 @@ exactly as before, and the pre-1.3.0 doctor's check roster and residuals are unc
 that carries the section 9.2 ceiling refuses an above-ceiling declaration as a fail-closed
 INVALID finding; tooling released before that ceiling grades such a store as legacy instead, a
 disclosed residual of section 9.2. Activated 1.3.0
-tooling registers on homes 1 the imported managed leaves, the adoption archive
+tooling MUST register on homes 1 the imported managed leaves, the adoption archive
 `.working/archive/adoption/<run-id>/`, the Move destination `.working/archive/moved/`, and the
 evidence bundles `.working/imported/<kind>/<run-id>/`, all recognized by containment as OPF
-control area, and adds the four section 8.3 imported-series checks to the doctor roster.
-C-EVIDENCE-ENUM neither runs nor reads anything until homes 2 is activated; on homes 1 the
-section 14.1 completion checks carry the evidence digest verification themselves. The boundary
+control area, and MUST add the four section 8.3 imported-series checks to the doctor roster.
+C-EVIDENCE-ENUM MUST NOT run or read anything until homes 2 is activated; on homes 1 the
+section 14.1 completion checks MUST carry the evidence digest verification themselves. The boundary
 below applies only to a store that declares both `homes = 2` and `spec_version = "2.0.0"` once
 the tooling activates that generation.
 
@@ -233,44 +233,44 @@ canonical store-relative file path spelled from `.working/`), `size` (a nonnegat
 `sha256` (64 lowercase hex digits). A row may name a member of its own bundle other than a
 bundle-root inventory, a default Move destination under `.working/archive/moved/`, or, for an
 adoption bundle, a retire preimage of the same run under `.working/archive/adoption/<run-id>/`.
-The owning writer or migration derives each inventory from the run's transaction record or
-receipt and publishes it exclusively with the retained bytes. An inventory is never rewritten, so
-a bundle stays immutable and an evidence commit changes only its bundle folder. An inventory is
+The owning writer or migration MUST derive each inventory from the run's transaction record or
+receipt and MUST publish it exclusively with the retained bytes. An inventory MUST NOT be rewritten,
+so a bundle stays immutable and an evidence commit changes only its bundle folder. An inventory is
 not a journal projection and remains available in a clone without journals.
-A phase inventory may be published in the same transaction as the base inventory to claim the
+A phase inventory MAY be published in the same transaction as the base inventory to claim the
 promotion receipt without creating a receipt/inventory digest cycle.
 
 C-EVIDENCE-ENUM reconciles exact membership, directory structure, regular-file types, sizes and
 digests: every payload file under `.working/imported/` and `.working/archive/`, meaning every file
 other than a bundle-root inventory, is claimed by exactly one row, and every inventory is itself
 schema-checked against the shape above rather than claimed. Unlisted or unclaimed entries, a bundle
-without an inventory, and missing listed files are findings; unreadable or malformed inputs,
-including a path claimed twice, cannot evaluate. The recognized legacy format
-`opf.ingest.evidence-inventory/v1` is refused as the named `legacy-ingest-inventory` finding under
-C-EVIDENCE-ENUM, without migration or rewriting; completed-ingest replay cannot evaluate that bundle.
-A phase inventory never substitutes for a missing
+without an inventory, and missing listed files MUST be findings; unreadable or malformed inputs,
+including a path claimed twice, MUST yield cannot-evaluate. The recognized legacy format
+`opf.ingest.evidence-inventory/v1` MUST be refused as the named `legacy-ingest-inventory` finding
+under C-EVIDENCE-ENUM, without migration or rewriting; completed-ingest replay cannot evaluate that
+bundle. A phase inventory MUST NOT substitute for a missing
 `inventory.toml`: such a bundle cannot evaluate. Deleting a whole bundle, inventory and payload
 together, is outside this local snapshot check; independent history is required to detect that
 loss. Inventories assert membership, not authenticated actor history. The contained reader's size
 ceiling still applies.
 
 The legacy `imports/` exclusion remains registered until its writers migrate. In homes 2,
-`staging/` is walked and stray-graded, including empty runs; an unknown kind is always a finding.
-The existing staged-plan presence test also recognizes import and ingest runs in their typed
-staging homes. For legacy stores, other kinds cannot substantiate partial import status until
+`staging/` MUST be walked and stray-graded, including empty runs; an unknown kind MUST always be a
+finding. The existing staged-plan presence test also recognizes import and ingest runs in their
+typed staging homes. For legacy stores, other kinds cannot substantiate partial import status until
 their plan readers are registered. At 1.3.0, partial status is receipt-bound under section 11,
 not inferred from
-staging. Doctor never consults a journal to decide partial status and makes no claim that
+staging. Doctor MUST NOT consult a journal to decide partial status and makes no claim that
 a staged plan has a recoverable transaction. In homes 2, ordinary transaction operands, including
-those of an open transaction being recovered, cannot equal, descend from, or contain `journals/`; a
-legacy store's transactions and recovery keep their legacy operand handling, and no shipped writer
-targets that home. Capability-bound journal APIs derive their destinations from kind and run
-identity. Legacy journal transport must preserve bytes through the migration's receipt binding.
+those of an open transaction being recovered, MUST NOT equal, descend from, or contain `journals/`;
+a legacy store's transactions and recovery keep their legacy operand handling, and no shipped writer
+targets that home. Capability-bound journal APIs MUST derive their destinations from kind and run
+identity. Legacy journal transport MUST preserve bytes through the migration's receipt binding.
 These comparisons are byte-exact: on a case-insensitive or normalizing filesystem, a differently
 cased or composed spelling can alias a reserved home and is not caught. Discovery precedes the
-manifest, so it cannot know the generation: it examines `manifest.toml` in every immediate
-subdirectory, including `journals/`, and fails closed on a reserved-name match or ambiguity; it
-reads nothing deeper there.
+manifest, so it cannot know the generation: it MUST examine `manifest.toml` in every immediate
+subdirectory, including `journals/`, MUST fail closed on a reserved-name match or ambiguity, and
+MUST NOT read deeper there.
 
 
 ### 4.3 The pointer
@@ -352,7 +352,8 @@ The rationale: uppercase filenames are the recognized cross-industry norm for re
 documents (README, LICENSE, CHANGELOG), they sort to the top of directory listings, and their
 prominence signals "this is the surface a human reads". Lowercase signals machine-owned source that
 humans change only through tooling or review, never casually. The casing itself is part of the
-contract: a lowercase file is never a deliverable, an uppercase file is never hand-authored truth.
+contract: a lowercase file MUST NOT be a deliverable, and an uppercase file MUST NOT be
+hand-authored truth.
 
 ## 5. The store is a git repository: location, migration, and consistency
 
@@ -487,52 +488,52 @@ surfaced and refused, never pushed to. A store is never pushed to an unexpected 
 Nothing stale, nothing ahead. Before any OPF operation other than the reconciliation step itself
 (`init`, `adopt`, `import`, `doctor`, `render`,
 `migrate`, `upgrade`, `absorb`, `record`; `opf sync` is that surfaced reconciliation step), the
-store repository is reconciled to a
+store repository MUST be reconciled to a
 known-consistent, up-to-date state against its sync target: the target is fetched and the local
 store compared against it.
 
 - **Equal:** the operation proceeds.
-- **Behind the target:** the tooling refuses to operate and surfaces the state. The remedy is a
-  fast-forward pull to current (`opf sync`), which the tooling MAY offer and perform as its own
+- **Behind the target:** the tooling MUST refuse to operate and MUST surface the state. The remedy
+  is a fast-forward pull to current (`opf sync`), which the tooling MAY offer and perform as its own
   surfaced step, then re-run the operation; the pull is never folded silently into another
   operation.
 - **Ahead of the target** (local commits not yet pushed, the lease still held by the resuming
-  holder, and no divergent remote side): the tooling refuses to operate until the store is
+  holder, and no divergent remote side): the tooling MUST refuse to operate until the store is
   reconciled, and reconciliation is an authorized push of the pending local commits. The holder
-  confirms and pushes them as its own surfaced step, never folded silently into another operation;
+  MUST confirm and push them as its own surfaced step, never folded silently into another operation;
   the push is safe precisely because there is no divergent side that a push could lose. This is the
   recovery path for a store left ahead by a crash between a local write and its sync-back.
-- **Divergent from the target** (unsynced commits on two systems): the tooling refuses to operate
-  and surfaces the state. A divergence HALTS for the human, always: it is never auto-merged and
-  never silently resolved by picking a side, because a textual merge of the store's TOML records
-  can silently mangle the very records the standard exists to protect.
-- **After any operation that writes,** the store is synced back to its target in the same session,
-  so the store is not left intentionally ahead on one system; a crash between the local write and
-  the sync is detected on the next resume as an ahead-only or a divergent state and reconciled by
-  the matching path above (an authorized ahead-only push by the lease holder, or a human-resolved
-  halt on divergence), never left standing.
+- **Divergent from the target** (unsynced commits on two systems): the tooling MUST refuse to
+  operate and MUST surface the state. A divergence MUST halt for the human, always: it MUST NOT be
+  auto-merged or silently resolved by picking a side, because a textual merge of the store's TOML
+  records can silently mangle the very records the standard exists to protect.
+- **After any operation that writes,** the store MUST be synced back to its target in the same
+  session, so the store is not left intentionally ahead on one system; a crash between the local
+  write and the sync is detected on the next resume as an ahead-only or a divergent state and
+  MUST be reconciled by the matching path above (an authorized ahead-only push by the lease holder,
+  or a human-resolved halt on divergence), never left standing.
 
 A **single-writer lease** prevents concurrent divergent writes: before mutating the store, a run
-takes the lease (`lease.toml`, present only while held, carrying the holder, the operation, and an
-acquired-at timestamp read from the clock) and makes it observable at the sync target before its
-writes begin, so a second system's reconciliation sees the held lease and refuses. A lease is
-never seized from a live holder; it is reconciled against recorded state on resume or close, and a
-leftover lease from a dead run is released only through that reconciliation. Where the
-concurrent-operation module is enabled, the lease is additionally recorded as a `session_lease`
-record. There is a residual window between taking the lease and its reaching the target in which
-two systems can both begin; the divergence check above is the overlapping control that catches
-that collision after the fact, and the two layers together are the guarantee (disclosed in
-section 17).
+MUST take the lease (`lease.toml`, present only while held, carrying the holder, the operation, and
+an acquired-at timestamp read from the clock) and MUST make it observable at the sync target before
+its writes begin, so a second system's reconciliation sees the held lease and refuses. A lease
+MUST NOT be seized from a live holder; it MUST be reconciled against recorded state on resume or
+close, and a leftover lease from a dead run MUST be released only through that reconciliation. Where
+the concurrent-operation module is enabled, the lease MUST additionally be recorded as a
+`session_lease` record. There is a residual window between taking the lease and its reaching the
+target in which two systems can both begin; the divergence check above is the overlapping control
+that catches that collision after the fact, and the two layers together are the guarantee (disclosed
+in section 17).
 
 This contract states two generic operational requirements inline. First, a **single-writer
-lease**: a run holds a lease so two runs never act on the same store state at once, reconciles it
-on resume or close, and never seizes it from a live holder. Second, **reconcile the record against
-reality**: the store is authoritative only while it matches what is actually in use, so divergence
-is detected by observation at defined checkpoints and treated as a finding to resolve, never a
-discrepancy to leave standing, and a store can never certify itself current merely because nothing
-updated it. AIQT's concurrency-lease and reconcile-record-against-reality rules are the reference
-implementation of these two requirements; the requirements themselves are the standard's and bind
-any conforming adopter.
+lease**: a run MUST hold a lease so two runs never act on the same store state at once, MUST
+reconcile it on resume or close, and MUST NOT seize it from a live holder. Second, **reconcile the
+record against reality**: the store is authoritative only while it matches what is actually in use,
+so divergence MUST be detected by observation at defined checkpoints and treated as a finding to
+resolve, never a discrepancy to leave standing, and a store MUST NOT certify itself current merely
+because nothing updated it. AIQT's concurrency-lease and reconcile-record-against-reality rules are
+the reference implementation of these two requirements; the requirements themselves are the
+standard's and bind any conforming adopter.
 
 Scope of the contract by pattern:
 
@@ -543,23 +544,23 @@ Scope of the contract by pattern:
   whose own version-control discipline (branch and merge on green) is the consistency mechanism
   across systems. There the contract reduces to the lease plus a clean-state check: the store
   paths in the working tree carry no conflict markers, no mid-merge state, and no concurrent OPF
-  run, or the tooling refuses.
+  run, or the tooling MUST refuse.
 - **A local-only store** has no sync target, so the behind/ahead axis does not exist; the lease
   still guards concurrent runs on the one system, and durability is the adopter's recorded backup
   responsibility (section 5.3).
 
 **Parallel branches allocate against the integration base.** The lease serializes writers on one
 store, but two branches of a store that rides the product repository each start from the same
-committed `counters.toml`, so each can claim the same record ID. Store files are therefore never
+committed `counters.toml`, so each can claim the same record ID. Store files therefore MUST NOT be
 hand-merged: after a merge conflict on a store path, take the integration base's version of the
 conflicted store files and redo the authoring operation on that base, which claims the next ID
 afresh (section 8.8). The byte-reproduction precondition of `opf record` and `opf upgrade` refuses
 only a store file whose bytes are not the canonical serialization of its content, such as one
 carrying comments or non-canonical formatting. A hand edit or hand merge that leaves canonical bytes
 passes it undetected, so this integration-base rule is a separate requirement that the precondition
-does not enforce. A merge that resolves without a conflict yet duplicates an ID is caught by
-`opf doctor`, which checks store-wide ID uniqueness and that every ID lies within its counter
-(section 8.2). A collision is never resolved by decrementing a counter or reusing an ID.
+does not enforce. A merge that resolves without a conflict yet duplicates an ID is caught by `opf
+doctor`, which checks store-wide ID uniqueness and that every ID lies within its counter (section
+8.2). A collision MUST NOT be resolved by decrementing a counter or reusing an ID.
 
 ### 5.8 The public deliverables are identical across topologies
 
@@ -592,7 +593,7 @@ deterministically generated from it (the latest release's version, as exact byte
 and an optional human view renders to `.working/VERSION.md`. The reference suite's release-delta
 tooling (the check that computes the minimum required version bump for a change) anchors here; it
 is a consumer of the ledger, not part of the base standard's definition. The ledger is not the
-changelog: it carries numbers, dates, spans, and digests, never release prose.
+changelog: it carries numbers, dates, spans, and digests, and MUST NOT carry release prose.
 
 Each `[[release]]` row records:
 
@@ -605,11 +606,11 @@ Each `[[release]]` row records:
   follows this specification; it MUST be deterministic and cover the entries' full content.
 - `imported`: optional boolean, permitted only as `true` and only on a historical release recorded
   under section 14.3. On an imported-flagged row, `date` carries the source-recorded release date
-  rather than a clock read at a witnessed release cut, `worklog_span` is empty, and the row rests
-  on imported provenance. A witnessed release cut never sets the flag, and the flag is never
-  added to or removed from an existing row.
+  rather than a clock read at a witnessed release cut, `worklog_span` MUST be empty, and the row
+  rests on imported provenance. A witnessed release cut MUST NOT set the flag, and the flag MUST NOT
+  be added to or removed from an existing row.
 
-Release rows are append-only and immutable once written. Spans MUST be contiguous and
+Release rows MUST be append-only and immutable once written. Spans MUST be contiguous and
 non-overlapping across consecutive releases, in ID order, so the released worklog tiles exactly and
 the unreleased tail is everything after the last span.
 
@@ -624,8 +625,8 @@ records:
 - `superseded_by`: present exactly when `status` is `superseded`; the `covers` token of the rollup
   summary that replaced this one.
 
-Summary rows hold digests and ranges only, never prose. Prose lives in exactly one place: the root
-`CHANGELOG.md`.
+Summary rows MUST hold digests and ranges only, never prose. Prose MUST live in exactly one place:
+the root `CHANGELOG.md`.
 
 ### 6.2 worklog.toml, the durable operational record
 
@@ -776,13 +777,13 @@ Notes on the roster:
   it may enter later as a versioned module only if portable semantics are demonstrated.
 - Modules ship default-off; each is enabled by one manifest edit. `legacy_fragment` (LF) is
   deprecated for new stores as of 1.3.0, not removed: its taxonomy row and legacy validation remain
-  for existing stores and evidence. New imports use the imported series and verbatim `unparsed`
-  text (section 8.3), not LF quarantine. LF is never scaffolded.
+  for existing stores and evidence. New imports MUST use the imported series and verbatim `unparsed`
+  text (section 8.3), not LF quarantine. LF MUST NOT be scaffolded.
 - Imported history uses the same enabled types in a separate series, not additional record types.
   Reserved namespaces remain reserved. Imported states describe history and confer no current
   authority (section 8.6).
 - `done` is a durable completion receipt linked one-to-one to a backlog item reaching ratified
-  `done`; a standalone receipt is legal only for imported history with provenance.
+  `done`; a standalone receipt MUST be imported history with provenance.
 - A `finding` records the observation and links its remediation rather than containing it.
 - A `block` scopes one or more enumerated records and feeds actionability (section 8.5).
 - `contribution` records an artifact, fix, or proposal this project proposes or sends to a peer project,
@@ -801,23 +802,23 @@ Notes on the roster:
 
 Clean record IDs have the form `<NS>-<n>`; imported IDs have the form `imported:<NS>-<n>`,
 for example `imported:BI-7`. The complete lexical grammar is
-`^(?:imported:)?[A-Z]{2}-[1-9][0-9]*$`, with the namespace additionally required to name the
+`^(?:imported:)?[A-Z]{2}-[1-9][0-9]*$`, and the namespace MUST additionally name the
 record's enabled type in section 8.1. Namespaces map one-to-one to types within each series.
-`counters.toml` holds independent monotonic high-water values per series and namespace:
+`counters.toml` MUST hold independent monotonic high-water values per series and namespace:
 `BI` for clean backlog items and the quoted TOML key `"imported:BI"` for imported backlog items.
-The same rule includes `"imported:WL"`; clean release spans tile only the clean `WL` number line.
-Uniqueness, counter high-water, contiguity and no-deletion checks evaluate each series independently;
-allocation increments its counter under the store's lock as one atomic claim, so no gap
-between choosing and reserving can double-allocate. Counters are never reset and IDs are never
-reused, even when a record is superseded, refuted, or its work reverted. Rotation, index rewrites,
-and store relocation never touch `counters.toml`. Re-adoption seeds both series from a pinned
-ancestral snapshot and refuses a missing required namespace; it never zero-seeds prior ancestry.
-Only a genuinely first adoption starts its counters at zero.
+The same rule includes `"imported:WL"`; clean release spans MUST tile only the clean `WL` number
+line. Uniqueness, counter high-water, contiguity and no-deletion checks MUST evaluate each series
+independently; allocation MUST increment its counter under the store's lock as one atomic claim, so
+no gap between choosing and reserving can double-allocate. Counters MUST NOT be reset and IDs
+MUST NOT be reused, even when a record is superseded, refuted, or its work reverted. Rotation, index
+rewrites, and store relocation MUST NOT touch `counters.toml`. Re-adoption MUST seed both series
+from a pinned ancestral snapshot and MUST refuse a missing required namespace; it MUST NOT zero-seed
+prior ancestry. Only a genuinely first adoption MAY start its counters at zero.
 
 ### 8.3 The record envelope
 
 Clean records carry the envelope below; the imported envelope follows it. Types add their own
-fields on top. Schemas are closed: an unknown key is a validation failure unless it sits under a
+fields on top. Schemas are closed: an unknown key MUST fail validation unless it sits under a
 registered vendor extension table.
 
 | Field | Requirement | Meaning |
@@ -842,45 +843,46 @@ does not replace the following 1.3.0 imported-series contract.
 
 The worklog entry uses a reduced envelope (`id`, `date`, `actor`, `kind`, `summary`, optional
 detail, `links`, `refs`); its status is fixed (section 8.5). The worklog records facts, not
-proposable decisions, so its entries never take the `/proposed` qualifier whatever the actor: an
+proposable decisions, so its entries MUST NOT take the `/proposed` qualifier whatever the actor: an
 assistant-authored or automation-authored worklog entry is a conformant recorded fact needing no
 ratification (section 8.4).
 
-The imported envelope is closed and deterministic. It requires `id`, `type`, a one-line `title`,
+The imported envelope is closed and deterministic. It MUST carry `id`, `type`, a one-line `title`,
 `status` from the type's legal state set without `/proposed`, `actor.kind = "importer"`,
 `actor.id` naming the importing assistant, and an `import` provenance table. Imported worklog
-rows use this envelope with `type = "worklog"` and `status = "recorded"`, plus their worklog
+rows MUST use this envelope with `type = "worklog"` and `status = "recorded"`, plus their worklog
 fields. Standalone imported `done` receipts are legal history. Historical `created_at`,
 `updated_at`, `date` and `decided_at` are optional; when present they MUST be valid RFC 3339 UTC
 and no later than the writer's import clock instant. Import time MUST NOT stand in for event time.
 
-Other historical type fields may be absent only with an explicit missingness row. Supplied
-fields retain their declared value types and vocabularies; unknown keys still fail. Missing
-historical timestamps and type fields are accounted for in `unrecorded = [{field, reason}]`,
+Other historical type fields MUST NOT be absent without an explicit missingness row. Supplied
+fields MUST retain their declared value types and vocabularies; unknown keys still fail. Missing
+historical timestamps and type fields MUST be accounted for in `unrecorded = [{field, reason}]`,
 with one row per absent field, no duplicate fields and no row claiming a supplied field absent.
-`field` names a field in that type's schema. The closed reasons are `not_recorded_in_source`,
+`field` MUST name a field in that type's schema. The closed reasons are `not_recorded_in_source`,
 `unparsed`, `ambiguous`, `conflicting`, and `not_applicable`. The first means "never recorded
 historically in the supplied source", not a claim about all history. The required imported
-envelope and provenance fields cannot be waived through missingness. Strict current resolution
+envelope and provenance fields MUST NOT be waived through missingness. Strict current resolution
 bundles and transition obligations do not apply to historical omissions.
 
-The `import` table requires `source` (the canonical store-relative path of the preserved
+The `import` table MUST carry `source` (the canonical store-relative path of the preserved
 original, spelled from `.working/`), `source_sha256` (64 lowercase hexadecimal digits),
 `run` (the `imp-<YYYYMMDD>T<HHMMSS>Z-<hash16>` run ID), and `imported_at` (RFC 3339 UTC read
 from the writer's clock). Optional `span` is an informational byte range in the original.
 Optional `import.history` retains verbatim source-precision values that cannot be losslessly
-normalized, such as a date-only string; no UTC midnight is fabricated. Optional `import.unparsed`
-holds verbatim source text that cannot be mapped. The assistant MUST retain such text rather than
-drop it. The writer performs no byte-tiling or leftover accounting: byte-level coverage and
-semantic fidelity are not machine-proven. Preserved originals remain the restoration authority.
+normalized, such as a date-only string; a UTC midnight MUST NOT be fabricated. Optional
+`import.unparsed` holds verbatim source text that cannot be mapped. The assistant MUST retain such
+text rather than drop it. The writer performs no byte-tiling or leftover accounting: byte-level
+coverage and semantic fidelity are not machine-proven. Preserved originals remain the restoration
+authority.
 
-Imported records and their worklog entries are immutable after publication; corrections are a
-fresh import run retaining the old evidence. A conforming imported series can reach doctor VALID:
+Imported records and their worklog entries MUST be immutable after publication; corrections MUST be
+a fresh import run retaining the old evidence. A conforming imported series can reach doctor VALID:
 it MUST NOT enter the legacy importer or module-schema deferral seam. C-IMPORTED-SCHEMA checks
 this envelope and missingness; C-IMPORTED-IDS checks the series grammar, counters and no-deletion;
 C-IMPORTED-PROVENANCE re-reads each preserved original and verifies `source_sha256`.
 C-CONTAINMENT recognizes the imported managed leaves, C-LINKS resolves the union of both series,
-and C-IMPORTED-SEGREGATION enforces section 8.6. Missing or unreadable evidence fails closed.
+and C-IMPORTED-SEGREGATION enforces section 8.6. Missing or unreadable evidence MUST fail closed.
 
 ### 8.4 The status grammar
 
@@ -892,37 +894,38 @@ qualifier ::= "proposed"
 
 - Each type declares a closed state set: one initial state, zero or more working states, and one or
   more terminal states.
-- A terminal transition performed by an actor whose `kind` is `assistant` or `automation` lands
+- A terminal transition performed by an actor whose `kind` is `assistant` or `automation` MUST land
   with the `/proposed` qualifier (for example `done/proposed`); creating a record directly in a
   terminal factual or ACT state that awaits no ratification, such as an `autonomous_decision` or a
   `reference`, is not such a transition and carries no qualifier. Only a maintainer transition
-  removes the qualifier (ratification) or returns the record to a working state (rejection, with a
-  recorded reason). A `/proposed` status is not terminal: gates and completion claims treat the
-  record as unfinished, and views surface it as awaiting ratification. The `/proposed` qualifier
-  attaches to any transition an assistant or automation makes that awaits a maintainer's
+  MAY remove the qualifier (ratification) or return the record to a working state (rejection, with a
+  recorded reason). A `/proposed` status is not terminal: gates and completion claims MUST treat the
+  record as unfinished, and views MUST surface it as awaiting ratification. The `/proposed`
+  qualifier attaches to any transition an assistant or automation makes that awaits a maintainer's
   ratification: the assistant or automation terminal transitions above (for example `done/proposed`
-  or `fixed/proposed`), and the gated non-terminal states, which are proposals rather than grants even
-  though they are not terminal. A type declares its gated states: `block` gates `active` (a proposed
-  block, `active/proposed`), `contribution` gates `sent` (an assistant-sent contribution,
+  or `fixed/proposed`), and the gated non-terminal states, which are proposals rather than grants
+  even though they are not terminal. A type declares its gated states: `block` gates `active` (a
+  proposed block, `active/proposed`), `contribution` gates `sent` (an assistant-sent contribution,
   `sent/proposed`, awaiting a maintainer's ratification that it was genuinely sent), and
   `preference_pattern` gates `active` (an assistant-distilled pattern, `active/proposed`, awaiting
-  ratification). This is one mechanism, not a set of per-type special cases: entering a gated state as
-  an assistant or automation takes `/proposed`, and only a maintainer ratifies it to the unqualified
-  state. A recorded factual entry that proposes nothing and awaits no ratification is exempt: the
-  worklog, whose entries record facts rather than propose a transition, never takes `/proposed`, so an
-  assistant-authored or automation-authored worklog entry (status `recorded`) is a conformant recorded
-  fact rather than an unratified proposal.
-- Standing authorization for `contribution` `sent`: `sent` gating is on by default, but an adopter MAY
-  declare a standing authorization for a named recipient that deactivates per-send gating for that
-  recipient, letting an assistant or automation land the unqualified `sent` grant to it without a
-  per-send ratification. A valid declaration for the contribution's declared recipient relieves the
-  gating; an absent or malformed declaration fails closed, so gating stays on. The declaration is an
-  adopter configuration surface; a store that declares none keeps every `sent` gated.
-- No resurrection: a record in an unqualified terminal state never re-enters a working state. A
-  revived concern is a new record linking the old one.
-- Supersession is a link, not a state edit: the superseding record links `supersedes`, and where
-  the type records it, the superseded record's terminal state reflects it. Where the superseded
-  record is immutable, including every imported record, its recorded state stands and the link
+  ratification). This is one mechanism, not a set of per-type special cases: entering a gated state
+  as an assistant or automation MUST take `/proposed`, and only a maintainer MAY ratify it to the
+  unqualified state. A recorded factual entry that proposes nothing and awaits no ratification is
+  exempt: the worklog, whose entries record facts rather than propose a transition, MUST NOT take
+  `/proposed`, so an assistant-authored or automation-authored worklog entry (status `recorded`) is
+  a conformant recorded fact rather than an unratified proposal.
+- Standing authorization for `contribution` `sent`: `sent` gating is on by default, but an adopter
+  MAY declare a standing authorization for a named recipient that deactivates per-send gating for
+  that recipient, letting an assistant or automation land the unqualified `sent` grant to it without
+  a per-send ratification. A valid declaration for the contribution's declared recipient relieves
+  the gating; an absent or malformed declaration MUST fail closed, so gating stays on. The
+  declaration is an adopter configuration surface; a store that declares none keeps every `sent`
+  gated.
+- No resurrection: a record in an unqualified terminal state MUST NOT re-enter a working state. A
+  revived concern MUST be a new record linking the old one.
+- Supersession is a link, not a state edit: the superseding record MUST link `supersedes`, and where
+  the type records it, the superseded record's terminal state MUST reflect it. Where the superseded
+  record is immutable, including every imported record, its recorded state MUST stand and the link
   alone records the supersession.
 - The worklog is a special case of these rules, with terminality keyed to release rather than to a
   state transition (section 6.2). It declares the single state `recorded`: while an entry sits in
@@ -938,17 +941,17 @@ Baseline types:
 
 | Type | States | Rules |
 |---|---|---|
-| backlog_item | `open` > `active` > `done` or `dropped`; `open` > `dropped` | Ratified `done` creates the one-to-one `done` receipt. Blocked-ness is never a stored state; it is derived from active blocks at view time. |
+| backlog_item | `open` > `active` > `done` or `dropped`; `open` > `dropped` | Ratified `done` MUST create the one-to-one `done` receipt. Blocked-ness MUST NOT be a stored state; it is derived from active blocks at view time. |
 | done | `recorded` | Created terminal, immutable. Links `receipt_of` to its backlog item. |
 | worklog | `recorded` | Durable operational record with release-keyed terminality: the unreleased tail is pre-terminal and mutable, a released-frozen span is terminal and immutable (sections 6.2 and 8.4). Takes no `/proposed` qualifier whatever the actor. Mutability governed by section 6.2, not by transition. |
-| finding | `open` > `fixed`, `routed`, `refuted`, or `accepted` | Severity is graded at or after the fix decision, never before. |
-| pending_decision | `open` > `decided` or `withdrawn` | All-or-none resolution bundle: an open decision carries none of `decision`, `decided_at`, `decided_by`; a decided one carries all. A decided record may be superseded by a new decision linking `supersedes`; exactly one current effective resolution exists per chain. |
-| autonomous_decision | `recorded` | Immutable ACT record: the classification basis, the action, links. Overturning is a new record (or maintainer decision) linking it. |
-| block | `active` > `released` or `expired` | Scopes an enumerated list of record IDs. A block created by an assistant or automation actor is `active/proposed` and is a proposal, not a grant: it does not count toward blocked-ness or justify a stop until a maintainer ratifies it. |
-| handoff | `current` > `superseded` | Posting a new handoff supersedes the previous in the same act; at most one `current` handoff exists among clean records authored by non-importer actors (section 8.6). |
+| finding | `open` > `fixed`, `routed`, `refuted`, or `accepted` | Severity MUST be graded at or after the fix decision, never before. |
+| pending_decision | `open` > `decided` or `withdrawn` | All-or-none resolution bundle: an open decision MUST carry none of `decision`, `decided_at`, `decided_by`; a decided one MUST carry all. A decided record MAY be superseded by a new decision linking `supersedes`; exactly one current effective resolution MUST exist per chain. |
+| autonomous_decision | `recorded` | Immutable ACT record: the classification basis, the action, links. Overturning MUST be a new record (or maintainer decision) linking it. |
+| block | `active` > `released` or `expired` | Scopes an enumerated list of record IDs. A block created by an assistant or automation actor is `active/proposed` and is a proposal, not a grant: it MUST NOT count toward blocked-ness or justify a stop until a maintainer ratifies it. |
+| handoff | `current` > `superseded` | Posting a new handoff MUST supersede the previous in the same act; at most one `current` handoff MAY exist among clean records authored by non-importer actors (section 8.6). |
 | reference | `recorded` | Immutable captured reference. |
-| contribution | `proposed` > `sent` > `acknowledged` or `superseded`; `proposed` > `withdrawn` | Records what this project proposes or sends to a peer, with a delivery bundle `{channel, ref, sent_at, receipt_ref?, receipted_at?}`: `channel`/`ref`/`sent_at` are required once sent, `sent_at` is forbidden before, and the receipt fields are legal only at `acknowledged`. `sent` is gated (an assistant lands `sent/proposed`; a maintainer, or a valid standing authorization for the recipient, lands the bare grant). `acknowledged` is the single positive terminal (responded, adopted, reshaped, or declined); the outcome lives in `summary`/`x-<vendor>`, never as a state. A re-send is a new record linking `supersedes`; the superseded record records `superseded`. |
-| maintainer_decision | `recorded` | Created-terminal, immutable maintainer ruling carrying its `decision` (answer plus rationale). `actor.kind` is `maintainer` or `importer` only (a maintainer ruling with assistant attribution is a contradiction; `importer` covers migrated history). Overturning is a new record linking the old. It MAY `exemplifies` the preference_pattern it instantiates. |
+| contribution | `proposed` > `sent` > `acknowledged` or `superseded`; `proposed` > `withdrawn` | Records what this project proposes or sends to a peer, with a delivery bundle `{channel, ref, sent_at, receipt_ref?, receipted_at?}`: `channel`/`ref`/`sent_at` MUST be present once sent, `sent_at` MUST NOT be present before, and the receipt fields MAY appear only at `acknowledged`. `sent` is gated (an assistant lands `sent/proposed`; a maintainer, or a valid standing authorization for the recipient, lands the bare grant). `acknowledged` is the single positive terminal (responded, adopted, reshaped, or declined); the outcome MUST live in `summary`/`x-<vendor>`, never as a state. A re-send MUST be a new record linking `supersedes`; the superseded record records `superseded`. |
+| maintainer_decision | `recorded` | Created-terminal, immutable maintainer ruling carrying its `decision` (answer plus rationale). `actor.kind` MUST be `maintainer` or `importer` only (a maintainer ruling with assistant attribution is a contradiction; `importer` covers migrated history). Overturning MUST be a new record linking the old. It MAY `exemplifies` the preference_pattern it instantiates. |
 | preference_pattern | `active` > `retired` | A distilled preference pattern carrying `context` and `rationale` (with the envelope `title`). `active` is gated: an assistant-distilled pattern lands `active/proposed` awaiting maintainer ratification to the unqualified `active`. |
 
 Module types, in outline (full schemas ship with the module schemas release): maintainer_action
@@ -961,10 +964,10 @@ legacy_fragment `quarantined` > `resolved` or `ignored`.
 
 Actionability: a clean backlog item authored by a non-importer actor is actionable when its
 state is `open` or `active` and no clean, unqualified `active` block authored by a non-importer
-actor scopes it. Imported and importer-authored records never enter this join on either side: an
+actor scopes it. Imported and importer-authored records MUST NOT enter this join on either side: an
 importer-authored backlog item is history, never actionable work, whatever its recorded state,
-and an importer-authored block never blocks (section 8.6).
-This is the block join every scheduling view renders; a scheduling view surfaces an
+and an importer-authored block MUST NOT block (section 8.6).
+This is the block join every scheduling view renders; a scheduling view MUST surface an
 importer-authored item only as history, never as actionable.
 
 ### 8.6 Links and reference capture
@@ -973,7 +976,7 @@ importer-authored item only as history, never as actionable.
 `remediates`, `receipt_of`, `corrects`, `follows`, `relates`, `exemplifies`, `derives_from`.
 Extending the vocabulary is a specification version change.
 
-- `exemplifies`: the source record instantiates the linked pattern. Its target is constrained to a
+- `exemplifies`: the source record instantiates the linked pattern. Its target MUST be a
   `preference_pattern` (PP); the source side is unconstrained. Its primary user is
   `maintainer_decision` (a ruling exemplifies the pattern it instantiates).
 - `derives_from`: the source record was derived from the linked record; directional, usable by any
@@ -1011,7 +1014,7 @@ active `preference_pattern`; a state-bearing status on an importer-authored reco
 history at its source and MUST confer nothing now, and every current-state join, including the
 section 8.5 at-most-one-current handoff rule, MUST evaluate only clean records authored by
 non-importer actors. After the section 9.2 upgrade an
-existing legacy importer-authored clean record keeps its bytes, its recorded state and its place
+existing legacy importer-authored clean record MUST keep its bytes, its recorded state and its place
 in the clean series, and remains readable history there; what the upgrade changes, and its
 report enumerates (section 9.2), is authority alone: such a record leaves every current-state
 join, its open or active backlog items leave actionability, and its blocks stop granting a stop.
@@ -1020,14 +1023,14 @@ The clean-series writer MUST refuse a transition on an importer-authored record 
 link back to the historical record.
 C-IMPORTED-SEGREGATION enforces this firewall over importer-authored records in both series.
 
-Clean-to-imported links allow only `relates`, `derives_from`, `follows`, and same-type `supersedes`;
-the last records historical continuation without discharging a current supersession obligation,
-and the immutable imported target keeps its recorded state, the link alone recording the
-supersession (section 8.4). Imported-to-imported links allow every declared relation subject to
+Clean-to-imported links MUST be limited to `relates`, `derives_from`, `follows`, and same-type
+`supersedes`; the last records historical continuation without discharging a current supersession
+obligation, and the immutable imported target keeps its recorded state, the link alone recording the
+supersession (section 8.4). Imported-to-imported links MAY use every declared relation subject to
 its type constraints. Imported-to-clean links MUST be refused by both writer and doctor. Links
-resolve over the union of both series; a dangling cross-series link is a finding, never silently
-omitted. The imported series MUST NOT supply current authority through a link, an extension, or an adoption
-approval.
+MUST resolve over the union of both series; a dangling cross-series link MUST be a finding, never
+silently omitted. The imported series MUST NOT supply current authority through a link, an
+extension, or an adoption approval.
 
 ### 8.7 Extensions
 
@@ -1054,43 +1057,44 @@ history is a new clean record linking back (section 8.6). Its subcommands:
   or ACT type (`reference`, `autonomous_decision`, `maintainer_decision`) carries no qualifier
   (section 8.4). `done` receipts and worklog entries are not created this way.
 - `transition`: a status change checked against the type's grammar (section 8.5). An assistant or
-  automation author landing a terminal or gated state takes `/proposed`, and the verb records the
-  state the record held at that moment in the record's own `proposed_from` field (section 8.3) in
-  the same act; only a maintainer ratifies, or rejects with a recorded reason back to the recorded
-  pre-proposal state (section 8.4). A rejection restores exactly the recorded `proposed_from`
-  state, and leaving the `/proposed` status, by rejection or ratification, removes the field. A
-  proposed record that carries no `proposed_from` was proposed outside `transition`; that includes
-  a record `create` lands directly at a `/proposed` initial state, so the absence establishes no
-  provenance. Such a record cannot be rejected by `transition`, which never infers or invents a predecessor; the
-  worklog entry of the proposing transition is informational, never evidence. `transition` MUST refuse to act on, or overwrite, a record whose current row is not schema-valid,
-  `proposed_from` included, so a schema-detectable forgery must be repaired by the operator before
-  `transition` acts; it is never laundered. The field is an ordinary record field, so a
-  canonical hand edit of it that keeps the row schema-valid is not detected, the same as any
-  other field (the section 5.7 integration-base rule remains the control). A backlog item
-  reaches unqualified `done` only through `done-with-receipt`.
+  automation author landing a terminal or gated state takes `/proposed`, and the verb MUST record
+  the state the record held at that moment in the record's own `proposed_from` field (section 8.3)
+  in the same act; only a maintainer ratifies, or rejects with a recorded reason back to the
+  recorded pre-proposal state (section 8.4). A rejection MUST restore exactly the recorded
+  `proposed_from` state, and leaving the `/proposed` status, by rejection or ratification, MUST
+  remove the field. A proposed record that carries no `proposed_from` was proposed outside
+  `transition`; that includes a record `create` lands directly at a `/proposed` initial state, so
+  the absence establishes no provenance. Such a record cannot be rejected by `transition`, which
+  never infers or invents a predecessor; the worklog entry of the proposing transition is
+  informational, never evidence. `transition` MUST refuse to act on, or overwrite, a record whose
+  current row is not schema-valid, `proposed_from` included, so a schema-detectable forgery must be
+  repaired by the operator before `transition` acts; it is never laundered. The field is an ordinary
+  record field, so a canonical hand edit of it that keeps the row schema-valid is not detected, the
+  same as any other field (the section 5.7 integration-base rule remains the control). A backlog
+  item MUST reach unqualified `done` only through `done-with-receipt`.
 - `done-with-receipt`: maintainer-only. It moves a backlog item to unqualified `done`, from
   `active` or by ratifying `done/proposed`, and in the same act creates its one-to-one `done`
   receipt linked `receipt_of` (section 8.5). An assistant reaching `done` uses `transition` and
   lands `done/proposed`; no receipt exists until a maintainer ratifies.
 - `worklog-append`: one entry appended to the unreleased tail of `worklog.toml`, status `recorded`,
   never `/proposed` whatever the actor (sections 6.2 and 8.4). An entry that would fall inside a
-  released span is refused.
+  released span MUST be refused.
 
 - `import --batch FILE [--root DIR]`: the primary import surface (the import write mode; there
   is no separate `--import` flag). A single-record import is a one-row batch. The canonical TOML batch,
   `opf.record.import-batch/v1`, declares one source path, record rows, worklog rows, historical
-  fields, missingness, verbatim unparsed text and batch-local link keys. The writer resolves local
-  keys to claimed imported IDs and recomputes source size and SHA-256 from preserved bytes,
-  never trusting caller-supplied measurements. One invocation covers one source in one journaled
-  transaction, followed by one render and one full doctor, both treating a deferred view
+  fields, missingness, verbatim unparsed text and batch-local link keys. The writer MUST resolve
+  local keys to claimed imported IDs and MUST recompute source size and SHA-256 from preserved
+  bytes, never trusting caller-supplied measurements. One invocation covers one source in one
+  journaled transaction, followed by one render and one full doctor, both treating a deferred view
   destination under sections 14.2 and 11, so a pending migrate, move or retire source at a
   declared view path is neither overwritten nor an obstacle to VALID.
 
-`create`, `transition`, and `done-with-receipt` each append their own worklog entry, one entry per
-change (section 6.2), in the same journaled transaction as the change. Its `detail` opens with a
-lifecycle line naming the record and its status change (`opf-record create <ID> <status>`, or
-`opf-record transition <ID> <from> -> <to>`); a rejection's entry also records its reason.
-`worklog-append` refuses a `detail` that opens with that lifecycle grammar.
+`create`, `transition`, and `done-with-receipt` MUST each append their own worklog entry, one entry
+per change (section 6.2), in the same journaled transaction as the change. Its `detail` MUST open
+with a lifecycle line naming the record and its status change (`opf-record create <ID> <status>`, or
+`opf-record transition <ID> <from> -> <to>`); a rejection's entry MUST also record its reason.
+`worklog-append` MUST refuse a `detail` that opens with that lifecycle grammar.
 
 Every subcommand runs one operation sequence, and an implementation of the verb MUST preserve its
 guarantees:
@@ -1099,32 +1103,33 @@ guarantees:
    owed adoption or import cutover re-check the same way: while a committed cutover's re-check
    outcome is unrecorded, every roster command of the section 14.2 matrix MUST, before any store
    write, either run and record that owed outcome through the section 14.1 journal-led recovery or
-   refuse. Reconciliation writes the store, so it runs only under the single-writer lease that
-   publication uses: a held lease refuses before any recovery write and is never seized. An operand changed since the
-   interruption, to bytes that are neither its journaled prestate nor its planned poststate nor a
-   write of either torn by the interruption, is reported and refused, never overwritten. A
-   reconciled interruption refuses the new operation, so the operator inspects it before anything
-   new is written.
+   refuse. Reconciliation writes the store, so it MUST run only under the single-writer lease that
+   publication uses: a held lease MUST refuse before any recovery write and MUST NOT be seized. An
+   operand changed since the interruption, to bytes that are neither its journaled prestate nor its
+   planned poststate nor a write of either torn by the interruption, MUST be reported and refused,
+   never overwritten. A reconciled interruption MUST refuse the new operation, so the operator
+   inspects it before anything new is written.
 2. Precondition: re-emitting the unchanged parsed model of every file the operation rewrites
    reproduces its on-disk bytes exactly (the section 9.2 rule). A file carrying comments or
-   non-canonical serialization refuses and is left untouched. The check proves serialization only:
-   a hand edit or hand merge that leaves canonical bytes is not detectable by it, and the
+   non-canonical serialization MUST be refused and left untouched. The check proves serialization
+   only: a hand edit or hand merge that leaves canonical bytes is not detectable by it, and the
    integration-base merge policy of section 5.7 remains a separate requirement.
-3. Claim each new ID as one atomic act (section 8.2). At homes 1 the `counters.toml` advance is an
-   operand of the same journaled transaction, under the held lease, and IDs are reported only once
-   that transaction has completed, so a rollback never withdraws an ID anyone has seen. At homes 2
-   the claim is an irrevocable reservation in the journal home, made before the reversible
+3. Claim each new ID as one atomic act (section 8.2). At homes 1 the `counters.toml` advance MUST be
+   an operand of the same journaled transaction, under the held lease, and IDs MUST be reported only
+   once that transaction has completed, so a rollback never withdraws an ID anyone has seen. At
+   homes 2 the claim is an irrevocable reservation in the journal home, made before the reversible
    publication (section 4.2).
 4. Postcondition: the model diff of every rewritten file equals exactly the operation's allowed
    delta (the new rows appended, the counters advanced by exactly the claim, and for a transition
    one status and `updated_at` change plus the `proposed_from` write or removal), value for value
    and type for type (a boolean or float is never equal to an integer), before anything is
    written. The expected
-   delta is derived from the request, the prior bytes of each rewritten file, the claimed IDs, the
-   clock value, and the schema rules, never from the planned rows themselves.
-5. The in-repo store contract (section 5.7): the planned destinations are clean, including ignored
-   files, and the single-writer lease is held across publication, render, and the final doctor.
-6. Every rewritten file is published in one crash-durable journaled transaction, so an
+   delta MUST be derived from the request, the prior bytes of each rewritten file, the claimed IDs,
+   the clock value, and the schema rules, never from the planned rows themselves.
+5. The in-repo store contract (section 5.7): the planned destinations MUST be clean, including
+   ignored files, and the single-writer lease MUST be held across publication, render, and the final
+   doctor.
+6. Every rewritten file MUST be published in one crash-durable journaled transaction, so an
    interruption leaves the store exactly at its prestate or exactly at its poststate once
    reconciled. The reference tooling keeps that journal under `.aiqt/record/journal` at homes 1.
 7. The declared views are rendered, except that an occupied destination in a protective lifecycle
@@ -1142,13 +1147,13 @@ guarantees:
    accept that cannot-evaluate only for exactly the record and the from and to statuses it has
    just written, never a finding and never any other cannot-evaluate, and the verb reports it as
    pending until commit. `opf doctor` itself is unchanged and still reports it until then.
-8. The lease is released, and only then are the claimed IDs and touched files reported. The
-   change is left uncommitted in the working tree: the verb never stages or commits it.
+8. The lease MUST be released, and only then are the claimed IDs and touched files reported. The
+   change MUST be left uncommitted in the working tree: the verb MUST NOT stage or commit it.
 
 The verb exits 0 when the change is recorded and the store is doctor-VALID (or carries only the
 pending cannot-evaluate of item 7), and 2 on every refusal or cannot-evaluate.
 
-Import preserves that operation sequence, including the one allocation seam, independent model
+Import MUST preserve that operation sequence, including the one allocation seam, independent model
 delta check, cleanliness gate, lease and reconcile-first recovery. Its atomic operands are the
 imported counter rows first, the touched `<type>.imported.index.toml` and
 `worklog.imported.toml` files, and the evidence bundle: the exact original at
@@ -1167,16 +1172,16 @@ refuse into a fresh plan with its own single approval; import MUST NOT reinterpr
 approval.
 
 Replay identity is `(source_sha256, batch content digest)`. A completed identical replay
-re-reads and verifies the published records and evidence, then succeeds as a no-op reporting
+MUST re-read and verify the published records and evidence, then succeed as a no-op reporting
 the existing IDs. A partial overlap, including a differing batch against the same source within
 the run, MUST refuse, naming the overlap and directing to journal recovery. Each source admits
 at most one completed batch per correction chain: a differing batch against a source whose
 batch already completed MUST refuse and name the completed run, unless the new batch declares
 that run as the completed run it corrects. Such a corrected import is a fresh run; its records
-link `supersedes` or `corrects` to the imported records they replace, the previous run's
-immutable evidence is preserved, and source completion (section 14.1) evaluates the
+MUST link `supersedes` or `corrects` to the imported records they replace, the previous run's
+immutable evidence MUST be preserved, and source completion (section 14.1) evaluates the
 correcting run. Before the
-source's retirement, the live-bytes plan check of the refusal list binds a correcting run as it
+source's retirement, the live-bytes plan check of the refusal list MUST bind a correcting run as it
 binds any other; after its retirement, the preserved original under
 `.working/imported/import/<run-id>/originals/` is the source of record, the digest bound is its
 recorded `source_sha256`, and the live-bytes check does not apply to the retired path. Retry
@@ -1285,15 +1290,15 @@ Storage layout:
 The `layout` field selects the storage layout only:
 
 - **`inline`** (default): records live inline in `<type>.index.toml`; the index and the store
-  coincide. One global store lock serializes writers. This is the ordinary single-writer case: a
+  coincide. One global store lock MUST serialize writers. This is the ordinary single-writer case: a
   consumer reads one small file with one parse.
 - **`per-record`** (with the concurrent-operation module): `<type>.index.toml` becomes a registry
   of `{id, state, path, digest}` rows, records live one per file under `<type>/`, and any
-  multi-record operation takes `(namespace, id)` locks in ascending order. Concurrent writers pay
-  the file-count cost only when they have the problem it solves.
+  multi-record operation MUST take `(namespace, id)` locks in ascending order. Concurrent writers
+  pay the file-count cost only when they have the problem it solves.
 
 Readers always enter at `<type>.index.toml` in either layout. The ledgers are exempt from the
-per-record layout: `version.toml` and `worklog.toml` are always single files, written under the
+per-record layout: `version.toml` and `worklog.toml` MUST always be single files, written under the
 store lock (allocation of WL IDs still goes through `counters.toml` atomically).
 
 ### 9.1 Base standard and profiles
@@ -1334,80 +1339,81 @@ not yet a committed public contract for third-party authors.
 ### 9.2 Store schema upgrades
 
 The homes-generation upgrade targets `spec_version = "2.0.0"` with required integer `[opf].homes = 2`.
-Absent or `1` denotes legacy homes for migration; unknown future generations are refused.
+Absent or `1` denotes legacy homes for migration; unknown future generations MUST be refused.
 The homes-generation target does not itself change the runtime supported version or init format.
-The migration refuses a store resolved outside the product root until a multi-root coordinator exists.
-Unproven legacy `.archive/` entries remain in place with a standing finding until dispositioned.
+The migration MUST refuse a store resolved outside the product root until a multi-root coordinator
+exists. Unproven legacy `.archive/` entries MUST remain in place with a standing finding until
+dispositioned.
 
-A base-schema version bump ships a tested, in-place store-schema upgrade (`opf upgrade`). The upgrade
-is idempotent. A purely schema-level bump is additive, using atomic replacement of existing files,
-create-only writes for new index files, and regeneration of declared views through exclusively
-created temporary files followed by atomic rename. These writes are sequential, with recovery scope
-held in memory, not a durable transaction journal. A homes-generation bump additionally relocates
-OPF control areas as a versioned, journaled, fail-closed relocation.
-Every destination is digest-verified before its source is removed. Both kinds of upgrade run under
-the store consistency contract and the single-writer lease (section 5.7).
-It fails closed on an unresolvable store, a declared `spec_version` ABOVE the tooling,
-a divergence, a held lease, or any populated state that contradicts its preconditions; it never
-lowers the fail-closed floor. Before any write it enforces two fail-closed preconditions: it claims
-the single-writer lease (section 5.7) and holds it across the whole mutation, and it verifies the
-working tree is clean, including ignored files, over the planned schema and render destinations
+A base-schema version bump MUST ship a tested, in-place store-schema upgrade (`opf upgrade`). The
+upgrade MUST be idempotent. A purely schema-level bump MUST be additive, using atomic replacement of
+existing files, create-only writes for new index files, and regeneration of declared views through
+exclusively created temporary files followed by atomic rename. These writes are sequential, with
+recovery scope held in memory, not a durable transaction journal. A homes-generation bump
+MUST additionally relocate OPF control areas as a versioned, journaled, fail-closed relocation.
+Every destination MUST be digest-verified before its source is removed. Both kinds of upgrade MUST
+run under the store consistency contract and the single-writer lease (section 5.7).
+It MUST fail closed on an unresolvable store, a declared `spec_version` ABOVE the tooling,
+a divergence, a held lease, or any populated state that contradicts its preconditions; it MUST NOT
+lower the fail-closed floor. Before any write it MUST enforce two fail-closed preconditions: it
+claims the single-writer lease (section 5.7) and holds it across the whole mutation, and it verifies
+the working tree is clean, including ignored files, over the planned schema and render destinations
 (store and product roots) and the index collision candidates, so the committed HEAD is a verified
-restore path for that scope; a held lease or a dirty store refuses, and a dirty store is asked
-to commit its own changes, never restored by the tool. After applying the schema delta, it regenerates
+restore path for that scope; a held lease or a dirty store refuses, and a dirty store is asked to
+commit its own changes, never restored by the tool. After applying the schema delta, it regenerates
 the declared views and requires a full doctor VALID before offering the uncommitted change for the
-adopter's own branch-and-merge. It never stages or commits the change.
-Both upgrade kinds are roster commands under the section 14.2 matrix, keyed on the destination's
-lifecycle state, on the schema-level path and the homes-generation relocation path, the homes-2
-path included, alike: an upgrade MUST validate an occupied destination's view bytes prospectively,
-MUST withhold the same-path publication, MUST NOT overwrite or relocate the occupying source, and
-MUST NOT write a destination whose committed cutover awaits its recorded re-check outcome or whose
-re-check failed; the protected path sits outside its planned schema and render destinations, so
-the clean-tree precondition does not read it, and its required doctor VALID grades that
-destination under the section 11 bounded treatment. An upgrade delta or manifest change that would
-declare a new view or managed store path at a registered `[unmanaged]` path MUST refuse, naming
-the collision; the remedy is the adopter's own fresh plan re-dispositioning the kept file (section
-14.2).
+adopter's own branch-and-merge. It MUST NOT stage or commit the change. Both upgrade kinds are
+roster commands under the section 14.2 matrix, keyed on the destination's lifecycle state, on the
+schema-level path and the homes-generation relocation path, the homes-2 path included, alike: an
+upgrade MUST validate an occupied destination's view bytes prospectively, MUST withhold the
+same-path publication, MUST NOT overwrite or relocate the occupying source, and MUST NOT write a
+destination whose committed cutover awaits its recorded re-check outcome or whose re-check failed;
+the protected path sits outside its planned schema and render destinations, so the clean-tree
+precondition does not read it, and its required doctor VALID grades that destination under the
+section 11 bounded treatment. An upgrade delta or manifest change that would declare a new view or
+managed store path at a registered `[unmanaged]` path MUST refuse, naming the collision; the remedy
+is the adopter's own fresh plan re-dispositioning the kept file (section 14.2).
 
-The manifest and counters rewrite is a model regeneration through the canonical new-document emitter,
-never a textual round-trip edit, bounded by two guards: a precondition that re-emitting the UNCHANGED
-parsed model reproduces the on-disk bytes exactly (proving the file is canonical and comment-free, so
-nothing can be lost), failing closed otherwise; and a postcondition that the model diff equals exactly
-the allowed delta, failing closed otherwise. The allowed delta is expressed as ensure-present and
-ensure-absent over the whole 1.0.0 origin family, so a governance-enabled, a decision_support-enabled,
-a bare, and a view-omitting 1.0.0 store all migrate under one rule and the normative text cannot diverge
-from the tooling. For the 1.0.0 to 1.1.0 upgrade the allowed delta is: rename the base table
-`[devprocess]` to `[opf]` and its `standard` discovery token from `devprocess` to `opf` (the OPFiles
-rebrand), carrying every other base field over unchanged; bump `spec_version` to 1.1.0; remove the
-retired `decision_support` module key where present; add each of the `[types]` rows for `contribution`,
-`maintainer_decision`, and `preference_pattern` not already declared by an enabled 1.0.0 module (a
-governance-enabled store already declares `maintainer_decision` and a decision_support-enabled store
-`preference_pattern`; the row moves from module tier to baseline unchanged); add the two new view rows
-(`CONTRIBUTIONS.md` and the `DECISIONS.toml` projection); widen the existing `DECISIONS.md` composed
-view's `sources` from the two 1.0.0 decision sources (`pending_decision`, `autonomous_decision`) to the
-four required at 1.1.0 by adding `maintainer_decision` and `preference_pattern` where that view is
-declared (a 1.0.0 store that declares no `DECISIONS.md` gains none and stays valid, since no composed
-view is required); extend `counters.toml` with the `CN`/`MD`/`PP` zeros while preserving every existing
-high-water; and create each missing empty `*.index.toml` file for the three baseline types, skipping any
-that already exist (such as a `maintainer_decision.index.toml` where governance was enabled, whose
-records are preserved byte-for-byte). The upgrade weakens nothing: `preference_pattern` simply moves to
+The manifest and counters rewrite MUST be a model regeneration through the canonical new-document
+emitter, never a textual round-trip edit, bounded by two guards: a precondition that re-emitting the
+UNCHANGED parsed model reproduces the on-disk bytes exactly (proving the file is canonical and
+comment-free, so nothing can be lost), failing closed otherwise; and a postcondition that the model
+diff equals exactly the allowed delta, failing closed otherwise. The allowed delta is expressed as
+ensure-present and ensure-absent over the whole 1.0.0 origin family, so a governance-enabled, a
+decision_support-enabled, a bare, and a view-omitting 1.0.0 store all migrate under one rule and the
+normative text cannot diverge from the tooling. For the 1.0.0 to 1.1.0 upgrade the allowed delta is:
+rename the base table `[devprocess]` to `[opf]` and its `standard` discovery token from `devprocess`
+to `opf` (the OPFiles rebrand), carrying every other base field over unchanged; bump `spec_version`
+to 1.1.0; remove the retired `decision_support` module key where present; add each of the `[types]`
+rows for `contribution`, `maintainer_decision`, and `preference_pattern` not already declared by an
+enabled 1.0.0 module (a governance-enabled store already declares `maintainer_decision` and a
+decision_support-enabled store `preference_pattern`; the row moves from module tier to baseline
+unchanged); add the two new view rows (`CONTRIBUTIONS.md` and the `DECISIONS.toml` projection);
+widen the existing `DECISIONS.md` composed view's `sources` from the two 1.0.0 decision sources
+(`pending_decision`, `autonomous_decision`) to the four required at 1.1.0 by adding
+`maintainer_decision` and `preference_pattern` where that view is declared (a 1.0.0 store that
+declares no `DECISIONS.md` gains none and stays valid, since no composed view is required); extend
+`counters.toml` with the `CN`/`MD`/`PP` zeros while preserving every existing high-water; and create
+each missing empty `*.index.toml` file for the three baseline types, skipping any that already exist
+(such as a `maintainer_decision.index.toml` where governance was enabled, whose records are
+preserved byte-for-byte). The upgrade weakens nothing: `preference_pattern` simply moves to
 always-on, so a populated decision-support index is kept as is.
 
 Base spec 1.2.0 admits one new managed machine-store file, `.working/toml/init.toml`: the bootstrap
 provenance a coupled `opf init` records (its format is frozen in OPF-INIT-D2B). It is a managed leaf
 when present and is never required, so a store without it stays valid. For the 1.1.0 to 1.2.0 upgrade
 the allowed schema delta is the `spec_version` bump alone: no other manifest field, schema file, or
-counter changes, and no provenance is created for an existing store (none is ever fabricated).
-Declared views are then regenerated, so a stale committed view can change. A 1.0.0 store takes the
-1.0.0 delta above directly to 1.2.0.
+counter changes, and the upgrade MUST NOT create provenance for an existing store (none is ever
+fabricated). Declared views are then regenerated, so a stale committed view can change. A 1.0.0
+store takes the 1.0.0 delta above directly to 1.2.0.
 
 For the 1.2.0 to 1.3.0 upgrade, the allowed schema delta is the version bump, registration and
 create-only initialization of missing imported managed leaves for enabled types, and addition
 of missing imported counter rows at zero only where no imported ancestry exists.
 Existing records, evidence, clean counters and imported high-water values MUST be preserved;
 a populated collision, missing ancestral counter or unprovable prestate refuses.
-The upgrade creates no historical records, adoption approval or provenance, changes no posture
-or import status, and adds no imported views.
+The upgrade MUST NOT create historical records, adoption approval or provenance, MUST NOT change
+posture or import status, and MUST NOT add imported views.
 The bump changes no record's bytes, but it does change what a legacy importer-authored clean
 record confers, because the section 8.6 firewall keys on provenance: the upgrade report MUST
 enumerate every legacy importer-authored clean record whose current authority the firewall
@@ -1420,13 +1426,13 @@ upgrade MUST refuse before any write, naming each such record and the remedy: a 
 supersedes the withdrawn authority under section 8.6, for a receipt-stripped `done` item the
 section 8.6 `maintainer_decision` route, recorded before the upgrade is retried; every named
 remedy MUST be performable through the sanctioned writer without hand-editing canonical files.
-An unresolved legacy import must be reconciled under its original contract before upgrading;
-legacy LF records and evidence remain readable and are never silently converted.
-A completed legacy import upgrades in place: its `import_status` stays `"complete"`,
-substantiated by its preserved legacy run evidence under section 11, and no adoption approval,
-receipt or provenance is fabricated for it.
+An unresolved legacy import MUST be reconciled under its original contract before upgrading;
+legacy LF records and evidence remain readable and MUST NOT be silently converted.
+A completed legacy import upgrades in place: its `import_status` MUST stay `"complete"`,
+substantiated by its preserved legacy run evidence under section 11, and adoption approval,
+receipt or provenance MUST NOT be fabricated for it.
 The bump also activates the homes-1 recognition of the adoption and import control paths and
-the four imported-series checks of section 4.2; the upgrade itself creates no such folder.
+the four imported-series checks of section 4.2; the upgrade itself MUST NOT create such a folder.
 Earlier stores compose their applicable deltas with this delta; repeated upgrade is a verified
 no-op only after full doctor VALID.
 The 1.3.0 delta remains a target contract until a tested upgrade and its required readers
@@ -1523,9 +1529,9 @@ worklog span tiling and frozen coverage digests; changelog range coverage; chang
 archive integrity; the tracked-store requirement against the resolved store; pointer and
 sync-target agreement (the committed pointer, the manifest's recorded sync target, and the store
 repository's actual remote agree; section 5.6); unmanaged-path containment (section 14.2); and
-path containment. At `required`, an unreadable, unparseable, or unresolvable declared input is a
-failure, never an empty or clean result. Imported history joins this integrity layer through
-the deterministic checks in sections 8.3 and 8.6; the authority firewall is never report-only.
+path containment. At `required`, an unreadable, unparseable, or unresolvable declared input MUST be
+a failure, never an empty or clean result. Imported history joins this integrity layer through
+the deterministic checks in sections 8.3 and 8.6; the authority firewall MUST NOT be report-only.
 
 `import_status = "none"` means clean start with no approved migrate-source import.
 `"partial"` means the adoption receipt enumerates migrate-disposed sources whose cutover
@@ -1538,7 +1544,7 @@ evidence substantiates it; the
 section 9.2 upgrade preserves that legacy status without fabricating an approval or receipt.
 A partial or complete status that neither an adoption receipt with completion results nor
 preserved legacy import evidence substantiates MUST fail closed, as does a missing, unreadable
-or contradictory input. Neither elapsed time nor a staging directory proves status.
+or contradictory input. Elapsed time and a staging directory MUST NOT be taken as proof of status.
 From the recorded approval until the section 14.2 matrix records its re-check matched, a path the
 approved plan enumerates as an outstanding retire, move or migrate source is bounded adoption
 state keyed on its section 14.2 lifecycle state, never on bytes alone. In the planned and
@@ -1567,50 +1573,51 @@ produced and executed without hand-editing canonical files.
 
 Adoption coverage (which types are populated, which modules are wired, how much of the project's
 operational surface has moved into the store) is a report, never a gate: breadth of adoption is a
-journey, and failing a build over it would train bypasses. It stays report-only at every posture.
+journey, and failing a build over it would train bypasses. It MUST stay report-only at every
+posture.
 
-Defaults: scaffolding and clean-start adoption write `posture = "required"` and
+Defaults: scaffolding and clean-start adoption MUST write `posture = "required"` and
 `import_status = "none"`. An adoption with migrate-disposed sources keeps `required` and MUST
 hold `import_status = "partial"` until each source's completion check is green and its cutover
 has committed with a matched re-check (section 14.1), then `"complete"`.
-Import status MUST NOT weaken posture. Reports carry `migration_incomplete` while an approved
+Import status MUST NOT weaken posture. Reports MUST carry `migration_incomplete` while an approved
 source or detected file remains unresolved. Weakening the posture (`required` toward `warn`
 or `off`) is a guardrail-configuration change: it MUST take effect only through the
 maintainer's explicit, recorded authorization, separate from adoption approval, and MUST NOT
 be self-applied by the assistant or by tooling.
 
-A profile may raise, never lower, the effective posture: the effective posture is the strictest of
-the base `posture` and every supported profile's `posture_floor`. Weakening the base `posture`
-remains a guardrail-configuration change under the maintainer's recorded authorization; a profile
-floor is additive and cannot substitute for that authorization in the loosening direction.
+A profile MAY raise, and MUST NOT lower, the effective posture: the effective posture is the
+strictest of the base `posture` and every supported profile's `posture_floor`. Weakening the base
+`posture` remains a guardrail-configuration change under the maintainer's recorded authorization; a
+profile floor is additive and MUST NOT substitute for that authorization in the loosening direction.
 
 ## 12. Rotation, archive, and retention
 
-Rotation is relocation, never deletion, and never ID reuse. Records in unqualified terminal states,
-other than worklog records, MAY rotate to `.working/toml/archive/<YYYY>/` (calendar-year buckets) on
-manifest-declared age or size thresholds. Worklog records are excluded from that generic
+Rotation MUST be relocation, never deletion, and never ID reuse. Records in unqualified terminal
+states, other than worklog records, MAY rotate to `.working/toml/archive/<YYYY>/` (calendar-year
+buckets) on manifest-declared age or size thresholds. Worklog records are excluded from that generic
 terminal-record permission and rotate solely under the release-based rule: only released, frozen
 worklog spans MAY rotate, and the unreleased `recorded` tail never rotates whatever its age or size,
 because it is pre-terminal and mutable-until-release (sections 6.2 and 8.4). Open records, active
 blocks, unresolved decisions, unresolved fragments, unexpired waivers, the current handoff, and the
-unreleased worklog tail never rotate. The imported series never rotates at 1.3.0:
+unreleased worklog tail MUST NOT rotate. The imported series MUST NOT rotate at 1.3.0:
 `<type>.imported.index.toml` and `worklog.imported.toml` sit outside the rotation thresholds and
-their records never move to the record archive.
+their records MUST NOT move to the record archive.
 
 The record-rotation archive under the discovered machine store is distinct from the store-tree
 `archive/` in section 4.2, which retains relocated adopter files and adoption preimages, never
-rotated records. Neither is scanned as the other. Imported originals, acceptance evidence, and
-retire preimages are retained indefinitely by default. Automatic reclamation applies only to staging
-runs, after independent re-read and digest verification of their required evidence in its durable
-home; age alone never authorizes deletion.
+rotated records. Tooling MUST NOT scan either as the other. Imported originals, acceptance evidence,
+and retire preimages MUST be retained indefinitely by default. Automatic reclamation MUST apply only
+to staging runs, after independent re-read and digest verification of their required evidence in its
+durable home; age alone MUST NOT authorize deletion.
 
-Each rotation writes the year's `archive.toml`, enumerating every moved ID (and, for the worklog,
-every moved span) and its destination. Validation confirms that every ID exists in exactly one
-active or archived location, and coverage gates read active and archive together, so rotation never
-changes any gate's answer. `counters.toml` is untouched by rotation, preserving ID permanence.
-Retention is thereby indefinite by default; an adopter bound by a retention policy applies it as a
-recorded maintainer decision governing archival and rotation (aged data moved into the archive,
-preserved byte for byte), never as deletion of a record.
+Each rotation MUST write the year's `archive.toml`, enumerating every moved ID (and, for the
+worklog, every moved span) and its destination. Validation MUST confirm that every ID exists in
+exactly one active or archived location, and coverage gates MUST read active and archive together,
+so rotation never changes any gate's answer. `counters.toml` MUST remain untouched by rotation,
+preserving ID permanence. Retention is thereby indefinite by default; an adopter bound by a
+retention policy MUST apply it as a recorded maintainer decision governing archival and rotation
+(aged data moved into the archive, preserved byte for byte), never as deletion of a record.
 
 ## 13. Tamper evidence
 
@@ -1642,20 +1649,21 @@ and retire old operational files, establish the new store and enforcement, and i
 This makes no claim that historical obligations were fulfilled or converted.
 
 Adoption follows investigate, plan, one approval, apply, completion, then retirement. Investigation
-distinguishes first adoption from re-adoption and records a digest-stamped inventory, including
-governance surfaces for each supported assistant platform. Every foreign `.working/` file, and every pre-existing file at a declared view or deliverable
-destination outside `.working/`, the product-root `VERSION` included, MUST have a disposition
-before `init-store`; adoption MUST NOT run blind init over populated content.
-Apply composes the coupled-init substrate and the journaled adoption operations, with per-operation
-preimage checks and reversal. It MUST end with rendered views at every declared destination except
-the deferred view destinations of section 14.2, whose occupying sources it MUST leave
-byte-identical in place, and with an adoption receipt plus its
+MUST distinguish first adoption from re-adoption and MUST record a digest-stamped inventory,
+including governance surfaces for each supported assistant platform. Every foreign `.working/` file,
+and every pre-existing file at a declared view or deliverable destination outside `.working/`, the
+product-root `VERSION` included, MUST have a disposition before `init-store`; adoption MUST NOT run
+blind init over populated content. Apply MUST compose the coupled-init substrate and the journaled
+adoption operations, with per-operation preimage checks and reversal. It MUST end with rendered
+views at every declared destination except the deferred view destinations of section 14.2, whose
+occupying sources it MUST leave byte-identical in place, and with an adoption receipt plus its
 outcome-event chain. A bootstrap `views-ready` milestone alone MUST NOT count as adoption
 success.
 
 ### 14.1 One approval and completion
 
-Exactly one adopter approval MUST follow each concrete plan. The `opf.adoption.plan/v2` plan binds:
+Exactly one adopter approval MUST follow each concrete plan. The `opf.adoption.plan/v2` plan MUST
+bind:
 
 - product and store identities and the observed revision;
 - every source path, byte digest, disposition and preservation destination;
@@ -1667,8 +1675,8 @@ Exactly one adopter approval MUST follow each concrete plan. The `opf.adoption.p
 - the missingness and unparsed-content policy, the skip policy under which a migrate-disposed
   source may be recorded as skipped, and the migrate-disposed sources import may touch.
 
-The attributed approval binds `plan_digest` and `inventory_digest`, hence that whole plan.
-There is no per-fragment acceptance or later adopter checkpoint within the approved plan.
+The attributed approval MUST bind `plan_digest` and `inventory_digest`, hence that whole plan.
+A per-fragment acceptance or later adopter checkpoint MUST NOT occur within the approved plan.
 Any bound-item drift MUST refuse into a fresh plan with its own single approval; a changed old
 file MUST NOT be retired. One renewal is not drift: a section 5.4 whole-store relocation MUST
 rebind the plan's bound paths to their relocated equivalents with the bound digests unchanged
@@ -1677,7 +1685,7 @@ curation (section 7.3). Digests establish binding, not actor
 authenticity or semantic correctness; self-asserted identity and same-user tampering remain
 disclosed residuals.
 
-The clean-start completion check deterministically verifies the following roster:
+The clean-start completion check MUST deterministically verify the following roster:
 
 1. Authority and freshness: roots, destinations and live preimages still match the approved plan.
 2. Discovery accounting: every inventory entry has a disposition or recorded exclusion.
@@ -1735,7 +1743,7 @@ nothing is silently rolled back or retried, and a failed re-check MUST NOT deadl
 section 11 defines how doctor's `required` failure coexists with producing and approving that
 fresh plan, which binds the landed bytes as the preimage its own cutover replaces or confirms. Green proves preservation,
 restorability and operational coverage, never semantic fidelity or fulfilment of old obligations;
-the receipt discloses that limit. An occupied view destination MUST use a validated prospective
+the receipt MUST disclose that limit. An occupied view destination MUST use a validated prospective
 poststate, preserved preimage and the same journaled transaction for retirement and publication
 (section 14.2); completion checks MUST gate that cutover before removal or replacement, and
 only the cutover's own matched landed re-check completes it.
@@ -1754,16 +1762,16 @@ platform denial are not eliminated by this pack and MUST each be disclosed as re
 MUST NOT ship before the writer can perform every operation it forces. Curated `CHANGELOG.md`
 edits remain the curator's responsibility.
 
-Post-adoption import uses the approved, versioned prompt pack, with an example for every record
+Post-adoption import MUST use the approved, versioned prompt pack, with an example for every record
 type in the section 8.1 roster except the excluded `transaction`, the unassigned `CL` namespace,
-and the deprecated `legacy_fragment`. It directs the assistant to discover old operational
+and the deprecated `legacy_fragment`. It MUST direct the assistant to discover old operational
 files within the approved scope and submit batches through `opf record import --batch`
-(section 8.8), never hand-edit store TOML. Source instructions are historical data, never
-instructions to execute. Missingness, ambiguity, conflicts and source precision remain explicit;
-unmappable text is retained verbatim. The assistant reports semantic uncertainty without seeking
-another checkpoint. `opf import --prompt`, `--status` and `--verify` expose that activity.
-The former `--scan`, `--plan`, `--review` and `--apply` modes refuse with a pointer to adoption
-and the prompt pack when this contract activates.
+(section 8.8), never hand-edit store TOML. Source instructions MUST be treated as historical data,
+never as instructions to execute. Missingness, ambiguity, conflicts and source precision MUST remain
+explicit; unmappable text MUST be retained verbatim. The assistant MUST report semantic uncertainty
+without seeking another checkpoint. `opf import --prompt`, `--status` and `--verify` expose that
+activity. The former `--scan`, `--plan`, `--review` and `--apply` modes MUST refuse with a pointer
+to adoption and the prompt pack when this contract activates.
 
 For each migrate-disposed source, import completion MUST verify the preserved original's
 digest, at least one imported record referencing that source or a recorded skip under the
@@ -1789,42 +1797,42 @@ This proves source accounting and preservation, not byte-level mapping coverage 
 fidelity. No writer-side leftover accounting is required.
 
 Clean-start adoption and import ship on homes 1 with explicit evidence coverage: their completion
-checks re-read inventories and payload digests themselves, because C-EVIDENCE-ENUM is inactive
+checks MUST re-read inventories and payload digests themselves, because C-EVIDENCE-ENUM is inactive
 until homes 2. The evidence-bundle format in section 4.2 is retained, including the import home
 `.working/imported/import/<run-id>/`. Destination durability and digest verification MUST precede source removal; retirement and any
 same-path publication MUST share the same recoverable transaction. A source outside the
 participating roots MUST be a plan-time cannot-evaluate naming that source. Investigation,
 planning and read-only status commands MUST remove nothing.
 
-Legacy runs may occupy `.working/staging/import/<run-id>/` or
+Legacy runs MAY occupy `.working/staging/import/<run-id>/` or
 `.working/staging/ingest/<run-id>/`. Their evidence inventories and readers remain available;
 old acceptance records describe those runs and MUST NOT authorize a new adoption or retirement.
-A legacy import completed under the pre-1.3.0 contract keeps its recorded status, substantiated
-by its preserved run evidence (section 11); no retrospective approval or receipt is fabricated.
-Preserved legacy run evidence is that run's durable archive in its recorded legacy home, for
-the reference tooling `.aiqt/import-archive/<run-id>/`, holding the run's acceptance record and
-its evidence inventory in the retained legacy format; substantiation re-reads that inventory
-and digest-matches every file it enumerates, and a missing, unreadable or digest-mismatched
-item leaves the status unsubstantiated, failing closed under section 11.
-Old import and ingest orchestration is retired by staged decoupling only after clean-start
-adoption ships. Required evidence MUST be re-read and digest-matched in its durable home before staging
-reclamation. Reclamation MUST be journaled and idempotent; an unreadable tree MUST hold the run.
-Read-only commands MUST NOT clean staging. Pending legacy review MUST NOT become implicit
+A legacy import completed under the pre-1.3.0 contract MUST keep its recorded status, substantiated
+by its preserved run evidence (section 11); a retrospective approval or receipt MUST NOT be
+fabricated. Preserved legacy run evidence is that run's durable archive in its recorded legacy home,
+for the reference tooling `.aiqt/import-archive/<run-id>/`, holding the run's acceptance record and
+its evidence inventory in the retained legacy format; substantiation MUST re-read that inventory
+and digest-match every file it enumerates, and a missing, unreadable or digest-mismatched
+item MUST leave the status unsubstantiated, failing closed under section 11.
+Old import and ingest orchestration MUST be retired by staged decoupling only after clean-start
+adoption ships. Required evidence MUST be re-read and digest-matched in its durable home before
+staging reclamation. Reclamation MUST be journaled and idempotent; an unreadable tree MUST hold the
+run. Read-only commands MUST NOT clean staging. Pending legacy review MUST NOT become implicit
 approval.
 
 ### 14.2 Pre-existing files at the store location
 
-`opf adopt` investigates every file at the target `.working/` location that is not OPF-managed,
+`opf adopt` MUST investigate every file at the target `.working/` location that is not OPF-managed,
 and every pre-existing file at a declared view or deliverable destination outside `.working/`, the
 product-root `VERSION` included: the manifest, ledgers, counters, clean and imported typed
 indexes, declared views and registered control areas define the managed set. A matching pathname
 alone does not prove OPF ownership: foreign content at a planned managed destination, a
-machine-store path as much as a view path, still needs a disposition. A hand-maintained
+machine-store path as much as a view path, MUST still take a disposition. A hand-maintained
 `TODO.md` belongs to the adopter.
-`opf init` refuses undispositioned foreign content; post-adoption import uses only its approved
-source scope and does not authorize an incidental discovery.
+`opf init` MUST refuse undispositioned foreign content; post-adoption import MUST use only its
+approved source scope and MUST NOT authorize an incidental discovery.
 
-The plan records one disposition per foreign file from `keep`, `migrate`, `move`, `retire`:
+The plan MUST record one disposition per foreign file from `keep`, `migrate`, `move`, `retire`:
 
 - **Keep.** Leave it untouched and register it under `[unmanaged]`. Ordinary tooling MUST NOT
   read, rewrite or delete it. An unmanaged path MUST NOT collide with an OPF-managed file or view: a `keep` declaration naming a
@@ -1835,11 +1843,11 @@ The plan records one disposition per foreign file from `keep`, `migrate`, `move`
 - **Migrate.** Keep the source frozen now for post-adoption import into the separate imported
   series. Its exact bytes MUST be preserved, and it MUST be retired only after its source
   completion check is green, through the cutover transaction the matrix below governs.
-  There is no imported view. Where an old file occupies a clean generated-view destination, that path is a deferred view
-  destination whose protection is keyed on the matrix's lifecycle states below, never on the
-  occupying bytes alone: deferral MUST last until the authorized cutover transaction has actually
-  replaced the source and its post-commit re-check has matched (section 14.1), never merely until
-  the applicable completion check is green. One
+  There MUST NOT be an imported view. Where an old file occupies a clean generated-view
+  destination, that path is a deferred view destination whose protection is keyed on the matrix's
+  lifecycle states below, never on the occupying bytes alone: deferral MUST last until the
+  authorized cutover transaction has actually replaced the source and its post-commit re-check has
+  matched (section 14.1), never merely until the applicable completion check is green. One
   deferral rule MUST bind every roster command of the matrix below: each validates the view's
   generated bytes
   prospectively and MUST withhold the same-path publication, the deferred path sits outside a
@@ -1854,13 +1862,13 @@ The plan records one disposition per foreign file from `keep`, `migrate`, `move`
   a declared view destination defers identically, cut over by the adoption completion path.
 - **Move.** Relocate to a named destination outside the managed store, or by default to
   `.working/archive/moved/<source-path>`, preserving substructure. An occupied destination MUST
-  be a collision finding, never an overwrite. An explicit destination inside the store tree is
-  valid only beneath `.working/archive/moved/`. The default Move MUST refuse a store resolved outside the product root until a multi-root
-  coordinator exists. Removal MUST require the
-  plan-bound green completion check and digest-verified preservation. A move-disposed source at
-  a declared view destination defers identically to a migrate source: its relocation and the
-  same-path publication share one journaled cutover transaction after the green check, and
-  roster commands MUST NOT render over or relocate it beforehand.
+  be a collision finding, never an overwrite. An explicit destination inside the store tree MUST lie
+  beneath `.working/archive/moved/`. The default Move MUST refuse a store resolved outside the
+  product root until a multi-root coordinator exists. Removal MUST require the plan-bound green
+  completion check and digest-verified preservation. A move-disposed source at a declared view
+  destination defers identically to a migrate source: its relocation and the same-path publication
+  share one journaled cutover transaction after the green check, and roster commands MUST NOT render
+  over or relocate it beforehand.
 - **Retire.** The first-class clean-start choice: the exact preimage MUST be preserved under
   `.working/archive/adoption/<run-id>/` with restore and completion proven before the removal
   or replacement, which runs without import through the adoption cutover transaction. No old
@@ -1962,28 +1970,28 @@ that generates a version file and a changelog) migrates by recording its release
 `version.toml` as imported-flagged `[[release]]` rows (the optional `imported` flag of
 section 6.1) and its per-release notes as published
 per-release `[[summary]]` rows.
-Pre-migration releases have no worklog entries: their spans are empty and their summary digests
-are recorded as imported facts, flagged as resting on imported provenance rather than on a
+Pre-migration releases have no worklog entries: their spans MUST be empty and their summary digests
+MUST be recorded as imported facts, flagged as resting on imported provenance rather than on a
 witnessed release cut. This remains the historical-release path at 1.3.0: the ledger is not an
-imported record type, its spans never refer to `imported:WL` IDs, and import does not create a
-separate version or changelog TOML file. Changelog prose still requires the curator's act.
+imported record type, its spans MUST NOT refer to `imported:WL` IDs, and import MUST NOT create a
+separate version or changelog TOML file. Changelog prose MUST still come from the curator's act.
 
 ## 15. Genericization boundary
 
-Nothing in a conforming store's base-required schema vocabulary names a particular adopter,
+A conforming store's base-required schema vocabulary MUST NOT name a particular adopter,
 operator, profile, internal system, endpoint, tier vocabulary, or command. A profile schema (for
 example `[profiles.aiqt]`) legitimately names its owner, and a conforming store's own data
 legitimately names an operator via `actor.id`; the neutrality constraint binds the base-required
-vocabulary, not profile schemas or store data. `actor.kind` carries only the
+vocabulary, not profile schemas or store data. `actor.kind` MUST carry only the
 portable categories; identity detail lives in `actor.id` or extensions. `mode`,
-`tier_assessment`, and `waiver` ship structure only (evidence, assessor, outcome, validity, scope,
-expiry) with adopter-supplied vocabularies. The location patterns of section 5.3 are described
-generically; no pattern names a real repository, host account, or internal system. Import and
-adoption provenance, including originals under `imported/` and retired files under `archive/`,
-stays inside the adopter's own repositories. In homes 2, `.aiqt/` is AIQT-owned material, not an OPF
-state home; OPF operates without it. Only homes migration may read explicitly inventoried OPF
+`tier_assessment`, and `waiver` MUST ship structure only (evidence, assessor, outcome, validity,
+scope, expiry) with adopter-supplied vocabularies. The location patterns of section 5.3 are
+described generically; no pattern names a real repository, host account, or internal system. Import
+and adoption provenance, including originals under `imported/` and retired files under `archive/`,
+MUST stay inside the adopter's own repositories. In homes 2, `.aiqt/` is AIQT-owned material, not an
+OPF state home; OPF operates without it. Only homes migration MAY read explicitly inventoried OPF
 artefacts from former `.aiqt/` locations, without touching unrelated AIQT material.
-Experimental fields ride registered
+Experimental fields MUST ride registered
 `x-<vendor>` tables only, within the limits of section 8.7.
 
 The base standard's required schema vocabulary names no adopter, operator, or profile by
@@ -2049,14 +2057,14 @@ The gates in this standard are strong where they are strong and say so where the
   it declares, and a base-only tool would not detect it. This is by design (profiles are additive
   and a base tool is out of their scope), and it is the reason a conformance report always names
   which profiles it did and did not evaluate. Fail-safe-for-unknown-profiles is scoped to a tool
-  that does not cover the profile; a profile-aware tool fails closed on its own profile.
+  that does not cover the profile; a profile-aware tool MUST fail closed on its own profile.
 - The base discovery token `opf` is a single exact string carried in every adopter manifest.
   A mistyped or altered token makes the store undiscoverable, which resolves to cannot-evaluate
   (fail-closed), never to a silent empty store. The token is stable within a base-schema major line;
-  a store-breaking rename ships only with the tested `opf upgrade` migration (section 9.2), which
-  rewrites the base table and token in place so no existing adopter's manifest is stranded. The
-  retired 1.0.0 token `devprocess` is recognized by `opf upgrade` alone, purely to carry a legacy
-  store forward.
+  a store-breaking rename MUST ship only with the tested `opf upgrade` migration (section 9.2),
+  which rewrites the base table and token in place so no existing adopter's manifest is stranded.
+  The retired 1.0.0 token `devprocess` is recognized by `opf upgrade` alone, purely to carry a
+  legacy store forward.
 
 ## Appendix A: record envelope example
 
