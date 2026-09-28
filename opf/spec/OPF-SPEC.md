@@ -1071,8 +1071,15 @@ history is a new clean record linking back (section 8.6). Its subcommands:
   current row is not schema-valid, `proposed_from` included, so a schema-detectable forgery must be
   repaired by the operator before `transition` acts; it is never laundered. The field is an ordinary
   record field, so a canonical hand edit of it that keeps the row schema-valid is not detected, the
-  same as any other field (the section 5.7 integration-base rule remains the control). A backlog
-  item MUST reach unqualified `done` only through `done-with-receipt`.
+  same as any other field (the section 5.7 integration-base rule remains the control). A
+  pending_decision's `open` > `decided`, landing bare or `/proposed`, MUST write its resolution
+  bundle (section 8.5) in the same act: `transition` MUST require the `decision` and `decided_by`
+  values there and MUST refuse them on every other transition. `decided_by` MUST be given
+  explicitly, never inferred from the actor, because the recorder of an answer is often not its
+  decider, and `decided_at` MUST be the operation's clock value. A ratification MUST keep the
+  bundle; a rejection of `decided/proposed` MUST remove it together with `proposed_from`, since
+  an open decision carries none of it. A backlog item MUST reach unqualified `done` only through
+  `done-with-receipt`.
 - `done-with-receipt`: maintainer-only. It moves a backlog item to unqualified `done`, from
   `active` or by ratifying `done/proposed`, and in the same act creates its one-to-one `done`
   receipt linked `receipt_of` (section 8.5). An assistant reaching `done` uses `transition` and
@@ -1119,7 +1126,8 @@ guarantees:
    publication (section 4.2).
 4. Postcondition: the model diff of every rewritten file equals exactly the operation's allowed
    delta (the new rows appended, the counters advanced by exactly the claim, and for a transition
-   one status and `updated_at` change plus the `proposed_from` write or removal), value for value
+   one status and `updated_at` change plus the `proposed_from` write or removal and, for a
+   pending_decision, the resolution bundle write or removal), value for value
    and type for type (a boolean or float is never equal to an integer), before anything is
    written. The expected
    delta MUST be derived from the request, the prior bytes of each rewritten file, the claimed IDs,
