@@ -19,7 +19,7 @@ export PYTHONDONTWRITEBYTECODE=1
 
 failed=0
 notrun=0
-# Several gates print nothing on success or failure, so each failure is named as it happens and the
+# Gate output does not carry the runner's gate label, so each failure is named as it happens and the
 # names are listed again before RESULT: FAIL; a failing suite never needs a hand re-run to find it.
 failed_names=""
 

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f99b83d578cd8ee47872c55ead9e40086de96f1344ace708b8d4f5edf2a0583f"
+tree-sha256 = "3ccee241fd41772c30cb38b844c24fa43bcbfd4d7faf807144ae205756fa68a5"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3131,8 +3131,8 @@ sha256 = "7f6b2539235b5eea9dc6a61636336ebbdeb7917d1e23f35a6663107ee519ab7b"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 84814
-sha256 = "dbfae5ff7f4f4a2fc30c403c7840410a6d94b31c47f12ea91e3100118741e64b"
+bytes = 89862
+sha256 = "d19ca007bfe6f295d2e3ab3f24a2658209ca9e47faee3a21104cb49ea365af40"
 
 [[sources]]
 path = "tools/check_clauses.py"
@@ -3496,8 +3496,8 @@ sha256 = "6c0a50feeee104f3993c696a97f6860722e0deaa4ce75e494864d8662f0759d3"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 17928
-sha256 = "cfa29313785a802187e77e82ee658bfe0d8a1e6a6ab9be232e1ae4b333478dfa"
+bytes = 17929
+sha256 = "3b3f62945cc3e40eb0d965e38d6aa695ca6f19ab2bafb9eed2866d384a99b4f7"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"

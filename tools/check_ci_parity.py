@@ -509,6 +509,14 @@ def extract_local(text):
     function_body = []
     if_depth = 0
     if_unbalanced = False
+    failure_initializers = {
+        "failed": "failed=0",
+        "failed_names": 'failed_names=""',
+    }
+    initialized = set()
+    gitleaks_depth = None
+    gitleaks_else = False
+    gitleaks_updates = set()
     for line_number, raw in enumerate(text.splitlines(), 1):
         if line_number == 1 and raw == "#!/usr/bin/env bash":
             continue
@@ -542,12 +550,17 @@ def extract_local(text):
         # block; a top-level unconditional exit makes later gates unreachable. A fi
         # with no open if underflows: record it so the imbalance is not clamped away.
         if stripped == "fi":
+            if if_depth == gitleaks_depth:
+                gitleaks_depth = None
+                gitleaks_else = False
             if if_depth == 0:
                 if_unbalanced = True
             else:
                 if_depth -= 1
         elif stripped.endswith("; then"):
             if_depth += 1
+        elif stripped == "else" and if_depth == gitleaks_depth:
+            gitleaks_else = True
 
         if stripped.endswith("\\"):
             diagnostics.append(_diagnostic(
@@ -595,6 +608,8 @@ def extract_local(text):
                 and tokens[0] == "if"
                 and tokens[-2:] == [";", "then"]
                 and tokens[1].lstrip("./") == "gitleaks"):
+            gitleaks_depth = if_depth
+            gitleaks_else = False
             normalized = normalize(tokens[1:-2])
             if normalized.ok:
                 _add_member(
@@ -605,6 +620,37 @@ def extract_local(text):
                     line_number,
                     normalized.code,
                     normalized.message,
+                ))
+            continue
+
+        # Failure state may be initialized once before any gate, then changed only
+        # by the validated dispatcher or the gitleaks command's failure branch.
+        assignments = tokens[1:] if tokens[:1] == ["export"] else tokens
+        variable = assignments[0].split("=", 1)[0] if assignments else ""
+        if variable in failure_initializers and "=" in assignments[0]:
+            initial = (
+                if_depth == 0 and not members and variable not in initialized
+                and stripped == failure_initializers[variable]
+            )
+            gitleaks_update = (
+                if_depth == gitleaks_depth and gitleaks_else
+                and variable not in gitleaks_updates
+                and stripped in (
+                    "failed=1",
+                    'failed_names="${failed_names:+${failed_names}, }secrets (gitleaks)"',
+                )
+            )
+            if initial:
+                initialized.add(variable)
+            elif gitleaks_update:
+                gitleaks_updates.add(variable)
+            else:
+                diagnostics.append(_diagnostic(
+                    source,
+                    line_number,
+                    "failure-state-assignment",
+                    "unexpected assignment to {}; failure state must not be reset "
+                    "or overwritten".format(variable),
                 ))
             continue
 
@@ -670,6 +716,14 @@ def extract_local(text):
             0,
             "unbalanced-if",
             "unbalanced if/fi nesting; the shell file is not well-formed",
+        ))
+
+    for variable in sorted(set(failure_initializers) - initialized):
+        diagnostics.append(_diagnostic(
+            source,
+            0,
+            "failure-state-assignment",
+            "missing initial {}".format(failure_initializers[variable]),
         ))
 
     diagnostics.extend(_shadow_check(text, source, origins))
@@ -1597,21 +1651,22 @@ SILENT_RUNNER_REVERT = (
     ('  echo "FAILED GATES: ${failed_names}"\n', ""),
 )
 
-# Stub gates for runner_naming_problems. python3 records each call and, when asked, fails
-# only the plain leaks gate; gitleaks exits with the requested status.
+# Stub gates for runner_naming_problems. Both record their calls; python3 fails only
+# the selected command, and gitleaks exits with the requested status.
 _STUB_PYTHON3 = """#!/bin/sh
-printf '%s\\n' "$*" >> "$stub_log" || exit 2
-if [ "$stub_fail" = 1 ] && [ "$#" -eq 3 ] && [ "$3" = tools/check_leaks.py ]; then
+printf '%s\\n' "python3 $*" >> "$stub_log" || exit 2
+if [ "$*" = "$stub_fail_command" ]; then
   exit 3
 fi
 exit 0
 """
 _STUB_GITLEAKS = """#!/bin/sh
+printf '%s\\n' "gitleaks $*" >> "$stub_log" || exit 2
 exit "$stub_gitleaks_rc"
 """
 
 
-def _run_runner_copy(text, fail):
+def _run_runner_copy(text, fail_command="", gitleaks_rc=0):
     """Run text as tools/run_all_checks.sh in a scratch tree; return (rc, stdout lines, calls)."""
     import os
     import shutil
@@ -1638,8 +1693,8 @@ def _run_runner_copy(text, fail):
             HOME=tmp,
             LC_ALL="C",
             stub_log=str(log),
-            stub_fail="1" if fail else "0",
-            stub_gitleaks_rc="1" if fail else "0",
+            stub_fail_command=fail_command,
+            stub_gitleaks_rc=str(gitleaks_rc),
         )
         proc = subprocess.run(
             [bash, "--noprofile", "--norc", str(runner)],
@@ -1651,28 +1706,63 @@ def _run_runner_copy(text, fail):
 
 def runner_naming_problems(text):
     """Return the failure-naming problems of runner text; empty means failures are named."""
-    try:
-        pass_rc, pass_lines, pass_calls = _run_runner_copy(text, False)
-        fail_rc, fail_lines, fail_calls = _run_runner_copy(text, True)
-    except Exception as exc:  # no bash, a scratch-tree error, or a timeout
-        return ["runner copy did not complete: {!r}".format(exc)]
+    roster = []
+    registered = []
+    for raw in text.splitlines():
+        tokens = shlex.split(raw, comments=True)
+        if tokens[:1] == ["run_gate"] and len(tokens) >= 3:
+            name, command = tokens[1], tokens[2:]
+            if command[0] != "python3":
+                return ["runner stub does not support {!r}".format(command)]
+            registered.append((name, " ".join(command[1:])))
+            roster.append((name, " ".join(command)))
+        elif tokens[:2] == ["if", "gitleaks"]:
+            roster.append(("secrets (gitleaks)", " ".join(tokens[1:-1]).rstrip(";")))
+    if not registered:
+        return ["runner has no registered gates"]
+    expected_calls = [command for name, command in roster]
+    expected_headers = ["--- {} ---".format(name) for name, command in roster]
+    first_name, first_command = registered[0]
+    last_name, last_command = registered[-1]
+    scenarios = (
+        ("passing", "", 0, ()),
+        ("combined failure", "-I -B tools/check_leaks.py", 1,
+         (("secrets (gitleaks)", 1), ("leaks", 3))),
+        ("first gate only", first_command, 0, ((first_name, 3),)),
+        ("last gate only", last_command, 0, ((last_name, 3),)),
+        ("gitleaks only", "", 1, (("secrets (gitleaks)", 1),)),
+    )
     problems = []
-    if pass_rc != 0 or pass_lines[-1:] != ["RESULT: PASS"]:
-        problems.append("passing run: exit {}, last line {!r}".format(
-            pass_rc, pass_lines[-1:]))
-    if any(line.startswith(("GATE FAILED:", "FAILED GATES:")) for line in pass_lines):
-        problems.append("passing run names a failure")
-    if fail_rc != 1:
-        problems.append("failing run: exit {}, expected 1".format(fail_rc))
-    named = [line for line in fail_lines if line.startswith("GATE FAILED:")]
-    if named != ["GATE FAILED: secrets (gitleaks) (exit 1)", "GATE FAILED: leaks (exit 3)"]:
-        problems.append("failing run named {!r}".format(named))
-    if fail_lines[-2:] != ["FAILED GATES: secrets (gitleaks), leaks", "RESULT: FAIL"]:
-        problems.append("failing run ended {!r}".format(fail_lines[-2:]))
-    headers = [line for line in pass_lines if line.startswith("--- ")]
-    if (not pass_calls or fail_calls != pass_calls
-            or [line for line in fail_lines if line.startswith("--- ")] != headers):
-        problems.append("the failing run did not run the same gates in the same order")
+    for scenario, command, gitleaks_rc, failures in scenarios:
+        try:
+            rc, lines, calls = _run_runner_copy(text, command, gitleaks_rc)
+        except Exception as exc:  # no bash, a scratch-tree error, or a timeout
+            problems.append("{}: runner copy did not complete: {!r}".format(scenario, exc))
+            continue
+        expected_rc = 1 if failures else 0
+        if rc != expected_rc:
+            problems.append("{}: exit {}, expected {}".format(scenario, rc, expected_rc))
+        named = [line for line in lines if line.startswith("GATE FAILED:")]
+        expected_named = [
+            "GATE FAILED: {} (exit {})".format(name, status)
+            for name, status in failures
+        ]
+        if named != expected_named:
+            problems.append("{}: named {!r}, expected {!r}".format(
+                scenario, named, expected_named))
+        summaries = [line for line in lines if line.startswith("FAILED GATES:")]
+        expected_summaries = (
+            ["FAILED GATES: " + ", ".join(name for name, status in failures)]
+            if failures else []
+        )
+        ending = expected_summaries + ["RESULT: FAIL" if failures else "RESULT: PASS"]
+        if summaries != expected_summaries or lines[-len(ending):] != ending:
+            problems.append("{}: unexpected summary or result {!r}".format(
+                scenario, lines[-len(ending):]))
+        headers = [line for line in lines if line.startswith("--- ")]
+        if calls != expected_calls or headers != expected_headers:
+            problems.append("{}: calls or headers differ from the declared roster".format(
+                scenario))
     return problems
 
 
@@ -1691,6 +1781,7 @@ def self_test():
             "#!/usr/bin/env bash",
             "set -uo pipefail",
             "failed=0",
+            'failed_names=""',
             "run_gate() {",
             '  local name="$1"; shift',
             '  echo "--- ${name} ---"',
@@ -2060,6 +2151,7 @@ def self_test():
         "#!/usr/bin/env bash",
         "set -uo pipefail",
         "failed=0",
+        'failed_names=""',
         "run_gate() {",
         '  local name="$1"; shift',
         '  echo "--- ${name} ---"',
@@ -2088,6 +2180,7 @@ def self_test():
         "#!/usr/bin/env bash",
         "set -uo pipefail",
         "failed=0",
+        'failed_names=""',
         "run_gate() {",
         '  local name="$1"; shift',
         '  echo "--- ${name} ---"',
@@ -2097,7 +2190,7 @@ def self_test():
         "run_gate \"gate1\" python3 tools/a.py",
     )) + "\n"
     case(
-        "10f silent run_gate body (names no failing gate) is cannot-evaluate",
+        "10d2 silent run_gate body (names no failing gate) is cannot-evaluate",
         evaluate(
             silent_body_local,
             ci_fixture(common + ("python3 tools/a.py",)),
@@ -2570,16 +2663,41 @@ def self_test():
                 "got {!r}".format(good, want, extracted)
             )
 
-    # Failure naming (change-carries-check): a scratch copy of the LIVE runner, run with one
-    # failing python3 gate and a failing gitleaks, must name both as they fail and list both
-    # before RESULT: FAIL, with every gate still run and the exit status unchanged. The flip
-    # reverts the naming in memory and must be caught, so this vector fails without the change.
+    # Failure naming (change-carries-check): a scratch copy of the LIVE runner must name
+    # combined failures and isolated first, last, and gitleaks failures before RESULT: FAIL.
+    # Calls and headers must match the declared roster in each scenario. The flip reverts
+    # the naming in memory and must be caught, so this vector fails without the change.
     count += 1
     try:
         live_runner = LOCAL_PATH.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         failures.append("26 cannot read live runner: {!r}".format(exc))
     else:
+        live_extraction = extract_local(live_runner)
+        if live_extraction.diagnostics:
+            failures.append("26 live runner: {!r}".format(live_extraction.diagnostics))
+        resets = (
+            ("failed reset before gitleaks",
+             'echo "--- secrets (gitleaks) ---"',
+             'failed=0\necho "--- secrets (gitleaks) ---"'),
+            ("failed reset inside gitleaks else",
+             '  notrun=1\n',
+             '  failed=0\n  notrun=1\n'),
+            ("failed_names reset before gitleaks",
+             'echo "--- secrets (gitleaks) ---"',
+             'failed_names=""\necho "--- secrets (gitleaks) ---"'),
+            ("failed reset inside gitleaks failure branch",
+             '    gitleaks_rc=$?\n',
+             '    failed=0\n    gitleaks_rc=$?\n'),
+        )
+        for name, old, new in resets:
+            if live_runner.count(old) != 1:
+                failures.append("26 reset fixture drift: " + name)
+                continue
+            mutant = live_runner.replace(old, new, 1)
+            diagnostics = extract_local(mutant).diagnostics
+            if not any(item.code == "failure-state-assignment" for item in diagnostics):
+                failures.append("26 reset was not rejected: " + name)
         for problem in runner_naming_problems(live_runner):
             failures.append("26 live runner: " + problem)
         silent_runner = live_runner
