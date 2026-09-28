@@ -883,9 +883,11 @@ def _fixture_drain(subject, subject_fd=None, *, deadline=None):
         time.sleep(0.005)
 
 
+# array is required: socket.send_fds/recv_fds cold-import it inside their own
+# bodies, so importing socket alone does not load it (QA19 F4).
 _FIXTURE_GUARDIAN_MODULES = (
-    "ctypes", "errno", "gc", "json", "pathlib", "resource", "select", "signal",
-    "socket", "time", "traceback")
+    "array", "ctypes", "errno", "gc", "json", "pathlib", "resource", "select",
+    "signal", "socket", "time", "traceback")
 
 
 def _fixture_preload():
@@ -952,7 +954,14 @@ class _FixtureProcess:
     loudly and ABANDONS the launch to the launcher, which then collects its own
     fork; construction resources are never disposed while the launcher can still
     use them. A failed construction (e.g. thread exhaustion) aborts the launch,
-    releases every resource, and surfaces the original error.
+    releases every resource, and surfaces the original error. A cancellation
+    raised INSIDE close() itself still leaves an owner (QA19 F2): one landing
+    in the launch coordination (the launcher release or the bounded completion
+    wait) abandons an unrecorded launch to the launcher UNDER THE LAUNCH LOCK
+    before re-raising and keeps a recorded launch with this close(), which
+    finishes the bounded collection before re-raising; one landing inside the
+    collection itself kills the tree and bounded-reaps the guardian before
+    propagating.
 
     Locks: only the launcher thread survives into the guardian, whose
     dependencies are preloaded at construction, so guardian-side imports take no
@@ -973,9 +982,13 @@ class _FixtureProcess:
     receipt-identified subject's group and pidfd are SIGKILLed unconditionally
     (a reaped subject can leave same-group descendants; skipping killpg would
     strand them), then the guardian itself. On ANY guardian failure, escalated
-    or not, a receipt-identified subject is killed the same way and its
-    disappearance proven on its pidfd or refused loudly; an escalation with NO
-    receipt is reported as INCOMPLETE subject cleanup, never as a killed tree.
+    or not -- including a failure FIRST collected by poll(), which records it
+    for close() to act on and re-raise (QA19 F1) -- a receipt-identified
+    subject is killed the same way and its disappearance proven on its pidfd
+    or refused loudly. An escalated refusal names ONLY the steps actually
+    taken (QA19 F3): no receipt is INCOMPLETE subject cleanup, a pid-only
+    receipt (pidfd-absent host) is a guardian-only escalation with UNVERIFIED
+    subject cleanup, and neither is ever reported as a killed tree.
     Documented residual: descendants that leave the subject's group/session
     survive a WEDGED-guardian escalation (only the subreaper census can find
     them; the honest-guardian drain still covers them). The subject arms
@@ -999,6 +1012,10 @@ class _FixtureProcess:
         self.subject = subject
         self._launcher = None
         self._launch_error = None
+        # The recorded guardian failure, set at COLLECTION time by whichever
+        # collector reads the failed report first (QA19 F1); close() re-raises
+        # it after addressing the receipt-identified subject.
+        self._failure = None
         self._launch_lock = threading.Lock()
         self._go = threading.Event()          # start()/close() release the launcher
         self._launched = threading.Event()    # set by the launcher on every path
@@ -1275,6 +1292,14 @@ class _FixtureProcess:
         self._read_report(raw)
         return self.status
 
+    def _record_failure(self, failure):
+        """Record a supervision failure at COLLECTION time, whichever collector
+        observed it first: close() must address the receipt-identified subject
+        and re-raise the recorded failure even when poll() or start() was the
+        collector that read the failed report (QA19 F1)."""
+        self._failure = failure
+        return failure
+
     def _read_report(self, raw):
         import json
         import os
@@ -1283,17 +1308,19 @@ class _FixtureProcess:
         payload = self.report.read(8193)
         if not os.WIFEXITED(raw) or os.WEXITSTATUS(raw) != 0:
             receipt = payload[:8192].decode("ascii", errors="backslashreplace")
-            raise ChildStatusUnavailable("fixture guardian failed: {}; receipt={}".format(
-                termination, receipt or "<missing>"))
+            raise self._record_failure(ChildStatusUnavailable(
+                "fixture guardian failed: {}; receipt={}".format(termination, receipt or "<missing>")))
         try:
             if len(payload) > 8192:
                 raise ValueError("oversized receipt")
             result = json.loads(payload)
         except (ValueError, UnicodeError) as exc:
-            raise ChildStatusUnavailable("missing tree-cleanup receipt; " + termination) from exc
+            raise self._record_failure(ChildStatusUnavailable(
+                "missing tree-cleanup receipt; " + termination)) from exc
         if (not isinstance(result, list) or len(result) != 2
                 or type(result[0]) is not int or type(result[1]) is not bool):
-            raise ChildStatusUnavailable("malformed tree-cleanup receipt; " + termination)
+            raise self._record_failure(ChildStatusUnavailable(
+                "malformed tree-cleanup receipt; " + termination))
         self.status, self.timed_out = result
 
     def _recv_subject(self):
@@ -1333,11 +1360,19 @@ class _FixtureProcess:
             _fixture_escalate_subject(self.subject_pid, self.subject_pidfd)
         _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
 
+    def _abandon_unfinished_launch(self):
+        """Decide, under the launch lock, who owns an unfinished launch: if the
+        launcher has not recorded its result yet, ABANDON the launch to it (the
+        launcher is then the fork's last owner and collects its own fork,
+        QA19 F2) and report True; a result recorded in the meantime keeps this
+        close() the owner."""
+        with self._launch_lock:
+            if self._launched.is_set():
+                return False
+            self._abandoned = True
+            return True
+
     def close(self):
-        import os
-        import select
-        import signal
-        import time
         # Coordinated launch lifecycle FIRST, before any resource is disposed. The
         # launcher is never joined (its OS thread state is not what decides); its
         # completion event is set on every executed path, and the cancelled flag
@@ -1345,71 +1380,153 @@ class _FixtureProcess:
         # that has not happened yet or finds its result recorded below. If the
         # event never fires, the launch is ABANDONED to the launcher, which then
         # collects (or never creates) its own fork; nothing is disposed on that
-        # path, because the launcher and its guardian can still use it all.
+        # path, because the launcher and its guardian can still use it all. An
+        # exception raised INSIDE this coordination -- a real KeyboardInterrupt
+        # included -- must leave the same owner (QA19 F2): the launcher for an
+        # unrecorded launch (abandoned under the launch lock before re-raising),
+        # or this close(), which finishes collecting before re-raising.
         if self._launcher is not None:
             with self._launch_lock:
                 self._cancelled = True
                 abandoned = self._abandoned
+            interrupted = None
             if not abandoned:
-                self._go.set()
-                if not self._launched.wait(2 * _FIXTURE_CLEANUP_GRACE):
-                    with self._launch_lock:
-                        if not self._launched.is_set():
-                            self._abandoned = True
-                            abandoned = True
+                launched = False
+                try:
+                    self._go.set()
+                    launched = self._launched.wait(2 * _FIXTURE_CLEANUP_GRACE)
+                except BaseException as exc:  # noqa: BLE001 - ownership survives cancellation
+                    # A cancellation in the gap before the release must never
+                    # leave the launcher parked: release it (idempotent), then
+                    # decide ownership below exactly as on a timeout.
+                    self._go.set()
+                    interrupted = exc
+                if not launched and self._abandon_unfinished_launch():
+                    abandoned = True
             if abandoned:
-                raise ChildStatusUnavailable(
+                refusal = ChildStatusUnavailable(
                     "fixture launch did not complete: guardian ownership unknown")
+                if interrupted is not None:
+                    raise interrupted from refusal
+                raise refusal
             self._launcher = None
-        try:
-            # Read the buffered subject receipt BEFORE closing the control socket;
-            # closing it is what requests tree cleanup (EOF), and cancellation
-            # addresses this guardian and its receipt, never a stale PID.
-            self._recv_subject()
-            self.control.close()
-            self.peer.close()
-            if self.pid is not None and not self.collected:
-                if not self.armed:
-                    _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
-                # A cancelled call no longer needs the subject's execution time:
-                # wait within a bounded cleanup budget (twice the grace, so an
-                # honest guardian's own grace-bounded drain fits), then escalate
-                # rather than blocking for the remaining execution budget. An
-                # escalated collection is recorded on the cannot-evaluate channel
-                # below; it is never read as success.
-                escalated = False
-                deadline = time.monotonic() + 2 * _FIXTURE_CLEANUP_GRACE
-                while True:
-                    try:
-                        waited, raw = os.waitpid(self.pid, os.WNOHANG)
-                    except ChildProcessError as exc:
-                        self.collected = True
-                        raise ChildStatusUnavailable("guardian ownership lost") from exc
-                    if waited != 0:
-                        break
-                    if time.monotonic() >= deadline:
-                        if escalated:
-                            raise ChildStatusUnavailable(
-                                "guardian cleanup deadline: not collected after escalation")
-                        escalated = True
-                        self._escalate()
-                        deadline = time.monotonic() + _FIXTURE_CLEANUP_GRACE
-                    time.sleep(0.005)
+            if interrupted is not None:
+                # The fork result IS recorded: this close() stays the owner.
+                # Finish the bounded collection first, then re-raise the
+                # cancellation, chaining (never replacing) any refusal from it.
+                try:
+                    self._finish_close()
+                except BaseException as exc:
+                    raise interrupted from exc
+                raise interrupted
+        self._finish_close()
+
+    def _interrupt_collect(self):
+        """Last-resort owner for a cancellation landing INSIDE the collection
+        itself (the receipt read, the bounded reap wait, or the exit proof):
+        read the receipt if it is still pending, kill the whole tree NOW
+        (freeze, receipt kill, guardian SIGKILL), and bounded-reap the
+        guardian, so the re-raised cancellation never strands a live,
+        owner-less guardian or subject. The cancellation is what propagates; a
+        second cancellation landing here is outside the guarantee."""
+        import os
+        import time
+        if self.pid is None or self.collected:
+            return
+        self._recv_subject()
+        self._escalate()
+        deadline = time.monotonic() + _FIXTURE_CLEANUP_GRACE
+        while time.monotonic() < deadline:
+            try:
+                waited, _raw = os.waitpid(self.pid, os.WNOHANG)
+            except OSError:
+                return
+            if waited == self.pid:
                 self.collected = True
-                if waited != self.pid:
-                    raise ChildStatusUnavailable("unexpected guardian cleanup PID")
-                failure = None
-                if self.armed:
-                    try:
-                        self._read_report(raw)
-                    except ChildStatusUnavailable as exc:
-                        failure = exc
-                # The subject-exit proof runs on ANY guardian failure, not only
-                # after an escalation: a guardian killed before its drain finished
-                # (QA18 codex F3) leaves a receipt-identified subject this close()
-                # must still address. The guardian is dead and collected here, so
-                # the held pidfd pins the subject's pid/pgid exactly as the
-                # escalation freeze does, and the group+pidfd kill is safe.
+                return
+            time.sleep(0.005)
+
+    def _escalation_refusal(self, failure):
+        """Annotate an escalated refusal with ONLY what the escalation actually
+        did (QA19 F3): the freeze needs the guardian's pidfd, and the subject
+        kill with its exit proof needs the receipt's subject pidfd, so a
+        pid-only receipt (pidfd-absent host) is a guardian-only escalation
+        whose subject cleanup is UNVERIFIED, and a missing receipt is
+        INCOMPLETE cleanup -- never a claimed kill this close() could not
+        address (QA18 codex F2)."""
+        frozen = ("guardian frozen" if self.pidfd is not None
+                  else "guardian not frozen: no pidfd")
+        if self.subject_pidfd is not None:
+            raise ChildStatusUnavailable(
+                str(failure) + "; after bounded-close escalation ({}, subject "
+                "tree killed, guardian SIGKILL)".format(frozen)) from failure
+        if self.subject_pid is not None:
+            raise ChildStatusUnavailable(
+                str(failure) + "; after bounded-close guardian-only escalation "
+                "WITHOUT a subject pidfd ({}, guardian SIGKILL): subject "
+                "cleanup unverified".format(frozen)) from failure
+        raise ChildStatusUnavailable(
+            str(failure) + "; after bounded-close escalation WITHOUT a subject "
+            "receipt ({}, guardian SIGKILL): subject cleanup "
+            "incomplete".format(frozen)) from failure
+
+    def _finish_close(self):
+        import os
+        import select
+        import signal
+        import time
+        try:
+            escalated = False
+            try:
+                # Read the buffered subject receipt BEFORE closing the control socket;
+                # closing it is what requests tree cleanup (EOF), and cancellation
+                # addresses this guardian and its receipt, never a stale PID.
+                self._recv_subject()
+                self.control.close()
+                self.peer.close()
+                if self.pid is not None and not self.collected:
+                    if not self.armed:
+                        _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
+                    # A cancelled call no longer needs the subject's execution time:
+                    # wait within a bounded cleanup budget (twice the grace, so an
+                    # honest guardian's own grace-bounded drain fits), then escalate
+                    # rather than blocking for the remaining execution budget. An
+                    # escalated collection is recorded on the cannot-evaluate channel
+                    # below; it is never read as success.
+                    deadline = time.monotonic() + 2 * _FIXTURE_CLEANUP_GRACE
+                    while True:
+                        try:
+                            waited, raw = os.waitpid(self.pid, os.WNOHANG)
+                        except ChildProcessError as exc:
+                            self.collected = True
+                            raise ChildStatusUnavailable("guardian ownership lost") from exc
+                        if waited != 0:
+                            break
+                        if time.monotonic() >= deadline:
+                            if escalated:
+                                raise ChildStatusUnavailable(
+                                    "guardian cleanup deadline: not collected after escalation")
+                            escalated = True
+                            self._escalate()
+                            deadline = time.monotonic() + _FIXTURE_CLEANUP_GRACE
+                        time.sleep(0.005)
+                    self.collected = True
+                    if waited != self.pid:
+                        raise ChildStatusUnavailable("unexpected guardian cleanup PID")
+                    if self.armed:
+                        try:
+                            self._read_report(raw)
+                        except ChildStatusUnavailable:
+                            pass  # recorded by _read_report; addressed below
+                # HOISTED out of the not-collected gate (QA19 F1): the subject
+                # kill and exit proof run on ANY guardian failure, including one
+                # FIRST collected by poll() -- the layer's primary collection
+                # path -- which recorded it for this close(). The guardian is
+                # dead and collected here, so the held pidfd pins the subject's
+                # pid/pgid exactly as the escalation freeze does, and the
+                # group+pidfd kill is safe. A startup failure start() already
+                # surfaced (never armed) has no subject and nothing to re-raise.
+                failure = self._failure if self.armed else None
                 if (escalated or failure is not None) and self.subject_pidfd is not None:
                     if failure is not None and not escalated:
                         _fixture_escalate_subject(self.subject_pid, self.subject_pidfd)
@@ -1426,18 +1543,12 @@ class _FixtureProcess:
                 if failure is not None:
                     if not escalated:
                         raise failure
-                    if self.subject_pid is not None:
-                        raise ChildStatusUnavailable(
-                            str(failure) + "; after bounded-close escalation (guardian "
-                            "frozen, subject tree killed, guardian SIGKILL)") from failure
-                    # No receipt was ever delivered: an unacknowledged subject never
-                    # runs its callable and refuses on guardian death, but its exit
-                    # cannot be receipt-verified, so say so instead of claiming a
-                    # kill this close() could not address (QA18 codex F2).
-                    raise ChildStatusUnavailable(
-                        str(failure) + "; after bounded-close escalation WITHOUT a "
-                        "subject receipt (guardian frozen, guardian SIGKILL): subject "
-                        "cleanup incomplete") from failure
+                    self._escalation_refusal(failure)
+            except ChildStatusUnavailable:
+                raise
+            except BaseException:
+                self._interrupt_collect()
+                raise
         finally:
             for name in ("pidfd", "subject_pidfd"):
                 fd = getattr(self, name)
@@ -1792,7 +1903,12 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024, keep_fds=()):
             try:
                 child.close()
             except ChildStatusUnavailable as exc:
-                failures.append(_bounded_setup_error(exc))
+                # close() re-raises a recorded failure the poll above already
+                # reported (QA19 F1) AFTER addressing the receipt-identified
+                # subject: report each distinct refusal once.
+                sentinel = _bounded_setup_error(exc)
+                if sentinel not in failures:
+                    failures.append(sentinel)
     if failures:
         return "; ".join(failures)
     wstatus = child.status
