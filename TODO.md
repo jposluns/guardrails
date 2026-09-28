@@ -42,6 +42,7 @@ Fix errors and prevent their recurrence. Worked first.
 | --- | --- | --- |
 | OPF-HOMES-ACTIVATION-CHECKLIST | Items that must land before homes 2 activates (gates L4) (H, M) | `[public]` `[tooling]` |
 | MODE-CANONICAL-SOURCE | Mode-gated hooks read an optional canonical mode file before the hand-synced lease field (H, S) | `[public]` `[tooling]` |
+| REQ-OPF-IMPORT-DECISIONS | OPF import/ingest splits a mixed decisions register into pending and decided records, preserving history (H, M) | `[public]` `[tooling]` |
 
 ## Priority 2 - Fill significant gaps
 
@@ -65,9 +66,8 @@ Tooling: the pack's operational-files framework, migration and adoption machiner
 | OPF-ADOPT-VALIDATE | adoption-validation harness: a standing "does it work" check for adopters (M, M) | `[public]` `[tooling]` |
 | OPF-EARLYCUT | early release exposing OPF migration of existing operational files to first adopters (M, S) | `[public]` `[tooling]` |
 | OPF-CONSUMER | migrate our own tooling to consume the OPF store (M, M) | `[public]` `[tooling]` |
-| OPF-WRITER | OPF record-authoring verb (create, transition, done receipt) on the stdlib emitter (M, M) | `[public]` `[tooling]` |
-| OPF-DECISIONS-REGISTER | OPF decisions register: file answered decisions and preference patterns (M, M) | `[public]` `[BLOCKED: round-trip writer]` |
-| OPF-CONTRIBUTION-TYPE | OPF outbound contribution ledger type: append/write path (M, M) | `[public]` `[BLOCKED: round-trip writer]` |
+| OPF-DECISIONS-REGISTER | OPF decisions register: file answered decisions and preference patterns (M, M) | `[public]` `[in flight: PR #353; writer delivered]` |
+| OPF-CONTRIBUTION-TYPE | OPF outbound contribution ledger type: append/write path (M, M) | `[public]` `[unblocked: writer delivered #348/#351]` |
 | VER-1 | Adoption + versioning umbrella: release/tag process, drift gate, adopter manifest (H, XL) | `[public]` |
 | EN-2 | New protective hooks: trojan-source detection, self-guard loop, config-surface guard (M, L) | `[public]` |
 | EN-5 | Prose-enforcement hook roster: publish/enable the plugin for adopters (H, M) | `[public]` |
