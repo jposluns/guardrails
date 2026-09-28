@@ -840,6 +840,9 @@ def _roster_checks():
     local_text = (ROOT / local).read_text(encoding="utf-8")
     ci_text = (ROOT / ci).read_text(encoding="utf-8")
     binding = 'here="$(cd "$(dirname "$0")" && pwd)" || exit 2'
+    # The valid failure-state initializers, so an empty-roster fixture reaches
+    # its own guard rather than the missing-initializer diagnostic.
+    state = 'failed=0\nfailed_names=""\n'
 
     def refusal():
         try:
@@ -851,11 +854,11 @@ def _roster_checks():
     # Require THIS guard's diagnostic: an unrelated downstream refusal is not
     # evidence that the intended guard ran. Bad commands augment a valid roster.
     for check_id, relative, text, diagnostic in (
-            ("roster/empty-local-refused", local, "", local + ": empty registry"),
+            ("roster/empty-local-refused", local, state, local + ": empty registry"),
             ("roster/unparseable-local-refused", local,
              local_text + '\nrun_gate "cont" python3 -I -B tools/check_secrets.py \\\n  --self-test\n',
              local + ": registry diagnostics:"),
-            ("roster/empty-opf-refused", opf, binding + "\nexit 0\n",
+            ("roster/empty-opf-refused", opf, binding + "\n" + state + "exit 0\n",
              opf + ": empty registry"),
             ("roster/standalone-scaffold-refused", opf, binding + "\n" + binding + "\nexit 0\n",
              "unsupported standalone runner scaffold"),
@@ -869,7 +872,7 @@ def _roster_checks():
              local_text + '\nrun_gate "launcher" python3 -B -I tools/check_secrets.py --self-test\n',
              "unsupported self-test launcher:"),
             ("roster/empty-selftests-refused", local,
-             'run_gate "live" python3 -I -B tools/check_secrets.py\n',
+             state + 'run_gate "live" python3 -I -B tools/check_secrets.py\n',
              local + ": empty self-test roster"),
             ("roster/prefixed-invalid-suite-refused", local,
              local_text + '\nrun_gate "bad-suite" python3 -I -B ./tools/check_selftest_execution.py --suite git-fixture-env-selftest --extra\n',
