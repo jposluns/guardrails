@@ -368,9 +368,11 @@ def homes_gitignore_matches(text):
 
 def snapshot_caller_alarm():
     """Snapshot the caller's SIGALRM timing state for a hermetic FIFO-probe watchdog, the SINGLE source of
-    truth the opf-side watchdogs share (round-15 F1, so no per-site save/restore can diverge again and
-    re-induce the watchdog-timer class). Captures the caller's ITIMER_REAL value and repeating interval, a
-    monotonic baseline for the elapsed-aware restore, and whether a SIGALRM was already PENDING on entry.
+    truth the opf-side watchdogs are meant to route through (round-15 F1: one body to diverge in rather than
+    one per site). A call site that hand-rolls its own save/restore instead is caught only best-effort by the
+    behavioural watchdog tests; a structural call-site guard is tracked separately. Captures the caller's
+    ITIMER_REAL value and repeating interval, a monotonic baseline for the elapsed-aware restore, and whether
+    a SIGALRM was already PENDING on entry.
     Returns an opaque tuple to hand to restore_caller_alarm() in the watchdog's finally. Call it BEFORE the
     probe installs its own handler / unblocks / arms its timer (so the pending reading is the caller's, not
     the probe's)."""
@@ -384,8 +386,9 @@ def snapshot_caller_alarm():
 
 def restore_caller_alarm(prev_value, prev_interval, t0, was_pending):
     """Restore the caller's SIGALRM timing state a FIFO-probe watchdog borrowed, the SINGLE elapsed-aware
-    save/restore every opf-side watchdog shares (round-15 F1, so no per-site verbatim restore can diverge
-    and re-induce the watchdog-timer class the round-13 fix closed once). Two moves:
+    save/restore every opf-side watchdog is meant to share (round-15 F1: one body to diverge in rather than one
+    per site, guarding the watchdog-timer class the round-13 fix closed once; a hand-rolled call-site restore
+    is caught only best-effort by the behavioural watchdog tests). Two moves:
       (1) ITIMER_REAL is re-armed ELAPSED-AWARE: the caller's remaining value MINUS the wall time the
           watchdog held it (interval preserved), so running the watchdog neither PAUSES nor EXTENDS a
           caller deadline. A deadline that would have expired during the probe clamps to a tiny positive so
