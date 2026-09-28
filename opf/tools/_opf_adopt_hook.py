@@ -56,8 +56,9 @@ platform's next load, and the file usually already carries the adopter's own sec
      hook-startup failures may fall through to normal permissions (the enforcement-pack residual
      table this unit inherits); per-clone installation and later hand edits to the registration
      file after adoption are outside the op; an unverifiable platform gets no enable-hook write
-     (above); pack authenticity rests on `manifest_sha256` plus the receipt's independent anchor,
-     and a forged pack outside that anchor is the standing self-asserted-identity residual.
+     (above); until the adoption trust gate lands, pack authenticity rests on `manifest_sha256`
+     alone (no second, out-of-band digest is consulted), so a forged pack is the standing
+     self-asserted-identity residual.
 
 Outcome model (the _opf_adopt mapping, single-sourced from _opf_store): CANNOT-EVALUATE for input
 this library cannot decide under v1 assumptions (undecodable/unparseable bytes, a duplicate JSON
