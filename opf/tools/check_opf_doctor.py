@@ -29,13 +29,19 @@ of an immutable record body (a resurrection finding against the committed prior)
 unparseable manifest); and 0 (NOT APPLICABLE) on a non-adopter root. The enforcement-pack CI floor rides the
 same fixtures: `doctor --require-store` keeps 0 on the clean store and turns the non-adopter root into 2, and
 the shipped recipe opf/enforcement/ci/opf-ci.sh (doctor --require-store, then render --check) exits 0 on the
-clean store and 2 on the non-adopter root. Round-2 recipe-CONTRACT vectors hold the recipe itself durable:
+clean store and 2 on the non-adopter root. Recipe-CONTRACT vectors hold the recipe itself durable:
 a RECORDING STUB tool asserts the exact invocation order and arguments (doctor --require-store, then render
---check, each over the given root, nothing else) and per-step exit propagation (a doctor 1/2 stops the
-recipe before render; a render 1/2 is the recipe's exit; a step that cannot launch at all is normalized to
-2), and a committed clean store with ONE declared, planner-populated view red-flags end to end once the view
-is edited (render --check 1, doctor 1, recipe 1) while both recipe runs leave the tree byte-identical (the
-read-only claim, held as a check). The stub exists because the real tool cannot isolate the render step: a
+--check, each over the given root, nothing else), per-step exit propagation (a doctor 1/2 stops the recipe
+before render; a render 1/2 is the recipe's exit), and abnormal-status normalization for BOTH steps (a child
+status of 3, 126 or 137, a genuine signal death, and a non-executable or missing OPF_PYTHON each become the
+recipe's cannot-evaluate 2, never a forwarded out-of-vocabulary status, a doctor abnormality stopping before
+render); the usage guard (a surplus operand) exits 2 with NO step launched; the recipe run by a RELATIVE
+path under a hostile CDPATH naming a decoy pack still resolves its own directory and returns the true
+verdict; a committed clean store with ONE declared, planner-populated view red-flags end to end once the
+view is edited (render --check 1, doctor 1, recipe 1) while both recipe runs leave every file and directory
+outside .git/ identical and the ref set unchanged (the read-only claim, held as a check); and the GitHub
+Actions template is held to its own stated discipline (no non-comment line carries continue-on-error or a
+status-masking `|| true`). The stub exists because the real tool cannot isolate the render step: a
 drifted view fails doctor's own C-VIEW-DRIFT too, so only the stub proves the render invocation is still
 present, ordered, exactly argued, and forwarded. Each committed fixture is `git init` +
 `git add` + `git commit`ed so the `tracked` and `prior` observations _opf_observe.gather derives from HEAD are
@@ -277,26 +283,32 @@ def _self_test_isolated():
         _git(root, home, "add", "-A")
         _git(root, home, "commit", "-m", "seed store")
 
-    def _run_ci_recipe(root, tool=None, extra_env=None):
+    def _run_ci_recipe(root, tool=None, extra_env=None, extra_args=(), cwd=None, recipe=None):
         """Run the shipped CI recipe (opf/enforcement/ci/opf-ci.sh) over `root` with this interpreter as
         OPF_PYTHON, returning its exit status unmasked. By default OPF_TOOL is popped so the recipe
         exercises its default pack-relative opf.py path; `tool` sets OPF_TOOL instead (the recipe-contract
         vectors point it at the recording stub), and `extra_env` adds entries (the stub's log path and
-        per-verb exit codes, or an OPF_PYTHON override for the launch-failure vector). A missing `sh`,
-        a missing recipe, or a launch failure raises OSError (a harness error, exit 2 via _classify)."""
+        per-verb exit codes, an OPF_PYTHON override for the launch-failure vectors, or a hostile CDPATH).
+        `extra_args` appends operands after the root (the usage-guard vector), `cwd` sets the child's
+        working directory, and `recipe` substitutes a recipe path passed VERBATIM (the CDPATH vector runs
+        a COPY by a RELATIVE path; the default stays the shipped recipe, absolute). A missing `sh`, a
+        missing shipped recipe, or a launch failure raises OSError (a harness error, exit 2 via
+        _classify)."""
         sh = shutil.which("sh")
         if sh is None:
             raise OSError("sh not found on PATH; the CI recipe cannot be run")
-        recipe = Path(__file__).resolve().parent.parent / "enforcement" / "ci" / "opf-ci.sh"
-        if not recipe.is_file():
-            raise OSError("the CI recipe {} is missing".format(recipe))
+        shipped = Path(__file__).resolve().parent.parent / "enforcement" / "ci" / "opf-ci.sh"
+        if not shipped.is_file():
+            raise OSError("the CI recipe {} is missing".format(shipped))
         env = dict(os.environ, OPF_PYTHON=sys.executable)
         env.pop("OPF_TOOL", None)
         if tool is not None:
             env["OPF_TOOL"] = str(tool)
         if extra_env:
             env.update(extra_env)
-        proc = subprocess.run([os.path.abspath(sh), str(recipe), str(root)], env=env,
+        argv = [os.path.abspath(sh), str(shipped) if recipe is None else str(recipe), str(root)]
+        argv += [str(a) for a in extra_args]
+        proc = subprocess.run(argv, env=env, cwd=None if cwd is None else str(cwd),
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return proc.returncode
 
@@ -315,18 +327,32 @@ def _self_test_isolated():
             raise OSError("could not launch the render child for root {} ({})".format(root, exc))
         return proc.returncode
 
-    def _tree_digest(root):
-        """A byte-level snapshot of every file under `root` outside .git/ (relpath -> sha256), asserting
-        the recipe's read-only claim: a recipe run must leave the store tree byte-identical. .git/ is
-        excluded because the doctor step's observation gather runs read-only git commands whose internal
-        bookkeeping is not a store write."""
+    def _tree_digest(root, home):
+        """A snapshot asserting the recipe's read-only claim, three-legged: every file under `root`
+        outside .git/ (relpath -> sha256), the SORTED DIRECTORY LISTING outside .git/ (a created
+        directory, even an empty one, is a write the file digests alone cannot see), and the full
+        `git for-each-ref` output (a written ref, e.g. a planted tag, is a repository write even though
+        its bytes live under .git/). .git/ file CONTENTS are excluded because the doctor step's
+        observation gather runs read-only git commands whose internal bookkeeping is not a store write;
+        the ref leg covers the .git/ writes that ARE store-visible. A failing for-each-ref probe raises
+        OSError (a harness error, exit 2 via _classify)."""
         digests = {}
+        dirs = []
         for dirpath, dirnames, filenames in os.walk(str(root)):
             dirnames[:] = [d for d in dirnames if d != ".git"]
+            dirs.append(str(Path(dirpath).relative_to(root)))
             for fname in filenames:
                 p = Path(dirpath) / fname
                 digests[str(p.relative_to(root))] = hashlib.sha256(p.read_bytes()).hexdigest()
-        return digests
+        try:
+            proc = subprocess.run([git, "--no-replace-objects", "-C", str(root), "for-each-ref"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  env=_git_env(home), timeout=_GIT_TIMEOUT_S)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise OSError("git for-each-ref could not run in {} ({})".format(root, exc))
+        if proc.returncode != 0:
+            raise OSError("git for-each-ref failed in {} (rc {})".format(root, proc.returncode))
+        return digests, sorted(dirs), proc.stdout
 
     def _doctor_suite():
         """Build synthetic COMMITTED stores and assert the 0/1/2/0 doctor contract end to end through opf.py.
@@ -385,9 +411,10 @@ def _self_test_isolated():
             expect("ci-recipe-clean-store", _run_ci_recipe(clean), EXIT_OK)
             expect("ci-recipe-not-adopted-root", _run_ci_recipe(empty), EXIT_ERROR)
 
-            # --- The recipe CONTRACT vectors (U16 QA round 2). A RECORDING STUB stands in for opf.py: it
+            # --- The recipe CONTRACT vectors (U16). A RECORDING STUB stands in for opf.py: it
             # appends its argv (after the script path) to OPF_STUB_LOG, one unit-separator-joined line per
-            # invocation, and exits with the per-verb status OPF_STUB_RC_<VERB> (default 0). The stub is
+            # invocation, and exits with the per-verb status OPF_STUB_RC_<VERB> (default 0); a `sig:<N>`
+            # value makes it die by that signal instead (a GENUINE signal death, not an exit). The stub is
             # what makes these assertions possible: with the REAL tool, doctor and render agree over every
             # store this suite can build (a drifted view fails doctor's own C-VIEW-DRIFT too), so no real
             # fixture can red a recipe whose render step was deleted, reordered, re-flagged (--write), or
@@ -398,7 +425,10 @@ def _self_test_isolated():
                 "with open(os.environ['OPF_STUB_LOG'], 'a', encoding='utf-8') as log:\n"
                 "    log.write(chr(31).join(sys.argv[1:]) + chr(10))\n"
                 "verb = sys.argv[1].upper() if len(sys.argv) > 1 else 'NONE'\n"
-                "sys.exit(int(os.environ.get('OPF_STUB_RC_' + verb, '0')))\n",
+                "rc = os.environ.get('OPF_STUB_RC_' + verb, '0')\n"
+                "if rc.startswith('sig:'):\n"
+                "    os.kill(os.getpid(), int(rc[4:]))\n"
+                "sys.exit(int(rc))\n",
                 encoding="utf-8")
             stub_serial = [0]
 
@@ -445,14 +475,80 @@ def _self_test_isolated():
             expect("ci-recipe-missing-interpreter",
                    _run_ci_recipe(clean, extra_env=dict(OPF_PYTHON=str(base / "no-such-python"))),
                    EXIT_ERROR)
+            # A NON-EXECUTABLE interpreter (the shell's own 126) is the launch failure's sibling and
+            # must normalize the same way; a passthrough that special-cases only 127 forwards it.
+            nonexec = base / "nonexec-python"
+            nonexec.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")  # never made executable: 126 by construction
+            expect("ci-recipe-nonexec-interpreter",
+                   _run_ci_recipe(clean, extra_env=dict(OPF_PYTHON=str(nonexec))), EXIT_ERROR)
+            # Abnormal-status normalization for BOTH steps: any child status outside the 0/1/2 verdict
+            # vocabulary (a tool bug's 3, a 126/137 launch or kill status leaking through, a genuine
+            # signal death) must surface as the recipe's cannot-evaluate 2, never forwarded as if it
+            # were a verdict and never masked to 0. A doctor abnormality stops before render (the same
+            # short-circuit the 1/2 vectors assert); a render abnormality follows both steps.
+            for bad in ("3", "126", "137", "sig:15"):
+                rc, calls = _run_recipe_stubbed(rc_doctor=bad)
+                expect("ci-recipe-doctor-abnormal-{}".format(bad),
+                       (rc, [c[0] for c in calls]), (EXIT_ERROR, ["doctor"]))
+                rc, calls = _run_recipe_stubbed(rc_render=bad)
+                expect("ci-recipe-render-abnormal-{}".format(bad),
+                       (rc, [c[0] for c in calls]), (EXIT_ERROR, ["doctor", "render"]))
+            # The usage guard: a surplus operand is a usage error (exit 2) and NO step runs (the stub
+            # log is never created), so a deleted guard cannot silently check the first operand and
+            # ignore the rest.
+            usage_log = base / "stub-log-usage"
+            rc = _run_ci_recipe(clean, tool=stub, extra_env=dict(OPF_STUB_LOG=str(usage_log)),
+                                extra_args=("surplus",))
+            expect("ci-recipe-usage-surplus-operand",
+                   (rc, usage_log.exists()), (EXIT_ERROR, False))
+            # The CDPATH regression vector: the recipe resolves its own directory with `CDPATH= cd`; a
+            # plain `cd` under a hostile CDPATH PRINTS the resolved directory (corrupting `here` with a
+            # second output line) and can resolve into the CDPATH entry instead of the script's real
+            # directory, breaking the default pack-relative OPF_TOOL path. Run a COPY of the recipe by
+            # a RELATIVE path from the copy's root, with CDPATH naming a decoy that also holds
+            # opf/enforcement/ci and with the stub at the copy's default opf/tools/opf.py; the fixed
+            # recipe resolves its true directory and returns the true verdict (0, both steps recorded),
+            # while a reverted plain `cd` resolves into the decoy and reds this vector.
+            cdroot = base / "cdpath-copy"
+            (cdroot / "opf" / "enforcement" / "ci").mkdir(parents=True)
+            shutil.copyfile(
+                str(Path(__file__).resolve().parent.parent / "enforcement" / "ci" / "opf-ci.sh"),
+                str(cdroot / "opf" / "enforcement" / "ci" / "opf-ci.sh"))
+            (cdroot / "opf" / "tools").mkdir(parents=True)
+            shutil.copyfile(str(stub), str(cdroot / "opf" / "tools" / "opf.py"))
+            decoy = base / "cdpath-decoy"
+            (decoy / "opf" / "enforcement" / "ci").mkdir(parents=True)
+            cd_log = base / "stub-log-cdpath"
+            rc = _run_ci_recipe(clean, extra_env=dict(OPF_STUB_LOG=str(cd_log), CDPATH=str(decoy)),
+                                cwd=cdroot, recipe="opf/enforcement/ci/opf-ci.sh")
+            cd_calls = []
+            if cd_log.is_file():
+                cd_calls = [line.split(chr(31)) for line in
+                            cd_log.read_text(encoding="utf-8").splitlines()]
+            expect("ci-recipe-relative-path-hostile-cdpath",
+                   (rc, [c[0] for c in cd_calls]), (EXIT_OK, ["doctor", "render"]))
+            # The GitHub Actions template is held to its own stated discipline (a template nothing runs
+            # in this repository would otherwise drift as prose): no NON-COMMENT line may carry
+            # continue-on-error, and none may mask a step's status with a `|| true` trailer. Comment
+            # lines are excluded because the template's own comment names the forbidden key.
+            workflow = (Path(__file__).resolve().parent.parent / "enforcement" / "ci"
+                        / "github-actions.yml")
+            wf_lines = [" ".join(ln.split()) for ln in
+                        workflow.read_text(encoding="utf-8").splitlines()
+                        if not ln.lstrip().startswith("#")]
+            expect("workflow-no-continue-on-error",
+                   [ln for ln in wf_lines if "continue-on-error" in ln], [])
+            expect("workflow-no-status-masking-trailer",
+                   [ln for ln in wf_lines if "|| true" in ln or "||true" in ln], [])
 
-            # --- The recipe end to end over a REAL drifted view (U16 QA round 2): a committed clean store
+            # --- The recipe end to end over a REAL drifted view (U16): a committed clean store
             # with ONE declared view, populated through the U4 engine's own public planner
             # (_opf_views.plan_views, the check_opf_drift fixture idiom; never hand-built), then edited and
             # re-committed. First witness the fixture is genuinely clean through BOTH recipe steps (0),
             # then witness the drift red-flags end to end: render --check itself exits 1, doctor exits 1
             # (C-VIEW-DRIFT is part of validate_store), and the recipe forwards the finding (1). Both
-            # recipe runs leave the tree byte-identical: the read-only claim, held as a check. ----------
+            # recipe runs leave the files, directories and refs unchanged: the read-only claim, held as
+            # a check. ------------------------------------------------------------------------------
             viewed = base / "viewed"
             viewed.mkdir()
             machine = clean_machine()
@@ -471,9 +567,9 @@ def _self_test_isolated():
             _git(viewed, home, "init")
             _git(viewed, home, "add", "-A")
             _git(viewed, home, "commit", "-m", "seed store with a declared view")
-            before = _tree_digest(viewed)
+            before = _tree_digest(viewed, home)
             expect("ci-recipe-clean-viewed-store", _run_ci_recipe(viewed), EXIT_OK)
-            expect("ci-recipe-clean-run-read-only", _tree_digest(viewed) == before, True)
+            expect("ci-recipe-clean-run-read-only", _tree_digest(viewed, home) == before, True)
             view_target = viewed / _opf_store.WORKING_DIRNAME / "WORKLOG.md"
             view_target.write_text(view_target.read_text(encoding="utf-8") + "drifted line\n",
                                    encoding="utf-8")
@@ -481,9 +577,9 @@ def _self_test_isolated():
             _git(viewed, home, "commit", "-m", "commit the drifted view")
             expect("drifted-view-render-check", _run_render_check(viewed), EXIT_FINDING)
             expect("drifted-view-doctor", _run_doctor(viewed, capture=True), EXIT_FINDING)
-            before = _tree_digest(viewed)
+            before = _tree_digest(viewed, home)
             expect("ci-recipe-drifted-viewed-store", _run_ci_recipe(viewed), EXIT_FINDING)
-            expect("ci-recipe-drifted-run-read-only", _tree_digest(viewed) == before, True)
+            expect("ci-recipe-drifted-run-read-only", _tree_digest(viewed, home) == before, True)
 
             # Child-LAUNCH failure -> exit 2 (cannot-evaluate), never a false verdict. Inject an OSError at the
             # launch call (an OS refusal to fork under RLIMIT_NPROC pressure surfaces as BlockingIOError);
@@ -578,9 +674,13 @@ def _self_test_isolated():
               "immutable-body mutation vs the committed prior / 2 on a broken store / 0 NOT APPLICABLE, end to "
               "end; --require-store -> 0 clean / 2 NOT-ADOPTED; CI recipe -> 0 clean / 2 NOT-ADOPTED; "
               "recipe contract -> exact step order and arguments (doctor --require-store then render "
-              "--check), per-step 0/1/2 propagation with doctor failures stopping before render, launch "
-              "failure normalized to 2, a committed drifted view -> 1 end to end (render --check, doctor, "
-              "recipe), both recipe runs read-only (tree byte-identical); "
+              "--check), per-step 0/1/2 propagation with doctor failures stopping before render, abnormal "
+              "statuses (3/126/137, a signal death, a non-executable or missing interpreter) normalized "
+              "to 2 for BOTH steps with a doctor abnormality stopping before render, a surplus operand a "
+              "usage 2 with no step run, a relative invocation under a hostile CDPATH -> the true "
+              "verdict, a committed drifted view -> 1 end to end (render --check, doctor, "
+              "recipe), both recipe runs read-only (files and directories outside .git/ identical, refs "
+              "unchanged), the workflow template free of non-comment continue-on-error and `|| true`; "
               "child-launch failure -> 2; no-repo-root -> 2; invalid-git-marker -> 2; "
               "relative-toplevel probe -> None (exit 2); "
               "git executable absolutized (relative which() -> absolute argv[0]); "

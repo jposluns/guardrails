@@ -1,5 +1,5 @@
 #!/bin/sh
-# OPF CI floor: the portable shell recipe (enforcement pack, spec 1.3.0 14.1: the pack MUST provide CI checks).
+# OPF CI floor: the portable shell recipe (enforcement pack, spec 1.3.0 (draft) 14.1: the pack MUST provide CI checks).
 #
 #   sh opf-ci.sh [ROOT]      ROOT defaults to the current directory (the checked-out revision)
 #
@@ -8,7 +8,7 @@
 #                                    that was removed cannot pass CI vacuously
 #   2. opf render --check           the declared views match their sources (1 means drift)
 # Exit status is 0/1/2 only (0 clean, 1 finding, 2 cannot-evaluate): a failing step exits with its own
-# 0/1/2, forwarded unchanged, and ANY other child status (a launch failure such as the shell's own 127
+# 1/2, forwarded unchanged, and ANY other child status (a launch failure such as the shell's own 127
 # command-not-found or 126 not-executable, or a signal death) is normalized to 2, mirroring the
 # check_opf_doctor clamp, so an out-of-vocabulary status is never read as a verdict. 0 only when both
 # steps pass. It writes nothing.
