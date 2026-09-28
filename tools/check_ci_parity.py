@@ -51,9 +51,22 @@ if [ "$failed" -ne 0 ]; then, if [ "$notrun" -ne 0 ]; then, and the two exact
 gitleaks lookup lines, so a -v operand (whose subscript can assign), any NAME[...]
 subscript operand, a bare [ ] line, and every unlisted test form are unclassified.
 set -uo pipefail or set -euo pipefail is accepted only at top level before the first
-gate. Every expansion in an assignment or echo must be a plain $NAME, ${NAME} or $?,
-and a ${...:?...} abort expansion is refused on any runner line, because it exits
-the runner mid-roster with a non-zero status when its variable is unset.
+gate. Every other assignment, export or echo line must be byte-for-byte one of the
+finite scaffold lines the two real runners contain (RUNNER_SCAFFOLD_LINES, compared
+after comment stripping and whitespace trimming), so a spelling the runners do not
+contain is unclassified even when its value looks inert: bash evaluates a value
+assigned to an integer special variable as arithmetic (RANDOM=failed=0 resets
+failed), a compound array subscript assigns (x=([failed=0]=1)), and notrun=0 is
+accepted only at top level before the first gate, where the real runner puts it,
+because a later notrun=0 would hide the NOT RUN disclaimer. Behind that membership,
+each expansion must still be a plain $NAME, ${NAME} or $? of a name the runner
+itself sets or manages (failed, notrun, failed_names, name, rc, gitleaks_rc, HOME,
+PATH): under set -u, a plain expansion of any other, possibly unset, variable
+(x=$BASH_ENV) ends the runner mid-roster exactly as an abort expansion does. A
+${...:?...} abort expansion is refused on ANY runner line, including inside a masked
+runtime-value flag on a run_gate line, the one place the exact-line and
+named-expansion screens do not reach, because it exits the runner mid-roster with a
+non-zero status when its variable is unset.
 Deeper nested non-gate YAML (under on:, env:, with:, or strategy:) is structurally
 recognized but not exhaustively schema-validated; the shadow scan still prevents a
 tools/ gate from hiding there. Reachability is outside token-parity scope: a gate is
@@ -67,10 +80,19 @@ like a double-quoted one; and a duplicate run: key within one step is counted as
 members although YAML keeps one. The shadow scan has one soft edge: exotic quoting
 outside the supported grammar could hide a tools/ string from comment stripping.
 The runner's failure-state rules are lexical and shape-based: they validate each
-line against the allowlist, not reachability or runtime values, so a reset smuggled
-through content the allowlist does accept (a gate script itself, or the environment
-the runner inherits) is outside them; the formerly disclosed offset-carried spelling
-(y=failed=0 then x=${PATH:y:0}) is now refused as an unlisted expansion shape.
+line against the allowlist, not reachability or runtime values. Every reported
+smuggling spelling, including the formerly disclosed offset-carried one (y=failed=0
+then x=${PATH:y:0}) and the arithmetic-assignment class (RANDOM=failed=0), is now
+refused as outside the exact-line grammar. What the grammar accepts and still
+cannot see into is a gate script itself, the environment the runner inherits, and
+the masked value of a runtime-derived flag on a run_gate line. That masked value
+cannot assign failure state in the runner process (an assigning expansion shape is
+refused there too, and a command substitution runs in a subshell), but it could
+carry a ${...:?...} abort: the abort-expansion rule is the only rule that reaches
+it, so that rule is load-bearing, not redundant, and a self-test fixture fails
+without it. A plain expansion of an unset variable in such a masked value still
+ends the run early under set -u, always with a non-zero exit: it can lose the
+remaining roster and the FAILED GATES list, but never masks a failure as a pass.
 The --self-test backs the rules at runtime with a scratch copy
 of the live runner: no gate failing, gitleaks and leaks failing together, gitleaks failing alone,
 and each registered gate failing alone. Those scenarios run in parallel, so every
@@ -537,6 +559,40 @@ RUNNER_TEST_LINES = frozenset({
     'if command -v gitleaks >/dev/null 2>&1; then',
 })
 
+# The only non-gate, non-test scaffold lines the two real runners contain outside
+# run_gate(), the failure-state initializers and updates, and the position-checked
+# set/cd/notrun=0/exit shapes handled separately: enumerated from
+# tools/run_all_checks.sh and from opf/tools/run_all_checks.sh as
+# tools/selftest_git_fixture_env.py adapts it (its validated directory binding and
+# terminal exit 0 are removed there). Acceptance is exact membership, never an
+# assignment/export/echo pattern, so a spelling outside this finite set is
+# unclassified: bash evaluates a value assigned to RANDOM, SRANDOM, OPTIND or
+# HISTCMD as arithmetic (RANDOM=failed=0 resets failed), a compound array subscript
+# assigns (x=([failed=0]=1)), and an expansion of an unset variable aborts under
+# set -u (x=$BASH_ENV, echo "$stub_log"). notrun=0 is accepted only at top level
+# before the first gate, because a later reset would hide the NOT RUN disclaimer.
+RUNNER_SCAFFOLD_LINES = frozenset({
+    # tools/run_all_checks.sh
+    "export PYTHONDONTWRITEBYTECODE=1",
+    'PATH="$PATH:$HOME/.local/bin"',
+    "gitleaks_rc=$?",
+    "notrun=1",
+    "echo",
+    'echo "--- secrets (gitleaks) ---"',
+    'echo "PASS: gitleaks found no leaks"',
+    'echo "GATE FAILED: secrets (gitleaks) (exit ${gitleaks_rc})"',
+    'echo "NOT RUN: gitleaks is not on PATH locally. CI still runs it, so this is a gap"',
+    'echo "  in THIS run only, not in the pipeline. Install it to close the gap:"',
+    'echo "  see the pinned version and checksum in .github/workflows/quality.yml"',
+    'echo "FAILED GATES: ${failed_names}"',
+    'echo "RESULT: FAIL"',
+    'echo "RESULT: PASS, but one or more gates did NOT RUN locally (see above)"',
+    'echo "RESULT: PASS"',
+    # opf/tools/run_all_checks.sh (adapted): its distinct summary echoes
+    'echo "OPF STANDALONE SUBSET: FAILED"',
+    'echo "OPF STANDALONE SUBSET: OK"',
+})
+
 # Exact executable suffixes that may contain exits. The standalone roster adapter
 # validates and removes its final exit 0 and directory binding before extraction.
 TERMINAL_SUMMARIES = (
@@ -598,19 +654,42 @@ def _abort_expansion(code):
     """Return whether code carries a ${...:?...} abort expansion. When the named
     variable is unset (the disclosed harness-detection trigger), that expansion exits
     the runner mid-roster with a non-zero status, losing the remaining gates and the
-    FAILED GATES summary; no line of either real runner uses one."""
+    FAILED GATES summary; no line of either real runner uses one. This check runs
+    before the run_gate branch, so it also refuses an abort carried inside a masked
+    runtime-value flag, the one channel the exact-line scaffold membership and the
+    named-expansion screen do not reach; a vector 26 fixture fails without it."""
     return any(":?" in span for span in _expansion_spans(code, "${", "{", "}"))
 
 
-# The only expansions the runner allowlist accepts outside exact-shape lines: a plain
-# $NAME, ${NAME} or $?. Subscripts, offsets, case or :? operators, $(( )), $( ), $[ ]
-# and backquotes are all outside it, because bash can assign or abort inside them.
+# The only expansion forms a scaffold line may carry: a plain $NAME, ${NAME} or $?.
+# Subscripts, offsets, case or :? operators, $(( )), $( ), $[ ] and backquotes are
+# all outside it, because bash can assign or abort inside them. The NAME must also
+# be one the runner itself sets or manages (name and rc are run_gate() locals,
+# gitleaks_rc is set in the gitleaks failure branch, HOME and PATH feed the
+# gitleaks lookup): under set -u, a plain expansion of any other, possibly unset,
+# variable (x=$BASH_ENV, echo "$stub_log") ends the runner mid-roster with a
+# non-zero status. Exact-line membership in RUNNER_SCAFFOLD_LINES already implies
+# both properties; this screen is belt and braces behind it, so a future scaffold
+# addition cannot widen the expansion surface unreviewed.
+_RUNNER_SET_NAMES = frozenset({
+    "failed", "notrun", "failed_names", "name", "rc", "gitleaks_rc",
+    "HOME", "PATH", "?",
+})
 _PLAIN_EXPANSION_RE = re.compile(
-    r"\$(?:\?|[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})")
+    r"\$(?:(?P<special>\?)|(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+    r"|\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\})")
 
 
-def _allowed_expansions(code):
-    return "`" not in code and "$" not in _PLAIN_EXPANSION_RE.sub("", code)
+def _runner_set_expansions(code):
+    names = []
+
+    def _collect(match):
+        names.append(match.group("name") or match.group("braced") or "?")
+        return ""
+
+    remainder = _PLAIN_EXPANSION_RE.sub(_collect, code)
+    return ("`" not in code and "$" not in remainder
+            and all(name in _RUNNER_SET_NAMES for name in names))
 
 
 def extract_local(text):
@@ -793,9 +872,11 @@ def extract_local(text):
         # Failure state may be initialized once at top level before any gate, then
         # assigned here only in the gitleaks failure branch (the dispatcher body is
         # validated whole). These rules are lexical and shape-based: together with the
-        # scaffold allowlist below they reject direct assignments, every non-plain
-        # expansion, and every unlisted test shape, not a reset smuggled through
-        # content they accept (a gate script, the inherited environment). The
+        # exact-line scaffold membership below they reject direct assignments, every
+        # assignment, export or echo spelling the real runners do not contain, every
+        # non-plain or unlisted-name expansion, and every unlisted test shape, not a
+        # reset smuggled through content they accept (a gate script, the inherited
+        # environment). The
         # self-test exercises the declared scenarios; harness detection and untested
         # environments or failure combinations remain outside its runtime coverage.
         assignments = tokens[1:] if tokens[:1] == ["export"] else tokens
@@ -824,11 +905,14 @@ def extract_local(text):
                 ))
             continue
 
-        # ALLOWLIST scaffold: a non-gate line must match one of the exact shapes the
-        # two real runners use. Anything else, including any [ ] test outside
-        # RUNNER_TEST_LINES (bare or behind if), a set line anywhere but top level
-        # before the first gate, and an expansion that is not a plain $NAME, ${NAME}
-        # or $?, is unclassified rather than accepted.
+        # ALLOWLIST scaffold: a non-gate line must BE one of the exact lines the two
+        # real runners contain (RUNNER_SCAFFOLD_LINES plus the structural words and
+        # the position-checked set, cd, notrun=0 and terminal-exit shapes), never
+        # merely match an assignment, export or echo pattern. Anything else,
+        # including any [ ] test outside RUNNER_TEST_LINES (bare or behind if), an
+        # assignment such as RANDOM=failed=0 or x=([failed=0]=1) whose value bash
+        # would evaluate, and an expansion of a name the runner does not set
+        # (x=$BASH_ENV), is unclassified rather than accepted.
         scaffold = False
         if stripped in ("set -uo pipefail", "set -euo pipefail"):
             # Only where the real runners put it: top level, before any gate, where
@@ -836,20 +920,16 @@ def extract_local(text):
             scaffold = if_depth == 0 and not members
         elif stripped == 'cd "$(dirname "$0")/.." || exit 2':
             scaffold = True
-        elif (tokens and tokens[0] == "export"
-                and len(tokens) == 2
-                and ASSIGN_RE.fullmatch(tokens[1])):
-            scaffold = (_allowed_expansions(stripped)
-                        and _allowed_expansions(" ".join(tokens)))
-        elif len(tokens) == 1 and ASSIGN_RE.fullmatch(tokens[0]):
-            scaffold = (_allowed_expansions(stripped)
-                        and _allowed_expansions(" ".join(tokens)))
-        elif tokens and tokens[0] == "echo":
-            scaffold = (
-                _safe_simple(tokens)
-                and _allowed_expansions(stripped)
-                and _allowed_expansions(" ".join(tokens))
-            )
+        elif stripped == "notrun=0":
+            # Only where the real runner puts it: top level, before any gate. A
+            # later notrun=0 would clear the NOT RUN state and hide its disclaimer.
+            scaffold = if_depth == 0 and not members
+        elif stripped in RUNNER_SCAFFOLD_LINES:
+            # Exact membership decides; the named-expansion screen is belt and
+            # braces so a future scaffold addition cannot widen the expansion
+            # surface unreviewed.
+            scaffold = (_runner_set_expansions(stripped)
+                        and _runner_set_expansions(" ".join(tokens)))
         elif stripped in ("else", "fi", "then"):
             scaffold = True
         elif line_number in terminal_exits and if_depth == 1:
@@ -2040,10 +2120,13 @@ def _stubs_prepared_before_pool(text, red_command):
     recorder that sees nothing cannot pass; the required-stub and
     every-executable-was-seen legs keep the rest from passing vacuously.
     File-descriptor-only operations (os.fchmod, a write through an inherited
-    descriptor) are outside what these audit events name, as is a write made by a
-    child process (a cp or install run in a subprocess); only the
-    never-seen-written leg catches a stub that no Python code wrote. A dir_fd-
-    relative path in an audit event is resolved through /proc/self/fd where that
+    descriptor) are outside what these audit events name, as is an os.open with
+    dir_fd (the open audit event carries no dir_fd argument, so a relative path
+    opened that way stays working-directory-resolved and is not matched to the
+    stub) and a write made by a child process (a cp or install run in a
+    subprocess); only the never-seen-written leg catches a stub that no Python
+    code wrote. A dir_fd-relative path is resolved through /proc/self/fd only for
+    the os.chmod, os.rename, os.link and os.symlink events, and only where that
     pseudo-filesystem exists; without it such a path stays working-directory-
     resolved, the same residual class as the descriptor-only operations.
 
@@ -2384,7 +2467,7 @@ def self_test():
     gitleaks_tail = (
         "if gitleaks dir . --no-banner --redact "
         "--exit-code 1; then",
-        '  echo "PASS"',
+        '  echo "PASS: gitleaks found no leaks"',
         "else",
         "  gitleaks_rc=$?",
         "  failed=1",
@@ -3152,9 +3235,15 @@ def self_test():
             elif not any(item.code == "unclassified-line"
                          for item in extract_local(mutant).diagnostics):
                 failures.append("26 unexpected exit was not rejected: " + name)
-        # qa4 allowlist rejections: each spelling resets failure state, detects the
-        # harness, or ends the run early through a line shape no real runner uses;
-        # the allowlist must refuse every one as unclassified, not accept it.
+        # qa4/qa5 allowlist rejections: each spelling resets failure state, detects
+        # the harness, or ends the run early through a line no real runner contains;
+        # the exact-line allowlist must refuse every one as unclassified. The
+        # arithmetic assignments (bash evaluates a value assigned to RANDOM, SRANDOM
+        # or OPTIND as arithmetic), the compound subscript, the notrun reset and the
+        # unset-variable expansions fail without the exact-line membership change:
+        # the former pattern rules accepted them all. The masked-flag abort fixture
+        # fails without the ${...:?...} rule, the one rule reaching inside a masked
+        # runtime-value flag on a run_gate line.
         allowlist_fixtures = (
             ("-v subscript reset in a bare test",
              mutate((gitleaks, "[ -v 'PATH[failed=0]' ]\n" + gitleaks))),
@@ -3185,6 +3274,33 @@ def self_test():
              mutate((gitleaks, 'echo "${stub_log:?}"\n' + gitleaks))),
             ("offset expansion outside the allowlist",
              mutate((gitleaks, "x=${PATH:0:1}\n" + gitleaks))),
+            ("arithmetic assignment reset via RANDOM",
+             mutate((gitleaks, "RANDOM=failed=0\n" + gitleaks))),
+            ("arithmetic assignment reset via SRANDOM",
+             mutate((gitleaks, "SRANDOM=failed=0\n" + gitleaks))),
+            ("arithmetic assignment reset via OPTIND",
+             mutate((gitleaks, "OPTIND=failed=0\n" + gitleaks))),
+            ("exported arithmetic assignment reset",
+             mutate((gitleaks, "export RANDOM=failed=0\n" + gitleaks))),
+            ("compound array subscript reset",
+             mutate((gitleaks, "x=([failed=0]=1)\n" + gitleaks))),
+            ("harness-conditional arithmetic reset",
+             mutate((gitleaks,
+                     'RANDOM="failed=SECONDS>30?0:failed"\n' + gitleaks))),
+            ("harness-conditional arithmetic reset inside an allowed test",
+             mutate((summary,
+                     summary + 'RANDOM="failed=SECONDS>30?0:failed"\nfi\n'
+                     + summary))),
+            ("notrun reset below a gate",
+             mutate((gitleaks, "notrun=0\n" + gitleaks))),
+            ("unset-variable expansion in an assignment",
+             mutate((gitleaks, "x=$BASH_ENV\n" + gitleaks))),
+            ("unset-variable expansion in an echo",
+             mutate((gitleaks, 'echo "$stub_log"\n' + gitleaks))),
+            ("abort expansion masked inside a runtime-value flag",
+             mutate((gitleaks,
+                     'run_gate "abort-probe" python3 -I -B tools/check_leaks.py '
+                     "--base ${stub_log:?}\n" + gitleaks))),
         )
         for name, mutant in allowlist_fixtures:
             if mutant is None:
@@ -3200,28 +3316,42 @@ def self_test():
                 item.code == "unclassified-line"
                 for item in extract_local(indirect).diagnostics):
             failures.append("26 offset-carried indirect reset was not rejected")
-        # Sweep completeness is asserted on what runner_naming_problems EXECUTES,
-        # through the same subprocess.run seam vector 27 patches, not only on the
-        # _naming_scenarios helper: record each started scenario's
-        # (stub_fail_command, stub_gitleaks_rc) pair and require equality with the
-        # pairs the declared roster demands: a passing run and gitleaks alone
-        # (fail command empty), the fixed combined gitleaks+leaks scenario, and
-        # every distinct registered command failing alone. Truncating or filtering
-        # the scenario list at the call site turns this red.
+        # Sweep completeness is asserted on what runner_naming_problems EXECUTES
+        # (through the same subprocess.run seam vector 27 patches) AND on what it
+        # EVALUATES: a canary appended by the patched _scenario_problems must come
+        # back in the returned problem list for every scenario, so each scenario's
+        # outcome demonstrably reaches the problem check and the result of that
+        # check reaches the caller. Require both the executed and the evaluated
+        # set to equal the pairs the declared roster demands: a passing run and
+        # gitleaks alone (fail command empty), the fixed combined gitleaks+leaks
+        # scenario, and every distinct registered command failing alone.
+        # Truncating or filtering the scenario list at the call site, or
+        # discarding some scenarios' evaluated outcomes while still executing
+        # them, turns this red.
         import subprocess
         from unittest.mock import patch
         executed = []
         real_run = subprocess.run
+        real_scenario_problems = _scenario_problems
 
         def recording_run(argv, **kwargs):
             env = kwargs["env"]
             executed.append((env["stub_fail_command"], env["stub_gitleaks_rc"]))
             return real_run(argv, **kwargs)
 
-        with patch.object(subprocess, "run", recording_run):
+        def canary_scenario_problems(scenario, outcome, *args):
+            return (real_scenario_problems(scenario, outcome, *args)
+                    + [("canary", scenario[1], str(scenario[2]))])
+
+        with patch.object(sys.modules[__name__], "_scenario_problems",
+                          canary_scenario_problems), \
+                patch.object(subprocess, "run", recording_run):
             live_problems = runner_naming_problems(live_runner)
+        evaluated = {item[1:] for item in live_problems
+                     if isinstance(item, tuple) and item[:1] == ("canary",)}
         for problem in live_problems:
-            failures.append("26 live runner: " + problem)
+            if not (isinstance(problem, tuple) and problem[:1] == ("canary",)):
+                failures.append("26 live runner: " + problem)
         want_executed = ({("", "0"), ("", "1"),
                           ("-I -B tools/check_leaks.py", "1")}
                          | {(command, "0") for command in registered_commands})
@@ -3230,6 +3360,11 @@ def self_test():
                 "26 executed sweep incomplete: missing={!r}, extra={!r}".format(
                     sorted(want_executed - set(executed)),
                     sorted(set(executed) - want_executed)))
+        if evaluated != want_executed:
+            failures.append(
+                "26 evaluated sweep incomplete: missing={!r}, extra={!r}".format(
+                    sorted(want_executed - evaluated),
+                    sorted(evaluated - want_executed)))
         runtime_fixtures = (
             ("reset right after the first gate",
              mutate(after_gate(0, "failed=0\n", alone=False))),
