@@ -684,7 +684,7 @@ status or requested title of the new record, or the requested summary of a new w
 that two sequential creates claim BI-1 then BI-2, each with its own worklog entry, with monotonic
 counters, and that a counters map missing an enabled namespace refuses; that a kill at each journal step
 (fifteen over the counters, index, and worklog operands of a create and of an assistant transition, and
-nineteen over the counters, backlog index, done index, and worklog operands of a maintainer
+eighteen over the counters, backlog index, done index, and worklog operands of a maintainer
 done-with-receipt) leaves the killed run's lease, which refuses the next run before any recovery write,
 and that once the operator releases it the next run's reconciliation leaves the operands exactly the
 prestate or exactly the poststate, the poststate only when the transaction completed, and no killed run
@@ -698,9 +698,12 @@ while a rejection with a reason returns to the recorded pre-proposal state, whic
 corroborates, and records the reason; that a rejection refuses with every byte untouched when the
 proposing worklog line disagrees with the committed history (its FROM state rewritten canonically and
 committed with its views, doctor VALID; or a history that reached the proposal again from another state),
-when the committed snapshot before the proposal commit does not parse, or when the proposal is not
-committed; that two branches creating from the same committed counters conflict on the store paths and a
-canonical union resolution carrying a duplicate BI-1 is doctor INVALID with a C-ID-SPACE finding; that a
+when the committed snapshot before the proposal commit does not parse, when the proposal is not
+committed, when a .git/info/grafts entry substitutes the corroborating parent without rewriting the
+proposal commit (the deprecation warning silenced), or when the committed pre-proposal snapshot is an
+unsupported-schema index carrying an incomplete record; that two branches creating from the same
+committed counters conflict on the store paths and a canonical union resolution carrying a
+duplicate BI-1 is doctor INVALID with a C-ID-SPACE finding; that a
 held lease refuses and is never seized, success is reported only after the lease release, and a failed
 release reports the final gate's recorded outcome (doctor-VALID after a create, the accepted pending
 cannot-evaluate after an actor-dependent transition); that a store the final doctor grades not VALID
@@ -718,8 +721,10 @@ qualifier, the maintainer-only check, the done-only-through-its-receipt guard, t
 check sees, the recorded pre-proposal state, doctor's check_unique_ids, the release-before-report
 ordering, the release-failure outcome text, the final doctor, the released-span check, recovery under the
 lease, the intervening-edit check, the --type check before the operand read, the leftover-lock outcome
-text, and the committed-history corroboration) is applied in turn and must turn its test red with an
-assertion; where an independent guard would still refuse, the test asserts the written bytes or an
+text, and the committed-history corroboration's three flips: the worklog line trusted alone, the
+corroborating parent resolved through git's graph with the grafts refusal dropped, and the historical
+snapshot read without index schema or record validation) is applied in turn and must turn its test red
+with an assertion; where an independent guard would still refuse, the test asserts the written bytes or an
 isolated guard before any message. The unit leg (_opf_record.py, via opf.py --self-test) covers the
 argument grammar, the allocation seam including the homes-2 refusal, the four planners, the recorded and
 corroborated pre-proposal state, the one accepted snapshot cannot-evaluate, the leftover-lock outcome

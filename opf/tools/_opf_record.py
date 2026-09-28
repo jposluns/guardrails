@@ -84,9 +84,14 @@ pre-proposal state's lifecycle line is read from the active worklog only: a reco
 verb, or whose proposing entry has rotated to an archive, cannot be rejected here (refused, never guessed).
 Its committed-history corroboration walks the first-parent chain from HEAD (a proposal merged in from a
 branch is judged by the mainline snapshot before the merge, and refuses when that disagrees), reads at most
-_HISTORY_LIMIT commits that changed the record's index, runs before the lease is taken, and trusts the
-repository's own history: a rewritten history that changes the committed statuses is not detected. A
-transition refuses when the clock has not passed the record's recorded timestamps.
+_HISTORY_LIMIT commits that changed the record's index, and runs before the lease is taken. Every git read
+runs with replacement objects and the commit graph disabled, a present .git/info/grafts file REFUSES
+outright, each first parent is derived from the commit object's RAW parent header and must exist locally
+as a commit object, and each historical snapshot is validated before its status is evidence (a supported
+schema-1 index whose uniquely matching record is valid for its type), so grafts and replacement
+substitution are refused rather than followed; the corroboration still trusts the repository's own
+history, and a FULL HISTORY REWRITE that changes the committed commits and statuses themselves is not
+detected. A transition refuses when the clock has not passed the record's recorded timestamps.
 """
 import base64
 import binascii
@@ -357,7 +362,8 @@ class Context:
         self.worklog = None        # the worklog operand: every subcommand appends one entry
         self.done_index = None     # the done index operand, read by done-with-receipt only
         # The committed-history reader a rejection corroborates its pre-proposal state through (a seam).
-        self.history = lambda rel, rid, status: _committed_pre_proposal(res, rel, rid, status)
+        self.history = lambda rel, rid, status, rtype: _committed_pre_proposal(
+            res, rel, rid, status, rtype, self.vendors)
 
     def rel(self, name):
         return "{}/{}".format(self.machine_rel, name)
@@ -550,10 +556,98 @@ def _git_oid(git, store_root, spec):
     return oid
 
 
-def _committed_status(git, store_root, commit, path, rid):
-    """The status of `rid` in the index at `path` in `commit` (an exact commit id), read by git from that
-    blob's own object id; None when the index or the record is absent there. _Unverifiable when the blob
-    cannot be read or parsed, or does not seat `rid` exactly once with a string status."""
+def _require_graftless(git, store_root):
+    """Refuse a repository carrying $GIT_DIR/info/grafts: a grafts entry substitutes commit parents during
+    every graph traversal (rev-list, ^1) WITHOUT rewriting any commit's raw bytes, so a corroborating
+    parent could be swapped in place. --no-replace-objects and core.commitGraph=false, applied by _run_git
+    to every read in this history reader, do not neutralize grafts, so their presence refuses (the
+    tools/check_release_cut.py stance): even an empty or symlinked grafts file refuses, and one that
+    cannot be inspected is never read as absent. Ancestry is then unverifiable, never guessed."""
+    out = _opf_observe._run_git(git, store_root, ["rev-parse", "--path-format=absolute",
+                                                  "--git-path", "info/grafts"])
+    if not out.completed or out.rc != 0:
+        raise _Unverifiable("git could not locate the grafts path ({})".format(out.err.strip()))
+    path = out.out.decode("utf-8", "replace").strip()
+    if not os.path.isabs(path):
+        raise _Unverifiable("git named a non-absolute grafts path")
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise _Unverifiable("the grafts path cannot be inspected ({})".format(exc))
+    raise _Unverifiable("a grafts file is present ({}), which substitutes commit ancestry without "
+                        "rewriting any commit; remove it before a rejection can be corroborated".format(path))
+
+
+def _raw_first_parent(git, store_root, commit):
+    """The first parent of `commit` (an exact commit id) read from the commit object's RAW parent header
+    (git cat-file commit), never resolved through git's graph: grafts, replacement refs, and the commit
+    graph substitute graph traversal but cannot alter the raw commit bytes (the tools/check_release_cut.py
+    commit_header stance; _run_git already disables replacement objects and the commit graph, and
+    _committed_pre_proposal refuses a present grafts file outright). None for a parentless root commit.
+    The named parent must exist locally as a commit object (a shallow boundary names a parent whose object
+    is absent): _Unverifiable otherwise, or when the object cannot be read or its header is malformed."""
+    out = _opf_observe._run_git(git, store_root, ["cat-file", "commit", commit])
+    if not out.completed or out.rc != 0:
+        raise _Unverifiable("git could not read the commit object {} ({})".format(commit[:12], out.err.strip()))
+    if b"\n\n" not in out.out:
+        raise _Unverifiable("the commit object {} carries no header terminator".format(commit[:12]))
+    headers = out.out.split(b"\n\n", 1)[0].splitlines()
+    if not headers or not headers[0].startswith(b"tree "):
+        raise _Unverifiable("the commit object {} carries no tree header".format(commit[:12]))
+    parents = [line[len(b"parent "):].decode("ascii", "replace") for line in headers
+               if line.startswith(b"parent ")]
+    if not parents:
+        return None
+    parent = parents[0]
+    if not _OID_RE.match(parent):
+        raise _Unverifiable("the commit object {} names a malformed parent id".format(commit[:12]))
+    kind = _opf_observe._run_git(git, store_root, ["cat-file", "-t", parent])
+    if not kind.completed:
+        raise _Unverifiable("git could not type the parent {} of {} ({})".format(
+            parent[:12], commit[:12], kind.err.strip()))
+    if kind.rc != 0 or kind.out.strip() != b"commit":
+        raise _Unverifiable("the first parent {} of {} is not a present commit object (a shallow boundary, "
+                            "or a pruned parent)".format(parent[:12], commit[:12]))
+    return parent
+
+
+def _historical_index_rows(document, path, commit):
+    """The [[record]] rows of a committed historical index snapshot, admitted as evidence only when the
+    document is a supported schema-1 {schema, record} index whose rows are all tables (the _index_rows
+    stance applied to committed history): an unsupported schema, an unknown top-level key, or a non-table
+    row is _Unverifiable, never read through for a status."""
+    if not (isinstance(document, dict) and set(document) <= _opf_check.INDEX_TOP_KEYS
+            and document.get("schema") == _opf_schema.SUPPORTED_SCHEMA
+            and isinstance(document.get("record", []), list)):
+        raise _Unverifiable("{} at {} is not a supported schema-{} {{schema, record}} record index".format(
+            path, commit[:12], _opf_schema.SUPPORTED_SCHEMA))
+    rows = document.get("record", [])
+    if not all(isinstance(row, dict) for row in rows):
+        raise _Unverifiable("{} at {} carries a non-table record row".format(path, commit[:12]))
+    return rows
+
+
+def _validated_historical_record(row, rid, rtype, vendors, path, commit):
+    """The uniquely matching historical record, validated against the type the live index carries through
+    the store's own record validator (validate_record) BEFORE its status is used as evidence: an
+    incomplete envelope, a type mismatch, or any other schema violation is _Unverifiable, never
+    corroboration."""
+    rv = _opf_schema.validate_record(row, expected_type=rtype, registered_vendors=vendors)
+    if rv.status != _opf_store.VALID:
+        raise _Unverifiable("{} in {} at {} is not a valid {} record ({}), so its status is not "
+                            "evidence".format(rid, path, commit[:12], rtype, "; ".join(rv.findings)))
+
+
+def _committed_status(git, store_root, commit, path, rid, rtype, vendors):
+    """The status of `rid` (a `rtype` record) in the index at `path` in `commit` (an exact commit id),
+    read by git from that blob's own object id; None when the index or the record is absent there. The
+    snapshot is evidence, so it is validated before its status is used: the document must be a supported
+    schema-1 record index (_historical_index_rows) seating `rid` exactly once with a string status, and
+    the seated record must be a valid `rtype` record by the store's own validator
+    (_validated_historical_record). _Unverifiable when the blob cannot be read or parsed, or when any of
+    that validation fails."""
     blob = _git_oid(git, store_root, "{}:{}".format(commit, path))
     if blob is None:
         return None
@@ -564,34 +658,39 @@ def _committed_status(git, store_root, commit, path, rid):
         document = tomllib.loads(out.out.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
         raise _Unverifiable("{} at {} does not parse as TOML ({})".format(path, commit[:12], exc))
-    rows = document.get("record", [])
-    if not isinstance(rows, list):
-        raise _Unverifiable("{} at {} is not a record index".format(path, commit[:12]))
-    hits = [r for r in rows if isinstance(r, dict) and r.get("id") == rid]
+    hits = [r for r in _historical_index_rows(document, path, commit) if r.get("id") == rid]
     if not hits:
         return None
     if len(hits) > 1 or not isinstance(hits[0].get("status"), str):
         raise _Unverifiable("{} at {} does not seat {} exactly once with a string status".format(
             path, commit[:12], rid))
+    _validated_historical_record(hits[0], rid, rtype, vendors, path, commit)
     return hits[0]["status"]
 
 
-def _committed_pre_proposal(res, rel, rid, status):
-    """(state, evidence) or (None, why): the committed pre-proposal state of `rid`, now at the `/proposed`
-    `status` in the store file `rel`. HEAD must hold that status (the proposal is committed). The walk
+def _committed_pre_proposal(res, rel, rid, status, rtype, vendors):
+    """(state, evidence) or (None, why): the committed pre-proposal state of `rid` (a `rtype` record), now
+    at the `/proposed` `status` in the store file `rel`. HEAD must hold that status (the proposal is
+    committed). A present .git/info/grafts file refuses FIRST (_require_graftless): a graft substitutes
+    commit parents during graph traversal without rewriting any commit, so no read below could be trusted
+    (replacement objects and the commit graph are already disabled on every read by _run_git). The walk
     follows HEAD's first-parent chain through the commits that changed `rel` (git rev-list, newest first) to
     the newest one whose FIRST PARENT does not hold `status`: that commit landed the proposal, and the
-    record's status in its parent's snapshot, read by git from the store's own path at exact object ids, is
-    the pre-proposal state; it must be an unqualified state of a record that existed. git absent, an unborn
-    HEAD, an uncommitted proposal, a history that ends (a root commit or a shallow boundary) with the record
-    already proposed, a record absent before its proposal (created proposed), an unreadable or malformed
-    snapshot, a qualified predecessor, or a walk past _HISTORY_LIMIT each returns (None, why): the state
-    cannot be established, and is never guessed. Git reads only."""
+    record's status in its parent's snapshot, read by git from the store's own path at exact object ids and
+    validated as evidence (_committed_status), is the pre-proposal state; it must be an unqualified state
+    of a record that existed. Each first parent is derived from the commit object's RAW parent header
+    (_raw_first_parent), never resolved through the graph, and must exist locally as a commit object. git
+    absent, an unborn HEAD, an uncommitted proposal, a history that ends (a root commit) with the record
+    already proposed, a shallow boundary (a named parent whose object is absent), a record absent before
+    its proposal (created proposed), an unreadable, malformed, or schema-invalid snapshot, a qualified
+    predecessor, or a walk past _HISTORY_LIMIT each returns (None, why): the state cannot be established,
+    and is never guessed. Git reads only."""
     git = _opf_observe._git_path()
     if git is None:
         return None, "git is not on PATH"
     root = str(res.store_root)
     try:
+        _require_graftless(git, root)
         pfx = _opf_observe._run_git(git, root, ["rev-parse", "--show-prefix"])
         if not pfx.completed or pfx.rc != 0:
             return None, "the store root is not in a readable git work tree"
@@ -599,7 +698,7 @@ def _committed_pre_proposal(res, rel, rid, status):
         head = _git_oid(git, root, "HEAD^{commit}")
         if head is None:
             return None, "HEAD names no commit"
-        if _committed_status(git, root, head, path, rid) != status:
+        if _committed_status(git, root, head, path, rid, rtype, vendors) != status:
             return None, "HEAD {} does not hold {} at {!r}, so the proposal is not committed".format(
                 head[:12], rid, status)
         out = _opf_observe._run_git(git, root, ["--literal-pathspecs", "rev-list", "--first-parent",
@@ -613,11 +712,11 @@ def _committed_pre_proposal(res, rel, rid, status):
             return None, "the proposal lies beyond the {} most recent commits that changed {}".format(
                 _HISTORY_LIMIT, path)
         for commit in commits:
-            parent = _git_oid(git, root, commit + "^1^{commit}")
+            parent = _raw_first_parent(git, root, commit)
             if parent is None:
-                return None, ("the history ends at {} with {} already {!r} (created proposed, or a shallow "
-                              "clone)".format(commit[:12], rid, status))
-            before = _committed_status(git, root, parent, path, rid)
+                return None, ("the history ends at the root commit {} with {} already {!r} (created "
+                              "proposed)".format(commit[:12], rid, status))
+            before = _committed_status(git, root, parent, path, rid, rtype, vendors)
             if before == status:
                 continue
             if before is None:
@@ -632,11 +731,12 @@ def _committed_pre_proposal(res, rel, rid, status):
         return None, str(exc)
 
 
-def _corroborated_pre_proposal(ctx, rel, rid, status, claimed):
+def _corroborated_pre_proposal(ctx, rel, rid, status, claimed, rtype):
     """(state, None) when the pre-proposal state the worklog records (`claimed`) agrees with the committed
-    history (ctx.history, _committed_pre_proposal), else (None, why). Worklog text alone never licenses a
-    rejection: altered, stale, malformed, or unverifiable evidence refuses (spec 8.8)."""
-    committed, note = ctx.history(rel, rid, status)
+    history (ctx.history, _committed_pre_proposal, judging `rid` as a `rtype` record), else (None, why).
+    Worklog text alone never licenses a rejection: altered, stale, malformed, or unverifiable evidence
+    refuses (spec 8.8)."""
+    committed, note = ctx.history(rel, rid, status, rtype)
     if committed is None:
         return None, "the committed history cannot establish it ({})".format(note)
     if committed != claimed:
@@ -823,7 +923,7 @@ def _plan_transition(req, ctx, operand, now):
     claimed = _pre_proposal_state(_worklog_entries(ctx), rid, current) if rejection else None
     pre, uncorroborated = claimed, None
     if claimed is not None:
-        pre, uncorroborated = _corroborated_pre_proposal(ctx, operand.rel, rid, current, claimed)
+        pre, uncorroborated = _corroborated_pre_proposal(ctx, operand.rel, rid, current, claimed, rtype)
     tc = _opf_schema.validate_transition(rtype, current, to_status, kind, pre_proposal_state=pre,
                                          reason=_checked_reason(req))
     if tc.status != _opf_store.VALID or uncorroborated:
@@ -1783,7 +1883,7 @@ def _self_test_units(check):
         ctx.version = version or {"schema": 1, "release": [], "summary": []}
         ctx.worklog = _model_operand(".working/toml/worklog.toml", {"schema": 1, "entry": []})
         ctx.done_index = _model_operand(".working/toml/done.index.toml", {"schema": 1, "record": []})
-        ctx.history = lambda rel, rid, status: (None, "the unit leg has no committed history")
+        ctx.history = lambda rel, rid, status, rtype: (None, "the unit leg has no committed history")
         return ctx
 
     full = {ns: 0 for ns in _opf_store.BASELINE_TYPES.values()}
@@ -1928,7 +2028,7 @@ def _self_test_transitions(check, plan, post, full, now):
 
     def committed(state):
         """A synthetic committed history whose snapshot before the proposal commit holds `state`."""
-        return lambda rel, rid, status: (state, "a synthetic proposal commit")
+        return lambda rel, rid, status, rtype: (state, "a synthetic proposal commit")
 
     counters = dict(full, BI=2, WL=1)
     # -- transition: the derived qualifier, the delta, and its own worklog entry ----------------------------
@@ -2005,7 +2105,7 @@ def _self_test_transitions(check, plan, post, full, now):
             ("the forged line's own target", ["transition", "BI-1", "open", "--actor", "maintainer", "--reason",
                                               "r"], forged, committed("active"), "altered or stale"),
             ("a committed history that cannot establish the state", reject, proposed,
-             lambda rel, rid, status: (None, "HEAD names no commit"), "cannot establish it"),
+             lambda rel, rid, status, rtype: (None, "HEAD names no commit"), "cannot establish it"),
             ("the worklog text alone (the unit leg's default history)", reject, proposed, None,
              "cannot be corroborated")):
         check("a rejection refuses {}".format(label), _refuses(
@@ -2013,9 +2113,11 @@ def _self_test_transitions(check, plan, post, full, now):
                 argv, rows=[bi("done/proposed")], counters=counters, entries=entries, history=history), needle))
     seen = []
     p, c, op = plan(reject, rows=[bi("done/proposed")], counters=counters, entries=proposed,
-                    history=lambda rel, rid, status: seen.append((rel, rid, status)) or ("active", "commit"))
-    check("the committed history is read for the rejected record at its proposed status in its own index",
-          seen == [(op.rel, "BI-1", "done/proposed")])
+                    history=lambda rel, rid, status, rtype: seen.append((rel, rid, status, rtype))
+                    or ("active", "commit"))
+    check("the committed history is read for the rejected record, at its proposed status, in its own index, "
+          "as its index's type",
+          seen == [(op.rel, "BI-1", "done/proposed", "backlog_item")])
     check("a maintainer rejection with a reason returns to the corroborated pre-proposal state",
           op.new_model["record"][0]["status"] == "active" and c.worklog.new_model["entry"][-1]["detail"]
           == "opf-record transition BI-1 done/proposed -> active\nreason: not finished")

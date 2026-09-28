@@ -61,8 +61,13 @@ Each case runs on its own copy of that template; the root is removed in a finall
       transaction without claiming render and doctor never ran (flip: the old never-ran outcome text)
   T16 a rejection whose worklog lifecycle line disagrees with the committed history (the line's FROM state
       rewritten canonically and committed, doctor VALID; or a history that reached the proposal again from
-      another state), whose committed snapshot before the proposal commit does not parse, or whose proposal
-      is not committed refuses with every byte untouched (flip: trust the worklog line alone)
+      another state), whose committed snapshot before the proposal commit does not parse, whose proposal
+      is not committed, whose repository carries a .git/info/grafts entry substituting the corroborating
+      parent without rewriting the proposal commit (the deprecation warning silenced, so the refusal is
+      the grafts refusal itself, never an incidental one), or whose committed pre-proposal snapshot is an
+      unsupported-schema index carrying an incomplete record refuses with every byte untouched (flips:
+      trust the worklog line alone; resolve the corroborating parent through git's graph with the grafts
+      refusal dropped; use the historical snapshot without index schema or record validation)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -879,11 +884,83 @@ def t16_corroborated_rejection(fx):
         recorded(record_cli(env, root, ["transition", "BI-1", "done"] + ASSISTANT))
         refused_untouched(env, root, ["transition", "BI-1", "active", "--reason", "x"] + MAINTAINER,
                           "the proposal is not committed")
+    # Grafted: a .git/info/grafts entry substitutes the proposal commit's parent through git's graph
+    # without rewriting the commit's raw bytes, so the forged line's FROM state reads as corroborated.
+    # The deprecation warning is silenced (advice.graftFileDeprecated=false) so what refuses is the grafts
+    # refusal itself, never an incidental cleanliness refusal that would mask the bypass.
+    root = fx.case("t16-grafted-parent")
+    with ticking():
+        step(fx, root, CREATE, "BI-1")
+        open_commit = env.git(root, "rev-parse", "HEAD").strip()
+        step(fx, root, ["transition", "BI-1", "active"] + ASSISTANT, "BI-1 active")
+        step(fx, root, ["transition", "BI-1", "dropped"] + ASSISTANT, "BI-1 dropped/proposed")
+        proposal_commit = env.git(root, "rev-parse", "HEAD").strip()
+        worklog = model(root, WORKLOG)
+        worklog["entry"][-1]["detail"] = "opf-record transition BI-1 open -> dropped/proposed"
+        write_commit(env, root, WORKLOG, emit.emit_checked(worklog).encode("utf-8"), "a forged proposing line")
+        rc, out, err = cli(env, ["render", "--root", str(root), "--write"])
+        assert rc == 0, ("T16 the views re-render", rc, err[-800:])
+        env.git(root, "add", "-A")
+        env.git(root, "commit", "-q", "-m", "views")
+        doctor_valid(env, root)
+        env.git(root, "config", "advice.graftFileDeprecated", "false")
+        grafts = Path(root) / ".git" / "info" / "grafts"
+        grafts.parent.mkdir(parents=True, exist_ok=True)
+        grafts.write_text("{} {}\n".format(proposal_commit, open_commit), encoding="utf-8")
+        refused_untouched(env, root, ["transition", "BI-1", "open", "--reason", "reject"] + MAINTAINER,
+                          "grafts file is present")
+        assert row(root, "BI-1")["status"] == "dropped/proposed"
+    # Schema-invalid history: the snapshot before the (latest) proposal commit is syntactically valid TOML
+    # whose index schema is unsupported and whose only row is an incomplete envelope; it must never supply
+    # the corroborating status.
+    root = fx.case("t16-invalid-history-schema")
+    with ticking():
+        _proposed(fx, root, "done")
+        proposed = read(root, BI_INDEX)
+        write_commit(env, root, BI_INDEX,
+                     b'schema = 999\n\n[[record]]\nid = "BI-1"\nstatus = "open"\n',
+                     "an unsupported historical index")
+        write_commit(env, root, BI_INDEX, proposed, "the proposed index restored")
+        worklog = model(root, WORKLOG)
+        worklog["entry"][-1]["detail"] = "opf-record transition BI-1 open -> done/proposed"
+        write_commit(env, root, WORKLOG, emit.emit_checked(worklog).encode("utf-8"), "a forged proposing line")
+        rc, out, err = cli(env, ["render", "--root", str(root), "--write"])
+        assert rc == 0, ("T16 the views re-render", rc, err[-800:])
+        env.git(root, "add", "-A")
+        env.git(root, "commit", "-q", "-m", "views")
+        doctor_valid(env, root)
+        refused_untouched(env, root, ["transition", "BI-1", "open", "--reason", "reject"] + MAINTAINER,
+                          "not a supported schema-1")
+        assert row(root, "BI-1")["status"] == "done/proposed"
 
 
 def flip_t16():
     """Trust the worklog's lifecycle line alone (the reviewed head's behaviour)."""
-    return patch.object(record, "_corroborated_pre_proposal", lambda ctx, rel, rid, status, claimed: (claimed, None))
+    return patch.object(record, "_corroborated_pre_proposal",
+                        lambda ctx, rel, rid, status, claimed, rtype: (claimed, None))
+
+
+@contextlib.contextmanager
+def flip_t16_graft():
+    """Resolve the corroborating parent through git's graph with the grafts refusal dropped (the reviewed
+    head's behaviour: an info/grafts entry substitutes the parent without rewriting the proposal commit)."""
+    with patch.object(record, "_require_graftless", lambda git, store_root: None), \
+            patch.object(record, "_raw_first_parent",
+                         lambda git, store_root, commit: record._git_oid(git, store_root,
+                                                                         commit + "^1^{commit}")):
+        yield
+
+
+@contextlib.contextmanager
+def flip_t16_schema():
+    """Use a historical snapshot after TOML parsing plus the id/status checks alone (the reviewed head's
+    behaviour: no index schema or structure validation, no record validation)."""
+    with patch.object(record, "_historical_index_rows",
+                      lambda document, path, commit: [r for r in document.get("record", [])
+                                                      if isinstance(r, dict)]), \
+            patch.object(record, "_validated_historical_record",
+                         lambda row, rid, rtype, vendors, path, commit: None):
+        yield
 
 
 def t8_collision(fx):
@@ -988,7 +1065,8 @@ TESTS = (
     ("T13-recovery-intervening-edit", t13_intervening_edit, flip_t13),
     ("T14-create-type-before-read", t14_type_before_read, flip_t14),
     ("T15-leftover-journal-lock", t15_leftover_lock, flip_t15),
-    ("T16-rejection-corroborated-by-history", t16_corroborated_rejection, flip_t16),
+    ("T16-rejection-corroborated-by-history", t16_corroborated_rejection, (flip_t16, flip_t16_graft,
+                                                                          flip_t16_schema)),
 )
 
 
