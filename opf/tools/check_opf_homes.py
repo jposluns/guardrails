@@ -2,7 +2,7 @@
 """Homes contract, control-boundary and gitignore drift gate (writers still use legacy homes).
 
 Checks documented topology against the constructor authority. Text checks protect the planned
-contract, not runtime conformance to homes 2. No store is mutated or required to install a block.
+contract, including the 1.3.0 adoption/import target, not runtime conformance to either target. No store is mutated or required to install a block.
 Residual: wording checks require pinned text to be present; except for the self-test
 reconstruction of section 9.2, they do not detect added contradictory claims that leave the pins intact.
 """
@@ -24,13 +24,17 @@ _CONTRACT = {
             "A phase inventory never substitutes for a missing inventory.toml",
             "In homes 2, ordinary transaction operands", "keep their legacy operand handling",
             "check roster and residuals are unchanged", "byte-exact",
-            "fails closed on a reserved-name match or ambiguity"),
+            "fails closed on a reserved-name match or ambiguity",
+            "Base spec 1.3.0 defines adoption and the separate imported series on homes 1.",
+            "The imported files are registered managed leaves",
+            "<type>.imported.index.toml", "worklog.imported.toml",
+            "provides no views over imported data"),
     "4.4": ("MUST NOT be used as a machine subdirectory", "legacy content cannot be re-absorbed"),
     "9.2": (
         'The homes-generation upgrade targets spec_version = "2.0.0" with required integer '
         '[opf].homes = 2.',
         'Absent or 1 denotes legacy homes for migration; unknown future generations are refused.',
-        'The runtime supported version and init format remain unchanged until homes 2 is activated.',
+        'The homes-generation target does not itself change the runtime supported version or init format.',
         'The migration refuses a store resolved outside the product root until a multi-root '
         'coordinator exists.',
         'Unproven legacy .archive/ entries remain in place with a standing finding until '
@@ -97,20 +101,59 @@ _CONTRACT = {
         'existing store (none is ever fabricated).',
         'Declared views are then regenerated, so a stale committed view can change.',
         'A 1.0.0 store takes the 1.0.0 delta above directly to 1.2.0.',
+        'For the 1.2.0 to 1.3.0 upgrade, the allowed schema delta is the version bump, registration '
+        'and create-only initialization of missing imported managed leaves for enabled types, and '
+        'addition of missing imported counter rows at zero only where no imported ancestry exists.',
+        'Existing records, evidence, clean counters and imported high-water values MUST be '
+        'preserved; a populated collision, missing ancestral counter or unprovable prestate refuses.',
+        'The upgrade creates no historical records, adoption approval or provenance, changes no '
+        'posture or import status, and adds no imported views.',
+        'An unresolved legacy import must be reconciled under its original contract before '
+        'upgrading; legacy LF records and evidence remain readable and are never silently converted.',
+        'Earlier stores compose their applicable deltas with this delta; repeated upgrade is a '
+        'verified no-op only after full doctor VALID.',
+        'The 1.3.0 delta remains a target contract until a tested upgrade and its required readers '
+        'activate; import writing is a separate later activation.',
+        'Declaring 1.3.0 with older tooling is refused rather than treated as supported.',
     ),
+    "8.1": ("deprecated for new stores as of 1.3.0, not removed",),
+    "8.2": ("imported:<NS>-<n>", '"imported:BI"', '"imported:WL"',
+            "Counters are never reset and IDs are never reused"),
+    "8.3": ("The imported envelope is closed and deterministic",
+            "not_recorded_in_source", "unparsed", "ambiguous", "conflicting", "not_applicable",
+            "import.history", "import.unparsed", "The writer performs no byte-tiling or leftover accounting",
+            "A conforming imported series can reach doctor VALID"),
+    "8.6": ("MUST NOT satisfy a current approval, receipt, actionability or supersession obligation",
+            "Imported-to-clean links are refused by both writer and doctor",
+            "Clean-to-imported links allow only relates, derives_from, follows, and same-type supersedes"),
+    "8.8": ("import --batch FILE [--root DIR]", "opf.record.import-batch/v1",
+            "Replay identity is (source_sha256, batch content digest)",
+            "Import refuses with exit 2", "It never rewrites clean records or clean counters"),
+    "11": ('"partial" means the adoption receipt enumerates migrate-disposed sources',
+           "Import status never weakens posture", "partial status is never a blanket exemption"),
     "12": ("Neither is scanned as the other", "retained indefinitely", "independent re-read",
            "age alone never authorizes deletion"),
     "14.1": (".working/staging/import/<run-id>/", ".working/staging/ingest/<run-id>/",
-             ".working/imported/import/<run-id>/", "review remove nothing",
+             ".working/imported/import/<run-id>/",
+             "Investigation, planning and read-only status commands remove nothing",
              "Destination durability and digest verification precede source removal",
-             "same recoverable transaction", "Acceptance binds the removal action",
-             "acceptance never authorizes removal", "plan-time cannot-evaluate",
+             "same recoverable transaction",
+             "exact creations, replacements, removals and consumer repointings",
+             "The attributed approval binds plan_digest and inventory_digest",
+             "old acceptance records describe those runs and never authorize a new adoption or retirement",
+             "Exactly one adopter approval follows each concrete plan",
+             "Any bound-item drift refuses into a fresh plan with its own single approval",
+             "Retirement occurs only on a green completion check",
+             "plan-time cannot-evaluate",
              "Reclamation is journaled and idempotent", "Read-only commands never clean staging"),
-    "14.2": (".working/staging/import/<run-id>/", ".working/archive/moved/<source-path>",
+    "14.2": ("Keep the source frozen now for post-adoption import",
+             "keep, migrate, move, retire", ".working/archive/moved/<source-path>",
              "collision finding, never an overwrite", "outside the managed store",
              "only beneath", "multi-root coordinator", "no adoption option selects them",
              "declaration may equal, contain, or lie within them", ".working/archive/adoption/<run-id>/",
              ".working/imported/adoption/<run-id>/", ".working/journals/adoption/"),
+    "14.3": ("version.toml as imported-flagged [[release]] rows", "their spans are empty",
+             "its spans never refer to imported:WL IDs"),
     "15": ("adoption provenance", "OPF operates without it", "Only homes migration",
            "explicitly inventoried", "without touching unrelated AIQT material"),
 }
@@ -1538,6 +1581,20 @@ def self_test():
     for section, body in _sections(text).items():
         if section in _CONTRACT:
             check("spec-flip-" + section, lambda: bool(contract_findings(text.replace(body, "\n", 1))))
+    # Each target-contract pin must discriminate independently, not merely its whole section.
+    for section, fragments in _CONTRACT.items():
+        if section in {"4.2", "4.4", "9.2"}:
+            continue  # Structural formatting above; exhaustive 9.2 sentence controls below.
+        body = _sections(text)[section]
+        normalized_body = " ".join(body.replace("`", "").split())
+        control = text.replace(body, "\n\n" + normalized_body + "\n\n", 1)
+        check("spec-pin-control-" + section, lambda c=control: not contract_findings(c))
+        for fragment in fragments:
+            mutated_body = normalized_body.replace(fragment, "")
+            mutated = text.replace(body, "\n\n" + mutated_body + "\n\n", 1)
+            finding = "spec {} missing contract: {}".format(section, fragment)
+            check("spec-pin-flip-{}-{}".format(section, fragment),
+                  lambda f=finding, m=mutated: f in contract_findings(m))
     # Delete the wrapped sentence in place: normalization must not hide a lost requirement.
     body = _sections(text)["9.2"]
     mutated, removed = re.subn(r"The upgrade\s+is idempotent\.", "", body)
