@@ -1888,6 +1888,25 @@ def _registered_run_store_fd(rd, generation):
         bound = _retained_homes(rd, fresh)
         for rel in imp._import_run_locations(rd.name, generation):
             if rel in bound:
+                if generation == 2:
+                    # PR C: every reader refuses a run found in two homes (_locate_import_run's
+                    # ambiguity rule). Identity binding alone cannot see a SAME-ID COPY in another
+                    # registered home (a copy is another inode), so the bound home is re-checked
+                    # over the locator's own roster (_import_run_locations, never a second
+                    # enumeration): another DIRECTORY at a roster location is a second home,
+                    # refused with the shared locator's message. A symlink there is an alias of
+                    # one home, not a second run (the same-root-alias topology stays registered);
+                    # an unanswerable lstat fails closed (JournalError). Generation 1 has a
+                    # single-location roster and keeps its behaviour.
+                    import _journal
+                    found = []
+                    for other in imp._import_run_locations(rd.name, generation):
+                        st = None if other == rel else _journal._lstat_contained(bound[rel], other)
+                        if other == rel or (st is not None and stat.S_ISDIR(st.st_mode)):
+                            found.append(other)
+                    if len(found) != 1:
+                        raise _GateError("run {} has {} staging locations ({}); exactly one is "
+                                         "required".format(rd.name, len(found), ", ".join(found)))
                 return os.dup(bound[rel])
         return None
     finally:
@@ -6065,6 +6084,54 @@ def _self_test_isolated():
                bool(observed_rels)
                and not any(rel.startswith(_opf_store.JOURNALS_REL) for rel in observed_rels)
                and any(rel.startswith(".aiqt") for rel in observed_rels))
+
+        # --- PR C fix 1 (gate two-home ambiguity): the standalone gate refuses a run whose id is
+        # present in TWO staging homes, exactly as the shared locator (_locate_import_run) does for
+        # review and apply. The opened run binds by descriptor identity to its typed home; the second
+        # home is a same-id COPY (another inode), which identity binding alone cannot see. Red before
+        # the fix: every check passed on this fixture while _locate_import_run refused it. ------------
+        th_ambiguous_ids = ("acceptance-schema", "acceptance-binding", "acceptance-attribution",
+                            "acceptance-completeness") + _INGEST_ACCEPTANCE_CHECKS + _TRANSACTION_CHECKS
+        th_root, th_rid, th_run = _opf_ingest_apply._st_build(base, "gate-two-home", capture=False)
+        with imp._self_test_homes2_active(th_root):
+            th_typed = th_root / _opf_store.stage_run("ingest", th_rid)
+            th_typed.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(str(th_run), str(th_typed))
+            th_legacy = th_root / Path(imp.IMPORTS_REL) / th_rid
+            shutil.copytree(str(th_typed), str(th_legacy))
+            th_graded = check_staged_run(th_typed, homes=2)
+            expect("homes2-two-home-gate-refuses",
+                   set(th_graded) == set(EXPECTED_CHECKS)
+                   and {cid for cid, (ok, _d) in th_graded.items() if not ok} == set(th_ambiguous_ids)
+                   and all("2 staging locations" in th_graded[cid][1] for cid in th_ambiguous_ids))
+            # Mutation red: the ONE roster carries the refusal — confirmed present first (the
+            # genuine generation-2 roster names the legacy home beside the typed ones, and the
+            # shared locator refuses this store directly), then a roster that lost the legacy
+            # location passes the two-home run again: the fail-open this vector guards against.
+            th_probe = os.open(str(th_root), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                imp._locate_import_run(th_probe, th_rid, 2)
+                th_refused = False
+            except Exception:  # noqa: BLE001 - the locator's refusal class is _opf_import's own
+                th_refused = True
+            finally:
+                os.close(th_probe)
+            th_legacy_rel = imp.IMPORTS_REL + "/" + th_rid
+            th_roster = imp._import_run_locations
+            expect("homes2-two-home-roster-present",
+                   th_refused and th_legacy_rel in th_roster(th_rid, 2)
+                   and _opf_store.stage_run("ingest", th_rid) in th_roster(th_rid, 2))
+            with unittest.mock.patch.object(
+                    imp, "_import_run_locations",
+                    lambda run_id, homes: tuple(rel for rel in th_roster(run_id, homes)
+                                                if rel != imp.IMPORTS_REL + "/" + run_id)
+                    if type(homes) is int and homes == 2 else th_roster(run_id, homes)):
+                th_mutant = check_staged_run(th_typed, homes=2)
+            expect("homes2-two-home-mutant-passes", all(ok for ok, _d in th_mutant.values()))
+            # The single-home control stays green: removing the copy restores the clean grading.
+            shutil.rmtree(str(th_legacy))
+            th_control = check_staged_run(th_typed, homes=2)
+            expect("homes2-two-home-single-control", all(ok for ok, _d in th_control.values()))
 
         expect("module-self-test", imp.self_test() == 0)
     except OSError as exc:
