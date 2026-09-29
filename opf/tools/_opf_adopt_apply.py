@@ -966,6 +966,7 @@ def self_test():
 
 def _self_test_checks():
     import json
+    import signal
     import tempfile
     from unittest import mock
 
@@ -1862,7 +1863,11 @@ def _self_test_checks():
     # ValueError), the grant requires OWNERSHIP (a non-owned unwritable file fails closed with a named
     # JournalError, simulated by an EPERM chmod), and the recreate path's verify-before-mode ordering
     # is pinned (at the restore checkpoint the recreated file still holds the temporary 0600, the
-    # exact prestate mode installed only after).
+    # exact prestate mode installed only after). Round-4 additions: an interruption delivered
+    # IMMEDIATELY after the grant chmod returns (codex's settrace SIGINT, which used to escape
+    # between the chmod and the revert-protected reopen) now reaches the revert, and a fault AT
+    # the post-checkpoint prestate-mode install DELIBERATELY leaves the grant behind a NAMED
+    # JournalError, the next reconcile finishing directly through the still-writable file.
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         product = Path(temp).resolve() / "product"       # the product root under restore ...
         product.mkdir()
@@ -2029,6 +2034,74 @@ def _self_test_checks():
                     denied = try_restore()
                 check("grant-requires-ownership-fails-closed-named",
                       denied is not None and "ownership" in denied and mode_of(live) == 0o400)
+
+                # codex round-4: an interruption delivered IMMEDIATELY after the grant chmod
+                # returns (settrace fires SIGINT on the first traced line in _restore_preimage
+                # after the real chmod applied the grant) used to escape between the chmod and
+                # the revert-protected reopen with the 0600 grant still installed; the revert
+                # protection now spans the grant chmod itself, so the KeyboardInterrupt escapes
+                # with the mode already reverted to exactly as found
+                reset()
+                sigint_fired = []
+                grant_applied = []
+
+                def flagging_chmod(p, m, *a, _real=os.chmod, **kw):
+                    result = _real(p, m, *a, **kw)
+                    if p == "LOCKED.md" and kw.get("dir_fd") is not None and m == 0o600:
+                        grant_applied.append(True)
+                    return result
+
+                restore_code = _journal._restore_preimage.__code__
+
+                def sigint_tracer(frame, event, arg):
+                    if frame.f_code is not restore_code:
+                        return None
+                    if event == "line" and grant_applied and not sigint_fired:
+                        sigint_fired.append(True)
+                        os.kill(os.getpid(), signal.SIGINT)
+                    return sigint_tracer
+
+                escaped_interrupt = []
+                prior_trace = sys.gettrace()
+                try:
+                    with mock.patch.object(os, "chmod", flagging_chmod):
+                        sys.settrace(sigint_tracer)
+                        try:
+                            try_restore()
+                        except KeyboardInterrupt:
+                            escaped_interrupt.append(True)
+                finally:
+                    sys.settrace(prior_trace)
+                check("grant-interrupt-after-grant-chmod-reverts-the-grant",
+                      escaped_interrupt == [True] and sigint_fired == [True]
+                      and mode_of(live) == 0o400)
+                check("grant-interrupt-after-grant-chmod-retry-restores-exact",
+                      try_restore() is None and mode_of(live) == 0o400
+                      and live.read_bytes() == prior)
+
+                # claude round-4: a fault AT the post-checkpoint prestate-mode install is not an
+                # anonymous escape silently retaining the grant: the checkpoint has already
+                # verified the restored bytes, so this exit DELIBERATELY leaves the owner-write
+                # grant (the recreate path's restartability posture) and says so in a NAMED
+                # JournalError; the next reconcile then reopens the still-writable file and
+                # finishes installing the exact prestate mode without another grant cycle
+                reset()
+                fchmod_armed = [True]
+
+                def eio_prestate_fchmod(fd_, m, _real=os.fchmod):
+                    if fchmod_armed and m == 0o400:
+                        fchmod_armed.clear()
+                        raise OSError(5, "injected fault at the prestate-mode fchmod")
+                    return _real(fd_, m)
+
+                with mock.patch.object(os, "fchmod", eio_prestate_fchmod):
+                    retained = try_restore()
+                check("grant-post-checkpoint-mode-fault-names-the-retained-grant",
+                      retained is not None and "deliberately left" in retained
+                      and mode_of(live) == 0o600 and live.read_bytes() == prior)
+                check("grant-post-checkpoint-mode-fault-reconcile-finishes-directly",
+                      try_restore() is None and mode_of(live) == 0o400
+                      and live.read_bytes() == prior)
 
                 # the RECREATE path's verify-before-mode ordering is pinned: AT the restore checkpoint
                 # the recreated file still holds the temporary owner-rw 0600 (so a faulted checkpoint

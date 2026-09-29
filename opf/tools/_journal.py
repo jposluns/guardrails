@@ -1476,15 +1476,19 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
 
                 def _revert_grant(vfd=None):
                     # Best-effort revert of the temporary owner-rw grant, ATTEMPTED on every failed
-                    # exit: through the opened descriptor when its identity has been verified (vfd:
-                    # an fchmod that touches exactly the inode the lstat saw), else by name beneath
-                    # the same parent fd, no-follow (the same channel the grant itself used). The
-                    # revert can itself fail under the same fault that aborted the attempt, and a
-                    # hard kill can skip it entirely, so it is NOT unconditional; the grant then
+                    # exit from the grant chmod up to and including the checkpoint: through the
+                    # opened descriptor when its identity has been verified (vfd: an fchmod that
+                    # touches exactly the inode the lstat saw), else by name beneath the same
+                    # parent fd, no-follow (the same channel the grant itself used). The revert can
+                    # itself fail under the same fault that aborted the attempt, and a hard kill
+                    # can skip it entirely, so it is NOT unconditional; a failed exit AT the
+                    # post-checkpoint prestate-mode install below DELIBERATELY does not revert at
+                    # all (the bytes already verified; see the comment there). The grant then
                     # persists ONLY on an inode whose link count was 1 at the pre-grant gate below,
-                    # i.e. on the product file itself, and the next reconcile simply re-grants and
-                    # finishes. The pre-grant hard-link gate, not this revert, is what keeps an
-                    # inode reachable outside the product root from ever being widened.
+                    # i.e. on the product file itself, and the next reconcile simply re-grants (or,
+                    # after the checkpoint, reopens the still-writable file) and finishes. The
+                    # pre-grant hard-link gate, not this revert, is what keeps an inode reachable
+                    # outside the product root from ever being widened.
                     if vfd is not None:
                         try:
                             os.fchmod(vfd, observed_mode)
@@ -1496,73 +1500,97 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
                     except (OSError, ValueError):
                         pass
 
+                fd = None
+                identity_verified = False
                 try:
-                    fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
-                except PermissionError:
-                    # RESTARTABLE RESTORATION (codex U1 round-2): a live file whose mode denies owner
-                    # write (a 0400 or 0000 prestate, or the debris of an interrupted earlier restore)
-                    # cannot be reopened O_RDWR, which would wedge recovery forever on EACCES with the
-                    # preimage still retained. Grant a TEMPORARY owner-rw bit by name (no-follow,
-                    # beneath the same parent fd) and reopen. HARD-LINK GATE (codex U1 round-3): the
-                    # grant is applied ONLY to an inode whose lstat link count is exactly 1, checked
-                    # BEFORE any chmod, so an inode carrying a second name (possibly outside the
-                    # product root) is never widened, not even transiently, and not by a fault or an
-                    # interruption after the grant, because for such an inode no grant chmod ever
-                    # runs. The grant also requires OWNERSHIP of the file: the kernel refuses a
-                    # non-owner's chmod with EPERM, so a non-owned unwritable file fails closed with
-                    # the named JournalError below, its mode unchanged. On success the exact prestate
-                    # mode replaces the grant after the checkpoint; on a failed attempt the revert
-                    # above is attempted on every exit (a reopen failure, an fstat failure, an
-                    # identity refusal, a checkpoint failure, any exception, an interruption). The
-                    # lstat-to-chmod window is the same accident-model TOCTOU the pre-existing
-                    # lstat-to-open window carries; the post-open fstat identity check below stays
-                    # the arbiter, and an adversarial same-user racer remains outside the journal's
-                    # disclosed quiescence guarantee.
-                    if st.st_nlink != 1:
-                        raise JournalError("cannot restore {!r}: product file has {} hard links (>1); "
-                                           "refusing to grant temporary owner-write to a multiply-linked "
-                                           "inode (a second name, possibly outside the product root, "
-                                           "would be widened through the shared inode); no chmod was "
-                                           "applied".format(path, st.st_nlink))
                     try:
-                        os.chmod(name, observed_mode | 0o600, dir_fd=pfd, follow_symlinks=False)
-                    except ValueError:
-                        # A symlink raced in between the failed open and this chmod: os.chmod with
-                        # dir_fd and follow_symlinks=False refuses a symlink with ValueError on this
-                        # platform. Fail closed as a JournalError, never a raw traceback; nothing
-                        # was widened.
-                        raise JournalError("cannot restore {!r}: a symlink was raced in at the "
-                                           "temporary-grant chmod (dir_fd with follow_symlinks=False "
-                                           "refuses a symlink); failing closed, nothing was "
-                                           "widened".format(path))
-                    except PermissionError as exc:
-                        # The temporary grant REQUIRES OWNERSHIP of the file: chmod on a file this
-                        # process does not own raises EPERM. A non-owned unwritable file fails
-                        # closed here, its mode unchanged, rather than wedging recovery or escaping
-                        # with a raw error.
-                        raise JournalError("cannot restore {!r}: the temporary owner-write grant "
-                                           "requires ownership of the file and the kernel refused the "
-                                           "chmod ({}); a non-owned unwritable file fails closed with "
-                                           "its mode unchanged".format(path, exc))
-                    granted = True
-                    try:
-                        fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
-                    except BaseException:
-                        _revert_grant()      # every exit, an interruption included
-                        raise
-                try:
-                    # SECI-symlink-resolution: the S_ISREG decision above rests on the PRE-open lstat, which
-                    # describes a name that may no longer point where it did. O_NOFOLLOW refuses a symlink but
-                    # NOT a hardlink or a regular-file swap raced in between the lstat and this open (both are
-                    # regular files, so a post-open S_ISREG alone would not catch it). Before truncating and
-                    # rewriting, confirm on the OPENED fd that it is STILL a regular file AND the SAME object
-                    # (st_ino/st_dev) the lstat saw; a mismatch means a different inode was swapped in and is
-                    # refused fail-closed rather than truncating and overwriting an unintended victim. This
-                    # mirrors the apply path's _verify_fd_prestate post-open confirmation, which the restore
-                    # path previously lacked. (O_NONBLOCK matches the contained-reader pattern: a no-op for a
-                    # regular file, and it keeps a raced-in FIFO from blocking the open.)
-                    identity_verified = False
-                    try:
+                        try:
+                            fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
+                        except PermissionError:
+                            # RESTARTABLE RESTORATION (codex U1 round-2): a live file whose mode
+                            # denies owner write (a 0400 or 0000 prestate, or the debris of an
+                            # interrupted earlier restore) cannot be reopened O_RDWR, which would
+                            # wedge recovery forever on EACCES with the preimage still retained.
+                            # Grant a TEMPORARY owner-rw bit by name (no-follow, beneath the same
+                            # parent fd) and reopen. HARD-LINK GATE (codex U1 round-3): the grant
+                            # is applied ONLY to an inode whose lstat link count is exactly 1,
+                            # checked BEFORE any chmod, so an inode carrying a second name
+                            # (possibly outside the product root) is never widened, not even
+                            # transiently, and not by a fault or an interruption after the grant,
+                            # because for such an inode no grant chmod ever runs. The grant also
+                            # requires OWNERSHIP of the file: the kernel refuses a non-owner's
+                            # chmod with EPERM, so a non-owned unwritable file fails closed with
+                            # the named JournalError below, its mode unchanged. On success the
+                            # exact prestate mode replaces the grant after the checkpoint. The
+                            # revert above is attempted on every failed exit from the grant chmod
+                            # up to and including the checkpoint (a reopen failure, an fstat
+                            # failure, an identity refusal, a checkpoint failure, any catchable
+                            # exception or interruption in that span: the protection is
+                            # established BEFORE the chmod, so no such exit escapes it). Exactly
+                            # two residuals leave the grant installed, and only on the
+                            # singly-linked product file: a hard kill (no handler runs; the revert
+                            # can also itself fail under the same fault), and a failed exit AT the
+                            # post-checkpoint prestate-mode install, which DELIBERATELY leaves the
+                            # grant for the next reconcile to finish (see the comment there). The
+                            # lstat-to-chmod window is the same accident-model TOCTOU the
+                            # pre-existing lstat-to-open window carries; the post-open fstat
+                            # identity check below stays the arbiter, and an adversarial same-user
+                            # racer remains outside the journal's disclosed quiescence guarantee.
+                            if st.st_nlink != 1:
+                                raise JournalError("cannot restore {!r}: product file has {} hard "
+                                                   "links (>1); refusing to grant temporary "
+                                                   "owner-write to a multiply-linked inode (a "
+                                                   "second name, possibly outside the product "
+                                                   "root, would be widened through the shared "
+                                                   "inode); no chmod was "
+                                                   "applied".format(path, st.st_nlink))
+                            # REVERT PROTECTION BEFORE THE GRANT (codex U1 round-4): granted is
+                            # set BEFORE the grant chmod, and the BaseException handler below
+                            # spans the chmod, the reopen and the whole restore body, so a
+                            # catchable exception or an interruption landing ANYWHERE after the
+                            # grant syscall takes effect -- even between the chmod returning and
+                            # the next statement -- reaches the revert. If the interruption
+                            # instead beats the chmod, the revert is an idempotent chmod back to
+                            # the mode the file already holds.
+                            granted = True
+                            try:
+                                os.chmod(name, observed_mode | 0o600, dir_fd=pfd,
+                                         follow_symlinks=False)
+                            except ValueError:
+                                # A symlink raced in between the failed open and this chmod:
+                                # os.chmod with dir_fd and follow_symlinks=False refuses a symlink
+                                # with ValueError on this platform. Fail closed as a JournalError,
+                                # never a raw traceback; nothing was widened.
+                                raise JournalError("cannot restore {!r}: a symlink was raced in "
+                                                   "at the temporary-grant chmod (dir_fd with "
+                                                   "follow_symlinks=False refuses a symlink); "
+                                                   "failing closed, nothing was "
+                                                   "widened".format(path))
+                            except PermissionError as exc:
+                                # The temporary grant REQUIRES OWNERSHIP of the file: chmod on a
+                                # file this process does not own raises EPERM. A non-owned
+                                # unwritable file fails closed here, its mode unchanged, rather
+                                # than wedging recovery or escaping with a raw error.
+                                raise JournalError("cannot restore {!r}: the temporary "
+                                                   "owner-write grant requires ownership of the "
+                                                   "file and the kernel refused the chmod ({}); "
+                                                   "a non-owned unwritable file fails closed "
+                                                   "with its mode unchanged".format(path, exc))
+                            fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                         dir_fd=pfd)
+                        # SECI-symlink-resolution: the S_ISREG decision above rests on the PRE-open
+                        # lstat, which describes a name that may no longer point where it did.
+                        # O_NOFOLLOW refuses a symlink but NOT a hardlink or a regular-file swap
+                        # raced in between the lstat and this open (both are regular files, so a
+                        # post-open S_ISREG alone would not catch it). Before truncating and
+                        # rewriting, confirm on the OPENED fd that it is STILL a regular file AND
+                        # the SAME object (st_ino/st_dev) the lstat saw; a mismatch means a
+                        # different inode was swapped in and is refused fail-closed rather than
+                        # truncating and overwriting an unintended victim. This mirrors the apply
+                        # path's _verify_fd_prestate post-open confirmation, which the restore
+                        # path previously lacked. (O_NONBLOCK matches the contained-reader
+                        # pattern: a no-op for a regular file, and it keeps a raced-in FIFO from
+                        # blocking the open.)
                         fst = os.fstat(fd)
                         if (not stat.S_ISREG(fst.st_mode) or fst.st_ino != st.st_ino
                                 or fst.st_dev != st.st_dev):
@@ -1592,17 +1620,42 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
                         _read_back_verify(fd, prestate["sha256"], path, "restored")
                     except BaseException:
                         if granted:
-                            # The revert is attempted on EVERY failed exit: through the fd once its
-                            # identity is verified (it touches exactly the file the lstat saw), else
-                            # by name (an fstat failure or an identity refusal); see _revert_grant
-                            # for why a revert that itself fails is still confined to the product
-                            # file (the pre-grant hard-link gate).
+                            # The revert is attempted on EVERY failed exit up to and including the
+                            # checkpoint: through the fd once its identity is verified (it touches
+                            # exactly the file the lstat saw), else by name (a reopen failure, an
+                            # fstat failure or an identity refusal); see _revert_grant for why a
+                            # revert that itself fails is still confined to the product file (the
+                            # pre-grant hard-link gate).
                             _revert_grant(fd if identity_verified else None)
                         raise
-                    os.fchmod(fd, prestate["mode"])    # the exact prestate mode, only after the checkpoint
-                    os.fsync(fd)                       # the final mode durable alongside the verified bytes
+                    # POST-CHECKPOINT EXITS DELIBERATELY LEAVE THE GRANT (claude U1 round-4): the
+                    # checkpoint above has verified the restored live bytes, so the only missing
+                    # step is the exact prestate mode. A failed exit here (this fchmod or fsync
+                    # faulting, or an interruption) leaves the temporary owner-rw grant installed
+                    # rather than reverting to the pre-grant mode: exactly as on the recreate path
+                    # (_recreate_file), an owner-WRITABLE product file lets the next reconcile
+                    # reopen it and finish installing the prestate mode directly, where a revert
+                    # to a read-only debris mode would force the whole grant cycle to run again
+                    # for no gain. The residual is the one the gates-manifest residue discloses:
+                    # the grant persists only on the singly-linked product file. On the fault path
+                    # the exit is a NAMED JournalError stating the retained grant; an interruption
+                    # here leaves the same residual.
+                    try:
+                        os.fchmod(fd, prestate["mode"])   # the exact prestate mode, only after the checkpoint
+                        os.fsync(fd)                      # the final mode durable alongside the verified bytes
+                    except OSError as exc:
+                        if granted:
+                            raise JournalError("cannot restore {!r}: installing the exact prestate "
+                                               "mode after the checkpoint failed ({}); the "
+                                               "temporary owner-write grant is deliberately left "
+                                               "in place (the restored bytes already passed the "
+                                               "checkpoint, and an owner-writable product file "
+                                               "lets the next reconcile finish installing the "
+                                               "prestate mode directly)".format(path, exc))
+                        raise
                 finally:
-                    os.close(fd)
+                    if fd is not None:
+                        os.close(fd)
             else:                                     # a racing external writer left a non-regular file where a regular file is expected: fail closed
                 raise JournalError("cannot restore {!r}: unexpected non-regular file at restore time".format(path))
         os.fsync(pfd)
