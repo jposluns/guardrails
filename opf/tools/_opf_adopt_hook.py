@@ -109,6 +109,11 @@ from _opf_store import VALID, INVALID, CANNOT_EVALUATE  # noqa: E402
 REGISTRATION_FAMILY = "claude-settings-json"
 # An adopter registration file larger than this refuses (a representative resource bound, not a sandbox).
 MAX_REGISTRATION_BYTES = 1024 * 1024
+# A refusal returns at most this many findings plus one suppression marker (each finding already
+# bounds what it repeats via _shown), so a pathological registration cannot amplify a refusal
+# into megabytes of accumulated diagnostics. Construction cost stays linear in input size; only
+# the returned list is capped.
+MAX_FINDINGS = 64
 
 # The closed v1 hook-event vocabulary of the settings.json family. An event outside this set is an
 # out-of-vocabulary closed token (CANNOT-EVALUATE), never a best-effort merge around it.
@@ -168,11 +173,19 @@ def _digest(data):
 def _shown(value):
     """Findings and refusal messages embed adopter content; bound what they repeat so a refusal
     never echoes a megabyte lexeme or key back to the caller. repr-based, so a _Number shows as
-    its bare lexeme and a str stays quoted."""
+    its bare lexeme and a str stays quoted. A long genuine str or _Number is truncated on the
+    VALUE before repr, so the cut never splits a repr escape sequence and the reported count is
+    the value's own length; any other long repr (a foreign type's) is cut on the repr text and
+    labelled as such. Worst case stays near half a kilobyte (48 characters whose repr escapes
+    are up to ten bytes each, plus the suffix), so every embedding message is bounded."""
+    if type(value) is _Number and len(value) > 64:
+        return "{}... ({} characters)".format(str.__str__(value)[:64], len(value))
+    if type(value) is str and len(value) > 48:
+        return "{}... ({} characters)".format(repr(value[:48]), len(value))
     text = repr(value)
     if len(text) <= 72:
         return text
-    return text[:64] + "... ({} characters)".format(len(text))
+    return text[:64] + "... ({} characters in the repr)".format(len(text))
 
 
 # --- fail-closed parse and deterministic emission ------------------------------------------------------
@@ -214,8 +227,9 @@ class _Number(str):
     Comparison is TYPE-AWARE: a _Number equals only another _Number with the same lexeme, NEVER a
     plain str, so the in-merge reparse verification sees an emitter that turns a number into a
     same-lexeme string or a digit string into a number (threat model 2). Every field check that
-    needs a parsed STRING also excludes this type by isinstance (_is_json_string), and the
-    candidate plugin_entry check does the same. repr() shows the bare lexeme, never a quoted
+    needs a parsed STRING requires EXACTLY str by type identity (_is_json_string), which
+    excludes this type, and the candidate plugin_entry check does the same. repr() shows the
+    bare lexeme, never a quoted
     string, so a finding that embeds a value distinguishes a number from a string."""
 
     __slots__ = ()
@@ -271,8 +285,14 @@ def _emit(model):
     parser's own number grammar and finite double range, a parseable model carrying an escaped
     unpaired surrogate refuses here (below), and the output is held to MAX_REGISTRATION_BYTES by
     a RUNNING byte count (_emit_piece) that refuses the moment the bound would pass, so an
-    over-bound emission is never built. Raises _ParseRefusal on all of those and on a value no
-    parsed model can contain (a non-string key, a foreign type), and RecursionError on nesting
+    over-bound emission is never built; a string or key is refused BEFORE json.dumps
+    materializes a serialization that could not fit under the remaining budget (its UTF-8 form
+    is at least one byte per character plus the quotes), so a huge string, the caller's
+    candidate included, cannot allocate past the budget. Keys and string values must be EXACTLY
+    str, and a number exactly _Number or a code-built int/float (type identity, never
+    isinstance), so a _Number key can never serialize into duplicate-key JSON and a hostile str
+    subclass never reaches the serializer. Raises _ParseRefusal on all of those and on a value
+    no parsed model can contain (a key or value of a foreign type), and RecursionError on nesting
     near the interpreter recursion limit (roughly 1000 levels, dependent on the caller's
     remaining stack); merge_registration maps every one of these to CANNOT-EVALUATE. The residual
     reformatting of a changed merge is disclosed in the module docstring."""
@@ -301,14 +321,25 @@ def _emit_piece(piece, out, budget):
 
 
 def _emit_value(value, depth, out, budget):
-    if isinstance(value, _Number):
+    if type(value) is _Number:
         # held to the parser's own number rule (strict-JSON grammar, finite double range), so a
         # code-built lexeme carrier can never emit bytes _parse would refuse (the fixed point).
+        # Exact type: a _Number SUBCLASS is caller-run code and falls through to the
+        # unserializable refusal below, never into str(value) on an overridable __str__.
         if not (_NUMBER_LEXEME_RE.match(value) and math.isfinite(float(value))):
             raise _ParseRefusal("number lexeme {} is not a finite strict-JSON number".format(
                 _shown(value)))
         _emit_piece(str(value), out, budget)
-    elif isinstance(value, str):
+    elif type(value) is str:
+        # exact type: a hostile str subclass never reaches json.dumps, which reads the real
+        # underlying buffer (it falls through to the unserializable refusal below). The
+        # serialized form is at least len(value) + 2 bytes, so a string that cannot fit is
+        # refused BEFORE its escaped form is materialized; the caller's candidate has no
+        # length ceiling of its own, and this keeps its serialization inside the same
+        # incremental budget.
+        if budget[0] < len(value) + 2:
+            raise _EmitBoundRefusal(
+                "emission would exceed {} bytes".format(MAX_REGISTRATION_BYTES))
         _emit_piece(json.dumps(value, ensure_ascii=False), out, budget)
     elif value is True:
         _emit_piece("true", out, budget)
@@ -328,14 +359,23 @@ def _emit_value(value, depth, out, budget):
             raise _ParseRefusal("number outside the finite double range in the model")
         _emit_piece(json.dumps(value), out, budget)
     elif isinstance(value, dict):
-        if any(not isinstance(key, str) for key in value):
-            raise _ParseRefusal("non-string table key in the model")
+        if any(type(key) is not str for key in value):
+            # exact type: a _Number key and a same-lexeme str key are DISTINCT model keys that
+            # would both serialize as the same JSON string, emitting duplicate-key JSON _parse
+            # then refuses; a hostile str-subclass key is caller-run code. Both refuse here, so
+            # emission stays a fixed point for every model it emits at all.
+            raise _ParseRefusal("table key in the model is not exactly a string")
         if not value:
             _emit_piece("{}", out, budget)
             return
         pad = "  " * (depth + 1)
         _emit_piece("{\n", out, budget)
         for i, key in enumerate(sorted(value)):
+            if budget[0] < len(pad) + len(key) + 4:
+                # the key's emitted line is at least pad + quotes + key + ": "; refuse before
+                # json.dumps materializes an over-budget key.
+                raise _EmitBoundRefusal(
+                    "emission would exceed {} bytes".format(MAX_REGISTRATION_BYTES))
             _emit_piece(pad + json.dumps(key, ensure_ascii=False) + ": ", out, budget)
             _emit_value(value[key], depth + 1, out, budget)
             _emit_piece(",\n" if i + 1 < len(value) else "\n", out, budget)
@@ -364,9 +404,12 @@ def _single_line(value):
 
 
 def _is_json_string(value):
-    """A parsed JSON string: a str that is not the _Number lexeme carrier (which subclasses str), so
-    a number-typed field can never satisfy a string-typed check."""
-    return isinstance(value, str) and not isinstance(value, _Number)
+    """A parsed JSON string: EXACTLY str by type identity, never isinstance. This excludes the
+    _Number lexeme carrier (so a number-typed field can never satisfy a string-typed check) and
+    every other str subclass: a hostile subclass is caller-run code whose overridden __iter__
+    or __eq__ could hide control characters from the token scan or fake an already-merged
+    equality, so it is refused before any of its methods can run."""
+    return type(value) is str
 
 
 def _is_json_number(value):
@@ -405,8 +448,9 @@ def validate_registration_model(model):
     if not isinstance(model, dict):
         return schema.AdoptValidation(CANNOT_EVALUATE, ["registration top level is not a table"])
     findings = []
-    if any(not isinstance(k, str) for k in model):
-        return schema.AdoptValidation(INVALID, ["registration carries a non-string top-level key"])
+    if any(type(k) is not str for k in model):
+        return schema.AdoptValidation(
+            INVALID, ["registration carries a top-level key that is not exactly a string"])
     for key in sorted(model):
         if key not in TOP_LEVEL_KEYS:
             findings.append("unknown top-level key {} (the closed v1 recognized set; an "
@@ -419,8 +463,9 @@ def validate_registration_model(model):
             return verdict
         if not isinstance(hooks, dict):
             return schema.AdoptValidation(CANNOT_EVALUATE, ["hooks is not a table"])
-        if any(not isinstance(k, str) for k in hooks):
-            return schema.AdoptValidation(INVALID, ["hooks carries a non-string event key"])
+        if any(type(k) is not str for k in hooks):
+            return schema.AdoptValidation(
+                INVALID, ["hooks carries an event key that is not exactly a string"])
         for event in sorted(hooks):
             if event not in HOOK_EVENTS:
                 return schema.AdoptValidation(
@@ -439,6 +484,12 @@ def validate_registration_model(model):
                 if verdict is not None:
                     return verdict
     if findings:
+        if len(findings) > MAX_FINDINGS:
+            dropped = len(findings) - MAX_FINDINGS
+            findings = findings[:MAX_FINDINGS]
+            findings.append("... {} further findings suppressed (a refusal returns at most {} "
+                            "findings; the registration refuses regardless)".format(
+                                dropped, MAX_FINDINGS))
         return schema.AdoptValidation(INVALID, findings)
     return schema.AdoptValidation(VALID, [])
 
@@ -451,8 +502,8 @@ def _validate_group(group, where, findings):
         return verdict
     if not isinstance(group, dict):
         return schema.AdoptValidation(CANNOT_EVALUATE, ["{} is not a table".format(where)])
-    if any(not isinstance(k, str) for k in group):
-        findings.append("{} carries a non-string key".format(where))
+    if any(type(k) is not str for k in group):
+        findings.append("{} carries a key that is not exactly a string".format(where))
         return None
     for key in sorted(group):
         if key not in _GROUP_REQUIRED + _GROUP_OPTIONAL:
@@ -483,8 +534,8 @@ def _validate_group(group, where, findings):
             return verdict
         if not isinstance(entry, dict):
             return schema.AdoptValidation(CANNOT_EVALUATE, ["{} is not a table".format(ewhere)])
-        if any(not isinstance(k, str) for k in entry):
-            findings.append("{} carries a non-string key".format(ewhere))
+        if any(type(k) is not str for k in entry):
+            findings.append("{} carries a key that is not exactly a string".format(ewhere))
             continue
         for key in sorted(entry):
             if key not in _ENTRY_REQUIRED + _ENTRY_OPTIONAL:
@@ -496,7 +547,9 @@ def _validate_group(group, where, findings):
         verdict = _null_refusal(entry["type"], "{} type".format(ewhere))
         if verdict is not None:
             return verdict
-        if entry["type"] not in HOOK_TYPES:
+        if not _is_json_string(entry["type"]) or entry["type"] not in HOOK_TYPES:
+            # the exact-str requirement comes first: a hostile str subclass with an overridden
+            # __eq__ could otherwise satisfy the closed-vocabulary membership test.
             return schema.AdoptValidation(
                 CANNOT_EVALUATE,
                 ["{} type {} outside the closed v1 vocabulary".format(
@@ -548,7 +601,9 @@ def merge_registration(old_bytes, plugin_entry):
     no-op (changed False, new_bytes the file's OWN bytes verbatim, never a re-emission); an
     existing conflicting registration of the same entry, any unrecognized format or shape, JSON null
     in the recognized hooks surface, a number outside the finite double range, a plugin_entry that
-    is not a genuine JSON string, and a merged emission that would exceed MAX_REGISTRATION_BYTES
+    is not EXACTLY a JSON string (type identity: the _Number lexeme carrier and every other str
+    subclass are refused before any of their methods run), and a merged emission that would
+    exceed MAX_REGISTRATION_BYTES
     (refused by the emitter's running byte count the moment the bound would pass, so the over-bound
     output is never built) all refuse fail-closed. The no-op path and the merge
     path share the same parse and validation, so parse-level and shape-level refusals are
@@ -567,9 +622,11 @@ def merge_registration(old_bytes, plugin_entry):
         return _cannot("registration exceeds {} bytes".format(MAX_REGISTRATION_BYTES),
                        old_bytes=old_bytes)
     if not (_is_json_string(plugin_entry) and schema._is_token(plugin_entry)):
-        # a GENUINE JSON string only: a parsed-number lexeme carrier (_Number subclasses str, so
-        # it satisfies the bare token rule) would merge as a bare JSON number that this module's
-        # own next merge refuses, so it is refused up front.
+        # EXACTLY a str only (type identity, checked BEFORE the token scan runs): a
+        # parsed-number lexeme carrier (_Number) would merge as a bare JSON number that this
+        # module's own next merge refuses, and any other str subclass is caller-run code whose
+        # overridden __iter__ or __eq__ could hide control characters from the token scan or
+        # fake an already-merged equality, so both are refused up front.
         return _invalid(["plugin_entry is not a JSON string passing the no-control token rule"],
                         old_bytes=old_bytes)
     try:
@@ -600,8 +657,11 @@ def merge_registration(old_bytes, plugin_entry):
         new_bytes = _emit(merged)
         # verification, fail-closed (threat model 2): the emitted bytes reparse to exactly the prior
         # model plus the one inserted entry, and emission is a fixed point (byte-exact re-emission).
+        # The re-emission runs INSIDE this try, so even a fault only a broken emitter could
+        # raise on it maps to a refusal, never an uncaught exception.
         reparsed = _parse(new_bytes)
         stripped = _parse(new_bytes)
+        re_emitted = _emit(reparsed)
     except _EmitBoundRefusal:
         return _cannot("merged registration would exceed {} bytes (the same bound the input is "
                        "held to, refused by the emitter's running byte count so the over-bound "
@@ -622,8 +682,8 @@ def merge_registration(old_bytes, plugin_entry):
             del stripped["hooks"]
     # reparsed != merged and stripped != model overlap deliberately (given the tail guard, each
     # alone would refuse this corruption class); both stay as independent defenses, and the
-    # _emit(reparsed) clause pins byte-level canonicality on its own.
-    if reparsed != merged or stripped != model or _emit(reparsed) != new_bytes:
+    # re-emission clause pins byte-level canonicality on its own.
+    if reparsed != merged or stripped != model or re_emitted != new_bytes:
         return _cannot("merge verification failed: emission is not the prior model plus exactly "
                        "the one entry", old_bytes=old_bytes)
     return HookMergeResult(VALID, [], old_bytes=old_bytes, new_bytes=new_bytes,
@@ -1163,6 +1223,78 @@ def self_test():
     check("existing-command-control-invalid",
           merge_registration(_emit(ctrl_cmd), entry).status is INVALID)
 
+    # 6c: EXACT TYPES at every trust boundary (type identity, never isinstance). A hostile str
+    # subclass is caller-run code: overriding __iter__ hides characters from the token scan
+    # while json.dumps reads the real underlying buffer (a control character would ride into
+    # the executable-on-load command, threat model 5), and overriding __eq__ fakes an
+    # already-merged equality (a false no-op). The candidate check, the key checks, the
+    # string-typed field checks, and the emitter must all refuse such a value BEFORE any of
+    # its methods can run; reverting any one of those boundaries to isinstance turns its
+    # vector here (or in 7e) red.
+    class _HidingIter(str):
+        __slots__ = ()
+
+        def __iter__(self):
+            return iter("clean")
+
+    class _AlwaysEqual(str):
+        __slots__ = ()
+        __hash__ = str.__hash__
+
+        def __eq__(self, other):
+            return True
+
+        def __ne__(self, other):
+            return False
+
+    r = merge_registration(old, _HidingIter("opf-gov\nrm -rf tmp"))
+    check("hostile-str-subclass-candidate-invalid",
+          r.status is INVALID and r.new_bytes is None)
+    other_entry = merge_registration(b"{}", "someone-else").new_bytes
+    r = merge_registration(other_entry, _AlwaysEqual(entry))
+    # under an isinstance revert this is a FALSE already-merged no-op (VALID, changed False):
+    # the reflected __eq__ makes "someone-else" read as the candidate.
+    check("always-equal-candidate-invalid", r.status is INVALID and r.new_bytes is None)
+    exact_key = validate_registration_model({_Number("hooks"): dict()})
+    check("exact-type-top-level-key-invalid",
+          exact_key.status is INVALID and exact_key.findings ==
+          ["registration carries a top-level key that is not exactly a string"])
+    hostile_type = {"hooks": {"Stop": [{"hooks": [
+        {"command": "x", "type": _AlwaysEqual("command")}]}]}}
+    check("hostile-str-subclass-type-cannot-eval",
+          validate_registration_model(hostile_type).status is CANNOT_EVALUATE)
+    hostile_cmd = {"hooks": {"Stop": [{"hooks": [
+        {"command": _HidingIter("clean\nevil"), "type": "command"}]}]}}
+    check("hostile-str-subclass-command-invalid",
+          validate_registration_model(hostile_cmd).status is INVALID)
+    hostile_matcher = {"hooks": {"Stop": [{"matcher": _HidingIter("a\nb"), "hooks": [
+        {"command": "x", "type": "command"}]}]}}
+    check("hostile-str-subclass-matcher-invalid",
+          validate_registration_model(hostile_matcher).status is INVALID)
+    # keys are trust boundaries at EVERY level: a _Number key would be found by a plain-str
+    # membership or dict lookup (reflected str equality), so only the exact-type key checks
+    # keep a number-carrier key out of the recognized surface.
+    hostile_event_key = {"hooks": {_Number("Stop"): []}}
+    v = validate_registration_model(hostile_event_key)
+    check("exact-type-event-key-invalid",
+          v.status is INVALID and v.findings ==
+          ["hooks carries an event key that is not exactly a string"])
+    hostile_group_key = {"hooks": {"Stop": [{_Number("hooks"): [
+        {"command": "x", "type": "command"}]}]}}
+    v = validate_registration_model(hostile_group_key)
+    # the finding text is pinned: an isinstance revert still refuses INVALID here, but with a
+    # missing-required-key finding (the _Number key misses the plain-str dict lookup), so only
+    # the exact-type check produces this finding.
+    check("exact-type-group-key-invalid",
+          v.status is INVALID and
+          any("carries a key that is not exactly a string" in f for f in v.findings))
+    hostile_entry_key = {"hooks": {"Stop": [{"hooks": [
+        {_Number("command"): "x", "type": "command"}]}]}}
+    v = validate_registration_model(hostile_entry_key)
+    check("exact-type-entry-key-invalid",
+          v.status is INVALID and
+          any("carries a key that is not exactly a string" in f for f in v.findings))
+
     # 6b: JSON null anywhere in the recognized hooks surface refuses CANNOT-EVALUATE with a NAMED
     # finding; null is never read as absence and never crashes, while genuinely ABSENT optional
     # keys stay valid (the absent-vs-null distinction) and number-typed strings stay refused.
@@ -1258,30 +1390,84 @@ def self_test():
 
     # 7d: the output byte bound is enforced INCREMENTALLY during emission: a small
     # wide-and-deep input (2-byte array elements whose every emitted line carries about 2*depth
-    # bytes of indentation) must refuse the moment the running count would pass the bound, with
-    # traced memory staying near the bound; building the whole over-bound emission first and
-    # length-checking it afterwards peaked at hundreds of MiB on this vector and turns exactly
-    # the memory assertion red.
-    import tracemalloc
+    # bytes of indentation) must refuse the moment the running count would pass the bound. The
+    # discriminator is DETERMINISTIC: a counting shim on the _emit_piece seam measures the
+    # emission bytes actually BUILT, so the verdict depends on neither the interpreter build,
+    # nor the allocator, nor ambient tracemalloc state (an absolute traced-peak ceiling here
+    # was a false-red risk: reset_peak() keeps a caller's live allocations in the peak, and
+    # object sizes are build-dependent; as build-dependent evidence only, the fixed shape
+    # traced near 92 MiB on CPython 3.14 where the pre-fix shape traced near 332 MiB).
+    # Reverting to build-the-whole-emission-then-length-check builds the whole multi-hundred-MB
+    # output and turns exactly the built-bytes assertion red.
     wd_depth = 100
     wd_count = (MAX_REGISTRATION_BYTES - 2 * wd_depth - 20) // 2
     wide_deep = (b'{"env":' + b"[" * wd_depth + b"[" + b"0," * (wd_count - 1) + b"0]"
                  + b"]" * wd_depth + b"}")
     check("wide-deep-vector-inside-input-bound", len(wide_deep) <= MAX_REGISTRATION_BYTES)
-    was_tracing = tracemalloc.is_tracing()
-    if not was_tracing:
-        tracemalloc.start()
-    tracemalloc.reset_peak()
-    wide = merge_registration(wide_deep, entry)
-    wd_peak = tracemalloc.get_traced_memory()[1]
-    if not was_tracing:
-        tracemalloc.stop()
+    built = [0]
+    real_emit_piece = _emit_piece
+
+    def _counting_emit_piece(piece, out, budget):
+        built[0] += (len(piece) if piece.isascii()
+                     else len(piece.encode("utf-8", "surrogatepass")))
+        return real_emit_piece(piece, out, budget)
+
+    try:
+        globals()["_emit_piece"] = _counting_emit_piece
+        wide = merge_registration(wide_deep, entry)
+    finally:
+        globals()["_emit_piece"] = real_emit_piece
     check("wide-deep-emission-refuses",
           wide.status is CANNOT_EVALUATE and wide.new_bytes is None
           and any("exceed" in f for f in wide.findings))
-    # ceiling: the fixed shape peaks near 92 MiB here (two parsed copies of half a million
-    # number lexemes dominate); the pre-fix build-the-whole-emission shape peaked near 332 MiB.
-    check("wide-deep-emission-memory-bounded", wd_peak <= 160 * 1024 * 1024)
+    # an incremental refusal stops within one piece of the budget; pieces on this vector are a
+    # few dozen bytes, so 4096 bytes of slack is generous and still two orders of magnitude
+    # below the pre-fix whole-output build.
+    check("wide-deep-emission-built-bytes-bounded",
+          0 < built[0] <= MAX_REGISTRATION_BYTES + 4096)
+
+    # 7d2: the CANDIDATE string counts against the same incremental budget BEFORE it is
+    # serialized: a huge candidate refuses with nothing candidate-sized ever built (the
+    # counting shim on the module's json seam proves json.dumps never materialized its escaped
+    # form; without the emitter's pre-serialization budget check the whole multi-megabyte
+    # serialization is allocated first, a large enough candidate raised MemoryError, and only
+    # then refused).
+    dumped = [0]
+    real_json = json
+
+    class _CountingJson:
+        loads = staticmethod(real_json.loads)
+
+        @staticmethod
+        def dumps(value, **kwargs):
+            text = real_json.dumps(value, **kwargs)
+            dumped[0] += len(text)
+            return text
+
+    huge_candidate = "x" * (2 * MAX_REGISTRATION_BYTES)
+    try:
+        globals()["json"] = _CountingJson
+        r = merge_registration(b"{}", huge_candidate)
+    finally:
+        globals()["json"] = real_json
+    check("huge-candidate-refuses",
+          r.status is CANNOT_EVALUATE and r.new_bytes is None
+          and any("exceed" in f for f in r.findings))
+    check("huge-candidate-never-serialized", 0 < dumped[0] <= 4096)
+    # a KEY that could never fit is likewise refused before serialization (a code-built model
+    # only; parsed keys are already inside the input bound).
+    dumped[0] = 0
+    try:
+        globals()["json"] = _CountingJson
+        try:
+            _emit({"k" * (2 * MAX_REGISTRATION_BYTES): 0})
+            huge_key_refused = False
+        except _EmitBoundRefusal:
+            huge_key_refused = True
+    finally:
+        globals()["json"] = real_json
+    check("huge-key-refuses", huge_key_refused)
+    check("huge-key-never-serialized", dumped[0] == 0)
 
     # 7e: the emitter itself holds numbers to the parser's number grammar and finite double
     # range, so emission is a fixed point under _parse for every model it emits at all, including
@@ -1297,6 +1483,13 @@ def self_test():
     check("emit-code-built-nonfinite-refuses", _emit_refuses({"env": float("inf")}))
     check("emit-out-of-range-lexeme-refuses", _emit_refuses({"env": _Number("1e400")}))
     check("emit-malformed-lexeme-refuses", _emit_refuses({"env": _Number("007")}))
+    # exact-type keys and string values: a _Number key beside its same-lexeme str key would
+    # emit duplicate-key JSON _parse then refuses (breaking the fixed-point claim above), and
+    # a hostile str subclass must never reach json.dumps, which reads the real underlying
+    # buffer.
+    check("emit-nonexact-string-key-refuses",
+          _emit_refuses({"env": {_Number("1"): 0, "1": 1}}))
+    check("emit-nonexact-string-value-refuses", _emit_refuses({"env": _HidingIter("x")}))
 
     # 7c: recursion exhaustion refuses, never an uncaught exception, on BOTH paths: deep top-level
     # nesting exhausts the PARSER (mapped by _parse's RecursionError handler), and nesting that
@@ -1391,6 +1584,53 @@ def self_test():
     check("model-code-built-huge-int-refuses",
           validate_registration_model({"hooks": {"Stop": [{"hooks": [
               {"command": "x", "type": "command", "timeout": 10 ** 400}]}]}}).status is INVALID)
+
+    # 11: findings and refusal messages BOUND what they repeat (_shown): on every path that
+    # embeds adopter content (a number lexeme, a key, a duplicate key, a hook event, an entry
+    # type, and the caller's candidate), long content comes back as a bounded excerpt carrying
+    # the value's own length, never echoed whole; reverting _shown to a plain repr turns each
+    # of these red.
+    finding_bound = 256
+    big = 512 * 1024
+
+    def findings_bounded(result, expect_status):
+        return (result.status is expect_status and result.new_bytes is None
+                and result.findings
+                and all(len(f) <= finding_bound for f in result.findings))
+
+    long_lexeme = merge_registration(b'{"env": {"x": ' + b"9" * big + b'}}', entry)
+    check("bounded-finding-long-lexeme", findings_bounded(long_lexeme, CANNOT_EVALUATE))
+    long_key = merge_registration(b'{"' + b"k" * big + b'": {}}', entry)
+    check("bounded-finding-long-key", findings_bounded(long_key, INVALID))
+    long_dup = merge_registration(
+        b'{"' + b"d" * (big // 2) + b'": 1, "' + b"d" * (big // 2) + b'": 2}', entry)
+    check("bounded-finding-long-duplicate-key", findings_bounded(long_dup, CANNOT_EVALUATE))
+    long_event = merge_registration(b'{"hooks": {"' + b"e" * big + b'": []}}', entry)
+    check("bounded-finding-long-event", findings_bounded(long_event, CANNOT_EVALUATE))
+    long_type = merge_registration(
+        b'{"hooks": {"Stop": [{"hooks": [{"command": "x", "type": "' + b"t" * big
+        + b'"}]}]}}', entry)
+    check("bounded-finding-long-type", findings_bounded(long_type, CANNOT_EVALUATE))
+    long_entry = "c" * (256 * 1024)
+    conflicted = _emit({"hooks": {ENTRY_EVENT: [
+        {"hooks": [{"command": long_entry, "type": "command"}], "matcher": "Bash"}]}})
+    check("bounded-finding-long-candidate",
+          findings_bounded(merge_registration(conflicted, long_entry), INVALID))
+    # the excerpt reports the VALUE's length and cuts the value before repr, so the cut can
+    # never split a repr escape sequence (reverting to a repr-length count or a repr-text cut
+    # turns exactly this red).
+    check("shown-reports-value-length",
+          _shown("a" * 100) == "{}... (100 characters)".format(repr("a" * 48))
+          and _shown(_Number("1" * 100)) == "1" * 64 + "... (100 characters)")
+
+    # 11b: the findings LIST is bounded too: at most MAX_FINDINGS findings plus one
+    # suppression marker come back, so a registration with tens of thousands of violations
+    # cannot amplify a refusal into megabytes of accumulated diagnostics.
+    many = {"k" + str(i): 0 for i in range(MAX_FINDINGS + 200)}
+    capped = validate_registration_model(many)
+    check("findings-count-capped",
+          capped.status is INVALID and len(capped.findings) == MAX_FINDINGS + 1
+          and "further findings suppressed" in capped.findings[-1])
 
     if failures:
         print("OPF-ADOPT-HOOK SELF-TEST: FAIL ({} of {} checks failed)".format(
