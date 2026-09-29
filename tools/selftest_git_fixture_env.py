@@ -1667,6 +1667,44 @@ def _run_corpus_imported(poison_key, poison_value, cwd):
         return "imported corpus launch failed: {}".format(exc)
 
 
+def _auto_maintenance_children(workdir, env):
+    """The argv of every maintenance/gc child a traced fixture commit spawns under env: [] is
+    the pinned (F-367) behaviour; a non-empty list is the defective behaviour the red leg
+    reproduces (an UNPINNED commit spawns `git maintenance run --auto`, which DETACHES and keeps
+    pruning the fixture's .git/objects after the commit returned, racing a later
+    copytree/rmtree/read of that repository). A launch failure or an unreadable trace is a loud
+    string, never a silent pass."""
+    workdir.mkdir()
+    trace = workdir / "trace2-events.jsonl"
+    repo = workdir / "repo"
+    env = dict(env, GIT_TRACE2_EVENT=str(trace))
+    try:
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)],
+                       check=True, capture_output=True, timeout=60, env=env)
+        (repo / "seed.txt").write_text("seed line\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "seed.txt"],
+                       check=True, capture_output=True, timeout=60, env=env)
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.name=Selftest",
+             "-c", "user.email=selftest@example.invalid", "-c", "commit.gpgsign=false",
+             "commit", "-q", "-m", "seed"],
+            check=True, capture_output=True, timeout=60, env=env)
+        lines = trace.read_text(encoding="utf-8").splitlines()
+    except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
+        return "maintenance probe failed: %s" % (exc,)
+    children = []
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except ValueError as exc:
+            return "unparseable trace2 event: %s" % (exc,)
+        if event.get("event") == "child_start":
+            argv = event.get("argv") or []
+            if set(("maintenance", "gc")) & set(argv):
+                children.append(argv)
+    return children
+
+
 def _expected_check_ids():
     try:
         with open(CHECKS_MANIFEST, "rb") as handle:
@@ -1738,6 +1776,21 @@ def main(report_path=None):
         check("env/override-kept", env.get("GIT_AUTHOR_NAME"), "Fixture Author")
         check("env/non-git-preserved", env.get(SENTINEL), "kept")
 
+        # F-367: a fixture commit must not spawn automatic maintenance (a DETACHED
+        # `git maintenance run --auto` / `git gc --auto` keeps pruning the fixture's .git/objects
+        # after the commit returned, racing a later copytree/rmtree/read of that repository). The
+        # green leg proves the pinned env spawns none; the red leg strips exactly the maintenance
+        # pins and must OBSERVE the child, so the probe is proven discriminating, never vacuous.
+        check("env/no-auto-maintenance",
+              _auto_maintenance_children(base / "maintenance-green",
+                                         _git_fixture_env.git_fixture_env()), [])
+        unpinned = _git_fixture_env.git_fixture_env()
+        for name in _git_fixture_env._MAINTENANCE_PIN_VARS:
+            del unpinned[name]
+        red = _auto_maintenance_children(base / "maintenance-red", unpinned)
+        check("env/no-auto-maintenance-red",
+              red if isinstance(red, str) else bool(red), True)
+
         # The in-place form, in a CHILD interpreter under a fully poisoned environment: after
         # scrub_git_environment() the only GIT_-prefixed variables left are the three pins, and
         # HOME has left the poisoned value for the scratch home.
@@ -1761,8 +1814,11 @@ def main(report_path=None):
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
             got = "scrub child failed: {}".format(exc)
         check("env/scrub-in-place-child", got,
-              (0, [["GIT_CONFIG_GLOBAL", os.devnull], ["GIT_CONFIG_NOSYSTEM", "1"],
-                   ["GIT_CONFIG_SYSTEM", os.devnull]], True))
+              (0, [["GIT_CONFIG_COUNT", "3"], ["GIT_CONFIG_GLOBAL", os.devnull],
+                   ["GIT_CONFIG_KEY_0", "gc.auto"], ["GIT_CONFIG_KEY_1", "gc.autoDetach"],
+                   ["GIT_CONFIG_KEY_2", "maintenance.auto"], ["GIT_CONFIG_NOSYSTEM", "1"],
+                   ["GIT_CONFIG_SYSTEM", os.devnull], ["GIT_CONFIG_VALUE_0", "0"],
+                   ["GIT_CONFIG_VALUE_1", "false"], ["GIT_CONFIG_VALUE_2", "false"]], True))
 
         # caller_env_without_git(), in a CHILD interpreter under full poison, with HOME at a
         # scratch caller home whose .gitconfig carries the trust surface: after the in-place

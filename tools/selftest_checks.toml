@@ -421,6 +421,8 @@ expected-check-ids = [
   "config/system-control",
   "config/xdg-malformed-control",
   "env/lifecycle-path-removal-red",
+  "env/no-auto-maintenance",
+  "env/no-auto-maintenance-red",
   "env/opf-ingest-apply-both-legs",
   "env/opf-lifecycle-names-independent",
   "env/opf-lifecycle-bypass-denied",

@@ -1040,7 +1040,10 @@ def self_test_isolated():
         reads; a bounded timeout so a hung fixture call fails SAFE rather than hangs (mirrors _run_git)."""
         cmd = [git, "--no-replace-objects", "-C", str(cwd),
                "-c", "user.email=opf@example.invalid", "-c", "user.name=OPF Self Test",
-               "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"] + list(args)
+               "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main",
+               # F-367: no DETACHED auto-gc/auto-maintenance may outlive a fixture commit and
+               # churn .git while a later read or the teardown rmtree traverses it.
+               "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"] + list(args)
         try:
             proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                   env=_setup_env(home), timeout=_GIT_TIMEOUT_S)

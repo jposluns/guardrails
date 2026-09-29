@@ -96,6 +96,7 @@ import contextlib
 import copy
 import datetime
 import io
+import json
 import os
 import shutil
 import stat
@@ -153,8 +154,18 @@ class Env:
                      "GIT_AUTHOR_EMAIL": "gate@example.invalid", "GIT_COMMITTER_NAME": "gate",
                      "GIT_COMMITTER_EMAIL": "gate@example.invalid"}
 
+    # Spliced into EVERY fixture git command: no DETACHED auto-gc/auto-maintenance may outlive a
+    # commit and keep repacking/pruning .git/objects while Fixtures.case copytrees this repository
+    # (F-367: the loose objects and their fan-out directories vanish mid-copy, ENOENT). gc.auto=0
+    # disables auto-gc, maintenance.auto=false keeps commit from spawning `git maintenance run
+    # --auto` at all, and gc.autoDetach=false is defence in depth: a gc --auto that still runs
+    # stays foreground, inside run_git's wait.
+    NO_AUTO_MAINTENANCE = ("-c", "gc.auto=0", "-c", "gc.autoDetach=false",
+                           "-c", "maintenance.auto=false")
+
     def run_git(self, root, *args):
-        return subprocess.run(["git", "-C", str(root), "-c", "init.defaultBranch=main"] + list(args),
+        return subprocess.run(["git", "-C", str(root), "-c", "init.defaultBranch=main"]
+                              + list(self.NO_AUTO_MAINTENANCE) + list(args),
                               capture_output=True, text=True, timeout=120, env=self.vars)
 
     def git(self, root, *args):
@@ -162,6 +173,34 @@ class Env:
         if proc.returncode != 0:
             raise Harness("fixture git {} failed: {}".format(args, proc.stderr.strip()))
         return proc.stdout
+
+
+def assert_no_auto_maintenance(env, base):
+    """DETERMINISTIC guard on the run_git maintenance pins (F-367): a traced fixture commit must
+    spawn NO maintenance or gc child. Without the pins, commit spawns `git maintenance run --auto`,
+    which DETACHES and keeps pruning .git/objects after run_git returned, racing the copytree in
+    Fixtures.case (ENOENT mid-copy). Runs before any fixture is built; a spawned child is a
+    Harness fault (exit 2, cannot-evaluate), never a verdict."""
+    probe = base / "maintenance-probe"
+    probe.mkdir()
+    trace = base / "maintenance-probe-trace.jsonl"
+    env.git(probe, "init", "-q")
+    (probe / "seed.txt").write_bytes(b"seed\n")
+    env.git(probe, "add", "-A")
+    with patch.dict(env.vars, dict(GIT_TRACE2_EVENT=str(trace))):
+        env.git(probe, "commit", "-q", "-m", "probe")
+    spawned = []
+    for line in trace.read_text(encoding="utf-8").splitlines():
+        event = json.loads(line)   # one trace2 event per line; unparseable output is a Harness fault
+        if event.get("event") == "child_start":
+            argv = event.get("argv") or []
+            if set(("maintenance", "gc")) & set(argv):
+                spawned.append(argv)
+    if spawned:
+        raise Harness("a fixture commit spawned automatic maintenance %r: the run_git pins"
+                      " (gc.auto=0, gc.autoDetach=false, maintenance.auto=false) are missing, so a"
+                      " detached gc can prune .git/objects while a later case copytrees this"
+                      " repository" % (spawned,))
 
 
 def cli(env, argv):
@@ -1390,6 +1429,7 @@ def _self_test_isolated(red_on_revert=False):
         if opf._bootstrap() != 0:
             raise Harness("opf bootstrap failed")
         env = Env(base)
+        assert_no_auto_maintenance(env, base)
         fx = Fixtures(base, env)
         for name, test, _flip in TESTS:
             check(name, lambda test=test: test(fx))
