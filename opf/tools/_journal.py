@@ -1275,11 +1275,15 @@ def _verify_staged_digest(op, data):
 
 
 def _read_back_verify(fd, expected_sha, path, what):
-    """Spec 14.2 verification checkpoint: RE-READ the bytes just written through the SAME still-open
-    descriptor (never a re-resolved path) and digest-verify them against the recorded expectation BEFORE
-    the sequence moves on, so an archived copy is proven on disk before its source removal runs, and a
-    rollback's restored live bytes are proven before the aborted run's copy is discarded or a prestate is
-    reported. A mismatch (a torn, short, or faulty write) raises JournalError and fails closed."""
+    """Spec 14.2 verification checkpoint: after fsync, RE-READ the bytes just written THROUGH THE KERNEL
+    from the SAME still-open descriptor (never a re-resolved path) and digest-verify them against the
+    recorded expectation BEFORE the sequence moves on, so an archived copy is proven written before its
+    source removal runs, and a rollback's restored live bytes are proven before the aborted run's copy is
+    discarded or a prestate is reported. The re-read is the kernel's view of the file for this same
+    descriptor, so it deterministically catches THIS PROCESS'S OWN write-path faults (wrong, short, or
+    torn bytes handed to the kernel: a mismatch raises JournalError and fails closed); verification of
+    the physical medium below the syscall boundary is OUT OF SCOPE (no portable userspace re-read can
+    bypass the kernel's cache)."""
     os.lseek(fd, 0, os.SEEK_SET)
     digest = hashlib.sha256()
     while True:
@@ -1288,8 +1292,10 @@ def _read_back_verify(fd, expected_sha, path, what):
             break
         digest.update(chunk)
     if digest.hexdigest() != expected_sha:
-        raise JournalError("{}: the {} bytes re-read from disk do not match their recorded digest "
-                           "(verification checkpoint, spec 14.2); failing closed".format(path, what))
+        raise JournalError("{}: the {} bytes re-read through the kernel from the same descriptor do "
+                           "not match their recorded digest (verification checkpoint, spec 14.2: the "
+                           "process's own write path handed the kernel different bytes); failing "
+                           "closed".format(path, what))
 
 
 def apply_ops(root_fd, ops, staged_reader):
@@ -1297,9 +1303,10 @@ def apply_ops(root_fd, ops, staged_reader):
     follow, by final component; never a re-resolved absolute path between check and write. ops are in
     dependency order (parents before children for creates, children before parents for removes), so
     reversed(ops) is the normative reverse-dependency rollback order. Every write is fsync'd, RE-READ
-    from the destination and digest-verified against its INTENT poststate before the next op runs (the
-    spec 14.2 verification checkpoint: a removal paired with an archive copy runs only after that copy's
-    on-disk bytes verified), and every touched entry's parent directory is fsync'd (step 6). Any prestate
+    through the kernel from the same descriptor and digest-verified against its INTENT poststate before
+    the next op runs (the spec 14.2 verification checkpoint: a removal paired with an archive copy runs
+    only after that copy's written bytes verified), and every touched entry's parent directory is
+    fsync'd (step 6). Any prestate
     mismatch raises JournalError and the caller rolls back from the preimages."""
     for i, op in enumerate(ops):
         try:
@@ -1464,7 +1471,32 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
             if st is None:
                 _recreate_file(pfd, name, data, prestate["mode"])
             elif stat.S_ISREG(st.st_mode):
-                fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
+                observed_mode = stat.S_IMODE(st.st_mode)
+                granted = False
+                try:
+                    fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
+                except PermissionError:
+                    # RESTARTABLE RESTORATION (codex U1 round-2): a live file whose mode denies owner
+                    # write (a 0400 or 0000 prestate, or the debris of an interrupted earlier restore)
+                    # cannot be reopened O_RDWR, which would wedge recovery forever on EACCES with the
+                    # preimage still retained. Grant a TEMPORARY owner-rw bit by name (no-follow, beneath
+                    # the same parent fd; a raced-in symlink refuses) and reopen. The grant is ALWAYS
+                    # reverted: on success the exact prestate mode is installed after the checkpoint
+                    # below; on a failed attempt the pre-grant mode is re-applied through the verified
+                    # fd, so the next reconcile simply re-grants and retries. The lstat-to-chmod window
+                    # is the same accident-model TOCTOU the pre-existing lstat-to-open window carries;
+                    # the post-open fstat identity check below stays the arbiter, and an adversarial
+                    # same-user racer remains outside the journal's disclosed quiescence guarantee.
+                    os.chmod(name, observed_mode | 0o600, dir_fd=pfd, follow_symlinks=False)
+                    granted = True
+                    try:
+                        fd = os.open(name, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
+                    except OSError:
+                        try:
+                            os.chmod(name, observed_mode, dir_fd=pfd, follow_symlinks=False)
+                        except OSError:
+                            pass             # the grant stays; the next reconcile still finishes
+                        raise
                 try:
                     # SECI-symlink-resolution: the S_ISREG decision above rests on the PRE-open lstat, which
                     # describes a name that may no longer point where it did. O_NOFOLLOW refuses a symlink but
@@ -1480,24 +1512,38 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
                     if not stat.S_ISREG(fst.st_mode) or fst.st_ino != st.st_ino or fst.st_dev != st.st_dev:
                         raise JournalError("cannot restore {!r}: the regular file was swapped for a different "
                                            "object between the pre-open check and the open (fail-closed)".format(path))
-                    if fst.st_nlink != 1:
-                        # A multiply-linked target shares its inode with another name, so the ftruncate+rewrite
-                        # below would mutate that out-of-tree victim through the shared inode. Refuse on the
-                        # OPENED fd BEFORE truncating, the same product-file nlink==1 defence _verify_fd_prestate
-                        # applies on the apply path (SECI-symlink-resolution / codex round-8).
-                        raise JournalError("cannot restore {!r}: product file has {} hard links (>1); refusing "
-                                           "to truncate/write a multiply-linked file (a second name would "
-                                           "mutate an out-of-tree victim through the shared inode)".format(
-                                               path, fst.st_nlink))
-                    os.ftruncate(fd, 0)
-                    os.lseek(fd, 0, os.SEEK_SET)
-                    _write_all(fd, data)
-                    os.fchmod(fd, prestate["mode"])
-                    os.fsync(fd)
-                    # Spec 14.2 rollback checkpoint: the restored live bytes verify BEFORE this restore
-                    # returns, so the reversal never discards the aborted run's archive copy (a later
-                    # create-undo in the reverse order) or reports a prestate over a faulty restore.
-                    _read_back_verify(fd, prestate["sha256"], path, "restored")
+                    try:
+                        if fst.st_nlink != 1:
+                            # A multiply-linked target shares its inode with another name, so the
+                            # ftruncate+rewrite below would mutate that out-of-tree victim through the
+                            # shared inode. Refuse on the OPENED fd BEFORE truncating, the same
+                            # product-file nlink==1 defence _verify_fd_prestate applies on the apply path
+                            # (SECI-symlink-resolution / codex round-8).
+                            raise JournalError("cannot restore {!r}: product file has {} hard links (>1); "
+                                               "refusing to truncate/write a multiply-linked file (a second "
+                                               "name would mutate an out-of-tree victim through the shared "
+                                               "inode)".format(path, fst.st_nlink))
+                        os.ftruncate(fd, 0)
+                        os.lseek(fd, 0, os.SEEK_SET)
+                        _write_all(fd, data)
+                        os.fsync(fd)
+                        # Spec 14.2 rollback checkpoint: the restored live bytes verify BEFORE this restore
+                        # returns, so the reversal never discards the aborted run's archive copy (a later
+                        # create-undo in the reverse order) or reports a prestate over a faulty restore.
+                        # Verified BEFORE the prestate mode is installed (below), so a failed checkpoint
+                        # never strands the file behind a read-only mode: the attempt is restartable.
+                        _read_back_verify(fd, prestate["sha256"], path, "restored")
+                    except BaseException:
+                        if granted:
+                            # the temporary owner-write grant is ALWAYS reverted: identity already
+                            # verified above, so this fchmod touches exactly the file the lstat saw.
+                            try:
+                                os.fchmod(fd, observed_mode)
+                            except OSError:
+                                pass         # the grant stays; the next reconcile still finishes
+                        raise
+                    os.fchmod(fd, prestate["mode"])    # the exact prestate mode, only after the checkpoint
+                    os.fsync(fd)                       # the final mode durable alongside the verified bytes
                 finally:
                     os.close(fd)
             else:                                     # a racing external writer left a non-regular file where a regular file is expected: fail closed
@@ -1511,13 +1557,20 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
 
 def _recreate_file(pfd, name, data, mode):
     # O_RDWR (not O_WRONLY): the spec 14.2 rollback checkpoint re-reads the restored bytes through this
-    # same descriptor before the reversal moves on (see _read_back_verify).
-    fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, mode, dir_fd=pfd)
+    # same descriptor before the reversal moves on (see _read_back_verify). The file is created and
+    # verified under a TEMPORARY owner-rw mode; the exact prestate mode is installed only AFTER the
+    # checkpoint passes. A checkpoint failure (a faulty restore write, or the verification read itself
+    # failing) therefore leaves an owner-writable file a LATER reconcile can reopen and finish restoring
+    # once the fault is gone: a read-only prestate mode (0400, 0000) never wedges recovery behind an
+    # EACCES reopen (restartable restoration; codex U1 round-2).
+    fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o600, dir_fd=pfd)
     try:
-        os.fchmod(fd, mode)
+        os.fchmod(fd, 0o600)                 # pin the temporary grant exactly (umask independence)
         _write_all(fd, data)
         os.fsync(fd)
         _read_back_verify(fd, hashlib.sha256(data).hexdigest(), name, "restored")
+        os.fchmod(fd, mode)                  # the exact prestate mode, only after the bytes verified
+        os.fsync(fd)                         # the final mode durable alongside the verified bytes
     finally:
         os.close(fd)
 

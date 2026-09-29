@@ -293,7 +293,11 @@ def verify_bundle(product_root, run_id):
     file, a listed entry that is not a regular file, and a size or digest mismatch are findings (INVALID),
     as is the legacy ingest format; a phase inventory without inventory.toml, an unreadable or malformed
     inventory, a path claimed twice across the bundle's inventories, and an unreadable payload are
-    CANNOT-EVALUATE. Bundle membership (an unlisted file) is not reconciled here."""
+    CANNOT-EVALUATE. Bundle membership (an unlisted file) is not reconciled here. CAPACITY LIMIT
+    (disclosed): every inventory and payload read is bounded by the journal's contained-read cap
+    (_journal._MAX_PRODUCT_READ_BYTES, 16 MiB), so a listed file over the cap is CANNOT-EVALUATE naming
+    the cap, never truncated or slurped unbounded; the same ceiling bounds compose (_read_live), preimage
+    capture and poststate verification, so no bundle this shell writes can carry an over-cap payload."""
     if not is_run_id(run_id):
         return schema._cannot("bundle run id {!r} does not match the adoption grammar".format(run_id))
     root_fd = _open_product_root(product_root)
@@ -351,6 +355,9 @@ def _verify_bundle_at(root_fd, run_id, bundle):
             if not stat.S_ISREG(pst.st_mode):
                 findings.append("listed entry {!r} is not a regular file".format(path))
                 continue
+            # bounded by _MAX_PRODUCT_READ_BYTES (16 MiB): an over-cap listed payload cannot be hashed
+            # here and is CANNOT-EVALUATE below, naming the cap (a disclosed capacity limit; the same
+            # ceiling bounds compose/capture/poststate, so the shell never writes such a bundle).
             data, _fst = _journal._read_contained(root_fd, path, require_single_link=True)
         except (_journal.JournalError, OSError) as exc:
             return schema._cannot("cannot read listed file {!r} ({})".format(path, exc))
@@ -938,8 +945,10 @@ def apply_plan(plan_doc):
 
 def self_test():
     """Fail-closed invariants over synthetic vectors and throwaway temporary fixtures, judged on returned
-    statuses, byte comparisons and journal states; a refusal check also matches one reason keyword so the
-    refusal is attributed to the rule under test. No git, no network, no subprocess; every write lands
+    statuses, byte comparisons and journal states; each check asserting a refusal of the executable shell
+    or of apply input also matches one reason keyword so the refusal is attributed to the rule under test
+    (validator and dispatch gradings are asserted on their returned status, with a named finding matched
+    where that finding is itself the contract). No git, no network, no subprocess; every write lands
     under its own TemporaryDirectory."""
     try:
         _journal.require_containment()
@@ -1266,6 +1275,16 @@ def _self_test_checks():
         archived.unlink()
         archived.write_bytes(files[".working/TODO.md"])
         check("verify-restored-valid", verify_bundle(root, rid).status == VALID)
+        # a listed payload over the journal's contained-read cap cannot be hashed: CANNOT-EVALUATE naming
+        # the cap (the disclosed capacity limit; compose, capture and poststate reads share the ceiling,
+        # so the shell itself never writes such a bundle), never a truncated or unbounded read.
+        archived.write_bytes(b"x" * (_journal._MAX_PRODUCT_READ_BYTES + 1))
+        overcap = verify_bundle(root, rid)
+        check("verify-over-cap-payload-cannot-eval",
+              overcap.status == CANNOT and any("read cap" in f for f in overcap.findings))
+        archived.unlink()
+        archived.write_bytes(files[".working/TODO.md"])
+        check("verify-restored-after-over-cap-valid", verify_bundle(root, rid).status == VALID)
         # one transaction per run and phase: a second base transaction refuses before it opens.
         before = snapshot(root)
         late = refusal(run_adopt_transaction, root, rid,
@@ -1564,6 +1583,276 @@ def _self_test_checks():
               aborted2 is not None and "rolled back" in aborted2 and not misordered
               and snapshot(root) == before and lock_free(root))
 
+    # 6e: RESTARTABLE restoration of a read-only source (spec 14.2). The same fault as 6c, but the source
+    # is READ-ONLY (0400) or writable (0644, the control leg): the restore checkpoint verifies the bytes
+    # BEFORE the recorded prestate mode is installed, so the faulted attempt fails closed exactly as 6c
+    # and the LATER reconcile still finishes to the exact prestate bytes AND mode once the fault is gone,
+    # never wedging on an EACCES reopen of the half-restored file.
+    for ro_mode in (0o644, 0o400):
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            root = Path(temp).resolve()
+            keep = "legacy/KEEP.md"
+            prior = b"prior read-only bytes\n"
+            (root / keep).parent.mkdir(parents=True)
+            (root / keep).write_bytes(prior)
+            (root / keep).chmod(ro_mode)
+
+            def compose_keep(ops):
+                ops.archive_occupying(keep, plan_digest(prior))
+
+            real_verify = _journal._verify_staged_digest
+
+            def failing_inventory(op, payload):
+                if op["path"] == inventory_rel(rid):
+                    raise _journal.JournalError("injected failure at the inventory publication")
+                return real_verify(op, payload)
+
+            armed = []
+            real_restore = _journal._restore_preimage
+
+            def arming_restore(jr_fd, txn_dir, rfd, op, op_index=0):
+                if op.get("op") == "remove" and op.get("path") == keep:
+                    armed.append(True)
+                return real_restore(jr_fd, txn_dir, rfd, op, op_index)
+
+            real_write = _journal._write_all
+
+            def faulty_write(fd, data):
+                if armed:
+                    armed.clear()
+                    data = b"X" * len(data)
+                return real_write(fd, data)
+
+            with mock.patch.object(_journal, "_verify_staged_digest", failing_inventory), \
+                    mock.patch.object(_journal, "_restore_preimage", arming_restore), \
+                    mock.patch.object(_journal, "_write_all", faulty_write):
+                faulted = refusal(run_adopt_transaction, root, rid, compose_keep)
+            tag = "restore-fault-mode-{:04o}".format(ro_mode)
+            check(tag + "-fails-closed",
+                  faulted is not None and "rolled back" not in faulted and "reconcile" in faulted
+                  and txn_state(root, rid) == "open" and not lock_free(root))
+            _journal.release_lock(_journal_root(root))   # the crashed owner, in this in-process simulation
+            outcomes, _why = attempt(reconcile, root)
+            check(tag + "-reconciles-to-exact-prestate",
+                  outcomes is not None and (rid, "rolled-back") in outcomes
+                  and (root / keep).read_bytes() == prior
+                  and stat.S_IMODE((root / keep).lstat().st_mode) == ro_mode and lock_free(root))
+
+    # 6f: the verification READ itself failing (an injected EIO) while a read-only source restores must
+    # not wedge recovery either: the checkpoint runs before the prestate mode is installed, so the later
+    # reconcile reopens the still-owner-writable file and lands the exact prestate bytes and mode.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = Path(temp).resolve()
+        keep = "legacy/KEEP.md"
+        prior = b"prior read-only bytes\n"
+        (root / keep).parent.mkdir(parents=True)
+        (root / keep).write_bytes(prior)
+        (root / keep).chmod(0o400)
+
+        def compose_keep(ops):
+            ops.archive_occupying(keep, plan_digest(prior))
+
+        real_verify = _journal._verify_staged_digest
+
+        def failing_inventory(op, payload):
+            if op["path"] == inventory_rel(rid):
+                raise _journal.JournalError("injected failure at the inventory publication")
+            return real_verify(op, payload)
+
+        real_read_back = _journal._read_back_verify
+        eio = [True]
+
+        def eio_read_back(fd, expected_sha, path, what):
+            if eio and what == "restored":
+                eio.clear()
+                raise OSError(5, "injected fault at the verification read")
+            return real_read_back(fd, expected_sha, path, what)
+
+        with mock.patch.object(_journal, "_verify_staged_digest", failing_inventory), \
+                mock.patch.object(_journal, "_read_back_verify", eio_read_back):
+            faulted = refusal(run_adopt_transaction, root, rid, compose_keep)
+        check("verify-read-fault-fails-closed",
+              faulted is not None and "rolled back" not in faulted and "reconcile" in faulted
+              and txn_state(root, rid) == "open" and not lock_free(root))
+        _journal.release_lock(_journal_root(root))   # the crashed owner, in this in-process simulation
+        outcomes, _why = attempt(reconcile, root)
+        check("verify-read-fault-reconciles-to-exact-prestate",
+              outcomes is not None and (rid, "rolled-back") in outcomes
+              and (root / keep).read_bytes() == prior
+              and stat.S_IMODE((root / keep).lstat().st_mode) == 0o400 and lock_free(root))
+
+    # 6g: the restore PRIMITIVE stays restartable at prestate modes the shell cannot even compose (its
+    # bounded contained read cannot read a 0000 source, but the SHARED engine must finish any restore its
+    # journal records): a faulted attempt fails closed AND reverts the temporary owner-write grant, and
+    # the retry lands the exact prestate bytes and mode, on both the in-place (live file present) and the
+    # recreate (live file absent) paths.
+    for ro_mode in (0o400, 0o000):
+        with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+            root = Path(temp).resolve()
+            prior = b"the recorded preimage bytes\n"
+            (root / "legacy").mkdir()
+            live = root / "legacy/LOCKED.md"
+            live.write_bytes(b"?" * len(prior))          # a faulted earlier restore's debris
+            live.chmod(ro_mode)
+            root_fd = store._open_dir_nofollow(root)
+            try:
+                _journal.ensure_journal_dirs(root_fd, JOURNAL_REL)
+                txn_dir = _journal_root(root) / rid
+                (txn_dir / "preimages").mkdir(parents=True)
+                (txn_dir / "preimages/0").write_bytes(prior)
+                op = dict(op="remove", path="legacy/LOCKED.md",
+                          prestate=dict(kind="file", mode=ro_mode, size=len(prior), payload="0",
+                                        sha256=_sha256(prior)))
+                jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
+                try:
+                    def try_restore():
+                        try:
+                            _journal._restore_preimage(jr_fd, txn_dir, root_fd, op)
+                            return None
+                        except _journal.JournalError as exc:
+                            return str(exc)
+
+                    real_write = _journal._write_all
+                    armed = [True]
+
+                    def faulty_write(fd, data):
+                        if armed:
+                            armed.clear()
+                            data = b"X" * len(data)
+                        return real_write(fd, data)
+
+                    tag = "restore-primitive-mode-{:04o}".format(ro_mode)
+                    with mock.patch.object(_journal, "_write_all", faulty_write):
+                        faulted = try_restore()
+                    check(tag + "-fault-fails-closed-and-reverts-the-grant",
+                          faulted is not None and stat.S_IMODE(live.lstat().st_mode) == ro_mode)
+                    retried = try_restore()              # the fault is gone: the restore must finish
+                    got_mode = stat.S_IMODE(live.lstat().st_mode)
+                    live.chmod(0o600)                    # the fixture's own grant, for the byte assert
+                    check(tag + "-retry-restores-exact-prestate",
+                          retried is None and got_mode == ro_mode and live.read_bytes() == prior)
+                    live.unlink()                        # the RECREATE path: absent live file
+                    armed.append(True)
+                    with mock.patch.object(_journal, "_write_all", faulty_write):
+                        refaulted = try_restore()
+                    reretried = try_restore()            # the fault is gone: the restore must finish
+                    got_mode = stat.S_IMODE(live.lstat().st_mode)
+                    live.chmod(0o600)                    # the fixture's own grant, for the byte assert
+                    check(tag + "-recreate-fault-then-retry-exact",
+                          refaulted is not None and reretried is None and got_mode == ro_mode
+                          and live.read_bytes() == prior)
+                finally:
+                    _journal._close_fd_quietly(jr_fd)
+            finally:
+                os.close(root_fd)
+
+    # 6h: the apply-side checkpoint guards a PAIRED WRITE's own destination too (spec 14.2): a same-length
+    # fault in the write's kernel-visible bytes (the staged bytes verify) raises AT the checkpoint and
+    # HALTS the engine's op sequence, so the op after the faulted write never runs. This is the engine
+    # seam the shell's write-as-removal pairing relies on; a checkpoint skipped on the write branch would
+    # let the sequence continue and go red here.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = Path(temp).resolve()
+        old_doc, witness = b"old doc bytes\n", b"witness\n"
+        new_doc = b"NEW DOC BYTES\n"
+        (root / "doc.md").write_bytes(old_doc)
+        (root / "doc.md").chmod(0o644)
+        (root / "witness.md").write_bytes(witness)
+        (root / "witness.md").chmod(0o644)
+        wop = dict(op="write", path="doc.md",
+                   prestate=dict(kind="file", mode=0o644, size=len(old_doc), payload="0",
+                                 sha256=_sha256(old_doc)),
+                   poststate=dict(kind="file", mode=0o644))
+        wop["poststate"]["content-sha256"] = _sha256(new_doc)
+        rop = dict(op="remove", path="witness.md", poststate=dict(kind="absent"),
+                   prestate=dict(kind="file", mode=0o644, size=len(witness), payload="1",
+                                 sha256=_sha256(witness)))
+        real_write = _journal._write_all
+        armed = [True]
+
+        def faulty_write(fd, data):
+            if armed:
+                armed.clear()
+                data = b"X" * len(data)
+            return real_write(fd, data)
+
+        root_fd = store._open_dir_nofollow(root)
+        try:
+            with mock.patch.object(_journal, "_write_all", faulty_write):
+                try:
+                    _journal.apply_ops(root_fd, [wop, rop], lambda op: new_doc)
+                    halted = None
+                except _journal.JournalError as exc:
+                    halted = str(exc)
+        finally:
+            os.close(root_fd)
+        check("paired-write-destination-fault-fails-closed",
+              halted is not None and "recorded digest" in halted)
+        check("paired-write-destination-fault-halts-the-sequence",
+              (root / "witness.md").exists() and (root / "witness.md").read_bytes() == witness)
+
+    # 6i: the rollback-side checkpoint on the IN-PLACE restore path (a write op's undo, the live file
+    # still present): a same-length fault in the restoring write REFUSES to report a rollback (the journal
+    # stays open, fail-closed into recovery), and the recovery then lands the exact prestate; a reversal
+    # that accepted the faulty in-place restore and published its terminal frame would go red here.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = Path(temp).resolve()
+        old_doc, new_doc = b"old doc bytes\n", b"NEW DOC BYTES\n"
+        (root / "doc.md").write_bytes(old_doc)
+        (root / "doc.md").chmod(0o644)
+        wop = dict(op="write", path="doc.md", poststate=dict(kind="file", mode=0o644))
+        wop["poststate"]["content-sha256"] = _sha256(new_doc)
+        never = dict(op="create", path="never.md", poststate=dict(kind="file", mode=0o644))
+        never["poststate"]["content-sha256"] = _sha256(b"never staged\n")
+        staged = dict()
+        staged["doc.md"] = new_doc                       # never.md unstaged: raises INSIDE apply
+
+        def reader(op):
+            data = staged.get(op["path"])
+            if not isinstance(data, bytes):
+                raise _journal.JournalError("no staged bytes for {!r} (fail-closed)".format(op["path"]))
+            return data
+
+        armed = []
+        real_restore = _journal._restore_preimage
+
+        def arming_restore(jr_fd, txn_dir, rfd, op, op_index=0):
+            if op.get("op") == "write":
+                armed.append(True)
+            return real_restore(jr_fd, txn_dir, rfd, op, op_index)
+
+        real_write = _journal._write_all
+
+        def faulty_write(fd, data):
+            if armed:
+                armed.clear()
+                data = b"X" * len(data)
+            return real_write(fd, data)
+
+        root_fd = store._open_dir_nofollow(root)
+        jr_fd = None
+        try:
+            _journal.ensure_journal_dirs(root_fd, JOURNAL_REL)
+            jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
+            header = dict(kind=KIND, run_id=rid, phase="base", operation=OPERATION)
+            with mock.patch.object(_journal, "_restore_preimage", arming_restore), \
+                    mock.patch.object(_journal, "_write_all", faulty_write):
+                try:
+                    _journal.run_transaction(root_fd, jr_fd, _journal_root(root), rid, header,
+                                             [wop, never], reader, SESSION_ID)
+                    outcome = "complete"
+                except _journal.JournalError:
+                    outcome = _journal.classify_state(jr_fd, _journal_root(root) / rid)
+            check("restore-in-place-fault-never-reports-rollback", outcome == "open")
+            check("restore-in-place-fault-then-recover-exact",
+                  _journal.recover(jr_fd, _journal_root(root) / rid, root_fd) == "rolled-back"
+                  and (root / "doc.md").read_bytes() == old_doc
+                  and stat.S_IMODE((root / "doc.md").lstat().st_mode) == 0o644)
+        finally:
+            if jr_fd is not None:
+                _journal._close_fd_quietly(jr_fd)
+            os.close(root_fd)
+
     # 7: an interrupted apply (INTENT without a terminal frame, through the journal's kill-point seam)
     # refuses every later run until the EXPLICIT reconcile, which works from the journal alone and never
     # resolves the store; it reverses fully mid-archive, and completes forward once every op landed.
@@ -1582,6 +1871,38 @@ def _self_test_checks():
                 return reconcile(root)
             except (AssertionError, AdoptApplyError):
                 return []
+
+    # 7 order: the EXPLICIT recovery's rollback order is pinned exactly as the in-run reversal's (6d): at
+    # the moment recover()'s create-undo discards an archive copy, its source has ALREADY been restored
+    # byte-identical, so an explicit reconcile that unlinked the copies first would go red here.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        before = snapshot(root)
+        man = ".working/toml/manifest.toml"
+        gone = interrupt_when(lambda: (root / archive_rel(rid, man)).exists() and not (root / man).exists())
+        with mock.patch.object(_journal, "_kill_point", gone):
+            try:
+                run_adopt_transaction(root, rid, compose_full(files))
+            except (_Interrupt, AdoptApplyError):
+                pass
+        check("reconcile-order-fixture-left-open", txn_state(root, rid) == "open" and lock_free(root))
+        arch = _archive_root(rid) + "/"
+        misordered = []
+        real_restore = _journal._restore_preimage
+
+        def watching_restore(jr_fd, txn_dir, rfd, op, op_index=0):
+            if op.get("op") == "create" and str(op.get("path", "")).startswith(arch):
+                source = op["path"][len(arch):]
+                live = root / source
+                if source in files and not (live.exists() and live.read_bytes() == files[source]):
+                    misordered.append(op["path"])
+            return real_restore(jr_fd, txn_dir, rfd, op, op_index)
+
+        with mock.patch.object(_journal, "_restore_preimage", watching_restore):
+            outcomes, _why = attempt(reconcile, root)
+        check("reconcile-restores-sources-before-archive-discard",
+              outcomes is not None and (rid, "rolled-back") in outcomes and not misordered
+              and snapshot(root) == before and lock_free(root))
 
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root, files = fixture(temp)
@@ -1696,8 +2017,12 @@ def _self_test_checks():
     # 10: apply takes only a plan/v2 (spec 14.1): the shipped v1 schema is never apply input.
     v1 = apply_plan(schema.canonical_plan())
     check("apply-v1-plan-refused", v1.status == CANNOT and any("never apply input" in f for f in v1.findings))
-    check("apply-v2-marked-plan-refused", apply_plan(dict(format=PLAN_V2_FORMAT)).status == CANNOT)
-    check("apply-non-table-refused", apply_plan([]).status == CANNOT)
+    v2 = apply_plan(dict(format=PLAN_V2_FORMAT))
+    check("apply-v2-marked-plan-refused",
+          v2.status == CANNOT and any("later adoption slice" in f for f in v2.findings))
+    nontable = apply_plan([])
+    check("apply-non-table-refused",
+          nontable.status == CANNOT and any("not a table" in f for f in nontable.findings))
 
     if failures:
         print("OPF-ADOPT-APPLY SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), checked[0]))
