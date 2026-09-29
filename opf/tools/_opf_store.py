@@ -2326,7 +2326,7 @@ def self_test():
         import time as _time
 
         def _refused_no_hang(thunk):
-            """True when thunk() fails closed with a JournalError inside a 2s alarm; False when it HANGS (the
+            """True when thunk() fails closed with a JournalError inside a 20s alarm; False when it HANGS (the
             marker fires) so a writer-less-FIFO blocking-open regression is a check failure, not a hung suite.
             Test-hermeticity: snapshot the caller's SIGALRM disposition and signal mask, and snapshot its
             ITIMER_REAL + pending state through the SHARED snapshot_caller_alarm helper; RESTORE all of them
@@ -2354,7 +2354,12 @@ def self_test():
                 _signal.signal(_signal.SIGALRM, lambda *a: (_ for _ in ()).throw(_HangMarker()))
                 if _have_mask:
                     _signal.pthread_sigmask(_signal.SIG_UNBLOCK, {_signal.SIGALRM})
-                _signal.setitimer(_signal.ITIMER_REAL, 2.0)
+                # The bound is a hang guard, not a latency claim: correct code refuses in microseconds,
+                # but QA round 3 measured armed windows up to 73 ms under pinned-CPU scheduling
+                # contention (24 busy siblings confined to one CPU), and the bound-is-generous
+                # disposition requires at least 50x the measured worst; 2.0 s gave only 27x. 20 s
+                # keeps the margin above 270x and costs time only when a hang regression exists.
+                _signal.setitimer(_signal.ITIMER_REAL, 20.0)
                 try:
                     thunk()
                     return False

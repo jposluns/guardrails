@@ -3552,20 +3552,40 @@ def _self_test():
         "def best(n, run):\n"
         "    times = []\n"
         "    for _ in range(3):\n"
-        "        t0 = time.monotonic()\n"
+        "        t0 = time.process_time()\n"
         "        run(n)\n"
-        "        times.append(time.monotonic() - t0)\n"
+        "        times.append(time.process_time() - t0)\n"
         "    return min(times)\n"
         # round 32: a load spike during one size's runs skewed a growth ratio (one flake at load 34); the sizes
-        # are now INTERLEAVED, best of `reps` each, so a spike lands on both sizes' samples alike
+        # are now INTERLEAVED, best of `reps` each, so a spike lands on both sizes' samples alike. A sample near
+        # the timer's and scheduler's noise floor is still a coin toss on a loaded host (a sibling's ~1 ms
+        # baseline read 2.677x on a loaded 16-core host, and sound 0.1 s wall samples still read 2.7x at load
+        # ~50), so the samples are CPU time (time.process_time), which a preemption never advances, and
+        # interleaved() retries with a larger repetition multiplier, the same for every size, until every
+        # sample of the round it returns is at least FLOOR seconds of measured work; a floor met only during
+        # a separate calibration round could rest on a stalled clock read while the measured samples stayed
+        # in the noise. A run the cap cannot lift above the floor is refused (cannot measure above the
+        # floor), never returned as sub-noise samples
+        "FLOOR = 0.1\n"
+        "def _sample(n, run, mult):\n"
+        "    t0 = time.process_time()\n"
+        "    for _ in range(mult):\n"
+        "        run(n)\n"
+        "    return time.process_time() - t0\n"
         "def interleaved(sizes, run, reps=5):\n"
-        "    times = [[] for _ in sizes]\n"
-        "    for _ in range(reps):\n"
-        "        for n, out in zip(sizes, times):\n"
-        "            t0 = time.monotonic()\n"
-        "            run(n)\n"
-        "            out.append(time.monotonic() - t0)\n"
-        "    return [min(t) for t in times]\n"
+        "    mult = 1\n"
+        "    while True:\n"
+        "        times = [[] for _ in sizes]\n"
+        "        for _ in range(reps):\n"
+        "            for n, out in zip(sizes, times):\n"
+        "                out.append(_sample(n, run, mult))\n"
+        "        fastest = min(min(t) for t in times)\n"
+        "        if fastest >= FLOOR:\n"
+        "            return [min(t) for t in times]\n"
+        "        if mult >= 1 << 20:\n"
+        "            raise RuntimeError('cannot measure above the floor: the fastest sample is '\n"
+        "                               '%%.6f s at the multiplier cap' %% fastest)\n"
+        "        mult = min(max(mult * 2, int(mult * FLOOR / max(fastest, 1e-9)) + 1), 1 << 20)\n"
         "def ratio(n, run, reps=5):\n"
         "    def same_work(k):\n"
         "        for _ in range(GROWTH * n // k):\n"
@@ -3584,10 +3604,21 @@ def _self_test():
         "    return run\n"
         "GROWTH = %d\n") % (STORE, os.path.abspath(__file__), GROWTH)
 
+    def child_env():
+        """The environment for a timed child: the parent's, minus every MALLOC_* variable and GLIBC_TUNABLES.
+        An inherited allocator override (MALLOC_TOP_PAD_, MALLOC_MMAP_THRESHOLD_, MALLOC_TRIM_THRESHOLD_,
+        MALLOC_MMAP_MAX_, a GLIBC_TUNABLES glibc.malloc.* entry) pins glibc's thresholds and disables their
+        dynamic adaptation, so a timed verdict would rest on the operator's ambient allocator policy (QA
+        round 4, in the sibling stamp-truth-stop.py: healthy code false-REDs at 2.0 to 3.1x under load); a
+        timed child runs under the default policy only."""
+        return {k: v for k, v in os.environ.items() if not k.startswith("MALLOC_") and k != "GLIBC_TUNABLES"}
+
     def run_timed(code, timeout):
-        """Run `code` in a fresh isolated interpreter, killed at `timeout` seconds (raising TimeoutExpired); return
-        the JSON its last stdout line prints. A non-zero exit raises AssertionError with its stderr."""
-        r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True, timeout=timeout)
+        """Run `code` in a fresh isolated interpreter under child_env() (the ambient allocator policy
+        neutralized), killed at `timeout` seconds (raising TimeoutExpired); return the JSON its last stdout
+        line prints. A non-zero exit raises AssertionError with its stderr."""
+        r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True, timeout=timeout,
+                           env=child_env())
         if r.returncode != 0:
             raise AssertionError(f"timed child failed ({r.returncode}): {r.stderr}")
         return json.loads(r.stdout.strip().splitlines()[-1])
@@ -6166,6 +6197,58 @@ def _self_test():
                 self.assertIn("run_timed(code, HANG_TIMEOUT)", src)
                 self.assertNotIn("best(2 * n, r)", src)
             # a wall-clock bound in any test is rejected by test_no_wall_clock_verdict (an AST scan)
+
+        def test_interleaved_refuses_sub_floor_samples(self):
+            # QA round 2 (codex 3): at the multiplier cap interleaved() returned sub-floor samples, voiding
+            # the every-sample floor; it now fails closed. The child's CPU clock is replaced by a counter
+            # that barely advances, so the cap is reached the same way on any host
+            code = TIMED_PRELUDE + (
+                "ticks = [0.0]\n"
+                "def _fake_clock():\n"
+                "    ticks[0] += 1e-09\n"
+                "    return ticks[0]\n"
+                "time.process_time = _fake_clock\n"
+                "def run(n):\n"
+                "    pass\n"
+                "print(json.dumps(interleaved((1000, 8000), run, 1)))\n")
+            with self.assertRaises(AssertionError) as ctx:
+                run_timed(code, HANG_TIMEOUT)
+            self.assertIn("cannot measure above the floor", str(ctx.exception))
+
+        def test_timed_child_ignores_ambient_allocator_policy(self):
+            # QA round 4 (codex MAJOR, in the sibling stamp-truth-stop.py): a timed child inherited the
+            # parent's environment, so an ambient MALLOC_* variable or GLIBC_TUNABLES entry pinned glibc's
+            # thresholds and false-REDed healthy code under load (2.0 to 3.1x); every timed child now
+            # launches with child_env(). Deterministic: the probe reports the child's environment, no
+            # clock is read
+            ambient = {"MALLOC_TOP_PAD_": "131072", "MALLOC_MMAP_THRESHOLD_": "131072",
+                       "MALLOC_TRIM_THRESHOLD_": "0", "MALLOC_MMAP_MAX_": "65536",
+                       "GLIBC_TUNABLES": "glibc.malloc.mmap_threshold=131072"}
+            probe = ("import json, os\n"
+                     "leaked = [k for k in os.environ if k.startswith('MALLOC_') or k == 'GLIBC_TUNABLES']\n"
+                     "assert not leaked, 'ambient allocator policy reached the timed child: %r' % leaked\n"
+                     "print(json.dumps(sorted(leaked)))\n")
+            saved = {k: os.environ.get(k) for k in ambient}
+            os.environ.update(ambient)
+            try:
+                # the builder drops the overrides and nothing else
+                dropped = set(os.environ) - set(child_env())
+                self.assertTrue(dropped.issuperset(ambient), dropped)
+                self.assertTrue(all(k.startswith("MALLOC_") or k == "GLIBC_TUNABLES" for k in dropped),
+                                dropped)
+                # the real launch path: the child observes none of them (a leak raises AssertionError)
+                run_timed(probe, HANG_TIMEOUT)
+                # the builder bypassed (the environment inherited, the pre-fix launch): the same child is RED
+                r = subprocess.run([sys.executable, "-I", "-B", "-c", probe], capture_output=True, text=True,
+                                   timeout=HANG_TIMEOUT)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("ambient allocator policy reached the timed child", r.stderr)
+                self.assertIn("MALLOC_TOP_PAD_", r.stderr)
+            finally:
+                for k, v in saved.items():
+                    os.environ.pop(k, None)
+                    if v is not None:
+                        os.environ[k] = v
 
         def test_r32_disclosures(self):
             doc = " ".join(__doc__.split())
