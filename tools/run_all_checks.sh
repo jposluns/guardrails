@@ -19,11 +19,19 @@ export PYTHONDONTWRITEBYTECODE=1
 
 failed=0
 notrun=0
+# Gate output does not carry the runner's gate label, so each failure is named as it happens and the
+# names are listed again before RESULT: FAIL; a failing suite never needs a hand re-run to find it.
+failed_names=""
 
 run_gate() {
   local name="$1"; shift
   echo "--- ${name} ---"
-  if "$@"; then :; else failed=1; fi
+  if "$@"; then :; else
+    local rc=$?
+    failed=1
+    failed_names="${failed_names:+${failed_names}, }${name}"
+    echo "GATE FAILED: ${name} (exit ${rc})"
+  fi
   echo
 }
 
@@ -45,7 +53,10 @@ if command -v gitleaks >/dev/null 2>&1; then
   if gitleaks dir . --no-banner --redact --exit-code 1; then
     echo "PASS: gitleaks found no leaks"
   else
+    gitleaks_rc=$?
     failed=1
+    failed_names="${failed_names:+${failed_names}, }secrets (gitleaks)"
+    echo "GATE FAILED: secrets (gitleaks) (exit ${gitleaks_rc})"
   fi
 else
   echo "NOT RUN: gitleaks is not on PATH locally. CI still runs it, so this is a gap"
@@ -236,6 +247,7 @@ run_gate "internal-names"           python3 -I -B tools/check_internal_names.py
 run_gate "qa-advisory-digest"       python3 -I -B tools/audit_reference.py --digest
 
 if [ "$failed" -ne 0 ]; then
+  echo "FAILED GATES: ${failed_names}"
   echo "RESULT: FAIL"
   exit 1
 fi
