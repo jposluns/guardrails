@@ -19,6 +19,9 @@ policy with its migrate scope. v2 replaces v1 in place and a v1 marker is refuse
 persisted. A `migrate` source is kept for post-adoption import (spec 14.2), so a v2 plan carries no
 import-file row; that op stays a vocabulary row only.
 
+PR-C2 adds explicit HTTPS gathering and non-executing quarantine through the lazy
+public gather_release() wrapper. Observations confer no trust or apply authority.
+
 Apply, trust verification, acceptance capture, the adoption doctor, behavioral probes, and the CLI
 entry point remain later slices. In particular, enable-hook remains a vocabulary row only: this
 module neither computes a harness-specific registration merge nor activates a hook. A VALID frozen
@@ -43,7 +46,8 @@ Both non-VALID verdicts are REFUSING; neither is a pass. This distinction mirror
 or roster error is CANNOT-EVALUATE; a schema violation is INVALID) so the later engine and doctor compose it
 without a translation layer.
 
-Offline, stdlib only, fail-closed. It lives under `opf/tools/` and imports ONLY sibling `opf/tools/`
+Validators and planning are offline; release gathering is an explicit HTTPS edge.
+Stdlib only, fail-closed. It lives under `opf/tools/` and imports ONLY sibling `opf/tools/`
 modules (the shared outcome model from `_opf_store`, the closed effect vocabulary `OP_KINDS` from
 `_journal` as inert data), so it introduces no upward edge into `tools/` and the standalone-closure property
 holds.
@@ -2503,6 +2507,11 @@ def self_test():
     check("plan-v2-re-adoption-manifest-creation-invalid",
           _mutated(re_create, lambda p: p["ops"].append(_create(_MANIFEST)), True) == INVALID)
 
+    from _opf_adopt_observe import self_test as observing_self_test
+    observing_rc = observing_self_test(vectors_only=True)
+    check("https-observer-quarantine-suite",
+          type(observing_rc) is int and observing_rc == 0)
+
     from _opf_adopt_plan import self_test as planning_self_test
     planning_rc = planning_self_test()
     check("read-only-investigate-plan-suite",
@@ -2513,9 +2522,32 @@ def self_test():
         for f in failures:
             print("  FAILED: {}".format(f))
         return 1
-    print("OPF-ADOPT SELF-TEST: PASS ({} schema / vocabulary / planning checks)".format(
+    print("OPF-ADOPT SELF-TEST: PASS ({} schema / vocabulary / planning / observer checks)".format(
         checked[0]))
     return 0
+
+
+def gather_release(request, policy):
+    """Obtain untrusted observations; never authorize adoption or apply."""
+    previous_path = list(sys.path)
+    previous_bytecode = sys.dont_write_bytecode
+    try:
+        try:
+            sys.dont_write_bytecode = True
+            from _opf_adopt_observe import gather_release as observe_release
+        finally:
+            sys.dont_write_bytecode = previous_bytecode
+            sys.path[:] = previous_path
+        # Observation has no lazy module loads. Finish restoration before the
+        # inner operation acquires rollback authority. Interpreter return and
+        # inlined-call boundaries remain residuals (see the observer contract).
+        return observe_release(request, policy)
+    except Exception as exc:
+        return (
+            {"status": CANNOT_EVALUATE},
+            [{"status": CANNOT_EVALUATE, "phase": "observer",
+              "detail": "observer import/call failed: " + type(exc).__name__}],
+        )
 
 
 def investigate(product_root, *, sources, targets=()):

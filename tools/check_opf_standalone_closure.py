@@ -55,6 +55,7 @@ _SUBSET = [
     ("opf-adopt-apply-selftest", "_opf_adopt_apply.py", ["--self-test"]),
     ("opf-adopt-hook-selftest", "_opf_adopt_hook.py", ["--self-test"]),
     ("opf-pack-manifest-selftest", "_opf_pack_manifest.py", ["--self-test"]),
+    ("opf-adopt-observe-selftest", "_opf_adopt_observe.py", ["--self-test"]),
     ("opf-prompt-pack-selftest", "check_opf_prompt_pack.py", ["--self-test"]),
     ("opf-prompt-pack", "check_opf_prompt_pack.py", []),
     ("opf-oplock-selftest", "_opf_oplock.py", ["--self-test"]),
@@ -100,6 +101,36 @@ def _pack_manifest_registration_self_test():
     print("RED closure-registration -> closure/pack-manifest-registration")
 
 
+def _check_adopt_observe_registration(subset):
+    """Independent requirement, not inferred from the release manifest.
+
+    Covers this exact closure-roster tuple, not arbitrary dispatcher changes
+    or the registrations of other gates.
+    """
+    expected = ("opf-adopt-observe-selftest", "_opf_adopt_observe.py", ["--self-test"])
+    matches = [row for row in subset
+               if row[0] == expected[0] or row[1] == expected[1]]
+    if matches != [expected]:
+        raise AssertionError("closure/adopt-observe-registration")
+
+
+def _adopt_observe_registration_self_test():
+    _check_adopt_observe_registration(_SUBSET)
+    print("PASS closure/adopt-observe-registration")
+    # Mutate the real roster, independently of the shell-runner deletion.
+    # No digest or generated-manifest check participates in the verdict.
+    changed = list(_SUBSET)
+    changed.remove(("opf-adopt-observe-selftest", "_opf_adopt_observe.py", ["--self-test"]))
+    try:
+        _check_adopt_observe_registration(changed)
+    except AssertionError as exc:
+        if str(exc) != "closure/adopt-observe-registration":
+            raise
+    else:
+        raise AssertionError("closure/adopt-observe-registration-not-red")
+    print("RED closure-registration -> closure/adopt-observe-registration")
+
+
 def _isolated_env():
     """A minimal environment for the isolated subset. PYTHONPATH and PYTHONHOME are dropped so nothing off
     the copied tree can be imported (belt-and-suspenders atop `python3 -I`, which already ignores them), and
@@ -143,6 +174,7 @@ def _run_one(opf_root, script, args, run_dir, env):
 def _run_subset(opf_root, run_dir):
     """Run every subset member. Returns a list of (name, rc, tail)."""
     _check_pack_manifest_registration(_SUBSET)
+    _check_adopt_observe_registration(_SUBSET)
     env = _isolated_env()
     return [(name, *(_run_one(opf_root, script, args, run_dir, env)))
             for name, script, args in _SUBSET]
@@ -191,6 +223,7 @@ def self_test_main():
     non-zero. A gate that passed the deliberately-broken copy would provide no coverage."""
     try:
         _pack_manifest_registration_self_test()
+        _adopt_observe_registration_self_test()
     except AssertionError as exc:
         print("SELF-TEST FAIL:", str(exc), file=sys.stderr)
         return 1
