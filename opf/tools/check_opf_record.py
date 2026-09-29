@@ -1350,7 +1350,7 @@ RECORD_OPERANDS = (COUNTERS, BI_INDEX, WORKLOG)
 # so recovery of that shape stays exercised end to end.
 LEGACY_NAME_FLIP = """
 import os, time
-record._record_run_id = lambda token: "record-create." + str(os.getpid()) + "." + str(time.time_ns()) + "." + token
+record._record_run_id = lambda lock_id: "record-create." + str(os.getpid()) + "." + str(time.time_ns()) + "." + lock_id
 """
 
 # Inside a killed child: activate homes 2 exactly as _opf_import._self_test_homes2_active does (the
@@ -1392,8 +1392,8 @@ def t19_run_id_grammar(fx):
 
 
 def flip_t19():
-    return patch.object(record, "_record_run_id", lambda token: "record-create.{}.{}.{}".format(
-        os.getpid(), datetime.datetime.now().microsecond, token))
+    return patch.object(record, "_record_run_id", lambda lock_id: "record-create.{}.{}.{}".format(
+        os.getpid(), datetime.datetime.now().microsecond, lock_id))
 
 
 def t19_legacy_name_recovery(fx):
