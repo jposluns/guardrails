@@ -665,6 +665,9 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
         # this plan pins none: a resolved store's counters.toml lies in the excluded machine store, so
         # only the manifest digest is bound, and selecting and pinning the seeding snapshot is the later
         # seed step's (_opf_init_operation.read_ancestral_counter_seed), not this planner's.
+        # The frozen identity's store_root is ".", the one root this planner investigates, so the
+        # product-relative retire_preimage homes _decisions records equal the store-composed
+        # preservation homes validate_plan requires (spec 14.2).
         identity = {"store_root": ".", "machine_rel": managed[0],
                     "adoption": doc["ancestry"]["adoption"]}
         effects = schema.derive_effects(ordered, source_rows, schema.store_manifest(identity))

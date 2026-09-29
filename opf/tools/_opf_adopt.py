@@ -189,9 +189,10 @@ _REVISION_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 # touches. A v2 plan's own summaries are the exception, because both sides live in the one artefact: its
 # `effects` must equal the effects its ops and sources name, no two of those effects may create, replace or
 # repoint one path (the frozen manifest's registration chain is one sequential rewrite, checked link by
-# link), no creation may land on a source left live at apply, no replacement or repointing may rewrite such a
-# source (it stays byte-identical until its recorded retirement, spec 14.1 and 14.2), and its `sources` must
-# correspond one to one with its disposition ops.
+# link, and a file at the manifest is created only by init-store's scaffold), no creation may land on a
+# source left live at apply, no replacement or repointing may rewrite such a source (it stays
+# byte-identical until its recorded retirement, spec 14.1 and 14.2), and its `sources` must correspond one
+# to one with its disposition ops.
 #
 # Plan-v2 binding residuals (spec 14.1), shape and internal consistency only: the observed `revision` is
 # caller-asserted (investigation never enters .git); the release anchor agreement compares the two recorded
@@ -223,8 +224,9 @@ _REVISION_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 # 8.2), and a resolved store's counters.toml, inside the excluded machine store, is digest-bound nowhere in
 # the plan or inventory; selecting and pinning the seeding snapshot is the later seed step's
 # (_opf_init_operation.read_ancestral_counter_seed), not this plan's. Frame: the store tree, Move archive,
-# control roots, directory homes and receipt check compose under store_root, while source paths and their
-# adoption preimage homes are spelled from the product root, as the planner (store_root ".") emits them.
+# control roots, directory homes, adoption preimage homes and receipt check compose under store_root, while
+# source paths are spelled from the product root; the planner emits store_root ".", where the two frames
+# coincide, so the product-relative retire_preimage homes it records already satisfy the composed check.
 
 
 # --- result carrier (the U1 ManifestValidation / U2 RecordValidation idiom) --------------------------
@@ -912,8 +914,10 @@ def _validate_plan_sources(rows, run_id, homes, findings, root="."):
     disposition); otherwise appends findings and returns None. `occupying` records whether the source sits
     at a planned managed destination, a declared view or a machine-store path (spec 14.2). A kept source
     must not occupy one and records no preservation. A retire or migrate source, and any occupying source,
-    is preserved at the run's adoption preimage home; a non-occupying move source is preserved at its move
-    destination, which _cross_check_plan matches against its move-file row. In every homes generation no
+    is preserved at the run's adoption preimage home composed under the frozen store root `root` (spec
+    14.2: the adoption archive is a store-tree home, so the archive copy lands inside the frozen store); a
+    non-occupying move source is preserved at its move destination, which _cross_check_plan matches against
+    its move-file row. In every homes generation no
     source equals, contains or lies within the store control area under `root` (spec 14.2): a control area,
     committed adoption-archive originals included, is never adoption content, so it is never kept,
     registered unmanaged, moved, retired or migrated."""
@@ -957,6 +961,8 @@ def _validate_plan_sources(rows, run_id, homes, findings, root="."):
         elif disp in DISPOSITIONS:
             pres = row.get("preservation")
             home = _preimage_home(run_id, path)
+            if home is not None:
+                home = _compose(root, home)  # the adoption archive lies inside the frozen store tree
             if "preservation" not in row:
                 findings.append("{} disposition {!r} records no preservation destination".format(label, disp))
             elif not _is_contained_filepath(pres):
@@ -1235,8 +1241,11 @@ def _registration_chain_findings(plan, findings):
     Keep). Each register-unmanaged row changes the manifest bytes, and in program order its old digest is the
     manifest the program leaves before it: init-store's scaffolded manifest, or the previous registration's
     new digest. A registration ahead of init-store, and any enable-hook or repoint-consumer row naming the
-    manifest, is refused. For a store that already resolves the first link names the observed manifest,
-    which the planner binds and this lone plan cannot see."""
+    manifest, is refused; so is any other op creating a file at the manifest (a create-file or
+    plant-governance path, a move destination, a record-adoption receipt, or a composed install-pack or
+    render-views member there would fork the chain's one rewrite or plant an unchained manifest). For a
+    store that already resolves the first link names the observed manifest, which the planner binds and
+    this lone plan cannot see."""
     manifest = store_manifest(plan.get("store"))
     if manifest is None:
         return                          # the store table already carries a finding
@@ -1261,6 +1270,26 @@ def _registration_chain_findings(plan, findings):
         elif ((row["op"] == "enable-hook" and row["registration_path"] == manifest)
               or (row["op"] == "repoint-consumer" and row["path"] == manifest)):
             findings.append(label + " rewrites the frozen store manifest outside its registration chain")
+        elif _op_creates_at(row, manifest):
+            findings.append(label + " creates a file at the frozen store manifest, which only init-store's "
+                            "scaffold creates (spec 14.1: the chain is the manifest's one rewrite)")
+
+
+def _op_creates_at(row, path):
+    """Whether a VALID op row other than init-store names a creation at `path`, mirroring exactly the
+    creation rows derive_effects draws from it: a create-file or plant-governance path, a move-file
+    destination, a record-adoption receipt, or an install-pack/render-views member composed under its
+    root directory."""
+    name = row["op"]
+    if name in ("create-file", "plant-governance"):
+        return row["path"] == path
+    if name == "move-file":
+        return row["destination"] == path
+    if name == "record-adoption":
+        return row["receipt_path"] == path
+    if name in ("install-pack", "render-views"):
+        return any(_compose(row[_MEMBER_ROOTS[name]], m["path"]) == path for m in row["members"])
+    return False
 
 
 def _enforcement_install_findings(plan, findings):
@@ -1306,7 +1335,8 @@ def _directory_homes(plan):
 def _effect_collision_findings(plan, effects, findings):
     """The effects collide nowhere (spec 14.2: an occupied destination is a collision finding, never an
     overwrite). No path is created, replaced or repointed twice; the manifest replacements of the
-    registration chain are one sequential rewrite, checked link by link in _registration_chain_findings. No
+    registration chain are one sequential rewrite, checked link by link in _registration_chain_findings,
+    which also refuses any non-init creation at the manifest, so this exemption cannot swallow one. No
     creation lands on a source left live at apply, and no replacement or repointing rewrites one: a kept
     source, and every non-occupying source, stays frozen and byte-identical in place until its recorded
     retirement (spec 14.1, 14.2); an occupying source is archived and removed at apply, so its managed
@@ -2441,6 +2471,36 @@ def self_test():
                 p["ops"].pop(1), p["store"].update(adoption="re-adoption"))),
             ("move-into-sub-store-moved", sub_plan, _sub_move("sub/.working/archive/moved/moved.md"))):
         check("plan-v2-{}-valid".format(label), _mutated(base, mutate, True) == VALID)
+
+    # 17: U8 fix round 3 discriminators. Each vector FAILS if its corresponding fix is reverted.
+    # 17a (fix 1): preservation destinations compose under a non-root store_root. A retire source of the
+    # `sub` store is preserved inside the frozen store, at sub/.working/archive/adoption/<run>/..., and a
+    # preservation at the product-root archive home, outside the frozen store, is refused (spec 14.2).
+    sub_retire = copy.deepcopy(sub_plan)
+    sub_retire["ops"][0] = {"op": "retire-file", "path": "legacy/RULES.md",
+                            "preimage_digest": "sha256:" + "6" * 64}
+    sub_retire["sources"][0].update(disposition="retire",
+                                    preservation="sub/" + home("legacy/RULES.md"))
+    sub_retire["effects"] = derive_effects(sub_retire["ops"], sub_retire["sources"],
+                                           store_manifest(sub_retire["store"]))
+    check("plan-v2-sub-store-preserved-in-store-valid", validate_plan(sub_retire).status == VALID)
+    check("plan-v2-sub-store-preservation-outside-store-invalid", _mutated(
+        sub_retire, lambda p: p["sources"][0].update(preservation=home("legacy/RULES.md")), True)
+        == INVALID)
+    # 17b (fix 2): a file at the frozen store manifest is created only by init-store's scaffold. A
+    # re-adoption of a resolved store (no init-store) whose program also creates the manifest would fork
+    # the registration chain's one rewrite, so it is refused; the same re-adoption without that creation
+    # stays VALID (the chain's first link names the observed manifest the planner binds).
+    re_create = copy.deepcopy(base_plan)
+    re_create["store"]["adoption"] = "re-adoption"
+    re_create["ops"].pop(1)
+    re_create["sources"].append({"path": "adopter/KEEP.md", "digest": _D5, "disposition": "keep",
+                                 "occupying": False})
+    re_create["ops"].append({"op": "register-unmanaged", "entry": "adopter/KEEP.md",
+                             "old_digest": _D0, "new_digest": _D4})
+    check("plan-v2-re-adoption-keep-chain-valid", _mutated(re_create, lambda p: None, True) == VALID)
+    check("plan-v2-re-adoption-manifest-creation-invalid",
+          _mutated(re_create, lambda p: p["ops"].append(_create(_MANIFEST)), True) == INVALID)
 
     from _opf_adopt_plan import self_test as planning_self_test
     planning_rc = planning_self_test()
