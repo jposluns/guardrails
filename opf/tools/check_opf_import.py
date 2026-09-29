@@ -1893,17 +1893,50 @@ def _registered_run_store_fd(rd, generation):
                     # ambiguity rule). Identity binding alone cannot see a SAME-ID COPY in another
                     # registered home (a copy is another inode), so the bound home is re-checked
                     # over the locator's own roster (_import_run_locations, never a second
-                    # enumeration): another DIRECTORY at a roster location is a second home,
-                    # refused with the shared locator's message. A symlink there is an alias of
-                    # one home, not a second run (the same-root-alias topology stays registered);
-                    # an unanswerable lstat fails closed (JournalError). Generation 1 has a
-                    # single-location roster and keeps its behaviour.
+                    # enumeration). A non-bound roster location is the SAME home only when the
+                    # object it holds IS the opened run: one O_PATH open beneath the bound root
+                    # (following only a final symlink), identity read by fstat ON that
+                    # descriptor, never a second name resolution a swap could race. The
+                    # same-root-alias topology (a roster symlink to the bound run itself)
+                    # therefore stays registered, while EVERY other present entry -- a directory
+                    # (the same-id copy), a symlink to any other object, a dangling symlink, any
+                    # other type -- is a second home, refused with the shared locator's message.
+                    # An entry whose open resolves nowhere is classified once no-follow: still
+                    # present means dangling, refused; nothing on that path can re-approve. An
+                    # unanswerable open or stat fails closed (JournalError). The generation 1
+                    # roster has one location and is never re-checked here, but a homes-1 grade
+                    # of a run found at a generation-2 location falls back to this generation-2
+                    # binding, so that grade can carry this two-location message; its verdict is
+                    # unchanged.
                     import _journal
+                    run = _fd_identity(rd.fd)
                     found = []
                     for other in imp._import_run_locations(rd.name, generation):
-                        st = None if other == rel else _journal._lstat_contained(bound[rel], other)
-                        if other == rel or (st is not None and stat.S_ISDIR(st.st_mode)):
+                        if other == rel:
                             found.append(other)
+                            continue
+                        try:
+                            pfd, name = _journal._open_parent(bound[rel], other)
+                        except FileNotFoundError:
+                            continue
+                        try:
+                            try:
+                                ofd = os.open(name, os.O_PATH, dir_fd=pfd)
+                            except FileNotFoundError:
+                                if _journal._lstat_at(pfd, name) is not None:
+                                    found.append(other)
+                                continue
+                            except OSError as exc:
+                                raise _journal.JournalError(
+                                    "cannot open contained final component {!r} ({})".format(
+                                        name, exc))
+                            try:
+                                if _fd_identity(ofd) != run:
+                                    found.append(other)
+                            finally:
+                                os.close(ofd)
+                        finally:
+                            os.close(pfd)
                     if len(found) != 1:
                         raise _GateError("run {} has {} staging locations ({}); exactly one is "
                                          "required".format(rd.name, len(found), ", ".join(found)))
@@ -6132,6 +6165,72 @@ def _self_test_isolated():
             shutil.rmtree(str(th_legacy))
             th_control = check_staged_run(th_typed, homes=2)
             expect("homes2-two-home-single-control", all(ok for ok, _d in th_control.values()))
+
+            # --- PR C fix 2 (symlink second claims): a non-bound roster location is the SAME
+            # home only when it IS the bound run by descriptor identity. Red before the fix: a
+            # symlink at the legacy roster location was ignored wholesale, so a symlink to a
+            # same-id COPY held outside the roster graded all-green while the shared locator
+            # refused it, as did a dangling symlink. --------------------------------------------
+            th_copy = base / "gate-two-home-hidden" / th_rid
+            th_copy.parent.mkdir()
+            shutil.copytree(str(th_typed), str(th_copy))
+            os.symlink(str(th_copy), str(th_legacy))
+            # Mutation confirmed present first: the genuine roster still names the legacy home
+            # beside the typed ones, and the shared locator refuses this very store (before the
+            # fix the gate was the only reader that graded it green).
+            th_probe = os.open(str(th_root), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                imp._locate_import_run(th_probe, th_rid, 2)
+                th_link_refused = False
+            except Exception:  # noqa: BLE001 - the locator's refusal class is _opf_import's own
+                th_link_refused = True
+            finally:
+                os.close(th_probe)
+            expect("homes2-symlink-copy-locator-refuses",
+                   th_link_refused and th_legacy_rel in th_roster(th_rid, 2))
+            th_link = check_staged_run(th_typed, homes=2)
+            expect("homes2-symlink-copy-gate-refuses",
+                   set(th_link) == set(EXPECTED_CHECKS)
+                   and {cid for cid, (ok, _d) in th_link.items() if not ok} == set(th_ambiguous_ids)
+                   and all("2 staging locations" in th_link[cid][1] for cid in th_ambiguous_ids))
+            # The ONE roster carries this refusal too: a generation-2 roster that lost the
+            # legacy location grades the symlinked copy green again (the guarded fail-open).
+            with unittest.mock.patch.object(
+                    imp, "_import_run_locations",
+                    lambda run_id, homes: tuple(rel for rel in th_roster(run_id, homes)
+                                                if rel != imp.IMPORTS_REL + "/" + run_id)
+                    if type(homes) is int and homes == 2 else th_roster(run_id, homes)):
+                th_link_mutant = check_staged_run(th_typed, homes=2)
+            expect("homes2-symlink-copy-mutant-passes",
+                   all(ok for ok, _d in th_link_mutant.values()))
+            # A dangling symlink at a roster location is a present entry resolving nowhere:
+            # refused, never read as absent.
+            os.unlink(str(th_legacy))
+            shutil.rmtree(str(th_copy))
+            os.symlink(str(th_copy), str(th_legacy))
+            th_probe = os.open(str(th_root), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                imp._locate_import_run(th_probe, th_rid, 2)
+                th_dangling_refused = False
+            except Exception:  # noqa: BLE001 - the locator's refusal class is _opf_import's own
+                th_dangling_refused = True
+            finally:
+                os.close(th_probe)
+            expect("homes2-dangling-symlink-locator-refuses", th_dangling_refused)
+            th_dangling = check_staged_run(th_typed, homes=2)
+            expect("homes2-dangling-symlink-gate-refuses",
+                   set(th_dangling) == set(EXPECTED_CHECKS)
+                   and {cid for cid, (ok, _d) in th_dangling.items() if not ok}
+                   == set(th_ambiguous_ids)
+                   and all("2 staging locations" in th_dangling[cid][1]
+                           for cid in th_ambiguous_ids))
+            # The same-root-alias topology stays registered: a roster symlink to the BOUND run
+            # itself is one home spelled twice, not a second claim.
+            os.unlink(str(th_legacy))
+            os.symlink(str(th_typed), str(th_legacy))
+            th_alias = check_staged_run(th_typed, homes=2)
+            expect("homes2-same-run-symlink-stays-registered",
+                   all(ok for ok, _d in th_alias.values()))
 
         expect("module-self-test", imp.self_test() == 0)
     except OSError as exc:
