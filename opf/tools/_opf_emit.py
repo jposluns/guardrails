@@ -1268,7 +1268,12 @@ def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None):
     shared _cleanup_boundary (fix 6, QA27 codex BLOCKER 1), so a
     cancellation already propagating (a TimeoutError raised at the freeze)
     stays the outward exception even when that SIGKILL itself fails, the
-    kill failure kept reachable beneath it; the member census's per-pidfd
+    kill failure -- any failing send but ProcessLookupError, which proves
+    the leader already exited and is no failure to keep -- re-raised into
+    the boundary and kept reachable beneath it (fix 14, QA35 codex MAJOR:
+    the EPERM-class faults the send can raise were recorded in the
+    survivor flag only and dropped from that chain); the member census's
+    per-pidfd
     close routes through the same boundary (fix 7, QA28 codex BLOCKER 2),
     so a member-send cancellation crossing that close stays outward even
     when the close itself fails. The "tree"
@@ -1319,6 +1324,18 @@ def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None):
                 # gemini F1). ProcessLookupError alone proves the leader
                 # already exited.
                 leader_kill_failed = True
+                if isinstance(pending, _PENDING_CANCELLATIONS):
+                    # fix 14 (QA35 codex MAJOR): with a cancellation
+                    # already pending the survivor flag alone would drop
+                    # this kill failure from the cancellation's chain --
+                    # the docstring promises it stays reachable beneath
+                    # it -- so re-raise the failure into the boundary,
+                    # which attaches it beneath the pending cancellation
+                    # and re-raises the cancellation itself. With
+                    # nothing pending (or an ordinary failure pending)
+                    # the flag stays the whole record and the survivor
+                    # is named in the outcome, exactly as before.
+                    raise
 
     try:
         # The freeze runs INSIDE the kill protection (round 24, codex
@@ -2203,7 +2220,10 @@ class _FixtureProcess:
         it stays the OUTWARD exception, never displaced, its own
         pre-existing chain kept intact, and every later failure -- helper
         or backstop, ordinary or cancellation -- is kept REACHABLE beneath
-        it: attached as its __cause__ when that slot is free, else
+        it (fix 14, QA35 codex MAJOR: an ordinary backstop delivery fault
+        was discarded outright; only a backstop ProcessLookupError stays
+        unrecorded, proving the guardian already exited): attached as its
+        __cause__ when that slot is free, else
         appended at the tail of its existing cause/context chain, else
         (only when no acyclic attachment exists) named in a note, with
         every diagnostic computed inside the boundary's protection so a
@@ -2262,6 +2282,23 @@ class _FixtureProcess:
                         if isinstance(exc, _PENDING_CANCELLATIONS):
                             raise
                         if not isinstance(exc, OSError):
+                            raise
+                        if (not isinstance(exc, ProcessLookupError)
+                                and (isinstance(helper_exc,
+                                                _PENDING_CANCELLATIONS)
+                                     or isinstance(
+                                         pending,
+                                         _PENDING_CANCELLATIONS))):
+                            # fix 14 (QA35 codex MAJOR): with a
+                            # cancellation pending -- the helper's own,
+                            # pending at THIS boundary, or one already
+                            # propagating into the enclosing finally --
+                            # a discarded delivery fault would vanish
+                            # from that cancellation's chain; re-raise
+                            # it so a boundary keeps it reachable
+                            # beneath the outward cancellation. A
+                            # ProcessLookupError is no failure to keep:
+                            # it proves the guardian already exited.
                             raise
                         # An ordinary delivery failure is out of moves:
                         # the helper's own failure propagates below.

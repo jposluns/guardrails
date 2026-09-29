@@ -4265,6 +4265,8 @@ def _watchdog_completion_case(mode):
                 return "RuntimeError: helper ordinary"
             if boundary == "helper cancellation":
                 return "InterruptedError: helper cancellation"
+            if boundary == "backstop oserror":
+                return "PermissionError: [Errno 1] backstop OSError"
             if boundary == "backstop non-oserror":
                 return "IndexError: backstop non-OSError"
             if boundary == "backstop cancellation":
@@ -4340,12 +4342,22 @@ def _watchdog_completion_case(mode):
                     if helper_kind == "ok":
                         boundary = None
                     elif (helper_kind == "cancellation"
-                          or backstop_kind in ("ok", "oserror")):
+                          or backstop_kind == "ok"
+                          or (backstop_kind == "oserror"
+                              and pending_kind in ("none", "ordinary"))):
                         # Fix 7 (QA28 codex BLOCKER 1): a cancellation the
                         # helper raised is pending for the direct
                         # backstop, so it stays the boundary exception
                         # over ANY backstop failure; only an ordinary
                         # helper failure yields to a raising backstop.
+                        # Fix 14 (QA35 codex MAJOR): with a cancellation
+                        # pending -- at the backstop's own boundary or
+                        # the enclosing finally's -- an OSError backstop
+                        # fault is no longer discarded: it is re-raised
+                        # and attached, so with an ordinary helper
+                        # failure and a pending cancellation the
+                        # ATTACHED failure is the backstop's, the
+                        # helper failure reachable as its __context__.
                         boundary = "helper " + helper_kind
                     else:
                         boundary = "backstop " + backstop_kind
@@ -4445,11 +4457,14 @@ def _watchdog_completion_case(mode):
                             "the pending ordinary failure was dropped from "
                             "the chain", combo, chain)
                     if (helper_kind == "cancellation"
-                            and backstop_kind in ("non-oserror",
+                            and backstop_kind in ("oserror",
+                                                  "non-oserror",
                                                   "cancellation")):
                         # Fix 7 (QA28 codex BLOCKER 1): the cleanup-born
                         # cancellation stays over the backstop failure,
-                        # which attaches beneath IT.
+                        # which attaches beneath IT -- the OSError kind
+                        # included (fix 14, QA35 codex MAJOR: it was
+                        # discarded outright).
                         if pending_kind in ("none", "ordinary"):
                             helper_node = outward
                         elif pending_kind == "cancellation":
@@ -4457,7 +4472,9 @@ def _watchdog_completion_case(mode):
                         else:
                             helper_node = outward.__cause__.__context__
                         backstop_sig = (
-                            "IndexError: backstop non-OSError"
+                            "PermissionError: [Errno 1] backstop OSError"
+                            if backstop_kind == "oserror"
+                            else "IndexError: backstop non-OSError"
                             if backstop_kind == "non-oserror"
                             else "InterruptedError: backstop cancellation")
                         assert signature(helper_node) == boundary_sig, (
@@ -4565,8 +4582,11 @@ def _watchdog_completion_case(mode):
         # capture is walked in FULL (body, else and finally), the
         # capturing try's OWN finally is walked as a successor (QA32
         # codex BLOCKER 1), and a nested def or lambda after a
-        # capture has its definition-time work -- decorators,
-        # parameter defaults, annotations -- checked like any other
+        # capture has its definition-time work -- decorators and
+        # parameter defaults; NOT its parameter/return annotations,
+        # which PEP 649 defers on the pinned 3.14 interpreter so
+        # nothing spelled inside one runs at definition time (fix
+        # 14, QA35 codex/claude MINOR) -- checked like any other
         # call site (QA32 codex BLOCKER 2; a class statement after a
         # capture already fails closed). A handler whose capture
         # target collides with its own `as` name, and a handler that
@@ -4624,6 +4644,30 @@ def _watchdog_completion_case(mode):
         import builtins
         import inspect
         import textwrap
+
+        # MODELED INTERPRETER (fix 14, QA35 gemini, orchestrator
+        # decision reconciling QA35 gemini with the QA35 codex/claude
+        # annotation finding): this leg models the annotation
+        # semantics of the interpreter the project runs -- CPython
+        # 3.14 (CI pins python-version 3.14), where PEP 649 defers
+        # every def parameter/return annotation and a function-local
+        # AnnAssign annotation evaluates nothing on ANY target shape,
+        # name, attribute or subscript alike (and yield/await/walrus
+        # are SyntaxErrors in every annotation position). On an OLDER
+        # interpreter annotations in defs and on non-name AnnAssign
+        # targets WOULD execute exactly where this leg no longer
+        # scans them, so the leg refuses to run there instead of
+        # running with the wrong model.
+        def leg11_interpreter_pinned(version_info):
+            assert version_info >= (3, 14), (
+                "leg 11 models PEP 649 (Python 3.14) annotation "
+                "semantics: on this interpreter annotations in defs "
+                "and on non-name AnnAssign targets WOULD execute "
+                "where the leg does not scan them -- cannot-evaluate "
+                "FAILURE (fix 14, QA35 gemini; CI pins "
+                "python-version 3.14)", tuple(version_info[:3]))
+
+        leg11_interpreter_pinned(sys.version_info)
 
         module_tree = ast.parse(inspect.getsource(emit))
         module_functions, module_methods, module_classes = {}, {}, {}
@@ -5376,10 +5420,18 @@ def _watchdog_completion_case(mode):
             # Calls this block itself executes: a nested def runs only
             # when invoked, so its BODY is checked where it is routed
             # -- but the definition statement itself EXECUTES its
-            # decorators, parameter defaults and annotations in the
-            # enclosing scope, so those are walked here (fix 11, QA32
-            # codex BLOCKER 2: a default expression ran unprotected
-            # cleanup right after a capture).
+            # decorators and parameter defaults in the enclosing
+            # scope, so those are walked here (fix 11, QA32 codex
+            # BLOCKER 2: a default expression ran unprotected
+            # cleanup right after a capture). Its parameter and
+            # return annotations are NOT definition-time work on the
+            # pinned interpreter: PEP 649 defers them until an
+            # explicit annotation access, so nothing spelled inside
+            # one runs when the def executes, and they are not
+            # walked (fix 14, QA35 codex/claude MINOR: modeling them
+            # as immediate calls falsely rejected a harmless
+            # annotated nested def; the fix-11-era claim that they
+            # "execute now" was pre-3.14 semantics).
             stack = list(body)
             while stack:
                 node = stack.pop()
@@ -5389,12 +5441,6 @@ def _watchdog_completion_case(mode):
                     stack.extend(spec.defaults)
                     stack.extend(default for default in spec.kw_defaults
                                  if default is not None)
-                    for arg in (spec.posonlyargs + spec.args
-                                + spec.kwonlyargs
-                                + ([spec.vararg] if spec.vararg else [])
-                                + ([spec.kwarg] if spec.kwarg else [])):
-                        if arg.annotation is not None:
-                            stack.append(arg.annotation)
                     if not isinstance(node, ast.Lambda):
                         for decorator in node.decorator_list:
                             # applying a decorator CALLS it with the
@@ -5408,8 +5454,6 @@ def _watchdog_completion_case(mode):
                             stack.append(ast.Call(func=decorator,
                                                   args=[],
                                                   keywords=[]))
-                        if node.returns is not None:
-                            stack.append(node.returns)
                     continue
                 if isinstance(node, ast.Call):
                     yield node
@@ -5609,9 +5653,14 @@ def _watchdog_completion_case(mode):
                         # expression evaluate NOW, in THIS function,
                         # and stay scanned here; and a LOCAL
                         # annotation expression never executes at all
-                        # (fix 13, QA34 codex MINOR: nothing spelled
-                        # inside one runs or binds), so it is not
-                        # walked
+                        # on the pinned PEP 649 interpreter -- on ANY
+                        # AnnAssign target shape: name, attribute or
+                        # subscript (fix 13, QA34 codex MINOR: nothing
+                        # spelled inside one runs or binds; fix 14,
+                        # QA35 gemini: pre-3.14, where a non-name
+                        # target's annotation WOULD run, the
+                        # interpreter pin fails the leg closed) -- so
+                        # it is not walked
                         if isinstance(leaf, (ast.FunctionDef,
                                              ast.AsyncFunctionDef)):
                             deferred = set(map(id, leaf.body))
@@ -5772,12 +5821,14 @@ def _watchdog_completion_case(mode):
                         if isinstance(stmt, (ast.FunctionDef,
                                              ast.AsyncFunctionDef)):
                             # fix 11 (QA32 codex BLOCKER 2): the
-                            # definition EXECUTES its decorators,
-                            # defaults and annotations now, while the
-                            # capture may be pending -- checked like
-                            # any other call site (direct_calls
-                            # yields exactly that definition-time
-                            # work)
+                            # definition EXECUTES its decorators and
+                            # defaults now, while the capture may be
+                            # pending -- checked like any other call
+                            # site (direct_calls yields exactly that
+                            # definition-time work; its annotations
+                            # run NOTHING under PEP 649 and are not
+                            # checked, fix 14, QA35 codex/claude
+                            # MINOR)
                             protected_calls(stmt)
                     else:
                         raise AssertionError((
@@ -6530,6 +6581,38 @@ def _watchdog_completion_case(mode):
             successors_after(function, capturing,
                              "vector:gemini34-annotation-in-if"),
             "interrupted", "vector:gemini34-annotation-in-if")
+
+        # QA35 codex/claude MINOR (fix 14, acceptance pin): under
+        # PEP 649 a nested def's parameter and return annotations
+        # are deferred -- nothing spelled inside one runs at
+        # definition time -- so an otherwise-harmless annotated def
+        # after the capture must be ACCEPTED (the fix-13 scanner
+        # modeled the annotations as immediate calls and rejected
+        # it naming `type`).
+        function, capturing = leg11_vector("""
+            def mutant(self):
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                def unused(value: type(None)) -> type(None):
+                    pass
+                if interrupted is not None:
+                    raise interrupted
+            """)
+        deferred_capture_sound(
+            function,
+            successors_after(function, capturing,
+                             "vector:codex35-annotated-def"),
+            "interrupted", "vector:codex35-annotated-def")
+
+        # QA35 gemini (fix 14, rejection pin): the interpreter pin
+        # is a named FAILURE, never a silent model mismatch -- a
+        # pre-3.14 version tuple must be refused.
+        leg11_vector_rejected(
+            "gemini QA35 interpreter vector: leg 11 ran on a "
+            "pre-PEP-649 interpreter without failing closed",
+            lambda: leg11_interpreter_pinned((3, 13, 0)))
 
         # Leg 12 (QA27 codex BLOCKER 1): a TimeoutError raised at the
         # subject SIGSTOP stays the outward exception when the held-pidfd
@@ -7367,6 +7450,36 @@ def _watchdog_completion_case(mode):
                     case_label, behavioural_drivers[case_label],
                     cancellation_type("pending cancellation"),
                     RuntimeError("injected cleanup fault"))
+        # fix 14 (QA35 codex MAJOR): a RuntimeError fault crosses the
+        # two SIGKILL steps' own `except (ProcessLookupError, OSError)`
+        # / OSError filters untouched, so the matrix above never saw
+        # the module-owned handling of a realistic syscall failure --
+        # the held-pidfd subject SIGKILL recorded an EPERM-class fault
+        # in its survivor flag only, and the direct guardian backstop
+        # discarded it outright; both dropped it from the pending
+        # cancellation's chain. Drive those two sites with
+        # OSError-family faults too -- PermissionError (EPERM) and a
+        # plain OSError (EBADF), the realistic pidfd_send_signal
+        # failures -- for every cancellation type. ProcessLookupError
+        # is deliberately NOT such a case: at both sites it proves the
+        # target already exited, so there is no kill failure to keep
+        # (the narrowed docstring promise at each site).
+        syscall_fault_sites = (
+            ("f:_fixture_escalate_subject",
+             "held-pidfd subject SIGKILL", 0),
+            ("m:_FixtureProcess._escalate",
+             "direct guardian SIGKILL backstop", 0))
+        for case_label in syscall_fault_sites:
+            assert case_label in behavioural_drivers, case_label
+            for cancellation_type in pending_cancellations:
+                for syscall_fault in (
+                        PermissionError(1, "injected cleanup fault"),
+                        OSError(9, "injected cleanup fault")):
+                    behavioural_case(
+                        case_label,
+                        behavioural_drivers[case_label],
+                        cancellation_type("pending cancellation"),
+                        syscall_fault)
     elif mode == "receipt-high-fd":
         import fcntl
         import resource
