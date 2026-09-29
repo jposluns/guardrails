@@ -13,9 +13,11 @@ passing operation. `render` HAS landed (PR-A): the `opf render` CLI requires exa
 observations caller-side (_opf_observe.gather) and hands them to the U4 engine, which composes the EXISTING U6
 `validate_store` store-integrity gate and permits writing when source integrity holds. Post-write validation
 checks source integrity and regenerated outputs; other deliverable failures can remain. `doctor` HAS landed: `opf doctor
-[--root DIR]` RESOLVES the store, gathers the inert git-derived observations (_opf_observe.gather: tracked,
-actual_remote, prior), and runs the U6 `validate_store` store-integrity engine over them, returning that
-engine's 0/1/2 contract (a NOT-ADOPTED root reports NOT APPLICABLE and exits 0). Doctor is read-only; its
+[--root DIR] [--require-store]` RESOLVES the store, gathers the inert git-derived observations
+(_opf_observe.gather: tracked, actual_remote, prior), and runs the U6 `validate_store` store-integrity engine
+over them, returning that engine's 0/1/2 contract (a NOT-ADOPTED root reports NOT APPLICABLE and exits 0;
+with `--require-store`, the enforcement-pack CI floor, it is a cannot-evaluate and exits 2 instead, so a
+repository whose store was removed cannot pass CI vacuously). Doctor is read-only; its
 observation gather is the caller-side git seam validate_store itself never touches. `upgrade` HAS landed
 (spec 9.2): `opf upgrade [--root DIR] [--homes-plan]`. With `--homes-plan`, it prints the homes-generation
 migration plan read-only and exits without upgrading. Otherwise it is the in-place, additive, idempotent
@@ -6523,23 +6525,34 @@ def _doctor_report(result):
 
 
 def _cmd_doctor(rest):
-    """`opf doctor [--root DIR]`: the store-integrity verb.
+    """`opf doctor [--root DIR] [--require-store]`: the store-integrity verb.
 
     Doctor RESOLVES the store at --root (default: the cwd product repository root), gathers the inert
     git-derived observations (_opf_observe.gather: tracked, actual_remote, prior), and runs the U6 whole-store
     integrity engine (_opf_check.validate_store) over them, returning that engine's own 0/1/2 contract via
     _opf_check.exit_code (0 VALID, 1 INVALID, 2 CANNOT-EVALUATE). A NOT-ADOPTED root reports NOT APPLICABLE
     and exits 0 (the pack's own `--root .` case, mirroring render); any other non-RESOLVED status is a located
-    cannot-evaluate (exit 2). Doctor is READ-ONLY: it makes no store change (SECI-preview-has-no-side-effects);
+    cannot-evaluate (exit 2). `--require-store` is the enforcement-pack CI floor (spec 1.3.0 14.1: the pack
+    MUST provide CI checks): with it, a NOT-ADOPTED root is a located cannot-evaluate (exit 2) instead of NOT
+    APPLICABLE, so a repository whose store was removed cannot pass CI vacuously; every other status keeps
+    its unflagged outcome. Doctor is READ-ONLY: it makes no store change (SECI-preview-has-no-side-effects);
     the observation gather is git reads only. The parser is the house fail-closed idiom (unknown token, an
-    empty or option-looking or duplicate --root value -> exit 2), matching _cmd_render's --root loop. Every
+    empty or option-looking or duplicate --root value, a duplicate --require-store -> exit 2), matching
+    _cmd_render's --root loop. Every
     residual escape from the resolver, the git gather, or the engine fails closed to exit 2 (never a false
     verdict), the same class-width backstop the render dispatch carries."""
     root = None
+    require_store = False
     i = 0
     while i < len(rest):
         tok = rest[i]
-        if tok == "--root":
+        if tok == "--require-store":
+            if require_store:
+                print("opf doctor: --require-store given more than once", file=sys.stderr)
+                return EXIT_MALFORMED
+            require_store = True
+            i += 1
+        elif tok == "--root":
             if i + 1 >= len(rest):
                 print("opf doctor: --root requires a directory argument", file=sys.stderr)
                 return EXIT_MALFORMED
@@ -6564,6 +6577,11 @@ def _cmd_doctor(rest):
               "closed to exit 2".format(root, exc), file=sys.stderr)
         return EXIT_MALFORMED
     if res.status == _opf_store.NOT_ADOPTED:
+        if require_store:
+            # The CI floor: an absent store is a cannot-evaluate, never a vacuous pass.
+            print("opf doctor: cannot evaluate: --require-store was given but no OPF store was found ({}); "
+                  "a repository with no store cannot pass the CI floor".format(res.detail), file=sys.stderr)
+            return EXIT_MALFORMED
         print("opf doctor: NOT APPLICABLE ({})".format(res.detail))
         return EXIT_OK
     if res.status != _opf_store.RESOLVED:
@@ -8407,7 +8425,9 @@ def _cli_self_test():
     `doctor`: bad-flag / usage
     cases (a `--root` with no value, an unknown flag) fail closed (exit 2); a NOT-ADOPTED root returns 0 (the
     doctor wiring discriminator: reverting the doctor route routes `doctor` to the fail-closed KNOWN_VERBS
-    branch and returns 2, failing this case); a garbage store returns 2. The render clean/drift 0/1
+    branch and returns 2, failing this case); a garbage store returns 2; with `--require-store` (the CI
+    floor) the same NOT-ADOPTED root returns 2 with the located flag message, and a duplicate flag is a usage
+    error (exit 2). The render clean/drift 0/1
     discrimination rides check_opf_drift.py --self-test, and the doctor clean(0)/mutation(1) discrimination
     over a validate_store-VALID COMMITTED store rides check_opf_doctor.py --self-test, each driving the same
     wiring end to end. Returns 0 clean, 1 on a failure, 2 on a harness error.
@@ -8452,6 +8472,7 @@ def _cli_self_test():
         expect(["doctor", "--root"], EXIT_MALFORMED)    # --root needs a value
         expect(["doctor", "--check", "--root", ""], EXIT_MALFORMED)   # unknown doctor flag (and empty root)
         expect(["doctor", "--bogus"], EXIT_MALFORMED)   # unknown doctor flag
+        expect(["doctor", "--require-store", "--require-store"], EXIT_MALFORMED)   # duplicate CI-floor flag
 
         # absorb verb ROUTING (OPF-CHANGELOG-ABSORB), judged on exit code only. These grammar cases fail
         # closed in the parser BEFORE any store resolution, so they need no store on disk. The NOT-ADOPTED
@@ -8553,6 +8574,18 @@ def _cli_self_test():
                 # observation), mirroring how the render clean/drift 0/1 rides check_opf_drift.py --self-test.
                 expect(["doctor", "--root", not_adopted], EXIT_OK)
                 expect(["doctor", "--root", broken], EXIT_MALFORMED)
+                # The CI floor (enforcement pack, U16): with --require-store the SAME NOT-ADOPTED root is a
+                # located cannot-evaluate (exit 2), while the unflagged case just above still returns 0. The
+                # message is asserted too, because deleting the flag would also exit 2 (as an unrecognized
+                # argument), so the code alone would not discriminate. Reverting the flag's NOT-ADOPTED branch
+                # returns 0 here, failing this case. A garbage store keeps its unflagged exit 2.
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                    rc = main(["doctor", "--require-store", "--root", not_adopted])
+                if rc != EXIT_MALFORMED or "--require-store was given but no OPF store" not in buf.getvalue():
+                    failures.append("doctor --require-store over a NOT-ADOPTED root: rc={!r} (expected 2 + "
+                                    "the located no-store message)".format(rc))
+                expect(["doctor", "--require-store", "--root", broken], EXIT_MALFORMED)
                 # upgrade over the same synthetic roots: a NOT-ADOPTED root reports NOT APPLICABLE and
                 # returns 0 -- the wiring discriminator (reverting the upgrade route sends `upgrade` to the
                 # fail-closed KNOWN_VERBS branch, which returns 2 here, failing this case); a garbage store
@@ -8892,7 +8925,8 @@ def _cli_self_test():
             return EXIT_FINDING
         print("opf cli self-test: PASS (verb routing: unknown/unwired verbs and render/doctor/import usage "
               "errors fail closed; render --check forwards to the U4 engine; doctor resolves + validates a "
-              "store, NOT-ADOPTED -> 0 and a garbage store -> 2; import wires scan/plan/review/apply onto "
+              "store, NOT-ADOPTED -> 0 (2 with --require-store) and a garbage store -> 2; "
+              "import wires scan/plan/review/apply onto "
               "the U7 operation layer -- an unresolved store -> 2 init-first, --scan -> 0 writing nothing, "
               "--plan -> 0 staging a run, --review incomplete -> 1 and complete -> 0 with a valid "
               "acceptance.json, non-TTY --interactive -> 2, and --apply over a reviewed run on a non-doctor-"
