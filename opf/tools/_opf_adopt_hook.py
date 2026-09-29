@@ -186,6 +186,7 @@ def _digest(data):
 # The fixed descriptors _shown returns INSTEAD of formatting a value it must never format, and
 # the one placeholder it returns if formatting fails anyway. Each is constant and bounded.
 _SHOWN_INT = "a code-built integer (not shown)"
+_SHOWN_MALFORMED_NUMBER = "a code-built malformed number lexeme (not shown)"
 _SHOWN_TABLE = "a table (not shown)"
 _SHOWN_ARRAY = "an array (not shown)"
 _SHOWN_OTHER = "a value of a type this formatter does not show"
@@ -199,20 +200,25 @@ def _shown(value):
     cannot fail or grow is formatted. An exact str or _Number is bounded on the VALUE at EVERY
     length: a long one is truncated on the value before repr and reports the value's own
     length, and a short one comes back whole (its repr is never cut, so no cut can split a repr
-    escape sequence and no reported count is ever the repr's); a _Number shows as its bare
-    lexeme and a str stays quoted. An exact float, True, False and None show their repr, a few
-    dozen characters at most. An int, a table and an array are NEVER formatted and get a fixed
-    descriptor instead: int-to-text conversion raises past the interpreter's digit limit, and a
-    container's repr exhausts the stack on deep nesting (reachable from exact parsed bytes in
-    the entry type field) and runs to megabytes on a wide one. Any other type gets a fixed
-    descriptor too, with no method of it run (the public entry gates refuse foreign types before
-    any interior check could hand one here). Any formatting failure at all returns the fixed
-    _SHOWN_UNFORMATTABLE placeholder. Worst case stays near half a kilobyte (48 characters
-    whose repr escapes are up to ten bytes each, plus the suffix), so every embedding message
-    is bounded."""
+    escape sequence and no reported count is ever the repr's); a str stays quoted, and a _Number
+    shows as its bare lexeme ONLY when _NUMBER_LEXEME_RE matches it (every parsed one does), so
+    a number never reads as a string and no raw control text reaches a finding; a code-built
+    _Number that does not match is NEVER formatted and gets the fixed _SHOWN_MALFORMED_NUMBER
+    descriptor instead. An exact float shows its repr, and True, False and None show their JSON
+    spelling (true, false, null), a few dozen characters at most. An int, a table and an array
+    are NEVER formatted and get a fixed descriptor instead: int-to-text conversion raises past
+    the interpreter's digit limit, and a container's repr exhausts the stack on deep nesting
+    (reachable from exact parsed bytes in the entry type field) and runs to megabytes on a wide
+    one. Any other type gets a fixed descriptor too, with no method of it run (the public entry
+    gates refuse foreign types before any interior check could hand one here). Any formatting
+    failure at all returns the fixed _SHOWN_UNFORMATTABLE placeholder. Worst case stays near
+    half a kilobyte (48 characters whose repr escapes are up to ten bytes each, plus the
+    suffix), so every embedding message is bounded."""
     try:
         value_type = type(value)
         if value_type is _Number:
+            if not _NUMBER_LEXEME_RE.match(value):
+                return _SHOWN_MALFORMED_NUMBER
             if len(value) > 64:
                 return "{}... ({} characters)".format(str.__str__(value)[:64], len(value))
             return str.__str__(value)
@@ -220,7 +226,13 @@ def _shown(value):
             if len(value) > 48:
                 return "{}... ({} characters)".format(repr(value[:48]), len(value))
             return repr(value)
-        if value is None or value is True or value is False or value_type is float:
+        if value is None:
+            return "null"
+        if value is True:
+            return "true"
+        if value is False:
+            return "false"
+        if value_type is float:
             return repr(value)
         if value_type is int:
             return _SHOWN_INT
@@ -369,9 +381,9 @@ def _emit(model):
     assumed: every number lexeme is held to the parser's own number grammar and finite double
     range, a parseable model carrying an escaped unpaired surrogate refuses here (below), and
     keys, string values and lexeme carriers are classified by type IDENTITY (exactly str,
-    exactly _Number), so a _Number key can never serialize into duplicate-key JSON. A
-    CODE-BUILT model (the self-test's literals, a finite exact int/float) emits under the same
-    number rule, but the container and numeric branches classify it by isinstance, so a SUBCLASS of
+    exactly _Number), so a _Number key can never serialize into duplicate-key JSON. A CODE-BUILT
+    model (the self-test's literals, a finite exact int/float) emits under the same number rule,
+    but the container and numeric branches classify it by isinstance, so a SUBCLASS of
     int/float/dict/list, which only this repository's own code could pass (_emit is
     module-private and the public entry gates refuse foreign-typed models), is NOT covered by
     the fixed-point claim and may emit bytes _parse refuses. The output is held to
@@ -551,11 +563,10 @@ def _foreign_typed(model):
     of an EXACT admitted type: the parsed-JSON types dict, list, str, the module's own _Number,
     bool and None, plus int and float, which only a code-built model carries (_parse returns
     numbers as _Number). The decision is by IDENTITY alone (`is` on type(node), which a
-    __class__ spoof cannot fool
-    and which never invokes a method, a metaclass __eq__ included; None, True and False by
-    object identity, and bool cannot be subclassed). Past this gate only built-in-backed types
-    flow, so every interior check classifies parsed data instead of defending against
-    caller-run code. Returns True when a foreign-typed node is present."""
+    __class__ spoof cannot fool and which never invokes a method, a metaclass __eq__ included;
+    None, True and False by object identity, and bool cannot be subclassed). Past this gate only
+    built-in-backed types flow, so every interior check classifies parsed data instead of
+    defending against caller-run code. Returns True when a foreign-typed node is present."""
     stack = [model]
     seen = set()
     while stack:
@@ -829,6 +840,17 @@ def merge_registration(old_bytes, plugin_entry):
     merged.setdefault("hooks", dict()).setdefault(ENTRY_EVENT, []).append(wanted)
     try:
         new_bytes = _emit(merged)
+    except _EmitBoundRefusal:
+        return _cannot("merged registration would exceed {} bytes (the same bound the input is "
+                       "held to, refused by the emitter's running byte count so the over-bound "
+                       "output is never built and an accepted output always no-ops on its next "
+                       "merge)".format(MAX_REGISTRATION_BYTES), old_bytes=old_bytes)
+    except (_ParseRefusal, RecursionError) as exc:
+        # a refusal of the merged model's EMISSION (deep opaque nesting, an escaped unpaired
+        # surrogate): no bytes were produced, so nothing was verified, and the message says so.
+        return _cannot("merged registration cannot be emitted: {}".format(exc),
+                       old_bytes=old_bytes)
+    try:
         # verification, fail-closed (threat model 2): the emitted bytes reparse to exactly the prior
         # model plus the one inserted entry, and emission is a fixed point (byte-exact re-emission).
         # The re-emission runs INSIDE this try, so even a fault only a broken emitter could
@@ -836,11 +858,6 @@ def merge_registration(old_bytes, plugin_entry):
         reparsed = _parse(new_bytes)
         stripped = _parse(new_bytes)
         re_emitted = _emit(reparsed)
-    except _EmitBoundRefusal:
-        return _cannot("merged registration would exceed {} bytes (the same bound the input is "
-                       "held to, refused by the emitter's running byte count so the over-bound "
-                       "output is never built and an accepted output always no-ops on its next "
-                       "merge)".format(MAX_REGISTRATION_BYTES), old_bytes=old_bytes)
     except (_ParseRefusal, RecursionError) as exc:
         return _cannot("merge verification failed: {}".format(exc), old_bytes=old_bytes)
     tail = stripped["hooks"][ENTRY_EVENT]
@@ -1995,8 +2012,9 @@ def self_test():
     # 7c: recursion exhaustion refuses, never an uncaught exception, on BOTH paths: deep top-level
     # nesting exhausts the PARSER (mapped by _parse's RecursionError handler), and nesting that
     # parses but exceeds the Python-level emission depth (roughly the interpreter recursion limit)
-    # exhausts EMISSION on the changed-merge path (mapped by the merge verification handler);
-    # dropping either RecursionError handler turns its vector into an uncaught crash here.
+    # exhausts EMISSION on the changed-merge path (mapped by the merged-emission handler, whose
+    # message never claims a verification ran); dropping either RecursionError handler turns
+    # its vector into an uncaught crash here.
     deep_parse = b"[" * 100000 + b"]" * 100000
     r = merge_registration(deep_parse, entry)
     check("deep-nesting-parse-cannot-eval", r.status is CANNOT_EVALUATE and r.new_bytes is None)
@@ -2004,6 +2022,12 @@ def self_test():
     r = merge_registration(deep_env, entry)
     check("deep-nesting-emission-cannot-eval",
           r.status is CANNOT_EVALUATE and r.new_bytes is None)
+    # the emission refusal is reported as an emission refusal, never as a failed verification
+    # (catching it in the verification handler turns this red).
+    check("deep-nesting-emission-not-reported-as-verification",
+          len(r.findings) == 1
+          and r.findings[0].startswith("merged registration cannot be emitted: ")
+          and "verification" not in r.findings[0])
     # a FINDING never recurses over adopter content either: exact bytes nesting an array in
     # the entry type field just under the parser's own depth limit (found here by bisection,
     # since the limit depends on the build and its stack) parse, then refuse on the type with
@@ -2214,6 +2238,35 @@ def self_test():
     check("shown-int-and-containers-fixed-descriptors",
           _shown(7) == _SHOWN_INT and _shown(10 ** 5000) == _SHOWN_INT
           and _shown(dict(a=1)) == _SHOWN_TABLE and _shown([1]) == _SHOWN_ARRAY)
+    # a code-built _Number shows bare ONLY when it is a grammatical number lexeme: one carrying
+    # a quote and control characters comes back as its fixed descriptor on the validator's type
+    # finding and on the emitter's lexeme refusal, so no raw control text reaches a finding and
+    # a number never reads as a string (showing every _Number bare turns this red).
+    hostile_lexeme = _Number("'command'\n\x1b[31m")
+    hostile_type = validate_registration_model({"hooks": {"Stop": [{"hooks": [
+        {"command": "x", "type": hostile_lexeme}]}]}})
+    try:
+        _emit({"env": hostile_lexeme})
+        hostile_emit = None
+    except _ParseRefusal as exc:
+        hostile_emit = str(exc)
+    check("shown-malformed-number-lexeme-fixed-descriptor",
+          _shown(hostile_lexeme) == _SHOWN_MALFORMED_NUMBER
+          and _shown(_Number("-1.5E3")) == "-1.5E3"
+          and hostile_type.status is CANNOT_EVALUATE
+          and hostile_type.findings == ["hooks['Stop'][0].hooks[0] type {} outside the closed "
+                                        "v1 vocabulary".format(_SHOWN_MALFORMED_NUMBER)]
+          and hostile_emit == "number lexeme {} is not a finite strict-JSON number".format(
+              _SHOWN_MALFORMED_NUMBER))
+    # a parsed JSON literal in a finding reads in JSON spelling (true, false, null), never in
+    # Python's (True, False, None); restoring repr for the three literals turns this red.
+    literal_type = merge_registration(
+        b'{"hooks": {"Stop": [{"hooks": [{"command": "x", "type": true}]}]}}', entry)
+    check("shown-json-literals-json-spelling",
+          literal_type.status is CANNOT_EVALUATE
+          and literal_type.findings == ["hooks['Stop'][0].hooks[0] type true outside the "
+                                        "closed v1 vocabulary"]
+          and _shown(True) == "true" and _shown(False) == "false" and _shown(None) == "null")
 
     def _raising_repr(value):
         raise ValueError("formatter fault (self-test shim)")
