@@ -4475,7 +4475,8 @@ def _watchdog_completion_case(mode):
 
         # Leg 11 (fix 6, premise change; fix 7, QA28; fix 8, QA29 codex
         # BLOCKER 2 / claude MAJOR 1, MINOR 2 / gemini BLOCKER; maintainer
-        # ruling PD-335, narrow and disclose): the pending-cancellation
+        # ruling PD-335, narrow and disclose; fix 9, QA30 codex BLOCKER
+        # 1/2 / claude MINOR 1/2/3): the pending-cancellation
         # boundary is STRUCTURAL, its scope is COMPUTED over the whole
         # close lifecycle, and the computation FAILS CLOSED on every call
         # edge it cannot resolve. The GUARANTEE is scoped to cleanup the
@@ -4509,9 +4510,23 @@ def _watchdog_completion_case(mode):
         # the isinstance guard ON ITS OWN BOUND NAME (QA29 claude MINOR
         # 2), standing after a bare-raising handler that already covers
         # those types, ending in a raise while calling nothing but
-        # isinstance and _cleanup_boundary, or capturing its exception
-        # for a deferred re-raise while doing nothing else but
-        # boundary-routed work.
+        # isinstance and _cleanup_boundary (a final raise may name only
+        # the handler's own bound exception or an alias of it, fix 9,
+        # QA30 claude MINOR 1), or capturing its exception for a
+        # deferred re-raise while doing nothing else but boundary-routed
+        # work -- and the capture is held to its promise STRUCTURALLY
+        # (fix 9, QA30 codex BLOCKER 1): after a capturing handler,
+        # every statement that can run while the captured object may be
+        # pending calls nothing but the boundary and isinstance, never
+        # rebinds the captured name, and every path re-raises exactly
+        # THAT captured object, else cannot-evaluate FAILURE. Receiver
+        # identity (fix 9, QA30 codex BLOCKER 2 / claude MINOR 3): a
+        # disclosed method name clears a call only on a receiver PROVEN
+        # external -- a builtin-typed value or an object built by a call
+        # into an imported module -- a proven module class instance is
+        # resolved INTO the closure, no disclosed name may shadow a
+        # module method, and any receiver that could be module-owned is
+        # a cannot-evaluate FAILURE.
         import ast
         import builtins
         import inspect
@@ -4560,20 +4575,235 @@ def _watchdog_completion_case(mode):
             ("report", "close"), ("report", "seek"), ("report", "read"),
             ("_go", "set"), ("_launched", "wait"), ("_launched", "is_set"),
         }
-        # Methods on module-local objects (container growth, str/bytes
-        # accessors, poll objects), disclosed by NAME; anything else is a
-        # cannot-evaluate FAILURE.
-        external_local_methods = {
+        # Methods on module-local VALUES, disclosed by NAME -- and, fix 9
+        # (QA30 codex BLOCKER 2 / claude MINOR 3), a name only counts
+        # when the receiver is PROVEN external: a builtin-typed value (a
+        # literal, a display, a fresh-value builtin call, a disclosed
+        # method's result, or a local bound only to those) or an object
+        # built by a call into an imported module (a select poller),
+        # whose methods are the same disclosed external-code residual as
+        # the module call that built it. A receiver that could be
+        # module-owned -- self, a module class instance, a parameter, an
+        # unknown -- is resolved into the closure (a proven module class
+        # instance) or is a cannot-evaluate FAILURE. "register" and
+        # "poll" left the name set: a poller call is cleared by its
+        # proven receiver origin, never by name, and no disclosed name
+        # may shadow a module method (asserted below), so a module-owned
+        # method can no longer hide behind a stdlib method name (the
+        # QA30 .poll() collision).
+        external_builtin_methods = frozenset([
             "append", "add", "join", "format", "split", "rsplit",
-            "isdecimal", "decode", "register", "poll",
-        }
+            "isdecimal", "decode",
+        ])
+        assert not (external_builtin_methods & set(module_methods)), (
+            "a disclosed external method name shadows a module method: "
+            "a module-owned method could hide behind it (fix 9, QA30 "
+            "claude MINOR 3)",
+            sorted(external_builtin_methods & set(module_methods)))
+        # Builtin callables whose result is always a FRESH builtin-typed
+        # value -- never one of their arguments (unlike min/max/next), so
+        # a module-owned object cannot flow through them into a proven
+        # receiver.
+        builtin_value_makers = frozenset([
+            "list", "set", "dict", "tuple", "frozenset", "sorted", "str",
+            "bytes", "bytearray", "int", "float", "bool", "repr", "len",
+            "range", "sum", "abs",
+        ])
 
-        def resolve_call(func, where, nested):
+        def local_value_kinds(function):
+            # Receiver-origin PROOF (fix 9, QA30 codex BLOCKER 2): map
+            # each local name to "builtin" (always a builtin-typed
+            # value), "extmodule" (an object built by a call into an
+            # imported module), or ("modclass", name) (a proven module
+            # class instance, resolved into the closure); anything else
+            # stays unproven and its method calls are cannot-evaluate
+            # FAILURES. A name is proven only when EVERY binding proves
+            # the same origin and nothing poisons it: a parameter, a
+            # with-item, a handler name, an unsplittable tuple target,
+            # del/global/nonlocal. A for-target or comprehension target
+            # over a proven iterable enters as "builtin", never
+            # "extmodule": an element the module may itself have placed
+            # in a container is cleared only through the NAMED methods,
+            # which no module method may shadow (asserted above).
+            bindings = dict()
+            poisoned = set()
+
+            def bind(name, entry):
+                bindings.setdefault(name, []).append(entry)
+
+            def poison_names(target):
+                for leaf in ast.walk(target):
+                    if isinstance(leaf, ast.Name):
+                        poisoned.add(leaf.id)
+
+            for node in ast.walk(function):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                     ast.Lambda)):
+                    spec = node.args
+                    for arg in (spec.posonlyargs + spec.args
+                                + spec.kwonlyargs
+                                + ([spec.vararg] if spec.vararg else [])
+                                + ([spec.kwarg] if spec.kwarg else [])):
+                        poisoned.add(arg.arg)
+                elif isinstance(node, ast.Assign):
+                    targets = node.targets
+                    if (len(targets) == 1
+                            and isinstance(targets[0], ast.Tuple)
+                            and isinstance(node.value, (ast.Tuple,
+                                                        ast.List))
+                            and len(targets[0].elts)
+                            == len(node.value.elts)
+                            and all(isinstance(elt, ast.Name)
+                                    for elt in targets[0].elts)):
+                        for elt, value in zip(targets[0].elts,
+                                              node.value.elts):
+                            bind(elt.id, ("value", value))
+                    else:
+                        for target in targets:
+                            if isinstance(target, ast.Name):
+                                bind(target.id, ("value", node.value))
+                            else:
+                                poison_names(target)
+                elif isinstance(node, ast.AugAssign):
+                    if isinstance(node.target, ast.Name):
+                        bind(node.target.id, ("value", node.value))
+                elif isinstance(node, ast.AnnAssign):
+                    if isinstance(node.target, ast.Name):
+                        if node.value is not None:
+                            bind(node.target.id, ("value", node.value))
+                        else:
+                            poisoned.add(node.target.id)
+                elif isinstance(node, ast.NamedExpr):
+                    bind(node.target.id, ("value", node.value))
+                elif isinstance(node, (ast.For, ast.AsyncFor)):
+                    if isinstance(node.target, ast.Name):
+                        bind(node.target.id, ("iter", node.iter))
+                    else:
+                        poison_names(node.target)
+                elif isinstance(node, ast.comprehension):
+                    if isinstance(node.target, ast.Name):
+                        bind(node.target.id, ("iter", node.iter))
+                    else:
+                        poison_names(node.target)
+                elif isinstance(node, (ast.With, ast.AsyncWith)):
+                    for item in node.items:
+                        if item.optional_vars is not None:
+                            poison_names(item.optional_vars)
+                elif isinstance(node, ast.ExceptHandler):
+                    if node.name:
+                        poisoned.add(node.name)
+                elif isinstance(node, (ast.Global, ast.Nonlocal)):
+                    poisoned.update(node.names)
+                elif isinstance(node, ast.Delete):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            poisoned.add(target.id)
+            kinds = dict()
+
+            def value_kind(node):
+                if isinstance(node, ast.Constant):
+                    return "builtin"
+                if isinstance(node, (ast.List, ast.Tuple, ast.Set,
+                                     ast.Dict, ast.ListComp, ast.SetComp,
+                                     ast.DictComp, ast.GeneratorExp,
+                                     ast.JoinedStr)):
+                    return "builtin"
+                if isinstance(node, ast.Name):
+                    kind = kinds.get(node.id)
+                    return (kind if kind in ("builtin", "extmodule")
+                            else None)
+                if isinstance(node, ast.BinOp):
+                    return ("builtin"
+                            if value_kind(node.left)
+                            and value_kind(node.right) else None)
+                if isinstance(node, ast.IfExp):
+                    return ("builtin"
+                            if value_kind(node.body)
+                            and value_kind(node.orelse) else None)
+                if isinstance(node, ast.Subscript):
+                    # an element or slice OF a proven external value:
+                    # it re-enters as "builtin", so only the NAMED
+                    # methods (none of which a module method may
+                    # shadow) are cleared on it
+                    return ("builtin" if value_kind(node.value)
+                            else None)
+                if isinstance(node, ast.Call):
+                    func = node.func
+                    if (isinstance(func, ast.Name)
+                            and func.id in builtin_value_makers):
+                        return "builtin"
+                    if isinstance(func, ast.Attribute):
+                        base = func.value
+                        if (isinstance(base, ast.Name)
+                                and base.id in imported_modules):
+                            return "extmodule"
+                        if (isinstance(base, ast.Attribute)
+                                and isinstance(base.value, ast.Name)
+                                and base.value.id in ("self", "cls")
+                                and (base.attr, func.attr)
+                                in external_self_calls):
+                            return "builtin"
+                        if isinstance(base, ast.Constant):
+                            return "builtin"
+                        base_kind = value_kind(base)
+                        if base_kind == "extmodule":
+                            return "builtin"
+                        if (base_kind == "builtin" and func.attr
+                                in external_builtin_methods):
+                            return "builtin"
+                return None
+
+            def modclass_of(node):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id in module_classes):
+                    return node.func.id
+                return None
+
+            for _ in range(8):
+                changed = False
+                for name, entries in bindings.items():
+                    if name in poisoned or name in kinds:
+                        continue
+                    proofs = []
+                    for tag, value in entries:
+                        if tag == "iter":
+                            proofs.append("builtin" if value_kind(value)
+                                          else None)
+                        else:
+                            cls = modclass_of(value)
+                            proofs.append(("modclass", cls) if cls
+                                          else value_kind(value))
+                    if any(proof is None for proof in proofs):
+                        continue
+                    if all(isinstance(proof, tuple) for proof in proofs):
+                        classes = set(proof[1] for proof in proofs)
+                        if len(classes) == 1:
+                            kinds[name] = ("modclass", classes.pop())
+                            changed = True
+                        continue
+                    if any(isinstance(proof, tuple) for proof in proofs):
+                        continue  # mixed module/external: unproven
+                    kinds[name] = ("extmodule" if all(
+                        proof == "extmodule" for proof in proofs)
+                        else "builtin")
+                    changed = True
+                if not changed:
+                    break
+            for name in poisoned:
+                kinds.pop(name, None)
+            return kinds, value_kind
+
+        def resolve_call(func, where, nested, kinds, value_kind):
             # Returns the in-module (key, node) targets a call edge
             # reaches (empty when it stays inside this scope), or None
             # when the callee is DISCLOSED external code; anything it
             # cannot resolve is a cannot-evaluate FAILURE (fix 8, QA29
-            # claude MAJOR 1), never a silent pass.
+            # claude MAJOR 1), never a silent pass. A method call on a
+            # local value resolves through the receiver-origin proof
+            # (fix 9): disclosed names count only on proven-external
+            # receivers, a proven module class instance resolves into
+            # the closure, and an unproven receiver is a FAILURE.
             if isinstance(func, ast.Name):
                 name = func.id
                 if name in boundary_internals or name in nested:
@@ -4605,12 +4835,37 @@ def _watchdog_completion_case(mode):
                                 for qual, node in targets]
                     if base.id in imported_modules:
                         return None
-                    if func.attr in external_local_methods:
+                    kind = kinds.get(base.id)
+                    if kind == "extmodule":
+                        # every method on an object a call into an
+                        # imported module built is the same disclosed
+                        # residual as that call itself (fix 9)
                         return None
+                    if (kind == "builtin"
+                            and func.attr in external_builtin_methods):
+                        return None
+                    if isinstance(kind, tuple):
+                        # a PROVEN module class instance: the method is
+                        # module-owned and joins the closure (fix 9,
+                        # QA30 codex BLOCKER 2)
+                        cls = module_classes[kind[1]]
+                        targets = [("m:" + cls.name + "." + inner.name,
+                                    inner)
+                                   for inner in cls.body
+                                   if isinstance(inner,
+                                                 (ast.FunctionDef,
+                                                  ast.AsyncFunctionDef))
+                                   and inner.name == func.attr]
+                        assert targets, (
+                            "cannot resolve a module-class method call "
+                            "in the close-lifecycle closure: FAILURE "
+                            "(fix 9)", where, ast.dump(func))
+                        return targets
                     raise AssertionError((
-                        "cannot resolve an attribute call in the "
-                        "close-lifecycle closure: FAILURE (fix 8, QA29 "
-                        "claude MAJOR 1)", where, ast.dump(func)))
+                        "cannot prove a method receiver external in "
+                        "the close-lifecycle closure: FAILURE, never a "
+                        "silent pass (fix 9, QA30 codex BLOCKER 2)",
+                        where, ast.dump(func)))
                 if (isinstance(base, ast.Attribute)
                         and isinstance(base.value, ast.Name)
                         and base.value.id in ("self", "cls")
@@ -4618,12 +4873,17 @@ def _watchdog_completion_case(mode):
                     return None
                 if isinstance(base, ast.Constant):
                     return None  # a str/bytes literal method is pure
-                if func.attr in external_local_methods:
+                base_kind = value_kind(base)
+                if base_kind == "extmodule":
+                    return None
+                if (base_kind == "builtin"
+                        and func.attr in external_builtin_methods):
                     return None
                 raise AssertionError((
-                    "cannot resolve an attribute call in the "
-                    "close-lifecycle closure: FAILURE (fix 8, QA29 "
-                    "claude MAJOR 1)", where, ast.dump(func)))
+                    "cannot prove a method receiver external in the "
+                    "close-lifecycle closure: FAILURE, never a silent "
+                    "pass (fix 9, QA30 codex BLOCKER 2)", where,
+                    ast.dump(func)))
             raise AssertionError((
                 "cannot resolve a computed call in the close-lifecycle "
                 "closure: FAILURE (fix 8, QA29 claude MAJOR 1)", where,
@@ -4634,9 +4894,11 @@ def _watchdog_completion_case(mode):
                       if isinstance(inner, (ast.FunctionDef,
                                             ast.AsyncFunctionDef))
                       and inner is not function}
+            kinds, value_kind = local_value_kinds(function)
             for node in ast.walk(function):
                 if isinstance(node, ast.Call):
-                    targets = resolve_call(node.func, key, nested)
+                    targets = resolve_call(node.func, key, nested, kinds,
+                                           value_kind)
                     if targets:
                         yield from targets
                 elif (isinstance(node, ast.Name)
@@ -4733,12 +4995,30 @@ def _watchdog_completion_case(mode):
             return (len(body) == 1 and isinstance(body[0], ast.Raise)
                     and body[0].exc is None)
 
-        def ends_in_raise(body):
-            # A bare re-raise, or the deferred re-raise of a CAPTURED
-            # exception object (a bare Name, never a construction).
-            return (isinstance(body[-1], ast.Raise)
-                    and (body[-1].exc is None
-                         or isinstance(body[-1].exc, ast.Name)))
+        def ends_in_raise(body, bound):
+            # A bare re-raise, or the deferred re-raise of the handler's
+            # OWN captured object: a final `raise <name>` counts only
+            # when <name> is the handler's bound name or was assigned
+            # from it in this handler (fix 9, QA30 claude MINOR 1:
+            # any-Name acceptance let a handler end in a raise of an
+            # unrelated pre-existing object while swallowing the caught
+            # cancellation).
+            last = body[-1]
+            if not isinstance(last, ast.Raise):
+                return False
+            if last.exc is None:
+                return True
+            if not isinstance(last.exc, ast.Name) or bound is None:
+                return False
+            aliases = set([bound])
+            for stmt in body:
+                if (isinstance(stmt, ast.Assign)
+                        and len(stmt.targets) == 1
+                        and isinstance(stmt.targets[0], ast.Name)
+                        and isinstance(stmt.value, ast.Name)
+                        and stmt.value.id in aliases):
+                    aliases.add(stmt.targets[0].id)
+            return last.exc.id in aliases
 
         def guard_covers(stmt, required, bound, where):
             # `if isinstance(<bound>, (...)): raise` as the FIRST
@@ -4766,27 +5046,33 @@ def _watchdog_completion_case(mode):
             # `except ... as exc: <boundary-routed work>; captured = exc`
             # -- the deferred-re-raise pattern (_close_coordinated): the
             # handler captures the exception and does nothing else but
-            # boundary-routed calls; the enclosing code re-raises the
-            # captured object on every path (pinned dynamically by the
-            # close-cancel legs).
+            # boundary-routed calls. Returns the CAPTURED name so the
+            # enclosing code can be held to the promise structurally
+            # (fix 9, QA30 codex BLOCKER 1: this shape used to be
+            # accepted on the handler alone, so cleanup after the
+            # capture could run outside the boundary and displace the
+            # captured cancellation), or None when the shape does not
+            # match.
             if bound is None:
-                return False
-            saw_capture = False
+                return None
+            captured = None
             for stmt in body:
                 if (isinstance(stmt, ast.Assign)
                         and len(stmt.targets) == 1
                         and isinstance(stmt.targets[0], ast.Name)
                         and isinstance(stmt.value, ast.Name)
                         and stmt.value.id == bound):
-                    saw_capture = True
+                    if captured is not None:
+                        return None
+                    captured = stmt.targets[0].id
                     continue
                 if (isinstance(stmt, ast.Expr)
                         and isinstance(stmt.value, ast.Call)
                         and call_target(stmt.value)[:2]
                         == ("name", "_cleanup_boundary")):
                     continue
-                return False
-            return saw_capture
+                return None
+            return captured
 
         def direct_calls(body):
             # Calls this block itself executes: a nested def runs only
@@ -4814,6 +5100,158 @@ def _watchdog_completion_case(mode):
                     and func.value.value.id in ("self", "cls")):
                 return ("selfattr", func.value.attr, func.attr)
             return ("opaque", ast.dump(func))
+
+        def successors_after(function, target, key):
+            # The statements that can run after `target` completes,
+            # walking out through every enclosing block in execution
+            # order (fix 9, QA30 codex BLOCKER 1). Fails closed on an
+            # enclosing construct this walk does not model: a loop can
+            # re-run statements before the capture.
+            def blocks(stmt):
+                found = []
+                for field in ("body", "orelse", "finalbody"):
+                    inner = getattr(stmt, field, None)
+                    if inner and isinstance(inner, list):
+                        found.append((field, inner))
+                for handler in getattr(stmt, "handlers", None) or ():
+                    found.append(("handler", handler.body))
+                return found
+
+            def find(body):
+                for index, stmt in enumerate(body):
+                    if stmt is target:
+                        return [body[index + 1:]]
+                    for field, inner in blocks(stmt):
+                        path = find(inner)
+                        if path is None:
+                            continue
+                        assert not isinstance(
+                            stmt, (ast.For, ast.AsyncFor,
+                                   ast.While)), (
+                            "a capturing handler sits inside a loop: "
+                            "cannot evaluate what re-runs while the "
+                            "captured object is pending -- FAILURE "
+                            "(fix 9)", key)
+                        if isinstance(stmt, try_nodes):
+                            if field == "body":
+                                path.append(stmt.orelse)
+                                path.append(stmt.finalbody)
+                            elif field in ("handler", "orelse"):
+                                path.append(stmt.finalbody)
+                        path.append(body[index + 1:])
+                        return path
+                return None
+
+            path = find(function.body)
+            assert path is not None, (
+                "a capturing try was not found in its function "
+                "(fix 9)", key)
+            return [stmt for block in path for stmt in block]
+
+        def deferred_capture_sound(successors, captured, key):
+            # Fix 9 (QA30 codex BLOCKER 1 / claude MINOR 1): after a
+            # capturing handler, walk everything that can still run.
+            # While the captured object may be pending, a statement may
+            # call nothing but _cleanup_boundary and isinstance, never
+            # rebinds the captured name, and a raise may raise only THAT
+            # captured object; an `if <captured> is not None` guard whose
+            # body ends in that re-raise discharges the capture, so the
+            # code after it runs only with the capture empty. A shape
+            # this walk does not model is a cannot-evaluate FAILURE, and
+            # a path that could complete with the capture still pending
+            # is a FAILURE: the function would swallow the captured
+            # cancellation by returning normally.
+            def protected_calls(node):
+                for call in direct_calls([node]):
+                    called = call_target(call)
+                    assert called[0] == "name" and called[1] in (
+                        "isinstance", "_cleanup_boundary"), (
+                        "an unprotected call runs after a capture while "
+                        "the captured exception may be pending (fix 9, "
+                        "QA30 codex BLOCKER 1)", key,
+                        ast.dump(call.func))
+
+            def is_none_guard(stmt):
+                return (isinstance(stmt, ast.If) and not stmt.orelse
+                        and isinstance(stmt.test, ast.Compare)
+                        and isinstance(stmt.test.left, ast.Name)
+                        and stmt.test.left.id == captured
+                        and len(stmt.test.ops) == 1
+                        and isinstance(stmt.test.ops[0], ast.IsNot)
+                        and len(stmt.test.comparators) == 1
+                        and isinstance(stmt.test.comparators[0],
+                                       ast.Constant)
+                        and stmt.test.comparators[0].value is None)
+
+            def walk_block(stmts, state):
+                for stmt in stmts:
+                    if state in ("clear", "terminated"):
+                        break
+                    if isinstance(stmt, ast.Raise):
+                        assert (isinstance(stmt.exc, ast.Name)
+                                and stmt.exc.id == captured
+                                and (stmt.cause is None
+                                     or isinstance(stmt.cause,
+                                                   ast.Name))), (
+                            "after a capture, raising anything but the "
+                            "captured object could swallow the pending "
+                            "cancellation (fix 9, QA30 codex BLOCKER 1 "
+                            "/ claude MINOR 1)", key)
+                        state = "terminated"
+                    elif isinstance(stmt, ast.If):
+                        protected_calls(stmt.test)
+                        if is_none_guard(stmt):
+                            assert walk_block(stmt.body,
+                                              "pending") == "terminated", (
+                                "an `if <captured> is not None` guard "
+                                "does not end by re-raising the captured "
+                                "object (fix 9)", key)
+                            state = "clear"
+                        else:
+                            body_state = walk_block(stmt.body, "pending")
+                            else_state = (walk_block(stmt.orelse,
+                                                     "pending")
+                                          if stmt.orelse else "pending")
+                            falls = [leg for leg in (body_state,
+                                                     else_state)
+                                     if leg != "terminated"]
+                            state = ("terminated" if not falls
+                                     else "clear" if all(
+                                         leg == "clear" for leg in falls)
+                                     else "pending")
+                    elif isinstance(stmt, try_nodes):
+                        assert not stmt.handlers, (
+                            "a try with handlers follows a capture: "
+                            "cannot evaluate the pending path -- FAILURE "
+                            "(fix 9)", key)
+                        for inner in stmt.finalbody:
+                            protected_calls(inner)
+                        state = walk_block(stmt.body, "pending")
+                    elif isinstance(stmt, (ast.Assign, ast.AugAssign,
+                                           ast.AnnAssign, ast.Expr)):
+                        for target in (stmt.targets
+                                       if isinstance(stmt, ast.Assign)
+                                       else []):
+                            assert not (isinstance(target, ast.Name)
+                                        and target.id == captured), (
+                                "the captured name is rebound before "
+                                "its re-raise (fix 9)", key)
+                        protected_calls(stmt)
+                    elif isinstance(stmt, (ast.Pass, ast.FunctionDef,
+                                           ast.AsyncFunctionDef)):
+                        pass
+                    else:
+                        raise AssertionError((
+                            "cannot evaluate a statement that follows a "
+                            "capture while the captured exception may be "
+                            "pending: FAILURE (fix 9)", key,
+                            ast.dump(stmt)[:160]))
+                return state
+
+            assert walk_block(successors, "pending") != "pending", (
+                "a capturing function can complete without re-raising "
+                "the captured object (fix 9, QA30 codex BLOCKER 1)",
+                key)
 
         try_nodes = ((ast.Try, ast.TryStar) if hasattr(ast, "TryStar")
                      else (ast.Try,))
@@ -4869,6 +5307,7 @@ def _watchdog_completion_case(mode):
                                     called[1] in ("isinstance",
                                                   "_cleanup_boundary")
                                     or called[1] in module_functions
+                                    or called[1] in module_classes
                                     or called[1] in nested)
                                 or called[0] == "attr"
                                 and (called[1], called[2])
@@ -4913,10 +5352,21 @@ def _watchdog_completion_case(mode):
                         for h in earlier)
                     if (bare_raise_only(handler.body) or guarded_before
                             or guard_covers(handler.body[0], required,
-                                            handler.name, key)
-                            or capture_shape(handler.body, handler.name)):
+                                            handler.name, key)):
                         continue
-                    assert ends_in_raise(handler.body), (
+                    captured = capture_shape(handler.body, handler.name)
+                    if captured is not None:
+                        # Fix 9 (QA30 codex BLOCKER 1): the capture is a
+                        # PROMISE, now checked structurally -- everything
+                        # that can run after the capturing try while the
+                        # captured object may be pending routes through
+                        # the boundary, and every path re-raises exactly
+                        # that object.
+                        deferred_capture_sound(
+                            successors_after(function, node, key),
+                            captured, key)
+                        continue
+                    assert ends_in_raise(handler.body, handler.name), (
                         "a close-lifecycle handler can swallow or "
                         "replace a pending cancellation without the "
                         "boundary (fix 6/7)", key)

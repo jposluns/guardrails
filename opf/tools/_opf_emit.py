@@ -1106,7 +1106,19 @@ def _fixture_verify_group_kill(group):
 # backstop's cancellation tier is one explicit _PENDING_CANCELLATIONS
 # guard): at the boundary AND at the recording/retry tier, a cleanup a
 # cancellation interrupted records nothing, whichever of the three
-# cancellation types it was.
+# cancellation types it was. Fix 9 (QA30 codex BLOCKER 1/2, claude
+# MINOR 1/2/3) makes the CAPTURE shape sound and the disclosure exact:
+# a handler that captures its exception for a deferred re-raise routes
+# every later cleanup through the boundary with the captured object
+# pending, and every later path re-raises THAT captured object -- the
+# structural leg walks the code that follows the capture and fails
+# closed on any unprotected call, on a raise of any other name, and on
+# a path that could complete without the re-raise; a disclosed method
+# NAME counts only for a receiver PROVEN external (a builtin-typed
+# value or an object built by a call into an imported module), never
+# for one that could be module-owned; and every module /proc read,
+# the guardian-side census included, goes through os.open/os.read with
+# the descriptor close as a boundary step.
 _PENDING_CANCELLATIONS = (TimeoutError, InterruptedError, KeyboardInterrupt)
 
 
@@ -1352,17 +1364,51 @@ def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None):
 
 
 def _fixture_children():
-    """Census by PPID; task/children can transiently omit adopted children."""
+    """Census by PPID; task/children can transiently omit adopted children.
+    The per-entry stat read goes through os.open/os.read with the descriptor
+    close as a _cleanup_boundary step (fix 9, QA30 claude MINOR 2: this
+    guardian-side census still read /proc via Path.read_bytes, so the fix-8
+    header claim that the module's own /proc reads never hide a stdlib
+    context manager was not literally true of the module; it now is).
+    Exception behaviour is unchanged: an entry that disappears mid-read
+    (FileNotFoundError/ProcessLookupError) is skipped, every other failure
+    propagates so the caller refuses."""
     import os
-    from pathlib import Path
     owner = os.getpid()
     pids = []
+    fd = None
+    pending = None
+
+    def close_stat_fd():
+        if fd is not None:
+            os.close(fd)
+
     with os.scandir("/proc") as entries:
         for entry in entries:
             if not entry.name.isdecimal():
                 continue
+            stat = b""
+            fd = None
+            pending = None
             try:
-                stat = Path(entry.path, "stat").read_bytes()
+                try:
+                    fd = os.open(entry.path + "/stat",
+                                 os.O_RDONLY | os.O_CLOEXEC)
+                    while True:
+                        chunk = os.read(fd, 65536)
+                        if not chunk:
+                            break
+                        stat += chunk
+                except BaseException as exc:
+                    # Capture the exception already propagating into the
+                    # close below: a read-born cancellation must stay the
+                    # outward exception even when the descriptor close
+                    # itself fails (fix 9, the _fixture_stat_fields shape).
+                    pending = exc
+                    raise
+                finally:
+                    _cleanup_boundary(pending, close_stat_fd,
+                                      "stat descriptor close")
             except (FileNotFoundError, ProcessLookupError):
                 continue  # an unrelated process disappeared during enumeration
             # comm is parenthesized and may contain spaces and ')' characters.
@@ -2385,6 +2431,16 @@ class _FixtureProcess:
             raise
 
     def _close_coordinated(self):
+        def abandon_unfinished():
+            return self._abandon_unfinished_launch()
+
+        def make_refusal():
+            return ChildStatusUnavailable(
+                "fixture launch did not complete: guardian ownership unknown")
+
+        def finish_close():
+            self._finish_close()
+
         if self._launcher is not None:
             with self._launch_lock:
                 self._cancelled = True
@@ -2404,31 +2460,50 @@ class _FixtureProcess:
                     # leave the launcher parked: release it (idempotent,
                     # through the shared boundary, fix 8, so a release fault
                     # never displaces the cancellation), then decide ownership
-                    # below exactly as on a timeout; every later path
-                    # re-raises the captured exception.
+                    # below exactly as on a timeout. EVERY cleanup that runs
+                    # after this capture routes through the shared boundary
+                    # with the captured exception pending, and every later
+                    # path re-raises the captured object itself (fix 9, QA30
+                    # codex BLOCKER 1: the abandonment decision ran outside
+                    # the boundary, so an abandonment fault displaced the
+                    # captured cancellation).
                     _cleanup_boundary(
                         exc if isinstance(exc, _PENDING_CANCELLATIONS)
                         else None,
                         release_launcher, "parked launcher release")
                     interrupted = exc
-                if not launched and self._abandon_unfinished_launch():
+                if not launched and _cleanup_boundary(
+                        interrupted, abandon_unfinished,
+                        "unfinished-launch abandonment"):
                     abandoned = True
             if abandoned:
-                refusal = ChildStatusUnavailable(
-                    "fixture launch did not complete: guardian ownership unknown")
+                # The refusal is constructed through the boundary too: a
+                # raising constructor while the captured cancellation is
+                # pending must never displace it (best-effort: such a fault
+                # costs the refusal detail, never the cancellation).
+                refusal = _cleanup_boundary(
+                    interrupted, make_refusal, "abandonment refusal")
                 if interrupted is not None:
                     raise interrupted from refusal
                 raise refusal
             self._launcher = None
             if interrupted is not None:
                 # The fork result IS recorded: this close() stays the owner.
-                # Finish the bounded collection first, then re-raise the
-                # cancellation, chaining (never replacing) any refusal from it.
+                # Finish the bounded collection first -- through the shared
+                # boundary (fix 9, QA30 codex BLOCKER 1), so a collection
+                # failure never displaces a captured cancellation -- then
+                # re-raise the captured object, with any collection failure
+                # chained beneath it (never replacing it). A captured
+                # NON-cancellation stays reachable as the collection
+                # failure's context; the outward-priority guarantee itself
+                # is scoped to cancellations (PD-335), and a cancellation
+                # BORN in the collection now wins over a captured
+                # non-cancellation, per the fix-7 premise.
                 try:
-                    self._finish_close()
-                except BaseException as exc:
-                    raise interrupted from exc
-                raise interrupted
+                    raise interrupted
+                finally:
+                    _cleanup_boundary(interrupted, finish_close,
+                                      "owner collection finish")
         self._finish_close()
 
     def _interrupt_collect(self):
