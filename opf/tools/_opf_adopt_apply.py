@@ -30,12 +30,13 @@ discards the copy or reports a prestate (the rollback-side checkpoint). A source
 longer match its plan digest is drifted and is never archived or removed. A non-occupying source takes
 only its retirement preimage at apply and stays frozen in place (its removal waits for the green
 completion check, a later slice). An `rmdir` may target ONLY a directory this same transaction created; a
-pre-existing live directory is never removed by this shell. The store control roots
-(`_opf_store.STORE_ROOT_CONTROL_DIRS`: `.git/` and `.aiqt/`, the adoption journal's own tree included) are
-never apply operands of ANY kind. The adoption archive and every evidence bundle are immutable: an op may
-only create beneath this run's own archive, this run's own bundle, or the Move root, never write, remove,
-or rmdir anything under `.working/archive/` or `.working/imported/`, and never create in another run's
-home.
+pre-existing live directory is never removed by this shell. No protected destination
+(`_opf_adopt.protected_destination`, the ONE predicate the planner shares: a `.git` or `.aiqt` component
+at any depth, the adoption journal's own tree included; the product-root pointers; the store control area;
+the store tree's `.gitignore`) is an apply operand of ANY kind, save the mkdirs leading to this run's own
+homes. The adoption archive and every evidence bundle are immutable: an op may only create beneath this
+run's own archive, this run's own bundle, or the Move root, never write, remove, or rmdir anything under
+`.working/archive/` or `.working/imported/`, and never create in another run's home.
 
 The adoption journal root is `.aiqt/adopt/journal` at the PRODUCT root: the homes-1 legacy journal family
 of `.aiqt/record/journal` and `.aiqt/import/journal`. It is anchored there, never under the store, because
@@ -107,7 +108,8 @@ PLAN_V2_FORMAT = "opf.adoption.plan/v2"
 DIR_MODE = 0o755
 FILE_MODE = 0o644
 _NONCE_RE = re.compile(r"^[0-9a-f]{16}\Z")
-# The store-tree control homes this engine may create beneath and never rewrite (spec 4.2, 14.2).
+# The store-tree control homes this engine may create beneath and never rewrite (spec 4.2, 14.2); which of
+# their paths take a create is the shared protected-destination predicate's.
 _CONTROL_HOMES = (store.ARCHIVE_REL, store.IMPORTED_REL)
 # The Move root, derived from the public Move-destination constructor (spec 14.2), never re-spelled.
 _MOVED_ROOT = store.moved_dest("x").rsplit("/", 1)[0]
@@ -494,12 +496,14 @@ def check_apply_ops(run_id, phase, ops, staged):
     follows, in this same list, the create of its archive copy with that same digest (spec 14.2); a write
     additionally needs staged bytes matching its own content digest, like a create. An rmdir may target
     only a directory an earlier mkdir in this same list creates (so, under one-op-per-path, no live
-    directory is ever removed by this shell). The store control roots (_opf_store.STORE_ROOT_CONTROL_DIRS:
-    `.git/` and `.aiqt/`, the adoption journal's own tree included) are never operands of any kind.
-    Immutable homes: under `.working/archive/` and `.working/imported/` only a create beneath this run's
-    own archive, own bundle, or the Move root (and the mkdirs leading there) is allowed, never a write,
-    remove, or rmdir, and never another run's home (spec 14.2, 4.2). One op per path. The final op, and
-    the only bundle-root inventory, is this transaction's own inventory, byte-equal to the inventory
+    directory is ever removed by this shell). A protected destination (_opf_adopt.protected_destination,
+    the predicate the planner applies to every move destination and archive copy: `.git` and `.aiqt` at any
+    depth, the adoption journal's own tree included, the product-root pointers, the store control area and
+    the store tree's `.gitignore`) is never an operand of any kind, save a mkdir of this run's own homes or
+    their ancestors. Immutable homes: under `.working/archive/` and `.working/imported/` only a create
+    beneath this run's own archive, own bundle, or the Move root (and the mkdirs leading there) is allowed,
+    never a write, remove, or rmdir, and never another run's home (spec 14.2, 4.2). One op per path. The
+    final op, and the only bundle-root inventory, is this transaction's own inventory, byte-equal to the inventory
     derived from the list's retained bytes (spec 4.2). Spec 4.2 MAY lets a phase inventory publish in the
     same transaction as the base to claim a promotion receipt without a digest cycle; this shell has no
     receipt to claim, so it deliberately takes the STRICTER exactly-one-inventory rule, and the receipt
@@ -519,24 +523,18 @@ def check_apply_ops(run_id, phase, ops, staged):
             findings.append("{} is not a contained journal op".format(where))
             continue
         kind, path = op["op"], op["path"]
-        if any(_within(path, top) for top in store.STORE_ROOT_CONTROL_DIRS):
-            findings.append("{} would {} {!r} under a store control root; the version-control area and "
-                            "the adoption journal's own tree are never apply operands "
-                            "(fail-closed)".format(where, kind, path))
+        protected = schema.protected_destination(path, run_id)
+        if protected is not None and not (kind == "mkdir" and any(_within(r, path) for r in roots)):
+            findings.append("{} would {} {!r}, a protected destination: {} (fail-closed)".format(
+                where, kind, path, protected))
             continue
         if path in seen:
             findings.append("{} touches {!r} a second time (one op per path)".format(where, path))
         seen.add(path)
-        if any(_within(path, home) for home in _CONTROL_HOMES):
-            if kind == "create" and not any(_within(path, r) and path != r for r in roots):
-                findings.append("{} creates {!r} outside this run's own archive, own evidence bundle and "
-                                "the Move root; another run's home is immutable".format(where, path))
-            elif kind == "mkdir" and not any(_within(path, r) or _within(r, path) for r in roots):
-                findings.append("{} creates directory {!r} outside this run's own homes".format(where, path))
-            elif kind not in ("create", "mkdir"):
-                findings.append("{} would {} {!r}: the adoption archive and evidence bundles are immutable "
-                                "(spec 14.2, 4.2); only a create beneath this run's own homes is "
-                                "allowed".format(where, kind, path))
+        if kind not in ("create", "mkdir") and any(_within(path, home) for home in _CONTROL_HOMES):
+            findings.append("{} would {} {!r}: the adoption archive and evidence bundles are immutable "
+                            "(spec 14.2, 4.2); only a create beneath this run's own homes is "
+                            "allowed".format(where, kind, path))
         if kind == "create":
             digest = (op.get("poststate") or {}).get("content-sha256")
             data = staged.get(path)
@@ -1205,6 +1203,48 @@ def _self_test_checks():
     mv = store.moved_dest("legacy/OLD.md")
     check("derive-rows-claims-move-destination",
           derive_rows(rid, [c(mv, body)], {mv: body}) == [inventory_row(mv, body)])
+    # K1: no protected destination (_opf_adopt.protected_destination, the ONE predicate the planner shares) is
+    # an operand: .git and .aiqt at any depth, every store control root (staging, journals and the imports
+    # tree too, not only the archive and evidence homes), the product-root pointers and the store .gitignore.
+    for label, path in (("nested-aiqt", "docs/.aiqt/x.md"), ("nested-git", "docs/.git/x"),
+                        ("journals", ".working/journals/x"), ("staging", ".working/staging/x"),
+                        ("imports", ".working/imports/x"), ("pointer", ".opf.toml"),
+                        ("local-pointer", ".opf.local.toml"), ("store-gitignore", ".working/.gitignore")):
+        refused = findings_of(*sealed([c(path, body)], dict([(path, body)])))
+        check("compose-protected-{}-create-refused".format(label),
+              any("protected destination" in f for f in refused))
+
+    def mkdir(path):
+        return dict(op="mkdir", path=path, poststate=dict(kind="dir", mode=DIR_MODE))
+    check("compose-protected-mkdir-refused", any("protected destination" in f for f in findings_of(
+        *sealed([mkdir(".working/staging")], dict()))))
+    check("compose-own-home-mkdirs-admitted", findings_of(*sealed(
+        [mkdir(d) for d in (".working", ".working/archive", ".working/archive/moved",
+                            ".working/archive/moved/legacy")] + [c(mv, body)], dict([(mv, body)]))) == [])
+
+    # K1 parity: for each destination, a plan moving a source there validates exactly when apply admits the
+    # create of it, both through the one shared predicate.
+    def move_plan(destination):
+        p = schema.canonical_plan()
+        digest = "sha256:" + _sha256(body)
+        p["ops"].insert(0, dict(op="move-file", source="legacy/MOVE.md", destination=destination,
+                                source_digest=digest))
+        p["sources"] = sorted(p["sources"] + [dict(path="legacy/MOVE.md", digest=digest, disposition="move",
+                                                   occupying=False, preservation=destination)],
+                              key=lambda r: r["path"])
+        p["effects"] = schema.derive_effects(p["ops"], p["sources"], schema.store_manifest(p["store"]))
+        return p
+    check("parity-canonical-plan-run", schema.canonical_plan()["run_id"] == rid)
+    for path, admitted in (("adopter/moved.md", True), (store.moved_dest("legacy/MOVE.md"), True),
+                           (store.moved_dest(".working/TODO.md"), True), (".aiqt/x.md", False),
+                           ("docs/.aiqt/x.md", False), ("docs/.git/x", False), (".opf.toml", False),
+                           (".opf.local.toml", False), (".working/.gitignore", False),
+                           (".working/journals/x", False), (".working/staging/x", False),
+                           (".working/imports/x", False), (".working/imported/x", False),
+                           (archive_rel(other_run, "x.md"), False)):
+        planned = schema.validate_plan(move_plan(path)).status == VALID
+        applied = findings_of(*sealed([c(path, body)], dict([(path, body)]))) == []
+        check("parity-" + path, planned == applied == admitted)
 
     # 5: the journaled shell over throwaway fixtures. An occupied view destination and an occupying
     # machine-store file (a foreign manifest-shaped file, so no store resolves) are archived preserve-first
