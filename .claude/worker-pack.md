@@ -9,8 +9,8 @@
    when you executed them this session (worker profile). If your sandbox prevents a required check or
    read, report that item as UNVERIFIABLE and name what you could not do and why. (vrfdlv)
 5. UNVERIFIABLE is a terminal answer for that item. Never fold it into a pass, a clean verdict, or a
-   finding-free result. A verdict that lists its UNVERIFIABLE items is legitimate; an invented
-   measurement is a hard fail. (vrfdlv)
+   finding-free result; a verdict that lists its UNVERIFIABLE items is legitimate. (vrfdlv) An invented
+   measurement is a hard fail. (nofabr, worker profile)
 6. Never characterize what a file, interface, diff, or system contains, lacks, or requires without
    opening it this session. Read first, then describe. (rdbchr, worker profile)
 7. A head, tail, grep, range, or other bounded read is evidence only about the slice it exposed. Do not

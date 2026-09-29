@@ -196,7 +196,7 @@ def self_test_main():
         return 2
     failures = []
     try:
-        # (a) conformant: generate, byte-compare against the source body, then --check drift-clean.
+        # (a) conformant: generate, byte-compare against the independently spelled expected body, then --check.
         good = tmp / "good"
         _build(good, "selfw1, selfw2")
         if run_quiet(good, check=False) != 0:
