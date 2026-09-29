@@ -84,11 +84,17 @@ def _opened(cap, kind, run_id, create):
 # validators and the projection model below, so the writer and the reader cannot drift. All of them are
 # pure over already-captured frames or identity strings: no descriptor is opened, no directory is created,
 # and no state is mutated. Identity is validated through the shared _opf_store constructors, so every
-# registered kind (import, ingest, adoption, layout, preview) is admitted by one grammar.
+# registered kind (import, ingest, adoption, layout, preview, and the journal-only record) is admitted
+# by one grammar.
 
 PROJECTION_FORMAT = "opf.journal.transaction/v1"
 PROJECTION_STATES = ("complete", "rolled-back")
 _RUN_HEADER_KEYS = frozenset(("kind", "run_id", "operation_id"))
+# The one header widening (spec 8.8): kind `record` MAY additionally carry `staged`, the planned
+# poststate bytes, so record recovery can tell a torn write from an intervening edit. Every other
+# kind keeps the exact three-key header.
+_STAGED_HEADER_KIND = "record"
+_STAGED_HEADER_KEY = "staged"
 
 
 def _validate_identity(kind, run_id):
@@ -130,15 +136,19 @@ def state_of_frames(frames):
 
 def check_run_frames(frames, kind, run_id):
     """Pure validation of one single-transaction frame sequence against the requested identity: the C2
-    accepted-sequence state machine, then the exact {kind, run_id, operation_id} header binding. Raises
-    JournalError; returns the INTENT frame object (None for an empty sequence)."""
+    accepted-sequence state machine, then the exact {kind, run_id, operation_id} header binding (kind
+    `record` alone may additionally carry the optional `staged` key). Raises JournalError; returns the
+    INTENT frame object (None for an empty sequence)."""
     _validate_identity(kind, run_id)
     _journal._validate_terminal_agreement(frames)
     intent = _journal._first(frames, _journal.F_INTENT)
     if intent is not None:
         header = intent.get("header")
+        allowed = set(_RUN_HEADER_KEYS)
+        if kind == _STAGED_HEADER_KIND:
+            allowed.add(_STAGED_HEADER_KEY)
         if (intent.get("txn") != run_id or not isinstance(header, dict)
-                or set(header) != set(_RUN_HEADER_KEYS)
+                or not set(_RUN_HEADER_KEYS) <= set(header) or not set(header) <= allowed
                 or header.get("kind") != kind or header.get("run_id") != run_id
                 or not isinstance(header.get("operation_id"), str) or not header["operation_id"]):
             raise _journal.JournalError("store journal identity does not match the requested operation")
@@ -185,11 +195,17 @@ def _project(root_fd, jr_fd, txn_dir, kind, run_id):
         os.close(pfd)
 
 
-def run_transaction(cap, kind, run_id, ops, staged_reader):
-    """Run ordinary ops under the held capability, then derive the terminal projection."""
+def run_transaction(cap, kind, run_id, ops, staged_reader, staged=None):
+    """Run ordinary ops under the held capability, then derive the terminal projection. `staged`, when
+    given, is the per-op planned poststate payload the INTENT header retains for recovery's torn-write
+    explanation; it rides kind `record` only and is refused on every other kind."""
     _check_ordinary_ops(ops)
+    if staged is not None and kind != _STAGED_HEADER_KIND:
+        raise _journal.JournalError("a staged header rides the record kind only")
     with _opened(cap, kind, run_id, create=True) as (root_fd, jr_fd, txn_dir):
         header = dict(kind=kind, run_id=run_id, operation_id=cap.op_id)
+        if staged is not None:
+            header[_STAGED_HEADER_KEY] = staged
         result = _journal.run_transaction(root_fd, jr_fd, txn_dir.parent, run_id, header,
                                           ops, staged_reader, cap.holder)
         _project(root_fd, jr_fd, txn_dir, kind, run_id)

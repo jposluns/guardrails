@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T18)
+  check_opf_record.py --self-test                    the fixture suite (T1-T23)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -88,6 +88,25 @@ Each case runs on its own copy of that template; the root is removed in a finall
       options on open -> withdrawn, and on the ratification of decided/proposed, each refuse in its own
       test (flip, applied to each of the two: drop the apply-only half of the option guard, under which
       the options are silently ignored)
+
+  T19 a publication's journal transaction name is the homes record- grammar
+      record-<YYYYMMDD>T<HHMMSS>Z-<hash16> (flip: mint the legacy dotted name); an interrupted
+      transaction under the LEGACY dotted name an earlier build minted is still reconciled, at kill
+      points on both sides of COMPLETE (flip: a recovery that enumerates only grammar-named
+      transactions)
+  T20 a legacy .aiqt/record/journal on a homes-2 store is refused by name, never recovered in place,
+      with the .aiqt subtree byte-unchanged and no typed journal home created (flip: probe the
+      generation as 1, under which the legacy journal is reconciled in place)
+  T21 a direct homes-2 _publish lands ONE capability-bound transaction in
+      .working/journals/record/journal with its projection at txn_record("record", <rid>), the operands
+      rewritten, and nothing under .aiqt (flip: route homes 2 to the legacy journal root)
+  T22 on a homes-2 store the verb still refuses at the claim seam (the record reservation is a separate
+      later change), with every byte untouched and neither journal home created (flip: a reconcile that
+      mkdirs the typed home)
+  T23 a homes-2 publication killed at each journal step leaves the typed journal reconcilable: the next
+      run reconciles it under the operation capability (the confirmed-dead gate clears the dead run's
+      lease and active record), the operands end exactly at the prestate or exactly at the poststate,
+      the poststate iff COMPLETE, and .aiqt is never touched (its flip runs inside the killed child)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -443,11 +462,12 @@ def child(env, root, args, kill=None, flip=""):
                           capture_output=True, text=True, timeout=180, env=child_env)
 
 
-def journal_states(root):
-    jroot = Path(root) / record.JOURNAL_REL
+def journal_states(root, rel=None):
+    rel = record.JOURNAL_REL if rel is None else rel
+    jroot = Path(root) / rel
     if not jroot.is_dir():
         return {}
-    jr_fd = journal.open_journal_root_from_path(str(root), record.JOURNAL_REL)
+    jr_fd = journal.open_journal_root_from_path(str(root), rel)
     try:
         return {t.name: journal.classify_state(jr_fd, t) for t in journal._journal_txn_dirs(jr_fd, jroot)}
     finally:
@@ -1317,6 +1337,229 @@ def flip_t3():
     return patch.object(record, "_postcondition", lambda plan, req, ctx, now: None)
 
 
+# --- T19-T23: the record run-id grammar and the homes-2 journal home (spec 4.2/8.8) -----------------------
+
+import re
+import _opf_import as imp
+
+RECORD_RUN_RE = r"record-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}"
+TYPED_JOURNAL = ".working/journals/record/journal"
+RECORD_OPERANDS = (COUNTERS, BI_INDEX, WORKLOG)
+
+# Inside a killed child: the transaction is minted under the LEGACY dotted name an earlier build used,
+# so recovery of that shape stays exercised end to end.
+LEGACY_NAME_FLIP = """
+import os, time
+record._record_run_id = lambda token: "record-create." + str(os.getpid()) + "." + str(time.time_ns()) + "." + token
+"""
+
+# Inside a killed child: activate homes 2 exactly as _opf_import._self_test_homes2_active does (the
+# manifest on disk already declares homes = 2; these are the module patches), and route the claim seam
+# through the homes-1 counters path, emulating the later id-reservation change, so the run reaches the
+# homes-2 publication.
+HOMES2_CHILD_FLIP = """
+import _opf_store
+_opf_store.SUPPORTED_HOMES = 2
+_opf_store.HOMES2_SPEC_VERSION = _opf_store.SUPPORTED_SPEC_VERSION
+_real_validate = _opf_store.validate_manifest
+def _declared_validate(data, *a, **k):
+    table = data.get("opf") if isinstance(data, dict) else None
+    if not (isinstance(table, dict) and "homes" in table):
+        return _real_validate(data, *a, **k)
+    result = _real_validate(dict(data, opf=dict((key, v) for key, v in table.items() if key != "homes")),
+                            *a, **k)
+    if isinstance(result.base, dict):
+        result.base = dict(result.base, homes=table["homes"])
+    return result
+_opf_store.validate_manifest = _declared_validate
+_claim_seam = record.claim_ids
+record.claim_ids = lambda homes, high, demand, known_complete: _claim_seam(1, high, demand, known_complete)
+"""
+
+
+def subtree(root, prefix):
+    return dict((k, v) for k, v in snapshot(root).items() if k == prefix or k.startswith(prefix + "/"))
+
+
+def t19_run_id_grammar(fx):
+    """A publication's journal transaction name is the record run id in the homes grammar, and the
+    shared constructor accepts it verbatim."""
+    root = fx.case("t19-run-id")
+    recorded(record_cli(fx.env, root, CREATE))
+    names = list(journal_states(root))
+    assert len(names) == 1 and re.fullmatch(RECORD_RUN_RE, names[0]), ("T19 the homes grammar", names)
+    assert record._opf_store.txn_record("record", names[0]).endswith("/transaction.toml")
+
+
+def flip_t19():
+    return patch.object(record, "_record_run_id", lambda token: "record-create.{}.{}.{}".format(
+        os.getpid(), datetime.datetime.now().microsecond, token))
+
+
+def t19_legacy_name_recovery(fx):
+    """An interrupted transaction under the LEGACY dotted name is still reconciled: kill points before
+    apply, mid-apply, and at a torn COMPLETE, with the operands ending exactly at the prestate or
+    exactly at the poststate, the poststate iff COMPLETE."""
+    env = fx.env
+    reference = fx.case("t19-legacy-reference")
+    proc = child(env, reference, CREATE)
+    assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-800:])
+    post = dict((rel, read(reference, rel)) for rel in RECORD_OPERANDS)
+    for hook in ("after-publish-INTENT", "after-apply-0", "torn:COMPLETE"):
+        root = fx.case("t19-legacy-" + hook.replace(":", "-"))
+        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+        proc = child(env, root, CREATE, kill=hook, flip=LEGACY_NAME_FLIP)
+        assert proc.returncode == 137, ("T19 the child is killed at", hook, proc.stderr[-800:])
+        (Path(root) / LEASE).unlink()
+        refused(record_cli(env, root, CREATE), "was reconciled")
+        states = journal_states(root)
+        assert states and all(s != "open" for s in states.values()), ("T19 terminal", hook, states)
+        assert all(name.startswith("record-create.") for name in states), ("T19 the legacy name", states)
+        now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+        complete = any(s == "complete" for s in states.values())
+        assert now == (post if complete else pre), ("T19 prestate or poststate, poststate iff COMPLETE",
+                                                    hook, states)
+
+
+def flip_t19_legacy():
+    """A recovery that enumerates only grammar-named transactions: the legacy-named interruption is
+    never reconciled."""
+    original = journal._journal_txn_dirs
+
+    def grammar_only(jr_fd, journal_root):
+        return [t for t in original(jr_fd, journal_root) if re.fullmatch(RECORD_RUN_RE, t.name)]
+    return patch.object(journal, "_journal_txn_dirs", grammar_only)
+
+
+def t20_homes2_legacy_refused(fx):
+    """A legacy .aiqt/record/journal found on a homes-2 store is refused by name and never recovered in
+    place: the .aiqt subtree stays byte-unchanged (the T15 leftover lock included) and no typed journal
+    home is created."""
+    env = fx.env
+    root = fx.case("t20-homes2-legacy")
+    proc = child(env, root, CREATE, flip=FAILING_LOCK_RELEASE)
+    assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-800:])
+    assert (Path(root) / record.JOURNAL_REL / "lock").exists(), "T20 the legacy journal holds a leftover lock"
+    with imp._self_test_homes2_active(root):
+        aiqt_before = subtree(root, ".aiqt")
+        result = record_cli(env, root, CREATE)
+        refused(result, "legacy record journal")
+        assert "never recovered" in result[2] and "homes migration transports it" in result[2], result[2][-800:]
+        assert subtree(root, ".aiqt") == aiqt_before, "T20 the .aiqt subtree is byte-unchanged"
+        assert not (Path(root) / ".working/journals").exists(), "T20 no typed journal home is created"
+
+
+def flip_t20():
+    """Probe the generation as 1 (the reviewed head's behaviour): the legacy journal is reconciled in
+    place and .aiqt changes."""
+    return patch.object(record, "_probe_homes", lambda ctx: 1)
+
+
+def t21_homes2_publish(fx):
+    """A direct homes-2 publication (claim_ids bypassed to the homes-1 counters path, emulating the
+    later id-reservation change) lands ONE capability-bound transaction in the typed journal home with
+    its terminal projection, rewrites exactly the planned operands, and touches nothing under .aiqt."""
+    env = fx.env
+    root = fx.case("t21-homes2-publish")
+    with imp._self_test_homes2_active(root):
+        req = record.parse_request(CREATE + ["--root", str(root)])
+        res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
+        assert res.status == record._opf_store.RESOLVED, res
+        root_fd = record._opf_store._open_dir_nofollow(res.store_root)
+        try:
+            ctx = record.Context(res, str(root), root_fd)
+            ctx.journal_rel = record._record_journal_rel(record._probe_homes(ctx))
+            assert ctx.journal_rel == TYPED_JOURNAL, ("T21 the probed journal home", ctx.journal_rel)
+            record._load_manifest(ctx)
+            assert ctx.homes == 2, ("T21 the validated generation", ctx.homes)
+            ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
+            ctx.version = record._read_operand(root_fd, ctx.rel(opf_check.VERSION_NAME)).model
+            ctx.worklog = record._read_operand(root_fd, ctx.rel(opf_check.WORKLOG_NAME))
+            operand = record._read_operand(root_fd, record._operand_rel(req, ctx))
+            seam = record.claim_ids
+            with patch.object(record, "claim_ids", lambda homes, high, demand, known_complete:
+                              seam(1, high, demand, known_complete)):
+                plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
+            for op in plan.operands:
+                op.new_raw = record._emit_bytes(op.new_model)
+            record._publish(ctx, plan, "create")
+        finally:
+            os.close(root_fd)
+        assert not (Path(root) / ".aiqt").exists(), "T21 nothing under .aiqt"
+        states = journal_states(root, TYPED_JOURNAL)
+        names = list(states)
+        assert len(names) == 1 and re.fullmatch(RECORD_RUN_RE, names[0]), ("T21 one grammar-named txn", names)
+        assert states[names[0]] == "complete", states
+        projection = Path(root) / record._opf_store.txn_record("record", names[0])
+        assert projection.is_file(), "T21 the terminal projection is published"
+        for op in plan.operands:
+            assert read(root, op.rel) == op.new_raw, ("T21 the operand is rewritten", op.rel)
+        assert not (Path(root) / LEASE).exists(), "T21 the capability lease is released"
+
+
+def flip_t21():
+    return patch.object(record, "_record_journal_rel", lambda homes: record.JOURNAL_REL)
+
+
+def t22_homes2_claim_refused(fx):
+    """On a homes-2 store the verb still refuses at the claim seam (the record id reservation is a
+    separate later change): every byte untouched, and neither the legacy nor the typed journal home is
+    created."""
+    env = fx.env
+    root = fx.case("t22-homes2-claim")
+    with imp._self_test_homes2_active(root):
+        refused_untouched(env, root, CREATE, "is not active in this build")
+        assert not (Path(root) / record.JOURNAL_REL).exists(), "T22 no legacy journal is created"
+        assert not (Path(root) / ".working/journals").exists(), "T22 no typed journal home is created"
+
+
+def flip_t22():
+    def creating(ctx):
+        (Path(ctx.res.store_root) / ctx.journal_rel).mkdir(parents=True, exist_ok=True)
+    return patch.object(record, "_reconcile_capability_journal", creating)
+
+
+def t23_homes2_crash(fx):
+    """A homes-2 publication killed at each journal step: the typed journal is reconciled by the next
+    run under the operation capability (whose confirmed-dead gate clears the dead run's lease and active
+    record), the operands end exactly at the prestate or exactly at the poststate, the poststate iff
+    COMPLETE, and .aiqt is never touched."""
+    env = fx.env
+    base = fx.case("t23-homes2-base")
+    with imp._self_test_homes2_active(base):
+        reference = fx.case("t23-homes2-reference", base)
+        proc = child(env, reference, CREATE, flip=HOMES2_CHILD_FLIP)
+        assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-1600:])
+        assert not (Path(reference) / ".aiqt").exists(), "T23 the reference run touches nothing under .aiqt"
+        ref_states = journal_states(reference, TYPED_JOURNAL)
+        assert list(ref_states.values()) == ["complete"], ref_states
+        post = dict((rel, read(reference, rel)) for rel in RECORD_OPERANDS)
+        for hook in ("after-publish-INTENT", "torn-payload:1", "after-apply-2", "torn:COMPLETE"):
+            root = fx.case("t23-homes2-" + hook.replace(":", "-"), base)
+            pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+            proc = child(env, root, CREATE, kill=hook, flip=HOMES2_CHILD_FLIP)
+            assert proc.returncode == 137, ("T23 the child is killed at", hook, proc.stderr[-800:])
+            assert RECORDED_EVENT not in proc.stdout, ("T23 a killed run reports no id", hook)
+            assert (Path(root) / LEASE).exists(), ("T23 the dead run's capability lease is left", hook)
+            result = record_cli(env, root, CREATE)
+            refused(result, "was reconciled")
+            assert not (Path(root) / ".aiqt").exists(), ("T23 recovery touches nothing under .aiqt", hook)
+            states = journal_states(root, TYPED_JOURNAL)
+            assert states and all(s != "open" for s in states.values()), ("T23 terminal", hook, states)
+            assert all(re.fullmatch(RECORD_RUN_RE, name) for name in states), ("T23 grammar names", states)
+            now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+            complete = any(s == "complete" for s in states.values())
+            assert now == (post if complete else pre), ("T23 prestate or poststate, poststate iff COMPLETE",
+                                                        hook, states)
+            assert not (Path(root) / LEASE).exists(), ("T23 the confirmed-dead lease is cleared", hook)
+
+
+def flip_t23():
+    """Recover the homes-2 store from the legacy journal root (the reviewed head's routing): the typed
+    interruption is never reconciled."""
+    return patch.object(record, "_record_journal_rel", lambda homes: record.JOURNAL_REL)
+
+
 # --- the runner ------------------------------------------------------------------------------------------------
 
 TESTS = (
@@ -1347,6 +1590,12 @@ TESTS = (
     ("T18-options-given-together", t18_given_together, flip_t18_together),
     ("T18-options-apply-only-withdrawn", t18_apply_only_withdrawn, flip_t18_apply_only),
     ("T18-options-apply-only-ratification", t18_apply_only_ratification, flip_t18_apply_only),
+    ("T19-record-run-id-grammar", t19_run_id_grammar, flip_t19),
+    ("T19-legacy-name-recovery", t19_legacy_name_recovery, flip_t19_legacy),
+    ("T20-homes2-legacy-journal-refused", t20_homes2_legacy_refused, flip_t20),
+    ("T21-homes2-publish-typed", t21_homes2_publish, flip_t21),
+    ("T22-homes2-claim-still-refused", t22_homes2_claim_refused, flip_t22),
+    ("T23-homes2-crash-typed", t23_homes2_crash, flip_t23),
 )
 
 
