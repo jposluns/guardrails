@@ -1476,19 +1476,26 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
 
                 def _revert_grant(vfd=None):
                     # Best-effort revert of the temporary owner-rw grant, ATTEMPTED on every failed
-                    # exit from the grant chmod up to and including the checkpoint: through the
-                    # opened descriptor when its identity has been verified (vfd: an fchmod that
-                    # touches exactly the inode the lstat saw), else by name beneath the same
-                    # parent fd, no-follow (the same channel the grant itself used). The revert can
-                    # itself fail under the same fault that aborted the attempt, and a hard kill
-                    # can skip it entirely, so it is NOT unconditional; a failed exit AT the
-                    # post-checkpoint prestate-mode install below DELIBERATELY does not revert at
-                    # all (the bytes already verified; see the comment there). The grant then
-                    # persists ONLY on an inode whose link count was 1 at the pre-grant gate below,
-                    # i.e. on the product file itself, and the next reconcile simply re-grants (or,
-                    # after the checkpoint, reopens the still-writable file) and finishes. The
-                    # pre-grant hard-link gate, not this revert, is what keeps an inode reachable
-                    # outside the product root from ever being widened.
+                    # exit from the grant chmod up to and including the checkpoint that the
+                    # BaseException handler below observes: through the opened descriptor when its
+                    # identity has been verified (vfd: an fchmod that touches exactly the inode
+                    # the lstat saw), else by name beneath the same parent fd, no-follow (the same
+                    # channel the grant itself used). The revert can itself fail under the same
+                    # fault that aborted the attempt, and a hard kill -- or an exception raised at
+                    # an interpreter instruction the compiled exception table does not cover (see
+                    # the INTERPRETER-INSTRUCTION RESIDUAL below) -- can skip it entirely, so it
+                    # is NOT unconditional; a failed exit AT the post-checkpoint prestate-mode
+                    # install below DELIBERATELY does not revert at all (the bytes already
+                    # verified; see the comment there). The grant then persists ONLY on an inode
+                    # whose link count was 1 at the pre-grant gate below, i.e. on the product file
+                    # itself. A persisted grant always carries owner rw, so the next reconcile's
+                    # O_RDWR reopen succeeds DIRECTLY and finishes without re-entering this grant
+                    # path at all; the grant cycle runs again only on an exit that left NO grant
+                    # behind a still-unwritable mode (a reverted failure, an interruption that
+                    # beat the grant chmod, or a post-checkpoint exit whose prestate-mode fchmod
+                    # already took effect and left a read-only prestate mode). The pre-grant
+                    # hard-link gate, not this revert, is what keeps an inode reachable outside
+                    # the product root from ever being widened.
                     if vfd is not None:
                         try:
                             os.fchmod(vfd, observed_mode)
@@ -1523,15 +1530,20 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
                             # the named JournalError below, its mode unchanged. On success the
                             # exact prestate mode replaces the grant after the checkpoint. The
                             # revert above is attempted on every failed exit from the grant chmod
-                            # up to and including the checkpoint (a reopen failure, an fstat
-                            # failure, an identity refusal, a checkpoint failure, any catchable
-                            # exception or interruption in that span: the protection is
-                            # established BEFORE the chmod, so no such exit escapes it). Exactly
-                            # two residuals leave the grant installed, and only on the
-                            # singly-linked product file: a hard kill (no handler runs; the revert
-                            # can also itself fail under the same fault), and a failed exit AT the
-                            # post-checkpoint prestate-mode install, which DELIBERATELY leaves the
-                            # grant for the next reconcile to finish (see the comment there). The
+                            # up to and including the checkpoint that the handler observes (a
+                            # reopen failure, an fstat failure, an identity refusal, a checkpoint
+                            # failure, an exception or interruption delivered in that span: the
+                            # protection is established BEFORE the chmod). The residuals that
+                            # leave the grant installed, all only on the singly-linked product
+                            # file and all restored by the next reconcile, are: a hard kill (no
+                            # handler runs; the revert can also itself fail under the same
+                            # fault); an exception raised at an interpreter instruction the
+                            # compiled exception table does not cover, equivalent to a hard kill
+                            # (see the INTERPRETER-INSTRUCTION RESIDUAL below); and a failed exit
+                            # AT the post-checkpoint prestate-mode install BEFORE its fchmod takes
+                            # effect, which DELIBERATELY leaves the grant for the next reconcile
+                            # to finish (see the comment there; a failure AFTER that fchmod leaves
+                            # the exact prestate mode, no grant). The
                             # lstat-to-chmod window is the same accident-model TOCTOU the
                             # pre-existing lstat-to-open window carries; the post-open fstat
                             # identity check below stays the arbiter, and an adversarial same-user
@@ -1546,12 +1558,27 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
                                                    "applied".format(path, st.st_nlink))
                             # REVERT PROTECTION BEFORE THE GRANT (codex U1 round-4): granted is
                             # set BEFORE the grant chmod, and the BaseException handler below
-                            # spans the chmod, the reopen and the whole restore body, so a
-                            # catchable exception or an interruption landing ANYWHERE after the
-                            # grant syscall takes effect -- even between the chmod returning and
-                            # the next statement -- reaches the revert. If the interruption
-                            # instead beats the chmod, the revert is an idempotent chmod back to
-                            # the mode the file already holds.
+                            # spans the chmod, the reopen and the whole restore body at source
+                            # level, so an exception or an interruption the handler observes
+                            # after the grant syscall takes effect -- even between the chmod
+                            # returning and the next statement -- reaches the revert. If the
+                            # interruption instead beats the chmod, the revert is an idempotent
+                            # chmod back to the mode the file already holds.
+                            # INTERPRETER-INSTRUCTION RESIDUAL (codex U1 round-5): the handler's
+                            # span is a source-level guarantee. The compiled body can hold
+                            # individual instructions that no exception-table entry covers
+                            # (OBSERVED on CPython 3.14.4: a NOT_TAKEN instruction of the
+                            # post-reopen identity-check branch sits in a one-instruction gap
+                            # between two covered ranges). An exception that a tracing or
+                            # monitoring hook raises AT such an instruction escapes this handler
+                            # with the grant still installed; that escape was demonstrated only
+                            # under opcode-level trace injection. That a real asynchronously
+                            # delivered signal cannot land on such an instruction is INFERRED
+                            # from the interpreter's safe-point delivery, not observed. The
+                            # residual is treated exactly as a hard kill: the grant persists only
+                            # on the singly-linked product file (the pre-grant hard-link gate)
+                            # and the next reconcile restores the exact prestate bytes and mode.
+                            # No machinery chases interpreter instruction gaps here.
                             granted = True
                             try:
                                 os.chmod(name, observed_mode | 0o600, dir_fd=pfd,
@@ -1620,31 +1647,42 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
                         _read_back_verify(fd, prestate["sha256"], path, "restored")
                     except BaseException:
                         if granted:
-                            # The revert is attempted on EVERY failed exit up to and including the
-                            # checkpoint: through the fd once its identity is verified (it touches
-                            # exactly the file the lstat saw), else by name (a reopen failure, an
-                            # fstat failure or an identity refusal); see _revert_grant for why a
-                            # revert that itself fails is still confined to the product file (the
-                            # pre-grant hard-link gate).
+                            # The revert is attempted on every failed exit up to and including
+                            # the checkpoint that this handler observes: through the fd once its
+                            # identity is verified (it touches exactly the file the lstat saw),
+                            # else by name (a reopen failure, an fstat failure or an identity
+                            # refusal); see _revert_grant for why a revert that itself fails is
+                            # still confined to the product file (the pre-grant hard-link gate),
+                            # and the INTERPRETER-INSTRUCTION RESIDUAL above for the exits this
+                            # handler never sees.
                             _revert_grant(fd if identity_verified else None)
                         raise
-                    # POST-CHECKPOINT EXITS DELIBERATELY LEAVE THE GRANT (claude U1 round-4): the
-                    # checkpoint above has verified the restored live bytes, so the only missing
-                    # step is the exact prestate mode. A failed exit here (this fchmod or fsync
-                    # faulting, or an interruption) leaves the temporary owner-rw grant installed
-                    # rather than reverting to the pre-grant mode: exactly as on the recreate path
-                    # (_recreate_file), an owner-WRITABLE product file lets the next reconcile
-                    # reopen it and finish installing the prestate mode directly, where a revert
-                    # to a read-only debris mode would force the whole grant cycle to run again
-                    # for no gain. The residual is the one the gates-manifest residue discloses:
-                    # the grant persists only on the singly-linked product file. On the fault path
-                    # the exit is a NAMED JournalError stating the retained grant; an interruption
-                    # here leaves the same residual.
+                    # POST-CHECKPOINT EXITS NEVER REVERT (claude U1 round-4; split by the fchmod
+                    # boundary in round-5): the checkpoint above has verified the restored live
+                    # bytes, so the only missing step is the exact prestate mode, and no exit
+                    # past this point reverts to the pre-grant mode. WHICH state a failed exit
+                    # leaves depends on whether the prestate-mode fchmod below took effect.
+                    # BEFORE it takes effect (the fchmod itself faulting, or an interruption
+                    # beating it): the temporary owner-rw grant is DELIBERATELY left installed --
+                    # exactly as on the recreate path (_recreate_file), an owner-WRITABLE product
+                    # file lets the next reconcile reopen it and finish installing the prestate
+                    # mode directly, where a revert to a read-only debris mode would force the
+                    # whole grant cycle to run again for no gain; this is the post-checkpoint
+                    # grant residual the gates-manifest residue discloses, only on the
+                    # singly-linked product file. AFTER it takes effect (the durability fsync
+                    # faulting, or an interruption landing past the fchmod): the live mode is
+                    # ALREADY the exact prestate mode -- NO grant remains, only the mode's
+                    # durability is unconfirmed, and a read-only prestate mode makes the next
+                    # reconcile run the whole grant cycle again before it finishes. On the fault
+                    # paths the exit is a NAMED JournalError stating which of the two states was
+                    # left; an interruption leaves the same state un-named.
+                    mode_installed = False
                     try:
                         os.fchmod(fd, prestate["mode"])   # the exact prestate mode, only after the checkpoint
+                        mode_installed = True
                         os.fsync(fd)                      # the final mode durable alongside the verified bytes
                     except OSError as exc:
-                        if granted:
+                        if granted and not mode_installed:
                             raise JournalError("cannot restore {!r}: installing the exact prestate "
                                                "mode after the checkpoint failed ({}); the "
                                                "temporary owner-write grant is deliberately left "
@@ -1652,6 +1690,16 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
                                                "checkpoint, and an owner-writable product file "
                                                "lets the next reconcile finish installing the "
                                                "prestate mode directly)".format(path, exc))
+                        if granted:
+                            raise JournalError("cannot restore {!r}: the exact prestate mode was "
+                                               "already installed after the checkpoint and only "
+                                               "its durability fsync failed ({}); no grant "
+                                               "remains (the live mode is the prestate mode and "
+                                               "the restored bytes already passed the "
+                                               "checkpoint), and the next reconcile finishes "
+                                               "from that mode, re-running the grant cycle "
+                                               "first when the prestate mode is itself "
+                                               "unwritable".format(path, exc))
                         raise
                 finally:
                     if fd is not None:

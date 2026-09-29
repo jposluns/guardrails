@@ -1858,16 +1858,20 @@ def _self_test_checks():
     # linked unwritable target is refused BEFORE any chmod (codex round-3: a second name, here OUTSIDE
     # the product root, must stay exactly as found, under an injected fstat fault, under an uninjected
     # retry, and under an interruption raced into the reopen). On a singly-linked target the grant is
-    # reverted on EVERY failed exit (an fstat fault, an identity refusal, an interruption at the
-    # reopen), a raced-in symlink at the grant chmod fails closed as a JournalError (never a raw
+    # reverted on each exercised failed exit its handler observes (an fstat fault, an identity
+    # refusal, an interruption at the reopen; the journal's own comments disclose the exits the
+    # handler never sees), a raced-in symlink at the grant chmod fails closed as a JournalError (never a raw
     # ValueError), the grant requires OWNERSHIP (a non-owned unwritable file fails closed with a named
     # JournalError, simulated by an EPERM chmod), and the recreate path's verify-before-mode ordering
     # is pinned (at the restore checkpoint the recreated file still holds the temporary 0600, the
     # exact prestate mode installed only after). Round-4 additions: an interruption delivered
     # IMMEDIATELY after the grant chmod returns (codex's settrace SIGINT, which used to escape
     # between the chmod and the revert-protected reopen) now reaches the revert, and a fault AT
-    # the post-checkpoint prestate-mode install DELIBERATELY leaves the grant behind a NAMED
-    # JournalError, the next reconcile finishing directly through the still-writable file.
+    # the post-checkpoint prestate-mode install, BEFORE its fchmod takes effect, DELIBERATELY
+    # leaves the grant behind a NAMED JournalError, the next reconcile finishing directly through
+    # the still-writable file. Round-5 addition: a fault at the durability fsync AFTER that fchmod
+    # took effect leaves the exact prestate mode with NO grant, behind a JournalError naming that
+    # state, the uninjected retry then landing the exact prestate bytes and mode.
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         product = Path(temp).resolve() / "product"       # the product root under restore ...
         product.mkdir()
@@ -2100,6 +2104,38 @@ def _self_test_checks():
                       retained is not None and "deliberately left" in retained
                       and mode_of(live) == 0o600 and live.read_bytes() == prior)
                 check("grant-post-checkpoint-mode-fault-reconcile-finishes-directly",
+                      try_restore() is None and mode_of(live) == 0o400
+                      and live.read_bytes() == prior)
+
+                # codex round-5 (= claude F1): the OTHER post-checkpoint state. A fault at the
+                # durability fsync AFTER the prestate fchmod took effect leaves the live mode
+                # ALREADY the exact prestate mode -- NO grant remains -- and the NAMED
+                # JournalError must say so instead of claiming a retained grant; the uninjected
+                # retry re-runs the whole grant cycle (the prestate mode is read-only) and lands
+                # the exact prestate bytes and mode
+                reset()
+                fsync_fault_armed = []
+
+                def arming_prestate_fchmod(fd_, m, _real=os.fchmod):
+                    result = _real(fd_, m)
+                    if m == 0o400:
+                        fsync_fault_armed.append(True)
+                    return result
+
+                def eio_post_mode_fsync(fd_, _real=os.fsync):
+                    if fsync_fault_armed:
+                        fsync_fault_armed.clear()
+                        raise OSError(5, "injected fault at the post-mode durability fsync")
+                    return _real(fd_)
+
+                with mock.patch.object(os, "fchmod", arming_prestate_fchmod), \
+                        mock.patch.object(os, "fsync", eio_post_mode_fsync):
+                    unsynced = try_restore()
+                check("grant-post-mode-fsync-fault-names-no-grant-remains",
+                      unsynced is not None and "no grant remains" in unsynced
+                      and "deliberately left" not in unsynced
+                      and mode_of(live) == 0o400 and live.read_bytes() == prior)
+                check("grant-post-mode-fsync-fault-retry-restores-exact",
                       try_restore() is None and mode_of(live) == 0o400
                       and live.read_bytes() == prior)
 
