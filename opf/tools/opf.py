@@ -149,6 +149,46 @@ def _aggregator_self_test():
     return EXIT_OK
 
 
+_REPLAY_CAP = 8192       # max CAPTURED characters re-emitted as failure evidence (head + tail halves)
+
+
+def _replay_captured(label, text):
+    """Re-emit captured inner-run output as failure evidence, BOUNDED and terminal-safe. At most
+    _REPLAY_CAP characters of the CAPTURED text are re-emitted: when the capture is longer, the first and
+    last _REPLAY_CAP//2 characters are kept, with an explicit elision marker between them naming how much
+    was dropped, so the TAIL -- where a failing inner run prints its failure lines and summary -- survives
+    the bound instead of being cut away with the head-only clip. The cap applies to the CAPTURED
+    characters BEFORE escaping: every non-printable character except the newline, and every backslash, is
+    escaped repr-style, so the emitted evidence is bounded by _REPLAY_CAP times the longest
+    single-character escape (10 characters, a non-printable astral code point), PLUS up to one terminating
+    newline per emitted chunk (appended only when the chunk does not already end in one; one chunk
+    unclipped, two -- head and tail -- clipped) and the elision marker line; it is not bounded by
+    _REPLAY_CAP itself.
+    Escaping the backslash keeps the escapes unambiguous: literal backslash-x-1-b text in the capture no
+    longer renders identically to an escaped ESC. A NESTED replay (a capture that itself contains replay
+    output, as when the wrapper-deadline test re-emits the hostile test's already-escaped replay) escapes
+    the inner replay's backslashes AGAIN, so an inner escape renders with a doubled backslash: still
+    unambiguous at a known nesting depth, at a readability cost. Single-pass emission of inner replays is
+    not attempted, because the capture does not mark which of its regions are already escaped. `label`
+    prefixes the elision marker only; the (escaped)
+    captured text itself is re-emitted unprefixed, as before."""
+    def _esc(chunk):
+        out = "".join(ch if ch == "\n" or (ch.isprintable() and ch != "\\")
+                      else repr(ch)[1:-1] for ch in chunk)
+        if not out.endswith("\n"):
+            out += "\n"
+        return out
+    total = len(text)
+    if total <= _REPLAY_CAP:
+        sys.stderr.write(_esc(text))
+        return
+    _half = _REPLAY_CAP // 2
+    sys.stderr.write(_esc(text[:_half]))
+    print("{}: captured output truncated: showing the first and last {} of {} characters ({} "
+          "elided)".format(label, _half, total, total - 2 * _half), file=sys.stderr)
+    sys.stderr.write(_esc(text[-_half:]))
+
+
 def _watchdog_hostile_ambient_self_test():
     """Guard F2 (round-10, class-width; extended round-15): the opf-side self-tests that manipulate SIGALRM
     (the FIFO-probe watchdogs in _opf_changelog / _opf_views / _opf_store, AND _opf_check's run_bounded f7
@@ -199,8 +239,14 @@ def _watchdog_hostile_ambient_self_test():
             # value AND a nonzero repeating interval, F3), BLOCK SIGALRM, then self-signal so a SIGALRM is left
             # PENDING-and-BLOCKED (timer already fired).
             _signal.signal(_signal.SIGALRM, _benign)
-            _signal.setitimer(_signal.ITIMER_REAL, _FIX_VAL, _FIX_INT)
+            # F3 (load-hardening, start side): the elapsed baseline is sampled BEFORE the fixture timer is
+            # armed, so a scheduler preemption between the sample and the arm only WIDENS the accepted band
+            # (conservative). The prior order (arm, then sample) excluded timer time consumed by a
+            # preemption between arming and the sample from _elapsed_ub, so the band check redded under
+            # machine load with the restore itself correct (the start-side twin of the end-side
+            # read-ordering defect handled at the _elapsed_ub measurement below).
             _t_arm = _time.monotonic()                            # F3: elapsed baseline for the fixture-value bound
+            _signal.setitimer(_signal.ITIMER_REAL, _FIX_VAL, _FIX_INT)
             _signal.pthread_sigmask(_signal.SIG_BLOCK, {_signal.SIGALRM})
             _os.kill(_os.getpid(), _signal.SIGALRM)
             _pending_ok = _signal.SIGALRM in _signal.sigpending()
@@ -212,23 +258,39 @@ def _watchdog_hostile_ambient_self_test():
             except BaseException as exc:                          # a watchdog crash is the pre-fix failure
                 _crashed = repr(exc)
                 rc = None
-            _fn_elapsed = _time.monotonic() - _t_arm              # upper bound on the elapsed the watchdog subtracts
             _blocked_after = _signal.SIGALRM in _signal.pthread_sigmask(_signal.SIG_BLOCK, set())
             _disp_after = _signal.getsignal(_signal.SIGALRM)
             _val_after, _int_after = _signal.getitimer(_signal.ITIMER_REAL)
+            # F3 (load-hardening, end side): the elapsed upper bound for the fixture-value band spans from
+            # BEFORE the fixture timer was armed (_t_arm above) to AFTER the getitimer read, so it BRACKETS
+            # everything the fixture timer can have consumed: the elapsed the watchdog subtracted (its
+            # snapshot is at or after the arm) PLUS the restored timer's live countdown up to the read. The
+            # prior end bound was measured BEFORE the read (at fn() return); a scheduler preemption between
+            # that measurement and the read let the restored timer count below the bound, so the band check
+            # redded under machine load with the restore itself correct (a test-hermeticity defect: the
+            # verdict tracked ambient scheduling, not the code under test; fixed at the test).
+            _elapsed_ub = _time.monotonic() - _t_arm
             _pending_after = _signal.SIGALRM in _signal.sigpending()   # F2: caller pending must survive
             if not _pending_ok:
                 print("opf watchdog self-test: {}: setup did not leave SIGALRM pending".format(label),
                       file=sys.stderr)
                 ok = False
             if _crashed is not None:
-                print("opf watchdog self-test: {}: RAISED under blocked+pending SIGALRM ({}); the unblock "
-                      "escaped its try/finally (F2)".format(label, _crashed), file=sys.stderr)
+                print("opf watchdog self-test: {}: RAISED under blocked+pending SIGALRM ({}); an exception "
+                      "escaped the helper under the hostile ambient (F2)".format(label, _crashed), file=sys.stderr)
                 ok = False
             elif rc != EXIT_OK:
                 print("opf watchdog self-test: {}: returned {!r} under the hostile ambient (expected "
                       "0)".format(label, rc), file=sys.stderr)
                 ok = False
+            if (_crashed is not None or rc != EXIT_OK) and _buf.getvalue():
+                # The redirect above keeps a passing run quiet, but on a crash or nonzero return the
+                # captured output IS the failure evidence; re-emit it rather than swallow it -- BOUNDED
+                # (capped with an explicit truncation marker, control characters escaped), so a
+                # misbehaving inner run cannot flood the log or rewrite the terminal.
+                print("opf watchdog self-test: {}: captured output of the failing inner run "
+                      "follows".format(label), file=sys.stderr)
+                _replay_captured("opf watchdog self-test: {}".format(label), _buf.getvalue())
             if not _blocked_after:
                 print("opf watchdog self-test: {}: left SIGALRM UNBLOCKED; the caller mask was corrupted "
                       "(F2)".format(label), file=sys.stderr)
@@ -249,15 +311,20 @@ def _watchdog_hostile_ambient_self_test():
                 ok = False
             # F3 (round-12): the watchdog must restore the caller's ITIMER VALUE (elapsed-aware, per F2) AND
             # its REPEATING INTERVAL, not merely leave some positive time. The value lies in
-            # (_FIX_VAL - _fn_elapsed, _FIX_VAL]: the watchdog subtracts an elapsed >= 0 and <= the whole
-            # fn() run, so a restored value below that band means the value was not preserved and one above
-            # _FIX_VAL means the elapsed was not subtracted at all. A small float slack absorbs monotonic
-            # jitter. The interval must be restored exactly to the fixture's _FIX_INT; a dropped
-            # interval-restoration leaves 0 and reds this (the mutant a one-shot fixture hid).
-            if not (_FIX_VAL - _fn_elapsed - 1e-3 <= _val_after <= _FIX_VAL + 1e-3):
+            # [_FIX_VAL - _elapsed_ub, _FIX_VAL]: the watchdog subtracts an elapsed >= 0, and the restored
+            # timer keeps counting down until the getitimer read, so the total deficit at the read is at
+            # most _elapsed_ub, which is measured AFTER that read and therefore brackets both parts. A
+            # restored value below the band means the caller's value was lost or over-reduced; one above
+            # _FIX_VAL means time was ADDED to the caller's deadline (an extended or re-armed-to-full
+            # restore). A small float slack absorbs monotonic jitter. The interval must be restored exactly
+            # to the fixture's _FIX_INT; a dropped interval-restoration leaves 0 and reds this (the mutant
+            # a one-shot fixture hid).
+            if not (_FIX_VAL - _elapsed_ub - 1e-3 <= _val_after <= _FIX_VAL + 1e-3):
                 print("opf watchdog self-test: {}: did not restore the caller's ITIMER_REAL value "
-                      "elapsed-aware (got {!r}, expected within ({:.6f}, {:.6f}]) (F2/F3)".format(
-                          label, _val_after, _FIX_VAL - _fn_elapsed, _FIX_VAL), file=sys.stderr)
+                      "elapsed-aware (got {!r}, expected within [{:.6f}, {:.6f}]; elapsed upper bound "
+                      "{:.6f}s measured after the read) (F2/F3)".format(
+                          label, _val_after, _FIX_VAL - _elapsed_ub, _FIX_VAL, _elapsed_ub),
+                      file=sys.stderr)
                 ok = False
             if abs(_int_after - _FIX_INT) > 1e-6:
                 print("opf watchdog self-test: {}: did not restore the caller's ITIMER_REAL repeating "
@@ -270,18 +337,23 @@ def _watchdog_hostile_ambient_self_test():
             _signal.signal(_signal.SIGALRM, _prev_disp)           # restore the real caller disposition
             _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)
             # Restore the caller's ITIMER_REAL + any pending SIGALRM through the SHARED helper (round-15 F1,
-            # the SINGLE elapsed-aware save/restore every opf-side watchdog uses, so no per-site verbatim
-            # restore can diverge again): value minus the time held (interval preserved) so the 3 helper runs
-            # neither pause nor extend the caller's deadline (a 50ms deadline set before the test still fires,
-            # not sitting ~50ms away after ~300ms of test; a deadline that expired during the test clamps to a
-            # tiny positive so it still fires, never re-armed to its full original value), AND a SIGALRM the
-            # caller had pending on entry re-posted so the probe's SIG_IGN does not destroy it (round-15 F2).
+            # the single elapsed-aware save/restore every opf-side watchdog is meant to route through): value
+            # minus the time held (interval preserved) so the 4 helper runs (one per affected label) neither
+            # pause nor extend the caller's deadline (a 50ms deadline set before the test still fires, not
+            # sitting ~50ms away after this multi-second test; a deadline that expired during the test clamps
+            # to a tiny positive so it still fires, never re-armed to its full original value), AND a SIGALRM
+            # the caller had pending on entry re-posted so the probe's SIG_IGN does not destroy it
+            # (round-15 F2).
             _opf_store.restore_caller_alarm(*_caller_snap)
     if not ok:
-        print("opf watchdog hostile-ambient self-test: FAIL (a FIFO-probe watchdog did not survive a "
-              "blocked+pending ambient SIGALRM with state restored)", file=sys.stderr)
+        # The summary names no single cause: the failed check above already printed the observed one (a
+        # setup that left no pending SIGALRM, an inner crash or nonzero return, or an unrestored mask,
+        # disposition, pending state, value, or interval), and this line must not claim a cause a
+        # different check found.
+        print("opf watchdog hostile-ambient self-test: FAIL (a hostile-ambient check failed; the message "
+              "above states the observed cause)", file=sys.stderr)
         return EXIT_FINDING
-    print("opf watchdog hostile-ambient self-test: PASS (changelog/views/store watchdogs survive a "
+    print("opf watchdog hostile-ambient self-test: PASS (changelog/views/store/check watchdogs survive a "
           "blocked+pending SIGALRM with mask, disposition, and timer restored)")
     return EXIT_OK
 
@@ -289,16 +361,29 @@ def _watchdog_hostile_ambient_self_test():
 def _watchdog_wrapper_caller_deadline_self_test():
     """Guard F2 (round-12, fix-induced): _watchdog_hostile_ambient_self_test must restore the CALLER's
     ITIMER_REAL with ELAPSED TIME SUBTRACTED, so running it neither PAUSES nor EXTENDS a caller's deadline
-    (the pre-fix wrapper restored the caller value VERBATIM, so a 50ms deadline was still ~50ms away after
-    the ~sub-second test and never fired). The three helper restore sites carry their own elapsed-aware
-    discrimination inside the wrapper (the fixture value+interval check); this covers the WRAPPER's own
-    caller-timer restore, which the default self-test never exercises because it arms no caller deadline.
+    (the pre-fix wrapper restored the caller value VERBATIM, so a short deadline was still its full value
+    away after the multi-second test and never fired). This covers the WRAPPER's OWN caller-timer restore
+    site, which the default self-test never exercises because it arms no caller deadline.
 
-    Arm a short (50ms) caller deadline with a firing-recorder handler, run the wrapper (which holds the
-    caller timer across its 3 helper self-test runs, well over 50ms in total), and assert the deadline was
-    HONOURED: elapsed-aware, the wrapper drives it below zero and it FIRES during the run (the recorder sees
-    it) and reads as expired afterwards; the pre-fix verbatim restore leaves it sitting at its full 50ms,
-    unfired. Returns 0 clean, 1 on failure; SKIPS clean on a platform without POSIX SIGALRM/itimer.
+    Arm a short (0.5s) caller deadline with a firing-recorder handler, run the wrapper (which holds the
+    caller timer across its four helper self-test runs; the guard below confirms the run outlasted the
+    deadline), and assert two OBSERVATIONS: a SIGALRM was DELIVERED (the recorder saw it, during the run
+    or the bounded grace wait), AND the caller's ITIMER_REAL read back BELOW HALF the deadline afterwards.
+    With an elapsed-aware restore the deadline expires during the run and the timer reads ~0. A verbatim
+    re-arm at the wrapper's own restore site reads back the full deadline minus only the time spent
+    between that re-arm and the read, so it reds the below-half check unless scheduling stalls totalling
+    more than half the deadline (0.25s) land in that short window: an executed observation with a wide
+    margin, not a load-proof discriminator. Disclosed residual: detection of a hand-rolled (verbatim or
+    otherwise divergent) or DROPPED restore at a call site is BEST-EFFORT through these behavioural
+    checks; the miss direction is a long scheduling stall landing between a restore and the read that
+    observes it, which shrinks a defective reading toward the elapsed-aware one. A structural call-site
+    guard is tracked separately. The helper-module restore sites exercised inside
+    the wrapper (_opf_changelog / _opf_views / _opf_store / _opf_check) hold the borrowed timer for well
+    under a millisecond, so neither this below-half reading nor the hostile test's fixture band can
+    tell a verbatim restore from an elapsed-aware one THERE; that limit is part of the same disclosed
+    residual. (A verbatim re-arm still fires, but only after the run, inside the grace wait, so the
+    delivery check alone cannot make the distinction.)
+    Returns 0 clean, 1 on failure; SKIPS clean on a platform without POSIX SIGALRM/itimer.
 
     Round-15 F1: this guard's OWN caller-timer restore is now the SHARED _opf_store.restore_caller_alarm
     helper (it previously restored the caller value verbatim, re-introducing inside its own guard the exact
@@ -311,7 +396,7 @@ def _watchdog_wrapper_caller_deadline_self_test():
             and hasattr(_signal, "ITIMER_REAL")):
         print("opf watchdog wrapper-deadline self-test: SKIP (no POSIX SIGALRM/itimer on this platform)")
         return EXIT_OK
-    _deadline = 0.05                                             # a 50ms caller deadline the wrapper outlasts
+    _deadline = 0.5                                              # a 0.5s caller deadline the wrapper's multi-second run outlasts (guarded below)
     _fired = []
 
     def _recorder(_s, _f):
@@ -334,17 +419,35 @@ def _watchdog_wrapper_caller_deadline_self_test():
         _signal.setitimer(_signal.ITIMER_REAL, _deadline)
         _t0 = _time.monotonic()
         _buf = _io.StringIO()
-        with _ctx.redirect_stdout(_buf), _ctx.redirect_stderr(_buf):
-            _rc = _watchdog_hostile_ambient_self_test()          # the wrapper under test
+        try:
+            with _ctx.redirect_stdout(_buf), _ctx.redirect_stderr(_buf):
+                _rc = _watchdog_hostile_ambient_self_test()      # the wrapper under test
+        except BaseException:
+            if _buf.getvalue():                                  # a raise is failure evidence too
+                print("opf watchdog wrapper-deadline self-test: captured output of the raising inner "
+                      "wrapper follows", file=sys.stderr)
+                _replay_captured("opf watchdog wrapper-deadline self-test", _buf.getvalue())
+            raise
         _elapsed = _time.monotonic() - _t0
         _val_after, _ = _signal.getitimer(_signal.ITIMER_REAL)
         if _rc != EXIT_OK:
             print("opf watchdog wrapper-deadline self-test: the inner hostile-ambient wrapper returned {!r} "
                   "(expected 0)".format(_rc), file=sys.stderr)
+            if _buf.getvalue():
+                # The redirect keeps a passing run quiet, but on a nonzero inner return the captured
+                # output IS the failure evidence; re-emit it rather than swallow it -- BOUNDED (capped
+                # with an explicit truncation marker, control characters escaped), so a misbehaving
+                # inner run cannot flood the log or rewrite the terminal.
+                print("opf watchdog wrapper-deadline self-test: captured output of the failing inner "
+                      "wrapper follows", file=sys.stderr)
+                _replay_captured("opf watchdog wrapper-deadline self-test", _buf.getvalue())
             ok = False
-        # The wrapper ran far longer than the deadline, so an elapsed-aware restore drove the deadline below
-        # zero: it FIRED during the run (recorder saw it) and reads as expired (~0) afterwards. A verbatim
-        # restore (the pre-fix bug) leaves it at its full 50ms, unfired: _elapsed > _deadline guards the test.
+        # The wrapper ran longer than the deadline (guarded here), so an elapsed-aware restore leaves
+        # the caller timer EXPIRED: it fires during the run and getitimer reads ~0 afterwards. A verbatim
+        # re-arm at the wrapper's OWN restore site reads back the full deadline minus only the time spent
+        # between that re-arm and the read above, and can still fire LATE, inside the grace wait below, so
+        # neither the firing check nor a below-full read can catch it; the below-half check further down
+        # separates the two readings (see its comment for the margin that separation relies on).
         if _elapsed <= _deadline:
             print("opf watchdog wrapper-deadline self-test: the wrapper ran {:.4f}s, not longer than the {}s "
                   "deadline; the fixture cannot discriminate".format(_elapsed, _deadline), file=sys.stderr)
@@ -354,14 +457,24 @@ def _watchdog_wrapper_caller_deadline_self_test():
         while not _fired and _time.monotonic() < _grace:
             _time.sleep(0.005)
         if not _fired:
+            # State only the observation: no SIGALRM delivery was recorded within the run plus the grace
+            # wait. WHICH defect (or other cause) suppressed delivery is not observed here; the
+            # _val_after check below reports the restored value it actually read.
             print("opf watchdog wrapper-deadline self-test: the caller's {}s deadline never FIRED across a "
-                  "{:.4f}s run; the wrapper paused/extended it instead of restoring it elapsed-aware "
+                  "{:.4f}s run plus the bounded delivery-grace wait; no SIGALRM delivery was observed "
                   "(F2)".format(_deadline, _elapsed), file=sys.stderr)
             ok = False
-        if _val_after >= _deadline:
-            print("opf watchdog wrapper-deadline self-test: the caller's ITIMER_REAL was restored to {!r} "
-                  ">= its full {}s value; the elapsed time was not subtracted (F2)".format(
-                      _val_after, _deadline), file=sys.stderr)
+        # Require a REAL elapsed deduction, not merely a value below the armed one: the _elapsed >
+        # _deadline guard above means an elapsed-aware restore reads ~0 here, while a verbatim re-arm at
+        # the wrapper's own restore site reads the full deadline minus the time spent between that re-arm
+        # and the read above. Half the deadline (0.25s) separates those readings unless scheduling stalls
+        # totalling more than 0.25s land in that short window, so this is a wide-margin executed
+        # observation, not a deterministic guard: a verbatim re-arm hidden by such a stall is the
+        # disclosed best-effort miss; a structural call-site guard is tracked separately (F1).
+        if _val_after >= _deadline / 2:
+            print("opf watchdog wrapper-deadline self-test: the caller's ITIMER_REAL read {!r} after the "
+                  "{:.4f}s run, not below half its {}s deadline; a restore that deducted the real elapsed "
+                  "would read ~0 (F2)".format(_val_after, _elapsed, _deadline), file=sys.stderr)
             ok = False
     finally:
         _signal.setitimer(_signal.ITIMER_REAL, 0)                # disarm before restoring the caller state
@@ -371,26 +484,41 @@ def _watchdog_wrapper_caller_deadline_self_test():
             _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)   # restore the caller's exact mask
         _opf_store.restore_caller_alarm(*_caller_snap)          # shared elapsed-aware timer + pending restore (F1)
     if not ok:
-        print("opf watchdog wrapper-deadline self-test: FAIL (the wrapper did not restore the caller's "
-              "ITIMER_REAL elapsed-aware; a caller deadline was paused/extended)", file=sys.stderr)
+        # The summary names no single cause: the failed check above already printed the observed one (an
+        # inner-wrapper failure, a non-discriminating fixture, an unfired deadline, or an unsubtracted
+        # elapsed), and this line must not claim a cause a different check found.
+        print("opf watchdog wrapper-deadline self-test: FAIL (a wrapper-deadline check failed; the message "
+              "above states the observed cause)", file=sys.stderr)
         return EXIT_FINDING
-    print("opf watchdog wrapper-deadline self-test: PASS (a caller ITIMER_REAL deadline is honoured "
-          "elapsed-aware across the hostile-ambient wrapper, not paused or extended)")
+    print("opf watchdog wrapper-deadline self-test: PASS (a SIGALRM was delivered within the run plus "
+          "the bounded grace wait, and the caller's ITIMER_REAL read {!r} afterwards, below half its {}s "
+          "deadline)".format(_val_after, _deadline))
     return EXIT_OK
 
 
 def _watchdog_shared_restore_self_test(_hold_s=0.0):
-    """Guard F1 (round-15, break the watchdog-timer re-induction loop): every opf-side watchdog restores a
-    borrowed caller ITIMER_REAL through the ONE shared _opf_store.restore_caller_alarm helper, the single
-    source of truth, so no per-site verbatim restore can diverge again and re-introduce the watchdog-timer
-    class its own guards kept re-inducing (rounds 12->13->14). This exercises that helper DIRECTLY: a caller
+    """Guard F1 (round-15, break the watchdog-timer re-induction loop): every opf-side watchdog is meant to
+    restore a borrowed caller ITIMER_REAL through the ONE shared _opf_store.restore_caller_alarm helper, the
+    single source of truth, so a divergent restore has one body to diverge in rather than one per site. This
+    exercises that HELPER directly (its own body, not who calls it): a caller
     timer restored after a KNOWN elapsed must come back reduced by that elapsed (elapsed-aware), its repeating
     interval preserved, never re-armed to its full original value. Reverting the helper to a verbatim restore
-    (value re-armed to its original) reds this. SKIPS clean on a platform without POSIX SIGALRM/itimer.
+    (value re-armed to its original) reds this. A SECOND probe restores the same snapshot with was_pending
+    True (under a blocked SIGALRM, so the helper's re-post PENDS rather than delivers), so a restore that
+    goes verbatim exactly when an alarm was pending -- a branch the fixture-band tests admit and the direct
+    probe above (was_pending False) never reaches -- reds here too, and the re-posted pending SIGALRM is
+    asserted observable. SKIPS clean on a platform without POSIX SIGALRM/itimer.
 
-    Deterministic, not timing-dependent: the elapsed is a fixed baseline in the past (monotonic() - 5s), so
-    the restored value is ~95s for a 100s caller value regardless of machine speed; a verbatim restore yields
-    the full 100s, far outside the elapsed-aware band.
+    Margins, not determinism: the elapsed is a fixed baseline in the past (monotonic() - 5s), so the
+    expected restored value is ~95s for a 100s caller value while a verbatim restore yields the full
+    100s -- a ~5s separation, far above scheduling jitter, though still one a comparably long stall
+    between the restore call and the getitimer read would erode. Each probe's accepted band is bracketed
+    by a MEASURED probe-to-read elapsed (baseline sampled before the restore call, upper bound after the
+    read, the hostile test's conservative ordering), so a scheduling stall in that window only WIDENS the
+    band's floor and a correct restore stays green; the prior FIXED +-0.5s band redded a correct restore
+    under a >0.5s stall there. Detection of a hand-rolled, dropped, or restore-time-t0 restore at a CALL
+    SITE is best-effort through the behavioural watchdog tests (the miss direction is a long stall between
+    a restore and the read that observes it); a structural call-site guard is tracked separately.
 
     F-R18-C2TEST: `_hold_s` (default 0.0) injects a CONTROLLED measurable delay AFTER the top snapshot and
     BEFORE the finally-restore of the caller's borrowed timer, so a caller deadline held across this wrapper
@@ -413,18 +541,84 @@ def _watchdog_shared_restore_self_test(_hold_s=0.0):
         _known_val, _known_int, _elapsed = 100.0, 50.0, 5.0
         # Exercise the shared helper with an explicit snapshot whose baseline is _elapsed seconds in the past,
         # was_pending False (this probe does not manipulate the pending state). Elapsed-aware => ~95s remains.
-        _opf_store.restore_caller_alarm(_known_val, _known_int, _time.monotonic() - _elapsed, False)
+        # The accepted band is bracketed by a MEASURED probe-to-read elapsed (baseline sampled BEFORE the
+        # restore call, upper bound AFTER the getitimer read, the hostile test's conservative ordering), so
+        # a scheduling stall between the restore and the read only WIDENS the band's floor (the restored
+        # timer counts down until the read; the bracket bounds that countdown plus any extra elapsed the
+        # helper subtracted); the prior FIXED +-0.5s band redded a CORRECT restore under a >0.5s stall in
+        # that window.
+        _t_probe = _time.monotonic()
+        _opf_store.restore_caller_alarm(_known_val, _known_int, _t_probe - _elapsed, False)
         _val_after, _int_after = _signal.getitimer(_signal.ITIMER_REAL)
+        _probe_ub = _time.monotonic() - _t_probe                # brackets extra subtraction + countdown
         _signal.setitimer(_signal.ITIMER_REAL, 0)               # disarm the probe timer
-        if not (_known_val - _elapsed - 0.5 <= _val_after <= _known_val - _elapsed + 0.5):
-            print("opf watchdog shared-restore self-test: restored ITIMER value {!r}; expected ~{} (elapsed "
-                  "{}s subtracted from {}s); a verbatim restore would leave {} (F1)".format(
-                      _val_after, _known_val - _elapsed, _elapsed, _known_val, _known_val), file=sys.stderr)
+        if not (_known_val - _elapsed - _probe_ub - 1e-3 <= _val_after <= _known_val - _elapsed + 1e-3):
+            print("opf watchdog shared-restore self-test: restored ITIMER value {!r}; expected within "
+                  "[{:.6f}, {:.6f}] (elapsed {}s subtracted from {}s, then at most the bracketed {:.6f}s "
+                  "probe-to-read elapsed); a verbatim restore would leave ~{} (F1)".format(
+                      _val_after, _known_val - _elapsed - _probe_ub, _known_val - _elapsed, _elapsed,
+                      _known_val, _probe_ub, _known_val), file=sys.stderr)
             ok = False
         if abs(_int_after - _known_int) > 1e-6:
             print("opf watchdog shared-restore self-test: restored ITIMER interval {!r}; expected {!r} "
                   "(F1)".format(_int_after, _known_int), file=sys.stderr)
             ok = False
+        # Pending-branch probe (fix round 2): exercise the helper's was_pending=True path DIRECTLY. A
+        # restore defect that goes verbatim exactly when a SIGALRM was pending (elapsed-aware otherwise)
+        # passes every fixture-band watchdog test -- the band's upper edge admits a verbatim restore, and
+        # the probe above passes was_pending False -- so this probe is the red for that mutant. SIGALRM is
+        # BLOCKED around the call so the helper's re-post PENDS rather than delivers (deterministic); a
+        # SIGALRM the CALLER already had pending is discarded under SIG_IGN BEFORE the restore call, so
+        # the pending assertion below can only be satisfied by the helper's OWN re-post (an inherited
+        # caller pending SIGALRM would otherwise stand in for a missing re-post); the probe's re-posted
+        # SIGALRM is discarded under SIG_IGN before the probe-local disposition and mask are restored.
+        # Hermetic: a SIGALRM the CALLER had pending on entry is re-posted by the outer finally's
+        # restore_caller_alarm(*_caller_snap), from the top-of-function snapshot.
+        if (hasattr(_signal, "pthread_sigmask") and hasattr(_signal, "sigpending")
+                and hasattr(_signal, "SIGALRM")):
+            def _benign(_s, _f):                                  # a throwaway probe-local disposition
+                pass
+            _p_disp = _signal.getsignal(_signal.SIGALRM)
+            _p_mask = _signal.pthread_sigmask(_signal.SIG_BLOCK, {_signal.SIGALRM})
+            try:
+                _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)  # discard an INHERITED caller pending SIGALRM
+                _signal.signal(_signal.SIGALRM, _benign)
+                # The accepted band is bracketed by a measured probe-to-read elapsed, exactly as the
+                # was_pending False probe above (a stall between the restore and the read widens the
+                # band's floor instead of false-failing a correct restore).
+                _t_probe_p = _time.monotonic()
+                _opf_store.restore_caller_alarm(_known_val, _known_int, _t_probe_p - _elapsed, True)
+                _val_p, _int_p = _signal.getitimer(_signal.ITIMER_REAL)
+                _probe_ub_p = _time.monotonic() - _t_probe_p      # brackets extra subtraction + countdown
+                _pend_p = _signal.SIGALRM in _signal.sigpending()
+                _signal.setitimer(_signal.ITIMER_REAL, 0)         # disarm the probe timer
+                if not (_known_val - _elapsed - _probe_ub_p - 1e-3 <= _val_p
+                        <= _known_val - _elapsed + 1e-3):
+                    print("opf watchdog shared-restore self-test: with was_pending True the restored "
+                          "ITIMER value is {!r}; expected within [{:.6f}, {:.6f}] (elapsed {}s subtracted "
+                          "from {}s, then at most the bracketed {:.6f}s probe-to-read elapsed); a "
+                          "pending-only verbatim restore would leave ~{} (F1/F2)".format(
+                              _val_p, _known_val - _elapsed - _probe_ub_p, _known_val - _elapsed,
+                              _elapsed, _known_val, _probe_ub_p, _known_val),
+                          file=sys.stderr)
+                    ok = False
+                if abs(_int_p - _known_int) > 1e-6:
+                    print("opf watchdog shared-restore self-test: with was_pending True the restored "
+                          "ITIMER interval is {!r}; expected {!r} (F1/F2)".format(_int_p, _known_int),
+                          file=sys.stderr)
+                    ok = False
+                if not _pend_p:
+                    # State only the observation: no pending SIGALRM after the restore call. Whether the
+                    # helper never re-posted it, or re-posted it and something else consumed it, is not
+                    # observed here.
+                    print("opf watchdog shared-restore self-test: with was_pending True no pending "
+                          "SIGALRM was observed after the restore (F2)", file=sys.stderr)
+                    ok = False
+            finally:
+                _signal.setitimer(_signal.ITIMER_REAL, 0)
+                _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)  # discard the probe's re-posted SIGALRM
+                _signal.signal(_signal.SIGALRM, _p_disp)
+                _signal.pthread_sigmask(_signal.SIG_SETMASK, _p_mask)
         # F-R18-C2TEST: hold the borrowed caller timer for a CONTROLLED, measurable interval before the
         # finally restores it elapsed-aware, so the deadline wrapper can assert this exact elapsed was
         # deducted (a restore-time-t0 / verbatim revert deducts ~0). Default 0.0 => no delay.
@@ -436,9 +630,11 @@ def _watchdog_shared_restore_self_test(_hold_s=0.0):
         _signal.setitimer(_signal.ITIMER_REAL, 0)
         _opf_store.restore_caller_alarm(*_caller_snap)
     if not ok:
-        print("opf watchdog shared-restore self-test: FAIL (the shared caller-timer restore is not "
-              "elapsed-aware; a per-site verbatim restore could re-induce the watchdog-timer class)",
-              file=sys.stderr)
+        # The summary names no single cause: the failed check above already printed the observed one (a
+        # value or interval outside the elapsed-aware band, or a missing pending re-post), and this line
+        # must not claim a cause a different check found.
+        print("opf watchdog shared-restore self-test: FAIL (a shared-restore check failed; the message "
+              "above states the observed cause)", file=sys.stderr)
         return EXIT_FINDING
     print("opf watchdog shared-restore self-test: PASS (the single shared restore helper is elapsed-aware: "
           "a caller timer comes back reduced by the time held, interval preserved)")
@@ -452,8 +648,8 @@ def _watchdog_shared_restore_deadline_self_test():
     restore_caller_alarm(*snap); a regression that passes RESTORE-time monotonic() as t0 subtracts ~no
     elapsed and EXTENDS the caller's deadline. This arms a large ~10s caller deadline that never fires, runs
     the wrapped self-test with a CONTROLLED hold, and asserts that specific held interval was subtracted from
-    the restored ITIMER value, so a restore-time-t0 / verbatim revert (which subtracts ~0) reds. SKIPS clean
-    without POSIX itimer.
+    the restored ITIMER value, so a restore-time-t0 / verbatim revert (which subtracts ~0) reds (see the
+    margin note below for the stall this can miss). SKIPS clean without POSIX itimer.
 
     F-R18-C2TEST: the discrimination is driven by an explicit `_hold_s` the wrapped call sleeps while it
     holds the borrowed caller timer, NOT by the wrapped call's own (microsecond) wall time. The prior form
@@ -461,7 +657,18 @@ def _watchdog_shared_restore_deadline_self_test():
     sub-millisecond, that band was measurement noise and a restore-time-t0 / verbatim revert stayed green.
     Here the held interval is a controlled ~0.2s, well above scheduling jitter, and the assertion requires
     that at least half of it was deducted -- the exact PARENT-FUNCTION revert (restore-time-t0 / verbatim)
-    deducts ~0 and reds."""
+    deducts ~0 and reds, unless a scheduling stall longer than half the hold (~0.1s) lands between the
+    wrapped test's final restore and the read here: a wide-margin executed observation, best-effort at the
+    call site, not a deterministic guard (a structural call-site guard is tracked separately).
+
+    Fix round 4: the assertion is a BAND, not a one-sided ceiling. The prior form required only
+    `_val_after <= _armed - _hold_s*0.5`, which a DROPPED caller timer also satisfies: with the wrapped
+    test's final restore removed, ITIMER_REAL is left disarmed and getitimer reads 0, well under the
+    ceiling. The band's floor is _armed minus the bracketed arm-to-read elapsed (measured AFTER the
+    getitimer read, so it bounds everything the caller timer can legitimately have lost: the elapsed the
+    restore subtracted plus the restored timer's countdown up to the read); a reading below the floor is
+    one no elapsed-aware restore of the armed timer can produce, so a dropped or over-reduced restore
+    reds."""
     import signal as _signal
     import time as _time
     import io as _io
@@ -476,22 +683,38 @@ def _watchdog_shared_restore_deadline_self_test():
     ok = True
     try:
         _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)        # a fired deadline here is harmless (ignored)
+        # Fix round 4: the floor baseline is sampled BEFORE the arm (and the elapsed upper bound AFTER the
+        # read below), so a preemption anywhere in between only WIDENS the accepted band (conservative).
+        _t_arm = _time.monotonic()
         _signal.setitimer(_signal.ITIMER_REAL, _armed, 0.0)
         _buf = _io.StringIO()
         with _ctx.redirect_stdout(_buf), _ctx.redirect_stderr(_buf):
             _rc = _watchdog_shared_restore_self_test(_hold_s=_hold_s)
         _val_after, _ = _signal.getitimer(_signal.ITIMER_REAL)
+        _elapsed_ub = _time.monotonic() - _t_arm                # brackets the subtracted elapsed + countdown
         if _rc != EXIT_OK:
             print("opf watchdog shared-restore deadline self-test: inner self-test returned {!r} (expected "
                   "0)".format(_rc), file=sys.stderr)
             ok = False
         # An elapsed-aware restore subtracts ~the whole held interval (>= _hold_s); a restore-time-t0 /
         # verbatim revert subtracts ~0 and leaves the deadline near its full armed value. Require at least
-        # half the controlled hold to have been deducted, a band well clear of scheduling jitter.
+        # half the controlled hold to have been deducted, a ceiling well clear of scheduling jitter.
         if not (_val_after <= _armed - _hold_s * 0.5):
-            print("opf watchdog shared-restore deadline self-test: caller ITIMER restored to {!r} after a "
+            print("opf watchdog shared-restore deadline self-test: caller ITIMER read {!r} after a "
                   "controlled {:.3f}s hold; that elapsed was not subtracted (a restore-time-t0 / verbatim "
                   "restore extends a caller deadline, F-R17-C2 / F-R18-C2TEST)".format(_val_after, _hold_s),
+                  file=sys.stderr)
+            ok = False
+        # Fix round 4, the band's FLOOR: the deduction can be at most the bracketed arm-to-read elapsed,
+        # so a reading below _armed - _elapsed_ub (minus a small float slack) is one no elapsed-aware
+        # restore of the armed timer can produce. A DROPPED restore (the wrapped test's final
+        # restore_caller_alarm removed) leaves ITIMER_REAL disarmed, reads 0.0, and reds here; the
+        # one-sided ceiling above accepts that reading.
+        if not (_armed - _elapsed_ub - 1e-3 <= _val_after):
+            print("opf watchdog shared-restore deadline self-test: caller ITIMER read {!r} after the "
+                  "wrapped run, below the elapsed-aware floor {:.6f} (armed {} minus the bracketed "
+                  "{:.6f}s arm-to-read elapsed); no elapsed-aware restore of the armed timer can produce "
+                  "that reading (F1)".format(_val_after, _armed - _elapsed_ub, _armed, _elapsed_ub),
                   file=sys.stderr)
             ok = False
     finally:
@@ -501,8 +724,9 @@ def _watchdog_shared_restore_deadline_self_test():
     if not ok:
         print("opf watchdog shared-restore deadline self-test: FAIL", file=sys.stderr)
         return EXIT_FINDING
-    print("opf watchdog shared-restore deadline self-test: PASS (the shared-restore self-test restores a "
-          "caller ITIMER_REAL elapsed-aware, not extended)")
+    print("opf watchdog shared-restore deadline self-test: PASS (the caller ITIMER_REAL read back inside "
+          "the elapsed-aware band: reduced by at least half the controlled {:.1f}s hold and by no more "
+          "than the bracketed arm-to-read elapsed)".format(_hold_s))
     return EXIT_OK
 
 
