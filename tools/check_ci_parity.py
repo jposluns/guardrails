@@ -44,7 +44,9 @@ extractors implement a disclosed shell and YAML subset; an unknown construct is
 cannot-evaluate rather than a clean pass. Fail-closed cases include an unknown
 top-level or job-level workflow key, an exit outside the exact terminal summary
 blocks or the top-level directory-binding line before the first gate, unbalanced
-if/fi nesting in the runner, job content without a job mapping, a run_gate()
+if/fi nesting in the runner, a duplicate else or an empty then or else branch,
+any character outside printable ASCII (0x20-0x7E) plus tab and newline in
+either input file, job content without a job mapping, a run_gate()
 dispatcher body outside its recognized shape, a run_gate word (label or argument)
 outside the gate-line character allowlist, a masked runtime-value flag in the
 workflow whose expression is not reviewed, and a runner
@@ -61,7 +63,8 @@ subscript operand, a bare [ ] line, and every unlisted test form are unclassifie
 set -uo pipefail or set -euo pipefail, and the directory-binding
 cd "$(dirname "$0")/.." || exit 2 line, are accepted only at top level before the
 first gate. A bare then or done is never a runner line, and else is accepted only
-inside an open if block. Every other assignment, export or echo line must be
+inside an open if block that holds at least one then-branch statement and is not
+already in its else branch. Every other assignment, export or echo line must be
 byte-for-byte one of the
 finite scaffold lines the two real runners contain (RUNNER_SCAFFOLD_LINES, compared
 after comment stripping and whitespace trimming), so a spelling the runners do not
@@ -90,8 +93,17 @@ does not preserve quote type, so a $ inside single quotes is treated as runtime-
 like a double-quoted one; and a duplicate run: key within one step is counted as two
 members although YAML keeps one. The shadow scan has one soft edge: exotic quoting
 outside the supported grammar could hide a tools/ string from comment stripping.
-The runner's failure-state rules are lexical and shape-based: they validate each
-line against the allowlist, not reachability or runtime values. Every run_gate
+The runner's failure-state rules are lexical and shape-based: the runner is
+validated as printable-ASCII lines against an exact line and word allowlist
+with branch-state checks; the rules see line shapes and branch positions, not
+reachability or runtime values. Before any line is trusted, BOTH input files
+are refused whole if any character falls outside printable ASCII (0x20-0x7E)
+plus tab and newline: Python's splitlines() also breaks a line at \v, \f,
+\x1c, \x1d, \x1e, \x85, U+2028 and U+2029, and its strip() also removes
+Unicode spaces such as U+00A0, while bash breaks lines only at \n and reads
+each of those bytes as an ordinary word character, so outside that alphabet
+the lines this gate validates are not the lines bash executes. Inside that
+alphabet a line break is exactly \n for both. Every run_gate
 line is screened by ONE character-allowlist rule over every word after quote
 removal: the label must fully match [a-z0-9][a-z0-9-]* (every label in the two
 real runners does) and every other word must fully match [A-Za-z0-9_./=:-]+, a
@@ -112,14 +124,23 @@ reviewed step's run block sets -u, so the step then ends early with a non-zero
 status); token-level parity sees neither. The ${...:?...} abort-expansion rule
 still screens every runner line first, so a masked ${...:?...} abort spelling
 is refused twice over; a self-test fixture pins that rule's own diagnostic and
-fails without it. The gitleaks-block lines (the PATH append, the gitleaks_rc
-capture and the gitleaks exit-code echo) are accepted only inside their real
-blocks, as notrun=0, set and cd already are, so a copy placed mid-roster
-cannot end the runner early under set -u through an unbound HOME or
-gitleaks_rc. What the grammar accepts and still cannot see into is exactly two
-surfaces: the content of a gate script the runner invokes, and the environment
-the runner inherits, which can change what an accepted literal line resolves
-to at runtime.
+fails without it. The if/else/fi structure is tracked per block: a duplicate
+else and an empty then or else branch are each refused (bash refuses both, so
+such a file never runs at all), and the gitleaks-block lines (the PATH append,
+the gitleaks_rc capture and the gitleaks exit-code echo) are accepted only
+inside their real blocks AND branches, as notrun=0, set and cd are already
+position-checked: the PATH append only in the HOME guard's then branch, which
+has just proven HOME non-empty; gitleaks_rc=$? only as the first statement of
+the gitleaks failure branch, where $? is still the gitleaks exit code; and the
+exit-code echo only after that capture in the same branch. A copy placed
+anywhere else, including the HOME guard's else branch, is refused, so an
+accepted runner cannot end early under set -u through an unbound HOME or
+gitleaks_rc, and cannot echo a stale gitleaks exit code. What the grammar
+accepts and still cannot see into is exactly three surfaces: the content of a
+gate script the runner invokes; the environment the runner inherits, which can
+change what an accepted literal line resolves to at runtime; and any bash
+parsing behaviour this hand-written grammar does not model beyond the checks
+named above, tracked as backlog item RUNNER-STATIC-GRAMMAR-HARDENING.
 The --self-test backs the rules at runtime with a scratch copy
 of the live runner: no gate failing, gitleaks and leaks failing together, gitleaks failing alone,
 and each registered gate failing alone. Those scenarios run in parallel, so every
@@ -637,8 +658,9 @@ GITLEAKS_FAILURE_UPDATES = (
 # what rejects a -v operand (whose subscript can assign), any NAME[...] subscript
 # operand, and every unlisted operator or operand form.
 # The HOME guard is the only block in which the real runner appends the
-# user-local gitleaks directory to PATH; extract_local records its depth so
-# the PATH append is accepted nowhere else.
+# user-local gitleaks directory to PATH; extract_local records its frame so
+# the PATH append is accepted only in that guard's then branch, the one
+# branch that has proven HOME non-empty.
 HOME_GUARD_LINE = (
     'if ! command -v gitleaks >/dev/null 2>&1 && '
     '[ -n "${HOME:-}" ] && '
@@ -653,10 +675,12 @@ RUNNER_TEST_LINES = frozenset({
 
 # The gitleaks-block lines are position-checked the way notrun=0 and cd
 # already are, never accepted by bare membership: each is accepted only
-# inside its real block. Placed anywhere else, the PATH append outside the
-# HOME guard and the exit-code echo without a prior gitleaks_rc capture each
-# end the runner mid-roster under set -u through an unbound variable, and a
-# stray gitleaks_rc=$? captures an unrelated exit status.
+# inside its real block AND branch. Placed anywhere else, the PATH append
+# outside the HOME guard's then branch and the exit-code echo without a
+# prior gitleaks_rc capture each end the runner mid-roster under set -u
+# through an unbound variable, and a gitleaks_rc=$? that is not the first
+# statement of the gitleaks failure branch captures an unrelated or already
+# replaced exit status.
 PATH_APPEND_LINE = 'PATH="$PATH:$HOME/.local/bin"'
 GITLEAKS_RC_LINE = "gitleaks_rc=$?"
 GITLEAKS_FAILED_ECHO = (
@@ -798,6 +822,33 @@ def _runner_set_expansions(code):
             and all(name in _RUNNER_SET_NAMES for name in names))
 
 
+# Python and bash disagree on text boundaries outside printable ASCII:
+# str.splitlines() also breaks a line at \v, \f, \x1c, \x1d, \x1e, \x85,
+# U+2028 and U+2029, and str.strip() also removes Unicode spaces such as
+# U+00A0, while bash breaks lines only at \n and reads each of those bytes as
+# an ordinary word character (and YAML parsers differ on \x85, U+2028 and
+# U+2029 too). A character outside printable ASCII (0x20-0x7E) plus tab and
+# newline therefore refuses the whole file, before any line is split or
+# trusted; NUL and CR fall outside the alphabet as well. Both real runners
+# and the live workflow are pure printable ASCII plus tab and newline.
+_TEXT_FORMAT_RE = re.compile(r"[^\t\n\x20-\x7e]")
+
+
+def _text_format_diagnostic(text, source):
+    match = _TEXT_FORMAT_RE.search(text)
+    if match is None:
+        return None
+    return _diagnostic(
+        source,
+        text.count("\n", 0, match.start()) + 1,
+        "text-format",
+        "character {!r} is outside printable ASCII (0x20-0x7E) plus tab and "
+        "newline; Python and bash (and YAML parsers) disagree on line and "
+        "word boundaries beyond that set, so the file is refused before any "
+        "line is trusted".format(match.group()),
+    )
+
+
 def extract_local(text):
     """Extract normalized members from tools/run_all_checks.sh."""
     source = LOCAL_SOURCE
@@ -812,13 +863,9 @@ def extract_local(text):
             (_diagnostic(
                 source, 0, "input-type", "input is not text"),),
         )
-    if "\x00" in text or "\r" in text:
-        diagnostics.append(_diagnostic(
-            source,
-            0,
-            "text-format",
-            "input contains NUL or carriage-return bytes",
-        ))
+    format_diagnostic = _text_format_diagnostic(text, source)
+    if format_diagnostic is not None:
+        return Extraction(frozenset(), {}, (format_diagnostic,))
 
     code_lines = [(number, _strip_comment(raw).strip())
                   for number, raw in enumerate(text.splitlines(), 1)]
@@ -832,18 +879,14 @@ def extract_local(text):
 
     in_function = False
     function_body = []
-    if_depth = 0
+    if_stack = []
     if_unbalanced = False
     failure_initializers = {
         "failed": "failed=0",
         "failed_names": 'failed_names=""',
     }
     initialized = set()
-    gitleaks_depth = None
-    gitleaks_else = False
     gitleaks_updates = set()
-    gitleaks_rc_set = False
-    home_guard_depth = None
     for line_number, raw in enumerate(text.splitlines(), 1):
         if line_number == 1 and raw == "#!/usr/bin/env bash":
             continue
@@ -873,24 +916,68 @@ def extract_local(text):
             function_body = []
             continue
 
-        # Track nesting for failure-state updates and top-level summary blocks.
-        # A fi with no open if underflows: record it rather than clamp it away.
+        # Track if/else/fi branch structure for failure-state updates, the
+        # branch-position-checked scaffold lines and the top-level summary
+        # blocks. Each frame counts the statements of its open branch, so a
+        # duplicate else, an empty then or else branch (both of which bash
+        # refuses outright) and a position-checked line in the wrong branch
+        # are refused with their own diagnostics. A fi with no open if
+        # underflows: record it rather than clamp it away.
         if stripped == "fi":
-            if if_depth == gitleaks_depth:
-                gitleaks_depth = None
-                gitleaks_else = False
-            if if_depth == home_guard_depth:
-                home_guard_depth = None
-            if if_depth == 0:
+            if not if_stack:
                 if_unbalanced = True
             else:
-                if_depth -= 1
+                frame = if_stack.pop()
+                branch = "else" if frame["in_else"] else "then"
+                if frame[branch + "_count"] == 0:
+                    diagnostics.append(_diagnostic(
+                        source,
+                        line_number,
+                        "branch-structure",
+                        "empty {} branch at fi; bash refuses an if block "
+                        "with an empty branch, so this is not a shell file "
+                        "bash would run".format(branch),
+                    ))
         elif stripped.endswith("; then"):
-            if_depth += 1
-            if stripped == HOME_GUARD_LINE:
-                home_guard_depth = if_depth
-        elif stripped == "else" and if_depth == gitleaks_depth:
-            gitleaks_else = True
+            if if_stack:
+                # The whole if block is one statement of the enclosing branch.
+                frame = if_stack[-1]
+                frame["else_count" if frame["in_else"] else "then_count"] += 1
+            if_stack.append({
+                "in_else": False,
+                "then_count": 0,
+                "else_count": 0,
+                "home_guard": stripped == HOME_GUARD_LINE,
+                "gitleaks": False,
+                "gitleaks_rc_set": False,
+            })
+        elif stripped == "else":
+            if if_stack:
+                frame = if_stack[-1]
+                if frame["in_else"]:
+                    diagnostics.append(_diagnostic(
+                        source,
+                        line_number,
+                        "branch-structure",
+                        "duplicate else in one if block; bash refuses it, "
+                        "so this is not a shell file bash would run",
+                    ))
+                    continue
+                if frame["then_count"] == 0:
+                    diagnostics.append(_diagnostic(
+                        source,
+                        line_number,
+                        "branch-structure",
+                        "else after an empty then branch; bash refuses an "
+                        "if block with an empty branch, so this is not a "
+                        "shell file bash would run",
+                    ))
+                frame["in_else"] = True
+        elif if_stack:
+            # Any other line is one statement of the innermost open branch;
+            # the count also decides gitleaks_rc=$? first-statement placement.
+            frame = if_stack[-1]
+            frame["else_count" if frame["in_else"] else "then_count"] += 1
 
         if stripped.endswith("\\"):
             diagnostics.append(_diagnostic(
@@ -998,8 +1085,8 @@ def extract_local(text):
                 and tokens[0] == "if"
                 and tokens[-2:] == [";", "then"]
                 and tokens[1].lstrip("./") == "gitleaks"):
-            gitleaks_depth = if_depth
-            gitleaks_else = False
+            if stripped.endswith("; then"):
+                if_stack[-1]["gitleaks"] = True
             unsafe = [word for word in tokens[1:-2]
                       if not GATE_WORD_RE.fullmatch(word)]
             if unsafe:
@@ -1043,11 +1130,12 @@ def extract_local(text):
         variable = assignments[0].split("=", 1)[0] if assignments else ""
         if variable in failure_initializers and "=" in assignments[0]:
             initial = (
-                if_depth == 0 and not members and variable not in initialized
+                not if_stack and not members and variable not in initialized
                 and stripped == failure_initializers[variable]
             )
             gitleaks_update = (
-                if_depth == gitleaks_depth and gitleaks_else
+                bool(if_stack) and if_stack[-1]["gitleaks"]
+                and if_stack[-1]["in_else"]
                 and variable not in gitleaks_updates
                 and stripped in GITLEAKS_FAILURE_UPDATES
             )
@@ -1078,37 +1166,65 @@ def extract_local(text):
         if stripped in ("set -uo pipefail", "set -euo pipefail"):
             # Only where the real runners put it: top level, before any gate, where
             # a late -e cannot silently end a partially failed roster.
-            scaffold = if_depth == 0 and not members
+            scaffold = not if_stack and not members
         elif stripped == 'cd "$(dirname "$0")/.." || exit 2':
             # Only where the real runner puts it: top level, before any gate. A
             # second binding mid-roster would move the remaining gates to the
             # parent of the repository root when $0 is relative.
-            scaffold = if_depth == 0 and not members
+            scaffold = not if_stack and not members
         elif stripped == "notrun=0":
             # Only where the real runner puts it: top level, before any gate. A
             # later notrun=0 would clear the NOT RUN state and hide its disclaimer.
-            scaffold = if_depth == 0 and not members
+            scaffold = not if_stack and not members
         elif stripped == PATH_APPEND_LINE:
-            # Only where the real runner puts it: inside the HOME guard, which
-            # has just proven HOME non-empty. Outside that guard $HOME may be
-            # unset, and set -u then ends the runner mid-roster.
-            scaffold = (home_guard_depth is not None
-                        and if_depth == home_guard_depth)
+            # Only where the real runner puts it: the HOME guard's then branch,
+            # which has just proven HOME non-empty. The guard's else branch
+            # runs exactly when that proof failed, and outside the guard $HOME
+            # may be unset; in both places set -u ends the runner mid-roster.
+            in_home_guard = bool(if_stack) and if_stack[-1]["home_guard"]
+            if in_home_guard and if_stack[-1]["in_else"]:
+                diagnostics.append(_diagnostic(
+                    source,
+                    line_number,
+                    "branch-structure",
+                    "the PATH append sits in the HOME guard's else branch, "
+                    "which runs only when the guard has NOT proven HOME "
+                    "non-empty; under set -u an unbound HOME there ends "
+                    "the runner mid-roster",
+                ))
+                continue
+            scaffold = in_home_guard
         elif stripped == GITLEAKS_RC_LINE:
-            # Only where the real runner puts it: the gitleaks failure branch,
-            # where $? is the gitleaks exit code. Anywhere else the line
-            # captures an unrelated status and vouches for a variable the
-            # exit-code echo below then trusts.
-            scaffold = if_depth == gitleaks_depth and gitleaks_else
+            # Only where the real runner puts it: the first statement of the
+            # gitleaks failure branch, where $? is still the gitleaks exit
+            # code. Any earlier statement in that branch replaces $?, and any
+            # other placement captures an unrelated status; either way the
+            # line vouches for a variable the exit-code echo below then
+            # trusts. This line was already counted into its branch above,
+            # so first-statement means a count of exactly one.
+            in_failure = (bool(if_stack) and if_stack[-1]["gitleaks"]
+                          and if_stack[-1]["in_else"])
+            if in_failure and if_stack[-1]["else_count"] != 1:
+                diagnostics.append(_diagnostic(
+                    source,
+                    line_number,
+                    "branch-structure",
+                    "gitleaks_rc=$? is not the first statement of the "
+                    "gitleaks failure branch, so $? is no longer the "
+                    "gitleaks exit code",
+                ))
+                continue
+            scaffold = in_failure
             if scaffold:
-                gitleaks_rc_set = True
+                if_stack[-1]["gitleaks_rc_set"] = True
         elif stripped == GITLEAKS_FAILED_ECHO:
             # Only after gitleaks_rc is captured in the same failure branch.
             # Anywhere else ${gitleaks_rc} is unbound, and set -u then ends
             # the runner mid-roster, losing the remaining gates and the
             # FAILED GATES list.
-            scaffold = (if_depth == gitleaks_depth and gitleaks_else
-                        and gitleaks_rc_set)
+            scaffold = (bool(if_stack) and if_stack[-1]["gitleaks"]
+                        and if_stack[-1]["in_else"]
+                        and if_stack[-1]["gitleaks_rc_set"])
         elif stripped in RUNNER_SCAFFOLD_LINES:
             # Exact membership decides; the named-expansion screen is belt and
             # braces so a future scaffold addition cannot widen the expansion
@@ -1120,11 +1236,12 @@ def extract_local(text):
             # through the unbalanced-if diagnostic.
             scaffold = True
         elif stripped == "else":
-            # Only inside an open if block, where the real runners put it. A bare
-            # then or done is not a line either real runner contains, so neither
+            # Only inside an open if block, where the real runners put it; a
+            # duplicate else in the same block is refused above. A bare then
+            # or done is not a line either real runner contains, so neither
             # is accepted anywhere.
-            scaffold = if_depth > 0
-        elif line_number in terminal_exits and if_depth == 1:
+            scaffold = bool(if_stack)
+        elif line_number in terminal_exits and len(if_stack) == 1:
             scaffold = True
         elif stripped in RUNNER_TEST_LINES:
             scaffold = True
@@ -1146,7 +1263,7 @@ def extract_local(text):
             "run_gate function is not closed",
         ))
 
-    if if_depth != 0 or if_unbalanced:
+    if if_stack or if_unbalanced:
         diagnostics.append(_diagnostic(
             source,
             0,
@@ -1335,13 +1452,9 @@ def extract_ci(text):
             (_diagnostic(
                 source, 0, "input-type", "input is not text"),),
         )
-    if "\x00" in text or "\r" in text:
-        diagnostics.append(_diagnostic(
-            source,
-            0,
-            "text-format",
-            "input contains NUL or carriage-return bytes",
-        ))
+    format_diagnostic = _text_format_diagnostic(text, source)
+    if format_diagnostic is not None:
+        return Extraction(frozenset(), {}, (format_diagnostic,))
 
     lines = text.splitlines()
     in_jobs = False
@@ -3652,6 +3765,79 @@ def self_test():
                          for item in extract_local(mutant).diagnostics):
                 failures.append(
                     "26 misplaced scaffold was not rejected: " + name)
+        # qa8 MAJOR-1 byte fixtures: Python's splitlines() and strip() see
+        # line and word boundaries bash does not (\v, \f, \x85, U+2028,
+        # U+00A0 and friends), so the static grammar formerly judged lines
+        # bash never ran; one such spelling hid the NOT RUN result line at
+        # runtime. The text-format character allowlist now refuses the whole
+        # file; each fixture fails without it, on the runner and on the
+        # workflow.
+        dashes_line = (
+            'run_gate "dashes"    python3 -I -B tools/check_no_dashes.py')
+        byte_fixtures = (
+            ("form feed as a line break (qa8 P1)", "\f",
+             mutate(("\n  notrun=1", "\fnotrun=1"))),
+            ("vertical tab as a line break (qa8 P1b)", "\v",
+             mutate(("\n  notrun=1", "\vnotrun=1"))),
+            ("U+2028 as a line break (qa8 P1c)", "\u2028",
+             mutate(("\n  notrun=1", "\u2028notrun=1"))),
+            ("U+0085 as a line break", "\x85",
+             mutate(("\n  notrun=1", "\x85notrun=1"))),
+            ("trailing no-break space (qa8 N1)", "\u00a0",
+             mutate(("  notrun=1\n", "  notrun=1\u00a0\n"))),
+            ("leading no-break space (qa8 N2)", "\u00a0",
+             mutate(("  notrun=1\n", "  \u00a0notrun=1\n"))),
+            ("gate hidden in a form-feed comment (qa8 P2)", "\f",
+             mutate((dashes_line, "# note\f" + dashes_line))),
+            ("failure update split by a form feed (qa8 P3)", "\f",
+             mutate(("    gitleaks_rc=$?\n    failed=1\n",
+                     "    gitleaks_rc=$?\ffailed=1\n"))),
+        )
+        for name, bad, mutant in byte_fixtures:
+            if mutant is None:
+                failures.append("26 byte fixture drift: " + name)
+            elif not any(item.code == "text-format"
+                         for item in extract_local(mutant).diagnostics):
+                failures.append(
+                    "26 non-ASCII runner character was not refused: " + name)
+            ci_mutant = ci_fixture(common).replace(
+                "name: Test", "name: Test" + bad, 1)
+            if not any(item.code == "text-format"
+                       for item in extract_ci(ci_mutant).diagnostics):
+                failures.append(
+                    "26 non-ASCII workflow character was not refused: "
+                    + name)
+        # qa8 MINOR-1, qa8 MINOR-2 and codex MINOR-3 branch fixtures:
+        # if/else/fi state is tracked per block, so a duplicate else, an
+        # empty then or else branch, the PATH append in the HOME guard's
+        # else branch (where HOME is unproven) and a gitleaks_rc=$? that is
+        # not the first statement of the gitleaks failure branch (where $?
+        # is no longer the gitleaks exit code) are each refused. Each
+        # fixture fails without the branch-state tracking.
+        path_append_block = '  PATH="$PATH:$HOME/.local/bin"\nfi'
+        branch_fixtures = (
+            ("duplicate else in the gitleaks block",
+             mutate(("  else\n    gitleaks_rc=$?",
+                     "  else\n  else\n    gitleaks_rc=$?"))),
+            ("empty gitleaks then branch",
+             mutate(('    echo "PASS: gitleaks found no leaks"\n', ""))),
+            ("empty else branch added to the HOME guard",
+             mutate((path_append_block,
+                     '  PATH="$PATH:$HOME/.local/bin"\nelse\nfi'))),
+            ("PATH append in the HOME guard else branch",
+             mutate((path_append_block,
+                     '  echo\nelse\n  PATH="$PATH:$HOME/.local/bin"\nfi'))),
+            ("statement ahead of the gitleaks_rc capture",
+             mutate(("  else\n    gitleaks_rc=$?",
+                     "  else\n    echo\n    gitleaks_rc=$?"))),
+        )
+        for name, mutant in branch_fixtures:
+            if mutant is None:
+                failures.append("26 branch fixture drift: " + name)
+            elif not any(item.code == "branch-structure"
+                         for item in extract_local(mutant).diagnostics):
+                failures.append(
+                    "26 branch structure was not rejected: " + name)
         # qa6 masked-value rejections, now behind two independent screens. In
         # the LOCAL runner the word allowlist refuses every $-carrying gate
         # word outright (run-gate-word), so a masked flag value never reaches
