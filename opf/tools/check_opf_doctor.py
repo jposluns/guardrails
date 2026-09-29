@@ -456,7 +456,12 @@ def _self_test_isolated():
 
         def _git_probe(*args):
             try:
-                proc = subprocess.run([git, "--no-replace-objects", "-C", str(root)] + list(args),
+                # F-367: the same pins as _git above, in option position, so even these
+                # read-only probes can never spawn a detached auto-gc/auto-maintenance
+                # child that outlives the digest and churns .git.
+                proc = subprocess.run([git, "--no-replace-objects", "-C", str(root),
+                                       "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
+                                       "-c", "maintenance.auto=false"] + list(args),
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                       env=_git_env(home), timeout=_GIT_TIMEOUT_S)
             except (OSError, subprocess.TimeoutExpired) as exc:

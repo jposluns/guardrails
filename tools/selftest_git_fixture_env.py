@@ -1830,13 +1830,20 @@ def _auto_maintenance_children(workdir, env):
 # os.popen / os.posix_spawn* / any .spawn spelling, pty.spawn included), asyncio's
 # create_subprocess_exec/_shell by any object spelling, shell-string launches (shell=True,
 # subprocess.getoutput/getstatusoutput), dynamic launcher access (exec or eval anywhere in the
-# scanned trees, getattr(subprocess, ...) / getattr(os, ...) except a literal non-launcher
-# attribute, subprocess.__dict__ / os.__dict__, vars(subprocess) / vars(os)), a launch with
+# scanned trees, getattr(subprocess, ...) / getattr(os, ...) / getattr(asyncio, ...) except
+# a literal non-launcher attribute, subprocess.__dict__ / os.__dict__ / asyncio.__dict__,
+# vars(subprocess) / vars(os) / vars(asyncio)), a launch with
 # **-expanded keywords or an executable= override, an argv or argv head the resolver cannot
 # reduce to literals (a helper return, another module's value, a parameterized subcommand
-# slot), a tracked argv list mutated in place at function OR module scope (a subscript
-# write, an insert/remove/pop/clear/sort/reverse call: the resolved value is invalidated,
-# never trusted), a tracked argv bound or grown only AFTER the launch point (a pin appended
+# slot), a tracked argv or env NAME whose resolution is invalidated (never trusted): a
+# subscript write, an insert/remove/pop/clear/sort/reverse/update/setdefault call, a del,
+# or a non-additive augmented assignment in its own scope; a bare-name alias binding of it
+# in its own scope; or ANY mutation, growth, aliasing, or global/nonlocal declaration of
+# it inside a nested same-module scope (this scan does not order cross-scope calls, so a
+# module constant a helper function grows, or an enclosing argv a closure rewrites, is
+# invalidated outright; a nested LOCAL that merely shadows the name through one of those
+# forms is indistinguishable at these bounds and invalidates too, fail-closed), a tracked
+# argv or env bound or grown only AFTER the launch point (a pin appended
 # after the launch is never credited to it), and import/alias spellings
 # that would re-spell a launch away from the module-qualified form this scan reads.
 # A RESOLVED git launch is judged on its EFFECTIVE argv with git's own LAST-VALUE-WINS config
@@ -1861,16 +1868,20 @@ def _auto_maintenance_children(workdir, env):
 # variable on the way.
 # DISCLOSED RESIDUAL (syntactic bounds, the same stance as the routing checks above): this scan
 # reads direct, literal Python launch forms only. Element-level literal resolution stays within
-# literal lists, same-scope assignments with their augmented/append/extend growth (in source
-# order), module-level constants, and one level of same-module function returns for env=
-# values. Out of this scan's reach and NOT flagged: a launcher REFERENCED as a value rather
-# than called (an alias `launch = subprocess.run`, a launcher stored in a container, a
+# literal lists, same-scope assignments with their additive-augmented/append/extend growth (in
+# source order), module-level constants, and one level of same-module function returns for
+# env= values. Out of this scan's reach and NOT flagged: a launcher REFERENCED as a value
+# rather than called (an alias `launch = subprocess.run`, a launcher stored in a container, a
 # multiprocessing or asyncio target=), a git launch INSIDE a launched script or behind a
 # non-git wrapper program (an `env`/`sh`/`bash`/interpreter head ends the analysis at that
-# head), an unresolved `-c` VALUE slot, and an unresolved argv tail AFTER the three pins are
+# head), an unresolved `-c` VALUE slot, an unresolved argv tail AFTER the three pins are
 # effective in option position (the pinned-funnel idiom passes subcommand and operands there;
 # the parse ends at the first unresolved token, so even a RESOLVED re-enable spelled after it
-# is out of this scan's reach). Those forms stay covered by review posture, not mechanics.
+# is out of this scan's reach), and a mutation of a tracked argv or env reached WITHOUT a
+# bare-name binding: through tuple unpacking, a container element, an object attribute, a
+# function that receives the object as an argument, or another module (a bare-name alias IS
+# tracked and invalidates resolution). Those forms stay covered by review posture, not
+# mechanics.
 _SCAN_DIRS = ("tools", "opf/tools")
 _SCAN_LAUNCH_NAMES = frozenset(("run", "Popen", "call", "check_call", "check_output",
                                 "getoutput", "getstatusoutput"))
@@ -2018,9 +2029,14 @@ _SCAN_ALLOWED_UNPINNED = (
      " subprocess.Popen inside its patched side_effect after asserting the launch"
      " environment; the argv is the runner check's own bash runner-script launch, not git"),
     # In-process exec loaders and mutant builders (the dynamic tripwire), each audited: each
-    # exec compiles THIS repo's own tracked source (or an AST/text mutant of it) into a module
-    # object, in-process; none launches a process itself, and any launch the executed source
-    # spells is scanned at its own source location like every other launch.
+    # exec compiles THIS repo's own tracked source, an AST/text mutant of it, or a red-leg
+    # candidate body spelled as a string literal in the self-test itself, into a module
+    # object, in-process; none launches a process at exec time. A launch the executed
+    # TRACKED source spells is scanned at its own source location like every other launch;
+    # a launch spelled only inside such a string-literal candidate body is outside the
+    # scan's reach and is covered by its entry's audited justification instead (the
+    # check_opf_init_observe.py red-leg candidate spells a subprocess.run whose argv
+    # heads are sys.executable commands, never git).
     ("tools/selftest_git_fixture_env.py", "_system_pin_checks", ("dynamic",),
      "exec of an AST-built PATH-removal mutant of the lifecycle helper's own source, for the"
      " wrapper red leg"),
@@ -2078,10 +2094,13 @@ def _scan_alias_findings(rel, tree):
 def _scan_module_consts(tree):
     """Module-level single-target assignments, name to value node. A name the module scope
     binds more than once, grows (an append/extend or an augmented assignment), or mutates
-    in place is EXCLUDED outright: module-scope argv mutation invalidates resolution
-    exactly like function-scope mutation, so an initial value the module later rewrites is
-    never trusted (a module-scope launch additionally resolves through the module scope
-    itself, where growth is read in source order and bounded to the launch point)."""
+    in place, or that ANY nested same-module scope mutates, grows, aliases, or declares
+    global (a helper function extending a module-level argv re-enables maintenance without
+    ever touching the module scope), is EXCLUDED outright: argv mutation invalidates
+    resolution at EVERY scope, so an initial value the module - or any function in it -
+    later rewrites is never trusted (a module-scope launch additionally resolves through
+    the module scope itself, where growth is read in source order and bounded to the
+    launch point)."""
     consts = dict()
     for node in tree.body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1 \
@@ -2110,9 +2129,19 @@ def _scan_local_assigns(func_node, name, launch=None):
     extend that adds the subcommand must be read in exactly that order, never reversed);
     <func_node> may be the MODULE node for a module-scope launch, so module-level argv
     mutation is tracked exactly like function-scope mutation. Nested function and class
-    bodies are other scopes and are skipped. `mutated` is True when the scope also rewrites
-    the value in place through a form the resolver does not model (a subscript or slice
-    write, an insert/remove/pop/clear/sort/reverse call, a del), or - when <launch> is the
+    bodies are other scopes: they contribute no plain or extend hits, but they ARE read
+    for mutation (below). `mutated` is True when the scope rewrites the value in place
+    through a form the resolver does not model (a subscript or slice write, an insert/
+    remove/pop/clear/sort/reverse/update/setdefault call, a del, or a NON-additive
+    augmented assignment: only += is growth - `args *= 0` EMPTIES the list, so every
+    other operator invalidates), when the scope binds the object to ANOTHER bare name (an
+    alias `other = name`: a later mutation through the alias is invisible to this
+    per-name reading, so the alias itself invalidates), when a NESTED same-module scope
+    mutates, grows, aliases, or declares global/nonlocal the name (this scan does not
+    order cross-scope calls, so a helper that grows a module constant or a closure that
+    rewrites an enclosing argv invalidates it outright; a nested local that merely
+    shadows the name through one of those forms is indistinguishable at these bounds and
+    invalidates too, fail-closed), or - when <launch> is the
     launch point's (lineno, col_offset) - when ANY binding or growth of the name sits AFTER
     that point: this scan does not order control flow, so a pin appended after the launch
     is never credited to it and the resolution is invalidated outright."""
@@ -2120,16 +2149,21 @@ def _scan_local_assigns(func_node, name, launch=None):
     if func_node is None:
         return plain, extend, mutated
     hits = []
+    nested = []
     stack = list(func_node.body)
     while stack:
         node = stack.pop()
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            nested.append(node)
             continue
         if isinstance(node, ast.Assign):
             if any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
                 hits.append((node.lineno, node.col_offset, "plain", node.value))
             if any(isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name)
                    and t.value.id == name for t in node.targets):
+                mutated = True
+            if isinstance(node.value, ast.Name) and node.value.id == name and any(
+                    not (isinstance(t, ast.Name) and t.id == name) for t in node.targets):
                 mutated = True
         elif isinstance(node, ast.AnnAssign):
             if isinstance(node.target, ast.Name) and node.target.id == name \
@@ -2139,9 +2173,19 @@ def _scan_local_assigns(func_node, name, launch=None):
                     and isinstance(node.target.value, ast.Name) \
                     and node.target.value.id == name:
                 mutated = True
+            elif isinstance(node.value, ast.Name) and node.value.id == name:
+                mutated = True
+        elif isinstance(node, ast.NamedExpr):
+            if isinstance(node.value, ast.Name) and node.value.id == name \
+                    and not (isinstance(node.target, ast.Name)
+                             and node.target.id == name):
+                mutated = True
         elif isinstance(node, ast.AugAssign):
             if isinstance(node.target, ast.Name) and node.target.id == name:
-                hits.append((node.lineno, node.col_offset, "extend", node.value))
+                if isinstance(node.op, ast.Add):
+                    hits.append((node.lineno, node.col_offset, "extend", node.value))
+                else:
+                    mutated = True
             elif isinstance(node.target, ast.Subscript) \
                     and isinstance(node.target.value, ast.Name) \
                     and node.target.value.id == name:
@@ -2161,9 +2205,51 @@ def _scan_local_assigns(func_node, name, launch=None):
             elif node.func.attr == "extend" and node.args:
                 hits.append((node.lineno, node.col_offset, "extend", node.args[0]))
             elif node.func.attr in ("insert", "remove", "pop", "clear", "sort", "reverse",
-                                    "__setitem__", "__delitem__"):
+                                    "update", "setdefault", "__setitem__", "__delitem__"):
                 mutated = True
         stack.extend(ast.iter_child_nodes(node))
+    # Nested function and class bodies contribute no hits, but a closure or helper CAN
+    # mutate, grow, or alias the same OBJECT through the free (or global) variable, and
+    # this scan does not order cross-scope calls: any such form inside a nested scope -
+    # a shadowing nested local included, indistinguishable at these bounds - invalidates
+    # the resolution outright, fail-closed.
+    for scope in nested:
+        if mutated:
+            break
+        for node in ast.walk(scope):
+            if isinstance(node, (ast.Global, ast.Nonlocal)) and name in node.names:
+                mutated = True
+            elif isinstance(node, ast.AugAssign) and (
+                    (isinstance(node.target, ast.Name) and node.target.id == name)
+                    or (isinstance(node.target, ast.Subscript)
+                        and isinstance(node.target.value, ast.Name)
+                        and node.target.value.id == name)):
+                mutated = True
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = (node.targets if isinstance(node, ast.Assign)
+                           else [node.target])
+                if any(isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name)
+                       and t.value.id == name for t in targets):
+                    mutated = True
+                value = getattr(node, "value", None)
+                if isinstance(value, ast.Name) and value.id == name:
+                    mutated = True
+            elif isinstance(node, ast.NamedExpr) and isinstance(node.value, ast.Name) \
+                    and node.value.id == name:
+                mutated = True
+            elif isinstance(node, ast.Delete) and any(
+                    (isinstance(t, ast.Name) and t.id == name)
+                    or (isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name)
+                        and t.value.id == name) for t in node.targets):
+                mutated = True
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                    and isinstance(node.func.value, ast.Name) \
+                    and node.func.value.id == name and node.func.attr in (
+                        "append", "extend", "insert", "remove", "pop", "clear", "sort",
+                        "reverse", "update", "setdefault", "__setitem__", "__delitem__"):
+                mutated = True
+            if mutated:
+                break
     if launch is not None:
         for lineno, col, _kind, _value in hits:
             if (lineno, col) > launch:
@@ -2346,12 +2432,17 @@ def _scan_git_argv_state(entries, func_node, module_consts, launch=None):
     environment VARIABLE read at launch time, unreadable here, and it outranks every
     environment-scope pin, so no env coverage can absorb it); 'subcommand' with the
     resolved subcommand token when the pins are not effective; 'opaque' when an
-    unknown-length region, an unresolved slot, an unreadable or alias-remapping `-c`
-    value, or a truncated option reaches the parser before the pins are effective (an
-    alias.* option never DISCARDS an adverse pin already parsed: a detected stomp is
-    returned as the stomp, not degraded to a coverage-gated opaque); 'end' for a fully
-    resolved argv that never reaches a subcommand."""
+    unknown-length region, an unresolved slot, an unreadable `-c` value, or a truncated
+    option reaches the parser before the pins are effective, or when a SUBCOMMAND is
+    reached after an alias.* option with the pins not effective (an alias.* option never
+    ENDS the parse: config evaluation continues through it with last-value-wins, so an
+    adverse pin BEFORE the alias is still overridden by a later re-pin and a stomp AFTER
+    the alias is still detected - but a command-scope alias can remap ANY later word to
+    another subcommand, so the subcommand token itself is never trusted unless the pins
+    are effective, in which case the launch is pinned whatever the word maps to); 'end'
+    for a fully resolved argv that never reaches a subcommand."""
     pin_state = dict()
+    alias_seen = False
 
     def _verdict(sub):
         for key, value in _SCAN_PIN_VALUES.items():
@@ -2380,14 +2471,15 @@ def _scan_git_argv_state(entries, func_node, module_consts, launch=None):
                 return "opaque", None
             key = value.partition("=")[0].lower()
             if key.startswith("alias."):
-                # A command-scope alias can remap ANY later word to another subcommand,
-                # but it cannot UN-set config already parsed: an adverse pin value
-                # detected before it stays the stomp finding (no env coverage can
-                # absorb a -c override), never discarded into a coverage-gated opaque.
-                state = _verdict(None)
-                if state is not None and state[0] == "stomped":
-                    return state
-                return "opaque", None
+                # A command-scope alias definition is CONFIG, not a parse terminator:
+                # git keeps applying later -c/--config-env values with last-value-wins,
+                # so the parse continues through it (an adverse pin before the alias is
+                # still overridden by a later re-pin; a stomp after it is still
+                # detected). Only the eventual SUBCOMMAND becomes untrustworthy - the
+                # alias can remap any later word - handled at the subcommand verdict.
+                alias_seen = True
+                index += 2
+                continue
             if key in _SCAN_PIN_VALUES:
                 # Track the LAST value per pin key, exactly as git will apply it.
                 pin_state[key] = value.partition("=")[2]
@@ -2417,10 +2509,10 @@ def _scan_git_argv_state(entries, func_node, module_consts, launch=None):
                 index += step
                 continue
             if key.startswith("alias."):
-                state = _verdict(None)
-                if state is not None and state[0] == "stomped":
-                    return state
-                return "opaque", None
+                # An alias defined through --config-env: same continuation as -c above
+                # (the alias TARGET is unreadable here, but that only widens which
+                # words the subcommand verdict must distrust, which alias_seen does).
+                alias_seen = True
             index += step
             continue
         if token in _SCAN_GIT_OPTION_ARG:
@@ -2432,7 +2524,15 @@ def _scan_git_argv_state(entries, func_node, module_consts, launch=None):
         if token.startswith("-") and token != "-":
             index += 1
             continue
-        return _verdict(token) or ("subcommand", token)
+        state = _verdict(token)
+        if state is not None:
+            return state
+        if alias_seen:
+            # The pins are not effective and an alias definition precedes this word: it
+            # may be remapped to ANY subcommand, so it is never trusted as a harmless
+            # one - coverage-gated opaque, exactly like an unresolved subcommand slot.
+            return "opaque", None
+        return "subcommand", token
     return "end", None
 
 
@@ -2461,7 +2561,10 @@ def _scan_scope_coverage(tree, wanted):
     """(module-scope covered, covered function names) for calls of <wanted>: a scrub or
     lifecycle call covers exactly the SCOPE that makes it, never the whole module, so a
     self-test's scrub call cannot silently cover a production launch elsewhere in the same
-    file. A function is covered when its own scope calls <wanted>, or when every visible
+    file. A function NAME is covered when EVERY same-module definition of that bare name
+    calls <wanted> in its own scope (coverage is keyed by bare name, so two unrelated
+    same-named methods share one verdict: one definition's scrub never covers the
+    other's launch - all must scrub, fail-closed), or when every visible
     same-module call site of its name sits in a covered scope (a least fixpoint, so a
     function with NO visible call site - an entry point, an exported or dynamically
     dispatched callback - is never covered by other scopes' calls). Definitions and call
@@ -2477,7 +2580,7 @@ def _scan_scope_coverage(tree, wanted):
             class_inits.add(node.name)
     module_covered = _scan_direct_calls(tree.body, wanted)
     covered = set(name for name, nodes in defs.items()
-                  if any(_scan_direct_calls(node.body, wanted) for node in nodes))
+                  if all(_scan_direct_calls(node.body, wanted) for node in nodes))
     sites = dict()
     stack = [(tree, ())]
     while stack:
@@ -2525,7 +2628,8 @@ def _scan_kw_stomps_pins(keywords):
     return False
 
 
-def _scan_env_covered(expr, func_node, module_consts, func_defs, scope_scrubbed, depth):
+def _scan_env_covered(expr, func_node, module_consts, func_defs, scope_scrubbed, depth,
+                      launch=None):
     """True when the env= expression provably derives from a pin-carrying source: a
     git_fixture_env(...) call (directly, through dict()/copy() derivation, a same-scope name,
     or one level of same-module function returns), or os.environ at a launch whose SCOPE is
@@ -2534,7 +2638,14 @@ def _scan_env_covered(expr, func_node, module_consts, func_defs, scope_scrubbed,
     in every case only when no keyword override on the way rewrites a pin variable
     (_scan_kw_stomps_pins): git_fixture_env(GIT_CONFIG_COUNT="0"),
     dict(os.environ, GIT_CONFIG_COUNT="0") and any GIT_CONFIG_PARAMETERS override carry NO
-    effective pins."""
+    effective pins. An env NAME counts only while its resolution is intact: an in-place
+    mutation (env.update / env.setdefault / a subscript write / a del), ANY splice growth
+    or augmented assignment (env |= {...} rewrites entries wholesale), an alias binding,
+    or - via <launch>, the launch point's (lineno, col_offset) - any binding of the name
+    at or after the launch invalidates coverage outright (this scan does not order
+    control flow or read mutation arguments, so a mutated derivation is never trusted,
+    fail-closed). <launch> bounds the launch's OWN scope only: it does not follow the
+    one-level function-return resolution into another scope's line numbers."""
     if expr is None or depth <= 0:
         return False
     if isinstance(expr, ast.Call):
@@ -2550,10 +2661,10 @@ def _scan_env_covered(expr, func_node, module_consts, func_defs, scope_scrubbed,
             if _scan_kw_stomps_pins(expr.keywords):
                 return False
             return _scan_env_covered(expr.args[0], func_node, module_consts, func_defs,
-                                     scope_scrubbed, depth - 1)
+                                     scope_scrubbed, depth - 1, launch)
         if callee_name == "copy" and isinstance(callee, ast.Attribute):
             return _scan_env_covered(callee.value, func_node, module_consts, func_defs,
-                                     scope_scrubbed, depth - 1)
+                                     scope_scrubbed, depth - 1, launch)
         returns = []
         for definition in func_defs.get(callee_name, []):
             for node in ast.walk(definition):
@@ -2566,20 +2677,20 @@ def _scan_env_covered(expr, func_node, module_consts, func_defs, scope_scrubbed,
             return True
         return False
     if isinstance(expr, ast.Name):
-        plain, _, mutated = _scan_local_assigns(func_node, expr.id)
-        if mutated:
+        plain, extend, mutated = _scan_local_assigns(func_node, expr.id, launch)
+        if mutated or extend:
             return False
         if not plain and expr.id in module_consts:
             plain = [module_consts[expr.id]]
         return bool(plain) and all(
             _scan_env_covered(value, func_node, module_consts, func_defs,
-                              scope_scrubbed, depth - 1) for value in plain)
+                              scope_scrubbed, depth - 1, launch) for value in plain)
     if isinstance(expr, ast.Attribute):
         return (expr.attr == "environ" and isinstance(expr.value, ast.Name)
                 and expr.value.id == "os" and scope_scrubbed)
     if isinstance(expr, ast.IfExp):
         return all(_scan_env_covered(branch, func_node, module_consts, func_defs,
-                                     scope_scrubbed, depth - 1)
+                                     scope_scrubbed, depth - 1, launch)
                    for branch in (expr.body, expr.orelse))
     return False
 
@@ -2591,9 +2702,11 @@ def _scan_launches(tree):
     subprocess.<launcher>(...) calls (flavor 'subprocess'), os-level launcher calls by any
     object spelling (flavor 'os', pty.spawn included), asyncio create_subprocess_* calls by
     any object spelling (flavor 'async'), and dynamic launcher access (flavor 'dynamic'):
-    exec/eval anywhere, getattr(subprocess, ...) / getattr(os, ...) except a literal
+    exec/eval anywhere, getattr(subprocess, ...) / getattr(os, ...) /
+    getattr(asyncio, ...) except a literal
     NON-launcher attribute (getattr(os, "O_NOFOLLOW", 0) reads a constant, not a launcher),
-    subprocess.__dict__ / os.__dict__, and vars(subprocess) / vars(os)."""
+    subprocess.__dict__ / os.__dict__ / asyncio.__dict__, and vars(subprocess) / vars(os) /
+    vars(asyncio)."""
     found = []
     stack = [(tree, (), None, None)]
     while stack:
@@ -2625,10 +2738,11 @@ def _scan_launches(tree):
                                       func_node, class_node))
                     elif isinstance(func, ast.Name) and func.id == "getattr" \
                             and child.args and isinstance(child.args[0], ast.Name) \
-                            and child.args[0].id in ("subprocess", "os"):
+                            and child.args[0].id in ("subprocess", "os", "asyncio"):
                         module = child.args[0].id
                         launchers = (_SCAN_LAUNCH_NAMES if module == "subprocess"
-                                     else _SCAN_OS_LAUNCH_NAMES)
+                                     else (_SCAN_ASYNC_LAUNCH_NAMES if module == "asyncio"
+                                           else _SCAN_OS_LAUNCH_NAMES))
                         harmless = (len(child.args) >= 2
                                     and isinstance(child.args[1], ast.Constant)
                                     and isinstance(child.args[1].value, str)
@@ -2638,12 +2752,12 @@ def _scan_launches(tree):
                                           qualname, parts, func_node, class_node))
                     elif isinstance(func, ast.Name) and func.id == "vars" \
                             and child.args and isinstance(child.args[0], ast.Name) \
-                            and child.args[0].id in ("subprocess", "os"):
+                            and child.args[0].id in ("subprocess", "os", "asyncio"):
                         found.append((child, "dynamic", "vars(" + child.args[0].id + ")",
                                       qualname, parts, func_node, class_node))
             elif isinstance(child, ast.Attribute) and child.attr == "__dict__" \
                     and isinstance(child.value, ast.Name) \
-                    and child.value.id in ("subprocess", "os"):
+                    and child.value.id in ("subprocess", "os", "asyncio"):
                 qualname = ".".join(parts) if parts else "<module>"
                 found.append((child, "dynamic", child.value.id + ".__dict__", qualname,
                               parts, func_node, class_node))
@@ -2889,7 +3003,7 @@ def _maintenance_pin_scan(root, allow_missing_files=False):
                     has_env = False
                 if has_env and _scan_env_covered(env_expr, scope_node, consts,
                                                  func_defs, scope_scrubbed,
-                                                 _SCAN_RESOLVE_DEPTH):
+                                                 _SCAN_RESOLVE_DEPTH, launch_at):
                     continue
                 if not has_env and scope_scrubbed:
                     continue
@@ -3273,6 +3387,137 @@ _SCAN_CONTRACT_CASES = (
          "def self_test():",
          "    scrub_git_environment()", ""))),),
      "maintenance-triggering git launch"),
+    # Round-5 forms: the env-mutation, alias-evaluation, cross-scope argv-mutation,
+    # same-named-method scrub-coverage and dynamic-asyncio gaps round-5 review
+    # demonstrated (each red without the round-5 resolver, parser and coverage changes,
+    # except the two clean guards, which hold the fixes to no new false flags).
+    ("fixture-env-update-override",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "",
+         "from _git_fixture_env import git_fixture_env", "", "",
+         "def _seed():",
+         "    env = git_fixture_env()",
+         "    env.update(GIT_CONFIG_COUNT='0')",
+         "    subprocess.run(['git', 'commit', '--allow-empty', '-m', 'x'],",
+         "                   env=env)", ""))),),
+     "maintenance-triggering git launch"),
+    ("fixture-env-setdefault-override",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "",
+         "from _git_fixture_env import git_fixture_env", "", "",
+         "def _seed():",
+         "    env = git_fixture_env()",
+         "    env.setdefault('GIT_CONFIG_PARAMETERS', 'maintenance.auto=true')",
+         "    subprocess.run(['git', 'commit', '--allow-empty', '-m', 'x'],",
+         "                   env=env)", ""))),),
+     "maintenance-triggering git launch"),
+    ("fixture-env-union-override",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "",
+         "from _git_fixture_env import git_fixture_env", "", "",
+         "def _seed():",
+         "    env = git_fixture_env()",
+         "    env |= dict(GIT_CONFIG_COUNT='0')",
+         "    subprocess.run(['git', 'commit', '--allow-empty', '-m', 'x'],",
+         "                   env=env)", ""))),),
+     "maintenance-triggering git launch"),
+    ("env-rebound-after-launch",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "",
+         "from _git_fixture_env import git_fixture_env", "", "",
+         "def _seed(env):",
+         "    subprocess.run(['git', 'commit', '--allow-empty', '-m', 'x'],",
+         "                   env=env)",
+         "    env = git_fixture_env()", ""))),),
+     "maintenance-triggering git launch"),
+    ("alias-before-adverse-pin",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "",
+         "from _git_fixture_env import git_fixture_env", "", "",
+         "def _seed():",
+         "    subprocess.run(['git', '-c', 'alias.unrelated=status',",
+         "                    '-c', 'maintenance.auto=true',",
+         "                    'commit', '--allow-empty', '-m', 'x'],",
+         "                   env=git_fixture_env())", ""))),),
+     "overrides an F-367 pin key"),
+    ("alias-then-full-repin",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _seed():",
+         "    subprocess.run(['git', '-c', 'maintenance.auto=true',",
+         "                    '-c', 'alias.unrelated=status',",
+         "                    '-c', 'maintenance.auto=false', '-c', 'gc.auto=0',",
+         "                    '-c', 'gc.autoDetach=false',",
+         "                    'commit', '--allow-empty', '-m', 'x'])", ""))),),
+     None),
+    ("module-argv-extended-elsewhere",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "",
+         "ARGS = ['git', '-c', 'gc.auto=0', '-c', 'gc.autoDetach=false',",
+         "        '-c', 'maintenance.auto=false']", "", "",
+         "def _poison():",
+         "    ARGS.extend(['-c', 'maintenance.auto=true'])", "", "",
+         "def _seed():",
+         "    subprocess.run(ARGS + ['commit', '--allow-empty', '-m', 'x'])", ""))),),
+     "cannot resolve"),
+    ("module-argv-written-elsewhere",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "",
+         "ARGS = ['git', '-c', 'gc.auto=0', '-c', 'gc.autoDetach=false',",
+         "        '-c', 'maintenance.auto=false', 'commit', '--allow-empty',",
+         "        '-m', 'x']", "", "",
+         "def _poison():",
+         "    ARGS[6] = 'maintenance.auto=true'", "", "",
+         "def _seed():",
+         "    subprocess.run(ARGS)", ""))),),
+     "cannot resolve"),
+    ("argv-alias-mutation",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _seed():",
+         "    args = ['git', '-c', 'gc.auto=0', '-c', 'gc.autoDetach=false',",
+         "            '-c', 'maintenance.auto=false', 'commit', '--allow-empty',",
+         "            '-m', 'x']",
+         "    alias = args",
+         "    alias[6] = 'maintenance.auto=true'",
+         "    subprocess.run(args)", ""))),),
+     "cannot resolve"),
+    ("argv-mult-augassign",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _seed():",
+         "    args = ['git', '-c', 'gc.auto=0', '-c', 'gc.autoDetach=false',",
+         "            '-c', 'maintenance.auto=false']",
+         "    args *= 0",
+         "    args.extend(['git', 'commit', '--allow-empty', '-m', 'x'])",
+         "    subprocess.run(args)", ""))),),
+     "cannot resolve"),
+    ("scrub-same-name-other-class",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "",
+         "from _git_fixture_env import scrub_git_environment", "", "",
+         "class Tests:",
+         "    def seed(self):",
+         "        scrub_git_environment()", "", "",
+         "class Fixture:",
+         "    def seed(self):",
+         "        subprocess.run(['git', 'commit', '--allow-empty', '-m', 'x'])",
+         ""))),),
+     "maintenance-triggering git launch"),
+    ("getattr-asyncio-launcher",
+     (("tools/planted.py", "\n".join((
+         "import asyncio", "", "",
+         "async def _seed():",
+         "    proc = await getattr(asyncio, 'create_subprocess_exec')(",
+         "        'git', 'commit', '--allow-empty', '-m', 'x')",
+         "    await proc.wait()", ""))),),
+     "dynamic launcher access"),
+    ("getattr-asyncio-harmless",
+     (("tools/planted.py", "\n".join((
+         "import asyncio", "",
+         "_HAS_RUNNER = getattr(asyncio, 'Runner', None)", "",
+         "print(_HAS_RUNNER)", ""))),),
+     None),
 )
 
 
