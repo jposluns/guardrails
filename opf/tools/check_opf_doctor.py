@@ -55,20 +55,25 @@ UNCOVERED by that snapshot; each covered leg is held red by its own per-write mu
 tag for the ref set, a local-config write, a hook-file write, a file content edit, a symlink plant and
 retarget, a file chmod, the two index writes, the exclude write, a nested .git write, the root and
 hooks-directory chmods, and an empty mkdir; the directory-set leg is pure defence in depth, every walked
-directory being already an entry record, so its mkdir fixture is equally held by the entry leg). The abnormal
+directory being already an entry record, so its mkdir fixture is equally held by the entry leg, and the entry
+records' kind component is likewise redundant with their lstat mode, whose file-type bits already encode it,
+so no fixture isolates it). The abnormal
 sig:15 vectors run AGAIN with SIGTERM inherited as SIG_IGN (a preexec in the recipe launch), so removing
 the recording stub's SIG_DFL restore reds the ordinary suite. And the GitHub Actions template is held to
 EXACT TEXT over a BYTE GATE: the file is read as RAW BYTES and any byte outside printable ASCII
 (0x20-0x7E) plus newline (0x0A) is REFUSED before any comment or blank-line reduction (a tab, a CR, a
-BOM and any other control or non-ASCII byte red the gate, closing the Unicode-whitespace bypass where
+BOM, a form feed, a NUL, a DEL and any other control or non-ASCII byte red the gate, closing the
+Unicode-whitespace bypass where
 Python's broad str whitespace read a U+00A0-led line as a comment that YAML, whose whitespace is only
 space and tab, reads as verdict-masking scalar content); the survivor is decoded STRICTLY as ASCII, and
 only then must its text with full-line comments and blank lines removed (and nothing else normalized)
 equal the module's canonical constant _WORKFLOW_CANONICAL verbatim, so ANY added or changed key
 (shell:, env:, defaults:, if:, continue-on-error:, quoted, space-padded or aliased, at step, job or
-workflow level), any run: continuation line or trailer, a flow mapping, a second step, or a rewritten on:
-block reds it, while full-line ASCII comments stay free to change; each reported bypass spelling and each
-refused byte class is held red by its own mutant fixture. The stub exists because the real tool cannot
+workflow level, or trailed by an inline "#" comment), any run: continuation line or trailer, a flow
+mapping, a second step, or a rewritten on: block reds it, while full-line ASCII comments stay free to
+change; each reported bypass spelling, the inline-"#" key, and each refused byte class is held red by its
+own mutant fixture, and a sweep plants every refused byte singly. The stub exists because the real tool
+cannot
 isolate the render step: a
 drifted view fails doctor's own C-VIEW-DRIFT too, so only the stub proves the render invocation is still
 present, ordered, exactly argued, and forwarded. Each committed fixture is `git init` +
@@ -399,7 +404,9 @@ def _self_test_isolated():
         """A snapshot asserting the recipe's read-only claim. It covers EXACTLY these legs: (1) every
         entry under `root` recorded through os.lstat (relpath -> kind, mode, and a regular file's
         sha256 or a symlink's TARGET, never followed, so a chmod, a planted symlink, or a swapped
-        entry kind is a visible write), with ONLY the top-level .git directory pruned; a .git
+        entry kind is a visible write; the kind component is redundant with the mode, whose
+        S_IFMT file-type bits already encode it, so it adds no reach), with ONLY the top-level
+        .git directory pruned; a .git
         directory anywhere BELOW the root is walked and recorded like any other entry; (2) the SORTED
         DIRECTORY LISTING under the same pruning (pure defence in depth: every walked directory is
         already an entry record, so this leg adds redundancy, not reach); (3) the lstat records of the
@@ -718,10 +725,11 @@ def _self_test_isolated():
             # workflow level), any run: continuation line or trailer, a flow mapping, a second step, or
             # a rewritten on: block therefore reds; only full-line ASCII comments and blank lines stay
             # free to change. Editing the template deliberately means updating the constant in the same
-            # change. Each bypass spelling reported against the older line-pattern assertion, and each
-            # refused byte class (the reported U+00A0-led 'comment' continuation that YAML reads as
-            # verdict-masking scalar content, a tab, a CR, a BOM), is held
-            # red below by its own mutant fixture.
+            # change. Each bypass spelling reported against the older line-pattern assertion, a key
+            # trailed by an inline "#" comment, and each refused byte class (the reported
+            # U+00A0-led 'comment' continuation that YAML reads as verdict-masking scalar content,
+            # a tab, a CR, a BOM, a form feed, a NUL, a DEL), is held red below by its own mutant
+            # fixture.
             workflow = (Path(__file__).resolve().parent.parent / "enforcement" / "ci"
                         / "github-actions.yml")
 
@@ -752,7 +760,9 @@ def _self_test_isolated():
             # The mutant fixtures: every bypass spelling reported against the older line-pattern
             # assertion, applied to the canonical text; each effective text must DIFFER from the
             # canonical (red). A no-op replace leaves the mutant equal to the canonical, so a stale
-            # needle fails its own fixture (fail-closed).
+            # needle fails its own fixture (fail-closed). The inline-comment key holds the comment
+            # filter to FULL-LINE comments: a filter weakened to drop any line containing "#" would
+            # reduce "if: false # x" away and leave the canonical, so that fixture reds it.
             wf_run = "        run: sh opf/enforcement/ci/opf-ci.sh ."
             wf_step = "      - name: OPF CI floor (doctor --require-store, then render --check)"
             wf_job = "    runs-on: ubuntu-latest"
@@ -785,6 +795,8 @@ def _self_test_isolated():
                     wf_run, wf_run + '\n        "if": false')),
                 ("step-space-padded-if", _WORKFLOW_CANONICAL.replace(
                     wf_run, wf_run + "\n        if : false")),
+                ("step-if-inline-comment", _WORKFLOW_CANONICAL.replace(
+                    wf_run, wf_run + "\n        if: false # x")),
                 ("job-double-quoted-if", _WORKFLOW_CANONICAL.replace(
                     wf_job, wf_job + '\n    "if": false')),
                 ("step-quoted-continue-on-error", _WORKFLOW_CANONICAL.replace(
@@ -808,7 +820,13 @@ def _self_test_isolated():
             # continuation led by Unicode whitespace (U+00A0, U+3000) and then "#", which the
             # older str-based reduction stripped as a comment while YAML, whose whitespace is
             # only space and tab, reads it as scalar content whose "|| true" masks the step's
-            # verdict. The tab, CRLF and BOM plants pin the other refused byte classes.
+            # verdict. The tab, CRLF and BOM plants pin those bytes; the form-feed and NUL plants
+            # (each before "#" on a space-led comment line) pin the other C0 controls, and the DEL
+            # plant pins 0x7F, so a gate narrowed to tab, CR and non-ASCII alone passes them to the
+            # reduction unrefused and reds. The sweep after them plants EVERY byte outside printable
+            # ASCII plus newline, one at a time, before "#" on the same kind of line, so a gate that
+            # exempts any single such byte reds and names it (a strict-decode error on a passed
+            # non-ASCII byte counts as unrefused, never a crash that would swallow the suite).
             wf_byte_mutants = (
                 ("unicode-nbsp-comment-continuation", _WORKFLOW_CANONICAL.replace(
                     wf_run, wf_run + "\n          \u00a0# || true").encode("utf-8")),
@@ -818,12 +836,30 @@ def _self_test_isolated():
                     wf_run, wf_run + "\n\t# a tab-led comment").encode("utf-8")),
                 ("crlf-line-endings", _WORKFLOW_CANONICAL.replace("\n", "\r\n").encode("utf-8")),
                 ("utf8-bom-prefix", b"\xef\xbb\xbf" + _WORKFLOW_CANONICAL.encode("utf-8")),
+                ("form-feed-led-comment-line", _WORKFLOW_CANONICAL.replace(
+                    wf_run, wf_run + "\n          \x0c# || true").encode("ascii")),
+                ("nul-led-comment-line", _WORKFLOW_CANONICAL.replace(
+                    wf_run, wf_run + "\n          \x00# || true").encode("ascii")),
+                ("del-led-comment-line", _WORKFLOW_CANONICAL.replace(
+                    wf_run, wf_run + "\n          \x7f# || true").encode("ascii")),
             )
             for wf_label, wf_data in wf_byte_mutants:
                 wf_eff = _wf_effective(wf_data)
                 expect("workflow-mutant-refused-{}".format(wf_label),
                        (wf_eff != _WORKFLOW_CANONICAL, wf_eff.startswith("REFUSED")),
                        (True, True))
+
+            def _wf_refused(data):
+                try:
+                    return _wf_effective(data).startswith("REFUSED")
+                except UnicodeDecodeError:
+                    return False
+
+            wf_plant = _WORKFLOW_CANONICAL.replace(wf_run, wf_run + "\n          ").encode("ascii")
+            expect("workflow-byte-gate-refuses-every-outside-byte",
+                   ["0x" + format(b, "02x") for b in range(256)
+                    if b != 0x0A and not 0x20 <= b <= 0x7E
+                    and not _wf_refused(wf_plant + bytes([b]) + b"# || true")], [])
 
             # --- The recipe end to end over a REAL drifted view (U16): a committed clean store
             # with ONE declared view, populated through the U4 engine's own public planner
@@ -877,10 +913,13 @@ def _self_test_isolated():
             # chmods via the root's and the hooks directory's own lstat records. The remaining legs
             # are each held by their own write: a planted tag via the ref set, a config write via
             # the local configuration, a hook file via the .git/hooks tree walk, a content edit via
-            # the entry CONTENT DIGEST alone (kind and mode unchanged), a symlink plant and a
-            # retarget via the entry kind and TARGET alone, a file chmod via the entry MODE alone,
+            # the entry CONTENT DIGEST alone (kind and mode unchanged), a symlink plant via the SET
+            # of entry keys (a new relpath, so it reds even with every entry record reduced to its
+            # key), its retarget via the entry TARGET alone, a file chmod via the entry MODE alone,
             # and an empty mkdir via the directory listing (which the entry records subsume, so
-            # that leg is redundancy, not reach).
+            # that leg is redundancy, not reach). The entry KIND component is redundant as well:
+            # the lstat mode's file-type bits already encode it, so no write changes the kind
+            # without changing the mode, and no fixture can isolate it.
             def _snapshot_sees(label, mutate):
                 before_m = _tree_digest(viewed, home)
                 mutate()
@@ -1052,7 +1091,8 @@ def _self_test_isolated():
               "(raw bytes; any byte outside printable ASCII plus newline refused before any "
               "reduction: tab, CR, BOM, any control or non-ASCII byte) then equal by EXACT "
               "TEXT to the canonical constant after dropping only ASCII comment and blank lines "
-              "(any other edit reds, per-spelling and per-byte-class mutant fixtures red); "
+              "(any other edit reds, per-spelling and per-byte-class mutant fixtures red, "
+              "a sweep refuses every outside byte singly); "
               "child-launch failure -> 2; no-repo-root -> 2; invalid-git-marker -> 2; "
               "relative-toplevel probe -> None (exit 2); "
               "git executable absolutized (relative which() -> absolute argv[0]); "
