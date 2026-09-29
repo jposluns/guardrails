@@ -183,30 +183,54 @@ def _digest(data):
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
+# The fixed descriptors _shown returns INSTEAD of formatting a value it must never format, and
+# the one placeholder it returns if formatting fails anyway. Each is constant and bounded.
+_SHOWN_INT = "a code-built integer (not shown)"
+_SHOWN_TABLE = "a table (not shown)"
+_SHOWN_ARRAY = "an array (not shown)"
+_SHOWN_OTHER = "a value of a type this formatter does not show"
+_SHOWN_UNFORMATTABLE = "a value that could not be shown"
+
+
 def _shown(value):
     """Findings and refusal messages embed adopter content; bound what they repeat so a refusal
-    never echoes a megabyte lexeme or key back to the caller. repr-based, so a _Number shows as
-    its bare lexeme and a str stays quoted. An exact str or _Number is bounded on the VALUE at
-    EVERY length: a long one is truncated on the value before repr and reports the value's own
+    never echoes a megabyte lexeme or key back to the caller, and NEVER RAISE, so no finding
+    path can turn a refusal into an exception. Dispatch is by type IDENTITY, and only what
+    cannot fail or grow is formatted. An exact str or _Number is bounded on the VALUE at EVERY
+    length: a long one is truncated on the value before repr and reports the value's own
     length, and a short one comes back whole (its repr is never cut, so no cut can split a repr
-    escape sequence and no reported count is ever the repr's). The final branch (cut on the
-    repr text and labelled as such) serves built-in scalars and containers only: the public
-    entry gates refuse foreign-typed values before any interior check can hand one to this
-    formatter, so no overridden __repr__ runs here. Worst case stays near half a kilobyte (48
-    characters whose repr escapes are up to ten bytes each, plus the suffix), so every
-    embedding message is bounded."""
-    if type(value) is _Number:
-        if len(value) > 64:
-            return "{}... ({} characters)".format(str.__str__(value)[:64], len(value))
-        return str.__str__(value)
-    if type(value) is str:
-        if len(value) > 48:
-            return "{}... ({} characters)".format(repr(value[:48]), len(value))
-        return repr(value)
-    text = repr(value)
-    if len(text) <= 72:
-        return text
-    return text[:64] + "... ({} characters in the repr)".format(len(text))
+    escape sequence and no reported count is ever the repr's); a _Number shows as its bare
+    lexeme and a str stays quoted. An exact float, True, False and None show their repr, a few
+    dozen characters at most. An int, a table and an array are NEVER formatted and get a fixed
+    descriptor instead: int-to-text conversion raises past the interpreter's digit limit, and a
+    container's repr exhausts the stack on deep nesting (reachable from exact parsed bytes in
+    the entry type field) and runs to megabytes on a wide one. Any other type gets a fixed
+    descriptor too, with no method of it run (the public entry gates refuse foreign types before
+    any interior check could hand one here). Any formatting failure at all returns the fixed
+    _SHOWN_UNFORMATTABLE placeholder. Worst case stays near half a kilobyte (48 characters
+    whose repr escapes are up to ten bytes each, plus the suffix), so every embedding message
+    is bounded."""
+    try:
+        value_type = type(value)
+        if value_type is _Number:
+            if len(value) > 64:
+                return "{}... ({} characters)".format(str.__str__(value)[:64], len(value))
+            return str.__str__(value)
+        if value_type is str:
+            if len(value) > 48:
+                return "{}... ({} characters)".format(repr(value[:48]), len(value))
+            return repr(value)
+        if value is None or value is True or value is False or value_type is float:
+            return repr(value)
+        if value_type is int:
+            return _SHOWN_INT
+        if value_type is dict:
+            return _SHOWN_TABLE
+        if value_type is list:
+            return _SHOWN_ARRAY
+        return _SHOWN_OTHER
+    except Exception:
+        return _SHOWN_UNFORMATTABLE
 
 
 # --- fail-closed parse and deterministic emission ------------------------------------------------------
@@ -240,6 +264,14 @@ def _no_constant(name):
 # The strict-JSON number grammar (RFC 8259): exactly what _parse can produce, and what _emit
 # holds every _Number lexeme to, so a code-built carrier cannot emit bytes _parse would refuse.
 _NUMBER_LEXEME_RE = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\Z")
+
+
+def _is_finite_lexeme(lexeme):
+    """The parser's own number rule over an exact _Number lexeme, single-sourced for the emitter
+    and the public validator: the strict-JSON grammar FIRST (so float() only ever reads a
+    grammatical lexeme and cannot raise), then the finite double range. Every parsed _Number
+    passes; a code-built carrier is held to the same rule, never trusted by its type."""
+    return bool(_NUMBER_LEXEME_RE.match(lexeme)) and math.isfinite(float(lexeme))
 
 
 class _Number(str):
@@ -332,14 +364,14 @@ def _emit(model):
     text and KEYS are preserved verbatim (never rewritten to \\uXXXX, which used to triple
     non-ASCII files and break the size-bound idempotence); _Number lexemes re-emit exactly as
     parsed. FIXED-POINT SCOPE, exactly: for every model produced by _parse or by
-    merge_registration's own merge step (whose nodes are exact dict/list/str/_Number by
-    construction), emission is a fixed point under _parse, enforced rather than assumed: every
-    number lexeme is held to the parser's own number grammar and finite double range, a
-    parseable model carrying an escaped unpaired surrogate refuses here (below), and keys,
-    string values and lexeme carriers are classified by type IDENTITY (exactly str, exactly
-    _Number), so a _Number key can never serialize into duplicate-key JSON. A CODE-BUILT model
-    (the self-test's literals, a finite exact int/float) emits under the same number rule, but
-    the container and numeric branches classify it by isinstance, so a SUBCLASS of
+    merge_registration's own merge step (whose nodes are exact dict/list/str/_Number, True,
+    False or None by construction), emission is a fixed point under _parse, enforced rather than
+    assumed: every number lexeme is held to the parser's own number grammar and finite double
+    range, a parseable model carrying an escaped unpaired surrogate refuses here (below), and
+    keys, string values and lexeme carriers are classified by type IDENTITY (exactly str,
+    exactly _Number), so a _Number key can never serialize into duplicate-key JSON. A
+    CODE-BUILT model (the self-test's literals, a finite exact int/float) emits under the same
+    number rule, but the container and numeric branches classify it by isinstance, so a SUBCLASS of
     int/float/dict/list, which only this repository's own code could pass (_emit is
     module-private and the public entry gates refuse foreign-typed models), is NOT covered by
     the fixed-point claim and may emit bytes _parse refuses. The output is held to
@@ -349,10 +381,10 @@ def _emit(model):
     quotes plus base bytes plus escape growth, the serializer's own arithmetic) exceeds the
     remaining budget, so a huge or escape-heavy string, the caller's length-gated candidate
     included, never allocates a serialization past the budget, and a value that fits is never
-    wrongly refused. Raises _ParseRefusal on all of those and on a value
-    no parsed model can contain (a key or value of a foreign type), and RecursionError on nesting
-    near the interpreter recursion limit (roughly 1000 levels, dependent on the caller's
-    remaining stack); merge_registration maps every one of these to CANNOT-EVALUATE. The residual
+    wrongly refused. Raises _ParseRefusal on all of those and on a value no parsed model can
+    contain (a key or value of a foreign type), and RecursionError on nesting near the
+    interpreter recursion limit (roughly 1000 levels, dependent on the caller's remaining
+    stack); merge_registration maps every one of these to CANNOT-EVALUATE. The residual
     reformatting of a changed merge is disclosed in the module docstring."""
     out = []
     budget = [MAX_REGISTRATION_BYTES]
@@ -384,7 +416,7 @@ def _emit_value(value, depth, out, budget):
         # code-built lexeme carrier can never emit bytes _parse would refuse (the fixed point).
         # Exact type: a _Number SUBCLASS is caller-run code and falls through to the
         # unserializable refusal below, never into str(value) on an overridable __str__.
-        if not (_NUMBER_LEXEME_RE.match(value) and math.isfinite(float(value))):
+        if not _is_finite_lexeme(value):
             raise _ParseRefusal("number lexeme {} is not a finite strict-JSON number".format(
                 _shown(value)))
         _emit_piece(str(value), out, budget)
@@ -473,10 +505,13 @@ def _is_json_string(value):
 
 
 def _is_json_number(value):
-    """A parsed JSON number (_Number, finite by construction) or, for code-built models such as the
-    self-test's, a finite non-bool int/float."""
-    if isinstance(value, _Number):
-        return True
+    """A JSON number: an exact _Number whose lexeme passes the parser's own number rule
+    (_is_finite_lexeme: strict-JSON grammar, then finite double range), or, for code-built
+    models such as the self-test's, a finite non-bool int/float. A parsed _Number always
+    passes; a code-built carrier the gate admits by type ("NaN", "1e400", "007", any
+    non-number text) is refused here rather than trusted as finite by construction."""
+    if type(value) is _Number:
+        return _is_finite_lexeme(value)
     if isinstance(value, bool):
         return False
     if not isinstance(value, (int, float)):
@@ -503,17 +538,20 @@ def _null_refusal(value, where):
 # The ONE fixed finding a gate returns for a foreign-typed model node. Deliberately CONSTANT: it
 # names no type and reads nothing off the refused object (no repr, no str, no type name off a
 # metaclass), so no method of a hostile type ever runs on the refusal path.
-_GATE_MODEL_FINDING = ("registration model carries a node that is not a parsed-JSON type "
-                       "(exactly dict, list, str, the module's _Number, int, float, bool or "
-                       "None; the entry gate refuses foreign types unread)")
+_GATE_MODEL_FINDING = ("registration model carries a node of a type the entry gate does not "
+                       "admit (exactly dict, list, str, the module's _Number, bool or None, "
+                       "the parsed-JSON types, or an int or float in a code-built model; the "
+                       "entry gate refuses foreign types unread)")
 
 
 def _foreign_typed(model):
     """The public validator's ENTRY GATE (fix 5): ONE iterative pre-order walk, no recursion (so
     depth cannot crash it) and visited-id tracking on containers (so a self-referencing
     code-built model terminates instead of hanging), requiring every node, keys included, to be
-    an EXACT parsed-JSON type: dict, list, str, the module's own _Number, int, float, bool or
-    None, decided by IDENTITY alone (`is` on type(node), which a __class__ spoof cannot fool
+    of an EXACT admitted type: the parsed-JSON types dict, list, str, the module's own _Number,
+    bool and None, plus int and float, which only a code-built model carries (_parse returns
+    numbers as _Number). The decision is by IDENTITY alone (`is` on type(node), which a
+    __class__ spoof cannot fool
     and which never invokes a method, a metaclass __eq__ included; None, True and False by
     object identity, and bool cannot be subclassed). Past this gate only built-in-backed types
     flow, so every interior check classifies parsed data instead of defending against
@@ -543,13 +581,18 @@ def _foreign_typed(model):
 
 def validate_registration_model(model):
     """Validate an already-parsed registration model against the closed v1 shape. Returns an
-    _opf_adopt.AdoptValidation. THE ENTRY GATE comes first (fix 5: one gate per public function,
-    never per-dunder hardening): _foreign_typed walks the model once and refuses any
-    foreign-typed node, keys included, with the one fixed _GATE_MODEL_FINDING and no method of
-    the refused object ever run; past the gate every interior check classifies parsed data.
-    Structural wrongness and out-of-vocabulary closed tokens short-circuit
-    CANNOT-EVALUATE; schema violations accumulate to INVALID; only a fully recognized shape is VALID
-    (never a best-effort read around an unrecognized part)."""
+    _opf_adopt.AdoptValidation and never raises on any model its gate admits (every finding
+    formats caller content through _shown, which never raises). THE ENTRY GATE comes first
+    (fix 5: one gate per public function, never per-dunder hardening): _foreign_typed walks the
+    model once and refuses any foreign-typed node, keys included, with the one fixed
+    _GATE_MODEL_FINDING and no method of the refused object ever run; past the gate every
+    interior check classifies parsed data. Structural wrongness and out-of-vocabulary closed
+    tokens short-circuit CANNOT-EVALUATE; schema violations accumulate to INVALID; only a fully
+    recognized shape is VALID (never a best-effort read around an unrecognized part). SCOPE:
+    this decides the closed v1 shape of the recognized hooks surface; an opaque subtree
+    ($schema, env, model, permissions) is gated for type only, so a code-built opaque value
+    the emitter refuses (a non-finite float, a key that is not exactly a string) validates
+    VALID here and refuses at emission. _parse never produces such a value."""
     if _foreign_typed(model):
         return schema.AdoptValidation(CANNOT_EVALUATE, [_GATE_MODEL_FINDING])
     if not isinstance(model, dict):
@@ -655,8 +698,11 @@ def _validate_group(group, where, findings):
         if verdict is not None:
             return verdict
         if not _is_json_string(entry["type"]) or entry["type"] not in HOOK_TYPES:
-            # classification first: a _Number("command") is a number-typed field and must
-            # refuse here, never satisfy the closed-vocabulary membership test by lexeme.
+            # classification first: a number-typed field never satisfies a string-typed check.
+            # Belt and braces, not a sole guard: _Number's type-aware __eq__ already keeps a
+            # _Number("command") out of the HOOK_TYPES membership test, so no vector can tell
+            # this exact-type test from an isinstance one; it keeps the classification explicit
+            # and independent of _Number's equality.
             return schema.AdoptValidation(
                 CANNOT_EVALUATE,
                 ["{} type {} outside the closed v1 vocabulary".format(
@@ -1397,6 +1443,18 @@ def self_test():
     except ValueError:
         gate_raised = True
     check("canonical-group-gate-refuses", gate_raised)
+    # the gate's other two guards, each pinned directly: an exact str one character over the
+    # registration bound (a clean token, so only the length guard refuses it) and a short exact
+    # str carrying a control character (only the token guard refuses it). Removing either guard
+    # turns exactly its vector red, because the function then returns a group around the value.
+    for name, bad in (("overlength", "x" * (MAX_REGISTRATION_BYTES + 1)),
+                      ("invalid-token", "a\nb")):
+        gate_raised = False
+        try:
+            canonical_hook_group(bad)
+        except ValueError:
+            gate_raised = True
+        check("canonical-group-{}-refuses".format(name), gate_raised)
     ctrl_cmd = canonical_registration()
     ctrl_cmd["hooks"]["PostToolUse"][0]["hooks"][0]["command"] = "run\N{PARAGRAPH SEPARATOR}it"
     check("existing-command-control-invalid",
@@ -1529,6 +1587,24 @@ def self_test():
     cyclic["env"]["self"] = cyclic
     check("model-gate-cyclic-model-terminates",
           validate_registration_model(cyclic).status is VALID)
+    # "keys included" is pinned: a foreign KEY inside an opaque subtree, which no interior
+    # check reads, refuses at the gate unread (dropping the walk's key push lets it validate
+    # VALID, so exactly this vector turns red).
+    key_repr_calls = []
+
+    class _RecordingKey(str):
+        __slots__ = ()
+
+        def __repr__(self):
+            key_repr_calls.append("repr")
+            return str.__repr__(self)
+
+    opaque_key = dict()
+    opaque_key[_RecordingKey("k")] = 1
+    v = validate_registration_model(dict(env=opaque_key, hooks=dict()))
+    check("model-gate-opaque-key-refused-unread",
+          v.status is CANNOT_EVALUATE and v.findings == [_GATE_MODEL_FINDING]
+          and key_repr_calls == [])
 
     # 6b: JSON null anywhere in the recognized hooks surface refuses CANNOT-EVALUATE with a NAMED
     # finding; null is never read as absence and never crashes, while genuinely ABSENT optional
@@ -1777,13 +1853,27 @@ def self_test():
     check("control-heavy-value-refuses", ctrl_value_refused)
     # only the tiny "env" key is ever serialized; the 2,400,002-byte escaped value is not.
     check("control-heavy-value-never-serialized", 0 < dumped[0] <= 16)
+    # the MULTIBYTE term of the exact count: a two-byte-UTF-8 candidate UNDER the gate bound
+    # whose 1,200,002-byte serialization cannot fit refuses before json.dumps builds it (a
+    # character-count revert of the UTF-8 term reads it as 600,002 bytes, lets json.dumps
+    # build it, and turns exactly this red).
+    dumped[0] = 0
+    try:
+        globals()["json"] = _CountingJson
+        r = merge_registration(b"{}", "\u00e9" * 600000)
+    finally:
+        globals()["json"] = real_json
+    check("multibyte-candidate-refused-never-serialized",
+          r.status is CANNOT_EVALUATE and r.new_bytes is None
+          and any("exceed" in f for f in r.findings) and 0 < dumped[0] <= 4096)
 
     # 7d3: the pre-serialization checks are EXACT (the serializer's own arithmetic), so they
     # can never refuse an emission that fits: a value or key landing the output exactly ON
     # the byte bound is accepted and one unit more refuses, for plain ASCII, escape-doubled,
     # \uXXXX-control and two-byte UTF-8 content alike (a pre-check stricter than exact, a
-    # +300000 slack say, turns the at-bound acceptances red; an overcounting escape or
-    # multibyte formula does too).
+    # +300000 slack say, turns the at-bound acceptances red). These end-to-end vectors keep a
+    # few bytes of closing structure after the string or key, so an overcount smaller than
+    # that is pinned by the direct and zero-slack vectors after them, not by these.
     def _emit_bound_refuses(model):
         try:
             _emit(model)
@@ -1817,10 +1907,60 @@ def self_test():
           == MAX_REGISTRATION_BYTES)
     check("late-key-one-over-refuses",
           _emit_bound_refuses({"permissions": {"k" * (key_room + 1): 0}}))
+    # the count ITSELF is exact: _string_bytes equals the serializer's own UTF-8 byte length
+    # over an edge set (every escape class, DEL and C1, two-, three- and four-byte UTF-8, a lone
+    # surrogate, and every code point below U+0080), so an overcount or undercount of even one
+    # byte in any term turns this red.
+    edge_strings = ["", "a", '"', "\\", "\b\t\n\r", "\x00\x01\x19", "\x7f\x80\x9f", "\u00e9",
+                    "\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}", "\uffff",
+                    "\U0010ffff", "\ud800", "caf\u00e9 \"q\"\n\x01",
+                    "".join(chr(c) for c in range(0x80))]
+    check("string-bytes-exact-over-edge-set",
+          all(_string_bytes(s) == len(json.dumps(s, ensure_ascii=False).encode(
+              "utf-8", "surrogatepass")) for s in edge_strings))
+
+    # ZERO-SLACK boundary vectors: the string or key under test is the FINAL piece against a
+    # budget of exactly the bytes up to and including it. The exact budget must admit it (an
+    # overcount of even one byte, or a stricter-than-exact pre-check, refuses it and turns the
+    # vector red), and a budget one byte short must refuse it with json.dumps never run (an
+    # undercount lets the pre-check pass and json.dumps build the piece first, red too).
+    def _final_piece_exact(value, as_key):
+        if as_key:
+            model, lead = {value: _Number("0")}, ["{\n"]
+            piece = "  " + json.dumps(value, ensure_ascii=False) + ": "
+        else:
+            model, lead = value, []
+            piece = json.dumps(value, ensure_ascii=False)
+        need = sum(len(p.encode("utf-8", "surrogatepass")) for p in lead + [piece])
+        fits = []
+        try:
+            _emit_value(model, 0, fits, [need])
+        except _EmitBoundRefusal:
+            pass  # a key's value cannot fit a zero-slack budget; only the key line is judged
+        short = []
+        short_refused = False
+        dumped[0] = 0
+        try:
+            globals()["json"] = _CountingJson
+            try:
+                _emit_value(model, 0, short, [need - 1])
+            except _EmitBoundRefusal:
+                short_refused = True
+        finally:
+            globals()["json"] = real_json
+        return fits == lead + [piece] and short_refused and short == lead and dumped[0] == 0
+
+    for kind, text in (("ascii", "a" * 1000), ("escape", '"\\' * 500),
+                       ("control", "\x01\x19\n" * 300), ("utf8", "\u00e9" * 700),
+                       ("astral", "\U0001f600" * 300)):
+        check("final-string-zero-slack-{}".format(kind), _final_piece_exact(text, False))
+        check("final-key-zero-slack-{}".format(kind), _final_piece_exact(text, True))
 
     # 7e: the emitter itself holds numbers to the parser's number grammar and finite double
-    # range, so emission is a fixed point under _parse for every model it emits at all, including
-    # code-built models (each vector below used to emit bytes _parse then refuses).
+    # range, so a code-built exact int, float or _Number that _parse would refuse is refused
+    # here instead of emitted (each vector below used to emit bytes _parse then refuses). The
+    # fixed-point claim is exactly the _emit docstring's narrowed scope, parsed and merge-built
+    # models; a subclass of int, float, dict or list is outside it.
     def _emit_refuses(model):
         try:
             _emit(model)
@@ -1864,6 +2004,44 @@ def self_test():
     r = merge_registration(deep_env, entry)
     check("deep-nesting-emission-cannot-eval",
           r.status is CANNOT_EVALUATE and r.new_bytes is None)
+    # a FINDING never recurses over adopter content either: exact bytes nesting an array in
+    # the entry type field just under the parser's own depth limit (found here by bisection,
+    # since the limit depends on the build and its stack) parse, then refuse on the type with
+    # the fixed array descriptor. A repr-based finding exhausts the stack on it on builds
+    # whose repr overflows below the parser limit (round 7: from about 47,000 levels, against
+    # a parser limit near 58,000, on CPython 3.14), an uncaught RecursionError.
+    type_head = b'{"hooks":{"Stop":[{"hooks":[{"command":"x","type":'
+    type_tail = b'}]}]}}'
+
+    def _deep_type(depth):
+        return type_head + b"[" * depth + b"]" * depth + type_tail
+
+    def _parses(raw):
+        try:
+            _parse(raw)
+        except _ParseRefusal:
+            return False
+        return True
+
+    low, high = 0, 100000
+    if _parses(_deep_type(high)):
+        low = high
+    while high - low > 1:
+        mid = (low + high) // 2
+        if _parses(_deep_type(mid)):
+            low = mid
+        else:
+            high = mid
+    deep_type = _deep_type(max(low - 64, 0))
+    try:
+        r = merge_registration(deep_type, entry)
+        deep_type_raised = False
+    except RecursionError:
+        deep_type_raised = True
+    check("deep-array-type-under-parser-limit-refuses-never-raises",
+          not deep_type_raised and r.status is CANNOT_EVALUATE and r.new_bytes is None
+          and r.findings == ["hooks['Stop'][0].hooks[0] type {} outside the closed v1 "
+                             "vocabulary".format(_SHOWN_ARRAY)])
 
     # 8: an existing CONFLICTING registration of the same entry refuses: same command under another
     # matcher, under another event, or beside extra entries is never treated as already-merged.
@@ -1945,6 +2123,43 @@ def self_test():
     check("model-code-built-huge-int-refuses",
           validate_registration_model({"hooks": {"Stop": [{"hooks": [
               {"command": "x", "type": "command", "timeout": 10 ** 400}]}]}}).status is INVALID)
+    # an EXACT _Number carrier the gate admits by type is held to the parser's own number
+    # rule (grammar, then finite range) before it counts as a timeout, never trusted as finite
+    # by construction: each malformed or non-finite lexeme refuses with the timeout finding,
+    # while grammatical finite lexemes stay VALID (dropping the lexeme check lets all five
+    # validate VALID; dropping only its grammar half makes float() raise on the non-numbers).
+    timeout_finding = ["hooks['Stop'][0].hooks[0] timeout is not a number in the finite "
+                       "double range"]
+
+    def _timeout_model(lexeme):
+        return {"hooks": {"Stop": [{"hooks": [
+            {"command": "x", "type": "command", "timeout": _Number(lexeme)}]}]}}
+
+    check("model-exact-number-carrier-lexeme-checked",
+          all(validate_registration_model(_timeout_model(bad)).findings == timeout_finding
+              for bad in ("not-a-number", "NaN", "1e400", "007", ""))
+          and all(validate_registration_model(_timeout_model(good)).status is VALID
+                  for good in ("60", "-0", "1.5E3", "1e-400")))
+    # no FINDING path formats a caller value in a way that can raise: an exact int past the
+    # interpreter's digit limit and a code-built array nested far past any repr depth, each
+    # in the entry type field, refuse with a fixed descriptor (a repr-based finding raises
+    # ValueError on the first and RecursionError on the second).
+    deep_array = []
+    for _ in range(200000):
+        deep_array = [deep_array]
+    for name, type_value, shown in (("huge-int", 10 ** 5000, _SHOWN_INT),
+                                    ("int-in-array", [10 ** 5000], _SHOWN_ARRAY),
+                                    ("deep-array", deep_array, _SHOWN_ARRAY)):
+        try:
+            v = validate_registration_model({"hooks": {"Stop": [{"hooks": [
+                {"command": "x", "type": type_value}]}]}})
+            refused = v.status is CANNOT_EVALUATE and v.findings == [
+                "hooks['Stop'][0].hooks[0] type {} outside the closed v1 vocabulary".format(
+                    shown)]
+        except (ValueError, RecursionError):
+            refused = False
+        check("model-{}-type-refuses-never-raises".format(name), refused)
+    del deep_array, type_value
 
     # 11: findings and refusal messages BOUND what they repeat (_shown): on every path that
     # embeds adopter content (a number lexeme, a key, a duplicate key, a hook event, an entry
@@ -1991,6 +2206,27 @@ def self_test():
           _shown("\x01" * 18) == repr("\x01" * 18)
           and _shown("\U000f0000" * 20) == repr("\U000f0000" * 20)
           and _shown(_Number("1")) == "1")
+    # an int, a table and an array are NEVER formatted, whatever their size: each comes back
+    # as its fixed descriptor (restoring a repr for any of them turns this red), and a
+    # formatting failure of any kind comes back as the fixed placeholder, never an exception
+    # (a raising formatter injected at the module's repr seam; removing the guard lets it
+    # raise and turns the second check red).
+    check("shown-int-and-containers-fixed-descriptors",
+          _shown(7) == _SHOWN_INT and _shown(10 ** 5000) == _SHOWN_INT
+          and _shown(dict(a=1)) == _SHOWN_TABLE and _shown([1]) == _SHOWN_ARRAY)
+
+    def _raising_repr(value):
+        raise ValueError("formatter fault (self-test shim)")
+
+    try:
+        globals()["repr"] = _raising_repr
+        try:
+            shown_fault = _shown("x")
+        except ValueError:
+            shown_fault = None
+    finally:
+        del globals()["repr"]
+    check("shown-formatting-failure-placeholder", shown_fault == _SHOWN_UNFORMATTABLE)
 
     # 11b: the findings LIST is bounded too: at most MAX_FINDINGS findings plus one
     # suppression marker come back, so a registration with tens of thousands of violations
