@@ -22,8 +22,9 @@ defective fixture suite (tools/selftest_aiqt_corpus.py) runs to green under a po
 GIT_INDEX_FILE and under a poisoned GIT_DIR, through the direct __main__ run AND the imported
 run_self_test() surface (which bypasses the entry-point scrub), each aimed at a decoy caller
 repository built here, and the decoy's .git content is asserted BYTE-IDENTICAL afterwards, so the
-leak cannot silently return. Fourth, a repo-wide maintenance-pin completeness scan (F-367),
-run as an enforceable CONTRACT: every git launch under tools/ and opf/tools/ must be a direct
+leak cannot silently return. Fourth, a repo-wide maintenance-pin tripwire scan (F-367) over
+the launch forms it can resolve (its residual is disclosed at the scan): every git launch
+under tools/ and opf/tools/ must be a direct
 subprocess list-argv call this scan can resolve, a resolved maintenance-triggering launch must
 carry the EFFECTIVE F-367 argv pins (`-c key=value` pairs in option position), route through a
 covered environment or a CALLED scrub, or carry a written justification, and every launch the
@@ -1815,7 +1816,7 @@ def _auto_maintenance_children(workdir, env):
     return children
 
 
-# ---------- layer 4: the repo-wide maintenance-pin completeness scan (F-367) ----------
+# ---------- layer 4: the repo-wide maintenance-pin tripwire scan (F-367) ----------
 # Round 1 of the F-367 fix showed that a HAND enumeration of fixture harnesses misses members:
 # tools/selftest_ci_status.py committed through a hand-rolled environment and an absolute git
 # executable, bypassing the shared scrub, the lifecycle PATH wrapper, and every reviewed funnel.
@@ -1833,8 +1834,10 @@ def _auto_maintenance_children(workdir, env):
 # attribute, subprocess.__dict__ / os.__dict__, vars(subprocess) / vars(os)), a launch with
 # **-expanded keywords or an executable= override, an argv or argv head the resolver cannot
 # reduce to literals (a helper return, another module's value, a parameterized subcommand
-# slot), a tracked argv list mutated in place (a subscript write, insert/remove/pop/clear/
-# sort/reverse: the resolved value is invalidated, never trusted), and import/alias spellings
+# slot), a tracked argv list mutated in place at function OR module scope (a subscript
+# write, an insert/remove/pop/clear/sort/reverse call: the resolved value is invalidated,
+# never trusted), a tracked argv bound or grown only AFTER the launch point (a pin appended
+# after the launch is never credited to it), and import/alias spellings
 # that would re-spell a launch away from the module-qualified form this scan reads.
 # A RESOLVED git launch is judged on its EFFECTIVE argv with git's own LAST-VALUE-WINS config
 # semantics (verified on git 2.53): the global-option region is parsed positionally, each F-367
@@ -1842,13 +1845,19 @@ def _auto_maintenance_children(workdir, env):
 # argument never counts), a NO_AUTO_MAINTENANCE splice counts only through its RESOLVED literal
 # elements, a LATER `-c` that re-sets a pin key to a non-pin value re-enables maintenance and
 # is a finding NO env coverage can absorb (-c outranks every environment-scope pin), and a
-# `--config-env` naming a pin key is the same finding (its launch-time value outranks -c). A
+# pin key whose LAST option-position setting is a `--config-env` is the same finding (its
+# launch-time environment value is unreadable here; -c and --config-env apply in
+# command-line order on git 2.53, last value wins, so a LATER `-c` re-pin restores the
+# pin). A
 # launch whose resolved SUBCOMMAND is not maintenance-triggering is out of scope (a trigger
-# word in operand position, `git show commit`, is not a launch of that trigger). A scrub covers
-# a launch only when the module actually CALLS it (scrub-first placement in the named entries
-# is separately enforced by the layer-2 scope/ checks above); a merely-imported scrub covers
-# nothing. An env= is pin-carrying only when it provably derives from git_fixture_env() or
-# from a scrubbed os.environ WITHOUT overriding any GIT_CONFIG_COUNT/KEY_n/VALUE_n pin
+# word in operand position, `git show commit`, is not a launch of that trigger). A scrub or
+# lifecycle call covers a launch only from a covering SCOPE: the launch's own function, an
+# enclosing function, the module scope, or a call reached through every visible same-module
+# caller (a self-test's scrub call never covers a production launch elsewhere in the file;
+# scrub-first placement in the named entries is separately enforced by the layer-2 scope/
+# checks above); a merely-imported scrub covers nothing. An env= is pin-carrying only when
+# it provably derives from git_fixture_env() or from a scope-covered scrubbed os.environ
+# WITHOUT overriding any GIT_CONFIG_COUNT/KEY_n/VALUE_n or GIT_CONFIG_PARAMETERS pin
 # variable on the way.
 # DISCLOSED RESIDUAL (syntactic bounds, the same stance as the routing checks above): this scan
 # reads direct, literal Python launch forms only. Element-level literal resolution stays within
@@ -1860,8 +1869,8 @@ def _auto_maintenance_children(workdir, env):
 # non-git wrapper program (an `env`/`sh`/`bash`/interpreter head ends the analysis at that
 # head), an unresolved `-c` VALUE slot, and an unresolved argv tail AFTER the three pins are
 # effective in option position (the pinned-funnel idiom passes subcommand and operands there;
-# a RESOLVED later re-enable is still caught). Those forms stay covered by review posture, not
-# mechanics.
+# the parse ends at the first unresolved token, so even a RESOLVED re-enable spelled after it
+# is out of this scan's reach). Those forms stay covered by review posture, not mechanics.
 _SCAN_DIRS = ("tools", "opf/tools")
 _SCAN_LAUNCH_NAMES = frozenset(("run", "Popen", "call", "check_call", "check_output",
                                 "getoutput", "getstatusoutput"))
@@ -1875,10 +1884,18 @@ _SCAN_TRIGGERS = frozenset(("commit", "merge", "rebase", "am", "cherry-pick", "p
                             "fetch", "gc", "maintenance"))
 # key (git config keys are case-insensitive) -> required value, from the shared constant.
 _SCAN_PIN_VALUES = {key.lower(): value for key, value in _git_fixture_env._NO_AUTO_MAINTENANCE}
-# The seven process-environment pin variables: an env derivation that overrides ANY of them
-# (git_fixture_env(GIT_CONFIG_COUNT="0"), dict(os.environ, GIT_CONFIG_COUNT="0")) disables the
-# injected config wholesale, so it can never count as pin-carrying.
-_SCAN_PIN_ENV_VARS = frozenset(_git_fixture_env._MAINTENANCE_PIN_VARS)
+# The seven process-environment pin variables, plus GIT_CONFIG_PARAMETERS: an env derivation
+# that overrides ANY of them (git_fixture_env(GIT_CONFIG_COUNT="0"), dict(os.environ,
+# GIT_CONFIG_COUNT="0")) disables the injected config wholesale, and git reads
+# GIT_CONFIG_PARAMETERS with the same command scope AFTER the COUNT/KEY_n/VALUE_n family, so
+# an override there re-enables maintenance OVER the injected pins (verified on git 2.53);
+# either way the derivation can never count as pin-carrying. GIT_CONFIG_GLOBAL /
+# GIT_CONFIG_SYSTEM / GIT_CONFIG_NOSYSTEM overrides stay OUT of this set: they select
+# FILE-scope config, which every command-scope pin outranks, so they cannot re-enable
+# maintenance (verified on git 2.53: a global or system config file carrying
+# maintenance.auto=true spawns no maintenance child under the pinned fixture env).
+_SCAN_PIN_ENV_VARS = frozenset(_git_fixture_env._MAINTENANCE_PIN_VARS) | frozenset(
+    ("GIT_CONFIG_PARAMETERS",))
 _SCAN_COVERED_ENV_CALLS = frozenset(("git_fixture_env",))
 _SCAN_SCRUB_NAMES = frozenset(("scrub_git_environment", "fixture_git_lifecycle"))
 _SCAN_RESOLVE_DEPTH = 6
@@ -1886,6 +1903,11 @@ _SCAN_RESOLVE_DEPTH = 6
 # return, a name assigned more than once, an unresolved splice). Distinct from a single opaque
 # SLOT (one list element whose VALUE is unresolved, e.g. str(repo)), which stays one argv item.
 _SCAN_OPEN = "<unresolved argv region>"
+# A pin key whose LAST option-position setting is a --config-env carries a launch-time
+# environment value this scan cannot read: the sentinel never equals a pin value, so the
+# verdict fails closed as stomped unless a LATER `-c` re-pins the key (-c and --config-env
+# apply in command-line order on git 2.53, last value wins).
+_SCAN_CONFIG_ENV_VALUE = "<config-env launch-time value>"
 # git GLOBAL options that consume the FOLLOWING argv slot; `--opt=value` spellings are single
 # slots and every other `-`-leading token is treated as a bare flag (git itself REJECTS a
 # joined `-ckey=value` spelling, verified on git 2.53, so it cannot launch anything). `-c` and
@@ -1916,6 +1938,30 @@ _SCAN_ALLOWED_UNPINNED = (
     ("tools/check_msg_leaks.py", "_run_git", ("git",),
      "production gate read helper (log/rev-parse over the real repository); read-only by"
      " design, and production launches stay unchanged"),
+    ("tools/check_record_sections.py", "_git", ("git",),
+     "shared gate/self-test funnel under _clean_env (GIT_* scrubbed, PATH kept):"
+     " production callers pass graph reads only (rev-parse/show/ls-tree/merge-base/"
+     " cat-file family), and the self-test's fixture init/config/add/commit calls are"
+     " reachable only from the lifecycle-wrapped self-test entry, whose PATH-front"
+     " wrapper pins every bare git; production launches stay unchanged by design"),
+    ("tools/check_release_build.py", "_git", ("git",),
+     "production gate read funnel over the real checkout (rev-parse/cat-file/show/"
+     " ls-tree/diff-tree/merge-base and `tag -l` listing reads); read-only by design,"
+     " and production launches stay unchanged"),
+    ("tools/check_release_cut.py", "git", ("git",),
+     "production gate read funnel under git_environment() and --no-replace-objects"
+     " (rev-parse/cat-file/ls-tree/ls-files/symbolic-ref/check-ref-format/rev-list/"
+     " merge-base reads); read-only by design, and production launches stay unchanged"),
+    ("tools/check_release_delta.py", "_git", ("git",),
+     "production gate read funnel (rev-parse/cat-file/ls-tree/show and `worktree list`"
+     " reads); read-only by design, and production launches stay unchanged"),
+    ("tools/check_release_delta.py", "_index_materialized_tree", ("git",),
+     "throwaway-index staging funnel: the loop variable carries exactly `init -q` and"
+     " `add --force -A` over a raw-materialized temp tree under a scrubbed env; neither"
+     " subcommand is maintenance-triggering and no commit is ever made there"),
+    ("tools/check_version_monotonicity.py", "_git", ("git",),
+     "production gate read funnel (rev-parse/cat-file/ls-tree/show/merge-base reads);"
+     " read-only by design, and production launches stay unchanged"),
     ("opf/tools/_opf_observe.py", "_run_git_config_discovery", ("git",),
      "production read-only config/index-discovery funnel under --no-pager (config reads,"
      " ls-files, and the no-lazy-fetch cat-file -e availability probe), never a"
@@ -1937,9 +1983,10 @@ _SCAN_ALLOWED_UNPINNED = (
      "cannot-evaluate argv: replays the registry-enumerated gate commands (the generators'"
      " python3 --check forms and the manifest-integrity commands) inside a throwaway"
      " materialized checkout; this entry covers ONLY that replayed-command launch - the"
-     " checkout's own staging init/add/commit launches beside it carry the three F-367 pins"
-     " as literal argv in option position, resolved and enforced by this scan, never"
-     " absorbed here"),
+     " checkout's own staging launches beside it are resolved and enforced by this scan,"
+     " never absorbed here: the maintenance-capable add and commit argvs carry the three"
+     " F-367 pins as literal `-c` pairs in option position, and the bare `git init -q`"
+     " carries none (init is not maintenance-triggering)"),
     ("tools/selftest_aiqt_hooks.py", "_main_isolated", ("unresolved",),
      "cannot-evaluate head: replays the REGISTERED hook entry's own dispatcher command (a"
      " python3 hook-script argv from the hooks registry), not a git launch; the suite's"
@@ -2029,12 +2076,21 @@ def _scan_alias_findings(rel, tree):
 
 
 def _scan_module_consts(tree):
-    """Module-level single-target assignments, name to value node."""
+    """Module-level single-target assignments, name to value node. A name the module scope
+    binds more than once, grows (an append/extend or an augmented assignment), or mutates
+    in place is EXCLUDED outright: module-scope argv mutation invalidates resolution
+    exactly like function-scope mutation, so an initial value the module later rewrites is
+    never trusted (a module-scope launch additionally resolves through the module scope
+    itself, where growth is read in source order and bounded to the launch point)."""
     consts = dict()
     for node in tree.body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1 \
                 and isinstance(node.targets[0], ast.Name):
             consts[node.targets[0].id] = node.value
+    for name in list(consts):
+        plain, extend, mutated = _scan_local_assigns(tree, name)
+        if mutated or extend or len(plain) != 1:
+            del consts[name]
     return consts
 
 
@@ -2048,14 +2104,18 @@ def _scan_function_defs(tree):
     return defs
 
 
-def _scan_local_assigns(func_node, name):
+def _scan_local_assigns(func_node, name, launch=None):
     """(plain assignment value nodes, splice extension value nodes, mutated) for Name <name>
-    in the function's own scope, in SOURCE order (an extend that adds the pins before the
+    in the scope's own statements, in SOURCE order (an extend that adds the pins before the
     extend that adds the subcommand must be read in exactly that order, never reversed);
-    nested function and class bodies are other scopes and are skipped. `mutated` is True when
-    the scope also rewrites the value in place through a form the resolver does not model (a
-    subscript or slice write, an insert/remove/pop/clear/sort/reverse call, a del): any
-    resolved value is then invalidated, never trusted."""
+    <func_node> may be the MODULE node for a module-scope launch, so module-level argv
+    mutation is tracked exactly like function-scope mutation. Nested function and class
+    bodies are other scopes and are skipped. `mutated` is True when the scope also rewrites
+    the value in place through a form the resolver does not model (a subscript or slice
+    write, an insert/remove/pop/clear/sort/reverse call, a del), or - when <launch> is the
+    launch point's (lineno, col_offset) - when ANY binding or growth of the name sits AFTER
+    that point: this scan does not order control flow, so a pin appended after the launch
+    is never credited to it and the resolution is invalidated outright."""
     plain, extend, mutated = [], [], False
     if func_node is None:
         return plain, extend, mutated
@@ -2104,40 +2164,49 @@ def _scan_local_assigns(func_node, name):
                                     "__setitem__", "__delitem__"):
                 mutated = True
         stack.extend(ast.iter_child_nodes(node))
+    if launch is not None:
+        for lineno, col, _kind, _value in hits:
+            if (lineno, col) > launch:
+                mutated = True
+                break
     for _, _, kind, value in sorted(hits, key=lambda hit: (hit[0], hit[1])):
         (plain if kind == "plain" else extend).append(value)
     return plain, extend, mutated
 
 
-def _scan_flatten(expr, func_node, module_consts, depth):
+def _scan_flatten(expr, func_node, module_consts, depth, launch=None):
     """(ordered argv entries, open) within the resolver's bounds: literal lists and tuples,
     + concatenation, list()/tuple() wrapping, starred splices, and Name resolution through a
     single same-scope assignment (with its append/extend growth as tail entries) or a
     module-level literal. Each entry is a single-slot AST node, or the _SCAN_OPEN marker where
     an unknown-length region the resolver cannot reduce sits, so a POSITIONAL reading knows
-    exactly where its knowledge ends (a marker at the head hides the program; a marker after
-    the pins hides nothing that could re-enable maintenance)."""
+    exactly where its knowledge ends (a marker at the head hides the program; a marker
+    after effective pins ENDS the positional parse there, so anything spelled beyond it -
+    a resolved re-enable included - is out of the parse's reach: the disclosed
+    unresolved-tail residual, held by review posture, not mechanics)."""
     if depth <= 0:
         return [_SCAN_OPEN], True
     if isinstance(expr, (ast.List, ast.Tuple)):
         entries, opened = [], False
         for elt in expr.elts:
             if isinstance(elt, ast.Starred):
-                inner, inner_open = _scan_flatten(elt.value, func_node, module_consts, depth - 1)
+                inner, inner_open = _scan_flatten(elt.value, func_node, module_consts,
+                                                  depth - 1, launch)
                 entries.extend(inner)
                 opened = opened or inner_open
             else:
                 entries.append(elt)
         return entries, opened
     if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
-        left, lopen = _scan_flatten(expr.left, func_node, module_consts, depth - 1)
-        right, ropen = _scan_flatten(expr.right, func_node, module_consts, depth - 1)
+        left, lopen = _scan_flatten(expr.left, func_node, module_consts, depth - 1, launch)
+        right, ropen = _scan_flatten(expr.right, func_node, module_consts, depth - 1,
+                                     launch)
         return left + right, lopen or ropen
     if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name) \
             and expr.func.id in ("list", "tuple") and len(expr.args) == 1 and not expr.keywords:
-        return _scan_flatten(expr.args[0], func_node, module_consts, depth - 1)
+        return _scan_flatten(expr.args[0], func_node, module_consts, depth - 1, launch)
     if isinstance(expr, ast.Name):
-        plain, extend, mutated = _scan_local_assigns(func_node, expr.id)
+        plain, extend, mutated = _scan_local_assigns(func_node, expr.id, launch)
         if mutated:
             # An in-place rewrite (args[6] = ..., args.insert(...)) invalidates every resolved
             # element: an unknown-length region, never the pre-mutation value.
@@ -2148,9 +2217,11 @@ def _scan_flatten(expr, func_node, module_consts, depth):
             # No assignment in reach, or more than one (source order between them and the
             # launch is not tracked): an unknown-length region, never a guessed merge.
             return [_SCAN_OPEN], True
-        entries, opened = _scan_flatten(plain[0], func_node, module_consts, depth - 1)
+        entries, opened = _scan_flatten(plain[0], func_node, module_consts, depth - 1,
+                                        launch)
         for value in extend:
-            more, more_open = _scan_flatten(value, func_node, module_consts, depth - 1)
+            more, more_open = _scan_flatten(value, func_node, module_consts, depth - 1,
+                                            launch)
             entries.extend(more)
             opened = opened or more_open
         return entries, opened
@@ -2160,7 +2231,8 @@ def _scan_flatten(expr, func_node, module_consts, depth):
         # single-target assignments into the consts mapping under "self."/"cls." keys).
         target = expr.value.id + "." + expr.attr
         if target in module_consts:
-            return _scan_flatten(module_consts[target], func_node, module_consts, depth - 1)
+            return _scan_flatten(module_consts[target], func_node, module_consts,
+                                 depth - 1, launch)
     return [_SCAN_OPEN], True
 
 
@@ -2173,7 +2245,7 @@ def _scan_program_kind(value):
     return "non-git"
 
 
-def _scan_head_kind(node, func_node, module_consts, depth):
+def _scan_head_kind(node, func_node, module_consts, depth, launch=None):
     """bare-git / abs-git / named-git / non-git / unknown for the first argv entry."""
     if node is None or node is _SCAN_OPEN or depth <= 0:
         return "unknown"
@@ -2194,7 +2266,8 @@ def _scan_head_kind(node, func_node, module_consts, depth):
                 and isinstance(node.args[0].value, str):
             return _scan_program_kind(node.args[0].value)
         if callee_name in ("str", "abspath", "realpath", "fspath") and len(node.args) == 1:
-            return _scan_head_kind(node.args[0], func_node, module_consts, depth - 1)
+            return _scan_head_kind(node.args[0], func_node, module_consts, depth - 1,
+                                   launch)
         return "unknown"
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
         # A pathlib join: the RIGHTMOST component names the program.
@@ -2202,12 +2275,12 @@ def _scan_head_kind(node, func_node, module_consts, depth):
             return "abs-git" if node.right.value == "git" else "non-git"
         return "unknown"
     if isinstance(node, ast.Name):
-        plain, _, mutated = _scan_local_assigns(func_node, node.id)
+        plain, _, mutated = _scan_local_assigns(func_node, node.id, launch)
         if mutated:
             return "unknown"
         if not plain and node.id in module_consts:
             plain = [module_consts[node.id]]
-        kinds = set(_scan_head_kind(value, func_node, module_consts, depth - 1)
+        kinds = set(_scan_head_kind(value, func_node, module_consts, depth - 1, launch)
                     for value in plain)
         if len(kinds) == 1 and "unknown" not in kinds:
             return kinds.pop()
@@ -2219,7 +2292,7 @@ def _scan_head_kind(node, func_node, module_consts, depth):
             target = node.value.id + "." + node.attr
             if target in module_consts:
                 return _scan_head_kind(module_consts[target], func_node, module_consts,
-                                       depth - 1)
+                                       depth - 1, launch)
         if node.attr == "executable":
             return "non-git"
         if node.attr in _SCAN_GIT_HEAD_NAMES:
@@ -2228,7 +2301,7 @@ def _scan_head_kind(node, func_node, module_consts, depth):
     return "unknown"
 
 
-def _scan_element_literal(node, func_node, module_consts, depth):
+def _scan_element_literal(node, func_node, module_consts, depth, launch=None):
     """The literal string a single argv ENTRY resolves to within the resolver's bounds, or None
     for an opaque slot (one argv element whose value the scan cannot read)."""
     if node is None or node is _SCAN_OPEN or depth <= 0:
@@ -2243,35 +2316,41 @@ def _scan_element_literal(node, func_node, module_consts, depth):
                 return None
         return None
     if isinstance(node, ast.Name):
-        plain, extend, mutated = _scan_local_assigns(func_node, node.id)
+        plain, extend, mutated = _scan_local_assigns(func_node, node.id, launch)
         if not plain and node.id in module_consts:
             plain = [module_consts[node.id]]
         if len(plain) == 1 and not extend and not mutated:
-            return _scan_element_literal(plain[0], func_node, module_consts, depth - 1)
+            return _scan_element_literal(plain[0], func_node, module_consts, depth - 1,
+                                         launch)
     if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) \
             and node.value.id in ("self", "cls"):
         target = node.value.id + "." + node.attr
         if target in module_consts:
             return _scan_element_literal(module_consts[target], func_node, module_consts,
-                                         depth - 1)
+                                         depth - 1, launch)
     return None
 
 
-def _scan_git_argv_state(entries, func_node, module_consts):
+def _scan_git_argv_state(entries, func_node, module_consts, launch=None):
     """(status, subcommand) for a git-headed argv parsed POSITIONALLY through git's
     global-option region with git's own LAST-VALUE-WINS config semantics (verified on git
-    2.53: a later `-c gc.auto=6700` overrides an earlier `-c gc.auto=0`, and a `--config-env`
-    value outranks a `-c` for the same key): 'pinned' when every F-367 pin key's LAST resolved
-    option-position value is the pin value at the point the parse ends - the resolved
-    subcommand, or the start of an unresolved region (a tail is trusted only AFTER effective
-    pins, the pinned-funnel idiom's subcommand-and-operands slot; a RESOLVED later re-enable
-    never survives this parse); 'stomped' when a pin key's LAST resolved value is NOT the pin
-    value, or a `--config-env` names a pin key (its launch-time value outranks -c and every
-    environment-scope pin, so no env coverage can absorb it); 'subcommand' with the resolved
-    subcommand token when the pins are not effective; 'opaque' when an unknown-length region,
-    an unresolved slot, an unreadable or alias-remapping `-c` value, or a truncated option
-    reaches the parser before the pins are effective; 'end' for a fully resolved argv that
-    never reaches a subcommand."""
+    2.53: a later `-c gc.auto=6700` overrides an earlier `-c gc.auto=0`, and -c and
+    --config-env for the SAME key apply in command-line order, the later one winning):
+    'pinned' when every F-367 pin key's LAST resolved option-position value is the pin
+    value at the point the parse ends - the resolved subcommand, or the start of an
+    unresolved region (a tail is trusted only AFTER effective pins, the pinned-funnel
+    idiom's subcommand-and-operands slot; the parse ENDS there, so a re-enable spelled
+    after that point, even a resolved one, is out of this parse's reach: the disclosed
+    unresolved-tail residual); 'stomped' when a pin key's LAST resolved value is NOT the
+    pin value, or its LAST option-position setting is a `--config-env` (that value is an
+    environment VARIABLE read at launch time, unreadable here, and it outranks every
+    environment-scope pin, so no env coverage can absorb it); 'subcommand' with the
+    resolved subcommand token when the pins are not effective; 'opaque' when an
+    unknown-length region, an unresolved slot, an unreadable or alias-remapping `-c`
+    value, or a truncated option reaches the parser before the pins are effective (an
+    alias.* option never DISCARDS an adverse pin already parsed: a detected stomp is
+    returned as the stomp, not degraded to a coverage-gated opaque); 'end' for a fully
+    resolved argv that never reaches a subcommand."""
     pin_state = dict()
 
     def _verdict(sub):
@@ -2289,19 +2368,25 @@ def _scan_git_argv_state(entries, func_node, module_consts):
         token = None
         if entry is not _SCAN_OPEN:
             token = _scan_element_literal(entry, func_node, module_consts,
-                                          _SCAN_RESOLVE_DEPTH)
+                                          _SCAN_RESOLVE_DEPTH, launch)
         if token is None:
             return _verdict(None) or ("opaque", None)
         if token == "-c":
             if index + 1 >= len(entries) or entries[index + 1] is _SCAN_OPEN:
                 return "opaque", None
             value = _scan_element_literal(entries[index + 1], func_node, module_consts,
-                                          _SCAN_RESOLVE_DEPTH)
+                                          _SCAN_RESOLVE_DEPTH, launch)
             if value is None:
                 return "opaque", None
             key = value.partition("=")[0].lower()
             if key.startswith("alias."):
-                # A command-scope alias can remap ANY later word to another subcommand.
+                # A command-scope alias can remap ANY later word to another subcommand,
+                # but it cannot UN-set config already parsed: an adverse pin value
+                # detected before it stays the stomp finding (no env coverage can
+                # absorb a -c override), never discarded into a coverage-gated opaque.
+                state = _verdict(None)
+                if state is not None and state[0] == "stomped":
+                    return state
                 return "opaque", None
             if key in _SCAN_PIN_VALUES:
                 # Track the LAST value per pin key, exactly as git will apply it.
@@ -2313,7 +2398,7 @@ def _scan_git_argv_state(entries, func_node, module_consts):
                 if index + 1 >= len(entries) or entries[index + 1] is _SCAN_OPEN:
                     return "opaque", None
                 value = _scan_element_literal(entries[index + 1], func_node, module_consts,
-                                              _SCAN_RESOLVE_DEPTH)
+                                              _SCAN_RESOLVE_DEPTH, launch)
                 step = 2
             else:
                 value = token.partition("=")[2]
@@ -2322,10 +2407,19 @@ def _scan_git_argv_state(entries, func_node, module_consts):
                 return "opaque", None
             key = value.partition("=")[0].lower()
             if key in _SCAN_PIN_VALUES:
-                # The effective value is an environment VARIABLE read at launch time: this
-                # scan cannot see it, and it outranks -c, so the pin is gone either way.
-                return "stomped", None
+                # The effective value is an environment VARIABLE read at launch time,
+                # unreadable here. git applies -c and --config-env in COMMAND-LINE order
+                # (last value wins, verified on git 2.53), so this slot decides the key
+                # only when it is the key's LAST option-position setting: record the
+                # unreadable sentinel and keep parsing - a LATER `-c` re-pin restores
+                # the pin, and a key left on the sentinel fails _verdict as stomped.
+                pin_state[key] = _SCAN_CONFIG_ENV_VALUE
+                index += step
+                continue
             if key.startswith("alias."):
+                state = _verdict(None)
+                if state is not None and state[0] == "stomped":
+                    return state
                 return "opaque", None
             index += step
             continue
@@ -2342,40 +2436,105 @@ def _scan_git_argv_state(entries, func_node, module_consts):
     return "end", None
 
 
-def _scan_calls_module(tree, wanted):
-    """True when the module contains an actual CALL of one of <wanted> (a bare name or an
-    attribute). A merely-imported or merely-referenced scrub name proves nothing about the
+def _scan_direct_calls(scope_body, wanted):
+    """True when one of <wanted> is actually CALLED (a bare name or an attribute) among
+    this scope's OWN statements; nested function and class bodies are other scopes and are
+    skipped. A merely-imported or merely-referenced scrub name proves nothing about the
     launch environment, so it covers nothing."""
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
+    stack = list(scope_body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                             ast.Lambda)):
             continue
-        func = node.func
-        name = func.id if isinstance(func, ast.Name) else (
-            func.attr if isinstance(func, ast.Attribute) else None)
-        if name in wanted:
-            return True
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else (
+                func.attr if isinstance(func, ast.Attribute) else None)
+            if name in wanted:
+                return True
+        stack.extend(ast.iter_child_nodes(node))
     return False
+
+
+def _scan_scope_coverage(tree, wanted):
+    """(module-scope covered, covered function names) for calls of <wanted>: a scrub or
+    lifecycle call covers exactly the SCOPE that makes it, never the whole module, so a
+    self-test's scrub call cannot silently cover a production launch elsewhere in the same
+    file. A function is covered when its own scope calls <wanted>, or when every visible
+    same-module call site of its name sits in a covered scope (a least fixpoint, so a
+    function with NO visible call site - an entry point, an exported or dynamically
+    dispatched callback - is never covered by other scopes' calls). Definitions and call
+    sites are matched by bare name (instantiating a same-module class counts as a call
+    site of __init__, since construction RUNS it): the same syntactic bounds as the rest
+    of this scan, fail-closed on anything it cannot see."""
+    defs = _scan_function_defs(tree)
+    class_inits = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and any(
+                isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and stmt.name == "__init__" for stmt in node.body):
+            class_inits.add(node.name)
+    module_covered = _scan_direct_calls(tree.body, wanted)
+    covered = set(name for name, nodes in defs.items()
+                  if any(_scan_direct_calls(node.body, wanted) for node in nodes))
+    sites = dict()
+    stack = [(tree, ())]
+    while stack:
+        node, chain = stack.pop()
+        for child in ast.iter_child_nodes(node):
+            child_chain = chain
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                child_chain = chain + (child.name,)
+            if isinstance(child, ast.Call):
+                func = child.func
+                name = func.id if isinstance(func, ast.Name) else (
+                    func.attr if isinstance(func, ast.Attribute) else None)
+                if name in defs:
+                    sites.setdefault(name, []).append(chain)
+                if name in class_inits:
+                    sites.setdefault("__init__", []).append(chain)
+            stack.append((child, child_chain))
+    changed = True
+    while changed:
+        changed = False
+        for name in defs:
+            if name in covered:
+                continue
+            chains = sites.get(name)
+            if not chains:
+                continue
+            if all((module_covered if not chain
+                    else any(part in covered for part in chain))
+                   for chain in chains):
+                covered.add(name)
+                changed = True
+    return module_covered, frozenset(covered)
 
 
 def _scan_kw_stomps_pins(keywords):
     """True when a call's keyword overrides could rewrite an F-367 pin variable: an explicit
     GIT_CONFIG_COUNT/KEY_n/VALUE_n keyword (git_fixture_env(GIT_CONFIG_COUNT="0") and
-    dict(os.environ, GIT_CONFIG_COUNT="0") each disable EVERY env pin at the launch, verified
-    on git 2.53) or a **-expansion this scan cannot read."""
+    dict(os.environ, GIT_CONFIG_COUNT="0") each disable EVERY env pin at the launch,
+    verified on git 2.53), an explicit GIT_CONFIG_PARAMETERS keyword (read by git with
+    command scope AFTER the COUNT/KEY_n/VALUE_n family, so it re-enables maintenance OVER
+    the injected pins, verified on git 2.53), or a **-expansion this scan cannot read."""
     for keyword in keywords:
         if keyword.arg is None or keyword.arg in _SCAN_PIN_ENV_VARS:
             return True
     return False
 
 
-def _scan_env_covered(expr, func_node, module_consts, func_defs, module_scrubbed, depth):
+def _scan_env_covered(expr, func_node, module_consts, func_defs, scope_scrubbed, depth):
     """True when the env= expression provably derives from a pin-carrying source: a
     git_fixture_env(...) call (directly, through dict()/copy() derivation, a same-scope name,
-    or one level of same-module function returns), or os.environ in a module that CALLS the
-    in-place scrub or the lifecycle wrapper (both leave the pins set in os.environ) - in every
-    case only when no keyword override on the way rewrites a pin variable
-    (_scan_kw_stomps_pins): git_fixture_env(GIT_CONFIG_COUNT="0") and
-    dict(os.environ, GIT_CONFIG_COUNT="0") carry NO effective pins."""
+    or one level of same-module function returns), or os.environ at a launch whose SCOPE is
+    covered by a call of the in-place scrub or the lifecycle wrapper (both leave the pins
+    set in os.environ; a self-test's scrub call elsewhere in the file covers nothing here) -
+    in every case only when no keyword override on the way rewrites a pin variable
+    (_scan_kw_stomps_pins): git_fixture_env(GIT_CONFIG_COUNT="0"),
+    dict(os.environ, GIT_CONFIG_COUNT="0") and any GIT_CONFIG_PARAMETERS override carry NO
+    effective pins."""
     if expr is None or depth <= 0:
         return False
     if isinstance(expr, ast.Call):
@@ -2391,10 +2550,10 @@ def _scan_env_covered(expr, func_node, module_consts, func_defs, module_scrubbed
             if _scan_kw_stomps_pins(expr.keywords):
                 return False
             return _scan_env_covered(expr.args[0], func_node, module_consts, func_defs,
-                                     module_scrubbed, depth - 1)
+                                     scope_scrubbed, depth - 1)
         if callee_name == "copy" and isinstance(callee, ast.Attribute):
             return _scan_env_covered(callee.value, func_node, module_consts, func_defs,
-                                     module_scrubbed, depth - 1)
+                                     scope_scrubbed, depth - 1)
         returns = []
         for definition in func_defs.get(callee_name, []):
             for node in ast.walk(definition):
@@ -2402,7 +2561,7 @@ def _scan_env_covered(expr, func_node, module_consts, func_defs, module_scrubbed
                     returns.append((node.value, definition))
         if returns and all(
                 _scan_env_covered(value, definition, module_consts, func_defs,
-                                  module_scrubbed, depth - 1)
+                                  scope_scrubbed, depth - 1)
                 for value, definition in returns):
             return True
         return False
@@ -2414,20 +2573,21 @@ def _scan_env_covered(expr, func_node, module_consts, func_defs, module_scrubbed
             plain = [module_consts[expr.id]]
         return bool(plain) and all(
             _scan_env_covered(value, func_node, module_consts, func_defs,
-                              module_scrubbed, depth - 1) for value in plain)
+                              scope_scrubbed, depth - 1) for value in plain)
     if isinstance(expr, ast.Attribute):
         return (expr.attr == "environ" and isinstance(expr.value, ast.Name)
-                and expr.value.id == "os" and module_scrubbed)
+                and expr.value.id == "os" and scope_scrubbed)
     if isinstance(expr, ast.IfExp):
         return all(_scan_env_covered(branch, func_node, module_consts, func_defs,
-                                     module_scrubbed, depth - 1)
+                                     scope_scrubbed, depth - 1)
                    for branch in (expr.body, expr.orelse))
     return False
 
 
 def _scan_launches(tree):
-    """(node, flavor, launcher, dotted qualname, enclosing function node, innermost enclosing
-    class node) for every launch-shaped or tripwire-shaped node in the module: direct
+    """(node, flavor, launcher, dotted qualname, qualname parts, enclosing function node,
+    innermost enclosing class node) for every launch-shaped or tripwire-shaped node in the
+    module: direct
     subprocess.<launcher>(...) calls (flavor 'subprocess'), os-level launcher calls by any
     object spelling (flavor 'os', pty.spawn included), asyncio create_subprocess_* calls by
     any object spelling (flavor 'async'), and dynamic launcher access (flavor 'dynamic'):
@@ -2449,18 +2609,20 @@ def _scan_launches(tree):
                 func = child.func
                 if isinstance(func, ast.Attribute) and func.attr in _SCAN_LAUNCH_NAMES \
                         and isinstance(func.value, ast.Name) and func.value.id == "subprocess":
-                    found.append((child, "subprocess", func.attr, qualname, func_node,
-                                  class_node))
+                    found.append((child, "subprocess", func.attr, qualname, parts,
+                                  func_node, class_node))
                 else:
                     name = func.attr if isinstance(func, ast.Attribute) else (
                         func.id if isinstance(func, ast.Name) else None)
                     if name in _SCAN_OS_LAUNCH_NAMES:
-                        found.append((child, "os", name, qualname, func_node, class_node))
-                    elif name in _SCAN_ASYNC_LAUNCH_NAMES:
-                        found.append((child, "async", name, qualname, func_node, class_node))
-                    elif isinstance(func, ast.Name) and func.id in ("exec", "eval"):
-                        found.append((child, "dynamic", func.id, qualname, func_node,
+                        found.append((child, "os", name, qualname, parts, func_node,
                                       class_node))
+                    elif name in _SCAN_ASYNC_LAUNCH_NAMES:
+                        found.append((child, "async", name, qualname, parts, func_node,
+                                      class_node))
+                    elif isinstance(func, ast.Name) and func.id in ("exec", "eval"):
+                        found.append((child, "dynamic", func.id, qualname, parts,
+                                      func_node, class_node))
                     elif isinstance(func, ast.Name) and func.id == "getattr" \
                             and child.args and isinstance(child.args[0], ast.Name) \
                             and child.args[0].id in ("subprocess", "os"):
@@ -2473,18 +2635,18 @@ def _scan_launches(tree):
                                     and child.args[1].value not in launchers)
                         if not harmless:
                             found.append((child, "dynamic", "getattr on " + module,
-                                          qualname, func_node, class_node))
+                                          qualname, parts, func_node, class_node))
                     elif isinstance(func, ast.Name) and func.id == "vars" \
                             and child.args and isinstance(child.args[0], ast.Name) \
                             and child.args[0].id in ("subprocess", "os"):
                         found.append((child, "dynamic", "vars(" + child.args[0].id + ")",
-                                      qualname, func_node, class_node))
+                                      qualname, parts, func_node, class_node))
             elif isinstance(child, ast.Attribute) and child.attr == "__dict__" \
                     and isinstance(child.value, ast.Name) \
                     and child.value.id in ("subprocess", "os"):
                 qualname = ".".join(parts) if parts else "<module>"
                 found.append((child, "dynamic", child.value.id + ".__dict__", qualname,
-                              func_node, class_node))
+                              parts, func_node, class_node))
             stack.append((child, child_parts, child_func, child_class))
     return found
 
@@ -2577,11 +2739,11 @@ def _maintenance_pin_scan(root, allow_missing_files=False):
             findings.extend(_scan_alias_findings(rel, tree))
             module_consts = _scan_module_consts(tree)
             func_defs = _scan_function_defs(tree)
-            module_scrubbed = _scan_calls_module(tree, _SCAN_SCRUB_NAMES)
-            module_lifecycle = _scan_calls_module(tree,
-                                                  frozenset(("fixture_git_lifecycle",)))
+            scrub_module, scrub_covered = _scan_scope_coverage(tree, _SCAN_SCRUB_NAMES)
+            life_module, life_covered = _scan_scope_coverage(
+                tree, frozenset(("fixture_git_lifecycle",)))
             class_consts = dict()
-            for call, flavor, launcher, qualname, func_node, class_node \
+            for call, flavor, launcher, qualname, parts, func_node, class_node \
                     in _scan_launches(tree):
                 consts = module_consts
                 if class_node is not None:
@@ -2595,6 +2757,17 @@ def _maintenance_pin_scan(root, allow_missing_files=False):
                         class_consts[id(class_node)] = merged
                     consts = class_consts[id(class_node)]
                 key = (rel, qualname)
+                # A module-scope launch resolves through the module scope itself, so
+                # module-level argv mutation is tracked exactly like function-scope
+                # mutation; the launch point bounds every resolution (a pin appended
+                # after the launch is never credited to it); and scrub/lifecycle
+                # coverage is per SCOPE, never smeared over the whole module.
+                scope_node = func_node if func_node is not None else tree
+                launch_at = (call.lineno, call.col_offset)
+                scope_scrubbed = scrub_module or any(
+                    part in scrub_covered for part in parts)
+                scope_lifecycle = life_module or any(
+                    part in life_covered for part in parts)
                 if flavor == "os":
                     if not absorbed(key, "os"):
                         findings.append(
@@ -2668,10 +2841,10 @@ def _maintenance_pin_scan(root, allow_missing_files=False):
                             " the argv positionally or as args=, or justify it in"
                             " _SCAN_ALLOWED_UNPINNED" % (rel, call.lineno, qualname))
                     continue
-                entries, _opened = _scan_flatten(argv, func_node, consts,
-                                                 _SCAN_RESOLVE_DEPTH)
-                head = _scan_head_kind(entries[0] if entries else None, func_node,
-                                       consts, _SCAN_RESOLVE_DEPTH)
+                entries, _opened = _scan_flatten(argv, scope_node, consts,
+                                                 _SCAN_RESOLVE_DEPTH, launch_at)
+                head = _scan_head_kind(entries[0] if entries else None, scope_node,
+                                       consts, _SCAN_RESOLVE_DEPTH, launch_at)
                 if head == "non-git":
                     continue
                 if head == "unknown":
@@ -2682,7 +2855,8 @@ def _maintenance_pin_scan(root, allow_missing_files=False):
                             " literal or justify it in _SCAN_ALLOWED_UNPINNED"
                             % (rel, call.lineno, qualname))
                     continue
-                status, subcommand = _scan_git_argv_state(entries, func_node, consts)
+                status, subcommand = _scan_git_argv_state(entries, scope_node, consts,
+                                                          launch_at)
                 if status == "pinned":
                     continue
                 if status in ("subcommand", "stomped") and subcommand is not None \
@@ -2713,16 +2887,16 @@ def _maintenance_pin_scan(root, allow_missing_files=False):
                         env_expr = keyword.value
                 if has_env and isinstance(env_expr, ast.Constant) and env_expr.value is None:
                     has_env = False
-                if has_env and _scan_env_covered(env_expr, func_node, consts,
-                                                 func_defs, module_scrubbed,
+                if has_env and _scan_env_covered(env_expr, scope_node, consts,
+                                                 func_defs, scope_scrubbed,
                                                  _SCAN_RESOLVE_DEPTH):
                     continue
-                if not has_env and module_scrubbed:
+                if not has_env and scope_scrubbed:
                     continue
                 if absorbed(key, "git-triggering" if status == "subcommand" else "git"):
                     continue
-                if head == "bare-git" and module_lifecycle and not (
-                        has_env and _scan_env_defeats_wrapper(env_expr, func_node,
+                if head == "bare-git" and scope_lifecycle and not (
+                        has_env and _scan_env_defeats_wrapper(env_expr, scope_node,
                                                               consts,
                                                               _SCAN_RESOLVE_DEPTH)):
                     continue
@@ -3033,6 +3207,72 @@ _SCAN_CONTRACT_CASES = (
          "def git(*args):",
          "    subprocess.run(['git', 'commit', '--allow-empty', '-m', 'x'])", ""))),),
      "maintenance-triggering git launch"),
+    # Round-4 forms: the env-derivation, alias, module-scope, launch-point, scrub-scope and
+    # --config-env order gaps round-4 review demonstrated (each red without the round-4
+    # parser, resolver and coverage changes).
+    ("fixture-env-parameters-override",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "",
+         "from _git_fixture_env import git_fixture_env", "", "",
+         "def _seed():",
+         "    subprocess.run(['git', 'commit', '--allow-empty', '-m', 'x'],",
+         "                   env=git_fixture_env(",
+         "                       GIT_CONFIG_PARAMETERS='maintenance.auto=true'))", ""))),),
+     "maintenance-triggering git launch"),
+    ("alias-keeps-detected-stomp",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "",
+         "from _git_fixture_env import git_fixture_env", "", "",
+         "def _seed():",
+         "    subprocess.run(['git', '-c', 'maintenance.auto=true',",
+         "                    '-c', 'alias.unrelated=status',",
+         "                    'commit', '--allow-empty', '-m', 'x'],",
+         "                   env=git_fixture_env())", ""))),),
+     "overrides an F-367 pin key"),
+    ("module-argv-index-write",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "",
+         "ARGS = ['git', '-c', 'gc.auto=0', '-c', 'gc.autoDetach=false',",
+         "        '-c', 'maintenance.auto=false', 'commit', '--allow-empty', '-m', 'x']",
+         "ARGS[6] = 'maintenance.auto=true'", "",
+         "subprocess.run(ARGS)", ""))),),
+     "cannot resolve"),
+    ("module-extend-reenable",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "",
+         "ARGS = ['git', '-c', 'gc.auto=0', '-c', 'gc.autoDetach=false',",
+         "        '-c', 'maintenance.auto=false']",
+         "ARGS.extend(['-c', 'maintenance.auto=true'])", "",
+         "subprocess.run(ARGS + ['commit', '--allow-empty', '-m', 'x'])", ""))),),
+     "overrides an F-367 pin key"),
+    ("pins-appended-after-launch",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _seed():",
+         "    args = ['git', '-c', 'maintenance.auto=true']",
+         "    subprocess.run(args + ['commit', '--allow-empty', '-m', 'x'])",
+         "    args.extend(['-c', 'gc.auto=0', '-c', 'gc.autoDetach=false',",
+         "                 '-c', 'maintenance.auto=false'])", ""))),),
+     "cannot resolve"),
+    ("config-env-then-repin",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _seed():",
+         "    subprocess.run(['git', '--config-env=maintenance.auto=MAINT_OVERRIDE',",
+         "                    '-c', 'gc.auto=0', '-c', 'gc.autoDetach=false',",
+         "                    '-c', 'maintenance.auto=false',",
+         "                    'commit', '--allow-empty', '-m', 'x'])", ""))),),
+     None),
+    ("selftest-scrub-not-production",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "",
+         "from _git_fixture_env import scrub_git_environment", "", "",
+         "def production_read(repo):",
+         "    subprocess.run(['git', '-C', str(repo), 'commit', '--allow-empty',",
+         "                    '-m', 'x'])", "", "",
+         "def self_test():",
+         "    scrub_git_environment()", ""))),),
+     "maintenance-triggering git launch"),
 )
 
 
@@ -3149,7 +3389,7 @@ def main(report_path=None):
         check("env/no-auto-maintenance-red",
               red if isinstance(red, str) else bool(red), True)
 
-        # Layer 4, the class-completeness leg: the repo-wide scan must report NO unpinned
+        # Layer 4, the tripwire leg: the repo-wide scan must report NO unpinned
         # maintenance-capable launch (green), and a planted unpinned fixture commit must be
         # reported while its pinned twin is not (the red leg proves the scan discriminating,
         # never vacuous).

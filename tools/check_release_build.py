@@ -466,10 +466,11 @@ def _materialized_check(root, sha, commands_fn, what):
         # inherited pin variables, and the PRODUCTION paths here (reproduce_gate /
         # _recompute_branch_integrity) run outside the self-test's scrub and lifecycle PATH
         # wrapper, so an unpinned commit could detach a `git maintenance run --auto` child into
-        # the very tree the finally-rmtree below is about to delete. The three pins ride each
-        # argv as literal `-c` pairs in option position, and the launches are spelled out one
-        # by one (never through a loop variable) so the repo-wide maintenance-pin scan can
-        # resolve and enforce them.
+        # the very tree the finally-rmtree below is about to delete. The three pins ride the
+        # maintenance-capable add and commit argvs as literal `-c` pairs in option position
+        # (the bare `git init -q` is not maintenance-triggering and carries none), and the
+        # launches are spelled out one by one (never through a loop variable) so the
+        # repo-wide maintenance-pin scan can resolve and enforce them.
         def _staged(r):
             if r.returncode != 0:
                 raise GateError("cannot stage the tree for {}: {}".format(
