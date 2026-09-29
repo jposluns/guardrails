@@ -7394,8 +7394,8 @@ def _watchdog_completion_case(mode):
         # ast.USub and whose operand is an ast.Constant int, float,
         # or complex (bool excluded), the sign applied, or a member
         # of an ast.Tuple/ast.List/ast.Set side (an ast.Call of the
-        # bare name frozenset around exactly one such literal
-        # included) whose every element is one of those two
+        # bare name frozenset with exactly one such literal argument
+        # and no keywords included) whose every element is one of those two
         # spellings (fix 20); a read nested anywhere DEEPER inside
         # a comparison side (in a call, a subscript, an attribute
         # chain, any expression) contributes both booleans plus
@@ -7412,9 +7412,13 @@ def _watchdog_completion_case(mode):
         # deduplications compared with plain ==, collapsing 2 into
         # 2.0 and True into 1). It does NOT drive multi-attribute
         # combinations, conditions carried through locals or other
-        # data flow, or state never read in a branch test, and the
-        # undriven list closes with the exact complement: EVERY
-        # spelling outside the grammar above is undriven -- for
+        # data flow, state never read in a branch test, or firing
+        # values not spelled as constants in the test (a test such
+        # as `self.x != False` fires on values the derivation never
+        # drives), and the undriven list closes with the exact
+        # complement: EVERY spelling outside the grammar above is
+        # undriven by derivation (the default state may still fire
+        # one by accident, which is not a guarantee) -- for
         # example a dict display side, a container compared by
         # equality as a whole value (its spelled members are
         # driven, the container value itself is never a driven
@@ -7492,8 +7496,8 @@ def _watchdog_completion_case(mode):
             #     ast.Constant int, float, or complex (bool
             #     excluded), the sign applied (fix 20), or a member
             #     of an ast.Tuple/ast.List/ast.Set side (an
-            #     ast.Call of the bare name frozenset around
-            #     exactly one such literal included) whose every
+            #     ast.Call of the bare name frozenset with exactly
+            #     one such literal argument and no keywords included) whose every
             #     element is one of those two spellings;
             #   - a read nested anywhere deeper inside a comparison
             #     side (in a call, a subscript, an attribute chain,
@@ -7513,10 +7517,13 @@ def _watchdog_completion_case(mode):
             # 18, QA39 claude/gemini BLOCKERs; fix 19, QA40; fix
             # 20, QA41; maintainer decisions 2026-09-29): it does
             # NOT drive multi-attribute combinations, conditions
-            # carried through locals or other data flow, or state
-            # never read in a branch test, and the undriven list
-            # closes with the exact complement: EVERY spelling
-            # outside the grammar above is undriven -- for example
+            # carried through locals or other data flow, state
+            # never read in a branch test, or firing values not
+            # spelled as constants in the test (for example
+            # `self.x != False`), and the undriven list closes with
+            # the exact complement: EVERY spelling outside the
+            # grammar above is undriven by derivation (the default
+            # state may still fire one by accident) -- for example
             # a dict display side, a container compared by
             # equality as a whole value (its spelled members are
             # driven, the container value itself is never a driven
