@@ -18,10 +18,12 @@
 .aiqt/core/migration/crosswalk-schema.toml text eol=lf
 .aiqt/core/order.toml text eol=lf
 .aiqt/core/ownership.toml text eol=lf
+.aiqt/core/profiles/worker-pack.md text eol=lf
 .aiqt/core/references.toml text eol=lf
 .aiqt/core/releases.toml text eol=lf
 .aiqt/core/renderers.toml text eol=lf
 .aiqt/core/rules/00-project-integrity.md text eol=lf
+.aiqt/core/rules/accur-citation-from-opened-file.md text eol=lf
 .aiqt/core/rules/accur-claims-rest-on-observation.md text eol=lf
 .aiqt/core/rules/accur-completeness-claim-enumerates-set.md text eol=lf
 .aiqt/core/rules/accur-corroborate-external-claims.md text eol=lf
@@ -41,6 +43,7 @@
 .aiqt/core/rules/accur-verify-fix-in-commit.md text eol=lf
 .aiqt/core/rules/cost-tier.md text eol=lf
 .aiqt/core/rules/integ-anything-wrong-fixed-first.md text eol=lf
+.aiqt/core/rules/integ-attestation-is-harness-owned.md text eol=lf
 .aiqt/core/rules/integ-branch-and-merge-on-green.md text eol=lf
 .aiqt/core/rules/integ-branch-rooted-on-live-main.md text eol=lf
 .aiqt/core/rules/integ-check-fails-closed-on-unreadable.md text eol=lf
@@ -180,6 +183,7 @@
 .claude/RULES-INDEX.md text eol=lf
 .claude/rules/README.md text eol=lf
 .claude/rules/aiqt/00-project-integrity.md text eol=lf
+.claude/rules/aiqt/10-ACCUR-citation-from-opened-file.md text eol=lf
 .claude/rules/aiqt/10-ACCUR-claims-rest-on-observation.md text eol=lf
 .claude/rules/aiqt/10-ACCUR-completeness-claim-enumerates-its-set.md text eol=lf
 .claude/rules/aiqt/10-ACCUR-corroborate-external-claims.md text eol=lf
@@ -198,6 +202,7 @@
 .claude/rules/aiqt/10-ACCUR-validate-inference-before-action.md text eol=lf
 .claude/rules/aiqt/10-ACCUR-verify-fix-in-commit.md text eol=lf
 .claude/rules/aiqt/10-INTEG-anything-wrong-fixed-first.md text eol=lf
+.claude/rules/aiqt/10-INTEG-attestation-is-harness-owned.md text eol=lf
 .claude/rules/aiqt/10-INTEG-branch-and-merge-on-green.md text eol=lf
 .claude/rules/aiqt/10-INTEG-branch-rooted-on-live-main.md text eol=lf
 .claude/rules/aiqt/10-INTEG-check-fails-closed-on-unreadable.md text eol=lf
@@ -309,7 +314,9 @@
 .claude/rules/security/SECP-data-residency-retention.md text eol=lf
 .claude/rules/security/SECP-purpose-limitation.md text eol=lf
 .claude/rules/security/SECP-synthetic-fixture-data.md text eol=lf
+.claude/worker-pack.md text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/00-project-integrity.mdc text eol=lf
+.cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-citation-from-opened-file.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-claims-rest-on-observation.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-completeness-claim-enumerates-its-set.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-corroborate-external-claims.mdc text eol=lf
@@ -328,6 +335,7 @@
 .cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-validate-inference-before-action.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-verify-fix-in-commit.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-INTEG-anything-wrong-fixed-first.mdc text eol=lf
+.cursor/rules/aiqt-guardrails/aiqt/10-INTEG-attestation-is-harness-owned.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-INTEG-branch-and-merge-on-green.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-INTEG-branch-rooted-on-live-main.mdc text eol=lf
 .cursor/rules/aiqt-guardrails/aiqt/10-INTEG-check-fails-closed-on-unreadable.mdc text eol=lf
@@ -698,6 +706,7 @@ tools/gen_rules.py text eol=lf
 tools/gen_secret_patterns.py text eol=lf
 tools/gen_site.py text eol=lf
 tools/gen_skill.py text eol=lf
+tools/gen_worker_pack.py text eol=lf
 tools/import_cwe.py text eol=lf
 tools/internal-name-hashes.txt text eol=lf
 tools/leak-hashes.txt text eol=lf

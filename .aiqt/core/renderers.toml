@@ -53,3 +53,11 @@ semantics-revision = 2
 targets = ["site/downloads/aiqt/", "site/downloads/aiqt-instructions.txt", "site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.5.zip"]
 closure = ["tools/gen_skill.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_rules.py"]
 code-digest = "a3856e2cfcc30f01c343e4fa4dc9e3ed83de51dbf19732f22ab0db3a5118fe6e"
+
+[[renderer]]
+renderer-id = "worker-pack"
+entrypoint = "tools/gen_worker_pack.py"
+semantics-revision = 1
+targets = [".claude/worker-pack.md"]
+closure = ["tools/gen_worker_pack.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_rules.py"]
+code-digest = "9ef654c0e63b5a24f15d5c9c60ec36bc92862c124950115521306f83066d3828"

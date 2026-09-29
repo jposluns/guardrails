@@ -178,6 +178,8 @@ run_gate "claude-drift"    python3 -I -B tools/gen_claude.py --check
 run_gate "adapters-drift"  python3 -I -B tools/gen_adapters.py --check
 run_gate "cursor-selftest"  python3 -I -B tools/gen_cursor.py --self-test
 run_gate "cursor-drift"  python3 -I -B tools/gen_cursor.py --check
+run_gate "worker-pack-selftest" python3 -I -B tools/gen_worker_pack.py --self-test
+run_gate "worker-pack-drift" python3 -I -B tools/gen_worker_pack.py --check
 run_gate "hooks-selftest" python3 -I -B tools/gen_hooks.py --self-test
 run_gate "secret-patterns-drift" python3 -I -B tools/gen_secret_patterns.py --check
 run_gate "hooks-drift"    python3 -I -B tools/gen_hooks.py --check
