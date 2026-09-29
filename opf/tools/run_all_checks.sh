@@ -14,11 +14,19 @@ here="$(cd "$(dirname "$0")" && pwd)" || exit 2
 export PYTHONDONTWRITEBYTECODE=1
 
 failed=0
+# Name each failing gate as it happens and list the names again before the FAILED line, so a failing
+# subset never needs a hand re-run to find which gate failed.
+failed_names=""
 
 run_gate() {
   local name="$1"; shift
   echo "--- ${name} ---"
-  if "$@"; then :; else failed=1; fi
+  if "$@"; then :; else
+    local rc=$?
+    failed=1
+    failed_names="${failed_names:+${failed_names}, }${name}"
+    echo "GATE FAILED: ${name} (exit ${rc})"
+  fi
   echo
 }
 
@@ -50,6 +58,7 @@ run_gate "commonmark-headings-selftest" python3 -I -B "$here/selftest_commonmark
 run_gate "commonmark-conformance"      python3 -I -B "$here/selftest_commonmark_conformance.py"
 
 if [ "$failed" -ne 0 ]; then
+  echo "FAILED GATES: ${failed_names}"
   echo "OPF STANDALONE SUBSET: FAILED"
   exit 1
 fi
