@@ -99,6 +99,9 @@ REQUIRED_DIR_ROOTS = [
     "plugin/aiqt-guardrails-hooks",      # the shipped plugin surface
     "site/downloads",                    # the published artefacts (skill dir, instructions, zip, mappings)
     "opf/spec",                          # the OPF specification pair, relocated from .aiqt/core/opf/ (OPF-SELF-CONTAIN)
+    "opf/enforcement",                   # the enforcement pack (CI recipe + workflow template, U16): the ownership
+                                         # roster records opf/enforcement/** as ADOPTER-INSTALLED content, so it is
+                                         # part of the portable surface this gate polices, unlike opf/tools below.
     # NOTE: opf/tools is NOT a portability root, mirroring tools/. Both are the pack's AUTHOR-SIDE tooling
     # (generators, gates, vendored provenance), not the adopter-installed portable surface this gate policies;
     # they legitimately carry operational domain vocabulary and vendored .sha256/.typed binaries. The spec
@@ -1355,6 +1358,16 @@ def _self_test_main_isolated():
                 "# Note\n\nrun the SessionHandoff at close\n", encoding="utf-8")
             if _run_quiet(sroot, entries) != 1:
                 failures.append("e2e: a camel-cased operational term expected exit 1")
+
+            # (d2) a portability violation under the adopter-installed enforcement pack (opf/enforcement,
+            # U16) is caught: the root is scanned like every other required root, so operational
+            # vocabulary in a shipped CI file fails.
+            sroot, entries = _fresh("enforcement-term")
+            (sroot / "opf/enforcement").mkdir(parents=True, exist_ok=True)
+            (sroot / "opf/enforcement/placeholder.md").write_text(
+                "# Note\n\nsee the session-handoff before running CI\n", encoding="utf-8")
+            if _run_quiet(sroot, entries) != 1:
+                failures.append("e2e: an operational term under opf/enforcement expected exit 1")
 
             # (e) a pathname operational term fails on the NAME alone, with clean bytes.
             sroot, entries = _fresh("pathname-term")
