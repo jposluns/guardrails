@@ -1858,7 +1858,7 @@ def boundary_self_test():
             result = planning.plan(
                 Path("/store"), sources=[], product="opf", decisions=[], ops=[op],
                 expected_observation_digest=tomllib.loads(observed.observation.decode())["observation_digest"],
-                now=utc, run_nonce="0123456789abcdef")
+                now=utc, run_nonce="0123456789abcdef", bindings=adopt.canonical_plan_bindings())
         return result, [c.kwargs.get("homes") for c in frozen.call_args_list]
 
     homes2_plan, _ = planned(2, control_op)
@@ -1869,7 +1869,10 @@ def boundary_self_test():
     check("plan-homes2-control-op-refused", lambda: homes2_plan.status == store.INVALID and homes2_plan.plan is None
           and bool(refused) and homes2_plan.findings == refused)
     control_retire = dict(op="retire-file", path=".working/journals/file", preimage_digest="sha256:" + "0" * 64)
-    with patch.object(planning, "_decisions", return_value=([control_retire], [])):
+    control_source = dict(path=control_retire["path"], digest=control_retire["preimage_digest"], disposition="retire",
+                          occupying=False, preservation=store.retire_preimage(
+                              "adopt-20260917T120000Z-0123456789abcdef", control_retire["path"]))
+    with patch.object(planning, "_decisions", return_value=([control_retire], [control_source], [])):
         retired, _ = planned(2, dict(create, path="notes.txt"))
         legacy_retired, _ = planned(1, dict(create, path="notes.txt"))
     check("plan-homes2-control-disposition-refused", lambda: retired.status == store.INVALID

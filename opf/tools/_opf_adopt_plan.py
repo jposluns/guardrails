@@ -17,8 +17,15 @@ and the .gitignore opf-managed block.
 
 VALID means an inert, digest-bound proposal, NEVER permission/readiness to apply.
 No release is trusted, acceptance verified, hook activated, or transaction run.
-Migration without an existing run/acceptance reference remains unresolved.
-Even supplied import references need PR-D's staged-run and acceptance checks.
+The frozen plan is `opf.adoption.plan/v2` (spec 14.1). A migrate decision
+resolves: the source is kept for post-adoption import, preserved under the
+run's adoption preimage home, named in the import scope, and given no
+import-file row; import references are refused as decision inputs. A candidate
+at a planned managed destination (a declared view of the resolved or default
+manifest, or a path under the planned machine store) is occupying (spec 14.2):
+keep refuses, and any other disposition is preserved under the adoption archive.
+The revision, release and anchor, prompt pack, enforcement contents and skip
+policy are caller inputs, shape-checked and digest-bound, never verified here.
 Inventory reads detect ordinary concurrent edits, not a coherent filesystem
 snapshot or an adversarial writer restoring stat values. Re-observe at apply.
 """
@@ -243,10 +250,12 @@ def _inventory(root, sources, targets):
                 excluded.extend({"path": path, "reason": "store-control"} for path in control)
             manifest_digest = _digest(raw)
             traces.append(manifest_path)
+            view_targets = sorted(v["target"] for v in manifest.get("views", {}).values())
         else:
             homes = 1
             manifest_path = ""
             manifest_digest = ""
+            view_targets = None
         exclusions = sorted(excluded, key=lambda row: (row["path"], row["reason"]))
         for source in sources + targets:
             if any(_under(source, row["path"]) for row in exclusions):
@@ -348,8 +357,9 @@ def _inventory(root, sources, targets):
                 raise PlanError("product root changed during investigation")
         finally:
             os.close(check_fd)
-        # The homes generation is returned beside the observation, never inside it, so the observation
-        # bytes are unchanged; it comes from the same manifest read that fixed the exclusions.
+        # The homes generation and the resolved store's declared view targets are returned beside the
+        # observation, never inside it, so the observation bytes are unchanged; both come from the same
+        # manifest read that fixed the exclusions.
         return {
             "format": OBS_FORMAT,
             "product_root": str(root),
@@ -388,7 +398,7 @@ def _inventory(root, sources, targets):
                             "(.aiqt/record/journal) and the .gitignore opf-managed block",
             },
             "coverage_residuals": list(RESIDUALS),
-        }, homes
+        }, homes, view_targets
     finally:
         os.close(root_fd)
 
@@ -399,34 +409,58 @@ def investigate(product_root, *, sources, targets=()):
 
 
 def _investigate(product_root, sources, targets):
-    """investigate, plus the resolved store's homes generation (legacy 1 when nothing resolved)."""
+    """investigate, plus the resolved store's homes generation (legacy 1 when nothing resolved) and its
+    declared view targets (None when nothing resolved)."""
     try:
         if not isinstance(product_root, (str, os.PathLike)):
             raise PlanError("product_root must be an absolute path")
         root = Path(product_root)
         if not root.is_absolute() or ".." in root.parts:
             raise PlanError("product_root must be absolute and contain no '..'")
-        doc, homes = _inventory(root, _roots(sources), _roots(targets))
-        return AdoptResult(store.VALID, observation=_seal(doc, "observation_digest")), homes
+        doc, homes, views = _inventory(root, _roots(sources), _roots(targets))
+        return AdoptResult(store.VALID, observation=_seal(doc, "observation_digest")), homes, views
     except (OSError, ValueError, UnicodeError, RecursionError, EmitError,
             store.StoreError, store._journal.JournalError) as exc:
-        return AdoptResult(store.CANNOT_EVALUATE, [str(exc)]), 1
+        return AdoptResult(store.CANNOT_EVALUATE, [str(exc)]), 1, None
 
 
-def _decisions(observation, decisions):
+def _managed_destinations(doc, views):
+    """The planned managed destinations a candidate can occupy (spec 14.2), as
+    (machine_rel, view_targets). A resolved store contributes its machine store and
+    its manifest's declared view targets; otherwise the plan targets the store
+    init-store would create: the default machine subdirectory and the default
+    manifest's views. The machine subtree is covered whole, as the unmanaged-overlap
+    check treats it."""
+    if doc["resolution"]["status"] == store.RESOLVED:
+        return doc["resolution"]["machine_rel"], frozenset(views)
+    import _opf_init
+    default = tomllib.loads(_opf_init.build_manifest())
+    return (store.WORKING_DIRNAME + "/" + store.DEFAULT_MACHINE_SUBDIR,
+            frozenset(v["target"] for v in default["views"].values()))
+
+
+def _decisions(observation, decisions, run_id, managed):
+    """Per-candidate dispositions -> (disposition ops, plan-v2 source rows, unresolved).
+
+    `managed` is (machine_rel, view_targets) from _managed_destinations. A candidate
+    at a declared view or under the planned machine store occupies a managed
+    destination (spec 14.2): keep refuses, and any other disposition is preserved
+    under the adoption archive, a move included."""
     if type(decisions) is not list:
         raise PlanError("decisions must be a list")
+    machine_rel, view_targets = managed
     files = {row["path"]: row for row in observation["entries"] if row["kind"] == "file"}
     wanted = set(observation["candidates"])
     seen = set()
     ops = []
+    sources = []
     unresolved = set(wanted)
     for row in sorted(decisions, key=lambda r: r.get("path", "") if type(r) is dict
                       and isinstance(r.get("path", ""), str) else ""):
         if type(row) is not dict:
             raise PlanError("decision must be a table")
         required = {"path", "disposition", "actor"}
-        optional = {"destination", "import_run_id", "acceptance_digest"}
+        optional = {"destination"}
         if not required <= row.keys() or set(row) - required - optional:
             raise PlanError("malformed decision keys")
         path = _path(row["path"])
@@ -435,11 +469,16 @@ def _decisions(observation, decisions):
         seen.add(path)
         disposition = row["disposition"]
         digest = files[path]["digest"]
+        occupying = path in view_targets or _under(path, machine_rel)
+        source = {"path": path, "digest": digest, "disposition": disposition, "occupying": occupying}
         if disposition == "keep" and set(row) == required:
+            if occupying:
+                raise PlanError("keep names a managed destination: {!r}".format(path))
             ops.append({"op": "register-unmanaged", "entry": path,
                         "note": "proposed by " + row["actor"]})
         elif disposition == "retire" and set(row) == required:
             ops.append({"op": "retire-file", "path": path, "preimage_digest": digest})
+            source["preservation"] = store.retire_preimage(run_id, path)
         elif disposition == "move" and set(row) == required | {"destination"}:
             destination = _path(row["destination"])
             target = next((r for r in observation["entries"] if r["path"] == destination), None)
@@ -449,29 +488,33 @@ def _decisions(observation, decisions):
                 raise PlanError("move destination has no observed absence")
             ops.append({"op": "move-file", "source": path,
                         "destination": destination, "source_digest": digest})
-        elif disposition == "migrate":
-            if set(row) == required:
-                continue  # no fabricated run id or blanket fragment acceptance
-            if set(row) != required | {"import_run_id", "acceptance_digest"}:
-                raise PlanError("migration needs both import reference fields")
-            ops.append({"op": "import-file", "import_run_id": row["import_run_id"],
-                        "acceptance_digest": row["acceptance_digest"]})
+            source["preservation"] = store.retire_preimage(run_id, path) if occupying else destination
+        elif disposition == "migrate" and set(row) == required:
+            # Kept for post-adoption import (spec 14.2): no op and no import reference. Its exact bytes
+            # are preserved at apply under the adoption archive, and the import scope names it.
+            source["preservation"] = store.retire_preimage(run_id, path)
         else:
             raise PlanError("unknown disposition or incompatible decision fields")
+        sources.append(source)
         unresolved.remove(path)
-    return ops, sorted(unresolved)
+    return ops, sorted(sources, key=lambda r: r["path"]), sorted(unresolved)
 
 
 def plan(product_root, *, sources, expected_observation_digest, product, decisions,
-         ops, now, run_nonce, targets=()):
+         ops, now, run_nonce, bindings, targets=()):
     """Re-investigate, bind to the reviewed inventory, then purely freeze the proposal.
 
     ops is an ordered list of additional PR-A vocabulary rows. It has no authority:
-    release member digests, generated postimages, hook diffs, receipts and import
-    acceptance references remain unverified inputs to later PRs. No generic op
-    can substitute for the explicit per-candidate dispositions below.
+    release member digests, generated postimages, hook diffs and receipts remain
+    unverified inputs to later PRs. No generic op can substitute for the explicit
+    per-candidate dispositions below.
+
+    bindings carries exactly the caller-supplied plan-v2 inputs
+    (schema.PLAN_BINDING_INPUTS). The store identity comes from the observation
+    (the resolved or default machine store and its ancestry); the sources, effects,
+    completion roster and import policy are derived here, never supplied.
     """
-    observed, homes = _investigate(product_root, sources, targets)
+    observed, homes, views = _investigate(product_root, sources, targets)
     if observed.status != store.VALID:
         return observed
     try:
@@ -485,6 +528,9 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
             raise PlanError("now must be a clock-derived aware UTC datetime")
         if not isinstance(run_nonce, str) or not re_full_nonce(run_nonce):
             raise PlanError("run_nonce must be 16 lowercase hex characters")
+        run_id = "adopt-" + now.strftime("%Y%m%dT%H%M%SZ") + "-" + run_nonce
+        if type(bindings) is not dict or set(bindings) != set(schema.PLAN_BINDING_INPUTS):
+            raise PlanError("bindings must carry exactly the plan-v2 binding inputs")
         if type(ops) is not list:
             raise PlanError("ops must be an ordered list")
         for row in ops:
@@ -499,7 +545,8 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
             if row["op"] == "install-pack":
                 for member in row["members"]:
                     _path(member["path"])
-        disposition_ops, unresolved = _decisions(doc, decisions)
+        managed = _managed_destinations(doc, views)
+        disposition_ops, source_rows, unresolved = _decisions(doc, decisions, run_id, managed)
         for row in disposition_ops:
             checked = schema.validate_op(row, homes=homes)
             if checked.status != store.VALID:
@@ -521,13 +568,24 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
         inventory_bytes = _seal(inventory, "inventory_digest")
         inventory_doc = tomllib.loads(inventory_bytes.decode("utf-8"))
         instant = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        ordered = _order_ops(disposition_ops, ops)
         proposal = {
             "format": schema.PLAN_FORMAT, "schema": schema.SCHEMA_VERSION,
             "product": product,
             "inventory_digest": inventory_doc["inventory_digest"],
-            "run_id": "adopt-" + now.strftime("%Y%m%dT%H%M%SZ") + "-" + run_nonce,
+            "run_id": run_id,
             "created_at": instant,
-            "ops": _order_ops(disposition_ops, ops),
+            "revision": bindings["revision"],
+            "store": {"store_root": ".", "machine_rel": managed[0],
+                      "adoption": doc["ancestry"]["adoption"]},
+            "sources": source_rows,
+            "effects": schema.derive_effects(ordered, source_rows),
+            "release": bindings["release"],
+            "prompt_pack": bindings["prompt_pack"],
+            "enforcement": bindings["enforcement"],
+            "completion": schema.plan_completion(),
+            "import_policy": schema.plan_import_policy(bindings["skip_policy"], source_rows),
+            "ops": ordered,
         }
         frozen = _seal(proposal, "plan_digest")
         checked = schema.validate_plan(tomllib.loads(frozen.decode("utf-8")), homes=homes)
@@ -540,7 +598,7 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
 
 
 def _order_ops(dispositions, additional):
-    """Move/retire first; create a store before unmanaged registration/import.
+    """Move/retire first; create a store before unmanaged registration.
 
     This is ordering of proposals, not compilation of journal effects or proof
     that init/render/receipt preconditions can be satisfied by the current tree.
@@ -551,18 +609,7 @@ def _order_ops(dispositions, additional):
     cut = inits[0] + 1 if inits else 0
     before = [r for r in dispositions if r["op"] in ("move-file", "retire-file")]
     after = [r for r in dispositions if r["op"] not in ("move-file", "retire-file")]
-    unique = []
-    imports = {}
-    for row in after:
-        if row["op"] == "import-file":
-            key = row["import_run_id"]
-            if key in imports:
-                if imports[key] != row:
-                    raise PlanError("conflicting acceptance references for an import run")
-                continue
-            imports[key] = row
-        unique.append(row)
-    return before + additional[:cut] + unique + additional[cut:]
+    return before + additional[:cut] + after + additional[cut:]
 
 
 def re_full_nonce(value):
@@ -587,6 +634,7 @@ def self_test():
             self.targets = ["archive/legacy.md"]
             self.now = datetime.datetime(2026, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc)
             self.decision = {"path": "legacy.md", "disposition": "keep", "actor": "fixture"}
+            self.bindings = schema.canonical_plan_bindings()
 
         def observation(self):
             result = investigate(self.root, sources=self.sources, targets=self.targets)
@@ -601,7 +649,7 @@ def self_test():
                     observation.observation.decode())["observation_digest"],
                 product="opf", decisions=[self.decision] if decisions is None else decisions,
                 ops=[{"op": "init-store", "store_root": "."}],
-                now=self.now, run_nonce="0123456789abcdef",
+                now=self.now, run_nonce="0123456789abcdef", bindings=self.bindings,
             )
             args.update(changes)
             return plan(self.root, **args)
@@ -669,16 +717,128 @@ def self_test():
             self.assertEqual(result.status, store.CANNOT_EVALUATE)
             self.assertIsNone(result.plan)
 
-        def test_unresolved_and_migrate_without_staging(self):
+        def test_unresolved_refuses(self):
             before = self.snapshot()
-            for decisions in ([], [dict(self.decision, disposition="migrate")]):
-                with self.subTest(decisions=decisions):
-                    result = self.make_plan(decisions=decisions)
-                    self.assertEqual(result.status, store.CANNOT_EVALUATE)
-                    self.assertEqual(result.unresolved, ("legacy.md",))
-                    self.assertIsNone(result.plan)
+            result = self.make_plan(decisions=[])
+            self.assertEqual(result.status, store.CANNOT_EVALUATE)
+            self.assertEqual(result.unresolved, ("legacy.md",))
+            self.assertIsNone(result.plan)
             self.assertEqual(before, self.snapshot())
             self.assertFalse((self.root / ".working").exists())
+
+        def test_migrate_resolves_keep_frozen(self):
+            # A bare migrate decision resolves (spec 14.2): kept for post-adoption import,
+            # preserved under the adoption preimage home, named in the import scope, and
+            # given no import-file row.
+            before = self.snapshot()
+            result = self.make_plan(decisions=[dict(self.decision, disposition="migrate")])
+            self.assertEqual(result.status, store.VALID, result.findings)
+            self.assertEqual(result.unresolved, ())
+            p = tomllib.loads(result.plan.decode())
+            preserved = store.retire_preimage(p["run_id"], "legacy.md")
+            digest = _digest(b"legacy\n")
+            self.assertEqual(p["sources"], [{"path": "legacy.md", "digest": digest,
+                                             "disposition": "migrate", "occupying": False,
+                                             "preservation": preserved}])
+            self.assertEqual(p["import_policy"]["scope"], ["legacy.md"])
+            self.assertEqual(p["effects"]["creations"], [{"path": preserved, "digest": digest}])
+            self.assertEqual(p["effects"]["removals"], [{"path": "legacy.md", "digest": digest}])
+            self.assertEqual([row["op"] for row in p["ops"]], ["init-store"])
+            self.assertEqual(before, self.snapshot())
+            self.assertFalse((self.root / ".working").exists())
+            # Import references are no longer decision inputs: an old acceptance cannot ride the plan.
+            referenced = dict(self.decision, disposition="migrate",
+                              import_run_id="imp-20260101T000000Z-0123456789abcdef",
+                              acceptance_digest="sha256:" + "0" * 64)
+            result = self.make_plan(decisions=[referenced])
+            self.assertEqual(result.status, store.CANNOT_EVALUATE)
+            self.assertIsNone(result.plan)
+
+        def test_plan_v2_bindings(self):
+            result = self.make_plan(decisions=[dict(self.decision, disposition="retire")])
+            self.assertEqual(result.status, store.VALID, result.findings)
+            p = tomllib.loads(result.plan.decode())
+            preserved = store.retire_preimage(p["run_id"], "legacy.md")
+            digest = _digest(b"legacy\n")
+            self.assertEqual(p["format"], "opf.adoption.plan/v2")
+            self.assertEqual(p["revision"], self.bindings["revision"])
+            # The store identity is derived: the default machine store and the investigated ancestry.
+            self.assertEqual(p["store"], {"store_root": ".", "machine_rel": ".working/toml",
+                                          "adoption": "first-adoption"})
+            self.assertIn(p["store"]["adoption"], schema.ADOPTION_KINDS)
+            self.assertEqual(p["sources"], [{"path": "legacy.md", "digest": digest,
+                                             "disposition": "retire", "occupying": False,
+                                             "preservation": preserved}])
+            self.assertEqual(p["effects"], {"creations": [{"path": preserved, "digest": digest}],
+                                            "replacements": [], "removals": [{"path": "legacy.md",
+                                                                               "digest": digest}],
+                                            "repointings": []})
+            for key in ("release", "prompt_pack", "enforcement"):
+                self.assertEqual(p[key], self.bindings[key])
+            self.assertEqual(p["completion"], {"checks": list(schema.COMPLETION_CHECKS),
+                                               "retirement": "green-checks-and-matching-bytes"})
+            self.assertEqual(p["import_policy"], {"missingness": list(schema.MISSINGNESS_REASONS),
+                                                  "unparsed": "retain-verbatim", "skip": "no-skip",
+                                                  "scope": []})
+            release = self.bindings["release"]
+            for label, bindings in (
+                    ("missing-input", {k: v for k, v in self.bindings.items() if k != "prompt_pack"}),
+                    ("extra-input", dict(self.bindings, note="x")),
+                    ("supplied-store", dict(self.bindings, store={"store_root": "."})),
+                    ("revision-not-hex", dict(self.bindings, revision="HEAD")),
+                    ("bad-skip-policy", dict(self.bindings, skip_policy="silent")),
+                    ("anchor-disagrees", dict(self.bindings, release=dict(
+                        release, anchor_sha256="sha256:" + "4" * 64))),
+                    ("missing-platform",
+                     dict(self.bindings, enforcement=self.bindings["enforcement"][:-1])),
+                    ("bad-prompt-version", dict(self.bindings, prompt_pack=dict(
+                        self.bindings["prompt_pack"], version="latest")))):
+                with self.subTest(label):
+                    result = self.make_plan(bindings=bindings)
+                    self.assertNotEqual(result.status, store.VALID)
+                    self.assertIsNone(result.plan)
+
+        def test_occupied_destinations(self):
+            # Foreign content at a planned managed destination (spec 14.2): a view the
+            # default manifest declares, or a path under the machine store init-store would
+            # create. Keep refuses there; any other disposition occupies and is preserved
+            # under the adoption archive, a move included.
+            (self.root / ".working/toml").mkdir(parents=True)
+            (self.root / ".working/TODO.md").write_bytes(b"todo\n")
+            (self.root / ".working/toml/counters.toml").write_bytes(b"[x]\n")
+            (self.root / ".working/notes.md").write_bytes(b"notes\n")
+            self.targets = ["archive/TODO.md"]
+            observed = self.observation()
+
+            def decide(path, disposition, **extra):
+                return dict(path=path, disposition=disposition, actor="fixture", **extra)
+            ordinary = [self.decision, decide(".working/notes.md", "keep")]
+            for kept, other in ((".working/TODO.md", ".working/toml/counters.toml"),
+                                (".working/toml/counters.toml", ".working/TODO.md")):
+                with self.subTest(keep=kept):
+                    result = self.make_plan(observed, decisions=ordinary + [decide(kept, "keep"),
+                                                                           decide(other, "retire")])
+                    self.assertEqual(result.status, store.CANNOT_EVALUATE)
+                    self.assertIsNone(result.plan)
+            result = self.make_plan(observed, decisions=ordinary + [
+                decide(".working/TODO.md", "move", destination="archive/TODO.md"),
+                decide(".working/toml/counters.toml", "migrate")])
+            self.assertEqual(result.status, store.VALID, result.findings)
+            p = tomllib.loads(result.plan.decode())
+            self.assertEqual(p["store"]["adoption"], "re-adoption")
+            rows = {row["path"]: row for row in p["sources"]}
+            for path, disposition in ((".working/TODO.md", "move"),
+                                      (".working/toml/counters.toml", "migrate")):
+                row = rows[path]
+                self.assertEqual((row["disposition"], row["occupying"], row["preservation"]),
+                                 (disposition, True, store.retire_preimage(p["run_id"], path)))
+            self.assertEqual((rows[".working/notes.md"]["occupying"], rows["legacy.md"]["occupying"]),
+                             (False, False))
+            self.assertNotIn("preservation", rows[".working/notes.md"])
+            move = [row for row in p["ops"] if row["op"] == "move-file"]
+            self.assertEqual([row["destination"] for row in move], ["archive/TODO.md"])
+            self.assertIn({"path": store.retire_preimage(p["run_id"], ".working/TODO.md"),
+                           "digest": _digest(b"todo\n")}, p["effects"]["creations"])
 
         def test_move_requires_observed_absence(self):
             decision = dict(self.decision, disposition="move", destination="archive/legacy.md")
@@ -691,6 +851,13 @@ def self_test():
             result = self.make_plan(decisions=[decision])
             self.assertEqual(result.status, store.CANNOT_EVALUATE)
             self.assertEqual((self.root / "archive/legacy.md").read_bytes(), b"occupied")
+            # An explicit destination inside the store tree must lie beneath .working/archive/moved/.
+            self.targets = [".working/elsewhere/legacy.md", ".working/archive/moved/legacy.md"]
+            for destination, status in ((".working/elsewhere/legacy.md", store.INVALID),
+                                        (".working/archive/moved/legacy.md", store.VALID)):
+                with self.subTest(destination=destination):
+                    result = self.make_plan(decisions=[dict(decision, destination=destination)])
+                    self.assertEqual(result.status, status, result.findings)
 
         def test_foreign_working_preserves_resolver_status(self):
             (self.root / ".working").mkdir()
@@ -826,7 +993,8 @@ def self_test():
                                      store.CANNOT_EVALUATE)
             for changes in ({"product": "unknown"}, {"ops": [{"op": "shell"}]},
                             {"now": self.now.replace(tzinfo=None)},
-                            {"run_nonce": "bad"}, {"ops": [{"op": "import-file"}]}):
+                            {"run_nonce": "bad"}, {"ops": [{"op": "import-file"}]},
+                            {"bindings": None}):
                 with self.subTest(changes=changes):
                     result = self.make_plan(**changes)
                     self.assertNotEqual(result.status, store.VALID)
@@ -838,6 +1006,8 @@ def self_test():
             machine.mkdir(parents=True)
             manifest = tomllib.loads(_opf_init.build_manifest())
             manifest["unmanaged"]["paths"] = [".working/private"]
+            # Drop one default view, so the planner must read the resolved manifest's own view targets.
+            del manifest["views"]["BACKLOG.md"]
             (machine / "manifest.toml").write_text(emit_checked(manifest), encoding="utf-8")
             private = self.root / ".working/private"
             private.mkdir()
@@ -852,6 +1022,31 @@ def self_test():
                              [row["path"] for row in doc["entries"]])
             self.assertEqual(investigate(self.root, sources=[".working/private"]).status,
                              store.CANNOT_EVALUATE)
+            # The plan binds the resolved machine store and its re-adoption ancestry.
+            planned = self.make_plan(result)
+            self.assertEqual(planned.status, store.VALID, planned.findings)
+            self.assertEqual(tomllib.loads(planned.plan.decode())["store"],
+                             {"store_root": ".", "machine_rel": ".working/toml",
+                              "adoption": "re-adoption"})
+            # The resolved manifest's own declared view is a managed destination: keep refuses there and
+            # a retire is occupying.
+            (self.root / ".working/TODO.md").write_bytes(b"todo\n")
+            view = dict(self.decision, path=".working/TODO.md")
+            self.assertEqual(self.make_plan(decisions=[self.decision, view]).status,
+                             store.CANNOT_EVALUATE)
+            retired = self.make_plan(decisions=[self.decision, dict(view, disposition="retire")])
+            self.assertEqual(retired.status, store.VALID, retired.findings)
+            rows = tomllib.loads(retired.plan.decode())["sources"]
+            self.assertEqual([row["occupying"] for row in rows], [True, False])
+            # A path the default manifest declares but this store does not is ordinary content here.
+            (self.root / ".working/BACKLOG.md").write_bytes(b"backlog\n")
+            kept = self.make_plan(decisions=[self.decision, dict(view, disposition="retire"),
+                                             dict(self.decision, path=".working/BACKLOG.md")])
+            self.assertEqual(kept.status, store.VALID, kept.findings)
+            rows = tomllib.loads(kept.plan.decode())["sources"]
+            self.assertEqual([(row["path"], row["occupying"]) for row in rows],
+                             [(".working/BACKLOG.md", False), (".working/TODO.md", True),
+                              ("legacy.md", False)])
 
         def test_malformed_pointer_and_store_manifest(self):
             (self.root / ".opf.toml").write_bytes(b"not toml")
