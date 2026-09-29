@@ -79,6 +79,14 @@
       "status": "prose-only"
     },
     {
+      "corpus-id": "attint",
+      "family": "aiqt",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/integ-attestation-is-harness-owned.md",
+      "status": "prose-only"
+    },
+    {
       "corpus-id": "bgcwai",
       "family": "aiqt",
       "gates": [],
@@ -162,6 +170,14 @@
       "hooks": [],
       "source": ".aiqt/core/rules/trust-change-record.md",
       "status": "gate-linked"
+    },
+    {
+      "corpus-id": "citint",
+      "family": "aiqt",
+      "gates": [],
+      "hooks": [],
+      "source": ".aiqt/core/rules/accur-citation-from-opened-file.md",
+      "status": "prose-only"
     },
     {
       "corpus-id": "clmobs",
@@ -700,6 +716,14 @@
           "platform": "ci",
           "residue": "A byte-identity drift gate over the artefact tools/gen_skill.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares.",
           "script": "tools/gen_skill.py"
+        },
+        {
+          "class": "a",
+          "default": "block",
+          "id": "worker-pack-drift",
+          "platform": "ci",
+          "residue": "A byte-identity drift gate over the artefact tools/gen_worker_pack.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares.",
+          "script": "tools/gen_worker_pack.py"
         }
       ],
       "hooks": [
