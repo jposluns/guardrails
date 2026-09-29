@@ -7384,20 +7384,42 @@ def _watchdog_completion_case(mode):
         # were driven. Leg 19 derives exactly the self-attributes
         # read inside an If/While/IfExp TEST of the member and
         # drives ONE deviation at a time; the recognized grammar
-        # is: a bare truthiness read contributes both booleans; a
-        # read that is itself a comparison side contributes every
-        # constant that comparison spells -- bare constant sides
-        # plus the members of tuple/list/set literal sides made
-        # only of constants (a frozenset() call wrapping such a
-        # literal included); a read nested anywhere DEEPER inside a
-        # comparison side (in a call, a subscript, an attribute
+        # is, in exact AST terms: a bare truthiness read (a self
+        # ast.Attribute in the test outside every ast.Compare)
+        # contributes both booleans; a read that is itself an
+        # ast.Compare side (the Compare's left or one of its
+        # comparators) contributes every constant that comparison
+        # spells, where a spelled constant is a bare ast.Constant
+        # side, an ast.UnaryOp side whose op is ast.UAdd or
+        # ast.USub and whose operand is an ast.Constant int, float,
+        # or complex (bool excluded), the sign applied, or a member
+        # of an ast.Tuple/ast.List/ast.Set side (an ast.Call of the
+        # bare name frozenset around exactly one such literal
+        # included) whose every element is one of those two
+        # spellings (fix 20); a read nested anywhere DEEPER inside
+        # a comparison side (in a call, a subscript, an attribute
         # chain, any expression) contributes both booleans plus
         # those same spelled constants; a spelled None also
-        # contributes a non-None stand-in. It does NOT drive
-        # multi-attribute combinations, conditions carried through
-        # locals or other data flow, state never read in a branch
-        # test, or firing values not spelled as constants in the
-        # test (computed or non-literal values). The two QA39
+        # contributes a non-None stand-in; and the driven states
+        # deduplicate TYPE-AWARE -- a value is a duplicate only
+        # when it is the same object, or has the same type and
+        # compares equal -- so type-distinct equal constants (2
+        # and 2.0, True and 1) are each their own driven state
+        # (fix 20, QA41 codex BLOCKER / claude MAJOR, maintainer
+        # decision 2026-09-29: spelled_constants accepted only
+        # ast.Constant, so a bare `-1` -- an ast.UnaryOp -- and any
+        # container holding one derived nothing, and both
+        # deduplications compared with plain ==, collapsing 2 into
+        # 2.0 and True into 1). It does NOT drive multi-attribute
+        # combinations, conditions carried through locals or other
+        # data flow, or state never read in a branch test, and the
+        # undriven list closes with the exact complement: EVERY
+        # spelling outside the grammar above is undriven -- for
+        # example a dict display side, a container compared by
+        # equality as a whole value (its spelled members are
+        # driven, the container value itself is never a driven
+        # state), or a computed or otherwise non-literal value.
+        # The two QA39
         # vectors -- a displacement conditioned on _failure read
         # through a local, and one conditioned on armed AND
         # unresolved together -- are pinned red after the QA38 pin,
@@ -7406,7 +7428,12 @@ def _watchdog_completion_case(mode):
         # constant-tuple membership test and an attribute nested in
         # a call on a comparison side -- are pinned red after
         # those, each driven by states the derivation itself
-        # recognizes. A flipped state that routes around the
+        # recognizes; the two QA41 spellings INSIDE the bound -- a
+        # unary-minus constant comparison and a constant-tuple
+        # membership whose spelled int member ==-collapsed into a
+        # float member -- are pinned red after the QA40 pins (fix
+        # 20), likewise driven only by states the derivation
+        # itself recognizes. A flipped state that routes around the
         # pending point still makes that run vacuous, as disclosed
         # at behavioural_case; only the DEFAULT state must never be
         # vacuous.
@@ -7451,33 +7478,50 @@ def _watchdog_completion_case(mode):
             # Every self.<attr> read inside an If/While/IfExp test of
             # the member (nested defs included) names an attribute the
             # site branches on. fix 19 (QA40 claude/codex/gemini
-            # BLOCKER, maintainer decision 2026-09-29): the
-            # recognized grammar, stated exactly:
-            #   - a read outside any comparison (a bare truthiness
+            # BLOCKER) and fix 20 (QA41 codex BLOCKER / claude
+            # MAJOR), maintainer decisions 2026-09-29: the
+            # recognized grammar, stated in exact AST terms:
+            #   - a read outside any ast.Compare (a bare truthiness
             #     read) contributes both booleans;
-            #   - a read that is itself a comparison side
+            #   - a read that is itself an ast.Compare side (the
+            #     Compare's left or one of its comparators)
             #     contributes every constant that comparison
-            #     spells: bare constant sides plus the members of
-            #     tuple/list/set literal sides made only of
-            #     constants (a frozenset() call wrapping such a
-            #     literal included);
+            #     spells, where a spelled constant is a bare
+            #     ast.Constant side, an ast.UnaryOp side whose op
+            #     is ast.UAdd or ast.USub and whose operand is an
+            #     ast.Constant int, float, or complex (bool
+            #     excluded), the sign applied (fix 20), or a member
+            #     of an ast.Tuple/ast.List/ast.Set side (an
+            #     ast.Call of the bare name frozenset around
+            #     exactly one such literal included) whose every
+            #     element is one of those two spellings;
             #   - a read nested anywhere deeper inside a comparison
             #     side (in a call, a subscript, an attribute chain,
             #     any expression) contributes both booleans plus
             #     those same spelled constants;
             #   - a spelled None also contributes a non-None
-            #     stand-in.
+            #     stand-in;
+            #   - the driven states deduplicate TYPE-AWARE: a value
+            #     is a duplicate only when it is the same object,
+            #     or has the same type and compares equal, so 2 and
+            #     2.0, or True and 1, are each their own driven
+            #     state (fix 20).
             # Each case then runs once per single-attribute
             # deviation on top of its fixture's default state, so a
             # displacement conditioned on any one state spelled
             # that way is driven. That is EXACTLY the bound (fix
-            # 18, QA39 claude/gemini BLOCKERs; fix 19, QA40;
-            # maintainer decisions 2026-09-29): it does NOT drive
-            # multi-attribute combinations, conditions carried
-            # through locals or other data flow, state never read
-            # in a branch test, or firing values not spelled as
-            # constants in the test (computed or non-literal
-            # values); the bound is not widened here -- the found
+            # 18, QA39 claude/gemini BLOCKERs; fix 19, QA40; fix
+            # 20, QA41; maintainer decisions 2026-09-29): it does
+            # NOT drive multi-attribute combinations, conditions
+            # carried through locals or other data flow, or state
+            # never read in a branch test, and the undriven list
+            # closes with the exact complement: EVERY spelling
+            # outside the grammar above is undriven -- for example
+            # a dict display side, a container compared by
+            # equality as a whole value (its spelled members are
+            # driven, the container value itself is never a driven
+            # state), or a computed or otherwise non-literal
+            # value; the bound is not widened here -- the found
             # QA39 vectors in those classes are pinned red after
             # the matrix, and the bound is disclosed at the leg 19
             # head. A pin passes `member` to derive from a mutant
@@ -7489,9 +7533,33 @@ def _watchdog_completion_case(mode):
                 member = scope[member_key]
 
             def spelled_constants(side):
-                # the constants a comparison side spells (fix 19)
-                if isinstance(side, ast.Constant):
-                    return [side.value]
+                # the constants a comparison side spells (fix 19):
+                # a bare ast.Constant, an ast.UnaryOp ast.UAdd or
+                # ast.USub over a numeric non-bool ast.Constant
+                # with the sign applied (fix 20), or an
+                # ast.Tuple/ast.List/ast.Set of those (a
+                # frozenset() call wrapping such a literal
+                # included)
+                def spelled(item):
+                    if isinstance(item, ast.Constant):
+                        return [item.value]
+                    if (isinstance(item, ast.UnaryOp)
+                            and isinstance(item.op,
+                                           (ast.UAdd, ast.USub))
+                            and isinstance(item.operand,
+                                           ast.Constant)
+                            and isinstance(item.operand.value,
+                                           (int, float, complex))
+                            and not isinstance(item.operand.value,
+                                               bool)):
+                        if isinstance(item.op, ast.USub):
+                            return [-item.operand.value]
+                        return [+item.operand.value]
+                    return []
+
+                bare = spelled(side)
+                if bare:
+                    return bare
                 container = side
                 if (isinstance(container, ast.Call)
                         and isinstance(container.func, ast.Name)
@@ -7499,12 +7567,13 @@ def _watchdog_completion_case(mode):
                         and len(container.args) == 1
                         and not container.keywords):
                     container = container.args[0]
-                if (isinstance(container, (ast.Tuple, ast.List,
-                                           ast.Set))
-                        and all(isinstance(item, ast.Constant)
-                                for item in container.elts)):
-                    return [item.value
-                            for item in container.elts]
+                if isinstance(container, (ast.Tuple, ast.List,
+                                          ast.Set)):
+                    members = [spelled(item)
+                               for item in container.elts]
+                    if all(members):
+                        return [value for member in members
+                                for value in member]
                 return []
 
             truthy, consts = set(), {}
@@ -7535,8 +7604,13 @@ def _watchdog_completion_case(mode):
                             bucket = consts.setdefault(
                                 part.attr, [])
                             for value in values:
+                                # type-aware: 2 never collapses
+                                # into 2.0, nor True into 1
+                                # (fix 20)
                                 if not any(value is known
-                                           or value == known
+                                           or (type(value)
+                                               is type(known)
+                                               and value == known)
                                            for known in bucket):
                                     bucket.append(value)
                 for leaf in ast.walk(node.test):
@@ -7549,7 +7623,11 @@ def _watchdog_completion_case(mode):
             for attr in sorted(set(truthy) | set(consts)):
                 states = [False, True] if attr in truthy else []
                 for value in consts.get(attr, ()):
-                    if not any(value is known or value == known
+                    # type-aware: a spelled 1 stays distinct from
+                    # the truthiness True (fix 20)
+                    if not any(value is known
+                               or (type(value) is type(known)
+                                   and value == known)
                                for known in states):
                         states.append(value)
                 if any(value is None
@@ -8339,6 +8417,138 @@ def _watchdog_completion_case(mode):
                         "the pinned QA40 " + vector + " mutation "
                         "was NOT caught by its derived-state "
                         "behavioural run (fix 19)")
+
+        # fix 20 (QA41 codex BLOCKER / claude MAJOR, maintainer
+        # decision 2026-09-29): the recognizer missed two more
+        # ORDINARY spellings of a DIRECT single-attribute branch
+        # test the disclosure's plain reading said were driven --
+        # a unary-minus numeric constant (`-1` parses as an
+        # ast.UnaryOp, and the pre-fix spelled_constants accepted
+        # only ast.Constant, so a bare `-1` side or a container
+        # holding one derived nothing), and a type-distinct equal
+        # constant (both deduplications compared with plain ==, so
+        # a spelled 2 collapsed into an already-collected 2.0 and
+        # was never driven -- exactly the state an
+        # isinstance-guarded displacement needs). Both spellings
+        # sit INSIDE the disclosed bound, so each pin follows the
+        # fix 19 shape unchanged: derive from a probe member
+        # holding ONLY the mutated branch and require the
+        # spelling's own states among them (red-on-revert for the
+        # recognizer clause), rebuild _finish_close from the
+        # module's own AST with the mutation inserted right after
+        # the same unique capture `pending = exc` (the capture
+        # line stays pristine and unique for the QA38/QA39/QA40
+        # pins), require the firing states among the states
+        # derived from that mutant member, prove every firing
+        # state green on the real member first, and require it to
+        # turn the mutant RED. State membership is checked
+        # TYPE-AWARE here too -- dict == compares values with
+        # plain ==, the very collapse under pin, so a plain `in`
+        # would accept {'pid': 2.0} as {'pid': 2}.
+        def driven_state(state, overrides):
+            return any(
+                set(state) == set(override)
+                and all(override[attr] is state[attr]
+                        or (type(override[attr])
+                            is type(state[attr])
+                            and override[attr] == state[attr])
+                        for attr in state)
+                for override in overrides)
+
+        fix20_vectors = (
+            ("if self._subject_kill == -1:\n"
+             "    pending = None",
+             (dict(_subject_kill=-1),),
+             (dict(_subject_kill=-1),),
+             "unary-minus-constant (QA41)"),
+            ("if self.pid in (2.0, 2) and isinstance(self.pid, "
+             "int):\n"
+             "    pending = None",
+             (dict(pid=2.0), dict(pid=2)),
+             (dict(pid=2),),
+             "type-collapsed-constant (QA41)"),
+        )
+        for (mutation_source, derived_states, firing_states,
+             vector) in fix20_vectors:
+            probe_member = ast.parse(
+                "def probe(self):\n" + "".join(
+                    "    " + line + "\n"
+                    for line in
+                    mutation_source.splitlines())).body[0]
+            probe_overrides = derived_overrides(
+                "m:probe", probe_member)
+            for derived_state in derived_states:
+                assert driven_state(derived_state,
+                                    probe_overrides), (
+                    "the derivation no longer recognizes this "
+                    "ordinary branch-test spelling: the leg 19 "
+                    "claim would again be broader than its code "
+                    "(fix 20)", vector, derived_state)
+            mutant_member = copy.deepcopy(
+                scope["m:_FixtureProcess._finish_close"])
+            capture_assigns = [
+                node for node in ast.walk(mutant_member)
+                if isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "pending"
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "exc"]
+            assert len(capture_assigns) == 1, (
+                "the pinned QA41 mutation site (`pending = exc` "
+                "inside _finish_close) is no longer unique "
+                "(fix 20)", len(capture_assigns))
+            holders = [
+                node for node in ast.walk(mutant_member)
+                if isinstance(getattr(node, "body", None), list)
+                and capture_assigns[0] in node.body]
+            assert len(holders) == 1, (
+                "the pinned QA41 capture's holding body is not "
+                "unique (fix 20)", len(holders))
+            at = holders[0].body.index(capture_assigns[0])
+            holders[0].body[at + 1:at + 1] = ast.parse(
+                mutation_source).body
+            mutant_overrides = derived_overrides(
+                "m:_FixtureProcess._finish_close", mutant_member)
+            for firing_state in firing_states:
+                assert driven_state(firing_state,
+                                    mutant_overrides), (
+                    "the ordinary matrix would not drive this "
+                    "QA41 firing state on a member containing "
+                    "the mutated branch (fix 20)", vector,
+                    firing_state)
+            mutant_namespace = dict(vars(emit))
+            exec(compile(ast.fix_missing_locations(ast.Module(
+                    body=[mutant_member], type_ignores=[])),
+                 "<fix 20 QA41 pinned mutant>", "exec"),
+                 mutant_namespace)
+            for pin_state in firing_states:
+                behavioural_case(
+                    ("m:_FixtureProcess._finish_close",
+                     "held descriptor and report close", 0),
+                    finish_handles_driver,
+                    TimeoutError("pending cancellation"),
+                    RuntimeError("injected cleanup fault"),
+                    dict(pin_state))
+                try:
+                    with patch.object(
+                            emit._FixtureProcess, "_finish_close",
+                            mutant_namespace["_finish_close"]):
+                        behavioural_case(
+                            ("m:_FixtureProcess._finish_close",
+                             "held descriptor and report close",
+                             0),
+                            finish_handles_driver,
+                            TimeoutError("pending cancellation"),
+                            RuntimeError("injected cleanup fault"),
+                            dict(pin_state))
+                except AssertionError:
+                    pass
+                else:
+                    raise AssertionError(
+                        "the pinned QA41 " + vector + " mutation "
+                        "was NOT caught by its derived-state "
+                        "behavioural run (fix 20)")
     elif mode == "receipt-high-fd":
         import fcntl
         import resource
