@@ -7410,15 +7410,19 @@ def _watchdog_completion_case(mode):
         # ast.Constant, so a bare `-1` -- an ast.UnaryOp -- and any
         # container holding one derived nothing, and both
         # deduplications compared with plain ==, collapsing 2 into
-        # 2.0 and True into 1). It does NOT drive multi-attribute
-        # combinations, conditions carried through locals or other
-        # data flow, state never read in a branch test, or firing
-        # values not spelled as constants in the test (a test such
-        # as `self.x != False` fires on values the derivation never
-        # drives), and the undriven list closes with the exact
-        # complement: EVERY spelling outside the grammar above is
-        # undriven by derivation (the default state may still fire
-        # one by accident, which is not a guarantee) -- for
+        # 2.0 and True into 1). It carries NO guarantee for
+        # multi-attribute combinations, conditions carried through
+        # locals or other data flow, state never read in a branch
+        # test, or firing values not spelled as constants in the
+        # member's branch tests (constants pool across all of the
+        # member's tests and a truthiness read adds False and True,
+        # so such a value MAY still be driven, never guaranteed; a
+        # test such as `self.x != False` is the shape), and the
+        # list closes with the exact
+        # complement: EVERY spelling outside the grammar above
+        # carries no derivation guarantee (any driven state, the
+        # default or a derived deviation, may still fire one by
+        # accident) -- for
         # example a dict display side, a container compared by
         # equality as a whole value (its spelled members are
         # driven, the container value itself is never a driven
@@ -7515,15 +7519,17 @@ def _watchdog_completion_case(mode):
             # displacement conditioned on any one state spelled
             # that way is driven. That is EXACTLY the bound (fix
             # 18, QA39 claude/gemini BLOCKERs; fix 19, QA40; fix
-            # 20, QA41; maintainer decisions 2026-09-29): it does
-            # NOT drive multi-attribute combinations, conditions
-            # carried through locals or other data flow, state
-            # never read in a branch test, or firing values not
-            # spelled as constants in the test (for example
-            # `self.x != False`), and the undriven list closes with
-            # the exact complement: EVERY spelling outside the
-            # grammar above is undriven by derivation (the default
-            # state may still fire one by accident) -- for example
+            # 20, QA41; maintainer decisions 2026-09-29): it
+            # carries NO guarantee for multi-attribute combinations,
+            # conditions carried through locals or other data flow,
+            # state never read in a branch test, or firing values
+            # not spelled as constants in the member's branch tests
+            # (pooled constants and truthiness booleans MAY still
+            # drive one, never guaranteed; for example
+            # `self.x != False`), and the list closes with the exact
+            # complement: EVERY spelling outside the grammar above
+            # carries no derivation guarantee (any driven state may
+            # still fire one by accident) -- for example
             # a dict display side, a container compared by
             # equality as a whole value (its spelled members are
             # driven, the container value itself is never a driven
@@ -7545,8 +7551,8 @@ def _watchdog_completion_case(mode):
                 # ast.USub over a numeric non-bool ast.Constant
                 # with the sign applied (fix 20), or an
                 # ast.Tuple/ast.List/ast.Set of those (a
-                # frozenset() call wrapping such a literal
-                # included)
+                # frozenset() call with exactly that one literal
+                # argument and no keywords included)
                 def spelled(item):
                     if isinstance(item, ast.Constant):
                         return [item.value]
