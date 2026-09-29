@@ -67,7 +67,8 @@ this library cannot decide under v1 assumptions (undecodable/unparseable bytes, 
 key, a non-finite constant or a number outside the finite double range, a JSON null anywhere in the
 recognized hooks surface (null is refused by name, never read as absence and never crashed on), a
 wrong container type, an out-of-vocabulary closed token such as an unknown hook event or hook type,
-an oversize file, a merged emission that would exceed the same size bound, nesting deep enough to
+an oversize file or candidate, a non-bytes input or a foreign-typed model node refused at an
+entry gate, a merged emission that would exceed the same size bound, nesting deep enough to
 exhaust parser recursion, a CHANGED merge whose re-emission would exhaust emission recursion
 (roughly the interpreter recursion limit; an already-merged file of the same depth still no-ops,
 because the no-op path returns its own bytes without re-emitting)); INVALID for a decodable
@@ -85,6 +86,18 @@ source re-emits as the raw character; control characters take the serializer's e
 emitted bytes are additionally held to the same MAX_REGISTRATION_BYTES bound as the input, so an
 accepted output always no-ops, byte-identically, on its next merge. The plan's new_digest pins the
 exact post-merge bytes, so the one approval covers this normalization byte-exactly.
+
+Hostile in-process objects (fix 5's premise): the only callers are this repository's own code, and
+rounds 4 to 6 showed that hardening every interior site against one more overridable dunder (str
+subclasses, a _Number carrier, __bytes__, __repr__, a __class__ spoof) is unbounded. So each PUBLIC
+function carries ONE ENTRY GATE instead: merge_registration accepts old_bytes only as EXACTLY bytes
+and plugin_entry only as EXACTLY str (length-bounded before any whole-candidate scan);
+validate_registration_model walks the model once, iteratively and cycle-safe, and refuses any
+foreign-typed node, keys included; canonical_hook_group gates its token the same way. Every gate
+refusal is a FIXED message that reads nothing off the refused object and never invokes one of its
+methods (no repr, no str, no __bytes__, no type name off a metaclass). Past a gate only
+built-in-backed types flow, so the interior exact-type checks CLASSIFY parsed data (str against the
+_Number lexeme carrier), never defend against caller-run code.
 
 Offline, stdlib only, fail-closed. It lives under `opf/tools/` and imports ONLY sibling `opf/tools/`
 modules (the shared outcome model from `_opf_store`; `_opf_adopt` for the single-sourced token rule
@@ -173,15 +186,23 @@ def _digest(data):
 def _shown(value):
     """Findings and refusal messages embed adopter content; bound what they repeat so a refusal
     never echoes a megabyte lexeme or key back to the caller. repr-based, so a _Number shows as
-    its bare lexeme and a str stays quoted. A long genuine str or _Number is truncated on the
-    VALUE before repr, so the cut never splits a repr escape sequence and the reported count is
-    the value's own length; any other long repr (a foreign type's) is cut on the repr text and
-    labelled as such. Worst case stays near half a kilobyte (48 characters whose repr escapes
-    are up to ten bytes each, plus the suffix), so every embedding message is bounded."""
-    if type(value) is _Number and len(value) > 64:
-        return "{}... ({} characters)".format(str.__str__(value)[:64], len(value))
-    if type(value) is str and len(value) > 48:
-        return "{}... ({} characters)".format(repr(value[:48]), len(value))
+    its bare lexeme and a str stays quoted. An exact str or _Number is bounded on the VALUE at
+    EVERY length: a long one is truncated on the value before repr and reports the value's own
+    length, and a short one comes back whole (its repr is never cut, so no cut can split a repr
+    escape sequence and no reported count is ever the repr's). The final branch (cut on the
+    repr text and labelled as such) serves built-in scalars and containers only: the public
+    entry gates refuse foreign-typed values before any interior check can hand one to this
+    formatter, so no overridden __repr__ runs here. Worst case stays near half a kilobyte (48
+    characters whose repr escapes are up to ten bytes each, plus the suffix), so every
+    embedding message is bounded."""
+    if type(value) is _Number:
+        if len(value) > 64:
+            return "{}... ({} characters)".format(str.__str__(value)[:64], len(value))
+        return str.__str__(value)
+    if type(value) is str:
+        if len(value) > 48:
+            return "{}... ({} characters)".format(repr(value[:48]), len(value))
+        return repr(value)
     text = repr(value)
     if len(text) <= 72:
         return text
@@ -229,8 +250,8 @@ class _Number(str):
     same-lexeme string or a digit string into a number (threat model 2). Every field check that
     needs a parsed STRING requires EXACTLY str by type identity (_is_json_string), which
     excludes this type, and the candidate plugin_entry check does the same. repr() shows the
-    bare lexeme, never a quoted
-    string, so a finding that embeds a value distinguishes a number from a string."""
+    bare lexeme, never a quoted string, so a finding that embeds a value distinguishes a
+    number from a string."""
 
     __slots__ = ()
 
@@ -275,23 +296,60 @@ def _parse(raw):
         raise _ParseRefusal("registration bytes are not strict JSON: {}".format(exc)) from None
 
 
+# json.dumps(value, ensure_ascii=False) escapes EXACTLY the backslash, the double quote, and the
+# C0 controls: \b \t \n \f \r as two-character escapes, every other C0 control as a six-character
+# \uXXXX escape; everything else passes through and costs its UTF-8 byte length (surrogatepass,
+# matching _emit_piece's count, so a lone escaped surrogate is countable here and still refused
+# by _emit's final strict encode).
+_TWO_CHAR_ESCAPES = ('\\', '"', '\b', '\t', '\n', '\f', '\r')
+_SIX_CHAR_ESCAPES = tuple(chr(c) for c in range(0x20)
+                          if chr(c) not in ('\b', '\t', '\n', '\f', '\r'))
+
+
+def _string_bytes(value):
+    """The EXACT UTF-8 byte length json.dumps(value, ensure_ascii=False) serializes `value` to,
+    computed WITHOUT serializing (C-speed counting passes, no allocation proportional to the
+    escaped form): two quotes, plus the value's own UTF-8 bytes, plus one extra byte per
+    two-character escape and five extra per \\uXXXX-escaped control. The emitter's
+    pre-serialization budget checks use this, so they are exact, never merely a character-count
+    lower bound: a string or key that fits is never refused, and one that cannot fit never
+    reaches json.dumps."""
+    total = 2 + (len(value) if value.isascii()
+                 else len(value.encode("utf-8", "surrogatepass")))
+    for ch in _TWO_CHAR_ESCAPES:
+        total += value.count(ch)
+    if value and min(value) < " ":
+        # the 27 rare \uXXXX-escaped controls are counted only when a control is present at
+        # all (min() is one C-speed pass; every control sorts below the space character).
+        for ch in _SIX_CHAR_ESCAPES:
+            total += 5 * value.count(ch)
+    return total
+
+
 def _emit(model):
     """Deterministic emission: sorted keys, two-space indent, one trailing newline, UTF-8 output.
     Strings are escaped by the json serializer with ensure_ascii=False, so the adopter's non-ASCII
     text and KEYS are preserved verbatim (never rewritten to \\uXXXX, which used to triple
     non-ASCII files and break the size-bound idempotence); _Number lexemes re-emit exactly as
-    parsed. Emission is a fixed point under _parse for every model it emits AT ALL, enforced
-    rather than assumed: every number (a parsed lexeme or a code-built int/float) is held to the
-    parser's own number grammar and finite double range, a parseable model carrying an escaped
-    unpaired surrogate refuses here (below), and the output is held to MAX_REGISTRATION_BYTES by
-    a RUNNING byte count (_emit_piece) that refuses the moment the bound would pass, so an
-    over-bound emission is never built; a string or key is refused BEFORE json.dumps
-    materializes a serialization that could not fit under the remaining budget (its UTF-8 form
-    is at least one byte per character plus the quotes), so a huge string, the caller's
-    candidate included, cannot allocate past the budget. Keys and string values must be EXACTLY
-    str, and a number exactly _Number or a code-built int/float (type identity, never
-    isinstance), so a _Number key can never serialize into duplicate-key JSON and a hostile str
-    subclass never reaches the serializer. Raises _ParseRefusal on all of those and on a value
+    parsed. FIXED-POINT SCOPE, exactly: for every model produced by _parse or by
+    merge_registration's own merge step (whose nodes are exact dict/list/str/_Number by
+    construction), emission is a fixed point under _parse, enforced rather than assumed: every
+    number lexeme is held to the parser's own number grammar and finite double range, a
+    parseable model carrying an escaped unpaired surrogate refuses here (below), and keys,
+    string values and lexeme carriers are classified by type IDENTITY (exactly str, exactly
+    _Number), so a _Number key can never serialize into duplicate-key JSON. A CODE-BUILT model
+    (the self-test's literals, a finite exact int/float) emits under the same number rule, but
+    the container and numeric branches classify it by isinstance, so a SUBCLASS of
+    int/float/dict/list, which only this repository's own code could pass (_emit is
+    module-private and the public entry gates refuse foreign-typed models), is NOT covered by
+    the fixed-point claim and may emit bytes _parse refuses. The output is held to
+    MAX_REGISTRATION_BYTES by a RUNNING byte count (_emit_piece) that refuses the moment the
+    bound would pass, so an over-bound emission is never built; a string or key is refused
+    BEFORE json.dumps runs whenever its EXACT serialized UTF-8 byte length (_string_bytes:
+    quotes plus base bytes plus escape growth, the serializer's own arithmetic) exceeds the
+    remaining budget, so a huge or escape-heavy string, the caller's length-gated candidate
+    included, never allocates a serialization past the budget, and a value that fits is never
+    wrongly refused. Raises _ParseRefusal on all of those and on a value
     no parsed model can contain (a key or value of a foreign type), and RecursionError on nesting
     near the interpreter recursion limit (roughly 1000 levels, dependent on the caller's
     remaining stack); merge_registration maps every one of these to CANNOT-EVALUATE. The residual
@@ -331,13 +389,14 @@ def _emit_value(value, depth, out, budget):
                 _shown(value)))
         _emit_piece(str(value), out, budget)
     elif type(value) is str:
-        # exact type: a hostile str subclass never reaches json.dumps, which reads the real
-        # underlying buffer (it falls through to the unserializable refusal below). The
-        # serialized form is at least len(value) + 2 bytes, so a string that cannot fit is
-        # refused BEFORE its escaped form is materialized; the caller's candidate has no
-        # length ceiling of its own, and this keeps its serialization inside the same
-        # incremental budget.
-        if budget[0] < len(value) + 2:
+        # exact type: classification against the _Number carrier (which must emit as a bare
+        # lexeme, never quoted); a str subclass, which no parsed or merge-built model can
+        # contain, falls through to the unserializable refusal below and never reaches
+        # json.dumps. The budget pre-check is EXACT (_string_bytes), so a string that cannot
+        # fit, the caller's length-gated candidate and an escape-heavy value included, is
+        # refused BEFORE json.dumps materializes any part of its escaped form, and one that
+        # fits is never wrongly refused.
+        if budget[0] < _string_bytes(value):
             raise _EmitBoundRefusal(
                 "emission would exceed {} bytes".format(MAX_REGISTRATION_BYTES))
         _emit_piece(json.dumps(value, ensure_ascii=False), out, budget)
@@ -362,8 +421,8 @@ def _emit_value(value, depth, out, budget):
         if any(type(key) is not str for key in value):
             # exact type: a _Number key and a same-lexeme str key are DISTINCT model keys that
             # would both serialize as the same JSON string, emitting duplicate-key JSON _parse
-            # then refuses; a hostile str-subclass key is caller-run code. Both refuse here, so
-            # emission stays a fixed point for every model it emits at all.
+            # then refuses. Both refuse here, so emission stays a fixed point for every
+            # parsed or merge-built model (the docstring's fixed-point scope).
             raise _ParseRefusal("table key in the model is not exactly a string")
         if not value:
             _emit_piece("{}", out, budget)
@@ -371,9 +430,10 @@ def _emit_value(value, depth, out, budget):
         pad = "  " * (depth + 1)
         _emit_piece("{\n", out, budget)
         for i, key in enumerate(sorted(value)):
-            if budget[0] < len(pad) + len(key) + 4:
-                # the key's emitted line is at least pad + quotes + key + ": "; refuse before
-                # json.dumps materializes an over-budget key.
+            if budget[0] < len(pad) + _string_bytes(key) + 2:
+                # the key's emitted piece is exactly pad + the key's serialized form + ": ";
+                # the EXACT pre-check refuses before json.dumps materializes an over-budget
+                # key and never refuses a key line that fits.
                 raise _EmitBoundRefusal(
                     "emission would exceed {} bytes".format(MAX_REGISTRATION_BYTES))
             _emit_piece(pad + json.dumps(key, ensure_ascii=False) + ": ", out, budget)
@@ -404,11 +464,11 @@ def _single_line(value):
 
 
 def _is_json_string(value):
-    """A parsed JSON string: EXACTLY str by type identity, never isinstance. This excludes the
-    _Number lexeme carrier (so a number-typed field can never satisfy a string-typed check) and
-    every other str subclass: a hostile subclass is caller-run code whose overridden __iter__
-    or __eq__ could hide control characters from the token scan or fake an already-merged
-    equality, so it is refused before any of its methods can run."""
+    """A parsed JSON string: EXACTLY str by type identity, never isinstance. Past the public
+    entry gates only exact types flow, so this is pure CLASSIFICATION of parsed data: it keeps
+    the _Number lexeme carrier out of every string-typed check (a number-typed field can never
+    satisfy one). It stays type-identity so the classification cannot drift if a non-gated
+    private path is ever added."""
     return type(value) is str
 
 
@@ -440,11 +500,58 @@ def _null_refusal(value, where):
     return None
 
 
+# The ONE fixed finding a gate returns for a foreign-typed model node. Deliberately CONSTANT: it
+# names no type and reads nothing off the refused object (no repr, no str, no type name off a
+# metaclass), so no method of a hostile type ever runs on the refusal path.
+_GATE_MODEL_FINDING = ("registration model carries a node that is not a parsed-JSON type "
+                       "(exactly dict, list, str, the module's _Number, int, float, bool or "
+                       "None; the entry gate refuses foreign types unread)")
+
+
+def _foreign_typed(model):
+    """The public validator's ENTRY GATE (fix 5): ONE iterative pre-order walk, no recursion (so
+    depth cannot crash it) and visited-id tracking on containers (so a self-referencing
+    code-built model terminates instead of hanging), requiring every node, keys included, to be
+    an EXACT parsed-JSON type: dict, list, str, the module's own _Number, int, float, bool or
+    None, decided by IDENTITY alone (`is` on type(node), which a __class__ spoof cannot fool
+    and which never invokes a method, a metaclass __eq__ included; None, True and False by
+    object identity, and bool cannot be subclassed). Past this gate only built-in-backed types
+    flow, so every interior check classifies parsed data instead of defending against
+    caller-run code. Returns True when a foreign-typed node is present."""
+    stack = [model]
+    seen = set()
+    while stack:
+        node = stack.pop()
+        if node is None or node is True or node is False:
+            continue
+        node_type = type(node)
+        if node_type is dict or node_type is list:
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            if node_type is dict:
+                for key, item in node.items():
+                    stack.append(key)
+                    stack.append(item)
+            else:
+                stack.extend(node)
+        elif not (node_type is str or node_type is _Number
+                  or node_type is int or node_type is float):
+            return True
+    return False
+
+
 def validate_registration_model(model):
     """Validate an already-parsed registration model against the closed v1 shape. Returns an
-    _opf_adopt.AdoptValidation. Structural wrongness and out-of-vocabulary closed tokens short-circuit
+    _opf_adopt.AdoptValidation. THE ENTRY GATE comes first (fix 5: one gate per public function,
+    never per-dunder hardening): _foreign_typed walks the model once and refuses any
+    foreign-typed node, keys included, with the one fixed _GATE_MODEL_FINDING and no method of
+    the refused object ever run; past the gate every interior check classifies parsed data.
+    Structural wrongness and out-of-vocabulary closed tokens short-circuit
     CANNOT-EVALUATE; schema violations accumulate to INVALID; only a fully recognized shape is VALID
     (never a best-effort read around an unrecognized part)."""
+    if _foreign_typed(model):
+        return schema.AdoptValidation(CANNOT_EVALUATE, [_GATE_MODEL_FINDING])
     if not isinstance(model, dict):
         return schema.AdoptValidation(CANNOT_EVALUATE, ["registration top level is not a table"])
     findings = []
@@ -548,8 +655,8 @@ def _validate_group(group, where, findings):
         if verdict is not None:
             return verdict
         if not _is_json_string(entry["type"]) or entry["type"] not in HOOK_TYPES:
-            # the exact-str requirement comes first: a hostile str subclass with an overridden
-            # __eq__ could otherwise satisfy the closed-vocabulary membership test.
+            # classification first: a _Number("command") is a number-typed field and must
+            # refuse here, never satisfy the closed-vocabulary membership test by lexeme.
             return schema.AdoptValidation(
                 CANNOT_EVALUATE,
                 ["{} type {} outside the closed v1 vocabulary".format(
@@ -577,7 +684,15 @@ def _validate_group(group, where, findings):
 def canonical_hook_group(plugin_entry):
     """The exact matcher group v1 inserts: match-all, one command entry whose command is EXACTLY the
     pinned `plugin_entry` token (a name into the digest-verified installed pack), nothing else. The
-    plan's new_digest pins the whole post-merge file, so the one approval binds these bytes."""
+    plan's new_digest pins the whole post-merge file, so the one approval binds these bytes.
+    Public, so it carries the same entry gate as merge_registration's candidate half (exactly
+    str by type identity, length-bounded, token-clean), raising ValueError with a fixed message
+    rather than building a group around a foreign object; on merge_registration's own path its
+    gate has already run, so this raise is defense in depth for the wiring slice."""
+    if (type(plugin_entry) is not str or len(plugin_entry) > MAX_REGISTRATION_BYTES
+            or not schema._is_token(plugin_entry)):
+        raise ValueError("plugin_entry is not exactly a token string (the entry gate accepts "
+                         "exact str passing the no-control token rule only)")
     return {"hooks": [{"command": plugin_entry, "type": "command"}], "matcher": ENTRY_MATCHER}
 
 
@@ -597,36 +712,49 @@ def _entry_occurrences(model, plugin_entry):
 def merge_registration(old_bytes, plugin_entry):
     """Compute the merged registration for `old_bytes` + `plugin_entry`, purely. No filesystem write:
     the caller (the enable-hook op wiring, next slice) publishes new_bytes through the journal only
-    after the plan's approval-bound new_digest matches. Merging an already-merged file is a verified
+    after the plan's approval-bound new_digest matches. THE ENTRY GATE comes first (fix 5: one
+    gate per public function, never per-dunder hardening): old_bytes must be EXACTLY bytes and
+    plugin_entry EXACTLY str, both by type identity, and anything else (a bytearray, a bytes or
+    str subclass, a __bytes__ or __class__ spoof) refuses with a FIXED message that reads
+    nothing off the refused object and never invokes one of its methods; a candidate longer
+    than MAX_REGISTRATION_BYTES, which could never fit in an emitted registration, refuses
+    before ANY whole-candidate scan, so candidate scanning is bounded by the registration
+    size. Past the gate only built-in types flow. Merging an already-merged file is a verified
     no-op (changed False, new_bytes the file's OWN bytes verbatim, never a re-emission); an
     existing conflicting registration of the same entry, any unrecognized format or shape, JSON null
-    in the recognized hooks surface, a number outside the finite double range, a plugin_entry that
-    is not EXACTLY a JSON string (type identity: the _Number lexeme carrier and every other str
-    subclass are refused before any of their methods run), and a merged emission that would
-    exceed MAX_REGISTRATION_BYTES
-    (refused by the emitter's running byte count the moment the bound would pass, so the over-bound
-    output is never built) all refuse fail-closed. The no-op path and the merge
-    path share the same parse and validation, so parse-level and shape-level refusals are
-    identical; content that only EMISSION refuses (an escaped unpaired surrogate, nesting past
-    the emission recursion depth) still no-ops when the file is already merged, because the
-    no-op returns the file's own bytes without re-emitting."""
-    if isinstance(old_bytes, bytearray):
-        old_bytes = bytes(old_bytes)
-    if not isinstance(old_bytes, bytes):
-        return _cannot("registration input is not bytes")
+    in the recognized hooks surface, a number outside the finite double range, a plugin_entry
+    failing the no-control token rule, and a merged emission that would exceed
+    MAX_REGISTRATION_BYTES (refused by the emitter's running byte count the moment the bound
+    would pass, so the over-bound output is never built) all refuse fail-closed. The no-op
+    path and the merge path share the same parse and validation, so parse-level and
+    shape-level refusals are identical; content that only EMISSION refuses (an escaped
+    unpaired surrogate, nesting past the emission recursion depth) still no-ops when the file
+    is already merged, because the no-op returns the file's own bytes without re-emitting."""
     if type(old_bytes) is not bytes:
-        # a bytes SUBCLASS may override decode() or other behavior the caller controls; normalize
-        # to exact bytes so parsing sees only bytes semantics (refuse or decide, never crash).
-        old_bytes = bytes(old_bytes)
+        # THE ENTRY GATE, input half: EXACTLY bytes by type identity, nothing else, and no
+        # normalization that runs caller code (bytes(x) invokes an overridable __bytes__, and
+        # CPython accepts a bytes-SUBCLASS return from it, so normalizing was an unbounded
+        # per-dunder chase; a bytearray or bytes-subclass carrier is likewise refused unread).
+        return _cannot("registration input is not exactly bytes (the entry gate accepts exact "
+                       "bytes only and refuses anything else unread)")
     if len(old_bytes) > MAX_REGISTRATION_BYTES:
         return _cannot("registration exceeds {} bytes".format(MAX_REGISTRATION_BYTES),
                        old_bytes=old_bytes)
-    if not (_is_json_string(plugin_entry) and schema._is_token(plugin_entry)):
-        # EXACTLY a str only (type identity, checked BEFORE the token scan runs): a
-        # parsed-number lexeme carrier (_Number) would merge as a bare JSON number that this
-        # module's own next merge refuses, and any other str subclass is caller-run code whose
-        # overridden __iter__ or __eq__ could hide control characters from the token scan or
-        # fake an already-merged equality, so both are refused up front.
+    if type(plugin_entry) is not str:
+        # THE ENTRY GATE, candidate half: EXACTLY str by type identity, decided before ANY
+        # read of the value (no len(), no scan), with the same fixed-message discipline. A
+        # parsed-number lexeme carrier (_Number) would otherwise merge as a bare JSON number
+        # this module's own next merge refuses.
+        return _invalid(["plugin_entry is not exactly a string (the entry gate accepts exact "
+                         "str only and refuses anything else unread)"], old_bytes=old_bytes)
+    if len(plugin_entry) > MAX_REGISTRATION_BYTES:
+        # a candidate longer than the whole registration bound can never fit in an emitted
+        # registration; refusing it HERE bounds every later whole-candidate pass (the token
+        # scan below and the emitter's exact byte count) by the registration size.
+        return _cannot("plugin_entry exceeds {} bytes (the registration byte bound also "
+                       "bounds candidate scanning)".format(MAX_REGISTRATION_BYTES),
+                       old_bytes=old_bytes)
+    if not schema._is_token(plugin_entry):
         return _invalid(["plugin_entry is not a JSON string passing the no-control token rule"],
                         old_bytes=old_bytes)
     try:
@@ -1206,31 +1334,81 @@ def self_test():
     check("noncanonical-emission-refuses",
           padded.status is CANNOT_EVALUATE and padded.new_bytes is None)
 
+    # 5f: the verification RE-EMISSION runs INSIDE the merge's try: a fault raised only on the
+    # second emission (the re-emission itself) maps to a refusal, never an uncaught exception
+    # (moving _emit(reparsed) back outside the try turns exactly this red).
+    emit_call_count = [0]
+
+    def _second_emit_faults(value):
+        emit_call_count[0] += 1
+        if emit_call_count[0] > 1:
+            raise _ParseRefusal("re-emission fault (self-test shim)")
+        return real_emit(value)
+
+    faulted = None
+    fault_escaped = False
+    try:
+        globals()["_emit"] = _second_emit_faults
+        try:
+            faulted = merge_registration(old, entry)
+        except _ParseRefusal:
+            fault_escaped = True
+    finally:
+        globals()["_emit"] = real_emit
+    check("verification-fault-refused-never-raised",
+          not fault_escaped and faulted is not None
+          and faulted.status is CANNOT_EVALUATE and faulted.new_bytes is None)
+
     # 6: injection vectors: a control character anywhere in the candidate entry refuses (threat
     # model 5), across the whole code-point space; so does one in an EXISTING registered command.
     for bad in ("a\nb", "a\tb", "a\x7fb", "a\x85b", "a\N{LINE SEPARATOR}b", "", None, 7):
         check("entry-injection-{!r}-invalid".format(bad),
               merge_registration(old, bad).status is INVALID)
     # a parsed-number lexeme carrier (a str subclass) is NOT a genuine candidate string:
-    # unchecked it would merge as a bare JSON number the module's own next merge refuses, so the
-    # candidate check refuses it up front (reverting its _is_json_string half turns exactly this
-    # red).
+    # unchecked it would merge as a bare JSON number the module's own next merge refuses, so
+    # the candidate GATE refuses it up front (reverting the gate's exact-type half turns
+    # exactly this red).
     numeric_entry = merge_registration(old, _Number("5"))
     check("number-lexeme-entry-invalid",
           numeric_entry.status is INVALID and numeric_entry.new_bytes is None)
+    # the candidate gate's refusal is the one FIXED message, decided before any read of the
+    # value: no method of the refused object runs (the recorder pins that), and the pinned
+    # text discriminates the gate from the per-site check it replaced.
+    candidate_gate_finding = ("plugin_entry is not exactly a string (the entry gate accepts "
+                              "exact str only and refuses anything else unread)")
+    check("number-lexeme-entry-gate-finding",
+          numeric_entry.findings == [candidate_gate_finding])
+    repr_calls = []
+
+    class _ReprRecordingStr(str):
+        __slots__ = ()
+
+        def __repr__(self):
+            repr_calls.append("repr")
+            return str.__repr__(self)
+
+    hostile_candidate = merge_registration(old, _ReprRecordingStr(entry))
+    check("candidate-gate-fixed-message-no-methods",
+          hostile_candidate.status is INVALID and hostile_candidate.new_bytes is None
+          and hostile_candidate.findings == [candidate_gate_finding] and repr_calls == [])
+    gate_raised = False
+    try:
+        canonical_hook_group(_Number("5"))
+    except ValueError:
+        gate_raised = True
+    check("canonical-group-gate-refuses", gate_raised)
     ctrl_cmd = canonical_registration()
     ctrl_cmd["hooks"]["PostToolUse"][0]["hooks"][0]["command"] = "run\N{PARAGRAPH SEPARATOR}it"
     check("existing-command-control-invalid",
           merge_registration(_emit(ctrl_cmd), entry).status is INVALID)
 
-    # 6c: EXACT TYPES at every trust boundary (type identity, never isinstance). A hostile str
-    # subclass is caller-run code: overriding __iter__ hides characters from the token scan
-    # while json.dumps reads the real underlying buffer (a control character would ride into
-    # the executable-on-load command, threat model 5), and overriding __eq__ fakes an
-    # already-merged equality (a false no-op). The candidate check, the key checks, the
-    # string-typed field checks, and the emitter must all refuse such a value BEFORE any of
-    # its methods can run; reverting any one of those boundaries to isinstance turns its
-    # vector here (or in 7e) red.
+    # 6c: EXACT TYPES, one ENTRY GATE per public function (fix 5). A hostile str subclass is
+    # caller-run code (an overridden __iter__ hides characters from a token scan, __eq__ fakes
+    # an already-merged equality, __repr__ runs inside a refusal message), and rounds 4 to 6
+    # showed per-site, per-dunder hardening against it is unbounded. The gates refuse every
+    # foreign type up front, unread and with a fixed message; the interior exact-type checks
+    # that remain (keys, string fields, the emitter) CLASSIFY parsed data, _Number against
+    # str, and their vectors below use the parsed and _Number forms the gates admit.
     class _HidingIter(str):
         __slots__ = ()
 
@@ -1261,16 +1439,19 @@ def self_test():
           ["registration carries a top-level key that is not exactly a string"])
     hostile_type = {"hooks": {"Stop": [{"hooks": [
         {"command": "x", "type": _AlwaysEqual("command")}]}]}}
-    check("hostile-str-subclass-type-cannot-eval",
-          validate_registration_model(hostile_type).status is CANNOT_EVALUATE)
+    v = validate_registration_model(hostile_type)
+    check("hostile-str-subclass-type-refused-at-gate",
+          v.status is CANNOT_EVALUATE and v.findings == [_GATE_MODEL_FINDING])
     hostile_cmd = {"hooks": {"Stop": [{"hooks": [
         {"command": _HidingIter("clean\nevil"), "type": "command"}]}]}}
-    check("hostile-str-subclass-command-invalid",
-          validate_registration_model(hostile_cmd).status is INVALID)
+    v = validate_registration_model(hostile_cmd)
+    check("hostile-str-subclass-command-refused-at-gate",
+          v.status is CANNOT_EVALUATE and v.findings == [_GATE_MODEL_FINDING])
     hostile_matcher = {"hooks": {"Stop": [{"matcher": _HidingIter("a\nb"), "hooks": [
         {"command": "x", "type": "command"}]}]}}
-    check("hostile-str-subclass-matcher-invalid",
-          validate_registration_model(hostile_matcher).status is INVALID)
+    v = validate_registration_model(hostile_matcher)
+    check("hostile-str-subclass-matcher-refused-at-gate",
+          v.status is CANNOT_EVALUATE and v.findings == [_GATE_MODEL_FINDING])
     # keys are trust boundaries at EVERY level: a _Number key would be found by a plain-str
     # membership or dict lookup (reflected str equality), so only the exact-type key checks
     # keep a number-carrier key out of the recognized surface.
@@ -1294,6 +1475,60 @@ def self_test():
     check("exact-type-entry-key-invalid",
           v.status is INVALID and
           any("carries a key that is not exactly a string" in f for f in v.findings))
+
+    # 6d: THE ENTRY GATE on the exposed validator, pinned from both sides. A foreign-typed
+    # node ANYWHERE (a recognized field, an opaque value, a container subclass) refuses with
+    # exactly _GATE_MODEL_FINDING and NO method of the hostile object run: round 6 showed a
+    # hostile __repr__ in the type field executing (and able to raise) inside the refusal
+    # message, and a __class__-spoofing str subclass reading as a number and validating
+    # VALID; type identity at the gate is immune to both. The walk is iterative with
+    # visited-id tracking, so depth cannot crash it and a self-referencing model terminates.
+    hostile_repr_calls = []
+
+    class _HostileRepr(str):
+        __slots__ = ()
+
+        def __repr__(self):
+            hostile_repr_calls.append("repr")
+            raise RuntimeError("hostile repr executed")
+
+    v = validate_registration_model({"hooks": {"Stop": [{"hooks": [
+        {"command": "x", "type": _HostileRepr("command")}]}]}})
+    check("model-gate-hostile-repr-refused-unrun",
+          v.status is CANNOT_EVALUATE and v.findings == [_GATE_MODEL_FINDING]
+          and hostile_repr_calls == [])
+
+    class _StrAsInt(str):
+        @property
+        def __class__(self):
+            return int
+
+        def __float__(self):
+            return 1.0
+
+    v = validate_registration_model({"hooks": {"Stop": [{"hooks": [
+        {"command": "x", "type": "command",
+         "timeout": _StrAsInt("not-a-number")}]}]}})
+    check("model-gate-class-spoof-refused",
+          v.status is CANNOT_EVALUATE and v.findings == [_GATE_MODEL_FINDING])
+
+    class _OpaqueForeign:
+        __slots__ = ()
+
+    v = validate_registration_model({"env": {"x": [_OpaqueForeign()]}})
+    check("model-gate-opaque-foreign-refused",
+          v.status is CANNOT_EVALUATE and v.findings == [_GATE_MODEL_FINDING])
+
+    class _TableSubclass(dict):
+        pass
+
+    v = validate_registration_model({"hooks": _TableSubclass()})
+    check("model-gate-container-subclass-refused",
+          v.status is CANNOT_EVALUATE and v.findings == [_GATE_MODEL_FINDING])
+    cyclic = {"env": dict()}
+    cyclic["env"]["self"] = cyclic
+    check("model-gate-cyclic-model-terminates",
+          validate_registration_model(cyclic).status is VALID)
 
     # 6b: JSON null anywhere in the recognized hooks surface refuses CANNOT-EVALUATE with a NAMED
     # finding; null is never read as absence and never crashes, while genuinely ABSENT optional
@@ -1341,17 +1576,48 @@ def self_test():
         check("unparseable-{}-cannot-eval".format(name),
               merge_registration(raw, entry).status is CANNOT_EVALUATE)
     check("nonbytes-input-cannot-eval", merge_registration("{}", entry).status is CANNOT_EVALUATE)
-    check("bytearray-input-accepted", merge_registration(bytearray(old), entry).status is VALID)
 
-    # a bytes SUBCLASS is normalized to exact bytes before parsing, so a caller-controlled
-    # decode() override can never run (without the normalization this vector crashes the merge).
+    # THE ENTRY GATE, input half (fix 5): EXACTLY bytes and nothing else, refused with the one
+    # fixed message and NO method of the carrier run. bytes(x) would invoke an overridable
+    # __bytes__, and CPython accepts a bytes-SUBCLASS return from it whose own decode() can
+    # lie about the file content (round 6: a VALID merge that deleted the adopter's hooks), so
+    # the gate never normalizes; a bytearray and a decode-overriding subclass refuse the same
+    # way, unread.
+    input_gate_finding = ("registration input is not exactly bytes (the entry gate accepts "
+                          "exact bytes only and refuses anything else unread)")
+    ba = merge_registration(bytearray(old), entry)
+    check("bytearray-input-refused-at-gate",
+          ba.status is CANNOT_EVALUATE and ba.new_bytes is None
+          and ba.findings == [input_gate_finding])
+
     class _DecodeOverridingBytes(bytes):
         def decode(self, *args, **kwargs):
             raise AssertionError("caller-controlled decode must never run")
 
     subclassed = merge_registration(_DecodeOverridingBytes(old), entry)
-    check("bytes-subclass-normalized-and-accepted",
-          subclassed.status is VALID and subclassed.new_bytes == merged.new_bytes)
+    check("bytes-subclass-refused-at-gate",
+          subclassed.status is CANNOT_EVALUATE and subclassed.new_bytes is None
+          and subclassed.findings == [input_gate_finding])
+    dunder_calls = []
+
+    class _InnerLyingBytes(bytes):
+        def decode(self, *args, **kwargs):
+            dunder_calls.append("Inner.decode")
+            return "{}"
+
+        def __bytes__(self):
+            dunder_calls.append("Inner.__bytes__")
+            return self
+
+    class _OuterBytesCarrier(bytes):
+        def __bytes__(self):
+            dunder_calls.append("Outer.__bytes__")
+            return _InnerLyingBytes(old)
+
+    carrier = merge_registration(_OuterBytesCarrier(old), entry)
+    check("bytes-dunder-carrier-refused-at-gate",
+          carrier.status is CANNOT_EVALUATE and carrier.new_bytes is None
+          and carrier.findings == [input_gate_finding] and dunder_calls == [])
     # the oversize vector is VALID, ALREADY-MERGED JSON over the bound: without the input size
     # guard it would sail through parse and validation and return a VALID no-op of its own bytes
     # (the no-op path never re-emits, so the output bound cannot catch it), so removing that guard
@@ -1420,18 +1686,17 @@ def self_test():
     check("wide-deep-emission-refuses",
           wide.status is CANNOT_EVALUATE and wide.new_bytes is None
           and any("exceed" in f for f in wide.findings))
-    # an incremental refusal stops within one piece of the budget; pieces on this vector are a
-    # few dozen bytes, so 4096 bytes of slack is generous and still two orders of magnitude
-    # below the pre-fix whole-output build.
+    # an incremental refusal stops within one piece of the budget; pieces on this vector
+    # reach about two hundred bytes (the deepest indentation runs), so 4096 bytes of slack is
+    # generous and still two orders of magnitude below the pre-fix whole-output build.
     check("wide-deep-emission-built-bytes-bounded",
           0 < built[0] <= MAX_REGISTRATION_BYTES + 4096)
 
-    # 7d2: the CANDIDATE string counts against the same incremental budget BEFORE it is
-    # serialized: a huge candidate refuses with nothing candidate-sized ever built (the
-    # counting shim on the module's json seam proves json.dumps never materialized its escaped
-    # form; without the emitter's pre-serialization budget check the whole multi-megabyte
-    # serialization is allocated first, a large enough candidate raised MemoryError, and only
-    # then refused).
+    # 7d2: the CANDIDATE is length-bounded at the ENTRY GATE, before any whole-candidate
+    # scan or serialization: one longer than the registration byte bound could never fit, so
+    # it refuses up front with json.dumps never run at all (the counting shim proves it) and
+    # with the gate's own pinned finding (so a gate revert turns this red even though the
+    # emitter's budget would also refuse, later and only after scanning).
     dumped = [0]
     real_json = json
 
@@ -1450,12 +1715,31 @@ def self_test():
         r = merge_registration(b"{}", huge_candidate)
     finally:
         globals()["json"] = real_json
-    check("huge-candidate-refuses",
+    check("huge-candidate-refused-at-gate",
+          r.status is CANNOT_EVALUATE and r.new_bytes is None
+          and r.findings == ["plugin_entry exceeds {} bytes (the registration byte "
+                             "bound also bounds candidate scanning)".format(
+                                 MAX_REGISTRATION_BYTES)])
+    check("huge-candidate-never-serialized", dumped[0] == 0)
+    # an ESCAPE-HEAVY candidate UNDER the gate bound: its exact serialized form (two bytes
+    # per quote) cannot fit the output budget, and the EXACT pre-serialization count
+    # (_string_bytes) refuses it before json.dumps materializes the doubled form (under the
+    # old len+2 lower bound a 1,200,002-byte serialization was built first and only the
+    # running count refused it afterwards).
+    dumped[0] = 0
+    try:
+        globals()["json"] = _CountingJson
+        r = merge_registration(b"{}", '"' * 600000)
+    finally:
+        globals()["json"] = real_json
+    check("escape-heavy-candidate-refuses",
           r.status is CANNOT_EVALUATE and r.new_bytes is None
           and any("exceed" in f for f in r.findings))
-    check("huge-candidate-never-serialized", 0 < dumped[0] <= 4096)
-    # a KEY that could never fit is likewise refused before serialization (a code-built model
-    # only; parsed keys are already inside the input bound).
+    check("escape-heavy-candidate-never-serialized", 0 < dumped[0] <= 4096)
+    # a KEY that could never fit is likewise refused before serialization (a code-built
+    # model only; parsed keys are already inside the input bound), and the EXACT count also
+    # stops an escape-heavy key and a \uXXXX-control-heavy value that the old
+    # character-count lower bound let through to json.dumps.
     dumped[0] = 0
     try:
         globals()["json"] = _CountingJson
@@ -1468,6 +1752,71 @@ def self_test():
         globals()["json"] = real_json
     check("huge-key-refuses", huge_key_refused)
     check("huge-key-never-serialized", dumped[0] == 0)
+    dumped[0] = 0
+    try:
+        globals()["json"] = _CountingJson
+        try:
+            _emit({'"' * 600000: 0})
+            quote_key_refused = False
+        except _EmitBoundRefusal:
+            quote_key_refused = True
+    finally:
+        globals()["json"] = real_json
+    check("escape-heavy-key-refuses", quote_key_refused)
+    check("escape-heavy-key-never-serialized", dumped[0] == 0)
+    dumped[0] = 0
+    try:
+        globals()["json"] = _CountingJson
+        try:
+            _emit({"env": "\x01" * 400000})
+            ctrl_value_refused = False
+        except _EmitBoundRefusal:
+            ctrl_value_refused = True
+    finally:
+        globals()["json"] = real_json
+    check("control-heavy-value-refuses", ctrl_value_refused)
+    # only the tiny "env" key is ever serialized; the 2,400,002-byte escaped value is not.
+    check("control-heavy-value-never-serialized", 0 < dumped[0] <= 16)
+
+    # 7d3: the pre-serialization checks are EXACT (the serializer's own arithmetic), so they
+    # can never refuse an emission that fits: a value or key landing the output exactly ON
+    # the byte bound is accepted and one unit more refuses, for plain ASCII, escape-doubled,
+    # \uXXXX-control and two-byte UTF-8 content alike (a pre-check stricter than exact, a
+    # +300000 slack say, turns the at-bound acceptances red; an overcounting escape or
+    # multibyte formula does too).
+    def _emit_bound_refuses(model):
+        try:
+            _emit(model)
+        except _EmitBoundRefusal:
+            return True
+        return False
+
+    tail_room = MAX_REGISTRATION_BYTES - len(_emit({"permissions": {"k": ""}}))
+    check("late-string-at-exact-bound-accepted",
+          len(_emit({"permissions": {"k": "a" * tail_room}}))
+          == MAX_REGISTRATION_BYTES)
+    check("late-string-one-over-refuses",
+          _emit_bound_refuses({"permissions": {"k": "a" * (tail_room + 1)}}))
+    esc_room = tail_room // 2
+    check("late-escaped-string-at-bound-accepted",
+          len(_emit({"permissions": {"k": '"' * esc_room}}))
+          == MAX_REGISTRATION_BYTES - tail_room + 2 * esc_room)
+    check("late-escaped-string-over-refuses",
+          _emit_bound_refuses({"permissions": {"k": '"' * (esc_room + 1)}}))
+    ctrl_room = tail_room // 6
+    check("late-control-string-at-bound-accepted",
+          len(_emit({"permissions": {"k": "\x01" * ctrl_room}}))
+          == MAX_REGISTRATION_BYTES - tail_room + 6 * ctrl_room)
+    utf8_room = tail_room // 2
+    check("late-utf8-string-at-bound-accepted",
+          len(_emit({"permissions": {"k": "\u00e9" * utf8_room}}))
+          == MAX_REGISTRATION_BYTES - tail_room + 2 * utf8_room)
+    key_room = MAX_REGISTRATION_BYTES - len(_emit({"permissions": {"": 0}}))
+    check("late-key-at-exact-bound-accepted",
+          len(_emit({"permissions": {"k" * key_room: 0}}))
+          == MAX_REGISTRATION_BYTES)
+    check("late-key-one-over-refuses",
+          _emit_bound_refuses({"permissions": {"k" * (key_room + 1): 0}}))
 
     # 7e: the emitter itself holds numbers to the parser's number grammar and finite double
     # range, so emission is a fixed point under _parse for every model it emits at all, including
@@ -1490,6 +1839,18 @@ def self_test():
     check("emit-nonexact-string-key-refuses",
           _emit_refuses({"env": {_Number("1"): 0, "1": 1}}))
     check("emit-nonexact-string-value-refuses", _emit_refuses({"env": _HidingIter("x")}))
+    # the lexeme-carrier check is type IDENTITY: a _Number SUBCLASS is caller-built code
+    # whose __str__ could emit arbitrary bytes AFTER the buffer passes the grammar check, so
+    # it refuses as unserializable (an isinstance revert would run the override and emit its
+    # output as JSON).
+
+    class _EvilStrNumber(_Number):
+        __slots__ = ()
+
+        def __str__(self):
+            return '0, "evil": 0'
+
+    check("emit-number-subclass-refuses", _emit_refuses({"env": _EvilStrNumber("1")}))
 
     # 7c: recursion exhaustion refuses, never an uncaught exception, on BOTH paths: deep top-level
     # nesting exhausts the PARSER (mapped by _parse's RecursionError handler), and nesting that
@@ -1622,6 +1983,14 @@ def self_test():
     check("shown-reports-value-length",
           _shown("a" * 100) == "{}... (100 characters)".format(repr("a" * 48))
           and _shown(_Number("1" * 100)) == "1" * 64 + "... (100 characters)")
+    # a SHORT exact str or _Number whose repr is long (heavy escapes) comes back WHOLE: the
+    # value, never the repr, is what gets cut at every length, so no cut can split an escape
+    # and no genuine value is ever counted in repr characters (round 6: an
+    # 18-control-character str came back cut mid-escape, labelled with the repr's length).
+    check("shown-short-heavy-escape-uncut",
+          _shown("\x01" * 18) == repr("\x01" * 18)
+          and _shown("\U000f0000" * 20) == repr("\U000f0000" * 20)
+          and _shown(_Number("1")) == "1")
 
     # 11b: the findings LIST is bounded too: at most MAX_FINDINGS findings plus one
     # suppression marker come back, so a registration with tens of thousands of violations
