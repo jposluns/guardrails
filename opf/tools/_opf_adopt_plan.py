@@ -6,6 +6,14 @@ Only explicit source roots, .working, and DETECTION_ROOTS are inventoried.
 are exclusions, recorded in the inventory; foreign content inside those excluded
 subtrees is NOT covered. Companion stores refuse in this slice. Detection is by
 path only: a candidate is neither a parsed registration nor a working pipeline.
+Ancestry marks re-adoption when a pointer, a resolved store manifest, or unresolved
+content at an OPF-reserved .working name (ANCESTRY_RESERVED) is present, so store
+debris never reads as a zero-seedable first adoption. first-adoption only means none
+of these: git history is not read, and a manifestless store under any other .working
+name reads as foreign content. Durable OPF history outside .working also reads as
+first-adoption on its own, including: root import-promotion state (.aiqt/import,
+.aiqt/import/journal, .aiqt/import-archive), the record journal (.aiqt/record/journal)
+and the .gitignore opf-managed block.
 
 VALID means an inert, digest-bound proposal, NEVER permission/readiness to apply.
 No release is trusted, acceptance verified, hook activated, or transaction run.
@@ -36,10 +44,15 @@ MAX_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 DETECTION_ROOTS = (
     ".opf.toml", ".opf.local.toml", ".working",
-    "AGENTS.md", "CLAUDE.md", ".claude", ".cursor", ".github/workflows",
-    ".gitlab-ci.yml", "Jenkinsfile", ".circleci", "azure-pipelines.yml",
+    "AGENTS.md", "CLAUDE.md", "GEMINI.md", ".claude", ".cursor", ".gemini", ".codex",
+    ".github/workflows", ".gitlab-ci.yml", "Jenkinsfile", ".circleci", "azure-pipelines.yml",
     "VERSION", "CHANGELOG.md", "release-notes.toml",
 )
+# OPF-reserved .working names, from the store module's own constants: the standard machine
+# subdirectory and every reserved store control subdirectory. Content at any is ancestry.
+ANCESTRY_RESERVED = tuple(sorted(
+    store.WORKING_DIRNAME + "/" + name
+    for name in (store.DEFAULT_MACHINE_SUBDIR,) + store.RESERVED_MACHINE_SUBDIRS))
 RESIDUALS = (
     "Only the enumerated scope is covered; detection is by path, not semantics.",
     "Machine-store and unmanaged exclusions are not inspected for foreign files.",
@@ -48,6 +61,11 @@ RESIDUALS = (
     "Resolver reads retain the resolver limits; inventory caps are not a process sandbox.",
     "No coherent snapshot; apply must recheck inventory, preimages and absences.",
     "No commit, merge, network, journal, import staging, rendering or hook effects.",
+    "Ancestry reads pointers, the resolved manifest and reserved .working names; git history "
+    "and a manifestless store under another .working name are not read as ancestry. "
+    "Durable OPF history outside .working also reads as first-adoption on its own, including: "
+    "root import-promotion state (.aiqt/import, .aiqt/import/journal, .aiqt/import-archive), "
+    "the record journal (.aiqt/record/journal) and the .gitignore opf-managed block.",
 )
 
 
@@ -164,10 +182,13 @@ def _inventory(root, sources, targets):
         root_stat = os.fstat(root_fd)
         # Bind discovery to this product only. Inspect BOTH pointers, even when
         # the local override would hide a malformed committed pointer.
+        traces = []
         for pointer in (store.POINTER_REL, store.LOCAL_POINTER_REL):
             target = store._read_pointer_target(root_fd, pointer)
             if target is not None and store._target_store_root(target, root) != root:
                 raise PlanError("companion/remote store requires separately scoped investigation")
+            if target is not None:
+                traces.append(pointer)
         resolution = store.resolve_store(root)
         excluded = []
         if resolution.status == store.CANNOT_EVALUATE:
@@ -221,6 +242,7 @@ def _inventory(root, sources, targets):
             if homes >= 2:
                 excluded.extend({"path": path, "reason": "store-control"} for path in control)
             manifest_digest = _digest(raw)
+            traces.append(manifest_path)
         else:
             homes = 1
             manifest_path = ""
@@ -301,6 +323,11 @@ def _inventory(root, sources, targets):
         for path in sources:
             if entries.get(path, {}).get("kind") in (None, "absent", "excluded"):
                 raise PlanError("declared source is unavailable: {!r}".format(path))
+        if resolution.status != store.RESOLVED:
+            # With no resolved store, content at a reserved name (for example counters and
+            # records, or import runs, left without a manifest) is still prior ancestry.
+            traces += [path for path in ANCESTRY_RESERVED
+                       if entries.get(path, {}).get("kind") in ("file", "directory")]
         # Candidate roots are the explicit sources plus .working outside exclusions.
         candidate_roots = sources + [".working"]
         candidates = [
@@ -346,6 +373,20 @@ def _inventory(root, sources, targets):
                  "evidence": "filesystem-entry; candidate only"}
                 for path in DETECTION_ROOTS if path in entries
             ],
+            # Prior-OPF ancestry, from the same pointer and manifest reads that fixed the
+            # exclusions plus the walked reserved names, so the seeded-versus-zero counters
+            # choice is plan-visible. Debris is re-adoption, not a third value that a
+            # consumer testing only for re-adoption could zero-seed.
+            "ancestry": {
+                "adoption": "re-adoption" if traces else "first-adoption",
+                "traces": traces,
+                "evidence": "live pointers, resolved manifest and reserved .working names; "
+                            "git history and other .working names are not ancestry. "
+                            "Durable OPF history outside .working also reads as first-adoption "
+                            "on its own, including: root import-promotion state (.aiqt/import, "
+                            ".aiqt/import/journal, .aiqt/import-archive), the record journal "
+                            "(.aiqt/record/journal) and the .gitignore opf-managed block",
+            },
             "coverage_residuals": list(RESIDUALS),
         }, homes
     finally:
@@ -660,6 +701,93 @@ def self_test():
             self.assertIn(".working/notes.md", doc["candidates"])
             planned = self.make_plan(result)
             self.assertEqual(planned.unresolved, (".working/notes.md",))
+
+        def test_platform_detection_roots(self):
+            (self.root / "GEMINI.md").write_bytes(b"gemini\n")
+            (self.root / ".gemini").mkdir()
+            (self.root / ".gemini/settings.json").write_bytes(b"{}\n")
+            (self.root / ".codex").mkdir()
+            (self.root / ".codex/config.toml").write_bytes(b"")
+            doc = tomllib.loads(self.observation().observation.decode())
+            detected = {row["path"]: row["kind"] for row in doc["detections"]}
+            self.assertEqual(detected.get(".gemini"), "directory")
+            self.assertEqual(detected.get("GEMINI.md"), "file")
+            self.assertEqual(detected.get(".codex"), "directory")
+            self.assertIn(".gemini/settings.json", [row["path"] for row in doc["entries"]])
+            # Detection by path only: a platform surface is not an adoption candidate.
+            self.assertNotIn(".gemini/settings.json", doc["candidates"])
+            self.assertEqual(self.make_plan().status, store.VALID)
+
+        def test_ancestry_marks_re_adoption(self):
+            def ancestry():
+                return tomllib.loads(self.observation().observation.decode())["ancestry"]
+            self.assertEqual((ancestry()["adoption"], ancestry()["traces"]), ("first-adoption", []))
+            inventory = tomllib.loads(self.make_plan().inventory.decode())
+            self.assertEqual(inventory["observation"]["ancestry"]["adoption"], "first-adoption")
+            # A committed dir:. pointer beside foreign .working content (no manifest) is ancestry.
+            (self.root / ".working").mkdir()
+            (self.root / ".working/notes.md").write_bytes(b"notes")
+            (self.root / ".opf.toml").write_text('[store]\ntarget = "dir:."\n', encoding="utf-8")
+            self.assertEqual((ancestry()["adoption"], ancestry()["traces"]),
+                             ("re-adoption", [".opf.toml"]))
+            (self.root / ".opf.toml").unlink()
+            import _opf_init
+            (self.root / ".working/toml").mkdir()
+            (self.root / ".working/toml/manifest.toml").write_text(
+                _opf_init.build_manifest(), encoding="utf-8")
+            self.assertEqual((ancestry()["adoption"], ancestry()["traces"]),
+                             ("re-adoption", [".working/toml/manifest.toml"]))
+
+        def test_ancestry_store_debris_is_re_adoption(self):
+            import shutil
+
+            def ancestry():
+                return tomllib.loads(self.observation().observation.decode())["ancestry"]
+            # Oracle derived from the store constants, not from this module's own set.
+            reserved = [store.WORKING_DIRNAME + "/" + name for name in
+                        (store.DEFAULT_MACHINE_SUBDIR,) + store.RESERVED_MACHINE_SUBDIRS]
+            run = ".working/imports/imp-20260102T030405Z-0123456789abcdef"
+            cases = [(".working/toml", [".working/toml/counters.toml"], [".working/toml/records"]),
+                     (".working/imports", [run + "/run.toml"], [])]
+            cases += [(name, [name + "/leftover.toml"], []) for name in reserved
+                      if name not in (".working/toml", ".working/imports")]
+            for name, files, dirs in cases:
+                with self.subTest(reserved=name):
+                    try:
+                        for rel in dirs + [str(Path(rel).parent) for rel in files]:
+                            (self.root / rel).mkdir(parents=True, exist_ok=True)
+                        for rel in files:
+                            (self.root / rel).write_bytes(b"[x]\n")
+                        doc = tomllib.loads(self.observation().observation.decode())
+                        self.assertEqual(doc["resolution"]["status"], store.CANNOT_EVALUATE)
+                        self.assertEqual((doc["ancestry"]["adoption"], doc["ancestry"]["traces"]),
+                                         ("re-adoption", [name]))
+                    finally:
+                        shutil.rmtree(self.root / ".working")
+            # Reserved files, even empty ones, and empty reserved directories are ancestry.
+            name = ".working/toml"
+            for kind, content in (("file", b""), ("file", b"[x]\n"), ("directory", None)):
+                with self.subTest(reserved=name, kind=kind, content=content):
+                    try:
+                        (self.root / ".working").mkdir()
+                        if kind == "file":
+                            (self.root / name).write_bytes(content)
+                        else:
+                            (self.root / name).mkdir()
+                        doc = tomllib.loads(self.observation().observation.decode())
+                        self.assertEqual((doc["ancestry"]["adoption"], doc["ancestry"]["traces"]),
+                                         ("re-adoption", [name]))
+                    finally:
+                        shutil.rmtree(self.root / ".working")
+            # Foreign .working content, even a nested reserved-looking name, stays first-adoption.
+            (self.root / ".working/notes").mkdir(parents=True)
+            (self.root / ".working/notes/toml").write_bytes(b"notes")
+            self.assertEqual((ancestry()["adoption"], ancestry()["traces"]), ("first-adoption", []))
+            # A pointer and debris are both traces, pointer first.
+            (self.root / ".working/toml").mkdir()
+            (self.root / ".working/toml/counters.toml").write_bytes(b"[x]\n")
+            (self.root / ".opf.toml").write_text('[store]\ntarget = "dir:."\n', encoding="utf-8")
+            self.assertEqual(ancestry()["traces"], [".opf.toml", ".working/toml"])
 
         def test_unreadable_declared_source(self):
             with mock.patch.object(sys.modules[__name__], "_read",
