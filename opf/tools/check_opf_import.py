@@ -489,8 +489,11 @@ _DIR_ID_FLAGS = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOL
 # its identity by fstat on the resulting descriptor. Both arms follow only the final symlink (no O_NOFOLLOW:
 # a roster symlink must resolve so the object it names is the one identified). Platforms without O_PATH
 # retain the stricter read-permission fallback here too, with O_NONBLOCK so the open itself can never block
-# on a FIFO with no writer or on a device; no bytes are ever read through this descriptor.
-_ALIAS_ID_FLAGS = getattr(os, "O_PATH", os.O_RDONLY | os.O_NONBLOCK)
+# on a FIFO with no writer or on a device; no bytes are ever read through this descriptor. The fallback
+# arm is a NAMED constant so the self-test's no-O_PATH vectors force _ALIAS_ID_FLAGS onto this very
+# definition, never a hard-coded copy of it: a mutant fallback reaches those vectors and is killed there.
+_ALIAS_ID_FALLBACK_FLAGS = os.O_RDONLY | os.O_NONBLOCK
+_ALIAS_ID_FLAGS = getattr(os, "O_PATH", _ALIAS_ID_FALLBACK_FLAGS)
 
 
 def _bind_run_name(fd, name):
@@ -3928,6 +3931,7 @@ def _self_test_isolated():
     import io
     import json
     import shutil
+    import signal
     import tempfile
 
     import _opf_import as imp
@@ -6245,26 +6249,68 @@ def _self_test_isolated():
                    all(ok for ok, _d in th_alias.values()))
             # --- PR C fix 3 (no-O_PATH platforms): the alias re-check derives its identity-open
             # flags through the module's guarded _ALIAS_ID_FLAGS, never a bare os.O_PATH (Python
-            # defines O_PATH only on Linux). Simulated by DELETING os.O_PATH and forcing the
-            # constant onto its documented fallback arm, O_RDONLY | O_NONBLOCK (create=True keeps
-            # the pre-fix source importable so the red run FAILS these vectors rather than
-            # erroring). Mutation confirmed present first: on the unguarded `os.O_PATH` open this
-            # same simulation turned BOTH clean controls red (the AttributeError fails every
-            # binding-dependent check), while the fallback must keep them green.
-            _saved_o_path = os.O_PATH
-            del os.O_PATH
+            # defines O_PATH only on Linux). Simulated by DELETING os.O_PATH -- through a guarded
+            # save/restore, so this simulation itself runs on a platform that never defined it --
+            # and forcing the constant onto the module's OWN named fallback arm,
+            # _ALIAS_ID_FALLBACK_FLAGS, never a hard-coded copy of it, so a mutant fallback
+            # reaches these vectors. The getattr default below deliberately lacks O_NONBLOCK and
+            # create=True keeps the pre-fix source importable, so the red run FAILS these vectors
+            # (the constant expect directly, the FIFO vector through its alarm backstop) rather
+            # than erroring. Mutation confirmed present first: on the unguarded `os.O_PATH` open
+            # this same simulation turned BOTH clean controls red (the AttributeError fails every
+            # binding-dependent check), and on a fallback stripped of O_NONBLOCK the FIFO open
+            # blocks (red by alarm); the genuine fallback must keep the controls green and refuse
+            # the FIFO without blocking.
+            _alias_fallback = getattr(gate_module, "_ALIAS_ID_FALLBACK_FLAGS", os.O_RDONLY)
+            expect("homes2-alias-fallback-constant-named",
+                   hasattr(gate_module, "_ALIAS_ID_FALLBACK_FLAGS"))
+            _saved_o_path = getattr(os, "O_PATH", None)
+            if _saved_o_path is not None:
+                del os.O_PATH
             try:
                 with unittest.mock.patch.object(gate_module, "_ALIAS_ID_FLAGS",
-                                                os.O_RDONLY | os.O_NONBLOCK, create=True):
+                                                _alias_fallback, create=True):
                     th_no_opath_alias = check_staged_run(th_typed, homes=2)
                     os.unlink(str(th_legacy))
                     th_no_opath_single = check_staged_run(th_typed, homes=2)
+                    # A FIFO at the second roster location: the fallback identity open must
+                    # neither block on the writer-less FIFO (O_NONBLOCK is load-bearing; the
+                    # repeating alarm turns a blocked open into a red, never a hang, even when
+                    # a check's broad handler swallows one interrupt) nor pass the run (a
+                    # present roster entry that is not the bound run is a second claim, refused
+                    # with the shared locator's message).
+                    os.mkfifo(str(th_legacy))
+
+                    class _AliasOpenBlocked(Exception):
+                        pass
+
+                    def _alias_alarm(signum, frame):
+                        raise _AliasOpenBlocked()
+
+                    _saved_alarm = signal.signal(signal.SIGALRM, _alias_alarm)
+                    signal.setitimer(signal.ITIMER_REAL, 30.0, 5.0)
+                    try:
+                        th_fifo = check_staged_run(th_typed, homes=2)
+                        th_fifo_blocked = False
+                    except _AliasOpenBlocked:
+                        th_fifo, th_fifo_blocked = {}, True
+                    finally:
+                        signal.setitimer(signal.ITIMER_REAL, 0.0, 0.0)
+                        signal.signal(signal.SIGALRM, _saved_alarm)
+                    os.unlink(str(th_legacy))
             finally:
-                os.O_PATH = _saved_o_path
+                if _saved_o_path is not None:
+                    os.O_PATH = _saved_o_path
             expect("homes2-no-opath-same-run-alias-stays-registered",
                    all(ok for ok, _d in th_no_opath_alias.values()))
             expect("homes2-no-opath-single-home-control",
                    all(ok for ok, _d in th_no_opath_single.values()))
+            expect("homes2-no-opath-fifo-second-location-refused-unblocked",
+                   not th_fifo_blocked and set(th_fifo) == set(EXPECTED_CHECKS)
+                   and {cid for cid, (ok, _d) in th_fifo.items() if not ok}
+                   == set(th_ambiguous_ids)
+                   and all("2 staging locations" in th_fifo[cid][1]
+                           for cid in th_ambiguous_ids))
 
         expect("module-self-test", imp.self_test() == 0)
     except OSError as exc:
