@@ -184,9 +184,11 @@ def _digest(data):
 
 
 # The fixed descriptors _shown returns INSTEAD of formatting a value it must never format, and
-# the one placeholder it returns if formatting fails anyway. Each is constant and bounded.
+# the one placeholder it returns if formatting fails anyway. Each is constant and bounded. The
+# malformed-lexeme descriptor names no provenance: _shown cannot tell a parsed _Number from a
+# code-built one, so a parsed lexeme that ever reaches it is never labelled code-built.
 _SHOWN_INT = "a code-built integer (not shown)"
-_SHOWN_MALFORMED_NUMBER = "a code-built malformed number lexeme (not shown)"
+_SHOWN_MALFORMED_NUMBER = "a malformed number lexeme (not shown)"
 _SHOWN_TABLE = "a table (not shown)"
 _SHOWN_ARRAY = "an array (not shown)"
 _SHOWN_OTHER = "a value of a type this formatter does not show"
@@ -203,9 +205,10 @@ def _shown(value):
     escape sequence and no reported count is ever the repr's); a str stays quoted, and a _Number
     shows as its bare lexeme ONLY when _NUMBER_LEXEME_RE FULLY matches it (every parsed one
     does: the parse hooks hold each lexeme to it), so a number never reads as a string and no
-    raw control text reaches a finding; a code-built _Number that does not fully match is NEVER
-    formatted and gets the fixed _SHOWN_MALFORMED_NUMBER
-    descriptor instead. An exact float shows its repr, and True, False and None show their JSON
+    raw control text reaches a finding; a _Number that does not fully match (only a code-built one
+    can while the parse hooks hold) is NEVER formatted and gets the fixed _SHOWN_MALFORMED_NUMBER
+    descriptor instead, which names no provenance. An exact float shows its repr, and True,
+    False and None show their JSON
     spelling (true, false, null), a few dozen characters at most. An int, a table and an array
     are NEVER formatted and get a fixed descriptor instead: int-to-text conversion raises past
     the interpreter's digit limit, and a container's repr exhausts the stack on deep nesting
@@ -285,7 +288,7 @@ def _is_finite_lexeme(lexeme):
     and the public validator: the strict-JSON grammar FIRST (so float() only ever reads a
     grammatical lexeme and cannot raise), then the finite double range. Every parsed _Number
     passes; a code-built carrier is held to the same rule, never trusted by its type."""
-    return bool(_NUMBER_LEXEME_RE.match(lexeme)) and math.isfinite(float(lexeme))
+    return bool(_NUMBER_LEXEME_RE.fullmatch(lexeme)) and math.isfinite(float(lexeme))
 
 
 class _Number(str):
@@ -1503,17 +1506,24 @@ def self_test():
             gate_raised = True
         check("canonical-group-{}-refuses".format(name), gate_raised)
     # merge_registration refuses the surrogate-carrying candidate at its candidate gate with a
-    # candidate finding, on the merge path and on the already-merged path alike (without the
-    # gate the first reached the emitter, whose refusal blamed the registration, and the
-    # second no-opped VALID).
+    # candidate finding, on the merge path and on the already-merged path alike. Without that
+    # gate alone, both paths reach canonical_hook_group, whose own surrogate guard raises
+    # ValueError; the check catches it, so that regression fails this check by name, not by an
+    # uncaught exception. Without both guards, the merge path reaches the emitter, whose refusal
+    # blames the registration, and the already-merged path no-ops VALID.
     surrogate_finding = ["plugin_entry carries a surrogate code point (not encodable as UTF-8, "
                          "so no emitted registration can carry it)"]
     surrogate_merged = (b'{"hooks":{"PreToolUse":[{"hooks":[{"command":"opf-\\ud800",'
                         b'"type":"command"}],"matcher":"*"}]}}')
+    surrogate_results = []
+    for raw in (old, surrogate_merged):
+        try:
+            surrogate_results.append(merge_registration(raw, "opf-\ud800"))
+        except ValueError:
+            surrogate_results.append(None)
     check("surrogate-candidate-refused-at-gate",
-          all(r.status is INVALID and r.new_bytes is None and r.findings == surrogate_finding
-              for r in (merge_registration(old, "opf-\ud800"),
-                        merge_registration(surrogate_merged, "opf-\ud800"))))
+          all(r is not None and r.status is INVALID and r.new_bytes is None
+              and r.findings == surrogate_finding for r in surrogate_results))
     ctrl_cmd = canonical_registration()
     ctrl_cmd["hooks"]["PostToolUse"][0]["hooks"][0]["command"] = "run\N{PARAGRAPH SEPARATOR}it"
     check("existing-command-control-invalid",
@@ -1794,8 +1804,12 @@ def self_test():
     # non-ASCII digits, which float() reads as finite numbers. The hooks refuse each one on the
     # strict ASCII grammar, on the merge path and the already-merged no-op path alike (without
     # the hooks' grammar check the no-op returns VALID over bytes the C scanner refuses). The
-    # canary pins that the patched scanner really admits each lexeme, so the vector exercises
-    # the hooks rather than a scanner refusal.
+    # third lexeme ends in a grammatical tail (5), so an unanchored .search guard, which finds
+    # that tail, turns this red too. The canary pins that the patched scanner really admits each
+    # lexeme, so the vector exercises the hooks rather than a scanner refusal. A parsed lexeme
+    # that escapes the grammar (the hooks' check bypassed here by a lax stand-in hook) is still
+    # refused on the merge path by the emitter's own number rule, and the refusal does not call
+    # it code-built (restoring a code-built label on the descriptor turns that check red).
     unicode_number_re = re.compile(r"(-?(?:0|[1-9]\d*))(\.\d+)?([eE][-+]?\d+)?",
                                    json.scanner.NUMBER_RE.flags)
     grammar_finding = ["registration bytes are not strict JSON: JSON number lexeme is outside "
@@ -1804,17 +1818,29 @@ def self_test():
     unicode_digit_results = []
     with mock.patch.object(json.scanner, "NUMBER_RE", unicode_number_re):
         with mock.patch.object(json.scanner, "make_scanner", json.scanner.py_make_scanner):
-            for lexeme in ("1\u0663", "2.5e\u0663"):
+            for lexeme in ("1\u0663", "2.5e\u0663", "1\u06635"):
                 scanner_admits.append(json.loads('{"x": ' + lexeme + '}', parse_int=str,
                                                  parse_float=str) == {"x": lexeme})
                 for raw in (b'{"env":{"x":' + lexeme.encode("utf-8") + b'}}',
                             already_1e400.replace(b"1e400", lexeme.encode("utf-8"))):
                     unicode_digit_results.append(merge_registration(raw, entry))
-    check("unicode-digit-scanner-canary", scanner_admits == [True, True])
+            strict_parse_number = globals()["_parse_number"]
+            try:
+                globals()["_parse_number"] = _Number
+                lax_merge = merge_registration(b'{"env":{"x":' + "1\u06635".encode("utf-8")
+                                               + b'}}', entry)
+            finally:
+                globals()["_parse_number"] = strict_parse_number
+    check("unicode-digit-scanner-canary", scanner_admits == [True, True, True])
     check("parse-number-grammar-scanner-independent",
-          len(unicode_digit_results) == 4
+          len(unicode_digit_results) == 6
           and all(r.status is CANNOT_EVALUATE and r.new_bytes is None
                   and r.findings == grammar_finding for r in unicode_digit_results))
+    check("parsed-malformed-lexeme-refusal-not-code-built",
+          lax_merge.status is CANNOT_EVALUATE and lax_merge.new_bytes is None
+          and lax_merge.findings == ["merged registration cannot be emitted: number lexeme in the "
+                                     "model is not a finite strict-JSON number: a malformed "
+                                     "number lexeme (not shown)"])
     near = b'{"env":{"x":"' + b"a" * (MAX_REGISTRATION_BYTES - 60) + b'"}}'
     check("near-limit-input-inside-bound", len(near) <= MAX_REGISTRATION_BYTES)
     over = merge_registration(near, entry)
