@@ -2335,7 +2335,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
             else:
                 check(label + "-transactions", all(
                     first[cid] == (True, "no transaction record (run not yet applied)")
-                    and second[cid] == (True, _chk._HOMES2_NO_LEGACY_TRANSACTION_DETAIL)
+                    and second[cid] == (True, _chk._HOMES2_TYPED_UNAPPLIED_DETAIL)
                     for cid in _chk._TRANSACTION_CHECKS))
             check(label + "-generation-2", set(second) == set(first) == set(_chk.EXPECTED_CHECKS)
                   and all(second[cid] == first[cid] for cid in first if cid not in varies)
