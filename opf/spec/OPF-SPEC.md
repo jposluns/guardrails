@@ -1924,6 +1924,8 @@ and adoption provenance, including originals under `imported/` and retired files
 MUST stay inside the adopter's own repositories. In homes 2, `.aiqt/` is AIQT-owned material, not an
 OPF state home; OPF operates without it. Only homes migration MAY read explicitly inventoried OPF
 artefacts from former `.aiqt/` locations, without touching unrelated AIQT material.
+A no-follow existence probe of a former `.aiqt/` location, used only to refuse an operation, is
+not a read of that material.
 Experimental fields MUST ride registered
 `x-<vendor>` tables only, within the limits of section 8.7.
 

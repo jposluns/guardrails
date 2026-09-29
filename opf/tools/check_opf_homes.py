@@ -665,6 +665,7 @@ _CONTRACT = {
         "Import and adoption provenance, including originals under imported/ and retired files under archive/, MUST stay inside the adopter's own repositories.",
         _D('In homes 2, .aiqt/ is AIQT-owned material, not an OPF state home; OPF operates without it.'),
         'Only homes migration MAY read explicitly inventoried OPF artefacts from former .aiqt/ locations, without touching unrelated AIQT material.',
+        _D('A no-follow existence probe of a former .aiqt/ location, used only to refuse an operation, is not a read of that material.'),
         'Experimental fields MUST ride registered x-<vendor> tables only, within the limits of section 8.7.',
         _D("The base standard's required schema vocabulary names no adopter, operator, or profile by definition; a conforming store's own data legitimately may (an operator via actor.id, a profile via a [profiles.<name>] table the adopter chose)."),
         _D("AIQT appears in the standard's title and brand as trademark and authorship attribution (the standard is authored and maintained by its lead maintainer), which is attribution rather than a requirement dependency; AIQT is also one profile, [profiles.aiqt], cited only as the reference enforcement suite and a consumer."),

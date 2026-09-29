@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T23)
+  check_opf_record.py --self-test                    the fixture suite (T1-T28)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -107,6 +107,26 @@ Each case runs on its own copy of that template; the root is removed in a finall
       run reconciles it under the operation capability (the confirmed-dead gate clears the dead run's
       lease and active record), the operands end exactly at the prestate or exactly at the poststate,
       the poststate iff COMPLETE, and .aiqt is never touched (its flip runs inside the killed child)
+  T5-flip FLIP_T5 stays a genuine discriminator against the current _publish signature: applied in a
+      killed child it performs its unjournaled counters write and dies at the kill point, never at
+      an earlier signature error
+  T24 a manifest the journal-home probe cannot read leaves the generation unknowable, so a store
+      carrying a legacy .aiqt/record/journal refuses fail-closed with the .aiqt subtree
+      byte-unchanged, and a store carrying none keeps the homes-1 broken-manifest behaviour
+      (flip: probe the failure as generation 1, under which the legacy journal is reconciled in
+      place)
+  T25 the homes-2 recovery plan is derived under the HELD operation capability: a peer publication
+      attempted right after the operand check is refused by the capability, or its completed bytes
+      survive reconciliation (flip: derive the plan before the acquisition, under which the peer's
+      completed publication is rolled back and erased)
+  T26 a homes-2 publication killed after its durable COMPLETE but before the terminal projection is
+      reconciled by the next run: the confirmed-dead leftovers are cleared, the missing projection
+      is published, and the operands keep the poststate (flip: a projection never reads as missing,
+      under which that state is never reconciled)
+  T27 the homes-1 success report carries no journal_rel key and its commit advice names the legacy
+      journal home, byte-shape-identical to the pre-D build (flip: re-add the key)
+  T28 spec 15 records that a no-follow existence probe of a former .aiqt/ location, used only to
+      refuse, is not a read (flip: read the spec with the sentence removed)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -115,6 +135,7 @@ import contextlib
 import copy
 import datetime
 import io
+import json
 import os
 import shutil
 import stat
@@ -444,11 +465,11 @@ sys.exit(opf.main(["record"] + sys.argv[2:] + ["--root", sys.argv[1]]))
 _t5_flip = [""]
 FLIP_T5 = """
 _journaled = record._publish
-def _publish(ctx, plan, subcommand):
+def _publish(ctx, plan, subcommand, cap=None):
     counters = plan.operands[0]
     (Path(ctx.res.store_root) / counters.rel).write_bytes(counters.new_raw)
     plan.operands = plan.operands[1:]
-    return _journaled(ctx, plan, subcommand)
+    return _journaled(ctx, plan, subcommand, cap=cap)
 record._publish = _publish
 """
 
@@ -1560,6 +1581,227 @@ def flip_t23():
     return patch.object(record, "_record_journal_rel", lambda homes: record.JOURNAL_REL)
 
 
+# --- T5-flip, T24-T28: the PR D fix-1 vectors ------------------------------------------------------------
+
+def t5_flip_write(fx):
+    """FLIP_T5 must stay a genuine discriminator against the current _publish signature: applied
+    inside a killed child it performs its unjournaled counters write and the child dies at the kill
+    point (137), never at an earlier signature error (a TypeError exits 2 before the flip's write
+    could ever run, so nothing would discriminate the journal boundary)."""
+    env = fx.env
+    root = fx.case("t5-flip-write")
+    pre = read(root, COUNTERS)
+    proc = child(env, root, CREATE, kill="after-publish-INTENT", flip=FLIP_T5)
+    assert "TypeError" not in proc.stderr, ("T5-flip a signature error is not a discrimination",
+                                            proc.stderr[-800:])
+    assert proc.returncode == 137, ("T5-flip the child dies at the kill point", proc.returncode,
+                                    proc.stderr[-800:])
+    assert read(root, COUNTERS) != pre, "T5-flip the unjournaled counters write executed before the kill"
+    states = journal_states(root)
+    assert any(s == "open" for s in states.values()), ("T5-flip the journaled remainder is open", states)
+
+
+def t24_broken_manifest(fx):
+    """A manifest the journal-home probe cannot read leaves the homes generation UNKNOWABLE (the two
+    generations share one layout), so a store carrying a legacy .aiqt/record/journal refuses
+    fail-closed BEFORE any legacy reconciliation write -- the .aiqt subtree stays byte-unchanged even
+    on a homes-2 store with a reconcilable leftover -- while a store carrying no legacy journal keeps
+    the homes-1 broken-manifest behaviour: the run proceeds to the manifest refusal itself, nothing
+    reconciled and nothing written."""
+    env = fx.env
+    root = fx.case("t24-broken-manifest")
+    proc = child(env, root, CREATE, flip=FAILING_LOCK_RELEASE)
+    assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-800:])
+    assert (Path(root) / record.JOURNAL_REL / "lock").exists(), "T24 a reconcilable legacy leftover exists"
+    manifest_rel = MACH + "/" + record._opf_store.MANIFEST_NAME
+    original_read = record._read_operand
+
+    def failing_manifest_read(root_fd, rel):
+        if rel == manifest_rel:
+            raise record.RecordError("synthetic manifest read failure")
+        return original_read(root_fd, rel)
+
+    with imp._self_test_homes2_active(root):
+        before = snapshot(root)
+        with patch.object(record, "_read_operand", failing_manifest_read):
+            result = record_cli(env, root, CREATE)
+        assert snapshot(root) == before, "T24 nothing is written on an unknowable generation"
+        refused(result, "homes generation cannot be told")
+    # With no legacy journal, the broken-manifest run keeps the homes-1 behaviour: it reaches the
+    # manifest read refusal itself.
+    root = fx.case("t24-no-legacy-journal")
+    before = snapshot(root)
+    with patch.object(record, "_read_operand", failing_manifest_read):
+        result = record_cli(env, root, CREATE)
+    assert snapshot(root) == before, "T24 bytes untouched without a legacy journal"
+    refused(result, "synthetic manifest read failure")
+
+
+def flip_t24():
+    """Probe a failed manifest read as generation 1 (the reviewed head's behaviour): the legacy
+    journal is reconciled in place and .aiqt changes."""
+    original = record._probe_homes
+
+    def probe_as_1(ctx):
+        try:
+            return original(ctx)
+        except record.RecordError:
+            return 1
+    return patch.object(record, "_probe_homes", probe_as_1)
+
+
+def t25_plan_under_capability(fx):
+    """The homes-2 recovery plan (which transactions are open, and the clean-state rule over their
+    operands) is derived under the HELD operation capability. A peer publication is attempted at the
+    exact moment an unheld check would leave unprotected -- immediately after the operand check
+    returns clean -- and either the held capability refuses the peer (the check ran under the
+    claim), or the peer's completed publication must survive reconciliation untouched; the reviewed
+    head instead rolled it back and erased it."""
+    env = fx.env
+    base = fx.case("t25-homes2-base")
+    with imp._self_test_homes2_active(base):
+        root = fx.case("t25-homes2-race", base)
+        proc = child(env, root, CREATE, kill="after-apply-0", flip=HOMES2_CHILD_FLIP)
+        assert proc.returncode == 137, ("T25 the child is killed", proc.returncode, proc.stderr[-800:])
+        assert any(s == "open" for s in journal_states(root, TYPED_JOURNAL).values()), \
+            "T25 the interruption is open"
+        peer = {"attempted": False, "published": False, "raw": None}
+        original_check = record._unexplained_operands
+
+        def racing_check(root_fd, jr_fd, txns):
+            problems = original_check(root_fd, jr_fd, txns)
+            if problems or peer["attempted"]:
+                return problems
+            peer["attempted"] = True
+            current = read(root, COUNTERS)
+            payload = current + b"# a peer publication landed between the check and the recovery\n"
+            op = {"op": "write", "path": COUNTERS,
+                  "poststate": {"kind": "file", "content-sha256": record._sha256(payload)},
+                  "source-poststate": {"kind": "file",
+                                       "mode": stat.S_IMODE((Path(root) / COUNTERS).lstat().st_mode),
+                                       "sha256": record._sha256(current)}}
+            try:
+                cap = record._opf_oplock.acquire_operation(str(root), record.VERB, recover=True)
+            except record._opf_oplock.OpLockError:
+                return problems     # the held capability excluded the peer: the check ran under it
+            try:
+                record._opf_journal.run_transaction(cap, "record", "record-20260927T000001Z-" + "0" * 16,
+                                                    [op], lambda o: payload)
+                peer["published"] = True
+                peer["raw"] = payload
+            finally:
+                record._opf_oplock.release_operation(cap)
+            return problems
+
+        with patch.object(record, "_unexplained_operands", racing_check):
+            result = record_cli(env, root, CREATE)
+        assert peer["attempted"], "T25 the peer attempted its publication in the unheld window"
+        if peer["published"]:
+            assert read(root, COUNTERS) == peer["raw"], \
+                "T25 a peer publication that completed is never rolled back by reconciliation"
+        refused(result, "was reconciled")
+
+
+def flip_t25():
+    """Derive the recovery plan BEFORE the capability is acquired (the reviewed head's order): a
+    peer publication landing in the gap is rolled back and erased."""
+    fixed = record._recover_capability_journal
+
+    def plan_outside(ctx, jr_fd, opened, unprojected):
+        plan = record._capability_recovery_plan(ctx, jr_fd)
+        with patch.object(record, "_capability_recovery_plan", lambda ctx, jr_fd: plan):
+            return fixed(ctx, jr_fd, opened, unprojected)
+    return patch.object(record, "_recover_capability_journal", plan_outside)
+
+
+def t26_complete_before_projection(fx):
+    """A homes-2 publication killed after its durable COMPLETE but before the terminal projection:
+    the transaction is terminal, its projection absent, and the dead holder's lease left. The next
+    run reconciles exactly that state -- the confirmed-dead leftovers are cleared, the missing
+    projection is published, the operands keep the poststate, and .aiqt is never touched -- instead
+    of leaving a state every later acquisition refuses."""
+    env = fx.env
+    base = fx.case("t26-homes2-base")
+    with imp._self_test_homes2_active(base):
+        reference = fx.case("t26-homes2-reference", base)
+        proc = child(env, reference, CREATE, flip=HOMES2_CHILD_FLIP)
+        assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode,
+                                                                        proc.stderr[-1600:])
+        post = dict((rel, read(reference, rel)) for rel in RECORD_OPERANDS)
+        root = fx.case("t26-homes2-complete", base)
+        proc = child(env, root, CREATE, kill="after-publish-COMPLETE", flip=HOMES2_CHILD_FLIP)
+        assert proc.returncode == 137, ("T26 the child is killed", proc.returncode, proc.stderr[-800:])
+        states = journal_states(root, TYPED_JOURNAL)
+        assert list(states.values()) == ["complete"], ("T26 the durable COMPLETE", states)
+        (name,) = states
+        projection = Path(root) / record._opf_store.txn_record("record", name)
+        assert not projection.exists(), "T26 the crash landed before the projection"
+        assert (Path(root) / LEASE).exists(), "T26 the dead holder's lease is left"
+        result = record_cli(env, root, CREATE)
+        refused(result, "was reconciled")
+        assert "already terminal" in result[2], result[2][-800:]
+        assert projection.is_file(), "T26 the missing terminal projection is published"
+        now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+        assert now == post, "T26 the completed publication keeps its poststate"
+        assert not (Path(root) / LEASE).exists(), "T26 the confirmed-dead lease is cleared"
+        assert not (Path(root) / ".aiqt").exists(), "T26 nothing under .aiqt"
+
+
+def flip_t26():
+    """A projection can never read as missing (the reviewed head's open-only trigger): the
+    COMPLETE-before-projection state is never reconciled."""
+    return patch.object(record, "_projection_missing", lambda ctx, name: False)
+
+
+def t27_homes1_report(fx):
+    """The homes-1 success report is byte-shape-identical to the pre-D build: it carries no
+    journal_rel key (the D-a2 rename is the only homes-1 change), and the commit advice still
+    names the legacy journal home."""
+    env = fx.env
+    root = fx.case("t27-homes1-report")
+    out = recorded(record_cli(env, root, CREATE))
+    line = next(l for l in out.splitlines() if RECORDED_EVENT in l)
+    report = json.loads(line)
+    assert "journal_rel" not in report, ("T27 no journal_rel on homes 1", sorted(report))
+    assert "the journal under {} is local recovery evidence".format(record.JOURNAL_REL) in out, out[-800:]
+
+
+def flip_t27():
+    """Re-add the journal_rel key to the homes-1 report (the reviewed head's shape)."""
+    original = record._emit_success
+
+    def with_journal_rel(report):
+        return original(dict(report, journal_rel=record.JOURNAL_REL))
+    return patch.object(record, "_emit_success", with_journal_rel)
+
+
+SPEC15_SENTENCE = ("A no-follow existence probe of a former `.aiqt/` location, used only to refuse "
+                   "an operation, is not a read of that material.")
+
+
+def spec15_text():
+    return (TOOLS.parent / "spec" / "OPF-SPEC.md").read_text(encoding="utf-8")
+
+
+def t28_spec15_sentence(fx):
+    """Spec 15 records the probe-to-refuse rule the D-a5 refusal and the unknowable-generation
+    refusal rely on (maintainer decision, 2026-09-29). Compared whitespace-normalized, so the
+    spec's own line wrapping never decides the verdict."""
+    flat = " ".join(spec15_text().split())
+    assert "## 15. Genericization boundary" in flat, "T28 the spec 15 heading is present"
+    section = flat.partition("## 15. Genericization boundary")[2]
+    assert "Only homes migration MAY read explicitly inventoried OPF artefacts" in section, \
+        "T28 the spec 15 anchor is present"
+    assert SPEC15_SENTENCE in section, "T28 the spec 15 probe sentence is present"
+
+
+def flip_t28():
+    """Read the spec with the sentence removed."""
+    original = spec15_text
+    return patch.object(sys.modules[__name__], "spec15_text",
+                        lambda: " ".join(original().split()).replace(SPEC15_SENTENCE, ""))
+
+
 # --- the runner ------------------------------------------------------------------------------------------------
 
 TESTS = (
@@ -1596,6 +1838,12 @@ TESTS = (
     ("T21-homes2-publish-typed", t21_homes2_publish, flip_t21),
     ("T22-homes2-claim-still-refused", t22_homes2_claim_refused, flip_t22),
     ("T23-homes2-crash-typed", t23_homes2_crash, flip_t23),
+    ("T5-flip-unjournaled-write", t5_flip_write, None),     # FLIP_T5 itself is T5's discriminator
+    ("T24-broken-manifest-fail-closed", t24_broken_manifest, flip_t24),
+    ("T25-recovery-plan-under-capability", t25_plan_under_capability, flip_t25),
+    ("T26-complete-before-projection", t26_complete_before_projection, flip_t26),
+    ("T27-homes1-report-shape", t27_homes1_report, flip_t27),
+    ("T28-spec15-probe-sentence", t28_spec15_sentence, flip_t28),
 )
 
 

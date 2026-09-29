@@ -1133,12 +1133,28 @@ def _record_journal_rel(homes):
 def _probe_homes(ctx):
     """The homes generation probed for the journal home BEFORE the manifest is validated (reconcile
     runs first, so it cannot wait for _load_manifest): homes_generation over a best-effort manifest
-    read, unvalidated, which is that helper's own contract. A read or parse failure probes as 1, so
-    homes-1 reconcile-first behaviour on a broken manifest is unchanged. _load_manifest re-derives the
+    read, unvalidated, which is that helper's own contract. On a read or parse failure the
+    generation is UNKNOWABLE (a homes-1 and a homes-2 store share one layout; only the manifest
+    tells them apart), so the store MAY be homes 2 and nothing may be written under .aiqt/: when a
+    no-follow existence probe finds a legacy record journal (an inspection used only to refuse,
+    never a read of AIQT material, spec 15) the run refuses fail-closed BEFORE any legacy
+    reconciliation could write there, and when none exists the probe reports 1, so homes-1
+    behaviour on a broken manifest is otherwise unchanged (reconcile finds nothing to do and
+    _load_manifest then refuses the unreadable manifest itself). _load_manifest re-derives the
     generation from the validated manifest and _run_operation refuses when the two differ."""
     try:
         model = _read_operand(ctx.root_fd, ctx.rel(_opf_store.MANIFEST_NAME)).model
-    except RecordError:
+    except RecordError as probe_exc:
+        try:
+            st = _journal._lstat_contained(ctx.root_fd, JOURNAL_REL)
+        except (_journal.JournalError, OSError) as exc:
+            raise RecordError("cannot inspect the legacy record journal {} ({}); fail-closed".format(
+                JOURNAL_REL, exc))
+        if st is not None:
+            raise RecordError("the store manifest cannot be read ({}), so the homes generation cannot "
+                              "be told, and a record journal is present at {}: reconciling it could "
+                              "write under .aiqt/ on what may be a homes-2 store. Restore the manifest "
+                              "first. Nothing written (fail-closed)".format(probe_exc, JOURNAL_REL))
         return 1
     return _opf_store.homes_generation(model)
 
@@ -1436,12 +1452,19 @@ def _refuse_legacy_journal(ctx):
 def _reconcile_capability_journal(ctx):
     """Reconcile an interrupted homes-2 record publication in the typed journal home, then refuse this
     run, mirroring the homes-1 rules: nothing to do, and nothing written, when the home is absent (no
-    mkdir) or every transaction is terminal; recovery is a STORE WRITE, so it runs only under the
+    mkdir), or when every transaction is terminal AND carries its terminal projection. A terminal
+    transaction WITHOUT its projection -- the state a crash between the durable COMPLETE (or the
+    terminal rollback frame) and the projection write leaves, together with the dead holder's lease --
+    is recovered too, so the projection is published and the confirmed-dead leftovers are cleared
+    instead of refusing every later acquisition. Recovery is a STORE WRITE, so it runs only under the
     operation capability, whose mandatory lease leg is the single-writer lease itself (a held lease
     refuses acquisition and is never seized; only a CONFIRMED-DEAD holder's leftovers are cleared, the
-    capability lock's own recovery gate); and every open transaction's operands must hold a state its
-    journal explains (_unexplained_operands over the staged header, D-a4), so an intervening edit is
-    surfaced and refused, never overwritten."""
+    capability lock's own recovery gate), and the recovery plan -- which transactions are open, which
+    lack their projection, and whether every open transaction's operands hold a state its journal
+    explains (_unexplained_operands over the staged header, D-a4) -- is derived UNDER the held
+    capability (_recover_capability_journal acquires FIRST): publication runs under the same
+    capability, so a peer publication can never land between the plan and the recovery that acts on
+    it. The read below only decides whether recovery is needed at all; it is never acted on."""
     root_fd = ctx.root_fd
     rel = ctx.journal_rel
     try:
@@ -1463,40 +1486,93 @@ def _reconcile_capability_journal(ctx):
         except (_journal.JournalError, OSError) as exc:
             raise RecordError("the record journal {} cannot be reconciled ({}); fail-closed".format(rel, exc))
         opened = sorted(n for n, s in states.items() if s == "open")
-        if not opened:
+        unprojected = sorted(n for n, s in states.items()
+                             if s in ("complete", "rolled-back") and _projection_missing(ctx, n))
+        if not opened and not unprojected:
             return
-        problems = _unexplained_operands(root_fd, jr_fd, [t for t in txns if t.name in opened])
-        if problems:
-            raise RecordError(
-                "an interrupted opf record publication cannot be reconciled without overwriting a change made "
-                "since it was interrupted: {}. Nothing was written; the journal and every operand are left "
-                "exactly as found. Either restore each path to its journaled preimage (under {}/<transaction>/"
-                "preimages, or from HEAD when it holds those bytes) and re-run, or keep the edit and retire the "
-                "transaction by moving its directory out of {} yourself (fail-closed)".format(
-                    "; ".join(problems), rel, rel))
-        outcomes = _recover_capability_journal(ctx, opened)
+        outcomes = _recover_capability_journal(ctx, jr_fd, opened, unprojected)
     finally:
         _journal._close_fd_quietly(jr_fd)
+    if outcomes is None:
+        return
     raise RecordError("an interrupted opf record run was reconciled before this operation: {}. Nothing was "
                       "recorded by this run. Inspect the store paths (git status) and run opf doctor, then "
                       "re-run".format("; ".join(outcomes)))
 
 
-def _recover_capability_journal(ctx, opened):
-    """Recovery proper for the typed home, under a held operation capability (acquire refuses a live
-    holder; recover=True clears only a CONFIRMED-DEAD holder's leftover lease and active record, the
-    same possibly-live-never-seized standard the homes-1 stale journal lock is held to). Each open
+def _projection_missing(ctx, name):
+    """Whether a terminal typed-home transaction lacks its terminal projection (txn_record): the state
+    a crash between the durable terminal frame and the projection write leaves. A name outside the
+    homes grammar can have no projection path and reads as not-missing (a terminal journal is history;
+    an OPEN transaction under such a name still refuses at recovery's own identity check)."""
+    try:
+        rel = _opf_store.txn_record("record", name)
+    except ValueError:
+        return False
+    try:
+        return _journal._lstat_contained(ctx.root_fd, rel) is None
+    except (_journal.JournalError, OSError) as exc:
+        raise RecordError("cannot inspect the record transaction projection {} ({}); "
+                          "fail-closed".format(rel, exc))
+
+
+def _capability_recovery_plan(ctx, jr_fd):
+    """(opened, unprojected): what the typed record journal needs reconciled, from a FRESH read -- the
+    open transactions, and the terminal ones missing their terminal projection -- with the clean-state
+    rule over the open ones checked on the SAME observation: every open transaction's operands must
+    hold a state its journal explains (_unexplained_operands over the staged header, D-a4), else the
+    plan refuses naming each path, so an intervening edit is surfaced and refused, never overwritten.
+    Read-only. Meaningful only under the held operation capability: publication runs under the same
+    capability, so a plan derived under it cannot miss a peer's completed publication."""
+    rel = ctx.journal_rel
+    try:
+        txns = _journal._journal_txn_dirs(jr_fd, _journal_root(ctx))
+        states = {t.name: _journal.classify_state(jr_fd, t) for t in txns}
+        problems = _unexplained_operands(ctx.root_fd, jr_fd,
+                                         [t for t in txns if states[t.name] == "open"])
+    except (_journal.JournalError, OSError) as exc:
+        raise RecordError("the record journal {} cannot be reconciled ({}); fail-closed".format(rel, exc))
+    if problems:
+        raise RecordError(
+            "an interrupted opf record publication cannot be reconciled without overwriting a change made "
+            "since it was interrupted: {}. Nothing was written; the journal and every operand are left "
+            "exactly as found. Either restore each path to its journaled preimage (under {}/<transaction>/"
+            "preimages, or from HEAD when it holds those bytes) and re-run, or keep the edit and retire the "
+            "transaction by moving its directory out of {} yourself (fail-closed)".format(
+                "; ".join(problems), rel, rel))
+    opened = sorted(n for n, s in states.items() if s == "open")
+    unprojected = sorted(n for n, s in states.items()
+                         if s in ("complete", "rolled-back") and _projection_missing(ctx, n))
+    return opened, unprojected
+
+
+def _recover_capability_journal(ctx, jr_fd, opened, unprojected):
+    """Recovery proper for the typed home: the operation capability is acquired FIRST (acquire refuses
+    a live holder; recover=True clears only a CONFIRMED-DEAD holder's leftover lease and active
+    record, the same possibly-live-never-seized standard the homes-1 stale journal lock is held to),
+    and the recovery plan is then re-derived UNDER the held capability (_capability_recovery_plan), so
+    a peer publication that completed between the trigger read and this acquisition is seen and kept,
+    never rolled back as if it were the interruption's own write. `opened` and `unprojected` are the
+    unheld trigger read, used ONLY to describe the pending work in the acquisition refusal. Returns
+    the outcome lines, or None when (re-read under the capability) nothing needed recovery. Each
     transaction is recovered through the capability-bound API, which re-validates identity and the
-    record header before any truncate or write."""
+    record header before any truncate or write, and publishes the terminal projection an interrupted
+    run left missing; an already-terminal transaction reconciles to exactly that projection repair."""
+    pending = ("open transaction(s) {}".format(", ".join(opened)) if opened
+               else "terminal transaction(s) {} missing the terminal projection".format(
+                   ", ".join(unprojected)))
     try:
         cap = _opf_oplock.acquire_operation(str(ctx.res.store_root), VERB, recover=True)
     except _opf_oplock.OpLockError as exc:
-        raise RecordError("an interrupted opf record publication needs reconciliation (open transaction(s) "
-                          "{}), and reconciliation writes the store, so it runs only under the operation "
-                          "capability: {} Nothing was written (fail-closed)".format(", ".join(opened), exc))
+        raise RecordError("an interrupted opf record publication needs reconciliation ({}), and "
+                          "reconciliation writes the store, so it runs only under the operation "
+                          "capability: {} Nothing was written (fail-closed)".format(pending, exc))
     try:
+        opened, unprojected = _capability_recovery_plan(ctx, jr_fd)
+        if not opened and not unprojected:
+            return None
         outcomes = []
-        for name in opened:
+        for name in opened + [n for n in unprojected if n not in opened]:
             try:
                 result = _opf_journal.recover_transaction(cap, "record", name)
             except (_journal.JournalError, OSError, ValueError) as exc:
@@ -1507,6 +1583,9 @@ def _recover_capability_journal(ctx, opened):
                                 "uncommitted; its render and final doctor never ran)".format(name))
             elif result == "rolled-back":
                 outcomes.append("{} rolled BACK to its prestate".format(name))
+            elif result == "terminal":
+                outcomes.append("{} was already terminal; its terminal projection is published and the "
+                                "publication outcome is unchanged".format(name))
             else:
                 raise RecordError("the record journal transaction {} did not reconcile to a terminal state "
                                   "({}); fail-closed".format(name, result))
@@ -1791,7 +1870,8 @@ def _emit_success(report):
               "comparison clears once the commit makes it the prior snapshot.".format(line))
     print(json.dumps(report, sort_keys=True))
     print("opf record: review the change, then stage and commit these paths yourself (the journal under {} "
-          "is local recovery evidence, not part of the change):".format(report["journal_rel"]))
+          "is local recovery evidence, not part of the change):".format(
+              report.get("journal_rel", JOURNAL_REL)))
     print("  git -C {} --literal-pathspecs add -- {}".format(
         shlex.quote(report["store_root"]), " ".join(shlex.quote(p) for p in report["store_paths"])))
     for p in report["product_paths"]:
@@ -1921,9 +2001,12 @@ def _run_operation(req):
             report = {"event": "recorded", "subcommand": req.subcommand, "ids": list(plan.ids),
                       "change": "{} {} -> {}".format(*plan.transition) if plan.transition else None,
                       "doctor_pending": snapshot_pending, "files": [op.rel for op in plan.operands],
-                      "journal_rel": ctx.journal_rel,
                       "store_root": str(res.store_root), "store_paths": list(scope["store"]),
                       "product_root": str(product_root), "product_paths": list(scope["product"])}
+            if ctx.journal_rel != JOURNAL_REL:
+                # Homes-1 output stays byte-identical to the pre-D build (the D-a2 rename is the
+                # only homes-1 change); only the homes-2 report names its typed journal home.
+                report["journal_rel"] = ctx.journal_rel
             released = True
             try:
                 _conclude(ctx, lease, report)
