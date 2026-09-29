@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "04e6f367fb16fcfc48ba214f52b5c83ca69277e00901a33ace3921a754d691d3"
+tree-sha256 = "ac5b646d503058b7b447110150955901fc0ed31982d215d3323e99aa5fb54f10"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -101,8 +101,8 @@ sha256 = "2ec7728abc86392c978ee5a5069ad1bd3cf52b55170367c3bbccd0316f5458d2"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
-bytes = 2239
-sha256 = "998fb4810a29b401874c41df8264115ad7c864cefad372c66bdcb15978474f50"
+bytes = 2264
+sha256 = "7547b67888c8b0696df3908cb9d518104c59dfcf194118bb935a6d153a99604d"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -117,7 +117,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2867
-sha256 = "9875272fc4ab9112ca60c8d312eb9b06ee5a3cd271c1e7449efab300ac3ddf7c"
+sha256 = "b2e304f2dcef71c2d142fd14e81ab83d569736fe575bd09a66ab5a8c337e8472"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -1566,8 +1566,8 @@ sha256 = "27b27ca584b3f43f111051d861e316ae6f78a64373dcd2cb2197c6da241a7126"
 
 [[sources]]
 path = ".claude/worker-pack.md"
-bytes = 2129
-sha256 = "b51e3a7682c29b1527e4fb3eb734b27e1a476f58a04f24cad6840c702fb8b5af"
+bytes = 2154
+sha256 = "971ca94e1d6cba72f11425d20274cca93e58b83fea4d066ea4909177dedc7b76"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/00-project-integrity.mdc"
@@ -3516,8 +3516,8 @@ sha256 = "bb4a8d8803f8fa41497ee1feea92db0167a8cc1a16d8a37d2f726d635babe6cd"
 
 [[sources]]
 path = "tools/gen_worker_pack.py"
-bytes = 13391
-sha256 = "ff7be47538b549bb0ed918df3b85708152b2417701e832bfb96e533ae91efdaa"
+bytes = 13403
+sha256 = "d94f92a7b74fee04010e1fe73db1cdfec9a57269df4435d14d2017aaf958c3ea"
 
 [[sources]]
 path = "tools/import_cwe.py"
@@ -4411,7 +4411,7 @@ sha256 = "27b27ca584b3f43f111051d861e316ae6f78a64373dcd2cb2197c6da241a7126"
 artifact-id = "worker-pack:.claude/worker-pack.md"
 path = ".claude/worker-pack.md"
 kind = "file"
-sha256 = "b51e3a7682c29b1527e4fb3eb734b27e1a476f58a04f24cad6840c702fb8b5af"
+sha256 = "971ca94e1d6cba72f11425d20274cca93e58b83fea4d066ea4909177dedc7b76"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/00-project-integrity.mdc"
