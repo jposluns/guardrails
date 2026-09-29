@@ -131,7 +131,10 @@ MAX_STORE_READ_BYTES = 1 << 20         # read cap for a contained store file (ma
                                        # store input is refused rather than read unboundedly (SECA)
 SUPPORTED_SPEC_VERSION = "1.2.0"       # the OPFiles base spec_version this tooling implements; a store
                                        # declaring an OLDER spec_version is fail-closed with a distinct
-                                       # migration-needed finding naming the `opf upgrade` remedy (spec 9.x)
+                                       # migration-needed finding naming the `opf upgrade` remedy (spec 9.x),
+                                       # and one declaring a NEWER spec_version is fail-closed with an
+                                       # upgrade-the-tooling finding, except only the reserved homes-2
+                                       # declaration pair, which stays gated on activation (spec 9.2/4.2)
 
 # Resolution outcomes.
 RESOLVED = "RESOLVED"                  # a machine store was resolved and located
@@ -1268,6 +1271,17 @@ def _validate_base(base, findings):
                             "run the store schema upgrade (`opf upgrade`) to migrate this store to {} "
                             "(spec 9.x; fail-closed)".format(
                                 _safe_display(sv), SUPPORTED_SPEC_VERSION, SUPPORTED_SPEC_VERSION))
+        elif spec_tuple > _parse(SUPPORTED_SPEC_VERSION) and not (
+                sv == HOMES2_SPEC_VERSION and base.get("homes") == 2):
+            # A store declaring a NEWER base spec_version than this tooling implements is fail-closed at
+            # validation: older tooling MUST refuse a 1.3.0 (or any above-supported) declaration rather
+            # than certify it under legacy checks (spec 9.2). The one exception is the exact reserved
+            # homes-2 declaration pair, spec_version 2.0.0 with homes = 2 (spec 4.2): homes_generation()
+            # gates its activation on SUPPORTED_HOMES, and the homes-migration planner must keep
+            # recognizing an already-migrated store idempotently.
+            findings.append("[opf].spec_version {} is above the {} this tooling implements; "
+                            "upgrade the tooling before operating on this store "
+                            "(spec 9.2; fail-closed)".format(_safe_display(sv), SUPPORTED_SPEC_VERSION))
     # Each closed-vocabulary field is type-checked BEFORE its membership test (MAJOR 3), so a wrong-typed
     # value (e.g. posture as a list) is a fail-closed finding here rather than an unhashable-value crash
     # in a later rank/membership test.
@@ -2015,6 +2029,27 @@ def self_test():
               any("older than the" in f and "opf upgrade" in f for f in mv_old.findings))
         check("spec-version-current-ok",
               validate_manifest(_t.loads(manifest_text(spec_version=SUPPORTED_SPEC_VERSION))).status == VALID)
+
+        # 10g2 (spec 9.2): a store declaring a spec_version ABOVE SUPPORTED_SPEC_VERSION is fail-closed at
+        # validation with its own named finding, so older tooling never certifies a newer store (a bare
+        # 1.3.0 declaration included) under legacy checks. The single carve-out is the exact reserved
+        # homes-2 declaration pair (spec 4.2), which homes_generation() gates on SUPPORTED_HOMES; a
+        # version-only 2.0.0, or an above-version paired with homes = 2, still refuses.
+        mv_above = validate_manifest(_t.loads(manifest_text(spec_version="1.3.0")))
+        check("spec-version-ceiling-invalid", mv_above.status == INVALID)
+        check("spec-version-ceiling-named",
+              any("above the" in f and "upgrade the tooling" in f for f in mv_above.findings))
+        check("spec-version-ceiling-2.0.0-alone-invalid",
+              validate_manifest(_t.loads(manifest_text(spec_version="2.0.0"))).status == INVALID)
+        ceiling_anchor = 'import_status = "none"'
+        homes2_pair = manifest_text(spec_version="2.0.0").replace(
+            ceiling_anchor, ceiling_anchor + "\nhomes = 2")
+        check("spec-version-ceiling-homes2-pair-recognized",
+              validate_manifest(_t.loads(homes2_pair)).status == VALID)
+        above_pair = manifest_text(spec_version="1.3.0").replace(
+            ceiling_anchor, ceiling_anchor + "\nhomes = 2")
+        check("spec-version-ceiling-non-homes2-pair-invalid",
+              validate_manifest(_t.loads(above_pair)).status == INVALID)
 
         # 10h: [opf].homes is an optional, validated integer generation declaration.
         # Recognition does not activate homes 2 or require a declaration in legacy manifests.
