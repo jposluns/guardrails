@@ -96,7 +96,7 @@ def _bootstrap():
     that could not be brought in."""
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
     global _opf_emit, _opf_views, _opf_fuzz, _opf_import, _opf_importers, _opf_observe, _opf_absorb
-    global _opf_ingest, _opf_write_guard, _opf_record
+    global _opf_ingest, _opf_write_guard, _opf_record, _opf_adopt_apply
     try:
         import _opf_store       # U1: store resolution + discovery + manifest base/profile schema
         import _opf_schema      # U2: record envelope + baseline type schemas + status/transition + counters
@@ -113,6 +113,7 @@ def _bootstrap():
         import _opf_absorb      # OPF-CHANGELOG-ABSORB: read-only CHANGELOG.md drafter (composes on U5)
         import _opf_write_guard  # the in-place writers' shared cleanliness gate and single-writer lease
         import _opf_record      # OPF-RECORD: the record-authoring verb (spec 8.8)
+        import _opf_adopt_apply  # OPF-ADOPT U1: the apply shell (zero executable ops)
     except ImportError as exc:
         print("opf: cannot bootstrap: {} (cannot evaluate)".format(exc.name or exc), file=sys.stderr)
         return EXIT_MALFORMED
@@ -3321,6 +3322,7 @@ def _self_tests():
     ("opf-observe", _opf_observe.self_test),
     ("opf-absorb", _opf_absorb.self_test),
     ("opf-record", _opf_record.self_test),
+    ("opf-adopt-apply", _opf_adopt_apply.self_test),
     ("opf-fuzz", _opf_fuzz.self_test),
     ("opf-check", _opf_check.self_test),
     ("opf-watchdog-hostile-ambient", _watchdog_hostile_ambient_self_test),
