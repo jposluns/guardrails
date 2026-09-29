@@ -22,11 +22,15 @@ defective fixture suite (tools/selftest_aiqt_corpus.py) runs to green under a po
 GIT_INDEX_FILE and under a poisoned GIT_DIR, through the direct __main__ run AND the imported
 run_self_test() surface (which bypasses the entry-point scrub), each aimed at a decoy caller
 repository built here, and the decoy's .git content is asserted BYTE-IDENTICAL afterwards, so the
-leak cannot silently return. Fourth, a repo-wide maintenance-pin completeness scan (F-367):
-every subprocess launch under tools/ and opf/tools/ whose argv can reach a
-maintenance-triggering git subcommand must carry the F-367 argv pins, route through a covered
-environment or scrub, or carry a written justification, so an omitted fixture harness (the
-class member a hand enumeration misses) fails this suite instead of racing CI.
+leak cannot silently return. Fourth, a repo-wide maintenance-pin completeness scan (F-367),
+run as an enforceable CONTRACT: every git launch under tools/ and opf/tools/ must be a direct
+subprocess list-argv call this scan can resolve, a resolved maintenance-triggering launch must
+carry the EFFECTIVE F-367 argv pins (`-c key=value` pairs in option position), route through a
+covered environment or a CALLED scrub, or carry a written justification, and every launch the
+scan cannot resolve (an os-level or shell-string launch, a helper-built or parameterized argv,
+an alias spelling) is itself a loud cannot-evaluate finding unless justified, so an omitted
+fixture harness (the class member a hand enumeration misses) or an unreviewable launch form
+fails this suite instead of racing CI.
 
 Verdicts use child return codes and byte comparisons, never output tokens. DISCLOSED RESIDUAL: a
 routing/scope check proves the scrub call site and its position in the named entry, not that every
@@ -1068,11 +1072,16 @@ def _config_injection_lane(base):
     (control / "seed").write_text("seed\n", encoding="utf-8")
     (control / "survivor").write_text("kept\n", encoding="utf-8")
     (control / ".gitattributes").write_text("survivor -export-ignore\n", encoding="utf-8")
+    # The env above is DELIBERATELY unscrubbed (the lane tests config injection), so the F-367
+    # pins ride the argv in option position: the control commit must not spawn a detached
+    # auto-gc/auto-maintenance child that outlives it (the pins do not touch the injection
+    # surfaces under test: hooks, ignore files, attributes, fsmonitor).
     for args in (("init", "-q"), ("add", "-f", "seed", "survivor", ".gitattributes"),
                  ("-c", "user.name=Selftest", "-c", "user.email=selftest@example.invalid",
                   "-c", "commit.gpgsign=false", "commit", "-q", "-m", "control")):
-        subprocess.run(["git", "-C", str(control), *args], env=env, check=True,
-                       capture_output=True, timeout=60)
+        subprocess.run(["git", "-C", str(control), "-c", "gc.auto=0",
+                        "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false", *args],
+                       env=env, check=True, capture_output=True, timeout=60)
     check("config/injection-control", bool(marker.read_bytes()), True)
     (control / "untracked").write_text("dirt\n", encoding="utf-8")
     # Exercise each on-disk source independently, including HOME's fallback.
@@ -1100,7 +1109,9 @@ def _config_injection_lane(base):
         import io
         import tarfile
         args = ["-c", "core.attributesFile=/dev/null"] if pin else []
-        archive = subprocess.run(["git", "-C", str(control), *args, "archive", "HEAD"],
+        archive = subprocess.run(["git", "-C", str(control), "-c", "gc.auto=0",
+                                  "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
+                                  *args, "archive", "HEAD"],
                                  env=env, capture_output=True, timeout=60, check=True)
         with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
             names = tar.getnames()
@@ -1715,25 +1726,57 @@ def _auto_maintenance_children(workdir, env):
 # Round 1 of the F-367 fix showed that a HAND enumeration of fixture harnesses misses members:
 # tools/selftest_ci_status.py committed through a hand-rolled environment and an absolute git
 # executable, bypassing the shared scrub, the lifecycle PATH wrapper, and every reviewed funnel.
-# This scan derives the member set MECHANICALLY from the source instead: every subprocess launch
-# under tools/ and opf/tools/ whose argv can reach a maintenance-triggering git subcommand must
-# carry the F-367 argv pins, route through a covered environment or scrub, or carry a written
-# justification in _SCAN_ALLOWED_UNPINNED (a stale justification is itself a finding).
-# DISCLOSED RESIDUAL (syntactic bounds, the same stance as the routing checks above): argv heads
-# and spliced tails are resolved through literal lists, same-scope assignments with their
-# augmented/append/extend growth, module-level constants, and one level of same-module function
-# returns for env= values; a launch whose argv is assembled beyond those bounds is in scope only
-# when a maintenance-triggering literal token or a git-ish head is visible to the resolver, and
-# a subcommand smuggled through a single opaque token defeats the scan. The from-import and
-# import-as guards keep every launch on the subprocess.<launcher> spelling this scan reads.
+# This scan derives the member set MECHANICALLY from the source instead, as an ENFORCEABLE
+# CONTRACT rather than a best-effort search: every git launch under tools/ and opf/tools/ must be
+# a DIRECT subprocess list-argv call whose argv this scan can resolve. A launch it cannot resolve
+# is a loud cannot-evaluate FINDING, never a silent skip, unless a written justification in
+# _SCAN_ALLOWED_UNPINNED covers it (a stale or dangling justification is itself a finding):
+# os-level launchers (os.system / os.exec* / os.spawn* / os.popen / os.posix_spawn*),
+# shell-string launches (shell=True, subprocess.getoutput/getstatusoutput), an argv or argv head
+# the resolver cannot reduce to literals (a helper return, another module's value, a
+# parameterized subcommand slot), and import/alias spellings that would re-spell a launch away
+# from the subprocess.<launcher> form this scan reads (a from-import of a launcher,
+# `import subprocess as x`, `x = subprocess`). A RESOLVED git launch is judged on its EFFECTIVE
+# argv: the git global-option region is parsed positionally, each F-367 pin counts only as a
+# `-c key=value` pair in OPTION position (a pin string inside a -m message argument never
+# counts), a NO_AUTO_MAINTENANCE splice counts only through its RESOLVED literal elements, and a
+# launch whose resolved SUBCOMMAND is not maintenance-triggering is out of scope (a trigger word
+# in operand position, `git show commit`, is not a launch of that trigger). A scrub covers a
+# launch only when the module actually CALLS it (scrub-first placement in the named entries is
+# separately enforced by the layer-2 scope/ checks above); a merely-imported scrub covers
+# nothing.
+# DISCLOSED RESIDUAL (syntactic bounds, the same stance as the routing checks above):
+# element-level literal resolution stays within literal lists, same-scope assignments with their
+# augmented/append/extend growth (treated as tail growth in source order), module-level
+# constants, and one level of same-module function returns for env= values; a launch whose head
+# resolves to a literal NON-git program (an interpreter, a shell, a copied script) ends the
+# analysis at that head, so a git launch INSIDE a launched script or a getattr()-style
+# indirection stays out of this scan's reach and is covered by review posture, not mechanics.
 _SCAN_DIRS = ("tools", "opf/tools")
-_SCAN_LAUNCH_NAMES = frozenset(("run", "Popen", "call", "check_call", "check_output"))
+_SCAN_LAUNCH_NAMES = frozenset(("run", "Popen", "call", "check_call", "check_output",
+                                "getoutput", "getstatusoutput"))
+_SCAN_SHELL_LAUNCH_NAMES = frozenset(("getoutput", "getstatusoutput"))
+_SCAN_OS_LAUNCH_NAMES = frozenset((
+    "system", "popen", "posix_spawn", "posix_spawnp", "startfile",
+    "execl", "execle", "execlp", "execlpe", "execv", "execve", "execvp", "execvpe",
+    "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe"))
 _SCAN_TRIGGERS = frozenset(("commit", "merge", "rebase", "am", "cherry-pick", "pull",
                             "fetch", "gc", "maintenance"))
-_SCAN_PIN_TOKENS = frozenset("%s=%s" % pair for pair in _git_fixture_env._NO_AUTO_MAINTENANCE)
+# key (git config keys are case-insensitive) -> required value, from the shared constant.
+_SCAN_PIN_VALUES = {key.lower(): value for key, value in _git_fixture_env._NO_AUTO_MAINTENANCE}
 _SCAN_COVERED_ENV_CALLS = frozenset(("git_fixture_env",))
 _SCAN_SCRUB_NAMES = frozenset(("scrub_git_environment", "fixture_git_lifecycle"))
 _SCAN_RESOLVE_DEPTH = 6
+# Marker for an unknown-length argv region the resolver could not reduce to elements (a helper
+# return, a name assigned more than once, an unresolved splice). Distinct from a single opaque
+# SLOT (one list element whose VALUE is unresolved, e.g. str(repo)), which stays one argv item.
+_SCAN_OPEN = "<unresolved argv region>"
+# git GLOBAL options that consume the FOLLOWING argv slot; `--opt=value` spellings are single
+# slots and every other `-`-leading token is treated as a bare flag. `-c` is handled separately
+# (its value carries the pins).
+_SCAN_GIT_OPTION_ARG = frozenset(("-C", "--git-dir", "--work-tree", "--namespace",
+                                  "--config-env", "--super-prefix"))
+_SCAN_GIT_HEAD_NAMES = ("git", "GIT", "_GIT", "GIT_BIN")
 _SCAN_ALLOWED_UNPINNED = (
     ("tools/selftest_git_fixture_env.py", "_auto_maintenance_children",
      "the F-367 probe's own traced commit: the green leg passes the pinned fixture env and the"
@@ -1748,32 +1791,86 @@ _SCAN_ALLOWED_UNPINNED = (
     ("tools/check_msg_leaks.py", "_run_git",
      "production gate read helper (log/rev-parse over the real repository); read-only by"
      " design, and production launches stay unchanged"),
-    ("opf/tools/_opf_oplock.py", "_git_rev_parse_output",
-     "production read-only funnel: every caller passes rev-parse options, never a"
-     " maintenance-triggering subcommand, and production launches stay unchanged by design"),
     ("opf/tools/_opf_observe.py", "_run_git_config_discovery",
-     "production read-only config-discovery probe (check-ignore under --no-pager), never a"
+     "production read-only config/index-discovery funnel under --no-pager (config reads,"
+     " ls-files, and the no-lazy-fetch cat-file -e availability probe), never a"
      " maintenance-triggering subcommand, and production launches stay unchanged by design"),
     ("opf/tools/check_opf_init.py", "_suite_isolated.git_input",
      "stdin-fed fixture plumbing (update-index --index-info style calls) under"
      " _opf_observe._scrubbed_env; its callers pass plumbing subcommands only, never a"
      " maintenance-triggering one"),
+    # Cannot-evaluate launches (argv or head outside the resolver's bounds), each audited:
+    ("tools/check_git_option_table.py", "_git",
+     "cannot-evaluate funnel: the argv tail is the caller's *args; every caller passes"
+     " option-table introspection forms (init -q --template= of a scratch probe repo,"
+     " --version, and per-subcommand -h / --git-completion-helper probes that exit inside"
+     " option parsing), never a real maintenance-triggering run"),
+    ("tools/check_newtab.py", "_self_test",
+     "cannot-evaluate head: the launch iterates a literal command table whose heads are all"
+     " sys.executable (the copied-tools self-test children); no git launch"),
+    ("tools/check_release_build.py", "_materialized_check",
+     "cannot-evaluate argv: replays the registry-enumerated gate commands (the generators'"
+     " python3 --check forms and the manifest-integrity commands) inside a throwaway"
+     " materialized checkout; the registries enumerate the pack's own python gates, not git"),
+    ("tools/selftest_aiqt_hooks.py", "_main_isolated",
+     "cannot-evaluate head: replays the REGISTERED hook entry's own dispatcher command (a"
+     " python3 hook-script argv from the hooks registry), not a git launch; the suite's"
+     " lifecycle PATH wrapper pins any git a hook child resolves through PATH"),
+    ("opf/tools/_opf_observe.py", "_capture_bounded",
+     "cannot-evaluate funnel: the bounded-read launcher receives argv and env from its"
+     " callers; every caller is a read-only observation (rev-parse/config/cat-file family),"
+     " and the lazy-fetch-enabled fixture caller passes the three pins via config_overrides"),
+    ("opf/tools/_opf_pack_manifest.py", "_runner_check.run_shell",
+     "cannot-evaluate head: a PATH-resolved bash running this self-test's planted"
+     " runner-script bodies; the bodies drive the manifest runner under test, not git"),
+    ("opf/tools/check_opf_init_p0.py", "runner_check.run_shell",
+     "cannot-evaluate head: a PATH-resolved bash running this self-test's planted"
+     " runner-script bodies; the bodies drive the runner under test, not git"),
+    ("opf/tools/check_opf_upgrade.py", "_suite_isolated",
+     "cannot-evaluate argv: replays the doctor's own printed `git -C <fixture>"
+     " --literal-pathspecs add ...` advice command (and its -f-stripped control) inside the"
+     " fixture repo; add is not maintenance-triggering and the argv shape is validated by the"
+     " preceding checks"),
+    ("opf/tools/selftest_commonmark_conformance.py", "_run_matrix",
+     "cannot-evaluate head: re-spawns this conformance harness under each named PATH-resolved"
+     " python interpreter (an optional maintainer matrix); not a git launch"),
+    ("opf/tools/_opf_pack_manifest.py", "_runner_red_checks.checked_environment",
+     "cannot-evaluate pass-through: the credential-red-check re-invokes the SAVED"
+     " subprocess.Popen inside its patched side_effect after asserting the launch"
+     " environment; the argv is the runner check's own bash runner-script launch, not git"),
+    ("opf/tools/check_opf_init_p0.py", "runner_red_checks.checked_environment",
+     "cannot-evaluate pass-through: the credential-red-check re-invokes the SAVED"
+     " subprocess.Popen inside its patched side_effect after asserting the launch"
+     " environment; the argv is the runner check's own bash runner-script launch, not git"),
 )
 
 
 def _scan_alias_findings(rel, tree):
-    """Import spellings that would hide a launch from this scan, as findings."""
+    """Import and alias spellings that would re-spell a process launch away from the
+    module-qualified form this scan reads, as findings. Only LAUNCH-CAPABLE names are flagged:
+    `from subprocess import PIPE` imports no launcher and is harmless, while a from-import
+    (bare, aliased, or *) of a launcher, `import subprocess as x`, or a plain-name alias
+    `x = subprocess` hides launches."""
     out = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "subprocess":
-            out.append("%s:%d <module>: from-import of subprocess hides launches from the"
-                       " maintenance-pin scan; call subprocess.<launcher> directly"
-                       % (rel, node.lineno))
+        if isinstance(node, ast.ImportFrom) and node.module in ("subprocess", "os"):
+            launchers = (_SCAN_LAUNCH_NAMES if node.module == "subprocess"
+                         else _SCAN_OS_LAUNCH_NAMES)
+            for alias in node.names:
+                if alias.name == "*" or alias.name in launchers:
+                    out.append("%s:%d <module>: from-import of %s.%s hides launches from the"
+                               " maintenance-pin scan; call the module-qualified launcher"
+                               " directly" % (rel, node.lineno, node.module, alias.name))
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name == "subprocess" and alias.asname:
                     out.append("%s:%d <module>: subprocess imported as %r hides launches from"
                                " the maintenance-pin scan" % (rel, node.lineno, alias.asname))
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            value = getattr(node, "value", None)
+            if isinstance(value, ast.Name) and value.id == "subprocess":
+                out.append("%s:%d <module>: aliasing subprocess to another name hides launches"
+                           " from the maintenance-pin scan" % (rel, node.lineno))
     return out
 
 
@@ -1829,22 +1926,25 @@ def _scan_local_assigns(func_node, name):
 
 
 def _scan_flatten(expr, func_node, module_consts, depth):
-    """(ordered argv element nodes, open) within the resolver's bounds: literal lists and
-    tuples, + concatenation, list()/tuple() wrapping, starred splices, and Name resolution
-    through same-scope assignments or a module-level literal. Anything else contributes no
-    elements and marks the argv OPEN (an unresolved splice could carry any subcommand)."""
+    """(ordered argv entries, open) within the resolver's bounds: literal lists and tuples,
+    + concatenation, list()/tuple() wrapping, starred splices, and Name resolution through a
+    single same-scope assignment (with its append/extend growth as tail entries) or a
+    module-level literal. Each entry is a single-slot AST node, or the _SCAN_OPEN marker where
+    an unknown-length region the resolver cannot reduce sits, so a POSITIONAL reading knows
+    exactly where its knowledge ends (a marker at the head hides the program; a marker after
+    the pins hides nothing that could re-enable maintenance)."""
     if depth <= 0:
-        return [], True
+        return [_SCAN_OPEN], True
     if isinstance(expr, (ast.List, ast.Tuple)):
-        elements, opened = [], False
+        entries, opened = [], False
         for elt in expr.elts:
             if isinstance(elt, ast.Starred):
                 inner, inner_open = _scan_flatten(elt.value, func_node, module_consts, depth - 1)
-                elements.extend(inner)
+                entries.extend(inner)
                 opened = opened or inner_open
             else:
-                elements.append(elt)
-        return elements, opened
+                entries.append(elt)
+        return entries, opened
     if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
         left, lopen = _scan_flatten(expr.left, func_node, module_consts, depth - 1)
         right, ropen = _scan_flatten(expr.right, func_node, module_consts, depth - 1)
@@ -1856,58 +1956,183 @@ def _scan_flatten(expr, func_node, module_consts, depth):
         plain, extend = _scan_local_assigns(func_node, expr.id)
         if not plain and expr.id in module_consts:
             plain = [module_consts[expr.id]]
-        if not plain:
-            return [], True
-        elements, opened = _scan_flatten(plain[0], func_node, module_consts, depth - 1)
-        if len(plain) > 1:
-            opened = True
-            for value in plain[1:]:
-                more, _ = _scan_flatten(value, func_node, module_consts, depth - 1)
-                elements.extend(more)
+        if len(plain) != 1:
+            # No assignment in reach, or more than one (source order between them and the
+            # launch is not tracked): an unknown-length region, never a guessed merge.
+            return [_SCAN_OPEN], True
+        entries, opened = _scan_flatten(plain[0], func_node, module_consts, depth - 1)
         for value in extend:
             more, more_open = _scan_flatten(value, func_node, module_consts, depth - 1)
-            elements.extend(more)
+            entries.extend(more)
             opened = opened or more_open
-        return elements, opened
-    return [], True
+        return entries, opened
+    if isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name) \
+            and expr.value.id in ("self", "cls"):
+        # A class-level constant (the scan loop merges the innermost enclosing class's
+        # single-target assignments into the consts mapping under "self."/"cls." keys).
+        target = expr.value.id + "." + expr.attr
+        if target in module_consts:
+            return _scan_flatten(module_consts[target], func_node, module_consts, depth - 1)
+    return [_SCAN_OPEN], True
+
+
+def _scan_program_kind(value):
+    """bare-git / abs-git / non-git for a literal program string."""
+    if value == "git":
+        return "bare-git"
+    if value.endswith("/git"):
+        return "abs-git"
+    return "non-git"
 
 
 def _scan_head_kind(node, func_node, module_consts, depth):
-    """bare-git / abs-git / named-git / non-git / unknown for the first argv element."""
-    if node is None or depth <= 0:
+    """bare-git / abs-git / named-git / non-git / unknown for the first argv entry."""
+    if node is None or node is _SCAN_OPEN or depth <= 0:
         return "unknown"
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        if node.value == "git":
-            return "bare-git"
-        if node.value.endswith("/git"):
-            return "abs-git"
-        return "non-git"
+    if isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes)):
+        value = node.value
+        if isinstance(value, bytes):
+            try:
+                value = value.decode("ascii")
+            except UnicodeDecodeError:
+                return "unknown"
+        return _scan_program_kind(value)
+    if isinstance(node, ast.Call):
+        callee = node.func
+        callee_name = callee.attr if isinstance(callee, ast.Attribute) else (
+            callee.id if isinstance(callee, ast.Name) else None)
+        if callee_name == "which" and len(node.args) == 1 and not node.keywords \
+                and isinstance(node.args[0], ast.Constant) \
+                and isinstance(node.args[0].value, str):
+            return _scan_program_kind(node.args[0].value)
+        if callee_name in ("str", "abspath", "realpath", "fspath") and len(node.args) == 1:
+            return _scan_head_kind(node.args[0], func_node, module_consts, depth - 1)
+        return "unknown"
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        # A pathlib join: the RIGHTMOST component names the program.
+        if isinstance(node.right, ast.Constant) and isinstance(node.right.value, str):
+            return "abs-git" if node.right.value == "git" else "non-git"
+        return "unknown"
     if isinstance(node, ast.Name):
         plain, _ = _scan_local_assigns(func_node, node.id)
-        if len(plain) == 1:
-            kind = _scan_head_kind(plain[0], func_node, module_consts, depth - 1)
-            if kind != "unknown":
-                return kind
         if not plain and node.id in module_consts:
-            kind = _scan_head_kind(module_consts[node.id], func_node, module_consts, depth - 1)
-            if kind != "unknown":
-                return kind
-        if node.id in ("git", "GIT"):
+            plain = [module_consts[node.id]]
+        kinds = set(_scan_head_kind(value, func_node, module_consts, depth - 1)
+                    for value in plain)
+        if len(kinds) == 1 and "unknown" not in kinds:
+            return kinds.pop()
+        if node.id in _SCAN_GIT_HEAD_NAMES:
             return "named-git"
         return "unknown"
     if isinstance(node, ast.Attribute):
+        if isinstance(node.value, ast.Name) and node.value.id in ("self", "cls"):
+            target = node.value.id + "." + node.attr
+            if target in module_consts:
+                return _scan_head_kind(module_consts[target], func_node, module_consts,
+                                       depth - 1)
         if node.attr == "executable":
             return "non-git"
-        if node.attr in ("git", "GIT"):
+        if node.attr in _SCAN_GIT_HEAD_NAMES:
             return "named-git"
         return "unknown"
     return "unknown"
 
 
+def _scan_element_literal(node, func_node, module_consts, depth):
+    """The literal string a single argv ENTRY resolves to within the resolver's bounds, or None
+    for an opaque slot (one argv element whose value the scan cannot read)."""
+    if node is None or node is _SCAN_OPEN or depth <= 0:
+        return None
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, str):
+            return node.value
+        if isinstance(node.value, bytes):
+            try:
+                return node.value.decode("ascii")
+            except UnicodeDecodeError:
+                return None
+        return None
+    if isinstance(node, ast.Name):
+        plain, extend = _scan_local_assigns(func_node, node.id)
+        if not plain and node.id in module_consts:
+            plain = [module_consts[node.id]]
+        if len(plain) == 1 and not extend:
+            return _scan_element_literal(plain[0], func_node, module_consts, depth - 1)
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) \
+            and node.value.id in ("self", "cls"):
+        target = node.value.id + "." + node.attr
+        if target in module_consts:
+            return _scan_element_literal(module_consts[target], func_node, module_consts,
+                                         depth - 1)
+    return None
+
+
+def _scan_git_argv_state(entries, func_node, module_consts):
+    """(status, subcommand) for a git-headed argv parsed POSITIONALLY through git's
+    global-option region: 'pinned' the moment all three F-367 pins have been seen as
+    `-c key=value` pairs in OPTION position (a pinned launch is maintenance-safe whatever
+    follows, so an open tail after the pins is fine); 'subcommand' with the resolved
+    subcommand token; 'opaque' when an unknown-length region, an unresolved slot, an
+    unreadable or alias-remapping `-c` value, or a truncated option reaches the parser before
+    either; 'end' for a fully resolved argv that never reaches a subcommand."""
+    pins = set()
+    index = 1
+    while index < len(entries):
+        entry = entries[index]
+        if entry is _SCAN_OPEN:
+            return "opaque", None
+        token = _scan_element_literal(entry, func_node, module_consts, _SCAN_RESOLVE_DEPTH)
+        if token is None:
+            return "opaque", None
+        if token == "-c":
+            if index + 1 >= len(entries) or entries[index + 1] is _SCAN_OPEN:
+                return "opaque", None
+            value = _scan_element_literal(entries[index + 1], func_node, module_consts,
+                                          _SCAN_RESOLVE_DEPTH)
+            if value is None:
+                return "opaque", None
+            key = value.partition("=")[0].lower()
+            if key.startswith("alias."):
+                # A command-scope alias can remap ANY later word to another subcommand.
+                return "opaque", None
+            if _SCAN_PIN_VALUES.get(key) == value.partition("=")[2]:
+                pins.add(key)
+                if len(pins) == len(_SCAN_PIN_VALUES):
+                    return "pinned", None
+            index += 2
+            continue
+        if token in _SCAN_GIT_OPTION_ARG:
+            # Consumes exactly the following slot (its value may stay opaque: one slot).
+            if index + 1 >= len(entries) or entries[index + 1] is _SCAN_OPEN:
+                return "opaque", None
+            index += 2
+            continue
+        if token.startswith("-") and token != "-":
+            index += 1
+            continue
+        return "subcommand", token
+    return "end", None
+
+
+def _scan_calls_module(tree, wanted):
+    """True when the module contains an actual CALL of one of <wanted> (a bare name or an
+    attribute). A merely-imported or merely-referenced scrub name proves nothing about the
+    launch environment, so it covers nothing."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else (
+            func.attr if isinstance(func, ast.Attribute) else None)
+        if name in wanted:
+            return True
+    return False
+
+
 def _scan_env_covered(expr, func_node, module_consts, func_defs, module_scrubbed, depth):
     """True when the env= expression provably derives from a pin-carrying source: a
     git_fixture_env(...) call (directly, through dict()/copy() derivation, a same-scope name,
-    or one level of same-module function returns), or os.environ in a module that applies the
+    or one level of same-module function returns), or os.environ in a module that CALLS the
     in-place scrub or the lifecycle wrapper (both leave the pins set in os.environ)."""
     if expr is None or depth <= 0:
         return False
@@ -1955,46 +2180,41 @@ def _scan_env_covered(expr, func_node, module_consts, func_defs, module_scrubbed
 
 
 def _scan_launches(tree):
-    """(call node, dotted qualname, enclosing function node) for every direct
-    subprocess.<launcher>(...) call in the module."""
+    """(call node, flavor, launcher, dotted qualname, enclosing function node, innermost
+    enclosing class node) for every direct subprocess.<launcher>(...) call (flavor
+    'subprocess') and every os-level launcher call by any object spelling (flavor 'os') in the
+    module."""
     found = []
-    stack = [(tree, (), None)]
+    stack = [(tree, (), None, None)]
     while stack:
-        node, parts, func_node = stack.pop()
+        node, parts, func_node, class_node = stack.pop()
         for child in ast.iter_child_nodes(node):
-            child_parts, child_func = parts, func_node
+            child_parts, child_func, child_class = parts, func_node, class_node
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 child_parts, child_func = parts + (child.name,), child
             elif isinstance(child, ast.ClassDef):
-                child_parts = parts + (child.name,)
-            if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute) \
-                    and child.func.attr in _SCAN_LAUNCH_NAMES \
-                    and isinstance(child.func.value, ast.Name) \
-                    and child.func.value.id == "subprocess":
-                found.append((child, ".".join(parts) if parts else "<module>", func_node))
-            stack.append((child, child_parts, child_func))
+                child_parts, child_class = parts + (child.name,), child
+            if isinstance(child, ast.Call):
+                qualname = ".".join(parts) if parts else "<module>"
+                func = child.func
+                if isinstance(func, ast.Attribute) and func.attr in _SCAN_LAUNCH_NAMES \
+                        and isinstance(func.value, ast.Name) and func.value.id == "subprocess":
+                    found.append((child, "subprocess", func.attr, qualname, func_node,
+                                  class_node))
+                else:
+                    name = func.attr if isinstance(func, ast.Attribute) else (
+                        func.id if isinstance(func, ast.Name) else None)
+                    if name in _SCAN_OS_LAUNCH_NAMES:
+                        found.append((child, "os", name, qualname, func_node, class_node))
+            stack.append((child, child_parts, child_func, child_class))
     return found
-
-
-def _scan_names_module(tree, wanted):
-    """True when any Name or Attribute in the module refers to one of <wanted> (an imported
-    scrub entry point, or a qualified _git_fixture_env access)."""
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and node.id in wanted:
-            return True
-        if isinstance(node, ast.Attribute) and node.attr in wanted:
-            return True
-        if isinstance(node, ast.ImportFrom) and node.module == "_git_fixture_env":
-            if any(alias.name in wanted for alias in node.names):
-                return True
-    return False
 
 
 def _scan_env_pins_own_path(expr, func_node, module_consts, depth):
     """True when the env= expression hand-rolls its own "PATH" entry (a dict literal keyed
     "PATH", directly or through a same-scope name): such an environment can drop the lifecycle
     wrapper directory from PATH, so the wrapper rule below must not cover it."""
-    if expr is None or depth <= 0:
+    if expr is None or expr is _SCAN_OPEN or depth <= 0:
         return False
     for sub in ast.walk(expr):
         if isinstance(sub, ast.Dict):
@@ -2014,22 +2234,26 @@ def _scan_env_pins_own_path(expr, func_node, module_consts, depth):
     return False
 
 
-def _maintenance_pin_scan(root):
+def _maintenance_pin_scan(root, allow_missing_files=False):
     """The sorted findings of the repo-wide F-367 completeness scan under <root>: [] means
-    every maintenance-capable subprocess launch under _SCAN_DIRS is pinned, covered, or
-    justified. Unreadable or unparseable sources and stale allowlist entries (checked only
-    for files the scan actually visited, so a synthetic tree can be scanned in isolation)
-    are loud findings, never silent passes."""
+    every launch under _SCAN_DIRS this scan can resolve to a maintenance-triggering git run is
+    pinned or covered, every launch it CANNOT resolve is justified, and no justification is
+    stale. Unreadable or unparseable sources are loud findings, never silent passes. Stale
+    allowlist enforcement covers unused entries for scanned files AND entries whose file is
+    missing (deleted or renamed); allow_missing_files=True relaxes ONLY the latter, for planted
+    synthetic trees that do not carry the real allowlisted files. The real-tree green leg runs
+    strict."""
     findings = []
     allowed = dict()
     for rel, qualname, justification in _SCAN_ALLOWED_UNPINNED:
         allowed[(rel, qualname)] = justification
-    used, scanned = set(), set()
+    used, scanned, scanned_bases = set(), set(), []
     for base in _SCAN_DIRS:
         basedir = root / base
         if not basedir.is_dir():
             findings.append("%s: scan directory missing under %s" % (base, root))
             continue
+        scanned_bases.append(base)
         for path in sorted(basedir.rglob("*.py")):
             rel = path.relative_to(root).as_posix()
             scanned.add(rel)
@@ -2041,67 +2265,290 @@ def _maintenance_pin_scan(root):
             findings.extend(_scan_alias_findings(rel, tree))
             module_consts = _scan_module_consts(tree)
             func_defs = _scan_function_defs(tree)
-            module_scrubbed = _scan_names_module(tree, _SCAN_SCRUB_NAMES)
-            module_lifecycle = _scan_names_module(tree, frozenset(("fixture_git_lifecycle",)))
-            for call, qualname, func_node in _scan_launches(tree):
+            module_scrubbed = _scan_calls_module(tree, _SCAN_SCRUB_NAMES)
+            module_lifecycle = _scan_calls_module(tree,
+                                                  frozenset(("fixture_git_lifecycle",)))
+            class_consts = dict()
+            for call, flavor, launcher, qualname, func_node, class_node \
+                    in _scan_launches(tree):
+                consts = module_consts
+                if class_node is not None:
+                    if id(class_node) not in class_consts:
+                        merged = dict(module_consts)
+                        for stmt in class_node.body:
+                            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 \
+                                    and isinstance(stmt.targets[0], ast.Name):
+                                merged["self." + stmt.targets[0].id] = stmt.value
+                                merged["cls." + stmt.targets[0].id] = stmt.value
+                        class_consts[id(class_node)] = merged
+                    consts = class_consts[id(class_node)]
+                key = (rel, qualname)
+                justified = key in allowed
+                if flavor == "os":
+                    if justified:
+                        used.add(key)
+                    else:
+                        findings.append(
+                            "%s:%d %s: os-level process launch (%s) is outside this scan's"
+                            " contract (cannot evaluate); use a direct subprocess list-argv"
+                            " launch or justify it in _SCAN_ALLOWED_UNPINNED"
+                            % (rel, call.lineno, qualname, launcher))
+                    continue
+                shell_mode = launcher in _SCAN_SHELL_LAUNCH_NAMES
+                for keyword in call.keywords:
+                    if keyword.arg == "shell" and not (
+                            isinstance(keyword.value, ast.Constant)
+                            and keyword.value.value is False):
+                        shell_mode = True
+                if shell_mode:
+                    if justified:
+                        used.add(key)
+                    else:
+                        findings.append(
+                            "%s:%d %s: shell-string launch (%s) is outside this scan's"
+                            " contract (cannot evaluate the effective argv); use a direct"
+                            " list-argv launch or justify it in _SCAN_ALLOWED_UNPINNED"
+                            % (rel, call.lineno, qualname, launcher))
+                    continue
                 argv = call.args[0] if call.args else None
                 if argv is None:
                     for keyword in call.keywords:
                         if keyword.arg == "args":
                             argv = keyword.value
                 if argv is None:
+                    if justified:
+                        used.add(key)
+                    else:
+                        findings.append(
+                            "%s:%d %s: launch without a visible argv (cannot evaluate); pass"
+                            " the argv positionally or as args=, or justify it in"
+                            " _SCAN_ALLOWED_UNPINNED" % (rel, call.lineno, qualname))
                     continue
-                elements, opened = _scan_flatten(argv, func_node, module_consts,
+                entries, _opened = _scan_flatten(argv, func_node, consts,
                                                  _SCAN_RESOLVE_DEPTH)
-                tokens = set()
-                for element in elements:
-                    for sub in ast.walk(element):
-                        if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
-                            tokens.add(sub.value)
-                head = _scan_head_kind(elements[0] if elements else None, func_node,
-                                       module_consts, _SCAN_RESOLVE_DEPTH)
-                git_head = head in ("bare-git", "abs-git", "named-git")
-                triggers = sorted(tokens & _SCAN_TRIGGERS)
-                capable = (bool(triggers) and head != "non-git") or (git_head and opened)
-                if not capable:
+                head = _scan_head_kind(entries[0] if entries else None, func_node,
+                                       consts, _SCAN_RESOLVE_DEPTH)
+                if head == "non-git":
                     continue
-                if _SCAN_PIN_TOKENS <= tokens:
+                if head == "unknown":
+                    if justified:
+                        used.add(key)
+                    else:
+                        findings.append(
+                            "%s:%d %s: launch whose argv head this scan cannot resolve"
+                            " (cannot evaluate whether it is git); resolve the head to a"
+                            " literal or justify it in _SCAN_ALLOWED_UNPINNED"
+                            % (rel, call.lineno, qualname))
                     continue
-                if any(isinstance(sub, ast.Name) and "NO_AUTO_MAINTENANCE" in sub.id
-                       or isinstance(sub, ast.Attribute) and "NO_AUTO_MAINTENANCE" in sub.attr
-                       for sub in ast.walk(argv)):
+                status, subcommand = _scan_git_argv_state(entries, func_node, consts)
+                if status == "pinned":
                     continue
-                env_expr = None
-                has_env = False
+                if status == "subcommand" and subcommand not in _SCAN_TRIGGERS:
+                    continue
+                if status == "end":
+                    continue
+                # Remaining: a maintenance-triggering subcommand, or an argv this scan cannot
+                # resolve past the option region. Both are acceptable only under a pin-carrying
+                # environment, a CALLED scrub, the lifecycle wrapper, or a justification.
+                env_expr, has_env = None, False
                 for keyword in call.keywords:
                     if keyword.arg == "env":
                         has_env = True
                         env_expr = keyword.value
                 if has_env and isinstance(env_expr, ast.Constant) and env_expr.value is None:
                     has_env = False
-                if has_env and _scan_env_covered(env_expr, func_node, module_consts, func_defs,
-                                                 module_scrubbed, _SCAN_RESOLVE_DEPTH):
+                if has_env and _scan_env_covered(env_expr, func_node, consts,
+                                                 func_defs, module_scrubbed,
+                                                 _SCAN_RESOLVE_DEPTH):
                     continue
                 if not has_env and module_scrubbed:
                     continue
-                if (rel, qualname) in allowed:
-                    used.add((rel, qualname))
+                if justified:
+                    used.add(key)
                     continue
                 if head == "bare-git" and module_lifecycle and not (
-                        has_env and _scan_env_pins_own_path(env_expr, func_node, module_consts,
+                        has_env and _scan_env_pins_own_path(env_expr, func_node,
+                                                            consts,
                                                             _SCAN_RESOLVE_DEPTH)):
                     continue
-                findings.append(
-                    "%s:%d %s: maintenance-capable git launch without the F-367 pins"
-                    " (head %s, triggers %r, open tail %r); pin the argv, route it through a"
-                    " covered env or scrub, or justify it in _SCAN_ALLOWED_UNPINNED"
-                    % (rel, call.lineno, qualname, head, triggers, opened))
+                if status == "subcommand":
+                    findings.append(
+                        "%s:%d %s: maintenance-triggering git launch (subcommand %r) without"
+                        " the effective F-367 pins; pin the argv with the three `-c"
+                        " key=value` pairs in option position, route it through a covered env"
+                        " or a called scrub, or justify it in _SCAN_ALLOWED_UNPINNED"
+                        % (rel, call.lineno, qualname, subcommand))
+                else:
+                    findings.append(
+                        "%s:%d %s: git launch whose subcommand this scan cannot resolve"
+                        " (cannot evaluate; no effective F-367 pins in option position);"
+                        " resolve or pin the argv, route it through a covered env or a called"
+                        " scrub, or justify it in _SCAN_ALLOWED_UNPINNED"
+                        % (rel, call.lineno, qualname))
     for rel, qualname in sorted(allowed):
-        if rel in scanned and (rel, qualname) not in used:
-            findings.append("%s %s: stale _SCAN_ALLOWED_UNPINNED entry (no matching unpinned"
-                            " launch); remove it so the justification cannot rot"
-                            % (rel, qualname))
+        if rel in scanned:
+            if (rel, qualname) not in used:
+                findings.append("%s %s: stale _SCAN_ALLOWED_UNPINNED entry (no matching"
+                                " cannot-evaluate or unpinned launch); remove it so the"
+                                " justification cannot rot" % (rel, qualname))
+        elif not allow_missing_files and any(
+                rel.startswith(base + "/") for base in scanned_bases):
+            findings.append("%s %s: stale _SCAN_ALLOWED_UNPINNED entry (allowlisted file"
+                            " missing: deleted or renamed); remove or retarget it so the"
+                            " justification cannot rot" % (rel, qualname))
     return sorted(findings)
+
+
+# Each entry: (case id, planted files as (relative path, source) pairs, expectation). An
+# expectation of None demands a CLEAN scan (a harmless form round-2 review showed being wrongly
+# flagged); a string demands at least one finding containing it (an evasion form round-2 review
+# showed being silently missed). The stale-missing case runs under the strict allowlist
+# file-existence enforcement; every other planted tree relaxes only that (its tree deliberately
+# carries none of the real allowlisted files).
+_SCAN_CONTRACT_CASES = (
+    ("os-system",
+     (("tools/planted.py", "\n".join((
+         "import os", "", "",
+         "def _seed():",
+         "    os.system('git commit --allow-empty -m x')", ""))),),
+     "os-level process launch"),
+    ("os-execvp",
+     (("tools/planted.py", "\n".join((
+         "import os", "", "",
+         "def _seed():",
+         "    os.execvp('git', ['git', 'commit', '--allow-empty', '-m', 'x'])", ""))),),
+     "os-level process launch"),
+    ("shell-true",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _seed():",
+         "    subprocess.run('git commit --allow-empty -m x', shell=True)", ""))),),
+     "shell-string launch"),
+    ("getoutput",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _seed():",
+         "    subprocess.getoutput('git commit --allow-empty -m x')", ""))),),
+     "shell-string launch"),
+    ("helper-argv",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _argv():",
+         "    return ['git', 'commit', '--allow-empty', '-m', 'x']", "", "",
+         "def _seed():",
+         "    subprocess.run(_argv())", ""))),),
+     "cannot resolve"),
+    ("helper-argv-imported",
+     (("tools/planted_helper.py", "\n".join((
+         "def commit_argv():",
+         "    return ['git', 'commit', '--allow-empty', '-m', 'x']", ""))),
+      ("tools/planted.py", "\n".join((
+         "import subprocess", "",
+         "from planted_helper import commit_argv", "", "",
+         "def _seed():",
+         "    subprocess.run(commit_argv())", ""))),),
+     "cannot resolve"),
+    ("param-subcommand",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _seed(subcommand):",
+         "    subprocess.run(['git', subcommand, '--allow-empty', '-m', 'x'])", ""))),),
+     "cannot resolve"),
+    ("pins-in-messages",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _seed():",
+         "    subprocess.run(['git', 'commit', '--allow-empty', '-m', 'gc.auto=0',",
+         "                    '-m', 'gc.autoDetach=false', '-m', 'maintenance.auto=false'])",
+         ""))),),
+     "maintenance-triggering git launch"),
+    ("empty-pin-splice",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "",
+         "NO_AUTO_MAINTENANCE = []", "", "",
+         "def _seed(repo):",
+         "    subprocess.run(['git', '-C', str(repo)] + NO_AUTO_MAINTENANCE",
+         "                   + ['commit', '-q', '-m', 'x'])", ""))),),
+     "maintenance-triggering git launch"),
+    ("scrub-imported-not-called",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "",
+         "from _git_fixture_env import scrub_git_environment", "", "",
+         "def _seed():",
+         "    subprocess.run(['git', 'commit', '--allow-empty', '-m', 'x'])", ""))),),
+     "maintenance-triggering git launch"),
+    ("alias-assign",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "",
+         "sp = subprocess", "", "",
+         "def _seed():",
+         "    sp.run(['git', 'commit', '--allow-empty', '-m', 'x'])", ""))),),
+     "aliasing subprocess"),
+    ("launcher-from-import",
+     (("tools/planted.py", "\n".join((
+         "from subprocess import run", "", "",
+         "def _seed():",
+         "    run(['git', 'commit', '--allow-empty', '-m', 'x'])", ""))),),
+     "from-import"),
+    ("read-only-operand",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _probe():",
+         "    subprocess.run(['git', 'show', 'commit'])", ""))),),
+     None),
+    ("harmless-import",
+     (("tools/planted.py", "\n".join((
+         "from subprocess import PIPE", "",
+         "print(PIPE)", ""))),),
+     None),
+    ("pins-module-splice",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "",
+         "NO_AUTO_MAINTENANCE = ['-c', 'gc.auto=0', '-c', 'gc.autoDetach=false',",
+         "                       '-c', 'maintenance.auto=false']", "", "",
+         "def _seed(repo):",
+         "    subprocess.run(['git', '-C', str(repo)] + NO_AUTO_MAINTENANCE",
+         "                   + ['commit', '-q', '-m', 'x'])", ""))),),
+     None),
+    ("scrub-called",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "",
+         "from _git_fixture_env import scrub_git_environment", "", "",
+         "def main():",
+         "    scrub_git_environment()",
+         "    subprocess.run(['git', 'commit', '--allow-empty', '-m', 'x'])", ""))),),
+     None),
+    ("stale-missing",
+     (("tools/placeholder.py", "pass\n"),),
+     "allowlisted file missing"),
+    ("stale-unused",
+     (("tools/aiqt_corpus.py", "pass\n"),),
+     "no matching"),
+)
+
+
+def _scan_contract_failures(base):
+    """The failures of the layer-4 contract table over isolated planted trees: every launch
+    form round-2 review showed the scan silently missing must be a loud finding, every harmless
+    form it showed wrongly flagged must stay clean, and the stale enforcement must fire for a
+    deleted or renamed allowlisted file. [] is the passing value; a failing case reports its
+    planted tree's actual findings, loudly, never a silent pass."""
+    failures = []
+    for case_id, files, expect in _SCAN_CONTRACT_CASES:
+        root = base / case_id
+        (root / "tools").mkdir(parents=True)
+        (root / "opf" / "tools").mkdir(parents=True)
+        for rel, source in files:
+            (root / rel).write_text(source, encoding="utf-8")
+        got = _maintenance_pin_scan(root,
+                                    allow_missing_files=(case_id != "stale-missing"))
+        if expect is None:
+            if got:
+                failures.append("%s: expected a clean scan, got %r" % (case_id, got))
+        elif not any(expect in finding for finding in got):
+            failures.append("%s: expected a finding containing %r, got %r"
+                            % (case_id, expect, got))
+    return failures
 
 
 def _expected_check_ids():
@@ -2175,11 +2622,13 @@ def main(report_path=None):
         check("env/override-kept", env.get("GIT_AUTHOR_NAME"), "Fixture Author")
         check("env/non-git-preserved", env.get(SENTINEL), "kept")
 
-        # F-367: a fixture commit must not spawn automatic maintenance (a DETACHED
-        # `git maintenance run --auto` / `git gc --auto` keeps pruning the fixture's .git/objects
-        # after the commit returned, racing a later copytree/rmtree/read of that repository). The
-        # green leg proves the pinned env spawns none; the red leg strips exactly the maintenance
-        # pins and must OBSERVE the child, so the probe is proven discriminating, never vacuous.
+        # F-367: a fixture commit must not spawn automatic maintenance (an unpinned commit
+        # LAUNCHES the DETACHED `git maintenance run --auto` / `git gc --auto` child; once the
+        # automatic-work thresholds are met, that child can repack or prune the fixture's
+        # .git/objects after the commit returned, racing a later copytree/rmtree/read of that
+        # repository). The green leg proves the pinned env spawns none; the red leg strips
+        # exactly the maintenance pins and must OBSERVE the child launching, so the probe is
+        # proven discriminating, never vacuous.
         check("env/no-auto-maintenance",
               _auto_maintenance_children(base / "maintenance-green",
                                          _git_fixture_env.git_fixture_env()), [])
@@ -2213,12 +2662,17 @@ def main(report_path=None):
             "                    'commit', '-q', '-m', 'x'],\n"
             "                   check=True, capture_output=True, timeout=30)\n",
             encoding="utf-8")
-        planted = _maintenance_pin_scan(planted_root)
+        planted = _maintenance_pin_scan(planted_root, allow_missing_files=True)
         got = "planted scan: %r" % (planted,)
         if len(planted) == 1 and "tools/planted_unpinned.py" in planted[0] \
                 and "planted_pinned" not in planted[0]:
             got = True
         check("env/maintenance-pin-scan-red", got, True)
+
+        # Layer 4, the contract leg: the planted red/green table over every launch form and
+        # false-flag form round-2 review demonstrated (see _SCAN_CONTRACT_CASES).
+        check("env/maintenance-pin-scan-contract",
+              _scan_contract_failures(base / "pin-scan-contract"), [])
 
         # The in-place form, in a CHILD interpreter under a fully poisoned environment: after
         # scrub_git_environment() the only GIT_-prefixed variables left are the three pins, and

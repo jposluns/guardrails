@@ -425,6 +425,7 @@ expected-check-ids = [
   "env/no-auto-maintenance-red",
   "env/maintenance-pin-scan",
   "env/maintenance-pin-scan-red",
+  "env/maintenance-pin-scan-contract",
   "env/opf-ingest-apply-both-legs",
   "env/opf-lifecycle-names-independent",
   "env/opf-lifecycle-bypass-denied",
