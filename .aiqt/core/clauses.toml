@@ -5551,3 +5551,48 @@ start-line = 31
 end-line = 33
 canonical-text = "Enumeration and use after classification stay\nbound to the same descriptor rather than re-resolving the string path, so a substitution of the\nname cannot redirect those operations to a different object."
 source-digest = "fec1beb6357dcdcfe6faf5f17f35fe045baa3c4340ff3352495828cd00e36a63"
+
+[[clause]]
+clause-id = "citint.1"
+corpus-id = "citint"
+source-path = ".aiqt/core/rules/accur-citation-from-opened-file.md"
+start-line = 13
+end-line = 14
+canonical-text = "The assistant cites a path and line number only from a file it opened this session at the commit under\nreview, never from memory, a prior report, or an inferred layout."
+source-digest = "149633fec8581536a0646d85b3ffc6673ccdb2dfaaa51cfbbd5030ecfcb2c4f4"
+
+[[clause]]
+clause-id = "citint.2"
+corpus-id = "citint"
+source-path = ".aiqt/core/rules/accur-citation-from-opened-file.md"
+start-line = 14
+end-line = 15
+canonical-text = "Where it is unsure of the line, it\ncites the symbol alone rather than guessing a number."
+source-digest = "149633fec8581536a0646d85b3ffc6673ccdb2dfaaa51cfbbd5030ecfcb2c4f4"
+
+[[clause]]
+clause-id = "citint.3"
+corpus-id = "citint"
+source-path = ".aiqt/core/rules/accur-citation-from-opened-file.md"
+start-line = 15
+end-line = 16
+canonical-text = "Code or document text is quoted only from what\nthe assistant actually read, so a quotation is an excerpt, never a reconstruction presented as one."
+source-digest = "149633fec8581536a0646d85b3ffc6673ccdb2dfaaa51cfbbd5030ecfcb2c4f4"
+
+[[clause]]
+clause-id = "attint.1"
+corpus-id = "attint"
+source-path = ".aiqt/core/rules/integ-attestation-is-harness-owned.md"
+start-line = 13
+end-line = 15
+canonical-text = "The assistant never writes an attestation wrapper line or its fields, such as a worker-status header or\nan account, model, return-code, or effort field: those lines belong to the harness that runs the work,\nand a hand-written copy is a forged attestation even when what it asserts happens to be true."
+source-digest = "dd3eab3381071080c059d31e998280fb3b29d5b07af6b3ea54a9ddbc7c8fa9b4"
+
+[[clause]]
+clause-id = "attint.2"
+corpus-id = "attint"
+source-path = ".aiqt/core/rules/integ-attestation-is-harness-owned.md"
+start-line = 15
+end-line = 16
+canonical-text = "The only\nstatus lines the assistant emits are the verdict and completion marker its brief names."
+source-digest = "dd3eab3381071080c059d31e998280fb3b29d5b07af6b3ea54a9ddbc7c8fa9b4"
