@@ -181,8 +181,11 @@ mid-roster) without touching an exit code; the recognized [ ] test lines do
 expand failure state, so a copy relocated above its initializer still ends
 the runner loudly under set -u before any gate, the same bounded early-exit
 class as the closed HOME, gitleaks_rc and failed_names placements. A
-divergence in this surface is loud (an early non-zero exit or a reworded
-summary), never a silent pass, a skipped gate or a masked failure. Four: any
+divergence in this surface is loud, never a silent pass: the runner itself
+exits early non-zero or rewords its summary, or, for a run_gate line moved
+into a branch where it can be skipped, the grammar accepts the placement but
+the self-test's runtime scenario sweep fails because the executed calls
+differ from the declared roster. Four: any
 bash parsing behaviour this hand-written grammar does not model beyond the
 checks named above. One known instance: the if-frame push keys on the
 literal "; then" spelling while gitleaks member detection is token-based, so
