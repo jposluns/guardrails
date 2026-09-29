@@ -2322,15 +2322,17 @@ def _self_test_checks():
         finally:
             os.close(root_fd)
 
-    # 10: apply takes only a plan/v2 (spec 14.1): a v1 plan is never apply input. The v1 input is built
-    # explicitly: schema.canonical_plan() is the v2 plan since the plan-v2 schema landed (U8).
-    v1 = apply_plan(dict(schema.canonical_plan(), format="opf.adoption.plan/v1"))
+    # 10: apply takes only a plan/v2 (spec 14.1): a v1-marked plan is never apply input. The v1 schema no
+    # longer ships (the plan-v2 schema replaced it, U8), and apply refuses on the format marker before it
+    # reads any other field, so the v1 input is the bare marker.
+    v1 = apply_plan(dict(format="opf.adoption.plan/v1"))
     check("apply-v1-plan-refused", v1.status == CANNOT and any("never apply input" in f for f in v1.findings))
-    # and the schema's own canonical v2 plan is refused fail-closed until v2 validation and the approval
-    # binding land in their later adoption slice.
+    # and the schema's own canonical v2 plan is refused fail-closed, attributed to the rule under test: v2
+    # validation and the approval binding land in their later adoption slice.
     canon = apply_plan(schema.canonical_plan())
     check("apply-canonical-v2-plan-refused-until-validated",
-          schema.canonical_plan().get("format") == PLAN_V2_FORMAT and canon.status == CANNOT)
+          schema.canonical_plan().get("format") == PLAN_V2_FORMAT and canon.status == CANNOT
+          and any("later adoption slice" in f for f in canon.findings))
     v2 = apply_plan(dict(format=PLAN_V2_FORMAT))
     check("apply-v2-marked-plan-refused",
           v2.status == CANNOT and any("later adoption slice" in f for f in v2.findings))
