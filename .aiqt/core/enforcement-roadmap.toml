@@ -42,6 +42,11 @@ status = "none"
 mechanisms = []
 
 [[rule]]
+corpus-id = "attint"
+status = "none"
+mechanisms = []
+
+[[rule]]
 corpus-id = "bgcwai"
 status = "none"
 mechanisms = []
@@ -70,6 +75,11 @@ mechanisms = []
 corpus-id = "chtrk1"
 status = "enforced"
 mechanisms = ["gate:record-drift"]
+
+[[rule]]
+corpus-id = "citint"
+status = "none"
+mechanisms = []
 
 [[rule]]
 corpus-id = "clmobs"
@@ -184,7 +194,7 @@ mechanisms = ["gate:ci-parity", "hook:gate-weakening-guard"]
 [[rule]]
 corpus-id = "gensrc"
 status = "enforced"
-mechanisms = ["gate:adapters-drift", "gate:agents-drift", "gate:changelog-drift", "gate:claude-drift", "gate:crosswalk-schema-drift", "gate:cursor-drift", "gate:disclosure-drift", "gate:enforceability-drift", "gate:enforcement-register-drift", "gate:gensrc-failclose", "gate:gensrc-registry-drift", "gate:hooks-drift", "gate:install-drift", "gate:manifest-gen-drift", "gate:mappings-page-drift", "gate:notice-drift", "gate:reference-roster-drift", "gate:renderers-drift", "gate:roadmap-drift", "gate:rules-drift", "gate:secret-patterns-drift", "gate:skill-drift", "hook:gensrc-edit-guard"]
+mechanisms = ["gate:adapters-drift", "gate:agents-drift", "gate:changelog-drift", "gate:claude-drift", "gate:crosswalk-schema-drift", "gate:cursor-drift", "gate:disclosure-drift", "gate:enforceability-drift", "gate:enforcement-register-drift", "gate:gensrc-failclose", "gate:gensrc-registry-drift", "gate:hooks-drift", "gate:install-drift", "gate:manifest-gen-drift", "gate:mappings-page-drift", "gate:notice-drift", "gate:reference-roster-drift", "gate:renderers-drift", "gate:roadmap-drift", "gate:rules-drift", "gate:secret-patterns-drift", "gate:skill-drift", "gate:worker-pack-drift", "hook:gensrc-edit-guard"]
 
 [[rule]]
 corpus-id = "goalfd"

@@ -167,6 +167,11 @@ path = ".claude/RULES-INDEX.md"
 class = "pack-immutable"
 
 [[release-class]]
+path = ".claude/worker-pack.md"
+class = "pack-immutable"
+note = "The generated worker-pack read surface (tools/gen_worker_pack.py); the dispatcher injects these bytes into every worker brief."
+
+[[release-class]]
 path = ".claude/rules/README.md"
 class = "pack-immutable"
 note = "Hand-authored shipped pack content, an explicit per-path entry (4.2)."
