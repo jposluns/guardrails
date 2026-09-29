@@ -946,6 +946,11 @@ def _fixture_kill_group_members(group, signum, anchors, leader=None):
         if fd is None:
             skipped.append(member)  # a live member this host cannot address
             continue
+        pending = None
+
+        def close_fd(fd=fd):
+            os.close(fd)
+
         try:
             fields = _fixture_stat_fields(member)  # re-verify AFTER the pidfd pinned it
             if fields is _FIXTURE_UNREADABLE:
@@ -965,8 +970,15 @@ def _fixture_kill_group_members(group, signum, anchors, leader=None):
                     skipped.append(member)  # verified member, delivery failed
                 continue
             delivered.append(member)
+        except BaseException as exc:
+            # Capture the exception already propagating into the close
+            # below (fix 7, QA28 codex BLOCKER 2): a member-send
+            # cancellation must stay the outward exception even when the
+            # per-member pidfd close itself fails.
+            pending = exc
+            raise
         finally:
-            os.close(fd)
+            _cleanup_boundary(pending, close_fd, "member pidfd close")
     return delivered, skipped, unverifiable
 
 
@@ -1031,13 +1043,24 @@ def _fixture_verify_group_kill(group):
 
 
 # Fix 6 (QA27 codex BLOCKER 1/2; premise change): pending-cancellation
-# priority is ONE shared boundary, never a per-site idiom. Every cleanup
-# step in the escalation path (_fixture_escalate_subject, _escalate) runs
-# through _cleanup_boundary below, and an AST structural leg in
-# `opf.py --self-test` (census-exception) turns red if any finally there
-# stops routing through it. KeyboardInterrupt joins TimeoutError and
-# InterruptedError in the pending set: all three carry cancellation
-# semantics a later cleanup failure must never displace.
+# priority is ONE shared boundary, never a per-site idiom. Fix 7 (QA28
+# codex BLOCKER 1/2, claude MINOR 1, gemini MAJOR 1) closes the SCOPE
+# class too: every cleanup reached from the escalation entry points --
+# the in-module call-graph closure of _FixtureProcess._escalate and
+# _FixtureProcess._address_failed_subject, the member census's per-pidfd
+# close included -- runs through _cleanup_boundary below, and an AST
+# structural leg in `opf.py --self-test` (census-exception) COMPUTES that
+# closure from the module source each run: a finally there that stops
+# routing through the boundary, a with statement (cleanup in an __exit__
+# the leg cannot see), or a cleanup call the leg cannot resolve to an
+# in-module function or an allowlisted primitive turns it red as
+# cannot-evaluate, never a silent pass. A cancellation raised BY a
+# cleanup step becomes the pending cancellation for every later step in
+# that cleanup sequence (QA28 codex BLOCKER 1). KeyboardInterrupt joins
+# TimeoutError and InterruptedError in the pending set, and the tiers
+# are harmonized (QA28 claude MINOR 3): at the boundary AND at the
+# recording/retry tier, a cleanup a cancellation interrupted records
+# nothing, whichever of the three cancellation types it was.
 _PENDING_CANCELLATIONS = (TimeoutError, InterruptedError, KeyboardInterrupt)
 
 
@@ -1061,12 +1084,19 @@ def _attach_beneath(pending, suppressed, site):
     suppressed's implicit back-edge to pending (set when it was raised
     inside the caller's finally), so the outward chain stays acyclic;
     then attach the suppressed EXCEPTION OBJECT as pending.__cause__ when
-    that slot is free, else append it at the tail of pending's displayed
+    that slot is free, else append it at the tail of pending's
     cause/context chain (QA27 codex: the object and its own chain stay
-    reachable, never just a repr), and only when no acyclic attachment
-    exists -- the two chains already share a node, or a cycle occupies
-    the tail slots -- fall back to a note naming the site and the
-    suppressed failure. Every diagnostic here, repr included, runs inside
+    reachable, never just a repr). REACHABILITY, never display, is the
+    contract (QA28 claude MINOR 2): the tail walk follows __cause__-then-
+    __context__ edges and ignores __suppress_context__, so beneath a
+    `raise ... from None` edge the attached object is reachable
+    programmatically but not rendered in the traceback. Only when no
+    attachment slot can be taken safely -- the two chains already share a
+    node (sharing is not itself a cycle, but attaching under a shared
+    structure could create one, so the refusal is deliberately
+    CONSERVATIVE), or a cycle occupies the tail slots -- fall back to a
+    note naming the site and the suppressed failure, computed inside the
+    same protection. Every diagnostic here, repr included, runs inside
     the caller's protection (_cleanup_boundary), so a raising __repr__ or
     hostile chain attribute can never displace the cancellation (QA27
     codex BLOCKER 2)."""
@@ -1108,7 +1138,9 @@ def _attach_beneath(pending, suppressed, site):
 def _cleanup_boundary(pending, step, site):
     """The ONE exception boundary every escalation-path cleanup step runs
     through (fix 6: QA25, QA26 and QA27 each closed one more hand-coded
-    site; this helper closes the site class). `pending` is the exception
+    site; fix 7: the census-exception structural leg computes the
+    escalation call-graph closure from the module source each run, so
+    the routed scope is mechanical, never hand-named). `pending` is the exception
     already propagating into the caller's finally (None when the caller
     completed normally); `step` is the cleanup callable; `site` names the
     step for diagnostics. Contract, exactly: a step that returns changes
@@ -1124,7 +1156,16 @@ def _cleanup_boundary(pending, step, site):
     so a hostile exception degrades the attachment, never the outward
     exception (QA27 codex BLOCKER 2). The re-raise happens OUTSIDE the
     handler that caught the step's failure, so CPython leaves the
-    cancellation's __context__ untouched (QA26 claude MINOR 1)."""
+    cancellation's __context__ untouched (QA26 claude MINOR 1).
+    Attachment is BEST-EFFORT, and that means exactly this (QA28 gemini):
+    a failure raised inside the attachment machinery itself -- a hostile
+    chain attribute, a MemoryError under pressure, even an asynchronous
+    KeyboardInterrupt landing there -- is caught and DISCARDED, the
+    attachment may then be partial or absent, and a cancellation born
+    inside the attachment is deliberately LOST; the ALREADY-PENDING
+    cancellation is still re-raised, because letting an attachment fault
+    displace it is the exact failure class this boundary exists to
+    close."""
     try:
         return step()
     except BaseException as cleanup_exc:
@@ -1134,8 +1175,12 @@ def _cleanup_boundary(pending, step, site):
     try:
         _attach_beneath(pending, suppressed, site)
     except BaseException:
-        # Attachment is best-effort by contract: even a failure inside
-        # the attachment machinery never displaces the cancellation.
+        # Attachment is best-effort by contract (QA28 gemini): ANY
+        # failure inside the attachment machinery -- MemoryError, a
+        # hostile chain attribute, an asynchronous KeyboardInterrupt
+        # landing here -- is discarded and never displaces the pending
+        # cancellation; a cancellation born inside the attachment is
+        # deliberately lost.
         pass
     raise pending
 
@@ -1165,7 +1210,10 @@ def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None):
     shared _cleanup_boundary (fix 6, QA27 codex BLOCKER 1), so a
     cancellation already propagating (a TimeoutError raised at the freeze)
     stays the outward exception even when that SIGKILL itself fails, the
-    kill failure kept reachable beneath it. The "tree"
+    kill failure kept reachable beneath it; the member census's per-pidfd
+    close routes through the same boundary (fix 7, QA28 codex BLOCKER 2),
+    so a member-send cancellation crossing that close stays outward even
+    when the close itself fails. The "tree"
     outcome rests on OBSERVATION, never on the kill sends alone (fix 2z,
     premise change; maintainer ruling PD-335-TREE-CLAIM-STALL): while the
     guardian stays frozen, a bounded verification census
@@ -2056,7 +2104,10 @@ class _FixtureProcess:
         cancellation propagates with the helper's failure chained as its
         context (round 24, codex BLOCKER 2), and ONE shared exception
         boundary (_cleanup_boundary, fix 6) spans that whole cleanup,
-        direct backstop included: a cancellation ALREADY propagating into
+        direct backstop included -- and a cancellation the kill helper
+        ITSELF raises becomes the pending cancellation for the direct
+        backstop (fix 7, QA28 codex BLOCKER 1), so a backstop failure
+        attaches beneath it, never over it: a cancellation ALREADY propagating into
         it stays the OUTWARD exception, never displaced, its own
         pre-existing chain kept intact, and every later failure -- helper
         or backstop, ordinary or cancellation -- is kept REACHABLE beneath
@@ -2073,9 +2124,11 @@ class _FixtureProcess:
         attempted), so any later refusal names exactly what ran, while a
         failure BEFORE the subject cleanup records nothing: the cleanup
         never ran and the retry still owns it. The original exception still
-        propagates. Cancellation semantics (TimeoutError/InterruptedError)
-        record nothing: the interrupt owner re-sends the idempotent receipt
-        kill."""
+        propagates. Cancellation semantics record nothing: the interrupt
+        owner re-sends the idempotent receipt kill -- and the recording
+        tier is harmonized with the boundary's pending set (fix 7, QA28
+        claude MINOR 3): TimeoutError, InterruptedError and
+        KeyboardInterrupt all record nothing."""
         import signal
         frozen = False
         pending = None
@@ -2087,30 +2140,39 @@ class _FixtureProcess:
             # backstop included (QA26 codex; fix 6).
             try:
                 _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
-            except BaseException:
+            except BaseException as helper_exc:
                 # Even the ownership-checked helper failing (e.g. the
                 # same census fault reaching its own group census) must
                 # not strand the frozen guardian: its held pidfd is
                 # identity-safe, SIGKILL it directly, then let the
-                # failure propagate.
-                if self.pidfd is not None:
+                # failure propagate. The backstop is a LATER cleanup
+                # step, so it runs through its own boundary (fix 7, QA28
+                # codex BLOCKER 1): a cancellation the helper ITSELF
+                # raised is pending for the backstop and can never be
+                # replaced by a backstop failure; with an ordinary
+                # helper failure nothing is pending at this boundary, so
+                # a backstop cancellation propagates over it, carrying
+                # it as its __context__ (round 24, codex BLOCKER 2), and
+                # the OUTER boundary still keeps a cancellation already
+                # propagating into the finally outward (QA26 codex).
+                def direct_backstop():
+                    if self.pidfd is None:
+                        return
                     try:
                         signal.pidfd_send_signal(self.pidfd,
                                                  signal.SIGKILL)
-                    except (TimeoutError, InterruptedError):
-                        # A cancellation during the direct backstop
-                        # propagates, carrying the helper's failure as
-                        # its __context__ (round 24, codex BLOCKER 2);
-                        # _cleanup_boundary still keeps a PENDING
-                        # cancellation outward over it (QA26 codex).
-                        raise
-                    except OSError:
+                    except OSError as exc:
+                        if isinstance(exc, (TimeoutError,
+                                            InterruptedError)):
+                            raise
                         # An ordinary delivery failure is out of moves:
-                        # the helper's own failure propagates below. A
-                        # non-OSError backstop fault falls through to
-                        # _cleanup_boundary instead of displacing a
-                        # pending cancellation (QA26 codex).
-                        pass
+                        # the helper's own failure propagates below.
+
+                _cleanup_boundary(
+                    helper_exc if isinstance(helper_exc,
+                                             _PENDING_CANCELLATIONS)
+                    else None,
+                    direct_backstop, "direct guardian SIGKILL backstop")
                 raise
 
         try:
@@ -2133,7 +2195,11 @@ class _FixtureProcess:
                     outcome = _fixture_escalate_subject(
                         self.subject_pid, self.subject_pidfd,
                         guardian_pid=self.pid if frozen else None)
-                except (TimeoutError, InterruptedError):
+                except (TimeoutError, InterruptedError, KeyboardInterrupt):
+                    # Harmonized with the boundary's pending set (fix 7,
+                    # QA28 claude MINOR 3): every cancellation type
+                    # records nothing -- the interrupt owner re-sends
+                    # the idempotent receipt kill.
                     raise
                 except BaseException:
                     # The failure escaped the escalation helper, whose freeze
