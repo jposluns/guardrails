@@ -201,9 +201,10 @@ def _shown(value):
     length: a long one is truncated on the value before repr and reports the value's own
     length, and a short one comes back whole (its repr is never cut, so no cut can split a repr
     escape sequence and no reported count is ever the repr's); a str stays quoted, and a _Number
-    shows as its bare lexeme ONLY when _NUMBER_LEXEME_RE matches it (every parsed one does), so
-    a number never reads as a string and no raw control text reaches a finding; a code-built
-    _Number that does not match is NEVER formatted and gets the fixed _SHOWN_MALFORMED_NUMBER
+    shows as its bare lexeme ONLY when _NUMBER_LEXEME_RE FULLY matches it (every parsed one
+    does: the parse hooks hold each lexeme to it), so a number never reads as a string and no
+    raw control text reaches a finding; a code-built _Number that does not fully match is NEVER
+    formatted and gets the fixed _SHOWN_MALFORMED_NUMBER
     descriptor instead. An exact float shows its repr, and True, False and None show their JSON
     spelling (true, false, null), a few dozen characters at most. An int, a table and an array
     are NEVER formatted and get a fixed descriptor instead: int-to-text conversion raises past
@@ -217,7 +218,7 @@ def _shown(value):
     try:
         value_type = type(value)
         if value_type is _Number:
-            if not _NUMBER_LEXEME_RE.match(value):
+            if not _NUMBER_LEXEME_RE.fullmatch(value):
                 return _SHOWN_MALFORMED_NUMBER
             if len(value) > 64:
                 return "{}... ({} characters)".format(str.__str__(value)[:64], len(value))
@@ -273,7 +274,8 @@ def _no_constant(name):
     raise _ParseRefusal("non-finite JSON constant {!r}".format(name))
 
 
-# The strict-JSON number grammar (RFC 8259): exactly what _parse can produce, and what _emit
+# The strict-JSON number grammar (RFC 8259), ASCII digits only: exactly what _parse can produce
+# (its parse hooks hold every number lexeme to it, whichever json scanner ran), and what _emit
 # holds every _Number lexeme to, so a code-built carrier cannot emit bytes _parse would refuse.
 _NUMBER_LEXEME_RE = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\Z")
 
@@ -318,20 +320,28 @@ class _Number(str):
 
 
 def _parse_number(lexeme):
-    """parse_float/parse_int hook: keep the exact lexeme; refuse a value outside the finite double
-    range (json.loads would otherwise read 1e400 as Infinity, sidestepping parse_constant), so no
-    later path, merge or no-op, ever sees a non-finite parsed number."""
+    """parse_float/parse_int hook. It holds the lexeme to the strict ASCII grammar FIRST, so the
+    parser's number grammar never rests on which json scanner ran (the C _json scanner reads
+    ASCII digits only, but a pure-Python scanner whose pattern spells digits as \\d would admit
+    non-ASCII digits, which float() accepts). It then keeps the exact lexeme and refuses a value
+    outside the finite double range (json.loads would otherwise read 1e400 as Infinity,
+    sidestepping parse_constant), so no later path, merge or no-op, ever sees a malformed or
+    non-finite parsed number. The out-of-range finding shows the lexeme bare, as a number."""
+    if not _NUMBER_LEXEME_RE.fullmatch(lexeme):
+        raise _ParseRefusal("JSON number lexeme is outside the strict ASCII number grammar "
+                            "(not shown)")
     if not math.isfinite(float(lexeme)):
         raise _ParseRefusal("JSON number {} is outside the finite double range".format(
-            _shown(lexeme)))
+            _shown(_Number(lexeme))))
     return _Number(lexeme)
 
 
 def _parse(raw):
     """Strict JSON parse of registration bytes. Raises _ParseRefusal (also for undecodable bytes, a
-    number outside the finite double range, and parser recursion exhaustion); callers map that to
-    CANNOT-EVALUATE. Numbers come back as _Number lexemes (never a lossy float), and the merge and
-    no-op paths share this one parse, so a parse-level refusal is shared by both."""
+    number lexeme outside the strict ASCII grammar or the finite double range, whichever json
+    scanner ran, and parser recursion exhaustion); callers map that to CANNOT-EVALUATE. Numbers
+    come back as _Number lexemes (never a lossy float), and the merge and no-op paths share this
+    one parse, so a parse-level refusal is shared by both."""
     try:
         return json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicate_pairs,
                           parse_constant=_no_constant, parse_float=_parse_number,
@@ -429,8 +439,8 @@ def _emit_value(value, depth, out, budget):
         # Exact type: a _Number SUBCLASS is caller-run code and falls through to the
         # unserializable refusal below, never into str(value) on an overridable __str__.
         if not _is_finite_lexeme(value):
-            raise _ParseRefusal("number lexeme {} is not a finite strict-JSON number".format(
-                _shown(value)))
+            raise _ParseRefusal("number lexeme in the model is not a finite strict-JSON "
+                                "number: {}".format(_shown(value)))
         _emit_piece(str(value), out, budget)
     elif type(value) is str:
         # exact type: classification against the _Number carrier (which must emit as a bare
@@ -738,18 +748,25 @@ def _validate_group(group, where, findings):
 
 # --- the merge ------------------------------------------------------------------------------------------
 
+# Any surrogate code point. A str carrying one cannot encode as UTF-8, so no emitted registration
+# can carry a candidate that does; both candidate gates refuse it up front, as a candidate defect.
+_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
+
+
 def canonical_hook_group(plugin_entry):
     """The exact matcher group v1 inserts: match-all, one command entry whose command is EXACTLY the
     pinned `plugin_entry` token (a name into the digest-verified installed pack), nothing else. The
     plan's new_digest pins the whole post-merge file, so the one approval binds these bytes.
     Public, so it carries the same entry gate as merge_registration's candidate half (exactly
-    str by type identity, length-bounded, token-clean), raising ValueError with a fixed message
-    rather than building a group around a foreign object; on merge_registration's own path its
-    gate has already run, so this raise is defense in depth for the wiring slice."""
+    str by type identity, length-bounded, token-clean, free of surrogate code points), raising
+    ValueError with a fixed message rather than building a group around a foreign object; on
+    merge_registration's own path its gate has already run, so this raise is defense in depth
+    for the wiring slice."""
     if (type(plugin_entry) is not str or len(plugin_entry) > MAX_REGISTRATION_BYTES
-            or not schema._is_token(plugin_entry)):
+            or not schema._is_token(plugin_entry) or _SURROGATE_RE.search(plugin_entry)):
         raise ValueError("plugin_entry is not exactly a token string (the entry gate accepts "
-                         "exact str passing the no-control token rule only)")
+                         "only an exact str that passes the no-control token rule and carries "
+                         "no surrogate code point)")
     return {"hooks": [{"command": plugin_entry, "type": "command"}], "matcher": ENTRY_MATCHER}
 
 
@@ -780,7 +797,8 @@ def merge_registration(old_bytes, plugin_entry):
     no-op (changed False, new_bytes the file's OWN bytes verbatim, never a re-emission); an
     existing conflicting registration of the same entry, any unrecognized format or shape, JSON null
     in the recognized hooks surface, a number outside the finite double range, a plugin_entry
-    failing the no-control token rule, and a merged emission that would exceed
+    failing the no-control token rule or carrying a surrogate code point (refused at the
+    candidate gate, never later as an emission refusal), and a merged emission that would exceed
     MAX_REGISTRATION_BYTES (refused by the emitter's running byte count the moment the bound
     would pass, so the over-bound output is never built) all refuse fail-closed. The no-op
     path and the merge path share the same parse and validation, so parse-level and
@@ -814,6 +832,12 @@ def merge_registration(old_bytes, plugin_entry):
     if not schema._is_token(plugin_entry):
         return _invalid(["plugin_entry is not a JSON string passing the no-control token rule"],
                         old_bytes=old_bytes)
+    if _SURROGATE_RE.search(plugin_entry):
+        # a surrogate code point passes the token rule but cannot encode as UTF-8, so it is
+        # refused HERE as a candidate defect, before the no-op test, never later by the
+        # emitter, whose refusal would blame the registration.
+        return _invalid(["plugin_entry carries a surrogate code point (not encodable as UTF-8, "
+                         "so no emitted registration can carry it)"], old_bytes=old_bytes)
     try:
         model = _parse(old_bytes)
     except _ParseRefusal as exc:
@@ -859,6 +883,9 @@ def merge_registration(old_bytes, plugin_entry):
         stripped = _parse(new_bytes)
         re_emitted = _emit(reparsed)
     except (_ParseRefusal, RecursionError) as exc:
+        # RecursionError here is defense in depth, with no vector: the reparse and re-emission
+        # cover the nesting the first emission above just walked from this same frame without
+        # exhausting recursion, so no self-test vector reaches this handler.
         return _cannot("merge verification failed: {}".format(exc), old_bytes=old_bytes)
     tail = stripped["hooks"][ENTRY_EVENT]
     if not tail or tail[-1] != wanted:
@@ -1460,18 +1487,33 @@ def self_test():
     except ValueError:
         gate_raised = True
     check("canonical-group-gate-refuses", gate_raised)
-    # the gate's other two guards, each pinned directly: an exact str one character over the
-    # registration bound (a clean token, so only the length guard refuses it) and a short exact
-    # str carrying a control character (only the token guard refuses it). Removing either guard
-    # turns exactly its vector red, because the function then returns a group around the value.
+    # the gate's other three guards, each pinned directly: an exact str one character over the
+    # registration bound (a clean token, so only the length guard refuses it), a short exact
+    # str carrying a control character (only the token guard refuses it) and a short exact str
+    # carrying a surrogate code point (a clean token, so only the surrogate guard refuses it).
+    # Removing any guard turns exactly its vector red, because the function then returns a
+    # group around the value.
     for name, bad in (("overlength", "x" * (MAX_REGISTRATION_BYTES + 1)),
-                      ("invalid-token", "a\nb")):
+                      ("invalid-token", "a\nb"),
+                      ("surrogate", "opf-\ud800")):
         gate_raised = False
         try:
             canonical_hook_group(bad)
         except ValueError:
             gate_raised = True
         check("canonical-group-{}-refuses".format(name), gate_raised)
+    # merge_registration refuses the surrogate-carrying candidate at its candidate gate with a
+    # candidate finding, on the merge path and on the already-merged path alike (without the
+    # gate the first reached the emitter, whose refusal blamed the registration, and the
+    # second no-opped VALID).
+    surrogate_finding = ["plugin_entry carries a surrogate code point (not encodable as UTF-8, "
+                         "so no emitted registration can carry it)"]
+    surrogate_merged = (b'{"hooks":{"PreToolUse":[{"hooks":[{"command":"opf-\\ud800",'
+                        b'"type":"command"}],"matcher":"*"}]}}')
+    check("surrogate-candidate-refused-at-gate",
+          all(r.status is INVALID and r.new_bytes is None and r.findings == surrogate_finding
+              for r in (merge_registration(old, "opf-\ud800"),
+                        merge_registration(surrogate_merged, "opf-\ud800"))))
     ctrl_cmd = canonical_registration()
     ctrl_cmd["hooks"]["PostToolUse"][0]["hooks"][0]["command"] = "run\N{PARAGRAPH SEPARATOR}it"
     check("existing-command-control-invalid",
@@ -1740,12 +1782,52 @@ def self_test():
                      b'"type":"command"}],"matcher":"*"}]},"env":{"x":1e400}}')
     r = merge_registration(already_1e400, entry)
     check("overflow-no-op-path-cannot-eval", r.status is CANNOT_EVALUATE and r.new_bytes is None)
+    # the out-of-range finding shows the lexeme BARE, like every other number finding (a
+    # quoted '1e400' would read as a string; showing the hook's plain str turns this red).
+    r = merge_registration(b'{"env":{"x":1e400}}', entry)
+    check("overflow-finding-shows-bare-lexeme",
+          r.findings == ["registration bytes are not strict JSON: JSON number 1e400 is outside "
+                         "the finite double range"])
+    # 7b2: the parser's number grammar does not rest on the json scanner. The C _json scanner
+    # reads ASCII digits only, but a pure-Python scanner whose number pattern spells digits as
+    # \d (reproduced here by patching json.scanner) hands the parse hooks lexemes carrying
+    # non-ASCII digits, which float() reads as finite numbers. The hooks refuse each one on the
+    # strict ASCII grammar, on the merge path and the already-merged no-op path alike (without
+    # the hooks' grammar check the no-op returns VALID over bytes the C scanner refuses). The
+    # canary pins that the patched scanner really admits each lexeme, so the vector exercises
+    # the hooks rather than a scanner refusal.
+    unicode_number_re = re.compile(r"(-?(?:0|[1-9]\d*))(\.\d+)?([eE][-+]?\d+)?",
+                                   json.scanner.NUMBER_RE.flags)
+    grammar_finding = ["registration bytes are not strict JSON: JSON number lexeme is outside "
+                       "the strict ASCII number grammar (not shown)"]
+    scanner_admits = []
+    unicode_digit_results = []
+    with mock.patch.object(json.scanner, "NUMBER_RE", unicode_number_re):
+        with mock.patch.object(json.scanner, "make_scanner", json.scanner.py_make_scanner):
+            for lexeme in ("1\u0663", "2.5e\u0663"):
+                scanner_admits.append(json.loads('{"x": ' + lexeme + '}', parse_int=str,
+                                                 parse_float=str) == {"x": lexeme})
+                for raw in (b'{"env":{"x":' + lexeme.encode("utf-8") + b'}}',
+                            already_1e400.replace(b"1e400", lexeme.encode("utf-8"))):
+                    unicode_digit_results.append(merge_registration(raw, entry))
+    check("unicode-digit-scanner-canary", scanner_admits == [True, True])
+    check("parse-number-grammar-scanner-independent",
+          len(unicode_digit_results) == 4
+          and all(r.status is CANNOT_EVALUATE and r.new_bytes is None
+                  and r.findings == grammar_finding for r in unicode_digit_results))
     near = b'{"env":{"x":"' + b"a" * (MAX_REGISTRATION_BYTES - 60) + b'"}}'
     check("near-limit-input-inside-bound", len(near) <= MAX_REGISTRATION_BYTES)
     over = merge_registration(near, entry)
+    # the bound refusal's own message is pinned (both it and the emission-refusal fallback
+    # contain "exceed", so disabling the _EmitBoundRefusal branch, or ordering it after the
+    # _ParseRefusal clause that would then catch it first, turns only this exact match red).
     check("merged-output-over-bound-refuses",
           over.status is CANNOT_EVALUATE and over.new_bytes is None
-          and any("exceed" in f for f in over.findings))
+          and over.findings == ["merged registration would exceed {} bytes (the same bound the "
+                                "input is held to, refused by the emitter's running byte "
+                                "count so the over-bound output is never built and an "
+                                "accepted output always no-ops on its next merge)".format(
+                                    MAX_REGISTRATION_BYTES)])
 
     # 7d: the output byte bound is enforced INCREMENTALLY during emission: a small
     # wide-and-deep input (2-byte array elements whose every emitted line carries about 2*depth
@@ -2238,26 +2320,36 @@ def self_test():
     check("shown-int-and-containers-fixed-descriptors",
           _shown(7) == _SHOWN_INT and _shown(10 ** 5000) == _SHOWN_INT
           and _shown(dict(a=1)) == _SHOWN_TABLE and _shown([1]) == _SHOWN_ARRAY)
-    # a code-built _Number shows bare ONLY when it is a grammatical number lexeme: one carrying
-    # a quote and control characters comes back as its fixed descriptor on the validator's type
-    # finding and on the emitter's lexeme refusal, so no raw control text reaches a finding and
-    # a number never reads as a string (showing every _Number bare turns this red).
-    hostile_lexeme = _Number("'command'\n\x1b[31m")
-    hostile_type = validate_registration_model({"hooks": {"Stop": [{"hooks": [
-        {"command": "x", "type": hostile_lexeme}]}]}})
-    try:
-        _emit({"env": hostile_lexeme})
-        hostile_emit = None
-    except _ParseRefusal as exc:
-        hostile_emit = str(exc)
+    # a code-built _Number shows bare ONLY when the WHOLE of it is a grammatical number lexeme:
+    # one carrying a quote and control characters comes back as its fixed descriptor on the
+    # validator's type finding and on the emitter's lexeme refusal, so no raw control text
+    # reaches a finding and a number never reads as a string (showing every _Number bare turns
+    # this red). The second lexeme ends in a grammatical tail (31), so an unanchored .search
+    # guard, which finds that tail, turns it red too. The emitter's refusal reads naturally
+    # with the descriptor and with a grammatical out-of-range lexeme shown bare.
+    def _emit_refusal(model):
+        try:
+            _emit(model)
+        except _ParseRefusal as exc:
+            return str(exc)
+        return None
+
+    hostile_ok = []
+    for hostile_lexeme in (_Number("'command'\n\x1b[31m"), _Number("'command'\n\x1b[31")):
+        hostile_type = validate_registration_model({"hooks": {"Stop": [{"hooks": [
+            {"command": "x", "type": hostile_lexeme}]}]}})
+        hostile_ok.append(
+            _shown(hostile_lexeme) == _SHOWN_MALFORMED_NUMBER
+            and hostile_type.status is CANNOT_EVALUATE
+            and hostile_type.findings == ["hooks['Stop'][0].hooks[0] type {} outside the "
+                                          "closed v1 vocabulary".format(_SHOWN_MALFORMED_NUMBER)]
+            and _emit_refusal({"env": hostile_lexeme}) == (
+                "number lexeme in the model is not a finite strict-JSON number: {}".format(
+                    _SHOWN_MALFORMED_NUMBER)))
     check("shown-malformed-number-lexeme-fixed-descriptor",
-          _shown(hostile_lexeme) == _SHOWN_MALFORMED_NUMBER
-          and _shown(_Number("-1.5E3")) == "-1.5E3"
-          and hostile_type.status is CANNOT_EVALUATE
-          and hostile_type.findings == ["hooks['Stop'][0].hooks[0] type {} outside the closed "
-                                        "v1 vocabulary".format(_SHOWN_MALFORMED_NUMBER)]
-          and hostile_emit == "number lexeme {} is not a finite strict-JSON number".format(
-              _SHOWN_MALFORMED_NUMBER))
+          hostile_ok == [True, True] and _shown(_Number("-1.5E3")) == "-1.5E3"
+          and _emit_refusal({"env": _Number("1e400")}) == (
+              "number lexeme in the model is not a finite strict-JSON number: 1e400"))
     # a parsed JSON literal in a finding reads in JSON spelling (true, false, null), never in
     # Python's (True, False, None); restoring repr for the three literals turns this red.
     literal_type = merge_registration(
