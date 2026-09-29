@@ -1993,8 +1993,13 @@ def _self_test():
     # unadapted (a bytecode-cache load allocates less than a source compile) serves every larger
     # assembly from freshly mmapped pages, and the zero-fill faults, charged to CPU time, read as a
     # measured 2.3x large-size penalty on CORRECT code (QA round 3: ratio 2.2 to 2.4 with a stale
-    # __pycache__ present, 0.85 to 0.92 without one, same code); the warmup pins every child in the
-    # adapted state, where repeated large blocks reuse heap pages, on either import path.
+    # __pycache__ present, 0.85 to 0.92 without one, same code); the warmup puts a child in the
+    # adapted state, where repeated large blocks reuse heap pages, on either import path. That
+    # adaptation, and so the warmup, holds under the DEFAULT allocator policy only: an ambient
+    # MALLOC_* variable or GLIBC_TUNABLES entry pins glibc's thresholds and disables the dynamic
+    # adjustment the warmup relies on (QA round 4: healthy code with an inherited
+    # MALLOC_TOP_PAD_=131072 false-REDs at 2.0 to 3.1x on a loaded host), so every timed child
+    # launches with child_env(), which neutralizes ambient allocator settings.
     HANG_TIMEOUT = 120  # seconds: a child's hang guard only, far above any child's own run (a few seconds)
     GROWTH = 8
     LINEAR_LIMIT = 2.0  # GROWTH growth: about 1 when linear, about GROWTH when quadratic
@@ -2023,6 +2028,15 @@ def _self_test():
                   "                               '%%.6f s at the multiplier cap' %% fastest)\n"
                   "        mult = min(max(mult * 2, int(mult * FLOOR / max(fastest, 1e-9)) + 1), 1 << 20)\n") % GROWTH
 
+    def child_env():
+        """The environment for a timed child: the parent's, minus every MALLOC_* variable and GLIBC_TUNABLES.
+        An inherited allocator override (MALLOC_TOP_PAD_, MALLOC_MMAP_THRESHOLD_, MALLOC_TRIM_THRESHOLD_,
+        MALLOC_MMAP_MAX_, a GLIBC_TUNABLES glibc.malloc.* entry) pins glibc's thresholds and disables the
+        dynamic adaptation the GROWTH_SRC warmup relies on, so a timed verdict would rest on the operator's
+        ambient allocator policy (QA round 4: healthy code false-REDs at 2.0 to 3.1x under load); a timed
+        child runs under the default policy only."""
+        return {k: v for k, v in os.environ.items() if not k.startswith("MALLOC_") and k != "GLIBC_TUNABLES"}
+
     def growth_in_child(run_src, n, reps=5):
         """Time GROWTH runs of run(n) and one of run(GROWTH * n), where the source `run_src` defines run, in a
         fresh interpreter under HANG_TIMEOUT (sizes interleaved, best of `reps` each); return (small, large) in
@@ -2031,7 +2045,7 @@ def _self_test():
         stderr."""
         code = CHILD_HEAD + GROWTH_SRC + run_src + "print(json.dumps(growth(%d, run, %d)))\n" % (n, reps)
         r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
-                           timeout=HANG_TIMEOUT)
+                           timeout=HANG_TIMEOUT, env=child_env())
         if r.returncode != 0:
             raise AssertionError(f"growth child failed ({r.returncode}): {r.stderr}")
         return json.loads(r.stdout.strip().splitlines()[-1])
@@ -2454,6 +2468,44 @@ def _self_test():
                     "def run(n):\n"
                     "    pass\n", 1000, 1)
             self.assertIn("cannot measure above the floor", str(ctx.exception))
+
+        def test_timed_child_ignores_ambient_allocator_policy(self):
+            # QA round 4 (codex MAJOR): a timed child inherited the parent's environment, so an ambient
+            # MALLOC_* variable or GLIBC_TUNABLES entry pinned glibc's thresholds, disabled the adaptation
+            # the GROWTH_SRC warmup relies on, and false-REDed healthy code under load (2.0 to 3.1x);
+            # every timed child now launches with child_env(). Deterministic: the probe reports the
+            # child's environment and answers before growth() runs, so no clock is read
+            ambient = {"MALLOC_TOP_PAD_": "131072", "MALLOC_MMAP_THRESHOLD_": "131072",
+                       "MALLOC_TRIM_THRESHOLD_": "0", "MALLOC_MMAP_MAX_": "65536",
+                       "GLIBC_TUNABLES": "glibc.malloc.mmap_threshold=131072"}
+            probe = ("leaked = [k for k in os.environ if k.startswith('MALLOC_') or k == 'GLIBC_TUNABLES']\n"
+                     "assert not leaked, 'ambient allocator policy reached the timed child: %r' % leaked\n"
+                     "print(json.dumps([1.0, 1.0]))\n"
+                     "raise SystemExit(0)\n"
+                     "def run(n):\n"
+                     "    pass\n")
+            saved = {k: os.environ.get(k) for k in ambient}
+            os.environ.update(ambient)
+            try:
+                # the builder drops the overrides and nothing else
+                dropped = set(os.environ) - set(child_env())
+                self.assertTrue(dropped.issuperset(ambient), dropped)
+                self.assertTrue(all(k.startswith("MALLOC_") or k == "GLIBC_TUNABLES" for k in dropped),
+                                dropped)
+                # the real launch path: the child observes none of them (a leak raises AssertionError)
+                growth_in_child(probe, 1000, 1)
+                # the builder bypassed (the environment inherited, the pre-fix launch): the same child is RED
+                code = CHILD_HEAD + GROWTH_SRC + probe + "print(json.dumps(growth(1000, run, 1)))\n"
+                r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
+                                   timeout=HANG_TIMEOUT)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("ambient allocator policy reached the timed child", r.stderr)
+                self.assertIn("MALLOC_TOP_PAD_", r.stderr)
+            finally:
+                for k, v in saved.items():
+                    os.environ.pop(k, None)
+                    if v is not None:
+                        os.environ[k] = v
 
         # -- which messages --
         def test_only_after_last_genuine_user(self):
