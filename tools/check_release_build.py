@@ -462,17 +462,32 @@ def _materialized_check(root, sha, commands_fn, what):
             _release_schema.materialize_tree_raw(root, sha, co)
         except SchemaError as exc:
             raise GateError("cannot materialize the tree for {}: {}".format(what, exc))
-        for args in (["init", "-q"], ["-c", "user.name=aiqt", "-c", "user.email=a@b.invalid", "add", "-A"],
-                     ["-c", "user.name=aiqt", "-c", "user.email=a@b.invalid", "commit", "-q", "-m",
-                      what, "--no-verify"]):
-            try:
-                r = subprocess.run(["git", "-C", str(co), *args], capture_output=True, env=env)
-            except OSError as exc:
-                raise GateError("cannot launch git to stage the tree for {} ({}); fail-closed".format(
-                    what, exc))
+        # F-367: the staging commit below is maintenance-capable, _fresh_git_env() carries no
+        # inherited pin variables, and the PRODUCTION paths here (reproduce_gate /
+        # _recompute_branch_integrity) run outside the self-test's scrub and lifecycle PATH
+        # wrapper, so an unpinned commit could detach a `git maintenance run --auto` child into
+        # the very tree the finally-rmtree below is about to delete. The three pins ride each
+        # argv as literal `-c` pairs in option position, and the launches are spelled out one
+        # by one (never through a loop variable) so the repo-wide maintenance-pin scan can
+        # resolve and enforce them.
+        def _staged(r):
             if r.returncode != 0:
                 raise GateError("cannot stage the tree for {}: {}".format(
                     what, r.stderr.decode("utf-8", "replace").strip()))
+        try:
+            _staged(subprocess.run(["git", "-C", str(co), "init", "-q"],
+                                   capture_output=True, env=env))
+            _staged(subprocess.run(
+                ["git", "-C", str(co), "-c", "user.name=aiqt", "-c", "user.email=a@b.invalid",
+                 "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
+                 "add", "-A"], capture_output=True, env=env))
+            _staged(subprocess.run(
+                ["git", "-C", str(co), "-c", "user.name=aiqt", "-c", "user.email=a@b.invalid",
+                 "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
+                 "commit", "-q", "-m", what, "--no-verify"], capture_output=True, env=env))
+        except OSError as exc:
+            raise GateError("cannot launch git to stage the tree for {} ({}); fail-closed".format(
+                what, exc))
         try:
             commands = commands_fn(co)
         except Exception as exc:  # noqa: BLE001  a bad registry is cannot-evaluate, not clean
