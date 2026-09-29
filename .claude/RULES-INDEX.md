@@ -5,6 +5,7 @@ Generated from `.aiqt/core/rules/` by `tools/gen_claude.py` and drift-gated in C
 **Apex** - [The AIQT principle (highest precedence)](rules/aiqt/00-project-integrity.md)
 
 **Accuracy**
+- [Citation only from a file opened at the reviewed commit](rules/aiqt/10-ACCUR-citation-from-opened-file.md)
 - [Claims about the work rest on observation](rules/aiqt/10-ACCUR-claims-rest-on-observation.md)
 - [A completeness claim enumerates its set](rules/aiqt/10-ACCUR-completeness-claim-enumerates-its-set.md)
 - [Corroborate external claims](rules/aiqt/10-ACCUR-corroborate-external-claims.md)
@@ -25,6 +26,7 @@ Generated from `.aiqt/core/rules/` by `tools/gen_claude.py` and drift-gated in C
 
 **Integrity**
 - [Anything wrong is fixed first](rules/aiqt/10-INTEG-anything-wrong-fixed-first.md)
+- [Attestation lines are harness-owned](rules/aiqt/10-INTEG-attestation-is-harness-owned.md)
 - [Branch and merge only on green](rules/aiqt/10-INTEG-branch-and-merge-on-green.md)
 - [Cut branches from the live protected line and re-home after a rewrite](rules/aiqt/10-INTEG-branch-rooted-on-live-main.md)
 - [A check fails closed on input it cannot read](rules/aiqt/10-INTEG-check-fails-closed-on-unreadable.md)

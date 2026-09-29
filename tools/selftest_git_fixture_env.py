@@ -1451,6 +1451,7 @@ def _manifest_extra_setup_failures():
 OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_opf_adopt.py": ("Adoption vocabulary and validator vectors; its observe vector suite runs "
                                 "git only inside _opf_adopt_observe._git_archive_fixture's lifecycle."),
+    "opf/tools/_opf_adopt_hook.py": "Pure enable-hook merge vectors over synthetic registration bytes.",
     "opf/tools/_opf_init.py": "Canonical model bytes, defaults and validator vectors.",
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
     "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",

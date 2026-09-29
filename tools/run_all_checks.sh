@@ -113,6 +113,7 @@ run_gate "opf-ingest-selftest" python3 -I -B opf/tools/check_opf_ingest.py --sel
 run_gate "opf-ingest" python3 -I -B opf/tools/check_opf_ingest.py
 run_gate "opf-ingest-apply-selftest" python3 -I -B opf/tools/_opf_ingest_apply.py --self-test --red-on-revert
 run_gate "opf-adopt-selftest" python3 -I -B opf/tools/_opf_adopt.py --self-test
+run_gate "opf-adopt-hook-selftest" python3 -I -B opf/tools/_opf_adopt_hook.py --self-test
 run_gate "opf-pack-manifest-selftest" python3 -I -B opf/tools/_opf_pack_manifest.py --self-test
 run_gate "opf-adopt-observe-selftest" python3 -I -B opf/tools/_opf_adopt_observe.py --self-test
 run_gate "opf-prompt-pack-selftest" python3 -I -B opf/tools/check_opf_prompt_pack.py --self-test
@@ -177,6 +178,8 @@ run_gate "claude-drift"    python3 -I -B tools/gen_claude.py --check
 run_gate "adapters-drift"  python3 -I -B tools/gen_adapters.py --check
 run_gate "cursor-selftest"  python3 -I -B tools/gen_cursor.py --self-test
 run_gate "cursor-drift"  python3 -I -B tools/gen_cursor.py --check
+run_gate "worker-pack-selftest" python3 -I -B tools/gen_worker_pack.py --self-test
+run_gate "worker-pack-drift" python3 -I -B tools/gen_worker_pack.py --check
 run_gate "hooks-selftest" python3 -I -B tools/gen_hooks.py --self-test
 run_gate "secret-patterns-drift" python3 -I -B tools/gen_secret_patterns.py --check
 run_gate "hooks-drift"    python3 -I -B tools/gen_hooks.py --check
