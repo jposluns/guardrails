@@ -1988,10 +1988,19 @@ def _self_test():
     # least FLOOR seconds of measured work; a floor met only during a separate calibration round could rest
     # on a stalled clock read while the measured samples stayed in the noise. A run the cap cannot lift
     # above the floor is refused (cannot measure above the floor), never returned as sub-noise samples.
+    # Before any sample the child allocates and frees one 4 MiB block: glibc's mmap threshold starts at
+    # 128 KiB and adapts only when an mmapped block is freed, so a child whose module import left it
+    # unadapted (a bytecode-cache load allocates less than a source compile) serves every larger
+    # assembly from freshly mmapped pages, and the zero-fill faults, charged to CPU time, read as a
+    # measured 2.3x large-size penalty on CORRECT code (QA round 3: ratio 2.2 to 2.4 with a stale
+    # __pycache__ present, 0.85 to 0.92 without one, same code); the warmup pins every child in the
+    # adapted state, where repeated large blocks reuse heap pages, on either import path.
     HANG_TIMEOUT = 120  # seconds: a child's hang guard only, far above any child's own run (a few seconds)
     GROWTH = 8
     LINEAR_LIMIT = 2.0  # GROWTH growth: about 1 when linear, about GROWTH when quadratic
     GROWTH_SRC = ("import json, tempfile\n"
+                  "_pad = bytearray(4 << 20)\n"
+                  "del _pad\n"
                   "GROWTH = %d\n"
                   "FLOOR = 0.1\n"
                   "def growth(n, run, reps):\n"
@@ -2912,14 +2921,20 @@ def _self_test():
             self.assertLess(alloc_large / (GROWTH * alloc_small), LINEAR_LIMIT, (alloc_small, alloc_large))
             # and the same assembly TIMED on the CPU clock (growth_in_child), which does see C-level work:
             # QA round 2's mutant (bytearray += piece, then a C-level find over the accumulated buffer per
-            # piece) is counted-invisible yet time-quadratic (3.9x here). Smaller sizes than the counted
-            # pair, and a smaller CHUNK: cache misses are charged to CPU time, so when the 8x record's
-            # working set outgrows a cache level the ratio absorbs the host's cache pressure, not just this
-            # code's work (measured on CORRECT code: 2.4x to 3.9x at 384 KiB and up under a cache-hostile
-            # neighbor, against 0.9x at these sizes under the same load). At 32 KiB both records stay
-            # resident in any per-core cache, and CHUNK 2048 keeps the piece counts high (16 against 128),
-            # which is what a per-piece re-scan or re-join grows with
-            nt = 32 << 10
+            # piece) is counted-invisible yet time-quadratic. Smaller sizes than the counted pair, and a
+            # smaller CHUNK: cache misses are charged to CPU time, so when the 8x record's working set
+            # outgrows a cache level the ratio absorbs the host's cache pressure, not just this code's
+            # work. The size is set by a MEASURED ladder (QA round 3), min-of-reps CPU time per point,
+            # healthy code's MAX ratio under 24 CPU/cache-pressure workers against the mutant's MIN ratio
+            # unloaded: 0.83 vs 1.89 at 32 KiB (the mutant ESCAPES the 2.0 limit), 1.14 vs 3.19 at
+            # 64 KiB, 1.35 vs 4.32 at 128 KiB, 1.68 vs 5.68 at 256 KiB, 2.05 vs 6.95 at 384 KiB (healthy
+            # code falsely RED under load). 64 KiB is the smallest measured size that separates both:
+            # healthy max 1.14 is 1.76x inside the limit, mutant min 3.19 is 1.60x outside it. CHUNK 2048
+            # keeps the piece counts high (32 against 256), which is what a per-piece re-scan or re-join
+            # grows with. Residual, disclosed: a C-level quadratic tuned to stay below this frame's
+            # measured detection floor still escapes any timed frame; the counted checks above stay
+            # load-bearing for everything Python-visible or allocating
+            nt = 64 << 10
             small, large = growth_in_child(
                 "import os\n"
                 "m.CHUNK = 2048\n"

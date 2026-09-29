@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "ec066f85041e23ed0ae03f2c09af840502fa1fd6e5b28316f59598b66e654b5f"
+tree-sha256 = "feadc85ccb67b9e8f0e0c5b591167e501236303be2e628af517a1ffe9343ecba"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2202,12 +2202,12 @@ sha256 = "d5247f6fae50f8d701c41559062209fc862a98135d659853ef7584a3572ea30f"
 [[sources]]
 path = ".preview/README.md"
 bytes = 22803
-sha256 = "cc8706c2f40d5ccf9dc47eb3c901ef9960b959f8b615ca994390c555456c9693"
+sha256 = "d0f9649db76aae41f23f52ab9babcb1f140fb071b7bcd6481098fb372570943c"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
 bytes = 636
-sha256 = "565be382a8dfa17472bc9b84d0c6c111888578faf74881c8989036758d8dd291"
+sha256 = "180b9fb51eac3e55ec72bce113b83d59d5dc21d526664511aa4b8061fe68019b"
 
 [[sources]]
 path = ".preview/clock-inject.py"
@@ -2226,8 +2226,8 @@ sha256 = "815563da687c461408c3c584f84adf2080958402ab17798129ba281723b2ee9f"
 
 [[sources]]
 path = ".preview/stamp-truth-stop.py"
-bytes = 289807
-sha256 = "4b62e200f3e8bd28a9c3ac4e73e85aeba9dec28d24a43ad95d253d0a3521bf35"
+bytes = 291183
+sha256 = "346c6f7922d2c0b70530835942eeb44ab4b84289ffda5076e69f717aa67d590d"
 
 [[sources]]
 path = ".preview/unbounded-wait.py"
@@ -2631,8 +2631,8 @@ sha256 = "8630c4480f494120a15c9557645a0a383394bbfcc7d5a50352c4fa58c0b1cb26"
 
 [[sources]]
 path = "opf/tools/_opf_store.py"
-bytes = 160009
-sha256 = "488d49d9aefc73fdfb6524438738d5e0ac5dfa8ee9a0ace2b091d0890ba98493"
+bytes = 160501
+sha256 = "31f5aa384aeceddbcbb66c1f300e511bad7ef8dcdf201d5944410c48299cd1f8"
 
 [[sources]]
 path = "opf/tools/_opf_views.py"
