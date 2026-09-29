@@ -5559,7 +5559,7 @@ source-path = ".aiqt/core/rules/accur-citation-from-opened-file.md"
 start-line = 13
 end-line = 14
 canonical-text = "The assistant cites a path and line number only from a file it opened this session at the commit under\nreview, never from memory, a prior report, or an inferred layout."
-source-digest = "149633fec8581536a0646d85b3ffc6673ccdb2dfaaa51cfbbd5030ecfcb2c4f4"
+source-digest = "e3c4fb5b1fb13e8014beb2a81315090fbb37d38f8a9ee59485fe17b0c7b9ca39"
 
 [[clause]]
 clause-id = "citint.2"
@@ -5568,7 +5568,7 @@ source-path = ".aiqt/core/rules/accur-citation-from-opened-file.md"
 start-line = 14
 end-line = 15
 canonical-text = "Where it is unsure of the line, it\ncites the symbol alone rather than guessing a number."
-source-digest = "149633fec8581536a0646d85b3ffc6673ccdb2dfaaa51cfbbd5030ecfcb2c4f4"
+source-digest = "e3c4fb5b1fb13e8014beb2a81315090fbb37d38f8a9ee59485fe17b0c7b9ca39"
 
 [[clause]]
 clause-id = "citint.3"
@@ -5577,7 +5577,7 @@ source-path = ".aiqt/core/rules/accur-citation-from-opened-file.md"
 start-line = 15
 end-line = 16
 canonical-text = "Code or document text is quoted only from what\nthe assistant actually read, so a quotation is an excerpt, never a reconstruction presented as one."
-source-digest = "149633fec8581536a0646d85b3ffc6673ccdb2dfaaa51cfbbd5030ecfcb2c4f4"
+source-digest = "e3c4fb5b1fb13e8014beb2a81315090fbb37d38f8a9ee59485fe17b0c7b9ca39"
 
 [[clause]]
 clause-id = "attint.1"

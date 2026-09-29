@@ -60,4 +60,4 @@ entrypoint = "tools/gen_worker_pack.py"
 semantics-revision = 1
 targets = [".claude/worker-pack.md"]
 closure = ["tools/gen_worker_pack.py", "tools/_gen_common.py", "tools/_standards.py", "tools/gen_rules.py"]
-code-digest = "43e6a0ade9894fa15f12c71c78c502dc01d16d429bc7b3b62223e110da466a57"
+code-digest = "a174d649c283e1453830cf3e55b8d8626d344f9bc9a60233b1bd273dc27054d7"

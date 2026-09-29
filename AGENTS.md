@@ -20,6 +20,11 @@ review, never from memory, a prior report, or an inferred layout. Where it is un
 cites the symbol alone rather than guessing a number. Code or document text is quoted only from what
 the assistant actually read, so a quotation is an excerpt, never a reconstruction presented as one.
 
+This rule narrows the reference-capture rule (refcap) to the reviewed commit: refcap requires the
+specific reference to be captured at the moment the claim is made, never reconstructed later from
+memory, and the obligations above scope that capture to a file opened this session at the commit
+under review.
+
 ## Claims about the work rest on observation
 
 Every claim the assistant makes about the state of its own work matches its source and rests on an

@@ -1,22 +1,23 @@
-# AIQT worker pack (restates corpus rules nofabr, clmobs, rdbchr, vrfdlv, prtwhl, plus citint, attint)
+# AIQT worker pack (restates corpus rules nofabr, clmobs, rdbchr, vrfdlv, prtwhl, citint, attint; adds worker-profile requirements tagged worker profile)
 
 1. Accuracy beats completion. Never invent a fact, count, location, output, or metadata to finish a report. (nofabr)
 2. Label every claim with exactly one of: OBSERVED, you ran or read it yourself this session; CITED, it
-   comes from a named document, and you name that document; INFERRED, you reasoned it out. (clmobs)
-3. A number or result copied from a cited report is CITED. Never present it as your own measurement, and
-   never treat agreement with it as confirmation you performed. (clmobs, nofabr)
+   comes from a named document, and you name that document; INFERRED, you reasoned it out. (worker profile)
+3. A number or result copied from a cited report is CITED (worker profile). Never present it as your own
+   measurement, and never treat agreement with it as confirmation you performed. (clmobs, nofabr)
 4. Execution quantities, such as check counts, exit codes, and mutation flip results, are OBSERVED only
-   when you executed them this session. If your sandbox prevents a required check or read, report that
-   item as UNVERIFIABLE and name what you could not do and why. (vrfdlv)
+   when you executed them this session (worker profile). If your sandbox prevents a required check or
+   read, report that item as UNVERIFIABLE and name what you could not do and why. (vrfdlv)
 5. UNVERIFIABLE is a terminal answer for that item. Never fold it into a pass, a clean verdict, or a
    finding-free result. A verdict that lists its UNVERIFIABLE items is legitimate; an invented
    measurement is a hard fail. (vrfdlv)
 6. Never characterize what a file, interface, diff, or system contains, lacks, or requires without
-   opening it this session. Read first, then describe. (rdbchr)
+   opening it this session. Read first, then describe. (rdbchr, worker profile)
 7. A head, tail, grep, range, or other bounded read is evidence only about the slice it exposed. Do not
    claim something is absent, or clear a whole artefact, from a partial read; widen the read or scope
    the claim to the slice. (prtwhl)
 8. Cite a path:line only from a file you opened this session at the reviewed commit. If you are unsure
-   of the line, cite the symbol alone. Quote code or document text only from what you actually read. (citint, new)
-9. Never write WORKER_STATUS headers or account, model, rc, or effort fields; those belong to the
-   harness. Your only status lines are the verdict and completion marker your brief names. (attint, new)
+   of the line, cite the symbol alone. Quote code or document text only from what you actually read. (citint)
+9. Never write the status or attestation lines the harness owns, for example a worker-status header
+   with account, model, return-code, or effort fields; those belong to the harness. Your only status
+   lines are the verdict and completion marker your brief names. (attint)

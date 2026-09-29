@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """Generate the AIQT worker-pack read surface from its .aiqt/core/ source (the source-and-adapter machinery).
 
-The worker pack is the fixed preamble the dispatcher (orch-verify) prepends to every worker brief across
+The worker pack is the fixed preamble the dispatcher prepends to every worker brief across
 all three worker families. Its SOURCE OF TRUTH is .aiqt/core/profiles/worker-pack.md (the updater's write
 root is .aiqt/core/), whose frontmatter records the pack's lineage: a `restates:` flow sequence naming
 every corpus rule the pack condenses, so corpus governance covers the pack. The published read surface is
 the GENERATED file .claude/worker-pack.md: the source BODY byte-verbatim (everything after the frontmatter
 terminator, with the house-style blank line after the frontmatter stripped), so the injected bytes are
 exactly the reviewed pack text and carry no frontmatter. Fail-closed: a malformed source, a `restates:`
-corpus-id that no longer resolves in .aiqt/core/rules/ (editing or retiring a restated rule forces a pack
-review), or an unreadable input is exit 2, never a fresh render over an unvalidated lineage.
+corpus-id that no longer resolves in .aiqt/core/rules/ (retiring or renaming a restated rule id forces a
+pack review; an edit that keeps the id does not trip the lineage check), or an unreadable input is
+exit 2, never a fresh render over an unvalidated lineage.
   gen_worker_pack.py           regenerate .claude/worker-pack.md
-  gen_worker_pack.py --check   fail (exit 1) on drift; exit 2 on a malformed source or a read/write failure
-  gen_worker_pack.py --self-test  assert the drift gate catches a planted drifted target (red without the
-                                  gate) and that the lineage and decode cases fail closed (exit 2)
+  gen_worker_pack.py --check   fail (exit 1) on drift, compared over the raw published bytes; exit 2 on
+                               a malformed source or a read/write failure
+  gen_worker_pack.py --self-test  assert the published bytes equal an independently specified expected
+                                  body, the planted-drift and CRLF-only legs go red (exit 1), and the
+                                  lineage and source-decode cases fail closed (exit 2)
 """
 import sys
 from pathlib import Path
@@ -69,7 +72,7 @@ def render(root):
     missing = sorted(seen - known)
     if missing:
         raise ValueError("{}: restates corpus-id(s) {} no longer resolve in .aiqt/core/rules/; "
-                         "editing or retiring a restated rule forces a pack review".format(
+                         "retiring or renaming a restated rule id forces a pack review".format(
                              src.name, ", ".join(missing)))
     text = src.read_text(encoding="utf-8")
     body = text[text.find("\n---\n", 4) + 5:].lstrip("\n")
@@ -81,13 +84,28 @@ def render(root):
 def run(root, check):
     """Reconcile the published pack under root against its source. Exit 0 in sync, 1 on drift (check
     mode), 2 on a malformed source or a read/write failure. Parameterized on root (the gen_rules idiom)
-    so the self-test drives it against a synthetic tempdir tree, never the real repo."""
+    so the self-test drives it against a synthetic tempdir tree, never the real repo. Check mode
+    compares the RAW BYTES of the published target against the rendered body: the registered residue of
+    the worker-pack-drift gate promises byte identity, and the shared text-mode reconcile decodes with
+    universal newlines, which would let a CRLF-only rewrite pass, so the check compares bytes to keep
+    that promise literal. Regeneration still writes through reconcile."""
     try:
         body = render(root)
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc), file=sys.stderr)
         return 2
-    if reconcile(root / TARGET_REL, body, check):
+    target = root / TARGET_REL
+    if check:
+        try:
+            current = target.read_bytes() if target.exists() else None
+        except OSError as exc:
+            print("error: cannot read {} ({}); fail-closed".format(target, exc), file=sys.stderr)
+            return 2
+        if current != body.encode("utf-8"):
+            print("drift: {} is out of date; run tools/gen_worker_pack.py".format(TARGET_REL))
+            return 1
+        return 0
+    if reconcile(target, body, check):
         print("drift: {} is out of date; run tools/gen_worker_pack.py".format(TARGET_REL))
         return 1
     return 0
@@ -102,13 +120,17 @@ def main():
 
 # --- self-test ----------------------------------------------------------------------------------------
 # Synthetic trees in a private tempdir prove the gate's own invariants (the sibling generators' idiom):
-#   (a) a conformant tree generates, the published bytes carry the source body, and --check is drift-clean;
+#   (a) a conformant tree generates, the published bytes equal _EXPECTED_BODY (spelled out independently
+#       of the source fixture, so a truncating or rewriting render cannot also rewrite the expectation),
+#       and --check is drift-clean;
 #   (b) a PLANTED DRIFTED target fails --check (exit 1): the case that goes red if the drift gate is
 #       neutered, so the gate itself is guarded;
 #   (c) a restates: corpus-id absent from the corpus fails closed (exit 2), the forced-pack-review leg;
 #   (d) a source missing the restates key fails closed (exit 2);
-#   (e) an invalid-UTF-8 published target fails closed (exit 2) through the shared reconcile guard
-#       (a raised SystemExit(2), the same process exit a real CLI run produces), never a raw traceback.
+#   (e) a CRLF-only rewrite of the published target fails --check (exit 1): the leg that goes red if the
+#       raw-byte comparison regresses to a newline-normalizing text compare;
+#   (f) an invalid-UTF-8 SOURCE fails closed (exit 2); an invalid-UTF-8 published target is plain byte
+#       drift under the raw-byte comparison, covered by the (b) and (e) legs.
 
 _RULE_SRC = """---
 corpus-id: {cid}
@@ -134,6 +156,10 @@ restates: [{restates}]
 
 1. A minimal pack line. (selfw1)
 """
+
+# Case (a) compares the published target against this body, spelled out INDEPENDENTLY of _PACK_SRC
+# (never sliced from it), so a render that truncates or rewrites the body goes red here.
+_EXPECTED_BODY = "# Self-test worker pack\n\n1. A minimal pack line. (selfw1)\n"
 
 
 def _build(base, restates):
@@ -176,9 +202,8 @@ def self_test_main():
         if run_quiet(good, check=False) != 0:
             failures.append("conformant tree: generation expected exit 0")
         target = good / TARGET_REL
-        if not target.is_file() or not target.read_text(encoding="utf-8").startswith(
-                "# Self-test worker pack"):
-            failures.append("conformant tree: published pack is missing or does not carry the source body")
+        if not target.is_file() or target.read_bytes() != _EXPECTED_BODY.encode("utf-8"):
+            failures.append("conformant tree: published pack does not byte-equal the expected body")
         if run_quiet(good, check=True) != 0:
             failures.append("conformant tree: regeneration expected drift-clean exit 0")
 
@@ -203,14 +228,23 @@ def self_test_main():
         if run_quiet(nokey, check=True) != 2:
             failures.append("source missing restates expected exit 2 (fail-closed)")
 
-        # (e) an invalid-UTF-8 published target fails closed (exit 2) via the shared reconcile guard.
-        unicode_tree = tmp / "unicode"
-        _build(unicode_tree, "selfw1, selfw2")
-        if run_quiet(unicode_tree, check=False) != 0:
-            failures.append("unicode case: initial generation expected exit 0")
-        (unicode_tree / TARGET_REL).write_bytes(b"\xff\xfe not utf-8")
-        if run_quiet(unicode_tree, check=True) != "raised SystemExit(2)":
-            failures.append("invalid-UTF-8 published target expected exit 2 (fail-closed)")
+        # (e) a CRLF-only rewrite of the published target fails --check (exit 1): red if the raw-byte
+        #     comparison regresses to a newline-normalizing text compare.
+        crlf = tmp / "crlf"
+        _build(crlf, "selfw1, selfw2")
+        if run_quiet(crlf, check=False) != 0:
+            failures.append("crlf case: initial generation expected exit 0")
+        crlf_target = crlf / TARGET_REL
+        crlf_target.write_bytes(crlf_target.read_bytes().replace(b"\n", b"\r\n"))
+        if run_quiet(crlf, check=True) != 1:
+            failures.append("CRLF-only published target expected exit 1 (drift)")
+
+        # (f) an invalid-UTF-8 SOURCE fails closed (exit 2): the decode leg on the input side.
+        undec = tmp / "undec"
+        _build(undec, "selfw1, selfw2")
+        (undec / ".aiqt" / "core" / "profiles" / "worker-pack.md").write_bytes(b"\xff\xfe not utf-8")
+        if run_quiet(undec, check=True) != 2:
+            failures.append("invalid-UTF-8 source expected exit 2 (fail-closed)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -219,10 +253,10 @@ def self_test_main():
         for failure in failures:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: a conformant tree generates and regenerates drift-clean with the published "
-          "bytes equal to the source body; a planted drifted target fails --check (exit 1, red without "
-          "the gate); and an unresolved restates corpus-id, a source missing restates, and an "
-          "invalid-UTF-8 published target all fail closed (exit 2)")
+    print("SELF-TEST PASS: a conformant tree generates with the published bytes equal to the expected "
+          "body and regenerates drift-clean; a planted drifted target and a CRLF-only published target "
+          "each fail --check (exit 1, red without the byte-exact gate); and an unresolved restates "
+          "corpus-id, a source missing restates, and an invalid-UTF-8 source all fail closed (exit 2)")
     return 0
 
 
