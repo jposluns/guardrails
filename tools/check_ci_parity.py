@@ -104,11 +104,27 @@ plus tab and newline: Python's splitlines() also breaks a line at \v, \f,
 Unicode spaces such as U+00A0, while bash breaks lines only at \n and reads
 each of those bytes as an ordinary word character, so outside that alphabet
 the lines this gate validates are not the lines bash executes. Inside that
-alphabet a line break is exactly \n for both. The standalone OPF runner,
-which vector 26 and the selftest roster hold to this same grammar, is
-screened the same way on its RAW text inside the ONE shared adapter
-(adapt_standalone_runner), before the adapter's own line split and newline
-rejoin could erase a forbidden character. Every run_gate
+alphabet a line break is exactly \n for both. Decoding before screening
+lost forbidden characters three separate times, one Python-side layer at a
+time (splitlines(), the adapter's line split and newline rejoin, and
+Path.read_text()'s universal-newline translation, which turns \r into \n
+before any text screen can see it), so EVERY read of a runner or workflow
+file, in the live check (run_paths), in self-test vector 26, and in
+tools/selftest_git_fixture_env.py's roster and roster checks, goes through
+the ONE byte-level reader (read_runner_text): the RAW BYTES are screened
+against this same alphabet before any decode, so no decode-layer newline
+translation or multi-byte spelling can erase a forbidden byte ahead of the
+screen, and the accepted bytes are decoded strictly as ASCII, which maps
+each byte to one character and translates no newline. A self-test vector
+pins every read_text or splitlines attribute and every text-mode open()
+call in this file and in tools/selftest_git_fixture_env.py, as spelled,
+against an exact per-function allowlist, so a new read path written
+through those APIs turns the self-test red for review against the reader;
+a read spelled another way (getattr, an alias) is outside that tripwire.
+The standalone OPF runner, which vector 26 and the selftest roster hold to
+this same grammar, is additionally screened on its RAW text inside the ONE
+shared adapter (adapt_standalone_runner), before the adapter's own line
+split and newline rejoin could erase a forbidden character. Every run_gate
 line is screened by ONE character-allowlist rule over every word after quote
 removal: the label must fully match [a-z0-9][a-z0-9-]* (every label in the two
 real runners does) and every other word must fully match [A-Za-z0-9_./=:-]+, a
@@ -135,7 +151,11 @@ such a file never runs at all); a run_gate() { function definition is
 accepted only at top level outside every if frame, because bash runs a
 definition as one ordinary, successfully-exiting statement, so a definition
 inside a branch both fills the branch and replaces $?, which this grammar
-formerly counted as neither; and the gitleaks-block lines (the PATH append,
+formerly counted as neither; the run_gate() definition must also precede
+the first run_gate invocation, because bash resolves a function name at
+invocation time, so a gate line ahead of the (or with no) definition calls
+an undefined name and the runner continues without recording that gate as
+run or failed; and the gitleaks-block lines (the PATH append,
 the gitleaks_rc capture and the gitleaks exit-code echo) and the FAILED
 GATES echo are accepted only inside their real blocks AND branches, as
 notrun=0, set and cd are already
@@ -143,9 +163,11 @@ position-checked: the PATH append only in the HOME guard's then branch, which
 has just proven HOME non-empty; gitleaks_rc=$? only as the first statement of
 the gitleaks failure branch, where $? is still the gitleaks exit code; the
 exit-code echo only after that capture in the same branch; and the FAILED
-GATES echo only in the then branch of the terminal failed check, after the
-top-level failed_names initializer. A copy placed
-anywhere else, including the HOME guard's else branch, is refused, so an
+GATES echo only in the then branch of the TERMINAL failed check, the one
+frame whose header line sits in the recognized terminal summary tail,
+after the top-level failed_names initializer. A copy placed
+anywhere else, including the HOME guard's else branch and the then branch
+of a copied or nested failed-check frame, is refused, so an
 accepted runner cannot end early under set -u through an unbound HOME,
 gitleaks_rc or failed_names, and cannot echo a stale gitleaks exit code.
 What the grammar accepts and still cannot see into are these four surfaces.
@@ -696,7 +718,9 @@ HOME_GUARD_LINE = (
 
 # The terminal failed check: its then branch is the one place the FAILED
 # GATES echo is accepted, the way the gitleaks-block lines are bound to
-# their real blocks.
+# their real blocks. extract_local marks a frame as the failed check only
+# when its header line sits in the recognized terminal summary tail, so a
+# copied or nested frame spelling this same header does not host the echo.
 FAILED_CHECK_LINE = 'if [ "$failed" -ne 0 ]; then'
 
 RUNNER_TEST_LINES = frozenset({
@@ -719,8 +743,9 @@ GITLEAKS_RC_LINE = "gitleaks_rc=$?"
 GITLEAKS_FAILED_ECHO = (
     'echo "GATE FAILED: secrets (gitleaks) (exit ${gitleaks_rc})"')
 # The FAILED GATES echo expands ${failed_names}, so it receives the same
-# treatment: accepted only in the then branch of the terminal failed check
-# (FAILED_CHECK_LINE), after the top-level failed_names initializer.
+# treatment: accepted only in the then branch of the TERMINAL failed check
+# (the FAILED_CHECK_LINE frame whose header sits in the terminal summary
+# tail), after the top-level failed_names initializer.
 # Relocated above that initializer, ${failed_names} is unbound and set -u
 # ends the runner at that line before the first gate.
 FAILED_GATES_ECHO = 'echo "FAILED GATES: ${failed_names}"'
@@ -901,6 +926,57 @@ STANDALONE_SOURCE = "opf/tools/run_all_checks.sh"
 STANDALONE_BINDING = 'here="$(cd "$(dirname "$0")" && pwd)" || exit 2'
 
 
+# ONE byte-level reader for every runner or workflow file this module or
+# tools/selftest_git_fixture_env.py reads. Decoding before screening lost
+# forbidden characters three separate times, one Python-side layer at a
+# time (splitlines(), the adapter's split-and-rejoin, and
+# Path.read_text()'s universal-newline translation, which turns \r into \n
+# before any text screen can see it), so the screen runs on the RAW BYTES:
+# any byte outside printable ASCII (0x20-0x7E) plus tab and newline
+# refuses the file before any decode, and the accepted bytes are decoded
+# strictly as ASCII, which maps each byte to one character and translates
+# no newline. The mirrored text-level screen (_TEXT_FORMAT_RE) stays for
+# text that arrives already decoded (fixtures, the adapter).
+_BYTE_FORMAT_RE = re.compile(rb"[^\t\n\x20-\x7e]")
+
+
+def read_runner_text(path, source, reader=None):
+    """Read a runner or workflow file as RAW BYTES, refuse any byte outside
+    printable ASCII (0x20-0x7E) plus tab and newline, and decode the
+    accepted bytes strictly as ASCII with no newline translation. Returns
+    (text, diagnostic); exactly one of the two is None."""
+    if reader is None:
+        reader = Path.read_bytes
+    try:
+        data = reader(path)
+    except OSError as exc:
+        return None, _diagnostic(
+            source,
+            0,
+            "read-error",
+            "cannot read {} ({})".format(path, type(exc).__name__),
+        )
+    if not isinstance(data, bytes):
+        return None, _diagnostic(
+            source,
+            0,
+            "read-type",
+            "reader for {} did not return bytes".format(path),
+        )
+    match = _BYTE_FORMAT_RE.search(data)
+    if match is not None:
+        return None, _diagnostic(
+            source,
+            data.count(b"\n", 0, match.start()) + 1,
+            "text-format",
+            "byte {!r} is outside printable ASCII (0x20-0x7E) plus tab and "
+            "newline; the raw bytes are screened before any decode, so no "
+            "newline translation or multi-byte spelling can erase a "
+            "forbidden byte ahead of the screen".format(match.group()),
+        )
+    return data.decode("ascii"), None
+
+
 def adapt_standalone_runner(text):
     """Return (adapted_text, diagnostic) for the standalone OPF runner;
     exactly one of the two is None. The raw text is screened against the
@@ -945,13 +1021,20 @@ def extract_local(text):
                   for number, raw in enumerate(text.splitlines(), 1)]
     executable = [(number, code) for number, code in code_lines if code]
     terminal_exits = set()
+    terminal_summary_lines = set()
     for summary in TERMINAL_SUMMARIES:
         tail = executable[-len(summary):]
         if tuple(code for number, code in tail) == summary:
             terminal_exits.update(number for number, code in tail
                                   if code.startswith("exit "))
+            # The line numbers of the TERMINAL summary tail: the one
+            # failed-check frame that may host the FAILED GATES echo is
+            # identified by its header sitting here, so a copied or nested
+            # frame spelling the same header elsewhere never qualifies.
+            terminal_summary_lines.update(number for number, code in tail)
 
     in_function = False
+    function_defined = False
     function_body = []
     if_stack = []
     if_unbalanced = False
@@ -1006,6 +1089,11 @@ def extract_local(text):
                     "runs it as an ordinary successful statement, filling "
                     "the branch and replacing $?",
                 ))
+            else:
+                # Only a top-level definition satisfies the
+                # definition-before-first-invocation check below; an
+                # in-branch definition is already refused above.
+                function_defined = True
             in_function = True
             function_body = []
             continue
@@ -1042,7 +1130,8 @@ def extract_local(text):
                 "then_count": 0,
                 "else_count": 0,
                 "home_guard": stripped == HOME_GUARD_LINE,
-                "failed_check": stripped == FAILED_CHECK_LINE,
+                "failed_check": (stripped == FAILED_CHECK_LINE
+                                 and line_number in terminal_summary_lines),
                 "gitleaks": False,
                 "gitleaks_rc_set": False,
             })
@@ -1123,6 +1212,21 @@ def extract_local(text):
             continue
 
         if tokens and tokens[0] == "run_gate":
+            if not function_defined:
+                # bash resolves a function name at invocation time, so a
+                # gate line ahead of the (or with no) top-level run_gate()
+                # definition calls an undefined name: bash reports the
+                # missing command and continues without recording the gate
+                # as run or failed, while the roster still reads complete.
+                diagnostics.append(_diagnostic(
+                    source,
+                    line_number,
+                    "function-order",
+                    "run_gate invoked before its top-level definition; "
+                    "bash resolves a function name at invocation time, so "
+                    "this gate line calls an undefined name and the runner "
+                    "continues without recording the gate",
+                ))
             if len(tokens) < 3:
                 diagnostics.append(_diagnostic(
                     source,
@@ -1322,8 +1426,11 @@ def extract_local(text):
                         and if_stack[-1]["gitleaks_rc_set"])
         elif stripped == FAILED_GATES_ECHO:
             # Only where the real runners put it: the then branch of the
-            # terminal failed check, after the top-level failed_names
-            # initializer. Anywhere earlier or in any other frame,
+            # TERMINAL failed check, the frame whose header sits in the
+            # terminal summary tail, after the top-level failed_names
+            # initializer. A copied or nested frame spelling the same
+            # header is never the terminal frame, so its echo stays
+            # unclassified. Anywhere earlier,
             # ${failed_names} can be unbound, and set -u then ends the
             # runner at this line, losing the whole roster.
             scaffold = (bool(if_stack) and if_stack[-1]["failed_check"]
@@ -2103,46 +2210,16 @@ def evaluate(local_text, ci_text, allowlist=ALLOWLIST):
     )
 
 
-def _read_utf8(path, reader):
-    try:
-        data = reader(path)
-    except OSError as exc:
-        return Result(
-            False,
-            None,
-            "read-error",
-            "cannot read {} ({})".format(
-                path, type(exc).__name__),
-        )
-
-    if not isinstance(data, bytes):
-        return Result(
-            False,
-            None,
-            "read-type",
-            "reader for {} did not return bytes".format(path),
-        )
-
-    try:
-        return Result(True, data.decode("utf-8"), "", "")
-    except UnicodeDecodeError:
-        return Result(
-            False,
-            None,
-            "utf8",
-            "{} is not UTF-8".format(path),
-        )
-
-
 def run_paths(
         local_path,
         ci_path,
         allowlist=ALLOWLIST,
         reader=None):
-    """Read both required absolute paths and return a structured Report."""
-    if reader is None:
-        reader = lambda path: path.read_bytes()
+    """Read both required absolute paths and return a structured Report.
 
+    Both files go through read_runner_text, the ONE byte-level reader: the
+    raw bytes are screened before any decode, and the accepted bytes are
+    decoded strictly as ASCII with no newline translation."""
     diagnostics = []
     texts = []
 
@@ -2160,16 +2237,11 @@ def run_paths(
             texts.append(None)
             continue
 
-        result = _read_utf8(path, reader)
-        if result.ok:
-            texts.append(result.value)
+        text, diagnostic = read_runner_text(path, source, reader=reader)
+        if diagnostic is None:
+            texts.append(text)
         else:
-            diagnostics.append(_diagnostic(
-                source,
-                0,
-                result.code,
-                result.message,
-            ))
+            diagnostics.append(diagnostic)
             texts.append(None)
 
     entries, allow_diagnostics = _validate_allowlist(allowlist)
@@ -3541,10 +3613,11 @@ def self_test():
     # runner run: each masks a failure only when one gate fails alone, except the
     # skipped gate, which only the roster comparison sees.
     count += 1
-    try:
-        live_runner = LOCAL_PATH.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        failures.append("26 cannot read live runner: {!r}".format(exc))
+    live_runner, live_read_diagnostic = read_runner_text(
+        LOCAL_PATH, LOCAL_SOURCE)
+    if live_read_diagnostic is not None:
+        failures.append("26 cannot read live runner: {!r}".format(
+            live_read_diagnostic))
     else:
         live_extraction = extract_local(live_runner)
         if live_extraction.diagnostics:
@@ -3553,13 +3626,13 @@ def self_test():
         # adapter tools/selftest_git_fixture_env.py also uses (validated
         # directory binding and terminal exit 0 removed, $here rebased),
         # must give zero diagnostics under the same grammar.
-        try:
-            opf_runner = (
-                ROOT / "opf" / "tools" / "run_all_checks.sh"
-            ).read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
+        opf_runner, opf_read_diagnostic = read_runner_text(
+            ROOT / "opf" / "tools" / "run_all_checks.sh",
+            STANDALONE_SOURCE)
+        if opf_read_diagnostic is not None:
             failures.append(
-                "26 cannot read standalone runner: {!r}".format(exc))
+                "26 cannot read standalone runner: {!r}".format(
+                    opf_read_diagnostic))
         else:
             adapted, adapter_diagnostic = adapt_standalone_runner(opf_runner)
             if adapter_diagnostic is not None:
@@ -3986,6 +4059,28 @@ def self_test():
                 failures.append(
                     "26 in-branch function definition was not refused: "
                     + name)
+        # codex qa10 MINOR-1: bash resolves a function name at invocation
+        # time, so the unchanged run_gate() definition moved BELOW the
+        # first gate line leaves that gate calling an undefined name; bash
+        # reports the missing command and continues, recording no gate
+        # failure, while the static roster still read as complete with
+        # zero diagnostics. The definition is now required before the
+        # first invocation. Both fixtures fail without the order check.
+        order_fixtures = (
+            ("definition moved below the first gate",
+             mutate((run_gate_function, ""),
+                    (gate_lines[0], gate_lines[0] + run_gate_function))),
+            ("definition removed entirely",
+             mutate((run_gate_function, ""))),
+        )
+        for name, mutant in order_fixtures:
+            if mutant is None:
+                failures.append("26 function order fixture drift: " + name)
+            elif not any(item.code == "function-order"
+                         for item in extract_local(mutant).diagnostics):
+                failures.append(
+                    "26 run_gate invocation before its definition was not "
+                    "refused: " + name)
         # claude qa9 MINOR-2 (D1): the FAILED GATES echo expands
         # ${failed_names}, so it is position-checked like the
         # gitleaks-block lines: accepted only in the then branch of the
@@ -4002,6 +4097,34 @@ def self_test():
         elif not any(item.code == "unclassified-line"
                      for item in extract_local(relocated_echo).diagnostics):
             failures.append("26 relocated FAILED GATES echo was not refused")
+        # claude qa10 MINOR-1: the FAILED GATES echo is bound to the
+        # TERMINAL failed-check frame, the one whose header sits in the
+        # terminal summary tail. A copied frame mid-roster and a frame
+        # nested in the gitleaks failure branch spell the same header, are
+        # valid bash, and formerly hosted the echo with zero diagnostics
+        # after the initializers. Both fixtures fail without the
+        # terminal-frame keying.
+        copied_frame = mutate((gitleaks,
+                               FAILED_CHECK_LINE + "\n"
+                               + "  " + FAILED_GATES_ECHO + "\n"
+                               + "fi\n" + gitleaks))
+        nested_frame = mutate(("    gitleaks_rc=$?\n",
+                               "    gitleaks_rc=$?\n"
+                               "    " + FAILED_CHECK_LINE + "\n"
+                               "      " + FAILED_GATES_ECHO + "\n"
+                               "    fi\n"))
+        for name, mutant in (
+                ("copied failed-check frame mid-roster", copied_frame),
+                ("failed-check frame nested in the gitleaks failure "
+                 "branch", nested_frame)):
+            if mutant is None:
+                failures.append(
+                    "26 failed-check frame fixture drift: " + name)
+            elif not any(item.code == "unclassified-line"
+                         for item in extract_local(mutant).diagnostics):
+                failures.append(
+                    "26 FAILED GATES echo in a non-terminal failed-check "
+                    "frame was not refused: " + name)
         # qa6 masked-value rejections, now behind two independent screens. In
         # the LOCAL runner the word allowlist refuses every $-carrying gate
         # word outright (run-gate-word), so a masked flag value never reaches
@@ -4168,6 +4291,153 @@ def self_test():
         failures.append(
             "27 executable stubs prepared before the pool: got {!r}, expected {!r}".format(
                 ordering, want))
+
+    # codex qa10 MAJOR-1: Path.read_text() translates a carriage return
+    # into a newline (universal newlines) BEFORE any text screen can run,
+    # so a forbidden byte planted in a runner ON DISK formerly vanished on
+    # its way into the grammar: a CR-hidden gate line read as a clean
+    # extra gate and the full self-test stayed green. read_runner_text
+    # screens the RAW BYTES of a real file before any decode, so every
+    # fixture below is written to disk and read back through the reader.
+    # Each fails without the byte-level screen; the two CR fixtures also
+    # fail against any decode-first reader, whose newline translation
+    # erases the byte ahead of a text screen (the pinned "byte " message
+    # prefix distinguishes the raw-byte screen from the text screen). The
+    # reader must also hand accepted bytes back unchanged.
+    count += 1
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="ci-parity-reader-") as tmp:
+        scratch_dir = Path(tmp)
+        reader_fixtures = (
+            ("carriage return hiding a gate behind a comment",
+             b'# hidden\rrun_gate "cr" python3 -I -B tools/a.py\n', 1),
+            ("CRLF line ending", b"notrun=0\r\n", 1),
+            ("form feed as a line break", b"# note\fnotrun=1\n", 1),
+            ("U+2028 line separator bytes",
+             ("# note" + chr(0x2028) + "notrun=1\n").encode("utf-8"), 1),
+            ("non-UTF-8 byte", b"\xffnotrun=0\n", 1),
+            ("NUL byte", b"notrun=0\x00\n", 1),
+            ("second-line carriage return", b"notrun=0\n# x\rexit 0\n", 2),
+        )
+        for number, (name, data, want_line) in enumerate(reader_fixtures):
+            fixture = scratch_dir / "fixture-{}".format(number)
+            fixture.write_bytes(data)
+            got_text, got_diagnostic = read_runner_text(
+                fixture, LOCAL_SOURCE)
+            if (got_text is not None
+                    or got_diagnostic is None
+                    or got_diagnostic.code != "text-format"
+                    or got_diagnostic.line != want_line
+                    or not got_diagnostic.message.startswith("byte ")):
+                failures.append(
+                    "28 forbidden byte on disk was not refused by the "
+                    "byte-level reader: " + name)
+        clean = b"#!/usr/bin/env bash\nnotrun=0\n\techo ok\n"
+        fixture = scratch_dir / "clean"
+        fixture.write_bytes(clean)
+        got_text, got_diagnostic = read_runner_text(fixture, LOCAL_SOURCE)
+        if (got_diagnostic is not None or got_text is None
+                or got_text.encode("ascii") != clean):
+            failures.append(
+                "28 clean ASCII bytes did not round-trip unchanged "
+                "through the byte-level reader")
+
+    # codex qa10 MAJOR-1 (class closure): every read of runner or workflow
+    # text must go through read_runner_text, the ONE byte-level reader.
+    # This structural vector parses this file and
+    # tools/selftest_git_fixture_env.py and pins EVERY read_text or
+    # splitlines attribute and every text-mode open() call, as spelled, to
+    # an exact per-function site count, so a new, moved or removed read
+    # written through those APIs turns this vector red and forces review
+    # against the reader. Every pinned site reads no runner or workflow
+    # text under the parity guarantee: the sites parse Python sources for
+    # ast, read harness and stub call logs, write the selftest report, or
+    # split text the reader or a screen has already validated. A read
+    # spelled another way (getattr, an alias) is outside this tripwire, as
+    # the module docstring discloses. This vector fails without the
+    # change: the former Path.read_text() calls on the runners and the
+    # workflow (vector 26, _registered_selftests, _roster_checks) are not
+    # in this allowlist.
+    count += 1
+    import ast
+    def _read_api_sites(tree):
+        parents = {}
+        for parent in ast.walk(tree):
+            for child in ast.iter_child_nodes(parent):
+                parents[child] = parent
+        def enclosing(node):
+            scope = parents.get(node)
+            while scope is not None:
+                if isinstance(scope, (ast.FunctionDef,
+                                      ast.AsyncFunctionDef)):
+                    return scope.name
+                scope = parents.get(scope)
+            return "<module>"
+        sites = {}
+        for node in ast.walk(tree):
+            kind = None
+            if (isinstance(node, ast.Attribute)
+                    and node.attr in ("read_text", "splitlines")):
+                kind = node.attr
+            elif (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "open"):
+                mode = ""
+                if (len(node.args) > 1
+                        and isinstance(node.args[1], ast.Constant)):
+                    mode = node.args[1].value
+                for keyword in node.keywords:
+                    if (keyword.arg == "mode"
+                            and isinstance(keyword.value, ast.Constant)):
+                        mode = keyword.value.value
+                if not (isinstance(mode, str) and "b" in mode):
+                    kind = "open-text"
+            if kind is not None:
+                site = (enclosing(node), kind)
+                sites[site] = sites.get(site, 0) + 1
+        return sites
+    allowed_read_sites = {
+        "tools/check_ci_parity.py": {
+            ("_naming_scenarios", "splitlines"): 1,
+            ("_run_runner_copy", "read_text"): 1,
+            ("_run_runner_copy", "splitlines"): 2,
+            ("_shadow_check", "splitlines"): 1,
+            ("adapt_standalone_runner", "splitlines"): 1,
+            ("extract_ci", "splitlines"): 1,
+            ("extract_local", "splitlines"): 2,
+            ("runner_naming_problems", "splitlines"): 1,
+            ("self_test", "splitlines"): 3,
+        },
+        "tools/selftest_git_fixture_env.py": {
+            ("_archive_reads_use_caller_env", "read_text"): 1,
+            ("_binding_calls", "read_text"): 1,
+            ("_caller_env_archive_only", "read_text"): 1,
+            ("_calls_any", "read_text"): 1,
+            ("_manifest_extra_setup_failures", "read_text"): 1,
+            ("_opf_home_lifecycles", "read_text"): 1,
+            ("_opf_lifecycle_graph_checks", "read_text"): 1,
+            ("_registered_selftests", "splitlines"): 1,
+            ("_require_wrapper_observed", "splitlines"): 1,
+            ("_scrub_scoped_first", "read_text"): 1,
+            ("_system_pin_checks", "read_text"): 1,
+            ("_system_pin_probe", "splitlines"): 1,
+            ("_write_report", "open-text"): 1,
+            ("prepare", "read_text"): 1,
+            ("run", "splitlines"): 1,
+        },
+    }
+    for relative, allowed in sorted(allowed_read_sites.items()):
+        got_sites = _read_api_sites(
+            ast.parse((ROOT / relative).read_bytes().decode("utf-8")))
+        if got_sites != allowed:
+            failures.append(
+                "29 {}: read-API sites drifted from the reviewed "
+                "allowlist; route any runner or workflow read through "
+                "read_runner_text and re-pin this vector: got {!r}, "
+                "allowed {!r}".format(
+                    relative,
+                    sorted(got_sites.items()),
+                    sorted(allowed.items())))
 
     if failures:
         print("SELF-TEST FAIL:")

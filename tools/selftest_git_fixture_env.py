@@ -397,6 +397,11 @@ def _registered_selftests(root=ROOT):
     adapter, which screens the raw text against the character allowlist before
     its own line split, then removes the validated directory binding and
     terminal exit; any adapter diagnostic refuses the roster here.
+    Each registry file is read through check_ci_parity.read_runner_text,
+    the ONE byte-level reader: the raw bytes are screened against
+    printable ASCII plus tab and newline BEFORE any decode, so a
+    decode-layer newline translation cannot erase a forbidden byte ahead
+    of the screen, and a reader diagnostic refuses the roster here too.
     Declaration coverage only: selection uses a selftest_ basename or an explicit
     --self-test, --selftest or --suite flag, not fixture-building behaviour.
     Other entry modes, unregistered entries and conditional reachability are outside
@@ -404,15 +409,18 @@ def _registered_selftests(root=ROOT):
     execution gate deliberately sanitizes its child environment.
     """
     from check_ci_parity import (
-        adapt_standalone_runner, extract_local, extract_ci, _strip_comment,
-        _tokenize, normalize)
+        adapt_standalone_runner, extract_local, extract_ci,
+        read_runner_text, _strip_comment, _tokenize, normalize)
     from check_selftest_execution import _manifest_suites
 
     commands = set()
     for relative, extract in (("tools/run_all_checks.sh", extract_local),
                               ("opf/tools/run_all_checks.sh", extract_local),
                               (".github/workflows/quality.yml", extract_ci)):
-        source = (root / relative).read_text(encoding="utf-8")
+        source, read_diagnostic = read_runner_text(root / relative, relative)
+        if read_diagnostic is not None:
+            raise ValueError("{}: registry diagnostics: {}".format(
+                relative, (read_diagnostic,)))
         if relative.startswith("opf/"):
             source, adapter_diagnostic = adapt_standalone_runner(source)
             if adapter_diagnostic is not None:
@@ -837,16 +845,27 @@ def _roster_checks():
     import check_ci_parity
     import check_selftest_execution
 
-    original = Path.read_text
     local = "tools/run_all_checks.sh"
     opf = "opf/tools/run_all_checks.sh"
     ci = ".github/workflows/quality.yml"
-    local_text = (ROOT / local).read_text(encoding="utf-8")
-    ci_text = (ROOT / ci).read_text(encoding="utf-8")
+    real_reader = check_ci_parity.read_runner_text
+    local_text, local_diagnostic = real_reader(ROOT / local, local)
+    ci_text, ci_diagnostic = real_reader(ROOT / ci, ci)
+    # The live registries must come through the byte-level reader clean;
+    # everything below mutates these texts.
+    check("roster/live-registry-reads", (local_diagnostic, ci_diagnostic),
+          (None, None))
+    if local_diagnostic is not None or ci_diagnostic is not None:
+        return
     binding = 'here="$(cd "$(dirname "$0")" && pwd)" || exit 2'
     # The valid failure-state initializers, so an empty-roster fixture reaches
     # its own guard rather than the missing-initializer diagnostic.
     state = 'failed=0\nfailed_names=""\n'
+    # The real dispatcher definition, so a fixture that declares a gate
+    # reaches its own guard rather than the definition-order diagnostic.
+    definition_start = local_text.index("run_gate() {")
+    definition = local_text[
+        definition_start:local_text.index("\n}\n", definition_start) + 3]
 
     def add_local(command):
         # Keep the exact terminal summary last so each fixture reaches its own guard.
@@ -861,6 +880,23 @@ def _roster_checks():
             return str(exc)
         return ""
 
+    scratch = Path(tempfile.mkdtemp(prefix="roster-fixture-"))
+
+    def disk_reader(name, relative, data):
+        """Write the fixture to a REAL file and redirect only the path, so
+        the raw fixture bytes flow through the actual byte-level reader;
+        injecting already-decoded text here formerly hid Path.read_text()'s
+        universal-newline translation from every roster fixture."""
+        fixture = scratch / name.replace("/", "-")
+        fixture.write_bytes(data if isinstance(data, bytes)
+                            else data.encode("utf-8"))
+        target = ROOT / relative
+
+        def read(path, source, reader=None):
+            return real_reader(fixture if path == target else path,
+                               source, reader=reader)
+        return read
+
     # Require THIS guard's diagnostic: an unrelated downstream refusal is not
     # evidence that the intended guard ran. Bad commands augment a valid roster.
     for check_id, relative, text, diagnostic in (
@@ -872,10 +908,10 @@ def _roster_checks():
              opf + ": empty registry"),
             ("roster/standalone-scaffold-refused", opf, binding + "\n" + binding + "\nexit 0\n",
              "unsupported standalone runner scaffold"),
-            # The shared adapter screens the RAW text, so the form feed is
-            # refused before the adapter's line split and newline rejoin
-            # could erase it; split first, this text adapts into a clean
-            # roster and the guard never fires.
+            # The byte-level reader refuses the form feed on the raw
+            # bytes at read time; the shared adapter's raw-text screen
+            # stays behind it for text that arrives already decoded
+            # (vector 26 pins that screen directly).
             ("roster/standalone-text-format-refused", opf,
              binding + "\n" + state
              + 'run_gate "probe-selftest" python3 -I -B tools/check_secrets.py --self-test\n'
@@ -902,15 +938,38 @@ def _roster_checks():
              add_local('\nrun_gate "launcher" python3 -B -I tools/check_secrets.py --self-test\n'),
              "unsupported self-test launcher:"),
             ("roster/empty-selftests-refused", local,
-             state + 'run_gate "live" python3 -I -B tools/check_secrets.py\n',
+             state + definition
+             + 'run_gate "live" python3 -I -B tools/check_secrets.py\n',
              local + ": empty self-test roster"),
             ("roster/prefixed-invalid-suite-refused", local,
              add_local('\nrun_gate "bad-suite" python3 -I -B ./tools/check_selftest_execution.py --suite git-fixture-env-selftest --extra\n'),
              "unparseable suite invocation:"),
+            # codex qa10 MAJOR-1: Path.read_text() translated a planted
+            # carriage return into a newline BEFORE any screen ran, so a
+            # \r-hidden gate line in a REAL runner file on disk read as a
+            # clean extra gate and the roster stayed green. Every fixture
+            # in this table is now written to disk and read through the
+            # actual byte-level reader; the two \r fixtures fail against
+            # any decode-first reader, whose universal-newline translation
+            # erases the byte ahead of a text screen.
+            ("roster/local-carriage-return-refused", local,
+             add_local('# hidden\rrun_gate "cr-probe" python3 -I -B tools/check_secrets.py --self-test'),
+             local + ": registry diagnostics:"),
+            ("roster/opf-carriage-return-refused", opf,
+             binding + "\n" + state + definition
+             + 'run_gate "probe-selftest" python3 -I -B tools/check_secrets.py --self-test\n'
+             + '# hidden\rrun_gate "cr-shadow" python3 -I -B tools/check_secrets.py --self-test\n'
+             + "exit 0\n",
+             opf + ": registry diagnostics:"),
+            # U+2028 (spelled via chr to keep this source ASCII) survives a
+            # UTF-8 decode, so only the byte-level screen refuses it at
+            # read time with the raw-byte diagnostic.
+            ("roster/ci-line-separator-refused", ci,
+             ci_text + "# probe" + chr(0x2028) + "trailer\n",
+             ci + ": registry diagnostics:"),
     ):
-        def read(path, *args, **kwargs):
-            return text if path == ROOT / relative else original(path, *args, **kwargs)
-        with patch.object(Path, "read_text", read):
+        with patch.object(check_ci_parity, "read_runner_text",
+                          disk_reader(check_id, relative, text)):
             got = refusal()
         check(check_id, got.startswith(diagnostic), True)
 
@@ -931,17 +990,16 @@ def _roster_checks():
           got.startswith("stale or unreasoned all exclusion:"), True)
 
     extra = '\nrun_gate "argument-probe" python3 -I -B tools/check_secrets.py --self-test --red-on-revert\n'
-    def read(path, *args, **kwargs):
-        value = original(path, *args, **kwargs)
-        return add_local(extra) if path == ROOT / local else value
-    with patch.object(Path, "read_text", read):
+    read = disk_reader("roster-registered-arguments", local, add_local(extra))
+    with patch.object(check_ci_parity, "read_runner_text", read):
         roster = _registered_selftests()
     check("roster/registered-arguments", ("tools/check_secrets.py", "--self-test",
                                          "--red-on-revert") in roster, True)
 
     suites = check_selftest_execution._manifest_suites(CHECKS_MANIFEST)
     extra = '\nrun_gate "new-suite" python3 -I -B ./tools/check_selftest_execution.py --suite roster-probe\n'
-    with patch.object(Path, "read_text", read), patch.object(
+    read = disk_reader("roster-prefixed-suite-expanded", local, add_local(extra))
+    with patch.object(check_ci_parity, "read_runner_text", read), patch.object(
             check_selftest_execution, "_manifest_suites", return_value=suites + [
                 {"id": "roster-probe", "runner": "tools/check_secrets.py",
                  "expected-check-ids": ["probe"]}]):
@@ -951,12 +1009,14 @@ def _roster_checks():
           and ("tools/check_secrets.py",) in roster, True)
 
     extra = '\nrun_gate "recursive-suite" python3 -I -B ./tools/check_selftest_execution.py --suite git-fixture-env-selftest\n'
-    with patch.object(Path, "read_text", read):
+    read = disk_reader("roster-prefixed-recursion", local, add_local(extra))
+    with patch.object(check_ci_parity, "read_runner_text", read):
         roster = _registered_selftests()
     check("roster/prefixed-recursion-excluded",
           ("tools/check_selftest_execution.py", "--suite", "git-fixture-env-selftest") not in roster
           and ("./tools/check_selftest_execution.py", "--suite", "git-fixture-env-selftest") not in roster
           and ("tools/selftest_git_fixture_env.py",) not in roster, True)
+    shutil.rmtree(scratch, ignore_errors=True)
 
 
 def _opf_both_legs():
