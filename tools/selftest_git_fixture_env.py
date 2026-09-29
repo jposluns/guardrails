@@ -1466,6 +1466,7 @@ def _manifest_extra_setup_failures():
 # New modules and removed wrappers are NOT implicitly exempt.
 OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_opf_adopt.py": "In-memory adoption vocabulary and validator vectors.",
+    "opf/tools/_opf_adopt_apply.py": "Apply-shell refusal, evidence and journal vectors over temporary filesystem fixtures.",
     "opf/tools/_opf_adopt_hook.py": "Pure enable-hook merge vectors over synthetic registration bytes.",
     "opf/tools/_opf_init.py": "Canonical model bytes, defaults and validator vectors.",
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
