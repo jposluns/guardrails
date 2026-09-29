@@ -2376,14 +2376,14 @@ exit 0
                         + "\n".join("PASS " + item for item in expected)
                         if scratch_only else "")})
 
-        def run_shell(body):
+        def run_shell(body, timeout=120):
             with subprocess.Popen(
                     [bash, "--noprofile", "--norc", "-c", body, str(runner)],
                     cwd=caller_cwd, env=env, stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE, text=True, start_new_session=True,
                     pass_fds=(marker.fileno(),)) as proc:
                 try:
-                    stdout, stderr = proc.communicate(timeout=120)
+                    stdout, stderr = proc.communicate(timeout=timeout)
                 except subprocess.TimeoutExpired:
                     # Kill descendants even when the shell itself has exited.
                     try:
@@ -2410,7 +2410,15 @@ exit 0
             raise RuntimeError(identity + "/cannot-evaluate/interception")
         # Exec only in the function subshell, so the runner can continue.
         shim = "python3() ( exec " + shlex.quote(str(executable)) + ' "$@" );\n'
-        proc = run_shell(shim + source)
+        # Only a non-scratch leg can reach the real nested vector suite (the
+        # scratch legs answer with canned output), and the config-injection
+        # lanes run registered self-tests four abreast: under that load the
+        # nested suite alone can exceed 120 s, so this leg timed out to
+        # cannot-evaluate without ever reading host configuration. 600 s
+        # keeps the worst-case hang inside the lanes' 1200 s member budget
+        # while removing the load sensitivity; the interception probe and
+        # the scratch legs keep the tight bound.
+        proc = run_shell(shim + source, timeout=120 if scratch_only else 600)
         try:
             argv_log = log.read_bytes()
         except OSError as exc:
