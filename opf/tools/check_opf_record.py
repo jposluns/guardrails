@@ -177,10 +177,12 @@ class Env:
 
 def assert_no_auto_maintenance(env, base):
     """DETERMINISTIC guard on the run_git maintenance pins (F-367): a traced fixture commit must
-    spawn NO maintenance or gc child. Without the pins, commit spawns `git maintenance run --auto`,
-    which DETACHES and keeps pruning .git/objects after run_git returned, racing the copytree in
-    Fixtures.case (ENOENT mid-copy). Runs before any fixture is built; a spawned child is a
-    Harness fault (exit 2, cannot-evaluate), never a verdict."""
+    spawn NO maintenance or gc child. Without the pins, commit spawns the DETACHED `git
+    maintenance run --auto` child; what an unpinned commit demonstrates here is that child
+    LAUNCHING (this single-file seed stays under the automatic-work thresholds), and once those
+    thresholds are met the child can repack or prune .git/objects after run_git returned, racing
+    the copytree in Fixtures.case (ENOENT mid-copy). Runs before any fixture is built; a spawned
+    child is a Harness fault (exit 2, cannot-evaluate), never a verdict."""
     probe = base / "maintenance-probe"
     probe.mkdir()
     trace = base / "maintenance-probe-trace.jsonl"

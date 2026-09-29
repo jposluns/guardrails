@@ -423,6 +423,8 @@ expected-check-ids = [
   "env/lifecycle-path-removal-red",
   "env/no-auto-maintenance",
   "env/no-auto-maintenance-red",
+  "env/maintenance-pin-scan",
+  "env/maintenance-pin-scan-red",
   "env/opf-ingest-apply-both-legs",
   "env/opf-lifecycle-names-independent",
   "env/opf-lifecycle-bypass-denied",
