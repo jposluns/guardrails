@@ -1853,6 +1853,205 @@ def _self_test_checks():
                 _journal._close_fd_quietly(jr_fd)
             os.close(root_fd)
 
+    # 6j: the temporary owner-write grant itself (fix #3). The grant is HARD-LINK GATED: a multiply-
+    # linked unwritable target is refused BEFORE any chmod (codex round-3: a second name, here OUTSIDE
+    # the product root, must stay exactly as found, under an injected fstat fault, under an uninjected
+    # retry, and under an interruption raced into the reopen). On a singly-linked target the grant is
+    # reverted on EVERY failed exit (an fstat fault, an identity refusal, an interruption at the
+    # reopen), a raced-in symlink at the grant chmod fails closed as a JournalError (never a raw
+    # ValueError), the grant requires OWNERSHIP (a non-owned unwritable file fails closed with a named
+    # JournalError, simulated by an EPERM chmod), and the recreate path's verify-before-mode ordering
+    # is pinned (at the restore checkpoint the recreated file still holds the temporary 0600, the
+    # exact prestate mode installed only after).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        product = Path(temp).resolve() / "product"       # the product root under restore ...
+        product.mkdir()
+        outside = Path(temp).resolve() / "outside-link.md"   # ... and a second name OUTSIDE it
+        prior = b"the recorded preimage bytes\n"
+        (product / "legacy").mkdir()
+        live = product / "legacy/LOCKED.md"
+
+        def mode_of(p):
+            return stat.S_IMODE(p.lstat().st_mode)
+
+        def reset(linked=False):
+            for f in (live, outside):
+                if f.exists():
+                    f.unlink()
+            live.write_bytes(b"?" * len(prior))          # a faulted earlier restore's debris
+            if linked:
+                os.link(live, outside)
+            live.chmod(0o400)
+
+        root_fd = store._open_dir_nofollow(product)
+        try:
+            _journal.ensure_journal_dirs(root_fd, JOURNAL_REL)
+            txn_dir = _journal_root(product) / rid
+            (txn_dir / "preimages").mkdir(parents=True)
+            (txn_dir / "preimages/0").write_bytes(prior)
+            op = dict(op="remove", path="legacy/LOCKED.md",
+                      prestate=dict(kind="file", mode=0o400, size=len(prior), payload="0",
+                                    sha256=_sha256(prior)))
+            jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
+            try:
+                def try_restore():
+                    try:
+                        _journal._restore_preimage(jr_fd, txn_dir, root_fd, op)
+                        return None
+                    except _journal.JournalError as exc:
+                        return str(exc)
+
+                # the multiply-linked target is refused BEFORE any chmod: the injected identity-fstat
+                # fault (codex's reproduction) is never even reached, and BOTH names keep 0400 exactly
+                reset(linked=True)
+
+                def eio_fstat(fd, _real=os.fstat, _ino=live.lstat().st_ino):
+                    fst = _real(fd)
+                    if fst.st_ino == _ino:
+                        raise OSError(5, "injected fault at the identity fstat")
+                    return fst
+
+                with mock.patch.object(os, "fstat", eio_fstat):
+                    refused = try_restore()
+                check("grant-hardlink-refused-before-any-chmod",
+                      refused is not None and "hard links" in refused
+                      and mode_of(live) == 0o400 and mode_of(outside) == 0o400
+                      and outside.lstat().st_nlink == 2)
+                retried = try_restore()                  # uninjected retry: still refused, still 0400
+                check("grant-hardlink-uninjected-retry-still-as-found",
+                      retried is not None and "hard links" in retried
+                      and mode_of(live) == 0o400 and mode_of(outside) == 0o400)
+
+                # an interruption raced into the reopen window: for a multiply-linked inode there IS
+                # no grant window (no chmod ever runs), so the outside name stays exactly as found
+                reset(linked=True)
+                opens = []
+
+                def interrupting_open(p, flags, *a, _real=os.open, **kw):
+                    if p == "LOCKED.md" and kw.get("dir_fd") is not None:
+                        opens.append(p)
+                        if len(opens) == 2:
+                            raise KeyboardInterrupt()
+                    return _real(p, flags, *a, **kw)
+
+                with mock.patch.object(os, "open", interrupting_open):
+                    try:
+                        interrupted = try_restore()
+                    except BaseException as exc:
+                        interrupted = "escaped: " + type(exc).__name__
+                check("grant-hardlink-interrupt-leaves-modes-as-found",
+                      interrupted is not None and "hard links" in interrupted and len(opens) == 1
+                      and mode_of(live) == 0o400 and mode_of(outside) == 0o400)
+
+                # fault-and-retry on the singly-linked target: an fstat fault AFTER the grant reverts
+                # the grant on that exit (fail-closed), and the uninjected retry lands the exact
+                # prestate bytes and mode
+                reset()
+                armed = [True]
+
+                def eio_fstat_once(fd, _real=os.fstat, _ino=live.lstat().st_ino):
+                    fst = _real(fd)
+                    if armed and fst.st_ino == _ino:
+                        armed.clear()
+                        raise OSError(5, "injected fault at the identity fstat")
+                    return fst
+
+                with mock.patch.object(os, "fstat", eio_fstat_once):
+                    faulted = try_restore()
+                check("grant-fstat-fault-fails-closed-and-reverts-the-grant",
+                      faulted is not None and mode_of(live) == 0o400)
+                refinished = try_restore()               # the fault is gone: the restore must finish
+                check("grant-fstat-fault-retry-restores-exact-prestate",
+                      refinished is None and mode_of(live) == 0o400 and live.read_bytes() == prior)
+
+                # an identity refusal (a swapped inode) also reverts the grant before failing closed
+                reset()
+
+                def swapped_fstat(fd, _real=os.fstat, _ino=live.lstat().st_ino):
+                    fst = _real(fd)
+                    if fst.st_ino == _ino:
+                        fake = list(fst)
+                        fake[1] = fst.st_ino + 1         # a different inode: the identity check refuses
+                        return os.stat_result(fake)
+                    return fst
+
+                with mock.patch.object(os, "fstat", swapped_fstat):
+                    swapped = try_restore()
+                check("grant-identity-refusal-reverts-the-grant",
+                      swapped is not None and "swapped" in swapped and mode_of(live) == 0o400)
+
+                # an interruption AT the reopen of a singly-linked target reverts the grant too
+                reset()
+                opens2 = []
+
+                def interrupting_open2(p, flags, *a, _real=os.open, **kw):
+                    if p == "LOCKED.md" and kw.get("dir_fd") is not None:
+                        opens2.append(p)
+                        if len(opens2) == 2:
+                            raise KeyboardInterrupt()
+                    return _real(p, flags, *a, **kw)
+
+                escaped = []
+                with mock.patch.object(os, "open", interrupting_open2):
+                    try:
+                        try_restore()
+                    except KeyboardInterrupt:
+                        escaped.append(True)
+                check("grant-interrupt-at-reopen-reverts-the-grant",
+                      escaped == [True] and mode_of(live) == 0o400)
+
+                # a symlink raced in at the grant chmod is a JournalError, never a raw ValueError
+                reset()
+
+                def valueerror_chmod(p, m, *a, _real=os.chmod, **kw):
+                    if p == "LOCKED.md" and kw.get("dir_fd") is not None and m == 0o600:
+                        raise ValueError("chmod: cannot use dir_fd and follow_symlinks together")
+                    return _real(p, m, *a, **kw)
+
+                with mock.patch.object(os, "chmod", valueerror_chmod):
+                    try:
+                        raced = try_restore()
+                    except ValueError:
+                        raced = None                     # a raw ValueError escaped: red
+                check("grant-raced-symlink-valueerror-is-journalerror",
+                      raced is not None and "symlink" in raced and mode_of(live) == 0o400)
+
+                # the grant requires OWNERSHIP: a non-owned unwritable file (the kernel refuses the
+                # chmod with EPERM, simulated here) fails closed with the NAMED JournalError
+                reset()
+
+                def eperm_chmod(p, m, *a, _real=os.chmod, **kw):
+                    if p == "LOCKED.md" and kw.get("dir_fd") is not None and m == 0o600:
+                        raise PermissionError(1, "Operation not permitted")
+                    return _real(p, m, *a, **kw)
+
+                with mock.patch.object(os, "chmod", eperm_chmod):
+                    denied = try_restore()
+                check("grant-requires-ownership-fails-closed-named",
+                      denied is not None and "ownership" in denied and mode_of(live) == 0o400)
+
+                # the RECREATE path's verify-before-mode ordering is pinned: AT the restore checkpoint
+                # the recreated file still holds the temporary owner-rw 0600 (so a faulted checkpoint
+                # leaves a reopenable file), and the exact 0400 prestate mode is installed only after
+                live.unlink()                            # absent live file: the recreate path
+                interim = []
+                real_read_back = _journal._read_back_verify
+
+                def observing_read_back(fd, expected_sha, path_, what):
+                    if what == "restored":
+                        interim.append(stat.S_IMODE(os.fstat(fd).st_mode))
+                    return real_read_back(fd, expected_sha, path_, what)
+
+                with mock.patch.object(_journal, "_read_back_verify", observing_read_back):
+                    recreated = try_restore()
+                check("recreate-verifies-before-prestate-mode-installed",
+                      recreated is None and interim == [0o600] and mode_of(live) == 0o400
+                      and live.read_bytes() == prior)
+            finally:
+                _journal._close_fd_quietly(jr_fd)
+        finally:
+            os.close(root_fd)
+
     # 7: an interrupted apply (INTENT without a terminal frame, through the journal's kill-point seam)
     # refuses every later run until the EXPLICIT reconcile, which works from the journal alone and never
     # resolves the store; it reverses fully mid-archive, and completes forward once every op landed.
