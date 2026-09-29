@@ -4613,10 +4613,13 @@ def _watchdog_completion_case(mode):
         # These classes are RESIDUAL, not enforced: their absence
         # from the emit module is a review invariant, and a mutation
         # inside one of them evades this leg while leg 19 still holds
-        # every existing boundary CALL SITE -- each driven at its own
-        # pending point, the cancellations born inside owned-handle
-        # cleanup included (fix 12, QA33 claude/codex BLOCKER) -- to
-        # its runtime behaviour.
+        # every existing boundary CALL SITE in the computed
+        # close-lifecycle closure -- each driven at its own pending
+        # point, the cancellations born inside owned-handle cleanup
+        # included (fix 12, QA33 claude/codex BLOCKER) -- to its
+        # runtime behaviour; a boundary call OUTSIDE that closure
+        # (_fixture_children's guardian-side census) is outside
+        # leg 19's hold (fix 13, QA34 gemini MINOR).
         import ast
         import builtins
         import inspect
@@ -5590,24 +5593,50 @@ def _watchdog_completion_case(mode):
                         # fix 10 (QA31 codex BLOCKER 1): no binding
                         # form may touch the captured name while it may
                         # be pending -- a walrus hides inside any
-                        # expression and a nested def reaches the name
-                        # only through nonlocal/global, both scanned
-                        # over the WHOLE statement subtree here; a def
-                        # named like the capture is caught below, and
-                        # the statement forms the walk does not model
+                        # expression that executes HERE, and a nested
+                        # def reaches the name only through
+                        # nonlocal/global, scanned over the WHOLE
+                        # statement subtree; a def named like the
+                        # capture is caught below, and the statement
+                        # forms the walk does not model
                         # (for/with/except/del/import/class targets)
                         # already fail closed
                         leaf, nested_def = leaves.pop()
+                        # fix 13 (QA34 codex/claude MAJOR): only a
+                        # nested def's or lambda's BODY is deferred to
+                        # its own call -- its decorators, parameter
+                        # defaults and every other definition-time
+                        # expression evaluate NOW, in THIS function,
+                        # and stay scanned here; and a LOCAL
+                        # annotation expression never executes at all
+                        # (fix 13, QA34 codex MINOR: nothing spelled
+                        # inside one runs or binds), so it is not
+                        # walked
+                        if isinstance(leaf, (ast.FunctionDef,
+                                             ast.AsyncFunctionDef)):
+                            deferred = set(map(id, leaf.body))
+                        elif isinstance(leaf, ast.Lambda):
+                            deferred = set((id(leaf.body),))
+                        else:
+                            deferred = set()
+                        skipped = (id(leaf.annotation)
+                                   if isinstance(leaf, ast.AnnAssign)
+                                   else None)
                         leaves.extend(
-                            (child, nested_def or isinstance(
-                                leaf, (ast.FunctionDef,
-                                       ast.AsyncFunctionDef,
-                                       ast.Lambda)))
-                            for child in ast.iter_child_nodes(leaf))
-                        assert not (isinstance(leaf, ast.NamedExpr)
-                                    and isinstance(leaf.target,
-                                                   ast.Name)
-                                    and leaf.target.id == captured), (
+                            (child,
+                             nested_def or id(child) in deferred)
+                            for child in ast.iter_child_nodes(leaf)
+                            if id(child) != skipped)
+                        # a walrus inside a nested def's or lambda's
+                        # BODY binds THAT function's local, never the
+                        # enclosing captured name (fix 13, QA34 codex
+                        # MINOR); reaching back needs nonlocal/global,
+                        # rejected function-wide above and on every
+                        # leaf below
+                        assert nested_def or not (
+                            isinstance(leaf, ast.NamedExpr)
+                            and isinstance(leaf.target, ast.Name)
+                            and leaf.target.id == captured), (
                             "the captured name is rebound before its "
                             "re-raise (fix 9/10, QA31 codex "
                             "BLOCKER 1)", key)
@@ -5617,12 +5646,16 @@ def _watchdog_completion_case(mode):
                             "the captured name is rebound before its "
                             "re-raise (fix 9/10, QA31 codex "
                             "BLOCKER 1)", key)
-                        # a yield/await INSIDE a nested def or
-                        # lambda suspends THAT function when it is
-                        # called, never this one, so it is no
+                        # a yield/await INSIDE a nested def's or
+                        # lambda's BODY suspends THAT function when
+                        # it is called, never this one, so it is no
                         # suspension point here (fix 12, QA33 codex
-                        # MINOR); its body is checked where it is
-                        # routed
+                        # MINOR; the body is checked where it is
+                        # routed) -- but one in a parameter default
+                        # or any other definition-time expression
+                        # runs in THIS function and generator-
+                        # converts it, so only the body is exempt
+                        # (fix 13, QA34 codex/claude MAJOR)
                         assert nested_def or not isinstance(
                             leaf, (ast.Yield, ast.YieldFrom,
                                    ast.Await)), (
@@ -6349,6 +6382,155 @@ def _watchdog_completion_case(mode):
                              "vector:codex33-minor-yield"),
             "interrupted", "vector:codex33-minor-yield")
 
+        # QA34 codex/claude MAJOR (fix 13, a fix-12 regression): a
+        # nested def's or lambda's parameter DEFAULT is
+        # definition-time work -- it evaluates in the ENCLOSING
+        # function, and a yield spelled there generator-converts
+        # THAT function, so its body (every boundary and re-raise
+        # included) never runs when it is called. The nested-body
+        # exemption must not cover it: the default, keyword-default
+        # and lambda-default spellings are all rejected as
+        # suspension points.
+        for label, source in (
+                ("default", """
+            def mutant(self):
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                def unused(value=(yield 1)):
+                    pass
+                if interrupted is not None:
+                    raise interrupted
+            """),
+                ("kwdefault", """
+            def mutant(self):
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                def unused(*, value=(yield 1)):
+                    pass
+                if interrupted is not None:
+                    raise interrupted
+            """),
+                ("lambda", """
+            def mutant(self):
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                unused = lambda value=(yield 1): value
+                if interrupted is not None:
+                    raise interrupted
+            """),
+        ):
+            function, capturing = leg11_vector(source)
+            leg11_vector_rejected(
+                "codex/claude QA34 " + label + " vector: a yield in "
+                "a nested definition-time default suspends the "
+                "enclosing function",
+                lambda function=function, capturing=capturing,
+                       label=label:
+                    deferred_capture_sound(
+                        function,
+                        successors_after(
+                            function, capturing,
+                            "vector:codex34-major-" + label),
+                        "interrupted",
+                        "vector:codex34-major-" + label))
+
+        # Companion rejection pin (fix 13): a walrus in that same
+        # definition-time default binds in the ENCLOSING scope, so
+        # the nested-body walrus exemption must not cover it either
+        # (already rejected at f4200b43; this pins the seam between
+        # the two fix-13 exemptions).
+        function, capturing = leg11_vector("""
+            def mutant(self):
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                def unused(value=(interrupted := None)):
+                    pass
+                if interrupted is not None:
+                    raise interrupted
+            """)
+        leg11_vector_rejected(
+            "fix 13 companion: a walrus in a nested definition-time "
+            "default rebinds the captured name",
+            lambda function=function, capturing=capturing:
+                deferred_capture_sound(
+                    function,
+                    successors_after(
+                        function, capturing,
+                        "vector:codex34-walrus-default"),
+                    "interrupted", "vector:codex34-walrus-default"))
+
+        # QA34 codex MINOR (fix 13, over-rejection pin): a walrus in
+        # a nested def's own BODY binds that function's local -- it
+        # cannot rebind the enclosing captured name without a
+        # nonlocal/global reach-back, which stays rejected
+        # function-wide -- so defining it after the capture must be
+        # ACCEPTED.
+        function, capturing = leg11_vector("""
+            def mutant(self):
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                def unused():
+                    return (interrupted := None)
+                if interrupted is not None:
+                    raise interrupted
+            """)
+        deferred_capture_sound(
+            function,
+            successors_after(function, capturing,
+                             "vector:codex34-minor-walrus-local"),
+            "interrupted", "vector:codex34-minor-walrus-local")
+
+        # QA34 codex MINOR (fix 13, over-rejection pin): a LOCAL
+        # annotation expression never executes, so a walrus spelled
+        # inside it -- reachable only through a nested lambda's body
+        # on this Python -- binds nothing and must be ACCEPTED.
+        function, capturing = leg11_vector("""
+            def mutant(self):
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                interrupted: (lambda: (interrupted := None))
+                if interrupted is not None:
+                    raise interrupted
+            """)
+        deferred_capture_sound(
+            function,
+            successors_after(
+                function, capturing,
+                "vector:codex34-minor-walrus-annotation"),
+            "interrupted", "vector:codex34-minor-walrus-annotation")
+
+        # QA34 gemini a (fix 13, acceptance pin): a bare local
+        # annotation nested inside the guard body after the capture
+        # is dispatched by walk_block's own AnnAssign arm -- never a
+        # whole-block call scan -- and stays ACCEPTED.
+        function, capturing = leg11_vector("""
+            def mutant(self):
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                if interrupted is not None:
+                    interrupted: BaseException | type(None)
+                    raise interrupted
+            """)
+        deferred_capture_sound(
+            function,
+            successors_after(function, capturing,
+                             "vector:gemini34-annotation-in-if"),
+            "interrupted", "vector:gemini34-annotation-in-if")
+
         # Leg 12 (QA27 codex BLOCKER 1): a TimeoutError raised at the
         # subject SIGSTOP stays the outward exception when the held-pidfd
         # subject SIGKILL in the finally itself fails -- with an ordinary
@@ -6730,8 +6912,12 @@ def _watchdog_completion_case(mode):
         # site where no enclosing boundary carries the same pending
         # value; at _finish_close's two normal-path calls the
         # enclosing boundary does, so a revert there leaves the
-        # driven behaviour intact -- leg 11's tripwire, not this
-        # leg, is what rejects the direct call. Reproduced for the
+        # driven behaviour intact -- what rejects the direct call
+        # there is this leg's OWN coverage assert, not leg 11's
+        # tripwire (fix 13, QA34 claude MINOR: leg 11 covers the two
+        # exceptional-path calls only, and dropping a normal-path
+        # site shifts its label's source-order ordinals, stranding
+        # that ordinal's case as stale). Reproduced for the
         # unfinished-launch abandonment site during fix 11 and for
         # both owned-handle cleanup sites during fix 12.
         lifecycle_sites = set()
