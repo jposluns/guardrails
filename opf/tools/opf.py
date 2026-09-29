@@ -11,20 +11,30 @@ passing operation. `render` HAS landed (PR-A): the `opf render` CLI requires exa
 `--check | --write` (a bare `render` is a usage error, exit 2); `--check` is the read-only drift check
 (forwarding to the U4 engine) and `--write` (VC-4/PR-C) is the mutating half: it gathers the inert git-derived
 observations caller-side (_opf_observe.gather) and hands them to the U4 engine, which composes the EXISTING U6
-`validate_store` store-integrity gate and permits the write only on a VALID verdict, refusing an INVALID or
-CANNOT-EVALUATE store with exit 2 and writing nothing. `doctor` HAS landed (PR-B): `opf doctor
-[--root DIR]` RESOLVES the store, gathers the inert git-derived observations (_opf_observe.gather: tracked,
-actual_remote, prior), and runs the U6 `validate_store` store-integrity engine over them, returning that
-engine's 0/1/2 contract (a NOT-ADOPTED root reports NOT APPLICABLE and exits 0). Doctor is read-only; its
+`validate_store` store-integrity gate and permits writing when source integrity holds. Post-write validation
+checks source integrity and regenerated outputs; other deliverable failures can remain. `doctor` HAS landed: `opf doctor
+[--root DIR] [--require-store]` RESOLVES the store, gathers the inert git-derived observations
+(_opf_observe.gather: tracked, actual_remote, prior), and runs the U6 `validate_store` store-integrity engine
+over them, returning that engine's 0/1/2 contract (a NOT-ADOPTED root reports NOT APPLICABLE and exits 0;
+with `--require-store`, the enforcement-pack CI floor, it is a cannot-evaluate and exits 2 instead, so a
+repository whose store was removed cannot pass CI vacuously). Doctor is read-only; its
 observation gather is the caller-side git seam validate_store itself never touches. `upgrade` HAS landed
-(spec 9.2): `opf upgrade [--root DIR]` is the in-place, additive, idempotent 1.0.0 -> 1.1.0 store-schema
-upgrade. It refuses fail-closed on a store above the tooling spec or on a non-canonical manifest/counters,
-applies exactly the allowed delta as a canonical model regeneration (bump spec_version; retire the
-decision_support module; add the contribution/maintainer_decision/preference_pattern type rows and the two
-new view rows; extend counters with CN/MD/PP preserving existing high-waters; create the three missing empty
-indexes, skipping any that already exist), renders the declared views, and requires a full doctor VALID
-before offering the staged change; it never commits (the adopter reviews and merges). A store already at the
-tooling spec_version is a byte no-op; a NOT-ADOPTED root reports NOT APPLICABLE and exits 0. `import` HAS
+(spec 9.2): `opf upgrade [--root DIR] [--homes-plan]`. With `--homes-plan`, it prints the homes-generation
+migration plan read-only and exits without upgrading. Otherwise it is the in-place, additive, idempotent
+upgrade from 1.0.0 or 1.1.0 to 1.2.0. The 1.1.0 schema delta changes only spec_version; declared views
+are then regenerated, so a stale committed view can change. The 1.0.0 path also applies the earlier
+schema delta
+(base-table and discovery-token rename, decision_support retirement, type and view declarations,
+DECISIONS.md source widening, counters, and missing indexes). Neither creates init.toml provenance.
+It refuses a store above the tooling spec. When migrating a 1.0.0 or 1.1.0 store, its preconditions
+include readable, canonical manifest/counters matching a recognised origin shape, cleanliness over
+planned schema/render destinations and index collision candidates (including ignored files there),
+and acquisition of its lease. An untracked or ignored lease is excepted from the cleanliness check
+and handled separately by lease acquisition. It then applies the schema delta,
+renders declared views, and requires a full doctor VALID before offering the uncommitted change for
+review and merge. A store already at the
+tooling spec_version is a byte no-op when doctor-VALID and exits 2 otherwise; a NOT-ADOPTED root reports
+NOT APPLICABLE and exits 0. `import` HAS
 landed (OPF-IMPORT-VERB): `opf import [--root DIR] (--scan --set FILE | --plan --set FILE | --review
 <run-id> --actor NAME (--decisions FILE | --interactive) | --apply <run-id>)` wires the reserved verb onto
 the U7 operation layer (_opf_import scan/plan/review/apply). Exactly one mode is required; `--scan` renders
@@ -34,6 +44,17 @@ attributed acceptance.json (no live-store write), and `--apply` wires onto the P
 0/1/2 verdict to the CLI exit contract. Unlike the applicability-probe siblings, import is a REQUESTED
 operation: an unresolved / NOT-ADOPTED root fails cannot-evaluate (exit 2) with a "run `opf init` first"
 message rather than reporting NOT APPLICABLE (divergence D7).
+
+`init` HAS landed: `opf init [--root DIR]` creates validated store sources, a pointer, and a starter
+`CHANGELOG.md` when none exists, without git writes or rendering.
+`absorb` HAS landed: `opf absorb [--root DIR] [--covers TOKEN] [--freeze-digest]`
+prints a changelog draft or freeze digest without writing files.
+`record` HAS landed (spec 8.8): `opf record create`, `transition`, `done-with-receipt`, and `worklog-append`
+author one change (with its own worklog entry, and for done-with-receipt the one-to-one done receipt)
+through one journaled publication, then render and require doctor VALID, leaving the change uncommitted.
+The one exception to doctor VALID is a status change (transition or done-with-receipt): doctor may then
+report only its cannot-evaluate for exactly that record and from/to pair, never a finding, and it keeps
+reporting that cannot-evaluate until the change is committed.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
 root named by --root (default: the cwd), never on this pack's own tree via `_gen_common.repo_root()`.
@@ -75,7 +96,7 @@ def _bootstrap():
     that could not be brought in."""
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
     global _opf_emit, _opf_views, _opf_fuzz, _opf_import, _opf_importers, _opf_observe, _opf_absorb
-    global _opf_ingest
+    global _opf_ingest, _opf_write_guard, _opf_record
     try:
         import _opf_store       # U1: store resolution + discovery + manifest base/profile schema
         import _opf_schema      # U2: record envelope + baseline type schemas + status/transition + counters
@@ -90,6 +111,8 @@ def _bootstrap():
         import _opf_ingest      # MIG-PR3: root-ingest detect + the disposition planner (plan_ingest)
         import _opf_observe     # PR-B: caller-side git-derived observations for the doctor verb (validate_store)
         import _opf_absorb      # OPF-CHANGELOG-ABSORB: read-only CHANGELOG.md drafter (composes on U5)
+        import _opf_write_guard  # the in-place writers' shared cleanliness gate and single-writer lease
+        import _opf_record      # OPF-RECORD: the record-authoring verb (spec 8.8)
     except ImportError as exc:
         print("opf: cannot bootstrap: {} (cannot evaluate)".format(exc.name or exc), file=sys.stderr)
         return EXIT_MALFORMED
@@ -124,6 +147,46 @@ def _aggregator_self_test():
         return EXIT_FINDING
     print("opf aggregator self-test: PASS (fail-closed on non-int / out-of-range helper returns)")
     return EXIT_OK
+
+
+_REPLAY_CAP = 8192       # max CAPTURED characters re-emitted as failure evidence (head + tail halves)
+
+
+def _replay_captured(label, text):
+    """Re-emit captured inner-run output as failure evidence, BOUNDED and terminal-safe. At most
+    _REPLAY_CAP characters of the CAPTURED text are re-emitted: when the capture is longer, the first and
+    last _REPLAY_CAP//2 characters are kept, with an explicit elision marker between them naming how much
+    was dropped, so the TAIL -- where a failing inner run prints its failure lines and summary -- survives
+    the bound instead of being cut away with the head-only clip. The cap applies to the CAPTURED
+    characters BEFORE escaping: every non-printable character except the newline, and every backslash, is
+    escaped repr-style, so the emitted evidence is bounded by _REPLAY_CAP times the longest
+    single-character escape (10 characters, a non-printable astral code point), PLUS up to one terminating
+    newline per emitted chunk (appended only when the chunk does not already end in one; one chunk
+    unclipped, two -- head and tail -- clipped) and the elision marker line; it is not bounded by
+    _REPLAY_CAP itself.
+    Escaping the backslash keeps the escapes unambiguous: literal backslash-x-1-b text in the capture no
+    longer renders identically to an escaped ESC. A NESTED replay (a capture that itself contains replay
+    output, as when the wrapper-deadline test re-emits the hostile test's already-escaped replay) escapes
+    the inner replay's backslashes AGAIN, so an inner escape renders with a doubled backslash: still
+    unambiguous at a known nesting depth, at a readability cost. Single-pass emission of inner replays is
+    not attempted, because the capture does not mark which of its regions are already escaped. `label`
+    prefixes the elision marker only; the (escaped)
+    captured text itself is re-emitted unprefixed, as before."""
+    def _esc(chunk):
+        out = "".join(ch if ch == "\n" or (ch.isprintable() and ch != "\\")
+                      else repr(ch)[1:-1] for ch in chunk)
+        if not out.endswith("\n"):
+            out += "\n"
+        return out
+    total = len(text)
+    if total <= _REPLAY_CAP:
+        sys.stderr.write(_esc(text))
+        return
+    _half = _REPLAY_CAP // 2
+    sys.stderr.write(_esc(text[:_half]))
+    print("{}: captured output truncated: showing the first and last {} of {} characters ({} "
+          "elided)".format(label, _half, total, total - 2 * _half), file=sys.stderr)
+    sys.stderr.write(_esc(text[-_half:]))
 
 
 def _watchdog_hostile_ambient_self_test():
@@ -176,8 +239,14 @@ def _watchdog_hostile_ambient_self_test():
             # value AND a nonzero repeating interval, F3), BLOCK SIGALRM, then self-signal so a SIGALRM is left
             # PENDING-and-BLOCKED (timer already fired).
             _signal.signal(_signal.SIGALRM, _benign)
-            _signal.setitimer(_signal.ITIMER_REAL, _FIX_VAL, _FIX_INT)
+            # F3 (load-hardening, start side): the elapsed baseline is sampled BEFORE the fixture timer is
+            # armed, so a scheduler preemption between the sample and the arm only WIDENS the accepted band
+            # (conservative). The prior order (arm, then sample) excluded timer time consumed by a
+            # preemption between arming and the sample from _elapsed_ub, so the band check redded under
+            # machine load with the restore itself correct (the start-side twin of the end-side
+            # read-ordering defect handled at the _elapsed_ub measurement below).
             _t_arm = _time.monotonic()                            # F3: elapsed baseline for the fixture-value bound
+            _signal.setitimer(_signal.ITIMER_REAL, _FIX_VAL, _FIX_INT)
             _signal.pthread_sigmask(_signal.SIG_BLOCK, {_signal.SIGALRM})
             _os.kill(_os.getpid(), _signal.SIGALRM)
             _pending_ok = _signal.SIGALRM in _signal.sigpending()
@@ -189,23 +258,39 @@ def _watchdog_hostile_ambient_self_test():
             except BaseException as exc:                          # a watchdog crash is the pre-fix failure
                 _crashed = repr(exc)
                 rc = None
-            _fn_elapsed = _time.monotonic() - _t_arm              # upper bound on the elapsed the watchdog subtracts
             _blocked_after = _signal.SIGALRM in _signal.pthread_sigmask(_signal.SIG_BLOCK, set())
             _disp_after = _signal.getsignal(_signal.SIGALRM)
             _val_after, _int_after = _signal.getitimer(_signal.ITIMER_REAL)
+            # F3 (load-hardening, end side): the elapsed upper bound for the fixture-value band spans from
+            # BEFORE the fixture timer was armed (_t_arm above) to AFTER the getitimer read, so it BRACKETS
+            # everything the fixture timer can have consumed: the elapsed the watchdog subtracted (its
+            # snapshot is at or after the arm) PLUS the restored timer's live countdown up to the read. The
+            # prior end bound was measured BEFORE the read (at fn() return); a scheduler preemption between
+            # that measurement and the read let the restored timer count below the bound, so the band check
+            # redded under machine load with the restore itself correct (a test-hermeticity defect: the
+            # verdict tracked ambient scheduling, not the code under test; fixed at the test).
+            _elapsed_ub = _time.monotonic() - _t_arm
             _pending_after = _signal.SIGALRM in _signal.sigpending()   # F2: caller pending must survive
             if not _pending_ok:
                 print("opf watchdog self-test: {}: setup did not leave SIGALRM pending".format(label),
                       file=sys.stderr)
                 ok = False
             if _crashed is not None:
-                print("opf watchdog self-test: {}: RAISED under blocked+pending SIGALRM ({}); the unblock "
-                      "escaped its try/finally (F2)".format(label, _crashed), file=sys.stderr)
+                print("opf watchdog self-test: {}: RAISED under blocked+pending SIGALRM ({}); an exception "
+                      "escaped the helper under the hostile ambient (F2)".format(label, _crashed), file=sys.stderr)
                 ok = False
             elif rc != EXIT_OK:
                 print("opf watchdog self-test: {}: returned {!r} under the hostile ambient (expected "
                       "0)".format(label, rc), file=sys.stderr)
                 ok = False
+            if (_crashed is not None or rc != EXIT_OK) and _buf.getvalue():
+                # The redirect above keeps a passing run quiet, but on a crash or nonzero return the
+                # captured output IS the failure evidence; re-emit it rather than swallow it -- BOUNDED
+                # (capped with an explicit truncation marker, control characters escaped), so a
+                # misbehaving inner run cannot flood the log or rewrite the terminal.
+                print("opf watchdog self-test: {}: captured output of the failing inner run "
+                      "follows".format(label), file=sys.stderr)
+                _replay_captured("opf watchdog self-test: {}".format(label), _buf.getvalue())
             if not _blocked_after:
                 print("opf watchdog self-test: {}: left SIGALRM UNBLOCKED; the caller mask was corrupted "
                       "(F2)".format(label), file=sys.stderr)
@@ -226,15 +311,20 @@ def _watchdog_hostile_ambient_self_test():
                 ok = False
             # F3 (round-12): the watchdog must restore the caller's ITIMER VALUE (elapsed-aware, per F2) AND
             # its REPEATING INTERVAL, not merely leave some positive time. The value lies in
-            # (_FIX_VAL - _fn_elapsed, _FIX_VAL]: the watchdog subtracts an elapsed >= 0 and <= the whole
-            # fn() run, so a restored value below that band means the value was not preserved and one above
-            # _FIX_VAL means the elapsed was not subtracted at all. A small float slack absorbs monotonic
-            # jitter. The interval must be restored exactly to the fixture's _FIX_INT; a dropped
-            # interval-restoration leaves 0 and reds this (the mutant a one-shot fixture hid).
-            if not (_FIX_VAL - _fn_elapsed - 1e-3 <= _val_after <= _FIX_VAL + 1e-3):
+            # [_FIX_VAL - _elapsed_ub, _FIX_VAL]: the watchdog subtracts an elapsed >= 0, and the restored
+            # timer keeps counting down until the getitimer read, so the total deficit at the read is at
+            # most _elapsed_ub, which is measured AFTER that read and therefore brackets both parts. A
+            # restored value below the band means the caller's value was lost or over-reduced; one above
+            # _FIX_VAL means time was ADDED to the caller's deadline (an extended or re-armed-to-full
+            # restore). A small float slack absorbs monotonic jitter. The interval must be restored exactly
+            # to the fixture's _FIX_INT; a dropped interval-restoration leaves 0 and reds this (the mutant
+            # a one-shot fixture hid).
+            if not (_FIX_VAL - _elapsed_ub - 1e-3 <= _val_after <= _FIX_VAL + 1e-3):
                 print("opf watchdog self-test: {}: did not restore the caller's ITIMER_REAL value "
-                      "elapsed-aware (got {!r}, expected within ({:.6f}, {:.6f}]) (F2/F3)".format(
-                          label, _val_after, _FIX_VAL - _fn_elapsed, _FIX_VAL), file=sys.stderr)
+                      "elapsed-aware (got {!r}, expected within [{:.6f}, {:.6f}]; elapsed upper bound "
+                      "{:.6f}s measured after the read) (F2/F3)".format(
+                          label, _val_after, _FIX_VAL - _elapsed_ub, _FIX_VAL, _elapsed_ub),
+                      file=sys.stderr)
                 ok = False
             if abs(_int_after - _FIX_INT) > 1e-6:
                 print("opf watchdog self-test: {}: did not restore the caller's ITIMER_REAL repeating "
@@ -247,18 +337,23 @@ def _watchdog_hostile_ambient_self_test():
             _signal.signal(_signal.SIGALRM, _prev_disp)           # restore the real caller disposition
             _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)
             # Restore the caller's ITIMER_REAL + any pending SIGALRM through the SHARED helper (round-15 F1,
-            # the SINGLE elapsed-aware save/restore every opf-side watchdog uses, so no per-site verbatim
-            # restore can diverge again): value minus the time held (interval preserved) so the 3 helper runs
-            # neither pause nor extend the caller's deadline (a 50ms deadline set before the test still fires,
-            # not sitting ~50ms away after ~300ms of test; a deadline that expired during the test clamps to a
-            # tiny positive so it still fires, never re-armed to its full original value), AND a SIGALRM the
-            # caller had pending on entry re-posted so the probe's SIG_IGN does not destroy it (round-15 F2).
+            # the single elapsed-aware save/restore every opf-side watchdog is meant to route through): value
+            # minus the time held (interval preserved) so the 4 helper runs (one per affected label) neither
+            # pause nor extend the caller's deadline (a 50ms deadline set before the test still fires, not
+            # sitting ~50ms away after this multi-second test; a deadline that expired during the test clamps
+            # to a tiny positive so it still fires, never re-armed to its full original value), AND a SIGALRM
+            # the caller had pending on entry re-posted so the probe's SIG_IGN does not destroy it
+            # (round-15 F2).
             _opf_store.restore_caller_alarm(*_caller_snap)
     if not ok:
-        print("opf watchdog hostile-ambient self-test: FAIL (a FIFO-probe watchdog did not survive a "
-              "blocked+pending ambient SIGALRM with state restored)", file=sys.stderr)
+        # The summary names no single cause: the failed check above already printed the observed one (a
+        # setup that left no pending SIGALRM, an inner crash or nonzero return, or an unrestored mask,
+        # disposition, pending state, value, or interval), and this line must not claim a cause a
+        # different check found.
+        print("opf watchdog hostile-ambient self-test: FAIL (a hostile-ambient check failed; the message "
+              "above states the observed cause)", file=sys.stderr)
         return EXIT_FINDING
-    print("opf watchdog hostile-ambient self-test: PASS (changelog/views/store watchdogs survive a "
+    print("opf watchdog hostile-ambient self-test: PASS (changelog/views/store/check watchdogs survive a "
           "blocked+pending SIGALRM with mask, disposition, and timer restored)")
     return EXIT_OK
 
@@ -266,16 +361,29 @@ def _watchdog_hostile_ambient_self_test():
 def _watchdog_wrapper_caller_deadline_self_test():
     """Guard F2 (round-12, fix-induced): _watchdog_hostile_ambient_self_test must restore the CALLER's
     ITIMER_REAL with ELAPSED TIME SUBTRACTED, so running it neither PAUSES nor EXTENDS a caller's deadline
-    (the pre-fix wrapper restored the caller value VERBATIM, so a 50ms deadline was still ~50ms away after
-    the ~sub-second test and never fired). The three helper restore sites carry their own elapsed-aware
-    discrimination inside the wrapper (the fixture value+interval check); this covers the WRAPPER's own
-    caller-timer restore, which the default self-test never exercises because it arms no caller deadline.
+    (the pre-fix wrapper restored the caller value VERBATIM, so a short deadline was still its full value
+    away after the multi-second test and never fired). This covers the WRAPPER's OWN caller-timer restore
+    site, which the default self-test never exercises because it arms no caller deadline.
 
-    Arm a short (50ms) caller deadline with a firing-recorder handler, run the wrapper (which holds the
-    caller timer across its 3 helper self-test runs, well over 50ms in total), and assert the deadline was
-    HONOURED: elapsed-aware, the wrapper drives it below zero and it FIRES during the run (the recorder sees
-    it) and reads as expired afterwards; the pre-fix verbatim restore leaves it sitting at its full 50ms,
-    unfired. Returns 0 clean, 1 on failure; SKIPS clean on a platform without POSIX SIGALRM/itimer.
+    Arm a short (0.5s) caller deadline with a firing-recorder handler, run the wrapper (which holds the
+    caller timer across its four helper self-test runs; the guard below confirms the run outlasted the
+    deadline), and assert two OBSERVATIONS: a SIGALRM was DELIVERED (the recorder saw it, during the run
+    or the bounded grace wait), AND the caller's ITIMER_REAL read back BELOW HALF the deadline afterwards.
+    With an elapsed-aware restore the deadline expires during the run and the timer reads ~0. A verbatim
+    re-arm at the wrapper's own restore site reads back the full deadline minus only the time spent
+    between that re-arm and the read, so it reds the below-half check unless scheduling stalls totalling
+    more than half the deadline (0.25s) land in that short window: an executed observation with a wide
+    margin, not a load-proof discriminator. Disclosed residual: detection of a hand-rolled (verbatim or
+    otherwise divergent) or DROPPED restore at a call site is BEST-EFFORT through these behavioural
+    checks; the miss direction is a long scheduling stall landing between a restore and the read that
+    observes it, which shrinks a defective reading toward the elapsed-aware one. A structural call-site
+    guard is tracked separately. The helper-module restore sites exercised inside
+    the wrapper (_opf_changelog / _opf_views / _opf_store / _opf_check) hold the borrowed timer for well
+    under a millisecond, so neither this below-half reading nor the hostile test's fixture band can
+    tell a verbatim restore from an elapsed-aware one THERE; that limit is part of the same disclosed
+    residual. (A verbatim re-arm still fires, but only after the run, inside the grace wait, so the
+    delivery check alone cannot make the distinction.)
+    Returns 0 clean, 1 on failure; SKIPS clean on a platform without POSIX SIGALRM/itimer.
 
     Round-15 F1: this guard's OWN caller-timer restore is now the SHARED _opf_store.restore_caller_alarm
     helper (it previously restored the caller value verbatim, re-introducing inside its own guard the exact
@@ -288,7 +396,7 @@ def _watchdog_wrapper_caller_deadline_self_test():
             and hasattr(_signal, "ITIMER_REAL")):
         print("opf watchdog wrapper-deadline self-test: SKIP (no POSIX SIGALRM/itimer on this platform)")
         return EXIT_OK
-    _deadline = 0.05                                             # a 50ms caller deadline the wrapper outlasts
+    _deadline = 0.5                                              # a 0.5s caller deadline the wrapper's multi-second run outlasts (guarded below)
     _fired = []
 
     def _recorder(_s, _f):
@@ -311,17 +419,35 @@ def _watchdog_wrapper_caller_deadline_self_test():
         _signal.setitimer(_signal.ITIMER_REAL, _deadline)
         _t0 = _time.monotonic()
         _buf = _io.StringIO()
-        with _ctx.redirect_stdout(_buf), _ctx.redirect_stderr(_buf):
-            _rc = _watchdog_hostile_ambient_self_test()          # the wrapper under test
+        try:
+            with _ctx.redirect_stdout(_buf), _ctx.redirect_stderr(_buf):
+                _rc = _watchdog_hostile_ambient_self_test()      # the wrapper under test
+        except BaseException:
+            if _buf.getvalue():                                  # a raise is failure evidence too
+                print("opf watchdog wrapper-deadline self-test: captured output of the raising inner "
+                      "wrapper follows", file=sys.stderr)
+                _replay_captured("opf watchdog wrapper-deadline self-test", _buf.getvalue())
+            raise
         _elapsed = _time.monotonic() - _t0
         _val_after, _ = _signal.getitimer(_signal.ITIMER_REAL)
         if _rc != EXIT_OK:
             print("opf watchdog wrapper-deadline self-test: the inner hostile-ambient wrapper returned {!r} "
                   "(expected 0)".format(_rc), file=sys.stderr)
+            if _buf.getvalue():
+                # The redirect keeps a passing run quiet, but on a nonzero inner return the captured
+                # output IS the failure evidence; re-emit it rather than swallow it -- BOUNDED (capped
+                # with an explicit truncation marker, control characters escaped), so a misbehaving
+                # inner run cannot flood the log or rewrite the terminal.
+                print("opf watchdog wrapper-deadline self-test: captured output of the failing inner "
+                      "wrapper follows", file=sys.stderr)
+                _replay_captured("opf watchdog wrapper-deadline self-test", _buf.getvalue())
             ok = False
-        # The wrapper ran far longer than the deadline, so an elapsed-aware restore drove the deadline below
-        # zero: it FIRED during the run (recorder saw it) and reads as expired (~0) afterwards. A verbatim
-        # restore (the pre-fix bug) leaves it at its full 50ms, unfired: _elapsed > _deadline guards the test.
+        # The wrapper ran longer than the deadline (guarded here), so an elapsed-aware restore leaves
+        # the caller timer EXPIRED: it fires during the run and getitimer reads ~0 afterwards. A verbatim
+        # re-arm at the wrapper's OWN restore site reads back the full deadline minus only the time spent
+        # between that re-arm and the read above, and can still fire LATE, inside the grace wait below, so
+        # neither the firing check nor a below-full read can catch it; the below-half check further down
+        # separates the two readings (see its comment for the margin that separation relies on).
         if _elapsed <= _deadline:
             print("opf watchdog wrapper-deadline self-test: the wrapper ran {:.4f}s, not longer than the {}s "
                   "deadline; the fixture cannot discriminate".format(_elapsed, _deadline), file=sys.stderr)
@@ -331,14 +457,24 @@ def _watchdog_wrapper_caller_deadline_self_test():
         while not _fired and _time.monotonic() < _grace:
             _time.sleep(0.005)
         if not _fired:
+            # State only the observation: no SIGALRM delivery was recorded within the run plus the grace
+            # wait. WHICH defect (or other cause) suppressed delivery is not observed here; the
+            # _val_after check below reports the restored value it actually read.
             print("opf watchdog wrapper-deadline self-test: the caller's {}s deadline never FIRED across a "
-                  "{:.4f}s run; the wrapper paused/extended it instead of restoring it elapsed-aware "
+                  "{:.4f}s run plus the bounded delivery-grace wait; no SIGALRM delivery was observed "
                   "(F2)".format(_deadline, _elapsed), file=sys.stderr)
             ok = False
-        if _val_after >= _deadline:
-            print("opf watchdog wrapper-deadline self-test: the caller's ITIMER_REAL was restored to {!r} "
-                  ">= its full {}s value; the elapsed time was not subtracted (F2)".format(
-                      _val_after, _deadline), file=sys.stderr)
+        # Require a REAL elapsed deduction, not merely a value below the armed one: the _elapsed >
+        # _deadline guard above means an elapsed-aware restore reads ~0 here, while a verbatim re-arm at
+        # the wrapper's own restore site reads the full deadline minus the time spent between that re-arm
+        # and the read above. Half the deadline (0.25s) separates those readings unless scheduling stalls
+        # totalling more than 0.25s land in that short window, so this is a wide-margin executed
+        # observation, not a deterministic guard: a verbatim re-arm hidden by such a stall is the
+        # disclosed best-effort miss; a structural call-site guard is tracked separately (F1).
+        if _val_after >= _deadline / 2:
+            print("opf watchdog wrapper-deadline self-test: the caller's ITIMER_REAL read {!r} after the "
+                  "{:.4f}s run, not below half its {}s deadline; a restore that deducted the real elapsed "
+                  "would read ~0 (F2)".format(_val_after, _elapsed, _deadline), file=sys.stderr)
             ok = False
     finally:
         _signal.setitimer(_signal.ITIMER_REAL, 0)                # disarm before restoring the caller state
@@ -348,26 +484,41 @@ def _watchdog_wrapper_caller_deadline_self_test():
             _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)   # restore the caller's exact mask
         _opf_store.restore_caller_alarm(*_caller_snap)          # shared elapsed-aware timer + pending restore (F1)
     if not ok:
-        print("opf watchdog wrapper-deadline self-test: FAIL (the wrapper did not restore the caller's "
-              "ITIMER_REAL elapsed-aware; a caller deadline was paused/extended)", file=sys.stderr)
+        # The summary names no single cause: the failed check above already printed the observed one (an
+        # inner-wrapper failure, a non-discriminating fixture, an unfired deadline, or an unsubtracted
+        # elapsed), and this line must not claim a cause a different check found.
+        print("opf watchdog wrapper-deadline self-test: FAIL (a wrapper-deadline check failed; the message "
+              "above states the observed cause)", file=sys.stderr)
         return EXIT_FINDING
-    print("opf watchdog wrapper-deadline self-test: PASS (a caller ITIMER_REAL deadline is honoured "
-          "elapsed-aware across the hostile-ambient wrapper, not paused or extended)")
+    print("opf watchdog wrapper-deadline self-test: PASS (a SIGALRM was delivered within the run plus "
+          "the bounded grace wait, and the caller's ITIMER_REAL read {!r} afterwards, below half its {}s "
+          "deadline)".format(_val_after, _deadline))
     return EXIT_OK
 
 
 def _watchdog_shared_restore_self_test(_hold_s=0.0):
-    """Guard F1 (round-15, break the watchdog-timer re-induction loop): every opf-side watchdog restores a
-    borrowed caller ITIMER_REAL through the ONE shared _opf_store.restore_caller_alarm helper, the single
-    source of truth, so no per-site verbatim restore can diverge again and re-introduce the watchdog-timer
-    class its own guards kept re-inducing (rounds 12->13->14). This exercises that helper DIRECTLY: a caller
+    """Guard F1 (round-15, break the watchdog-timer re-induction loop): every opf-side watchdog is meant to
+    restore a borrowed caller ITIMER_REAL through the ONE shared _opf_store.restore_caller_alarm helper, the
+    single source of truth, so a divergent restore has one body to diverge in rather than one per site. This
+    exercises that HELPER directly (its own body, not who calls it): a caller
     timer restored after a KNOWN elapsed must come back reduced by that elapsed (elapsed-aware), its repeating
     interval preserved, never re-armed to its full original value. Reverting the helper to a verbatim restore
-    (value re-armed to its original) reds this. SKIPS clean on a platform without POSIX SIGALRM/itimer.
+    (value re-armed to its original) reds this. A SECOND probe restores the same snapshot with was_pending
+    True (under a blocked SIGALRM, so the helper's re-post PENDS rather than delivers), so a restore that
+    goes verbatim exactly when an alarm was pending -- a branch the fixture-band tests admit and the direct
+    probe above (was_pending False) never reaches -- reds here too, and the re-posted pending SIGALRM is
+    asserted observable. SKIPS clean on a platform without POSIX SIGALRM/itimer.
 
-    Deterministic, not timing-dependent: the elapsed is a fixed baseline in the past (monotonic() - 5s), so
-    the restored value is ~95s for a 100s caller value regardless of machine speed; a verbatim restore yields
-    the full 100s, far outside the elapsed-aware band.
+    Margins, not determinism: the elapsed is a fixed baseline in the past (monotonic() - 5s), so the
+    expected restored value is ~95s for a 100s caller value while a verbatim restore yields the full
+    100s -- a ~5s separation, far above scheduling jitter, though still one a comparably long stall
+    between the restore call and the getitimer read would erode. Each probe's accepted band is bracketed
+    by a MEASURED probe-to-read elapsed (baseline sampled before the restore call, upper bound after the
+    read, the hostile test's conservative ordering), so a scheduling stall in that window only WIDENS the
+    band's floor and a correct restore stays green; the prior FIXED +-0.5s band redded a correct restore
+    under a >0.5s stall there. Detection of a hand-rolled, dropped, or restore-time-t0 restore at a CALL
+    SITE is best-effort through the behavioural watchdog tests (the miss direction is a long stall between
+    a restore and the read that observes it); a structural call-site guard is tracked separately.
 
     F-R18-C2TEST: `_hold_s` (default 0.0) injects a CONTROLLED measurable delay AFTER the top snapshot and
     BEFORE the finally-restore of the caller's borrowed timer, so a caller deadline held across this wrapper
@@ -390,18 +541,84 @@ def _watchdog_shared_restore_self_test(_hold_s=0.0):
         _known_val, _known_int, _elapsed = 100.0, 50.0, 5.0
         # Exercise the shared helper with an explicit snapshot whose baseline is _elapsed seconds in the past,
         # was_pending False (this probe does not manipulate the pending state). Elapsed-aware => ~95s remains.
-        _opf_store.restore_caller_alarm(_known_val, _known_int, _time.monotonic() - _elapsed, False)
+        # The accepted band is bracketed by a MEASURED probe-to-read elapsed (baseline sampled BEFORE the
+        # restore call, upper bound AFTER the getitimer read, the hostile test's conservative ordering), so
+        # a scheduling stall between the restore and the read only WIDENS the band's floor (the restored
+        # timer counts down until the read; the bracket bounds that countdown plus any extra elapsed the
+        # helper subtracted); the prior FIXED +-0.5s band redded a CORRECT restore under a >0.5s stall in
+        # that window.
+        _t_probe = _time.monotonic()
+        _opf_store.restore_caller_alarm(_known_val, _known_int, _t_probe - _elapsed, False)
         _val_after, _int_after = _signal.getitimer(_signal.ITIMER_REAL)
+        _probe_ub = _time.monotonic() - _t_probe                # brackets extra subtraction + countdown
         _signal.setitimer(_signal.ITIMER_REAL, 0)               # disarm the probe timer
-        if not (_known_val - _elapsed - 0.5 <= _val_after <= _known_val - _elapsed + 0.5):
-            print("opf watchdog shared-restore self-test: restored ITIMER value {!r}; expected ~{} (elapsed "
-                  "{}s subtracted from {}s); a verbatim restore would leave {} (F1)".format(
-                      _val_after, _known_val - _elapsed, _elapsed, _known_val, _known_val), file=sys.stderr)
+        if not (_known_val - _elapsed - _probe_ub - 1e-3 <= _val_after <= _known_val - _elapsed + 1e-3):
+            print("opf watchdog shared-restore self-test: restored ITIMER value {!r}; expected within "
+                  "[{:.6f}, {:.6f}] (elapsed {}s subtracted from {}s, then at most the bracketed {:.6f}s "
+                  "probe-to-read elapsed); a verbatim restore would leave ~{} (F1)".format(
+                      _val_after, _known_val - _elapsed - _probe_ub, _known_val - _elapsed, _elapsed,
+                      _known_val, _probe_ub, _known_val), file=sys.stderr)
             ok = False
         if abs(_int_after - _known_int) > 1e-6:
             print("opf watchdog shared-restore self-test: restored ITIMER interval {!r}; expected {!r} "
                   "(F1)".format(_int_after, _known_int), file=sys.stderr)
             ok = False
+        # Pending-branch probe (fix round 2): exercise the helper's was_pending=True path DIRECTLY. A
+        # restore defect that goes verbatim exactly when a SIGALRM was pending (elapsed-aware otherwise)
+        # passes every fixture-band watchdog test -- the band's upper edge admits a verbatim restore, and
+        # the probe above passes was_pending False -- so this probe is the red for that mutant. SIGALRM is
+        # BLOCKED around the call so the helper's re-post PENDS rather than delivers (deterministic); a
+        # SIGALRM the CALLER already had pending is discarded under SIG_IGN BEFORE the restore call, so
+        # the pending assertion below can only be satisfied by the helper's OWN re-post (an inherited
+        # caller pending SIGALRM would otherwise stand in for a missing re-post); the probe's re-posted
+        # SIGALRM is discarded under SIG_IGN before the probe-local disposition and mask are restored.
+        # Hermetic: a SIGALRM the CALLER had pending on entry is re-posted by the outer finally's
+        # restore_caller_alarm(*_caller_snap), from the top-of-function snapshot.
+        if (hasattr(_signal, "pthread_sigmask") and hasattr(_signal, "sigpending")
+                and hasattr(_signal, "SIGALRM")):
+            def _benign(_s, _f):                                  # a throwaway probe-local disposition
+                pass
+            _p_disp = _signal.getsignal(_signal.SIGALRM)
+            _p_mask = _signal.pthread_sigmask(_signal.SIG_BLOCK, {_signal.SIGALRM})
+            try:
+                _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)  # discard an INHERITED caller pending SIGALRM
+                _signal.signal(_signal.SIGALRM, _benign)
+                # The accepted band is bracketed by a measured probe-to-read elapsed, exactly as the
+                # was_pending False probe above (a stall between the restore and the read widens the
+                # band's floor instead of false-failing a correct restore).
+                _t_probe_p = _time.monotonic()
+                _opf_store.restore_caller_alarm(_known_val, _known_int, _t_probe_p - _elapsed, True)
+                _val_p, _int_p = _signal.getitimer(_signal.ITIMER_REAL)
+                _probe_ub_p = _time.monotonic() - _t_probe_p      # brackets extra subtraction + countdown
+                _pend_p = _signal.SIGALRM in _signal.sigpending()
+                _signal.setitimer(_signal.ITIMER_REAL, 0)         # disarm the probe timer
+                if not (_known_val - _elapsed - _probe_ub_p - 1e-3 <= _val_p
+                        <= _known_val - _elapsed + 1e-3):
+                    print("opf watchdog shared-restore self-test: with was_pending True the restored "
+                          "ITIMER value is {!r}; expected within [{:.6f}, {:.6f}] (elapsed {}s subtracted "
+                          "from {}s, then at most the bracketed {:.6f}s probe-to-read elapsed); a "
+                          "pending-only verbatim restore would leave ~{} (F1/F2)".format(
+                              _val_p, _known_val - _elapsed - _probe_ub_p, _known_val - _elapsed,
+                              _elapsed, _known_val, _probe_ub_p, _known_val),
+                          file=sys.stderr)
+                    ok = False
+                if abs(_int_p - _known_int) > 1e-6:
+                    print("opf watchdog shared-restore self-test: with was_pending True the restored "
+                          "ITIMER interval is {!r}; expected {!r} (F1/F2)".format(_int_p, _known_int),
+                          file=sys.stderr)
+                    ok = False
+                if not _pend_p:
+                    # State only the observation: no pending SIGALRM after the restore call. Whether the
+                    # helper never re-posted it, or re-posted it and something else consumed it, is not
+                    # observed here.
+                    print("opf watchdog shared-restore self-test: with was_pending True no pending "
+                          "SIGALRM was observed after the restore (F2)", file=sys.stderr)
+                    ok = False
+            finally:
+                _signal.setitimer(_signal.ITIMER_REAL, 0)
+                _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)  # discard the probe's re-posted SIGALRM
+                _signal.signal(_signal.SIGALRM, _p_disp)
+                _signal.pthread_sigmask(_signal.SIG_SETMASK, _p_mask)
         # F-R18-C2TEST: hold the borrowed caller timer for a CONTROLLED, measurable interval before the
         # finally restores it elapsed-aware, so the deadline wrapper can assert this exact elapsed was
         # deducted (a restore-time-t0 / verbatim revert deducts ~0). Default 0.0 => no delay.
@@ -413,9 +630,11 @@ def _watchdog_shared_restore_self_test(_hold_s=0.0):
         _signal.setitimer(_signal.ITIMER_REAL, 0)
         _opf_store.restore_caller_alarm(*_caller_snap)
     if not ok:
-        print("opf watchdog shared-restore self-test: FAIL (the shared caller-timer restore is not "
-              "elapsed-aware; a per-site verbatim restore could re-induce the watchdog-timer class)",
-              file=sys.stderr)
+        # The summary names no single cause: the failed check above already printed the observed one (a
+        # value or interval outside the elapsed-aware band, or a missing pending re-post), and this line
+        # must not claim a cause a different check found.
+        print("opf watchdog shared-restore self-test: FAIL (a shared-restore check failed; the message "
+              "above states the observed cause)", file=sys.stderr)
         return EXIT_FINDING
     print("opf watchdog shared-restore self-test: PASS (the single shared restore helper is elapsed-aware: "
           "a caller timer comes back reduced by the time held, interval preserved)")
@@ -429,8 +648,8 @@ def _watchdog_shared_restore_deadline_self_test():
     restore_caller_alarm(*snap); a regression that passes RESTORE-time monotonic() as t0 subtracts ~no
     elapsed and EXTENDS the caller's deadline. This arms a large ~10s caller deadline that never fires, runs
     the wrapped self-test with a CONTROLLED hold, and asserts that specific held interval was subtracted from
-    the restored ITIMER value, so a restore-time-t0 / verbatim revert (which subtracts ~0) reds. SKIPS clean
-    without POSIX itimer.
+    the restored ITIMER value, so a restore-time-t0 / verbatim revert (which subtracts ~0) reds (see the
+    margin note below for the stall this can miss). SKIPS clean without POSIX itimer.
 
     F-R18-C2TEST: the discrimination is driven by an explicit `_hold_s` the wrapped call sleeps while it
     holds the borrowed caller timer, NOT by the wrapped call's own (microsecond) wall time. The prior form
@@ -438,7 +657,18 @@ def _watchdog_shared_restore_deadline_self_test():
     sub-millisecond, that band was measurement noise and a restore-time-t0 / verbatim revert stayed green.
     Here the held interval is a controlled ~0.2s, well above scheduling jitter, and the assertion requires
     that at least half of it was deducted -- the exact PARENT-FUNCTION revert (restore-time-t0 / verbatim)
-    deducts ~0 and reds."""
+    deducts ~0 and reds, unless a scheduling stall longer than half the hold (~0.1s) lands between the
+    wrapped test's final restore and the read here: a wide-margin executed observation, best-effort at the
+    call site, not a deterministic guard (a structural call-site guard is tracked separately).
+
+    Fix round 4: the assertion is a BAND, not a one-sided ceiling. The prior form required only
+    `_val_after <= _armed - _hold_s*0.5`, which a DROPPED caller timer also satisfies: with the wrapped
+    test's final restore removed, ITIMER_REAL is left disarmed and getitimer reads 0, well under the
+    ceiling. The band's floor is _armed minus the bracketed arm-to-read elapsed (measured AFTER the
+    getitimer read, so it bounds everything the caller timer can legitimately have lost: the elapsed the
+    restore subtracted plus the restored timer's countdown up to the read); a reading below the floor is
+    one no elapsed-aware restore of the armed timer can produce, so a dropped or over-reduced restore
+    reds."""
     import signal as _signal
     import time as _time
     import io as _io
@@ -453,22 +683,38 @@ def _watchdog_shared_restore_deadline_self_test():
     ok = True
     try:
         _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)        # a fired deadline here is harmless (ignored)
+        # Fix round 4: the floor baseline is sampled BEFORE the arm (and the elapsed upper bound AFTER the
+        # read below), so a preemption anywhere in between only WIDENS the accepted band (conservative).
+        _t_arm = _time.monotonic()
         _signal.setitimer(_signal.ITIMER_REAL, _armed, 0.0)
         _buf = _io.StringIO()
         with _ctx.redirect_stdout(_buf), _ctx.redirect_stderr(_buf):
             _rc = _watchdog_shared_restore_self_test(_hold_s=_hold_s)
         _val_after, _ = _signal.getitimer(_signal.ITIMER_REAL)
+        _elapsed_ub = _time.monotonic() - _t_arm                # brackets the subtracted elapsed + countdown
         if _rc != EXIT_OK:
             print("opf watchdog shared-restore deadline self-test: inner self-test returned {!r} (expected "
                   "0)".format(_rc), file=sys.stderr)
             ok = False
         # An elapsed-aware restore subtracts ~the whole held interval (>= _hold_s); a restore-time-t0 /
         # verbatim revert subtracts ~0 and leaves the deadline near its full armed value. Require at least
-        # half the controlled hold to have been deducted, a band well clear of scheduling jitter.
+        # half the controlled hold to have been deducted, a ceiling well clear of scheduling jitter.
         if not (_val_after <= _armed - _hold_s * 0.5):
-            print("opf watchdog shared-restore deadline self-test: caller ITIMER restored to {!r} after a "
+            print("opf watchdog shared-restore deadline self-test: caller ITIMER read {!r} after a "
                   "controlled {:.3f}s hold; that elapsed was not subtracted (a restore-time-t0 / verbatim "
                   "restore extends a caller deadline, F-R17-C2 / F-R18-C2TEST)".format(_val_after, _hold_s),
+                  file=sys.stderr)
+            ok = False
+        # Fix round 4, the band's FLOOR: the deduction can be at most the bracketed arm-to-read elapsed,
+        # so a reading below _armed - _elapsed_ub (minus a small float slack) is one no elapsed-aware
+        # restore of the armed timer can produce. A DROPPED restore (the wrapped test's final
+        # restore_caller_alarm removed) leaves ITIMER_REAL disarmed, reads 0.0, and reds here; the
+        # one-sided ceiling above accepts that reading.
+        if not (_armed - _elapsed_ub - 1e-3 <= _val_after):
+            print("opf watchdog shared-restore deadline self-test: caller ITIMER read {!r} after the "
+                  "wrapped run, below the elapsed-aware floor {:.6f} (armed {} minus the bracketed "
+                  "{:.6f}s arm-to-read elapsed); no elapsed-aware restore of the armed timer can produce "
+                  "that reading (F1)".format(_val_after, _armed - _elapsed_ub, _armed, _elapsed_ub),
                   file=sys.stderr)
             ok = False
     finally:
@@ -478,8 +724,9 @@ def _watchdog_shared_restore_deadline_self_test():
     if not ok:
         print("opf watchdog shared-restore deadline self-test: FAIL", file=sys.stderr)
         return EXIT_FINDING
-    print("opf watchdog shared-restore deadline self-test: PASS (the shared-restore self-test restores a "
-          "caller ITIMER_REAL elapsed-aware, not extended)")
+    print("opf watchdog shared-restore deadline self-test: PASS (the caller ITIMER_REAL read back inside "
+          "the elapsed-aware band: reduced by at least half the controlled {:.1f}s hold and by no more "
+          "than the bracketed arm-to-read elapsed)".format(_hold_s))
     return EXIT_OK
 
 
@@ -490,8 +737,9 @@ def _cmd_render(rest):
     exactly the required one (0 clean, 1 drift, 2 cannot-evaluate; a NOT-ADOPTED root reports NOT APPLICABLE
     and exits 0, the pack's own `--root .` case). The mutating `--write` half (VC-4/PR-C) gathers the inert
     git-derived observations caller-side (_opf_observe.gather over the RESOLVED store, exactly as doctor does)
-    and hands them to the same engine, which composes the U6 store-integrity gate and permits the write only
-    on a VALID verdict, printing the findings/cannot-evaluates and returning 2 (writing nothing) otherwise, so
+    and hands them to the same engine, which composes the store-integrity gate and permits the write only
+    when source integrity is sound, printing the findings/cannot-evaluates and returning 2 (writing nothing)
+    otherwise, so
     a write can never read as a silent no-op. Exactly one of `--check`/`--write` is required: a bare
     `opf render` is a usage error (a preview never defaults into a write). The parser is the house fail-closed
     idiom (unknown token, an empty or option-looking or duplicate --root value -> exit 2), matching
@@ -647,23 +895,34 @@ def _doctor_report(result):
 
 
 def _cmd_doctor(rest):
-    """`opf doctor [--root DIR]`: the store-integrity verb.
+    """`opf doctor [--root DIR] [--require-store]`: the store-integrity verb.
 
     Doctor RESOLVES the store at --root (default: the cwd product repository root), gathers the inert
     git-derived observations (_opf_observe.gather: tracked, actual_remote, prior), and runs the U6 whole-store
     integrity engine (_opf_check.validate_store) over them, returning that engine's own 0/1/2 contract via
     _opf_check.exit_code (0 VALID, 1 INVALID, 2 CANNOT-EVALUATE). A NOT-ADOPTED root reports NOT APPLICABLE
     and exits 0 (the pack's own `--root .` case, mirroring render); any other non-RESOLVED status is a located
-    cannot-evaluate (exit 2). Doctor is READ-ONLY: it makes no store change (SECI-preview-has-no-side-effects);
+    cannot-evaluate (exit 2). `--require-store` is the enforcement-pack CI floor (spec 1.3.0 14.1: the pack
+    MUST provide CI checks): with it, a NOT-ADOPTED root is a located cannot-evaluate (exit 2) instead of NOT
+    APPLICABLE, so a repository whose store was removed cannot pass CI vacuously; every other status keeps
+    its unflagged outcome. Doctor is READ-ONLY: it makes no store change (SECI-preview-has-no-side-effects);
     the observation gather is git reads only. The parser is the house fail-closed idiom (unknown token, an
-    empty or option-looking or duplicate --root value -> exit 2), matching _cmd_render's --root loop. Every
+    empty or option-looking or duplicate --root value, a duplicate --require-store -> exit 2), matching
+    _cmd_render's --root loop. Every
     residual escape from the resolver, the git gather, or the engine fails closed to exit 2 (never a false
     verdict), the same class-width backstop the render dispatch carries."""
     root = None
+    require_store = False
     i = 0
     while i < len(rest):
         tok = rest[i]
-        if tok == "--root":
+        if tok == "--require-store":
+            if require_store:
+                print("opf doctor: --require-store given more than once", file=sys.stderr)
+                return EXIT_MALFORMED
+            require_store = True
+            i += 1
+        elif tok == "--root":
             if i + 1 >= len(rest):
                 print("opf doctor: --root requires a directory argument", file=sys.stderr)
                 return EXIT_MALFORMED
@@ -688,6 +947,11 @@ def _cmd_doctor(rest):
               "closed to exit 2".format(root, exc), file=sys.stderr)
         return EXIT_MALFORMED
     if res.status == _opf_store.NOT_ADOPTED:
+        if require_store:
+            # The CI floor: an absent store is a cannot-evaluate, never a vacuous pass.
+            print("opf doctor: cannot evaluate: --require-store was given but no OPF store was found ({}); "
+                  "a repository with no store cannot pass the CI floor".format(res.detail), file=sys.stderr)
+            return EXIT_MALFORMED
         print("opf doctor: NOT APPLICABLE ({})".format(res.detail))
         return EXIT_OK
     if res.status != _opf_store.RESOLVED:
@@ -1167,9 +1431,9 @@ def _cmd_init(rest):
 # constant silently drift from the roster.
 _UPGRADE_FROM = "1.0.0"
 # OPF-D2B PR3a (PD-D2B-PR3-SCHEMA decision 5): base spec 1.2.0 admits the managed bootstrap provenance
-# `.working/toml/init.toml` a coupled init writes. The 1.1.0 -> 1.2.0 allowed delta is the spec_version
+# `.working/toml/init.toml` a coupled init writes. The 1.1.0 -> 1.2.0 schema delta is the spec_version
 # bump ALONE: a 1.1.0 (D2a) store gains no init.toml (no provenance is ever fabricated for it), and a 1.0.0
-# store takes the full 1.0.0 delta straight to 1.2.0 (the later hop adds nothing else).
+# store takes the full 1.0.0 schema delta straight to 1.2.0. Declared views are then regenerated.
 _UPGRADE_MID = "1.1.0"
 _UPGRADE_TO = "1.2.0"
 _UPGRADE_NEW_TYPES = ("contribution", "maintainer_decision", "preference_pattern")
@@ -1272,7 +1536,8 @@ def _upgrade_plan(manifest_model, counters_model):
     and the pre-declared type/view rows -- and REFUSES any that fail (a _UpgradeError, fail-closed). It is NOT
     a complete 1.0.0 doctor: a 1.0.0 store invalid in a way these preconditions do not inspect (e.g. a missing
     type row, or a type carrying a wrong or non-normative namespace) is caught AFTER mutation by the render /
-    final-doctor gate, recovering through the step-3 subtree-scoped restore -- the no-complete-pre-doctor
+    final-doctor gate; recovery restores tracked paths from HEAD and removes upgrade-created files
+    within the checked scope -- the no-complete-pre-doctor
     residual disclosed on _cmd_upgrade. It is ORIGIN-AWARE: a governance-
     or decision_support-enabled 1.0.0 store already declares maintainer_decision / preference_pattern as a
     module-tier row (G1/G2), so the delta ADDS only the now-baseline types not already present and preserves
@@ -1577,31 +1842,41 @@ def _upgrade_plan_minor(manifest_model, counters_model):
 
 def _cmd_upgrade(rest):
     """`opf upgrade [--root DIR]`: the in-place, additive, idempotent store-schema upgrade to the tooling
-    spec_version {to} (spec 9.2). Two origins are supported: a 1.1.0 store takes the 1.1.0 -> {to} delta,
-    the spec_version bump alone (no init.toml provenance is fabricated, nothing else changes); a 1.0.0
-    store takes the full delta below, straight to {to}.
-    It RESOLVES the store at --root, refuses fail-closed on a store above the tooling spec or on
-    a non-canonical (hand-edited/comment-bearing) manifest or counters, applies EXACTLY the allowed delta as
+    spec_version {to} (spec 9.2). Two origins are supported: a 1.1.0 store takes the 1.1.0 -> {to} schema
+    delta, changing only spec_version (no init.toml provenance is fabricated); a 1.0.0 store takes the
+    full schema delta below, straight to {to}. Declared views are then regenerated, so a stale
+    committed view can change.
+    It RESOLVES the store at --root and refuses a store above the tooling spec. When migrating a 1.0.0
+    or 1.1.0 store, its preconditions include readable, canonical manifest/counters matching a recognised
+    origin shape, cleanliness over planned schema/render destinations and index collision candidates
+    (including ignored files there), and acquisition of its lease. An untracked or ignored lease is
+    excepted from the cleanliness check and handled separately by lease acquisition.
+    It then applies EXACTLY the allowed delta as
     a model regeneration through the canonical new-document emitter (bump spec_version; drop the retired
     decision_support module WHERE PRESENT; add each contribution/maintainer_decision/preference_pattern type
     row NOT already declared by an enabled 1.0.0 module; add the two new view rows; WIDEN the DECISIONS.md
-    composed view WHERE DECLARED; extend counters with the CN/MD/PP zeros preserving existing high-waters;
-    create the missing empty indexes, skipping any that already exist), RENDERS the declared views, and
-    requires a full doctor VALID before offering the staged change. It is ORIGIN-AWARE: a governance- or
-    decision_support-enabled 1.0.0 store, and a store that omits the optional decision_support key or the
-    DECISIONS.md view, each migrate correctly (spec 9.2, G1-G4). Before ANY write it enforces two fail-closed
-    preconditions: STORE-PATH CLEANLINESS over exactly the paths it writes (HEAD is a verified restore path,
-    SECA-verified-restore-path) and a SINGLE-WRITER LEASE it claims atomically and holds across the mutation,
-    render, and final doctor (spec 5.7). It NEVER commits: the adopter reviews and merges. A store already at
-    {to} is a byte no-op (idempotent, still requiring doctor-VALID); a NOT-ADOPTED root is NOT APPLICABLE
-    (exit 0), any other non-resolved status a located cannot-evaluate (exit 2). Two disclosed residuals: a
-    killed run leaves the lease, which is spec-conformant (present only while held; a leftover is released
-    through operator reconciliation, spec 5.7) and is what the EEXIST refusal covers; and the lease is not
-    made observable at a sync target before writes (spec 5.7) because this build has no sync runtime, so the
-    guarantee is single-host single-writer. A third disclosed residual: this build has no 1.0.0 pre-doctor,
-    so a 1.0.0 store invalid in a way the origin preconditions do not inspect fails only AFTER mutation (at
-    the render or the final doctor), recovering through the step-3 subtree-scoped restore; the committed HEAD
-    stays a verified restore path for the whole blast radius, so no owner work is lost.""".format(
+    composed view WHERE DECLARED; extend counters with zeros for any missing CN/MD/PP namespace,
+    preserving existing high-waters; create the missing empty indexes, skipping any that already exist),
+    RENDERS the declared views, and requires a full doctor VALID before offering the uncommitted change. It is
+    ORIGIN-AWARE: a governance- or decision_support-enabled 1.0.0 store, and a store that omits the
+    optional decision_support key or the DECISIONS.md view, each migrate correctly (spec 9.2, G1-G4).
+    Before ANY write it enforces two fail-closed preconditions:
+    PLANNED-DESTINATION CLEANLINESS (store and product roots), including ignored files, over planned
+    destinations and collisions (HEAD preserves pre-existing tracked content,
+    SECA-verified-restore-path), with an untracked or ignored lease handled separately, and a
+    SINGLE-WRITER LEASE it claims atomically and holds across the mutation, render, and final doctor (spec
+    5.7). It NEVER commits: the adopter reviews and merges. A store already at {to} returns without those
+    migration preconditions: doctor-VALID yields a byte no-op (exit 0), otherwise it exits 2 without
+    writing. A NOT-ADOPTED root is NOT APPLICABLE (exit 0), any other non-resolved status a located
+    cannot-evaluate (exit 2). Two disclosed residuals: a killed run leaves the lease, which is
+    spec-conformant (present only while held; a leftover is released through operator reconciliation, spec
+    5.7) and is what the EEXIST refusal covers; and the lease is not made observable at a sync target
+    before writes (spec 5.7) because this build has no sync runtime, so the guarantee is single-host
+    single-writer. A third disclosed residual: this build has no pre-doctor for a 1.0.0 or 1.1.0 origin,
+    so an older store invalid in a way the origin preconditions do not inspect fails only AFTER mutation
+    (at the render or the final doctor). Under the single-writer contract, recovery restores pre-existing
+    tracked content from HEAD and removes upgrade-created files within the checked store/product scope;
+    pre-existing untracked or ignored content in that scope refuses before mutation.""".format(
         to=_UPGRADE_TO)
     root = None
     homes_plan = False
@@ -1645,7 +1920,7 @@ def _cmd_upgrade(rest):
             print(text, end="")
             return EXIT_OK
         return _upgrade_run(root)
-    except _UpgradeError as exc:
+    except (_UpgradeError, _opf_write_guard.WriteGuardError) as exc:
         print("opf upgrade: refused: {}; exit 2".format(exc), file=sys.stderr)
         return EXIT_MALFORMED
     except Exception as exc:  # noqa: BLE001  class-width fail-closed backstop, never a false success
@@ -1668,491 +1943,87 @@ def _upgrade_doctor(root):
 # --- STEP 3/4 upgrade preconditions: store cleanliness and the single-writer lease -------------------
 
 _UPGRADE_NO_WHOLE_TREE = ("Never run a whole-tree restore (git restore . / git reset --hard): it would "
-                          "destroy unrelated uncommitted work. Scope every recovery to the store subtree.")
+                          "destroy unrelated uncommitted work. Scope every recovery to the affected "
+                          "store and product paths.")
+# The planned scope the shared cleanliness gate names in its dirty-tree refusal (_opf_write_guard.check_clean).
+_UPGRADE_CLEAN_SCOPE = "schema and render destinations and index collision candidates"
 
 
-def _upgrade_partial_recovery_text(store_root):
-    """Recovery advice for the read-only F2 triage (a store declares the target spec_version but is NOT
-    doctor-VALID: a previously interrupted run). This path cannot know what that run touched, so the advice
-    stays SUBTREE-SCOPED and review-first: inspect, then restore tracked store paths and remove upgrade-
-    created untracked files, all under `.working`, never a whole-tree restore (preserve-uncommitted-work).
-    The advice names the resolved STORE root (where `.working` lives), NOT the CLI product root: for a
-    RELOCATED store the two differ, and the CLI root would aim the `.working` restore at the wrong
-    repository (explicit-binding-over-ambient-context)."""
+def _upgrade_partial_recovery_text(res, manifest_model):
+    """A previous interrupted run has no trustworthy write plan in this process. Inspect under the
+    resolved store root, but do not prescribe a subtree restore: it could discard unmanaged owner work."""
     import shlex
-    r = shlex.quote(str(store_root))
+    r = shlex.quote(str(res.store_root))
     w = shlex.quote(_opf_store.WORKING_DIRNAME)
-    return ("Inspect the store subtree (git -C {r} --literal-pathspecs status -- {w}); restore ONLY its "
-            "tracked paths (git -C {r} --literal-pathspecs restore --staged --worktree -- {w}) and remove "
-            "the upgrade-created untracked files it lists, then re-run. {no}".format(r=r, w=w,
-                                                                                     no=_UPGRADE_NO_WHOLE_TREE))
+    try:
+        scope = _upgrade_write_scope(res.machine_rel, manifest_model, True, _UPGRADE_NEW_TYPES)
+        candidates = "Candidate store destinations under {} (current manifest; inspect only): {}.".format(
+            r, " ".join(shlex.quote(p) for p in scope["store"]))
+        if scope["product"]:
+            product_root = res.product_root if res.product_root is not None else res.store_root
+            candidates += "\nCandidate product destinations under {} (inspect only): {}.".format(
+                shlex.quote(str(product_root)), " ".join(shlex.quote(p) for p in scope["product"]))
+    except Exception as exc:  # Candidate advice must not hide the doctor findings.
+        candidates = "Cannot derive candidate destinations from the current manifest: {}.".format(exc)
+    return ("Inspect the store subtree (git -C {r} --literal-pathspecs status --ignored=matching "
+            "--untracked-files=all -- {w}). Identify the earlier run's planned destinations and reconcile "
+            "intervening owner edits before restoring individual tracked paths or removing files proven "
+            "upgrade-created. Exclude unmanaged paths and the lease; reconcile a leftover lease only after "
+            "confirming no run is live (spec 5.7). Reconcile product targets separately, then re-run. "
+            "{no}\n{candidates} These candidates do not prove the earlier write scope or which files were "
+            "created; reconcile them against the earlier run and owner edits before recovery.".format(
+                r=r, w=w, no=_UPGRADE_NO_WHOLE_TREE, candidates=candidates))
 
 
-def _upgrade_recovery_text(store_root, product_root, created_relpaths, product_relpaths):
-    """Recovery advice for a post-mutation failure (render or doctor): the touched set is KNOWN, and with the
-    step-3 cleanliness precondition in force everything dirty under the probe scope after a failed run is
-    upgrade-written by construction, so this enumerated, subtree-scoped remedy is COMPLETE for the run that
-    printed it. The DISTINCT roots are threaded (explicit-binding-over-ambient-context): tracked store paths
-    under `.working`, and the upgrade-created untracked files, are recovered under the STORE root (where
+def _upgrade_recovery_text(store_root, product_root, created_relpaths, product_relpaths, store_relpaths):
+    """Recovery advice for a post-mutation failure (render or doctor): the planned set is KNOWN, and with the
+    step-3 cleanliness precondition (including ignored files) and the single-writer contract, HEAD
+    preserves pre-existing tracked content in the checked scope; remove upgrade-created files to recover
+    previously absent paths. Inspect first for intervening owner edits. The DISTINCT roots are threaded
+    (explicit-binding-over-ambient-context): tracked store paths
+    in the explicit plan, and the upgrade-created untracked files, are recovered under the STORE root (where
     `.working` lives); a declared product-scope target rendered this run is recovered under the PRODUCT root.
     The two roots differ for a RELOCATED store (the pointer resolves `.working` to a store separate from the
     product tree), where using one root for both would aim the `.working` restore at the wrong repository.
     Never a whole-tree restore."""
     import shlex
     r = shlex.quote(str(store_root))
-    w = shlex.quote(_opf_store.WORKING_DIRNAME)
-    lines = ["opf upgrade: the staged change is left for review; recover it scoped to the paths this run "
-             "wrote (the cleanliness precondition proved nothing else is in the blast radius):",
-             "  restore tracked store paths: git -C {} --literal-pathspecs restore --staged --worktree "
-             "-- {}".format(r, w)]
+    w = " ".join(shlex.quote(p) for p in sorted(store_relpaths))
+    tracked = " ".join(shlex.quote(p) for p in sorted(set(store_relpaths) - set(created_relpaths)))
+    lines = ["opf upgrade: the uncommitted change is left for review; recover it scoped to the paths this run "
+             "planned (tracked content was clean against HEAD; untracked and ignored content was refused). "
+             "Confirm no opf run is live (spec 5.7), then inspect for intervening owner edits:"]
+    if tracked:
+        lines.append("  restore tracked store paths: git -C {} --literal-pathspecs restore --staged "
+                     "--worktree -- {}".format(r, tracked))
     if created_relpaths:
-        lines.append("  remove upgrade-created files: rm -- " + " ".join(
+        lines.append("  remove only these previously absent files if this run created them: rm -- " + " ".join(
             shlex.quote(os.path.join(str(store_root), p)) for p in sorted(created_relpaths)))
     pr = shlex.quote(str(product_root))
     for p in sorted(product_relpaths):
         lines.append("  product target rendered: git -C {} --literal-pathspecs restore --staged --worktree "
                      "-- {} (or remove it if this run created it)".format(pr, shlex.quote(p)))
-    lines.append("  inspect first: git -C {} --literal-pathspecs status -- {}".format(r, w))
+    lines.append("  inspect first: git -C {} --literal-pathspecs status --ignored=matching "
+                 "--untracked-files=all -- {}".format(r, w))
     lines.append("  " + _UPGRADE_NO_WHOLE_TREE)
     return "\n".join(lines)
 
 
-def _upgrade_product_render_targets(manifest_model):
-    """The product-scope (VERSION) destinations among the manifest's declared views, each a store-tree
-    relpath derived from the view's OWN identity via _opf_views._spec_destination (guard-input-soundness:
-    the pathspec set is derived from the authoritative declaration at the point of use, never hardcoded). A
-    view name outside the closed render vocabulary is skipped here; the render/doctor path grades it."""
-    targets = []
-    for vname in (manifest_model.get("views") or {}):
-        try:
-            _opf_views._resolve_view(vname)
-        except Exception:  # noqa: BLE001  an unrenderable declared view is graded by render/doctor, not here
-            continue
-        scope, relpath = _opf_views._spec_destination(vname)
-        if scope == "product":
-            targets.append(relpath)
-    return targets
-
-
-# The EXACT set of valid `git status --porcelain=v1 -z --untracked-files=all --no-renames` XY status PAIRS,
-# enumerated precisely from the git-status(1) "Short Format" table for the installed git (git 2.53.0 in this
-# env; the table is stable across modern git) and EMPIRICALLY cross-checked by driving real index/worktree
-# states and observing the emitted XY. Validating the whole PAIR (not each char independently) closes the
-# fail-open where an IMPOSSIBLE pair whose two chars each sit in a per-char set passes a char check and, for
-# the lease path, matches the exclusion and is SILENTLY DROPPED -- the M3 cleanliness guard then reads dirt
-# as clean. This is the EXACT man-page enumeration, NOT the {space,M,T,A,D} cartesian, which is a strict
-# SUPERSET that would admit impossible ordinary pairs: git emits X=D ONLY with a space Y, and Y=A ONLY with a
-# space X, so DM DT DA (and MA TA) are unemittable and MUST be refused, not silently accepted as dirt.
-# Composition:
-#   - "??" untracked (--untracked-files=all is passed).
-#   - ORDINARY (non-unmerged) changed entries, per the first table section with rename R and copy C EXCLUDED
-#     (--no-renames guarantees git emits neither) and U reserved to the unmerged tier. For each index letter X
-#     the EXACT set of worktree letters Y git can pair it with, straight off the man-page rows:
-#         X=' ' (index clean):        Y in {A, M, T, D}   (' A' intent-to-add is VALID and accepted)
-#         X in {M, T, A}:             Y in {' ', M, T, D}  (staged change, worktree clean/modified/typechg/del)
-#         X='D' (deleted from index): Y in {' '}           (a deleted-in-index path pairs ONLY with space)
-#   - the seven UNMERGED pairs, verbatim from git-status(1): DD AU UD UA DU AA UU.
-# "!!" (ignored) is deliberately ABSENT: --ignored is not passed, so it cannot appear and is treated as an
-# unexpected/malformed pair -> fail-closed. The per-X worktree sets are enumerated here, not the whole valid
-# set hardcoded flat, so each line stays auditable against the man-page table. Bytes throughout (2-byte keys).
-_PORCELAIN_ORDINARY_YSET = {
-    0x20:     b"AMTD",   # X=' ': worktree added(intent-to-add)/modified/type-changed/deleted
-    ord("M"): b" MTD",   # X='M' (updated in index): worktree unmodified/modified/type-changed/deleted
-    ord("T"): b" MTD",   # X='T' (type changed in index): worktree unmodified/modified/type-changed/deleted
-    ord("A"): b" MTD",   # X='A' (added to index): worktree unmodified/modified/type-changed/deleted
-    ord("D"): b" ",      # X='D' (deleted from index): worktree unmodified only
-}
-_PORCELAIN_UNMERGED_PAIRS = (b"DD", b"AU", b"UD", b"UA", b"DU", b"AA", b"UU")
-_PORCELAIN_VALID_PAIRS = frozenset(
-    [b"??"]
-    + [bytes((x, y)) for x, ys in _PORCELAIN_ORDINARY_YSET.items() for y in ys]
-    + list(_PORCELAIN_UNMERGED_PAIRS))
-
-
-def _upgrade_parse_porcelain(raw, prefix, lease_excl):
-    """Parse a `git status --porcelain=v1 -z --untracked-files=all --no-renames` payload into the list of
-    dirty paths, each normalized `root`-relative (the `prefix`, the store's repo-root-relative path with a
-    trailing '/', is stripped from every repository-root-relative porcelain path) and EXCLUDING `lease_excl`
-    (a byte-literal store-relative path, when given). Factored PURE so the grammar refusal is directly unit-
-    testable. The -z grammar is VALIDATED (guard-input-soundness): a non-empty payload is a run of
-    NUL-TERMINATED records, each `XY<space>PATH` (two status chars, a space, then >=1 path byte); --no-renames
-    means there is no second NUL-separated origin-path field. A payload that is not NUL-terminated, that
-    carries a record shorter than `XY PATH` or lacking the status/space framing, or whose XY status is
-    outside the porcelain v1 vocabulary (a bogus pair, a blank pair, or a rename/copy the --no-renames probe
-    cannot emit), is MALFORMED and refuses fail-closed -- never a clean empty result on an unparseable
-    payload (e.g. a lone NUL, which a naive split would read as clean), and never a silent lease-exclusion
-    drop of a malformed-status record (check-fails-closed-on-unreadable)."""
-    if not raw:
-        return []
-    parts = raw.split(b"\x00")
-    if parts[-1] != b"":
-        raise _UpgradeError("git status returned a porcelain payload that is not NUL-terminated; the store "
-                            "cleanliness cannot be verified (fail-closed)")
-    prefix_b = prefix.encode("utf-8")
-    lease_b = lease_excl.encode("utf-8") if lease_excl is not None else None
-    dirty = []
-    for rec in parts[:-1]:
-        # porcelain v1 -z: two status chars, a space, then the path bytes (verbatim under -z, no quoting).
-        if len(rec) < 4 or rec[2:3] != b" ":
-            raise _UpgradeError("git status returned a malformed porcelain record ({!r}); the store "
-                                "cleanliness cannot be verified (fail-closed)".format(rec[:16]))
-        # Validate the whole XY status PAIR against the enumerated valid-pair set BEFORE the lease exclusion
-        # below (guard-input-soundness): a per-CHAR check accepts an IMPOSSIBLE pair (UT, ZZ, a blank pair, a
-        # rename R, a copy C) whose chars each sit in a per-char set, and for the lease path that bogus record
-        # would match the exclusion and be SILENTLY DROPPED -- a fail-open in the M3 cleanliness guard. The
-        # pair is validated whole against _PORCELAIN_VALID_PAIRS (?? plus the EXACT man-page ordinary
-        # enumeration, plus the seven unmerged pairs; !!, rename, copy, an impossible ordinary pair such as DM
-        # or MA, and any U in a non-unmerged position all excluded).
-        # Anything outside that set is MALFORMED -> fail-closed, never a drop.
-        if rec[:2] not in _PORCELAIN_VALID_PAIRS:
-            raise _UpgradeError("git status returned a porcelain record with an out-of-vocabulary "
-                                "status pair ({!r}); the store cleanliness cannot be verified "
-                                "(fail-closed)".format(rec[:16]))
-        pbytes = rec[3:]
-        if prefix_b and pbytes.startswith(prefix_b):
-            pbytes = pbytes[len(prefix_b):]
-        if lease_b is not None and pbytes == lease_b:
-            # The lease path. ONLY a well-formed UNTRACKED ("??") lease is the legitimate held-lease case
-            # that step 4 handles as its never-seize refusal, so it is EXCLUDED here. Any OTHER (tracked)
-            # status on the lease path -- " D", "D ", " M", "MM", ... -- means the lease is COMMITTED or
-            # otherwise version-controlled, which VIOLATES spec 5.7 (a lease is present only while held): the
-            # store is anomalous. That is REFUSED fail-closed and NAMED DISTINCTLY here, never silently
-            # excluded. A silent drop of a " D" (a committed lease deleted in the worktree) would let step 4's
-            # O_EXCL acquire succeed on the now-absent file and sweep the tracked lease's DELETION into the
-            # upgrade's staged change set (outside the spec-9.2 delta), while a post-mutation failure's
-            # recovery text (git restore --staged --worktree -- .working) would RESURRECT the committed lease
-            # from HEAD, which the next run then refuses on EEXIST until manual reconciliation.
-            if rec[:2] == b"??":
-                continue
-            raise _UpgradeError(
-                "the single-writer lease {!r} is TRACKED in git (porcelain status {!r}, not untracked "
-                "'??'); a committed or otherwise version-controlled lease violates spec 5.7 (a lease is "
-                "present only while held) and leaves the store in an anomalous state. Reconcile the store "
-                "(remove the lease from version control) before re-running opf upgrade (fail-closed)".format(
-                    lease_excl, rec[:2].decode("ascii", "replace")))
-        dirty.append(pbytes.decode("utf-8", "replace"))
-    return dirty
-
-
-def _upgrade_probe_dirty(git, root, pathspecs, lease_excl):
-    """Run ONE hardened `git status --porcelain=v1 -z --untracked-files=all --no-renames` over `pathspecs`
-    beneath `root`, returning the list of dirty paths, each normalized to `root`-relative (excluding
-    `lease_excl`, a byte-literal store-relative path, when given). The porcelain paths are REPOSITORY-root-
-    relative, so the store's path within the repository (git rev-parse --show-prefix) is stripped, which is
-    what lets `lease_excl` be excluded even when the store root lies BELOW the git repository root (a NESTED
-    store, where the un-normalized compare missed and drew the step-3 dirty-store refusal in place of step
-    4's held-lease message). Reuses _opf_observe's scrubbed-env, --no-replace-objects, -C-bound, timeout-
-    bounded boundary (G6). Fail-closed: a non-completed probe, a not-a-repository, a nonzero exit, an
-    undeterminable store prefix, or a malformed payload refuses; never a clean pass on an unreadable probe
-    (check-fails-closed-on-unreadable, SECA-verified-restore-path).
-
-    This is the ONE caller that COMPARES WORKTREE CONTENT against the index (the operation that makes git run
-    a repo/worktree-configured clean/process filter), so it passes _filter_neutralizing_config to _run_git as
-    config_overrides: git EXECUTES such a filter's external command during this read-only observation, an
-    exec-on-observe vector of the executable-config-trust-gate class (SECI-config-is-executable-trust-gate,
-    OPF-STATUS-FILTER-SUPPRESS) that OPF-FSMON-SUPPRESS closed for core.fsmonitor and GIT_NO_LAZY_FETCH closed
-    for the lazy-fetch->core.sshCommand vector. The overrides are injected as SEPARATE GIT_CONFIG_KEY/VALUE
-    env strings (never `-c key=value` argv, whose first-`=` split a subsection name containing `=` would
-    exploit to leave the real driver executable, F-OPF-STATUSFILTER-EQ-BYPASS). Both _upgrade_check_clean call
-    sites (store and product_root) inherit the neutralization through this single narrow call. Any FUTURE
-    worktree-content observation (a non-`--cached` diff, diff-files, ls-files -m, update-index --refresh, a
-    status elsewhere) must pass _filter_neutralizing_config the same way; the other observe verbs read no
-    worktree content and do not.
-
-    RESIDUAL (disclose-guard-residuals, F-OPF-STATUSFILTER-LFS-FALSEPOS): neutralizing an EXTERNAL NORMALIZING
-    clean/process filter (the git-lfs shape, index=cleaned/pointer blob, worktree=smudged body, required=true)
-    stops git reproducing the cleaned blob, so in the racy-clean mtime window (normal post-add/checkout/clone
-    state) status re-hashes the raw worktree bytes, which differ from the index blob, and a genuinely-CLEAN
-    store reads DIRTY. This is inherent to driver neutralization and is FAIL-CLOSED (it over-refuses the
-    upgrade; never a false-clean, never a filter exec). _upgrade_check_clean surfaces it with operator-clear
-    guidance to settle the worktree first."""
-    try:
-        neutralizing = _opf_observe._filter_neutralizing_config(git, root)
-    except RuntimeError as exc:
-        # The enumeration that proves which clean/process filters git could exec on the status is a guard; an
-        # unreadable enumeration is a cannot-evaluate, so the probe refuses rather than run a status that might
-        # execute a repo-planted filter (guard-input-soundness, check-fails-closed-on-unreadable).
-        raise _UpgradeError("could not verify the store is clean before the upgrade: its git clean/process "
-                            "filter configuration is unreadable ({}), so a read-only status probe cannot run "
-                            "without risking filter execution; refusing the destructive rewrite "
-                            "(fail-closed)".format(exc))
-    args = (["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--untracked-files=all",
-             "--no-renames", "--"] + list(pathspecs))
-    out = _opf_observe._run_git(git, root, args, config_overrides=neutralizing)
-    if not out.completed:
-        raise _UpgradeError("could not verify the store is clean before the upgrade ({}); refusing the "
-                            "destructive rewrite (fail-closed)".format(out.err.strip()))
-    if out.rc != 0:
-        if _opf_observe._is_no_repo(out):
-            raise _UpgradeError("the store at {!r} is not a git repository, so HEAD is not a verified "
-                                "restore path for the in-place rewrite (spec 5.1); refusing "
-                                "(fail-closed)".format(str(root)))
-        raise _UpgradeError("git could not verify the store is clean (rc {}); refusing the destructive "
-                            "rewrite (fail-closed)".format(out.rc))
-    pfx = _opf_observe._run_git(git, root, ["rev-parse", "--show-prefix"])
-    if not pfx.completed or pfx.rc != 0:
-        raise _UpgradeError("could not determine the store's path within its git repository; without it a "
-                            "nested store's clean probe cannot be trusted, so the rewrite is refused "
-                            "(fail-closed)")
-    # Strip ONLY the trailing newline git appends, NEVER leading whitespace: a store dir whose name begins
-    # with a space (" leading/") would lose that space under .strip(), breaking the prefix match and the
-    # lease exclusion. "" at the repo toplevel, else "<dir>/" (trailing /).
-    prefix = pfx.out.decode("utf-8", "replace").rstrip("\n")
-    return _upgrade_parse_porcelain(out.out, prefix, lease_excl)
-
-
-def _upgrade_check_clean(res, manifest_model):
-    """STEP 3 (M3): store-cleanliness precondition, run AFTER the read-only triage/plan and immediately
-    BEFORE lease acquisition and the first write. Prove over EXACTLY the paths this upgrade can write (the
-    `.working` subtree at the store root, plus any declared product-scope render target) that the git index
-    and working tree equal HEAD, so the committed HEAD is a verified restore path for the precise destruction
-    surface (SECA-verified-restore-path). Only the UNTRACKED lease path is EXCLUDED (byte-literal): a held
-    (untracked "??") lease is step 4's own specific never-seize refusal, not generic dirt; a TRACKED lease on
-    that path is instead refused DISTINCTLY as a spec-5.7 violation (in _upgrade_parse_porcelain), never
-    excluded. Refuses fail-closed (exit 2) on any dirt, naming up to 10 paths plus the total, advising
-    commit-your-changes and NEVER a restore (the dirt is the owner's own work, preserve-uncommitted-work).
-
-    Residual (disclose-guard-residuals): the probe uses --untracked-files=all, which does NOT surface a
-    git-IGNORED file under the scope; a conforming store has no ignored render targets, so an ignored file
-    there would neither block the run nor be restorable from HEAD. The alternative (--ignored) would over-
-    fire on ordinary build detritus, so this build accepts and discloses the narrower scope. A committed or
-    otherwise TRACKED lease.toml (itself a spec-5.7 violation: the lease should be present only while held) is
-    NOT part of that residual and is NOT silently excluded like the legitimate untracked held lease: it
-    surfaces on the lease path as a tracked porcelain status (e.g. " D" for a committed lease deleted in the
-    worktree) and is REFUSED fail-closed by _upgrade_parse_porcelain, naming the spec-5.7 tracked-lease
-    violation, so that corner is handled here rather than slipping past the lease exclusion into step 4.
-
-    Residual (F-OPF-STATUSFILTER-LFS-FALSEPOS, disclose-guard-residuals): a store with an EXTERNAL NORMALIZING
-    clean/process filter (the git-lfs shape) can read DIRTY here even when genuinely clean, because the probe
-    neutralizes filter execution (so no repo-planted filter runs on this read-only observation) and the
-    racy-clean window then re-hashes raw worktree bytes against the cleaned index blob. This is a fail-closed
-    over-refusal (never a false-clean, never a filter exec); the refusal message adds operator-clear guidance
-    to settle the worktree when the store carries such a filter."""
-    git = _opf_observe._git_path()
-    if git is None:
-        raise _UpgradeError("cannot locate git to verify the store is clean before the upgrade; without a "
-                            "verified restore path the destructive rewrite is refused (spec 5.1, fail-closed)")
-    store_root = res.store_root
-    product_root = res.product_root if res.product_root is not None else store_root
-    lease_excl = "{}/{}".format(res.machine_rel, _opf_check.LEASE_NAME)
-    store_specs = [_opf_store.WORKING_DIRNAME]
-    product_specs = []
-    same_root = os.path.abspath(str(product_root)) == os.path.abspath(str(store_root))
-    for relpath in _upgrade_product_render_targets(manifest_model):
-        (store_specs if same_root else product_specs).append(relpath)
-
-    dirty = _upgrade_probe_dirty(git, store_root, store_specs, lease_excl)
-    if product_specs:
-        dirty += _upgrade_probe_dirty(git, product_root, product_specs, None)
-    if dirty:
-        shown = sorted(set(dirty))
-        head = shown[:10]
-        # A store with a configured external NORMALIZING clean/process filter (the git-lfs shape) can read
-        # DIRTY here even when genuinely clean: the probe neutralizes filter EXECUTION (fail-closed, so no
-        # repo-planted filter runs on this read-only observation), so the cleaned index blob cannot be
-        # reproduced and the racy-clean window re-hashes raw worktree bytes as a mismatch
-        # (F-OPF-STATUSFILTER-LFS-FALSEPOS). It is a fail-closed over-refusal, never a false-clean. When the
-        # store carries such a filter, guide the operator to settle the worktree rather than leaving a bare
-        # "dirty". The presence probe is on the error path only; a RuntimeError there (a config that turned
-        # unreadable since the probe) resolves to the generic message, never a crash.
-        def _has_clean_process_filter(rt):
-            try:
-                return bool(_opf_observe._filter_neutralizing_config(git, rt))
-            except RuntimeError:
-                return False
-        filtered = _has_clean_process_filter(store_root) or (
-            bool(product_specs) and _has_clean_process_filter(product_root))
-        note = (" This store has a configured clean/process filter (git-lfs-shape): the upgrade probe "
-                "neutralizes filter execution for safety, so a normalizing filter can make a genuinely-clean "
-                "store read dirty in the racy-clean window. Settle the worktree (commit, or check out so the "
-                "index and worktree agree for the filtered path) before upgrading." if filtered else "")
-        raise _UpgradeError(
-            "the store working tree is not clean over the paths this upgrade writes: {} dirty path(s), "
-            "showing {}: {}. Commit your store changes (or move them aside), then re-run opf upgrade; the "
-            "uncommitted work is yours and the upgrade never restores or discards it.{}".format(
-                len(shown), len(head), ", ".join(head), note))
-
-
-def _upgrade_lease_held_message(pfd, name, lease_rel):
-    """Compose the EEXIST held-lease refusal, best-effort naming the existing holder/operation/acquired_at.
-    A present-but-unreadable or malformed payload STILL refuses (present-is-held, matching C-LEASE); the
-    lease is never seized or overwritten (spec 5.7). Names the manual reconciliation remedy the tool never
-    performs itself."""
-    import tomllib
-    detail = "a present lease with an unreadable payload"
-    try:
-        # O_NONBLOCK so a FIFO (or other special file) planted at lease.toml cannot BLOCK the open (an
-        # O_RDONLY open of a writer-less FIFO would hang indefinitely); fstat the opened fd and, for any
-        # NON-REGULAR file, refuse WITHOUT reading (presence is refusal, matching C-LEASE; never block).
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                detail = "a present non-regular lease (held)"
-            else:
-                raw = os.read(fd, 65536)
-                data = tomllib.loads(raw.decode("utf-8"))
-                if isinstance(data, dict):
-                    detail = "held by {!r} (operation {!r}, acquired_at {!r})".format(
-                        data.get("holder"), data.get("operation"), data.get("acquired_at"))
-        finally:
-            os.close(fd)
-    except Exception:  # noqa: BLE001  a present-but-unreadable lease still refuses (present is held)
-        pass
-    return ("another opf run holds the single-writer lease {}: {}. The lease is never seized (spec 5.7). "
-            "If you have confirmed NO opf run is live, release the leftover lease as your own reconciliation "
-            "step (the tool never removes a foreign lease), then re-run opf upgrade.".format(lease_rel, detail))
-
-
-def _upgrade_lease_holder():
-    """The holder identity THIS run stamps on the lease it creates: "opf-upgrade:<host>:<pid>". Single-
-    sourced so the acquire WRITE and the release OWNERSHIP-CHECK reason about the same identity (the release
-    proves ownership by a full-payload byte compare, which subsumes this holder, and names a foreign holder
-    only in its diagnostic)."""
-    import socket
-    return "opf-upgrade:{}:{}".format(socket.gethostname(), os.getpid())
-
-
-def _upgrade_acquire_lease(root_fd, machine_rel):
-    """STEP 4 (M4): claim the single-writer lease ATOMICALLY (atomic-claim-from-pool). The claim IS the
-    create: open machine_rel/lease.toml O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW beneath the parent fd (the
-    _upgrade_replace idiom), so there is no check-then-create gap and EEXIST IS the held-lease refusal. The
-    closed payload (schema/holder/operation/acquired_at read from the clock, G5) satisfies C-LEASE exactly,
-    so the mid-run doctor stays VALID with the lease held (containment-clean, spec 5.7/11). RETURNS the exact
-    payload bytes written, so the ownership-verified release can prove the lease it removes is still THIS
-    run's own (never-seize, spec 5.7)."""
-    import datetime
-    journal = _opf_store._journal
-    lease_rel = "{}/{}".format(machine_rel, _opf_check.LEASE_NAME)
-    payload = _opf_emit.emit_checked({
-        "schema": _opf_schema.SUPPORTED_SCHEMA,
-        "holder": _upgrade_lease_holder(),
-        "operation": "upgrade",
-        "acquired_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }).encode("utf-8")
-    pfd, name = journal._open_parent(root_fd, lease_rel)
-    try:
-        try:
-            fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o644, dir_fd=pfd)
-        except FileExistsError:
-            raise _UpgradeError(_upgrade_lease_held_message(pfd, name, lease_rel))
-        try:
-            try:
-                journal._write_all(fd, payload)
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            os.fsync(pfd)
-        except BaseException as exc:
-            # Any failure AFTER the O_EXCL create but BEFORE successful acquisition (a failed payload write,
-            # fsync, or the durability fsync of the parent) LEAVES the lease in place: it is a leftover from
-            # THIS failed upgrade, released through operator reconciliation exactly like a lease from a dead
-            # run (spec 5.7), never removed here. A by-name unlink would be OWNERSHIP-BLIND: if a peer replaced
-            # the lease in the failure window (A-create / B-replace / A-fail), the unlink would delete the
-            # REPLACEMENT holder's lease, a never-seize violation (spec 5.7). This code never removes a lease
-            # it cannot prove is still the one it created, so it leaves-and-reconciles rather than racing an
-            # unlink. A KeyboardInterrupt/SystemExit propagates untouched (the lease is still left); an
-            # ordinary failure is surfaced as a reconcilable _UpgradeError so the operator gets clear advice.
-            if isinstance(exc, _UpgradeError) or not isinstance(exc, Exception):
-                raise
-            raise _UpgradeError(
-                "upgrade lease acquisition failed after the lease {} was created ({}); the lease is LEFT in "
-                "place as a leftover from this failed upgrade and is never seized (spec 5.7). If you have "
-                "confirmed NO opf run is live, release the leftover lease as your own reconciliation step "
-                "(the tool never removes it), then re-run opf upgrade.".format(lease_rel, exc)) from exc
-    finally:
-        os.close(pfd)
-    return payload
-
-
-def _upgrade_read_lease_payload(pfd, name):
-    """Read the lease at (pfd, name) SAFELY for an ownership compare, reusing the round-2 R3 pattern:
-    O_RDONLY|O_NOFOLLOW|O_NONBLOCK (a planted FIFO or other special file cannot BLOCK the open), then fstat
-    the opened fd and, for any NON-REGULAR file, return None WITHOUT reading. Returns the file's raw bytes,
-    or None when it is absent, non-regular, or unreadable. Bounded read (never trusts the on-disk size)."""
-    try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
-    except OSError:
-        return None
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None
-        return os.read(fd, 65536)
-    except OSError:
-        return None
-    finally:
-        os.close(fd)
-
-
-def _upgrade_lease_holder_of(raw):
-    """Best-effort holder identity from raw lease bytes, for a DIAGNOSTIC message only (never raises, never
-    load-bearing: the ownership decision is the full-payload byte compare in _upgrade_unlink_owned_lease)."""
-    if raw is None:
-        return "absent or a non-regular entry"
-    import tomllib
-    try:
-        data = tomllib.loads(raw.decode("utf-8"))
-        if isinstance(data, dict) and data.get("holder") is not None:
-            return "holder {!r}".format(data.get("holder"))
-    except Exception:  # noqa: BLE001  diagnostic only; an unreadable replacement still refuses above
-        pass
-    return "an unreadable or malformed replacement lease"
-
-
-def _upgrade_unlink_owned_lease(pfd, name, lease_rel, expected_payload):
-    """The SINGLE ownership-verified lease-removal site (class-width never-seize, spec 5.7, OPF-SPEC.md:376
-    "never seized from a live holder"). Unlink the lease at (pfd, name) ONLY when the file still there is
-    byte-for-byte the exact lease THIS run created (`expected_payload`, the bytes _upgrade_acquire_lease
-    returned; a full-payload proof that subsumes a holder-only compare). If it does NOT match -- a peer
-    replaced the lease in the interval -- it is NEVER unlinked (never-seize) and the replacement is LEFT in
-    place for operator reconciliation, surfaced as a fail-closed _UpgradeError naming the replacement's
-    holder where legible. A failed unlink is likewise SURFACED, never swallowed (no-concealed-failure). No
-    lease this run cannot prove is its own is ever removed here.
-
-    DISCLOSED RESIDUAL (disclose-guard-residuals): a tiny TOCTOU window remains between the ownership read and
-    the unlink -- a swap in exactly that window could still unlink a replacement, and because that unlink then
-    succeeds the run also reports exit-0 SUCCESS (a false "released") over the deleted peer lease rather than
-    the never-seize refusal. This is inherent to unlink-by-name (there is no unlink-this-exact-inode primitive
-    available here) and cannot be eliminated, only disclosed; it is reachable ONLY when an operator or peer
-    violates the documented release-only-when-no-run-is-live reconciliation (spec 5.7). It is vastly smaller
-    than the prior ownership-blind unlink and never-seizes under any non-adversarial-mid-window sequence."""
-    on_disk = _upgrade_read_lease_payload(pfd, name)
-    if on_disk != expected_payload:
-        # FIX3: distinguish a genuine ABSENCE (the lease was deleted, not replaced) from a REPLACEMENT (a
-        # present-but-different payload). Both stay fail-closed / never-seize; only the operator-facing
-        # wording differs. _upgrade_read_lease_payload returns None for absent, non-regular, or unreadable.
-        if on_disk is None:
-            detail = ("the lease is ABSENT at release (already removed, or present as a non-regular entry); "
-                      "this run's own lease is gone")
-        else:
-            detail = ("the lease was REPLACED by another holder ({}) before release; this run's own lease "
-                      "is gone".format(_upgrade_lease_holder_of(on_disk)))
-        raise _UpgradeError(
-            "the upgrade lease {} could not be released as this run's own: {}. It is NEVER seized (spec 5.7) "
-            "and is LEFT in place for operator reconciliation, so no lease is removed here "
-            "(fail-closed).".format(lease_rel, detail))
-    try:
-        os.unlink(name, dir_fd=pfd)
-    except OSError as exc:
-        raise _UpgradeError("could not release the upgrade lease {} ({}); surfaced, never swallowed "
-                            "(fail-closed)".format(lease_rel, exc))
-
-
-def _upgrade_release_lease(root_fd, machine_rel, expected_payload):
-    """Release the lease created by _upgrade_acquire_lease: OWNERSHIP-VERIFIED unlink of machine_rel/
-    lease.toml no-follow via the parent fd, then fsync the parent. The removal routes through the SINGLE
-    ownership-verified site (_upgrade_unlink_owned_lease): the lease is removed ONLY when it is still THIS
-    run's own (`expected_payload`), never seized from a peer that replaced it (spec 5.7); a replaced lease is
-    LEFT and surfaced (exit 2). A failed unlink is SURFACED (exit 2), never swallowed (no-concealed-failure).
-    A killed run leaves the lease, which is spec-conformant (present only while held; a leftover is released
-    through operator reconciliation, spec 5.7) and is what the EEXIST refusal covers."""
-    journal = _opf_store._journal
-    lease_rel = "{}/{}".format(machine_rel, _opf_check.LEASE_NAME)
-    pfd, name = journal._open_parent(root_fd, lease_rel)
-    try:
-        _upgrade_unlink_owned_lease(pfd, name, lease_rel, expected_payload)
-        os.fsync(pfd)
-    finally:
-        os.close(pfd)
+def _upgrade_write_scope(machine_rel, manifest_model, counters_changed, index_types):
+    """Plan the destinations of the schema delta and the subsequent declared-view render.
+    Index candidates are included for collision checks even when create-only will leave them alone.
+    Use the POST-delta manifest: it includes newly introduced views. The shared planner
+    (_opf_write_guard.plan_write_scope) adds every declared render destination and refuses a declaration
+    colliding with a managed destination before mutation, rather than licensing an overwrite. The lease
+    is checked separately and is never a restore/staging target."""
+    store = ["{}/{}".format(machine_rel, _opf_store.MANIFEST_NAME)]
+    if counters_changed:
+        store.append("{}/{}".format(machine_rel, _opf_check.COUNTERS_NAME))
+    indexes = tuple("{}/{}{}".format(machine_rel, t, _opf_check.INDEX_SUFFIX) for t in index_types)
+    store.extend(indexes)
+    scope = _opf_write_guard.plan_write_scope(machine_rel, manifest_model, store, "upgrade")
+    scope["indexes"] = indexes
+    return scope
 
 
 def _upgrade_run(root):
@@ -2182,6 +2053,7 @@ def _upgrade_run(root):
     manifest_rel = "{}/{}".format(machine_rel, _opf_store.MANIFEST_NAME)
     counters_rel = "{}/{}".format(machine_rel, _opf_check.COUNTERS_NAME)
     root_fd = _opf_store._open_dir_nofollow(res.store_root)
+    recovery = None
     try:
         manifest_bytes = _upgrade_read_bytes(root_fd, manifest_rel, control=True)
         counters_bytes = _upgrade_read_bytes(root_fd, counters_rel)
@@ -2213,7 +2085,7 @@ def _upgrade_run(root):
             print("opf upgrade: store declares spec_version {} but is NOT doctor-VALID: a partial or "
                   "interrupted migration is never reported complete (fail-closed, spec 9.2). {} Run "
                   "`opf doctor --root {}` for the findings, exit 2.".format(
-                      _UPGRADE_TO, _upgrade_partial_recovery_text(res.store_root), root), file=sys.stderr)
+                      _UPGRADE_TO, _upgrade_partial_recovery_text(res, manifest_model), root), file=sys.stderr)
             _doctor_report(result)
             return EXIT_MALFORMED
         try:
@@ -2239,21 +2111,44 @@ def _upgrade_run(root):
         new_manifest_bytes = _opf_emit.emit_checked(new_manifest).encode("utf-8")
         new_counters_bytes = _opf_emit.emit_checked(new_counters).encode("utf-8")
 
-        # STEP 3 (M3): the LAST read-only gate. Prove HEAD is a verified restore path over exactly the
-        # blast radius before any write; a dirty store refuses fail-closed with commit-your-changes advice,
-        # never a restore (the dirt is the owner's work). The lease path is excluded (step 4's own refusal).
-        _upgrade_check_clean(res, manifest_model)
-
-        product_targets = _upgrade_product_render_targets(manifest_model)
+        # STEP 3: derive the scope from this delta and its POST-delta render declarations. The same
+        # destinations drive the cleanliness gate, index creation, recovery, and staging advice.
+        write_scope = _upgrade_write_scope(
+            machine_rel, new_manifest, new_counters_bytes != counters_bytes,
+            () if minor else _UPGRADE_NEW_TYPES)
+        _opf_write_guard.check_clean(res, write_scope, "upgrade", _UPGRADE_CLEAN_SCOPE)
+        product_targets = write_scope["product"]
+        created_relpaths = []
+        for relpath in write_scope["store"]:
+            pfd, name = _opf_store._journal._open_parent(root_fd, relpath)
+            try:
+                entry = _opf_store._journal._lstat_at(pfd, name)
+                if entry is None:
+                    created_relpaths.append(relpath)
+                elif not stat.S_ISREG(entry.st_mode):
+                    raise _UpgradeError("upgrade destination {!r} is not a regular file "
+                                        "(fail-closed)".format(relpath))
+            finally:
+                os.close(pfd)
         # DISTINCT roots for the recovery/staging advice (R1): `.working` lives under the STORE root, product-
         # scope targets under the PRODUCT root; the two differ for a RELOCATED store.
         recovery_store_root = res.store_root
         recovery_product_root = res.product_root if res.product_root is not None else res.store_root
+        absent_product_targets = []
+        for relpath in product_targets:
+            try:
+                os.lstat(os.path.join(str(recovery_product_root), relpath))
+            except FileNotFoundError:
+                absent_product_targets.append(relpath)
+        _opf_write_guard.check_ignored(recovery_store_root, created_relpaths, "upgrade")
+        _opf_write_guard.check_ignored(recovery_product_root, absent_product_targets, "upgrade")
         # STEP 4 (M4): claim the single-writer lease atomically, then hold it across mutation, render, and
         # the final doctor; release it in the finally covering every exit after acquisition, EXCEPT the
         # success path releases FIRST (R5) so no success is reported over a still-held / failed-to-release
         # lease. `released` records that the success path already released, so the finally does not re-release.
-        lease_payload = _upgrade_acquire_lease(root_fd, machine_rel)
+        lease_payload = _opf_write_guard.acquire_lease(root_fd, machine_rel, "upgrade")
+        recovery = (recovery_store_root, recovery_product_root, created_relpaths,
+                    product_targets, write_scope["store"])
         released = False
         try:
             # Apply: rewrite manifest + counters (canonical bytes), create the missing empty indexes. The
@@ -2264,22 +2159,12 @@ def _upgrade_run(root):
             empty_index = _opf_emit.emit_checked(
                 {"schema": _opf_schema.SUPPORTED_SCHEMA, "record": []}).encode("utf-8")
             created_indexes = []
-            created_relpaths = []
-            for tname in (() if minor else _UPGRADE_NEW_TYPES):
-                idx_rel = "{}/{}{}".format(machine_rel, tname, _opf_check.INDEX_SUFFIX)
+            for idx_rel in write_scope["indexes"]:
                 if _upgrade_create_index(root_fd, idx_rel, empty_index):
-                    created_indexes.append(tname)
-                    created_relpaths.append(idx_rel)
-            # The two NET-NEW view targets are created-untracked this run (their store-relative destinations,
-            # for the enumerated recovery); the re-rendered pre-existing views live under the same `.working`
-            # subtree the scoped restore covers.
-            for vname in (() if minor else _UPGRADE_NEW_VIEWS):
-                _scope, _relpath = _opf_views._spec_destination(vname)
-                if _scope == "store":
-                    created_relpaths.append(_relpath)
+                    created_indexes.append(Path(idx_rel).name[:-len(_opf_check.INDEX_SUFFIX)])
 
             # Render the declared views (materializes the two new views and re-renders DECISIONS.md), then
-            # require a full doctor VALID before offering the staged change. Both run over the mutated
+            # require a full doctor VALID before offering the uncommitted change. Both run over the mutated
             # (uncommitted) tree, under the held lease (containment-clean; the mid-run doctor stays VALID).
             render_argv = ["--root", root, "--write"]
             try:
@@ -2287,13 +2172,14 @@ def _upgrade_run(root):
                 robs, _notes = _opf_observe.gather(rres) if rres.status == _opf_store.RESOLVED else (None, [])
                 rc = _opf_views.render(render_argv, observations=robs)
             except Exception as exc:  # noqa: BLE001  a render escape must not read as a clean upgrade
-                raise _UpgradeError("view render after the schema delta failed ({!r}); the staged change is "
+                raise _UpgradeError("view render after the schema delta failed ({!r}); the uncommitted change is "
                                     "left for review".format(exc))
             if rc != EXIT_OK:
                 print("opf upgrade: cannot evaluate: view render after the schema delta did not complete "
                       "cleanly (rc={}); exit 2.".format(rc), file=sys.stderr)
                 print(_upgrade_recovery_text(recovery_store_root, recovery_product_root, created_relpaths,
-                                             product_targets), file=sys.stderr)
+                                             product_targets, write_scope["store"]), file=sys.stderr)
+                recovery = None  # Already printed, even if the finally's lease release fails.
                 return EXIT_MALFORMED
 
             result = _upgrade_doctor(root)
@@ -2302,7 +2188,8 @@ def _upgrade_run(root):
                       "(fail-closed, spec 9.2). Run `opf doctor --root {}` for the findings, exit 2.".format(
                           root), file=sys.stderr)
                 print(_upgrade_recovery_text(recovery_store_root, recovery_product_root, created_relpaths,
-                                             product_targets), file=sys.stderr)
+                                             product_targets, write_scope["store"]), file=sys.stderr)
+                recovery = None  # Already printed, even if the finally's lease release fails.
                 _doctor_report(result)
                 return EXIT_MALFORMED
 
@@ -2311,8 +2198,17 @@ def _upgrade_run(root):
             # `released` is set FIRST so the finally never double-releases (a failed release legitimately
             # leaves the lease as a spec-conformant leftover for operator reconciliation).
             released = True
-            _upgrade_release_lease(root_fd, machine_rel, lease_payload)
-            print("opf upgrade: store schema upgraded {} -> {} and doctor-VALID (staged, NOT committed)."
+            # Doctor has validated the payload. A failed release can mean another holder is live;
+            # automatic rollback advice is unsafe and is not required to make this payload valid.
+            recovery = None
+            try:
+                _opf_write_guard.release_lease(root_fd, machine_rel, lease_payload, "upgrade")
+            except BaseException:
+                print("opf upgrade: the store reached doctor-VALID before lease release, but release "
+                      "failed. Confirm no opf run is live (spec 5.7) and reconcile the lease before "
+                      "any further action; no restore/removal commands are offered.", file=sys.stderr)
+                raise
+            print("opf upgrade: store schema upgraded {} -> {} and doctor-VALID (uncommitted, NOT staged or committed)."
                   .format(origin_version, _UPGRADE_TO))
             print(json.dumps({
                 "event": "upgraded", "root": str(root), "from": origin_version, "to": _UPGRADE_TO,
@@ -2321,12 +2217,20 @@ def _upgrade_run(root):
                 "decisions_view": "unchanged" if minor else (
                     "widened" if origin["decisions_declared"] else "not-declared")},
                 sort_keys=True))
-            print("opf upgrade: review the staged changes, then stage and commit them (scope the add to the "
-                  "store subtree, never `add -A`, which would sweep in unrelated product work):")
-            print("  git -C {} --literal-pathspecs add -- {}".format(
-                shlex.quote(str(recovery_store_root)), shlex.quote(_opf_store.WORKING_DIRNAME)))
+            print("opf upgrade: regenerated views reflect working-tree store content, including uncommitted "
+                  "source edits outside the cleanliness scope. Before committing, review those edits and "
+                  "commit the intended sources with their views, or set them aside and regenerate the views.")
+            print("opf upgrade: review the uncommitted changes, then stage and commit the planned destinations "
+                  "(never `add -A`, which would sweep in unrelated work). The commands use -f for "
+                  "these named destinations because the safety probes neutralize global/system config "
+                  "and core.excludesFile (including default HOME/XDG global ignores). They read "
+                  "working-tree .gitignore files and .git/info/exclude; the absent-path probe does "
+                  "not read indexed ignore rules:")
+            print("  git -C {} --literal-pathspecs add -f -- {}".format(
+                shlex.quote(str(recovery_store_root)),
+                " ".join(shlex.quote(p) for p in write_scope["store"])))
             for _pt in product_targets:
-                print("  git -C {} --literal-pathspecs add -- {}".format(
+                print("  git -C {} --literal-pathspecs add -f -- {}".format(
                     shlex.quote(str(recovery_product_root)), shlex.quote(_pt)))
             print("opf upgrade: exit 0 means the store is valid at {}; committing is the adopter's own "
                   "step.".format(_UPGRADE_TO))
@@ -2335,8 +2239,8 @@ def _upgrade_run(root):
             if not released:
                 # R5/FIX1: release the lease on every non-success exit. When a mid-run failure is ALREADY
                 # propagating (a render/doctor escape after the manifest+counters were rewritten, which
-                # carries its own "staged change is left for review" recovery advice) and the release then
-                # ALSO fails (its lease-replaced never-seize _UpgradeError), the release error must NOT
+                # carries its own "uncommitted change is left for review" recovery advice) and the release then
+                # ALSO fails (its lease-replaced never-seize WriteGuardError), the release error must NOT
                 # DISPLACE that original exception: the operator still needs the mid-run recovery advice, so
                 # the lease-replaced note is surfaced ALONGSIDE it, never in place of it (exit 2 preserved,
                 # peer lease left, never seized). A propagating KeyboardInterrupt/SystemExit is likewise not
@@ -2345,10 +2249,10 @@ def _upgrade_run(root):
                 if pending is None:
                     # A `return` (or normal fall-through) is passing through with no in-flight exception: a
                     # release failure legitimately becomes the surfaced outcome (exit 2), exactly as before.
-                    _upgrade_release_lease(root_fd, machine_rel, lease_payload)
+                    _opf_write_guard.release_lease(root_fd, machine_rel, lease_payload, "upgrade")
                 else:
                     try:
-                        _upgrade_release_lease(root_fd, machine_rel, lease_payload)
+                        _opf_write_guard.release_lease(root_fd, machine_rel, lease_payload, "upgrade")
                     except (KeyboardInterrupt, SystemExit):
                         raise
                     except Exception as rel_exc:  # noqa: BLE001  surfaced, never displaces the original
@@ -2357,6 +2261,12 @@ def _upgrade_run(root):
                               "still governs (exit 2).".format(rel_exc), file=sys.stderr)
                         # returning from the except lets `pending` resume propagating (the finally completes
                         # without raising a new exception), so _cmd_upgrade surfaces the original refusal.
+    except BaseException:
+        # Cover every escape after acquisition, including writes, render/doctor and lease release.
+        # Preserve the original exception and the existing never-seize release handling.
+        if recovery is not None:
+            print(_upgrade_recovery_text(*recovery), file=sys.stderr)
+        raise
     finally:
         os.close(root_fd)
 
@@ -2847,8 +2757,26 @@ def _cmd_import(rest):
         return EXIT_MALFORMED
 
 
+def _cmd_record(rest):
+    """`opf record <subcommand> ...` (spec 8.8): the record-authoring verb. `create`, `transition`,
+    `done-with-receipt`, and `worklog-append` run the shared journaled operation sequence in _opf_record
+    (byte-reproduction precondition, one id claim through the allocation seam, allowed-delta postcondition,
+    cleanliness gate and lease, one journaled publication, render, final doctor VALID, lease release before
+    the report). The final doctor's one exception is a status change (transition or done-with-receipt),
+    which may leave only doctor's cannot-evaluate for exactly that record and from/to pair, never a finding;
+    doctor keeps reporting it until the change is committed. Exit 0 recorded (left uncommitted), exit 2
+    every refusal or cannot-evaluate; exit 1 is not used. Unlike the applicability-probe siblings a
+    NOT-ADOPTED root is a cannot-evaluate (a requested operation, like import)."""
+    try:
+        return _opf_record.cli(rest)
+    except Exception as exc:  # noqa: BLE001  class-width fail-closed backstop, never a false success
+        print("opf record: cannot evaluate: unexpected error ({!r}); failing closed to exit 2".format(exc),
+              file=sys.stderr)
+        return EXIT_MALFORMED
+
+
 def _cli_self_test():
-    """Guard the dispatcher's render, doctor, import, and source-only init routes.
+    """Guard the dispatcher's render, doctor, import, record, and source-only init routes.
     Render/doctor cases below judge return codes; init also checks payload validation, refusal reasons,
     and preservation through check_opf_init._suite(main). Each case captures stdout and stderr.
     Cases: an unknown verb, no args, and every not-yet-wired KNOWN_VERB fail closed (exit 2); a bare `render`,
@@ -2860,7 +2788,9 @@ def _cli_self_test():
     `doctor`: bad-flag / usage
     cases (a `--root` with no value, an unknown flag) fail closed (exit 2); a NOT-ADOPTED root returns 0 (the
     doctor wiring discriminator: reverting the doctor route routes `doctor` to the fail-closed KNOWN_VERBS
-    branch and returns 2, failing this case); a garbage store returns 2. The render clean/drift 0/1
+    branch and returns 2, failing this case); a garbage store returns 2; with `--require-store` (the CI
+    floor) the same NOT-ADOPTED root returns 2 with the located flag message, and a duplicate flag is a usage
+    error (exit 2). The render clean/drift 0/1
     discrimination rides check_opf_drift.py --self-test, and the doctor clean(0)/mutation(1) discrimination
     over a validate_store-VALID COMMITTED store rides check_opf_doctor.py --self-test, each driving the same
     wiring end to end. Returns 0 clean, 1 on a failure, 2 on a harness error.
@@ -2893,7 +2823,7 @@ def _cli_self_test():
         expect([], EXIT_MALFORMED)
         expect(["frobnicate"], EXIT_MALFORMED)
         for verb in KNOWN_VERBS:
-            if verb not in ("init", "import", "render", "doctor", "upgrade", "absorb"):
+            if verb not in ("init", "import", "render", "doctor", "upgrade", "absorb", "record"):
                 expect([verb], EXIT_MALFORMED)          # a known but not-yet-wired verb fails closed
         expect(["render"], EXIT_MALFORMED)              # bare: exactly one of --check/--write required
         expect(["render", "--check", "--write"], EXIT_MALFORMED)   # both flags refused
@@ -2905,6 +2835,7 @@ def _cli_self_test():
         expect(["doctor", "--root"], EXIT_MALFORMED)    # --root needs a value
         expect(["doctor", "--check", "--root", ""], EXIT_MALFORMED)   # unknown doctor flag (and empty root)
         expect(["doctor", "--bogus"], EXIT_MALFORMED)   # unknown doctor flag
+        expect(["doctor", "--require-store", "--require-store"], EXIT_MALFORMED)   # duplicate CI-floor flag
 
         # absorb verb ROUTING (OPF-CHANGELOG-ABSORB), judged on exit code only. These grammar cases fail
         # closed in the parser BEFORE any store resolution, so they need no store on disk. The NOT-ADOPTED
@@ -2941,6 +2872,24 @@ def _cli_self_test():
         expect(["import", "--apply", "not-a-run-id"], EXIT_MALFORMED)   # bad run-id grammar
         expect(["import", "--bogus", "--scan", "--set", "s.toml"], EXIT_MALFORMED)  # unknown arg
         expect(["import", "--root"], EXIT_MALFORMED)             # --root needs a value
+
+        # record verb ROUTING (OPF-RECORD), judged on exit code only. These grammar cases fail closed in the
+        # parser BEFORE any store resolution, so they need no store on disk; the recorded 0 / refusal 2
+        # discrimination over real stores rides check_opf_record.py --self-test.
+        expect(["record"], EXIT_MALFORMED)                       # bare: a subcommand is required
+        expect(["record", "frobnicate"], EXIT_MALFORMED)         # unknown subcommand
+        expect(["record", "transition", "BI-1", "done"], EXIT_MALFORMED)   # missing --actor
+        expect(["record", "transition", "BI-1", "done/proposed", "--actor", "assistant"],
+               EXIT_MALFORMED)                                   # the qualifier is derived, never given
+        expect(["record", "transition", "PD-1", "decided", "--actor", "maintainer", "--decision", "x"],
+               EXIT_MALFORMED)                                   # the bundle options come together
+        expect(["record", "done-with-receipt", "BI-1"], EXIT_MALFORMED)    # missing --actor
+        expect(["record", "done-with-receipt", "BI-1", "--actor", "assistant"],
+               EXIT_MALFORMED)                                   # maintainer-only, refused before the store
+        expect(["record", "create"], EXIT_MALFORMED)             # missing --type/--title/--actor
+        expect(["record", "create", "--root"], EXIT_MALFORMED)   # --root needs a value
+        expect(["record", "worklog-append", "--kind", "added", "--summary", "s", "--actor", "importer"],
+               EXIT_MALFORMED)                                   # an importer never authors through record
 
         def _fixture_leg():
             """Build the on-disk fixtures and drive render --check over them. Assertion outcomes are recorded
@@ -2988,6 +2937,18 @@ def _cli_self_test():
                 # observation), mirroring how the render clean/drift 0/1 rides check_opf_drift.py --self-test.
                 expect(["doctor", "--root", not_adopted], EXIT_OK)
                 expect(["doctor", "--root", broken], EXIT_MALFORMED)
+                # The CI floor (enforcement pack, U16): with --require-store the SAME NOT-ADOPTED root is a
+                # located cannot-evaluate (exit 2), while the unflagged case just above still returns 0. The
+                # message is asserted too, because deleting the flag would also exit 2 (as an unrecognized
+                # argument), so the code alone would not discriminate. Reverting the flag's NOT-ADOPTED branch
+                # returns 0 here, failing this case. A garbage store keeps its unflagged exit 2.
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                    rc = main(["doctor", "--require-store", "--root", not_adopted])
+                if rc != EXIT_MALFORMED or "--require-store was given but no OPF store" not in buf.getvalue():
+                    failures.append("doctor --require-store over a NOT-ADOPTED root: rc={!r} (expected 2 + "
+                                    "the located no-store message)".format(rc))
+                expect(["doctor", "--require-store", "--root", broken], EXIT_MALFORMED)
                 # upgrade over the same synthetic roots: a NOT-ADOPTED root reports NOT APPLICABLE and
                 # returns 0 -- the wiring discriminator (reverting the upgrade route sends `upgrade` to the
                 # fail-closed KNOWN_VERBS branch, which returns 2 here, failing this case); a garbage store
@@ -3327,7 +3288,8 @@ def _cli_self_test():
             return EXIT_FINDING
         print("opf cli self-test: PASS (verb routing: unknown/unwired verbs and render/doctor/import usage "
               "errors fail closed; render --check forwards to the U4 engine; doctor resolves + validates a "
-              "store, NOT-ADOPTED -> 0 and a garbage store -> 2; import wires scan/plan/review/apply onto "
+              "store, NOT-ADOPTED -> 0 (2 with --require-store) and a garbage store -> 2; "
+              "import wires scan/plan/review/apply onto "
               "the U7 operation layer -- an unresolved store -> 2 init-first, --scan -> 0 writing nothing, "
               "--plan -> 0 staging a run, --review incomplete -> 1 and complete -> 0 with a valid "
               "acceptance.json, non-TTY --interactive -> 2, and --apply over a reviewed run on a non-doctor-"
@@ -3358,6 +3320,7 @@ def _self_tests():
     ("opf-importers", _opf_importers.self_test),
     ("opf-observe", _opf_observe.self_test),
     ("opf-absorb", _opf_absorb.self_test),
+    ("opf-record", _opf_record.self_test),
     ("opf-fuzz", _opf_fuzz.self_test),
     ("opf-check", _opf_check.self_test),
     ("opf-watchdog-hostile-ambient", _watchdog_hostile_ambient_self_test),
@@ -3369,7 +3332,7 @@ def _self_tests():
 )
 
 # The spec's command vocabulary (spec 1). Each lands in its own unit; until then a verb fails closed.
-KNOWN_VERBS = ("init", "import", "doctor", "render", "migrate", "sync", "upgrade", "absorb")
+KNOWN_VERBS = ("init", "import", "doctor", "render", "migrate", "sync", "upgrade", "absorb", "record")
 
 
 # Helper self-tests that pin sys.set_int_max_str_digits(4300) inside a fixture and MUST restore the ambient
@@ -3378,6 +3341,16 @@ _INT_LIMIT_SELF_TESTS = frozenset({"opf-release", "opf-emit", "opf-schema", "opf
 
 
 def run_self_tests(tests=None):
+    """Keep caller HOME/XDG out of fixture reads, including in-process production helpers."""
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
+            return run_self_tests_isolated(tests)
+
+
+def run_self_tests_isolated(tests=None):
     """Run every registered helper self-test in order, forwarding each result. The aggregate exit code
     is the WORST outcome (2 cannot-evaluate > 1 finding > 0 clean): one degraded or failing helper fails
     the whole leg, never masked by a later clean one. With no explicit `tests`, the registered set is built
@@ -3457,6 +3430,8 @@ def main(argv=None):
         return _cmd_import(rest)
     if verb == "absorb":
         return _cmd_absorb(rest)
+    if verb == "record":
+        return _cmd_record(rest)
     if verb in KNOWN_VERBS:
         # A recognized verb whose unit has not landed: fail closed (exit 2), never a silent success, so
         # a stub is never mistaken for a completed operation.

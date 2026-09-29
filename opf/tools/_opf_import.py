@@ -6388,6 +6388,16 @@ def _self_test_ingest_capture_homes2(root, run, now, check, stamp):
 
 
 def self_test():
+    """Isolate fixture configuration and restore the caller even on failure."""
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
+            return self_test_isolated()
+
+
+def self_test_isolated():
     """Import-staging invariants over synthetic stores. Judged on the returned verdict values, never by
     grepping output. Fixtures live under a private tempdir removed in a finally; the injected instant and
     nonce are fixed, so ids and bytes are deterministic. Follows the U1 self-test idiom."""

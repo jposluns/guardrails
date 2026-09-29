@@ -111,9 +111,19 @@ class = "pack-immutable"
 note = "The dependency-closed OPF tooling subtree (OPF-SELF-CONTAIN). Shipped pack tooling, byte-exact, mirroring tools/**; disjoint from it. H-1 ratified: no new class family."
 
 [[release-class]]
+pattern = "opf/prompt-pack/**"
+class = "pack-immutable"
+note = "The OPF prompt pack (manifest and member documents), verified by opf/tools/check_opf_prompt_pack.py. Shipped pack content, byte-exact, beside opf/tools/** and opf/spec/** and disjoint from both. No new class family."
+
+[[release-class]]
 pattern = "opf/spec/**"
 class = "pack-immutable"
 note = "The OPF specification pair (OPF-SPEC.md, OPF-QUICKSTART.md) relocated under opf/ (OPF-SELF-CONTAIN). Shipped pack content, byte-exact. H-1 ratified: no new class family."
+
+[[release-class]]
+pattern = "opf/enforcement/**"
+class = "pack-immutable"
+note = "The OPF enforcement pack: adopter-installed CI, pre-commit, hook and instruction files, starting with the CI floor under ci/. Shipped pack content, byte-exact. No new class family."
 
 [[release-class]]
 pattern = ".preview/**"

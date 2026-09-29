@@ -19,11 +19,19 @@ export PYTHONDONTWRITEBYTECODE=1
 
 failed=0
 notrun=0
+# Gate output does not carry the runner's gate label, so each failure is named as it happens and the
+# names are listed again before RESULT: FAIL; a failing suite never needs a hand re-run to find it.
+failed_names=""
 
 run_gate() {
   local name="$1"; shift
   echo "--- ${name} ---"
-  if "$@"; then :; else failed=1; fi
+  if "$@"; then :; else
+    local rc=$?
+    failed=1
+    failed_names="${failed_names:+${failed_names}, }${name}"
+    echo "GATE FAILED: ${name} (exit ${rc})"
+  fi
   echo
 }
 
@@ -45,7 +53,10 @@ if command -v gitleaks >/dev/null 2>&1; then
   if gitleaks dir . --no-banner --redact --exit-code 1; then
     echo "PASS: gitleaks found no leaks"
   else
+    gitleaks_rc=$?
     failed=1
+    failed_names="${failed_names:+${failed_names}, }secrets (gitleaks)"
+    echo "GATE FAILED: secrets (gitleaks) (exit ${gitleaks_rc})"
   fi
 else
   echo "NOT RUN: gitleaks is not on PATH locally. CI still runs it, so this is a gap"
@@ -81,6 +92,9 @@ run_gate "opf-homes-selftest" python3 -I -B opf/tools/check_opf_homes.py --self-
 run_gate "opf-homes-migrate-selftest" python3 -I -B opf/tools/check_opf_homes_migrate.py --self-test --red-on-revert
 run_gate "opf-homes-contract" python3 -I -B opf/tools/check_opf_homes.py
 run_gate "opf-tooling-selftest" python3 -I -B opf/tools/opf.py --self-test
+run_gate "opf-import-direct-selftest" python3 -I -B opf/tools/_opf_import.py --self-test
+run_gate "opf-ingest-direct-selftest" python3 -I -B opf/tools/_opf_ingest.py --self-test
+run_gate "opf-observe-direct-selftest" python3 -I -B opf/tools/_opf_observe.py --self-test
 run_gate "opf-drift-selftest" python3 -I -B opf/tools/check_opf_drift.py --self-test
 run_gate "opf-drift" python3 -I -B opf/tools/check_opf_drift.py
 run_gate "opf-doctor-selftest" python3 -I -B opf/tools/check_opf_doctor.py --self-test
@@ -92,6 +106,7 @@ run_gate "opf-init-contract-check-selftest" python3 -I -B opf/tools/check_opf_in
 run_gate "opf-init-contract-check" python3 -I -B opf/tools/check_opf_init_contract.py
 run_gate "opf-upgrade-selftest" python3 -I -B opf/tools/check_opf_upgrade.py --self-test
 run_gate "opf-upgrade" python3 -I -B opf/tools/check_opf_upgrade.py
+run_gate "opf-record-selftest" python3 -I -B opf/tools/check_opf_record.py --self-test --red-on-revert
 run_gate "opf-import-selftest" python3 -I -B opf/tools/check_opf_import.py --self-test
 run_gate "opf-import" python3 -I -B opf/tools/check_opf_import.py
 run_gate "opf-ingest-selftest" python3 -I -B opf/tools/check_opf_ingest.py --self-test
@@ -100,6 +115,8 @@ run_gate "opf-ingest-apply-selftest" python3 -I -B opf/tools/_opf_ingest_apply.p
 run_gate "opf-adopt-selftest" python3 -I -B opf/tools/_opf_adopt.py --self-test
 run_gate "opf-pack-manifest-selftest" python3 -I -B opf/tools/_opf_pack_manifest.py --self-test
 run_gate "opf-adopt-observe-selftest" python3 -I -B opf/tools/_opf_adopt_observe.py --self-test
+run_gate "opf-prompt-pack-selftest" python3 -I -B opf/tools/check_opf_prompt_pack.py --self-test
+run_gate "opf-prompt-pack" python3 -I -B opf/tools/check_opf_prompt_pack.py
 run_gate "opf-oplock-selftest" python3 -I -B opf/tools/_opf_oplock.py --self-test
 run_gate "opf-init-substrate-selftest" python3 -I -B opf/tools/_opf_init_substrate.py --self-test
 run_gate "opf-init-builders-selftest" python3 -I -B opf/tools/_opf_init.py --self-test
@@ -111,6 +128,8 @@ run_gate "aiqt-corpus-selftest" python3 -I -B tools/selftest_aiqt_corpus.py
 run_gate "roadmap-drift"   python3 -I -B tools/gen_roadmap.py --check
 run_gate "changelog-drift" python3 -I -B tools/gen_changelog.py --check
 run_gate "versions"        python3 -I -B tools/check_versions.py
+run_gate "release-cut-selftest" python3 -I -B tools/check_release_cut.py --self-test --red-on-revert
+run_gate "release-cut"          python3 -I -B tools/check_release_cut.py
 run_gate "version-monotonicity-selftest" python3 -I -B tools/check_version_monotonicity.py --self-test
 run_gate "version-monotonicity" python3 -I -B tools/check_version_monotonicity.py
 run_gate "branch-root-selftest" python3 -I -B tools/check_branch_root.py --self-test
@@ -167,6 +186,7 @@ run_gate "hooks-preview" python3 -I -B tools/check_hooks_preview.py
 run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execution.py --self-test
 run_gate "orch-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
 run_gate "ci-status-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
+run_gate "git-fixture-env-selftest" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest
 run_gate "record-drift-selftest" python3 -I -B tools/check_record_drift.py --self-test
 run_gate "record-drift"          python3 -I -B tools/check_record_drift.py
 run_gate "record-sections-selftest" python3 -I -B tools/check_record_sections.py --self-test
@@ -228,6 +248,7 @@ run_gate "internal-names"           python3 -I -B tools/check_internal_names.py
 run_gate "qa-advisory-digest"       python3 -I -B tools/audit_reference.py --digest
 
 if [ "$failed" -ne 0 ]; then
+  echo "FAILED GATES: ${failed_names}"
   echo "RESULT: FAIL"
   exit 1
 fi

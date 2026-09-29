@@ -189,7 +189,8 @@ def _checks():
 
     # C-SPEC-VERSION: the base spec_version the schema-compat obligation targets. Re-verified at 1.2.0 for
     # OPF-D2B PR3a (PD-D2B-PR3-SCHEMA decision 5): the bump admits the managed init.toml provenance as a
-    # C-CONTAINMENT leaf, and `opf upgrade` carries a 1.1.0 store forward by the version bump alone.
+    # C-CONTAINMENT leaf. For a 1.1.0 store, the upgrade schema delta changes only spec_version;
+    # declared views are then regenerated, so a stale committed view can change.
     if not _has_line(store, 'SUPPORTED_SPEC_VERSION = "1.2.0"'):
         _cant("_opf_store.py SUPPORTED_SPEC_VERSION changed; re-verify the schema-compat boundary")
 

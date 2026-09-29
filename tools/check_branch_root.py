@@ -246,6 +246,10 @@ def run(root, protected=None, head=None, max_lag=None):
 
 
 def _fixture_git(root, *args, identity=False, input_text=None):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _git_fixture_env import git_fixture_env
+    env = git_fixture_env(GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0",
+                          GIT_OPTIONAL_LOCKS="0", GIT_NO_REPLACE_OBJECTS="1")
     cmd = ["git", "-C", str(root)]
     if identity:
         cmd += [
@@ -261,7 +265,7 @@ def _fixture_git(root, *args, identity=False, input_text=None):
         text=True,
         check=True,
         timeout=TIMEOUT,
-        env=_git_env(),
+        env=env,
     ).stdout.strip()
 
 

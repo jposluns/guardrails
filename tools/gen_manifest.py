@@ -791,9 +791,8 @@ _DISPOSITIONS = "format-version = 1\n"
 
 
 def _git(root, *args):
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env["GIT_CONFIG_GLOBAL"] = os.devnull
-    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    from _git_fixture_env import git_fixture_env
+    env = git_fixture_env()
     base = ["git", "-C", str(root), "-c", "user.name=aiqt-selftest",
             "-c", "user.email=selftest@invalid", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"]
     return subprocess.run(base + list(args), capture_output=True, env=env, timeout=60)
@@ -826,12 +825,21 @@ def _build_fixture(base, own_extra="", extra_files=None, do_commit=True):
     if do_commit:
         if _git(base, "init", "-q", "--template=").returncode != 0:
             return None
-        _git(base, "add", "-A")
-        _git(base, "commit", "-q", "-m", "fixture", "--no-verify")
+        _git(base, "add", "-A").check_returncode()
+        _git(base, "commit", "-q", "-m", "fixture", "--no-verify").check_returncode()
     return base
 
 
 def self_test_main():
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _git_fixture_env import fixture_git_lifecycle
+    with fixture_git_lifecycle():
+        return _self_test_main_isolated()
+
+
+def _self_test_main_isolated():
+    from _git_fixture_env import scrub_git_environment
+    scrub_git_environment()
     import io
     import shutil
     import tempfile
@@ -939,8 +947,8 @@ def self_test_main():
         (stale / ".aiqt" / "core" / "ownership.toml").write_text(
             _OWN_BASE + '\n[[exclusion]]\npath = "nonexistent-file.txt"\nreason = "stale"\n' + _OWN_TAIL,
             encoding="utf-8")
-        _git(stale, "add", "-A")
-        _git(stale, "commit", "-q", "-m", "stale", "--no-verify")
+        _git(stale, "add", "-A").check_returncode()
+        _git(stale, "commit", "-q", "-m", "stale", "--no-verify").check_returncode()
         if run_quiet(stale, check=False) != 2:
             failures.append("a stale exclusion (zero matches) expected exit 2")
 
@@ -958,9 +966,9 @@ def self_test_main():
             + _OWN_TAIL.replace("[adopter-extent]",
                                 '[checkout]\nbinary = ["blob.bin"]\n\n[adopter-extent]'),
             encoding="utf-8")
-        _git(binok, "init", "-q", "--template=")
-        _git(binok, "add", "-A")
-        _git(binok, "commit", "-q", "-m", "binok", "--no-verify")
+        _git(binok, "init", "-q", "--template=").check_returncode()
+        _git(binok, "add", "-A").check_returncode()
+        _git(binok, "commit", "-q", "-m", "binok", "--no-verify").check_returncode()
         if run_quiet(binok, check=False) != 0:
             failures.append("a declared-binary non-UTF-8 file expected exit 0")
 
@@ -982,9 +990,9 @@ def self_test_main():
         # (h) a broken CLAUDE.md marker pair -> 2.
         marker = _build_fixture(tmp / "marker", do_commit=False)
         (marker / "CLAUDE.md").write_text("# no markers here\n", encoding="utf-8")
-        _git(marker, "init", "-q", "--template=")
-        _git(marker, "add", "-A")
-        _git(marker, "commit", "-q", "-m", "marker", "--no-verify")
+        _git(marker, "init", "-q", "--template=").check_returncode()
+        _git(marker, "add", "-A").check_returncode()
+        _git(marker, "commit", "-q", "-m", "marker", "--no-verify").check_returncode()
         if run_quiet(marker, check=False) != 2:
             failures.append("a missing CLAUDE.md marker pair expected exit 2")
 

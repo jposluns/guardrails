@@ -2594,7 +2594,12 @@ def _runner_red_checks(expected):
 
     for status in (1, 2, 7):
         own_failure(source, status)
-    propagation = '  if "$@"; then :; else failed=1; fi'
+    propagation = ('  if "$@"; then :; else\n'
+                   '    local rc=$?\n'
+                   '    failed=1\n'
+                   '    failed_names="${failed_names:+${failed_names}, }${name}"\n'
+                   '    echo "GATE FAILED: ${name} (exit ${rc})"\n'
+                   '  fi')
     if source.count(propagation) != 1:
         raise AssertionError(identity + "/red-fixture")
 
@@ -2844,6 +2849,67 @@ def _runner_registration_test(expected):
     _runner_red_checks(expected)
 
 
+def _git_archive_fixture(base):
+    """Keep caller HOME/XDG out of the archive fixture's git lifecycle."""
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-observe-git-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
+            return _git_archive_fixture_isolated(base)
+
+
+def _git_archive_fixture_isolated(base):
+    """Build a real git archive with its pinned comment under base.
+
+    Reached only through _git_archive_fixture, whose private home is HOME and
+    XDG_CONFIG_HOME here.
+    """
+    import gzip
+    import subprocess
+    executable = shutil.which("git", path=os.defpath)
+    if executable is None:
+        raise RuntimeError("git archive fixture builder unavailable")
+    repo = base / "git-fixture"
+    template = base / "git-template"
+    for directory in (repo, template):
+        directory.mkdir(mode=0o700)
+    # No ambient GIT_* value, HOME, XDG config, template or hooks survives.
+    env = {
+        "PATH": os.defpath, "HOME": os.environ["HOME"],
+        "XDG_CONFIG_HOME": os.environ["XDG_CONFIG_HOME"], "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_AUTHOR_NAME": "Archive fixture",
+        "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+        "GIT_COMMITTER_NAME": "Archive fixture",
+        "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+    }
+
+    def git(*args, data=None):
+        # No automatic gc or maintenance may detach from, or outlive, a launch.
+        return subprocess.run(
+            [os.path.abspath(executable), "-C", str(repo),
+             "-c", "core.attributesFile=" + os.devnull,
+             "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
+             "-c", "maintenance.auto=false", *args],
+            input=data, cwd=repo, env=env, check=True, timeout=15,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ).stdout
+
+    git("init", "--object-format=sha1", "--template=" + str(template))
+    blob = git("hash-object", "-w", "--stdin", data=b"data").strip().decode("ascii")
+    git("update-index", "--add", "--cacheinfo", "100644," + blob + ",data")
+    tree = git("write-tree").strip().decode("ascii")
+    revision = git("commit-tree", tree, data=b"archive fixture\n").strip().decode("ascii")
+    if _COMMIT.fullmatch(revision) is None:
+        raise AssertionError("fixture did not produce a SHA-1 commit")
+    raw = git("archive", "--format=tar", "--prefix=wrap/", revision)
+    if (raw[156:157] != tarfile.XGLTYPE
+            or raw[512:564] != b"52 comment=" + revision.encode("ascii") + b"\n"):
+        raise AssertionError("git archive did not produce its pinned comment")
+    return revision, gzip.compress(raw, mtime=0)
+
+
 def self_test(vectors_only=False):
     """Local fixtures only; report executed rows and require mutation sensitivity.
 
@@ -2947,47 +3013,6 @@ def self_test(vectors_only=False):
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, previous)
-
-    def git_archive_fixture(base):
-        executable = shutil.which("git", path=os.defpath)
-        if executable is None:
-            raise RuntimeError("git archive fixture builder unavailable")
-        repo = base / "git-fixture"
-        home = base / "git-home"
-        template = base / "git-template"
-        for directory in (repo, home, template):
-            directory.mkdir(mode=0o700)
-        # No ambient GIT_* value, HOME, XDG config, template or hooks survives.
-        env = {
-            "PATH": os.defpath, "HOME": str(home),
-            "XDG_CONFIG_HOME": str(home), "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_GLOBAL": os.devnull,
-            "GIT_AUTHOR_NAME": "Archive fixture",
-            "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
-            "GIT_COMMITTER_NAME": "Archive fixture",
-            "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
-        }
-
-        def git(*args, data=None):
-            return subprocess.run(
-                [os.path.abspath(executable), "-C", str(repo),
-                 "-c", "core.attributesFile=" + os.devnull, *args],
-                input=data, cwd=repo, env=env, check=True, timeout=15,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            ).stdout
-
-        git("init", "--object-format=sha1", "--template=" + str(template))
-        blob = git("hash-object", "-w", "--stdin", data=b"data").strip().decode("ascii")
-        git("update-index", "--add", "--cacheinfo", "100644," + blob + ",data")
-        tree = git("write-tree").strip().decode("ascii")
-        revision = git("commit-tree", tree, data=b"archive fixture\n").strip().decode("ascii")
-        if _COMMIT.fullmatch(revision) is None:
-            raise AssertionError("fixture did not produce a SHA-1 commit")
-        raw = git("archive", "--format=tar", "--prefix=wrap/", revision)
-        if (raw[156:157] != tarfile.XGLTYPE
-                or raw[512:564] != b"52 comment=" + revision.encode("ascii") + b"\n"):
-            raise AssertionError("git archive did not produce its pinned comment")
-        return revision, gzip.compress(raw, mtime=0)
 
     def reply(body, extra=b"", status=b"200 OK", chunked=False):
         if chunked:
@@ -3841,7 +3866,7 @@ def self_test(vectors_only=False):
                 context.load_cert_chain(str(cert), str(key))
                 contexts.append(context)
 
-            git_commit, git_archive = git_archive_fixture(base)
+            git_commit, git_archive = _git_archive_fixture(base)
             add("positive/git-archive", VALID, "reject-git-comment",
                 commit=git_commit, archive=git_archive)
 

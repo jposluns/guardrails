@@ -142,6 +142,15 @@ jobs:
       - name: OPF tooling self-test
         run: python3 -I -B opf/tools/opf.py --self-test
 
+      - name: OPF import direct self-test
+        run: python3 -I -B opf/tools/_opf_import.py --self-test
+
+      - name: OPF ingest direct self-test
+        run: python3 -I -B opf/tools/_opf_ingest.py --self-test
+
+      - name: OPF observe direct self-test
+        run: python3 -I -B opf/tools/_opf_observe.py --self-test
+
       - name: OPF render-drift gate self-test
         run: python3 -I -B opf/tools/check_opf_drift.py --self-test
 
@@ -175,6 +184,9 @@ jobs:
       - name: OPF store-schema upgrade gate
         run: python3 -I -B opf/tools/check_opf_upgrade.py
 
+      - name: OPF record-authoring gate self-test
+        run: python3 -I -B opf/tools/check_opf_record.py --self-test --red-on-revert
+
       - name: OPF import operation-layer gate self-test
         run: python3 -I -B opf/tools/check_opf_import.py --self-test
 
@@ -198,6 +210,12 @@ jobs:
 
       - name: OPF adoption HTTPS observer and quarantine self-test
         run: python3 -I -B opf/tools/_opf_adopt_observe.py --self-test
+
+      - name: OPF prompt-pack manifest drift gate self-test (PR7 slice 1)
+        run: python3 -I -B opf/tools/check_opf_prompt_pack.py --self-test
+
+      - name: OPF prompt-pack manifest drift gate
+        run: python3 -I -B opf/tools/check_opf_prompt_pack.py
 
       - name: OPF operation-lock self-test
         run: python3 -I -B opf/tools/_opf_oplock.py --self-test
@@ -231,6 +249,22 @@ jobs:
 
       - name: Version format and single-source
         run: python3 -I -B tools/check_versions.py
+
+      - name: Release cut self-test
+        run: python3 -I -B tools/check_release_cut.py --self-test --red-on-revert
+
+      - name: Release cut
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 -I -B tools/check_release_cut.py
+          else
+            # Check every first-parent transition in the pushed range.
+            python3 -I -B tools/check_release_cut.py --protected "origin/${GITHUB_REF_NAME}" --base "$PUSH_BEFORE"
+          fi
 
       - name: Version monotonicity self-test
         run: python3 -I -B tools/check_version_monotonicity.py --self-test
@@ -407,6 +441,9 @@ jobs:
 
       - name: CI-status behaviour self-test (execution-reconciled)
         run: python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
+
+      - name: Git-fixture-env behaviour self-test (execution-reconciled)
+        run: python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest
 
       - name: Record-drift self-test
         run: python3 -I -B tools/check_record_drift.py --self-test

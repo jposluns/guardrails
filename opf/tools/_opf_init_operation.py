@@ -2718,6 +2718,10 @@ def _read_plan(root):
 
 
 def _run_self_test():
+    return _opf_oplock._st_with_git_lifecycle(_run_self_test_isolated)
+
+
+def _run_self_test_isolated():
     import signal
     import tempfile
     import traceback

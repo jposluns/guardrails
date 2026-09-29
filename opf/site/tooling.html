@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Reference tooling | OPFiles</title>
-<meta name="description" content="The OPFiles reference commands for creating, validating, rendering, importing, relocating, and synchronizing an operational store.">
+<meta name="description" content="The nine OPFiles verbs: init, import, doctor, render, migrate, sync, upgrade, absorb, and record. Migration and synchronization are planned in the reference CLI.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
 <link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
 <meta property="og:title" content="Reference tooling | OPFiles">
-<meta property="og:description" content="The OPFiles reference commands for creating, validating, rendering, importing, relocating, and synchronizing an operational store.">
+<meta property="og:description" content="The nine OPFiles verbs: init, import, doctor, render, migrate, sync, upgrade, absorb, and record. Migration and synchronization are planned in the reference CLI.">
 <meta name="twitter:card" content="summary">
 </head>
 <body>
@@ -50,7 +50,7 @@
 <div class="wrap pagehead">
   <p class="eyebrow">Reference tooling</p>
   <h1>Reference tooling</h1>
-  <p class="lead">OPFiles names a standard command vocabulary; the reference suite implements that vocabulary: seven commands to create, render, validate, upgrade, import, relocate, and synchronize a store.</p>
+  <p class="lead">OPFiles names nine command verbs: <code>init</code>, <code>import</code>, <code>doctor</code>, <code>render</code>, <code>migrate</code>, <code>sync</code>, <code>upgrade</code>, <code>absorb</code>, and <code>record</code>. The reference CLI implements seven; <code>migrate</code> and <code>sync</code> are planned and currently exit 2 (not yet implemented).</p>
 </div>
 
 <section>
@@ -76,7 +76,7 @@
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 0 1 12.8-5.3L20 9"/><path d="M20 4v5h-5"/><path d="M19.5 12a7.5 7.5 0 0 1-12.8 5.3L4 15"/><path d="M4 20v-5h5"/></svg></span>
         <h3><code>opf render</code></h3>
-        <p>Regenerates the declared views; <code>--check</code> reports drift read-only, <code>--write</code> writes only on a full store validation before and after.</p>      </div>
+        <p>Regenerates declared views. <code>--check</code> compares bytes read-only. <code>--write</code> gates on source integrity, then checks source integrity and regenerated outputs after writing; other deliverable failures can remain and cause a nonzero exit.</p>      </div>
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="m8.5 12 2.3 2.3 4.7-4.9"/></svg></span>
         <h3><code>opf doctor</code></h3>
@@ -84,19 +84,27 @@
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20V6"/><path d="m6 12 6-6 6 6"/></svg></span>
         <h3><code>opf upgrade</code></h3>
-        <p>Applies the in-place, additive, idempotent base-schema upgrade, staged for your own review and merge; it never commits.</p>      </div>
+        <p>Applies the in-place, additive, idempotent base-schema upgrade, left uncommitted for your own review and merge; it never commits.</p>      </div>
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 14v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/><path d="M12 4v9"/><path d="m8 9 4 4 4-4"/></svg></span>
         <h3><code>opf import</code></h3>
         <p>Scans, plans, captures attributed reviews of legacy content, and promotes a reviewed import with <code>--apply</code>.</p>      </div>
       <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h9l3 3v15H6z"/><path d="M9 10h6M9 14h6M9 18h4"/></svg></span>
+        <h3><code>opf absorb</code></h3>
+        <p>Drafts changelog entries for human curation or computes a curated entry's freeze digest; outputs to stdout without writing files.</p>      </div>
+      <div class="benefit">
+        <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/></svg></span>
+        <h3><code>opf record</code></h3>
+        <p>Authors one record change at a time: creates a record, transitions its status, completes a backlog item with its receipt, or appends a worklog entry. It leaves the change uncommitted for your review.</p>      </div>
+      <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h13"/><path d="m11 7 5 5-5 5"/><path d="M20 5v14"/></svg></span>
         <h3><code>opf migrate</code></h3>
-        <p>Relocates the whole store, git history and worklog preserved, to any location a target can name.</p>      </div>
+        <p>Planned: relocate the whole store, preserving git history and worklog. Not yet implemented in the reference CLI (exit 2).</p>      </div>
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 9a7.5 7.5 0 0 1 12.8-2.3"/><path d="M17 4v3h-3"/><path d="M19.5 15a7.5 7.5 0 0 1-12.8 2.3"/><path d="M7 20v-3h3"/></svg></span>
         <h3><code>opf sync</code></h3>
-        <p>The surfaced pull and push step of the store consistency contract.</p>      </div>
+        <p>Planned: the surfaced pull and push step of the store consistency contract. Not yet implemented in the reference CLI (exit 2).</p>      </div>
     </div>
   </div>
 </section>
@@ -110,9 +118,10 @@
       <span class="chip">Schema validity</span>
       <span class="chip">ID uniqueness and counter monotonicity</span>
       <span class="chip">Bidirectional index reconciliation</span>
-      <span class="chip">Transition legality</span>
+      <span class="chip">Transition legality where observations suffice</span>
       <span class="chip">The all-or-none resolution bundle</span>
-      <span class="chip">Byte drift for every deterministic view</span>
+      <span class="chip">Byte drift for declared baseline views (inline layout)</span>
+      <span class="chip">The root <code>VERSION</code> deliverable (required whenever releases exist, absent before the first release)</span>
       <span class="chip">Worklog span tiling and frozen digests</span>
       <span class="chip">Changelog coverage and freeze</span>
       <span class="chip">Archive integrity</span>
@@ -120,6 +129,13 @@
       <span class="chip">Pointer and sync-target agreement</span>
       <span class="chip">Path containment</span>
     </p>
+    <p>Doctor reports per-record view drift and the content schemas of module-tier and importer
+      records, including <code>legacy_fragment</code>, as cannot-evaluate. Baseline view coverage includes
+      composed views and projections. A declared view outside the baseline set, such as a module-type
+      index mirror, makes the whole drift check cannot-evaluate. Transition checks also report
+      cannot-evaluate when legality depends on an unidentified last-transition actor or a rejection
+      requires unavailable pre-proposal state. Doctor does not check behind, ahead, or divergence
+      against a sync target.</p>
     <p>At the strictest posture, an unreadable, unparseable, or unresolvable declared input is a
       failure, never an empty or clean result.</p>
   </div>
@@ -129,10 +145,9 @@
   <div class="wrap">
     <p class="eyebrow">Integrity</p>
     <h2>Trust and integrity</h2>
-    <p>The release digests are published now, independently of artefact delivery, at
-      posluns.dev/hashes.txt, so you can confirm that the tooling you downloaded matches the one we
-      intended to publish. Before applying anything, verify the pack's published digest against the
-      authoritative reference on posluns.dev, and refuse on a mismatch or missing evidence.</p>
+    <p>Before applying a downloaded pack, compare its digest with the independently published reference
+      at posluns.dev/hashes.txt for that release. Refuse on a mismatch or missing evidence; the presence
+      of this instruction does not establish that a reference is currently available.</p>
     <p>Publishing a verifiable signature alongside releases is a roadmap item.</p>
   </div>
 </section>
@@ -141,10 +156,9 @@
   <div class="wrap">
     <p class="eyebrow">Discovery</p>
     <h2>How an assistant finds the standard</h2>
-    <p>The site exposes a machine-readable entry point for AI assistants: an
-      <code>/llms.txt</code> index, a machine-readable <code>/adopt.md</code>, and a plain link on the root
-      page an assistant can follow, so pointing an assistant at the site is enough for it to find
-      and follow the adoption steps.</p>
+    <p>The site provides an <a href="/llms.txt"><code>/llms.txt</code></a> index and
+      <a href="/adopt.md"><code>/adopt.md</code></a> guide, also linked from the root page.
+      Ask your assistant to read them, inspect your project, and propose a plan for review.</p>
   </div>
 </section>
 

@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OPFiles: the operational-files standard</title>
-<meta name="description" content="OPFiles (OPF) is a neutral, open-source standard for a project's operational records. Machine-written TOML sources are paired with generated human-readable views and kept in lockstep by drift gates, so AI-assisted work and project operations stay consistent and the record keeps its integrity.">
+<meta name="description" content="OPFiles (OPF) is a neutral standard for a project's operational records. It pairs TOML sources with generated human-readable views and defines drift checks for use in a required commit or CI gate.">
 <script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
 <link rel="stylesheet" href="./styles.css?v=20260918a">
 <script src="./theme.js"></script>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <meta property="og:type" content="website">
 <meta property="og:title" content="OPFiles: the operational-files standard">
-<meta property="og:description" content="OPFiles (OPF) is a neutral, open-source standard for a project's operational records. Machine-written TOML sources are paired with generated human-readable views and kept in lockstep by drift gates, so AI-assisted work and project operations stay consistent and the record keeps its integrity.">
+<meta property="og:description" content="OPFiles (OPF) is a neutral standard for a project's operational records. It pairs TOML sources with generated human-readable views and defines drift checks for use in a required commit or CI gate.">
 <meta name="twitter:card" content="summary">
 </head>
 <body>
@@ -47,7 +47,7 @@
 <div class="content">
 
 <!-- cs-banner:start -->
-<div class="wrap"><p class="cs-banner">This site is a <b>preview</b> for friends and colleagues to review; the reference code and repository are a few days from fully matching what it describes.</p></div>
+<div class="wrap"><p class="cs-banner">This site is a <b>preview</b> for friends and colleagues to review. See the <a href="./tooling">command status</a> for implemented and planned capabilities.</p></div>
 <!-- cs-banner:end -->
 
 <div class="wrap">
@@ -66,8 +66,8 @@
   <div class="wrap">
     <div class="hero-copy">
       <p class="eyebrow">Operational records, governed like code</p>
-      <h1>Integrity and consistency, <span class="grad">built into how your projects run.</span></h1>
-      <p class="lead">Keep every project's operational record accurate and consistent, so your teams and their AI assistants work from one source of truth, gated against quiet drift. Under the hood: machine-written TOML paired with generated human-readable views, checked by a drift gate when you configure it as a required commit or CI check.</p>
+      <h1>Operational records, <span class="grad">with checks for schema and view drift.</span></h1>
+      <p class="lead">Use structured operational records and configured checks with the aim of improving consistency. Review recorded claims against their evidence: schema and drift checks do not establish factual accuracy. Under the hood: machine-written TOML paired with generated human-readable views, checked by a drift gate when you configure it as a required commit or CI check.</p>
       <div class="cta">
         <a class="btn primary" href="#model">See how it holds together</a>
         <a class="btn ghost" href="./standard">Read the standard</a>
@@ -95,14 +95,14 @@
         </div>
       </div>
     </div>
-    <p class="code-cap"><b>Illustrative excerpt.</b> The source on top is what your tools and assistants write. The view below is what your people read. A gate checks the view against a fresh render of its sources.</p>
+    <p class="code-cap"><b>Illustrative excerpt.</b> The source on top is what your tools and assistants write. The view below is what your people read. When configured as a required check, a gate compares the view with a fresh render of its sources.</p>
   </div>
 </header>
 
 <section id="model" class="section-alt">
   <div class="wrap">
     <p class="eyebrow">The model</p>
-    <h2>Three parts. One record, gated against drift.</h2>
+    <h2>Three parts. One record, with a configurable drift gate.</h2>
     <div class="flow">
       <div class="flow-row">
         <div class="flow-node src">
@@ -131,7 +131,7 @@
 <section id="example">
   <div class="wrap">
     <p class="eyebrow">See it in one file</p>
-    <h2>You write the source. The view writes itself.</h2>
+    <h2>Edit the source. Run the renderer. Check the view.</h2>
     <div class="codepair">
       <div class="codecard src">
         <div class="codecard-bar">.working/toml/backlog_item.index.toml</div>
@@ -156,7 +156,7 @@
         </div>
       </div>
     </div>
-    <p class="code-cap">You edit the TOML. The Markdown is generated. The gate checks the view against a fresh render of its sources.</p>
+    <p class="code-cap">You edit the TOML. The Markdown is generated. When configured as a required check, the gate compares the view with a fresh render of its sources.</p>
   </div>
 </section>
 
@@ -168,18 +168,18 @@
       <div class="persona lead">
         <span class="persona-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 21V4"/><path d="M6 4h11l-2.2 3.2L17 10.5H6"/></svg></span>
         <h3>For leaders and decision-makers</h3>
-        <p>Mandate one standard and every project, every team, and every AI assistant you use records its work the same way, in a record gated against silent drift, like the code itself. The aim is operational truth you can cite in a review, an audit, or a handover, without reconciling anyone's notes.</p>
+        <p>Use one recording standard across projects, teams, and AI assistants, and configure its checks in your review pipeline. The aim is a shared operational record you can cite in a review, an audit, or a handover.</p>
       </div>
       <div class="persona">
         <span class="persona-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 8 5.5 12l4 4"/><path d="M14.5 8l4 4-4 4"/></svg></span>
         <h3>For individual developers</h3>
-        <p>Edit one TOML file; the human-readable view regenerates and the gate proves it matches. The aim is less time chasing stale docs and reconstructing context, with the same records-first process on every project you join, whichever assistant or tooling it uses.</p>
+        <p>Edit the TOML, regenerate the declared views, and run the drift check to compare their bytes. The aim is less time chasing stale docs and reconstructing context, with a shared records-first process.</p>
       </div>
       <div class="persona">
         <span class="persona-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4c.6 3.4 1.6 4.4 5 5-3.4.6-4.4 1.6-5 5-.6-3.4-1.6-4.4-5-5 3.4-.6 4.4-1.6 5-5z"/></svg></span>
-        <p class="eyebrow">A better starting point than most seasoned developers ever had</p>
+        <p class="eyebrow">Start with a structured record</p>
         <h3>For vibe coders</h3>
-        <p>Starting a project with OPF (and AIQT) gives you the structure, organization, and integrity most developers never had at the start: your assistant writes into a schema that refuses what does not fit, and the gate catches malformed or drifted records. The aim is a project that stays true to what you meant, from the first commit, without babysitting.</p>
+        <p>OPF defines record schemas and checks for malformed records and source-to-view drift. Ask your assistant to use them, and review the recorded claims against their evidence. The aim is to make the project's state easier to inspect from the first commit.</p>
       </div>
     </div>
   </div>
@@ -188,22 +188,22 @@
 <section id="why">
   <div class="wrap">
     <p class="eyebrow">Why it holds up</p>
-    <h2>Integrity you can check. Consistency you can count on.</h2>
+    <h2>Check schemas, references, and generated views.</h2>
     <div class="benefits">
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 13.5a3.5 3.5 0 0 0 5 0l2.5-2.5a3.5 3.5 0 0 0-5-5l-1.3 1.3"/><path d="M14.5 10.5a3.5 3.5 0 0 0-5 0L7 13a3.5 3.5 0 0 0 5 5l1.3-1.3"/></svg></span>
-        <h3>No silent drift</h3>
-        <p>Configured as a required commit or CI check, the drift gate re-renders every view from its sources and rejects any that disagree. That catches malformed records and source-to-view drift, which reduces errors; it does not make a record true, since a schema-valid record can still say something false.</p>
+        <h3>Check for view drift</h3>
+        <p>Configured as a required commit or CI check, the drift gate re-renders declared views from their sources and rejects byte differences. Schema validation and drift checks are intended to catch structural defects; they do not establish that a record's claims are true.</p>
       </div>
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7" cy="6" r="2.2"/><circle cx="7" cy="18" r="2.2"/><circle cx="17" cy="9" r="2.2"/><path d="M7 8.2v7.6"/><path d="M17 11.2c0 3-2.4 3.6-5 4"/></svg></span>
         <h3>Governed like code</h3>
-        <p>The record lives in a git repository, changes through review, and is gated in the same pipeline as your source. Released history is frozen by recorded digests.</p>
+        <p>The standard requires a tracked git store and a review flow. Configure its checks in your source pipeline. Released worklog spans and published changelog entries carry recorded digests for detecting changes.</p>
       </div>
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 4h10v16l-5-3.4L7 20z"/></svg></span>
         <h3>Cite it, not just read it</h3>
-        <p>Every record carries a permanent ID, a typed status, and captured references. IDs are never reused and records are never deleted, so what you cite today still resolves later.</p>
+        <p>Typed index records carry a permanent ID and a typed status; links and captured references are optional envelope fields. Capture evidence for claims that depend on external sources. The standard forbids ID reuse and record deletion and requires archived IDs to remain resolvable.</p>
       </div>
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 20.5 8 12 12.5 3.5 8z"/><path d="m3.5 12.5 8.5 4.5 8.5-4.5"/></svg></span>
@@ -213,12 +213,12 @@
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5" width="7" height="14" rx="1.5"/><rect x="13.5" y="5" width="7" height="14" rx="1.5"/></svg></span>
         <h3>Machine-written, human-readable</h3>
-        <p>Structured TOML for tools and AI assistants; generated Markdown for people. Structured, schema-validated input means less context to reconstruct and fewer places for a confident guess to land.</p>
+        <p>Structured TOML for tools and AI assistants; generated Markdown for people. The intended benefit is less context reconstruction. Measure any change in errors or effort in your own workflow.</p>
       </div>
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 19 6v5c0 4.2-3 7.2-7 9.5-4-2.3-7-5.3-7-9.5V6z"/><path d="m8.8 11.5 2.2 2.2 4.2-4.4"/></svg></span>
-        <h3>Open source, drop-in for CI</h3>
-        <p>Apache License 2.0 (except vendored third-party material, which remains under its own terms). The standard names the store, the views, and the checks; the reference tooling runs them as one CI step. Adopt the standard on its own, or as part of AIQT Guardrails.</p>
+        <h3>One CI step</h3>
+        <p>The standard names the store, the views, and the checks; <code>opf doctor</code> runs the integrity checks as one command you can configure as a required CI step, with the cannot-evaluate residuals listed on the <a href="./disclosure">disclosure page</a>.</p>
       </div>
     </div>
   </div>
@@ -227,8 +227,8 @@
 <section id="box">
   <div class="wrap">
     <p class="eyebrow">What is in the box</p>
-    <h2>Every record type, every gated file, counted from the specification.</h2>
-    <p class="lead">Twelve baseline record types, thirteen generated views, and seven command verbs, each count taken from the specification rather than asserted.</p>
+    <h2>The baseline types, initial views, and command vocabulary.</h2>
+    <p class="lead">The specification defines twelve baseline record types and nine command verbs; the reference scaffold declares thirteen generated views.</p>
     <div class="benefits">
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 20.5 8 12 12.5 3.5 8z"/><path d="m3.5 12.5 8.5 4.5 8.5-4.5"/><path d="m3.5 16.5 8.5 4.5 8.5-4.5"/></svg></span>
@@ -238,12 +238,12 @@
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 3h7l4.5 4.5V21H6.5z"/><path d="M13.5 3v4.5H18"/><path d="M9 13h6M9 16.5h4"/></svg></span>
         <h3>13 generated views</h3>
-        <p>Every declared view is rendered from its sources and byte-gated, so it is read, never hand-edited.</p>
+        <p>The scaffold declares twelve Markdown views and one TOML projection. Regenerate declared views and check them for byte drift; do not hand-edit them.</p>
       </div>
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="m7 9.5 3 2.5-3 2.5"/><path d="M12.5 15H17"/></svg></span>
-        <h3>7 command verbs</h3>
-        <p>init, render, doctor, upgrade, import, migrate, sync.</p>
+        <h3>9 command verbs</h3>
+        <p>init, import, doctor, render, migrate, sync, upgrade, absorb, record.</p>
       </div>
     </div>
   </div>
@@ -252,20 +252,22 @@
 <section id="adopt" class="section-alt">
   <div class="wrap">
     <p class="eyebrow">Adopt it</p>
-    <h2>Point your assistant at it. Say yes.</h2>
+    <h2>Ask your assistant for a plan. Review it, then authorize.</h2>
     <h3>Let your AI development assistant do the adoption</h3>
-    <p class="lead">The primary path is one instruction: point your AI development assistant at this site (or the repository) and tell it to adopt OPFiles, or to adopt AIQT. It reads the standard, investigates your project, and presents a short plan: what it will create, import, or retire, and how the pieces wire together. On your yes it carries out the adoption, scaffolds and validates the store, wires the records-first process into your project's assistant instructions, and leaves the <code>.working/</code> store for your review.</p>
-    <p>Point your assistant at this site's machine-readable entry point (<a href="/llms.txt"><code>/llms.txt</code></a> and a machine-readable adoption guide, <a href="/adopt.md"><code>/adopt.md</code></a>) and it reads the standard, inspects your project, and proposes a plan.</p>
+    <p class="lead">Ask your AI development assistant to read the standard, inspect your project, and propose an adoption plan naming what it would create, import, or retire. Review that plan before authorizing changes, then inspect the scaffolded store and validation results.</p>
+    <p>Give your assistant this site's machine-readable entry point (<a href="/llms.txt"><code>/llms.txt</code></a> and the adoption guide, <a href="/adopt.md"><code>/adopt.md</code></a>) as the starting material.</p>
     <p>
       <span class="chip ok"><code>opf init</code></span>
       <span class="chip ok"><code>opf render</code></span>
       <span class="chip ok"><code>opf doctor</code></span>
       <span class="chip ok"><code>opf upgrade</code></span>
       <span class="chip ok"><code>opf import</code></span>
-      <span class="chip ok"><code>opf migrate</code></span>
-      <span class="chip ok"><code>opf sync</code></span>
+      <span class="chip ok"><code>opf absorb</code></span>
+      <span class="chip ok"><code>opf record</code></span>
+      <span class="chip"><code>opf migrate</code> (planned)</span>
+      <span class="chip"><code>opf sync</code> (planned)</span>
     </p>
-    <p><code>init</code> scaffolds, <code>render</code> regenerates and checks, <code>doctor</code> verifies, <code>upgrade</code> migrates a store in place, and <code>import</code> brings legacy files in.</p>
+    <p><code>init</code> scaffolds, <code>render</code> regenerates and checks, <code>doctor</code> verifies, <code>upgrade</code> applies the in-place base-schema upgrade, <code>import</code> brings legacy files in, <code>absorb</code> drafts changelog entries for human curation, and <code>record</code> authors one record change at a time. <code>migrate</code> and <code>sync</code> are specified but not yet implemented in the reference CLI.</p>
   </div>
 </section>
 
@@ -282,7 +284,7 @@
       <a class="door" href="https://github.com/jposluns/guardrails/blob/main/opf/spec/OPF-QUICKSTART.md" target="_blank" rel="noopener noreferrer">
         <span class="door-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 3 5 13h5.5L10 21l8-11h-5.5z"/></svg></span>
         <h3>Quickstart</h3>
-        <p>The store layout and the steps to a gated store.</p>
+        <p>The store layout and the first steps to create and work in a store.</p>
       </a>
       <a class="door" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">
         <span class="door-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="m7 9.5 3 2.5-3 2.5"/><path d="M12.5 15H17"/></svg></span>
@@ -292,7 +294,7 @@
       <a class="door" href="./adopt">
         <span class="door-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="m15.5 8.5-2 5.5-5 2 2-5.5z"/></svg></span>
         <h3>Adopter guide</h3>
-        <p>Every standard file, what pairs with it, and the manual path if you need it.</p>
+        <p>Reference pages for core files and record indexes, plus the manual adoption path.</p>
       </a>
     </div>
   </div>

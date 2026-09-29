@@ -14,17 +14,28 @@ here="$(cd "$(dirname "$0")" && pwd)" || exit 2
 export PYTHONDONTWRITEBYTECODE=1
 
 failed=0
+# Name each failing gate as it happens and list the names again before the FAILED line, so a failing
+# subset never needs a hand re-run to find which gate failed.
+failed_names=""
 
 run_gate() {
   local name="$1"; shift
   echo "--- ${name} ---"
-  if "$@"; then :; else failed=1; fi
+  if "$@"; then :; else
+    local rc=$?
+    failed=1
+    failed_names="${failed_names:+${failed_names}, }${name}"
+    echo "GATE FAILED: ${name} (exit ${rc})"
+  fi
   echo
 }
 
 run_gate "opf-homes-selftest"          python3 -I -B "$here/check_opf_homes.py" --self-test
 run_gate "opf-homes-contract"          python3 -I -B "$here/check_opf_homes.py"
 run_gate "opf-tooling-selftest"        python3 -I -B "$here/opf.py" --self-test
+run_gate "opf-import-direct-selftest" python3 -I -B "$here/_opf_import.py" --self-test
+run_gate "opf-ingest-direct-selftest" python3 -I -B "$here/_opf_ingest.py" --self-test
+run_gate "opf-observe-direct-selftest" python3 -I -B "$here/_opf_observe.py" --self-test
 run_gate "opf-drift-selftest"          python3 -I -B "$here/check_opf_drift.py" --self-test
 run_gate "opf-doctor-selftest"         python3 -I -B "$here/check_opf_doctor.py" --self-test
 run_gate "opf-init-selftest"           python3 -I -B "$here/check_opf_init.py" --self-test
@@ -36,6 +47,8 @@ run_gate "opf-ingest-selftest"         python3 -I -B "$here/check_opf_ingest.py"
 run_gate "opf-adopt-selftest"          python3 -I -B "$here/_opf_adopt.py" --self-test
 run_gate "opf-pack-manifest-selftest"  python3 -I -B "$here/_opf_pack_manifest.py" --self-test
 run_gate "opf-adopt-observe-selftest"  python3 -I -B "$here/_opf_adopt_observe.py" --self-test
+run_gate "opf-prompt-pack-selftest"    python3 -I -B "$here/check_opf_prompt_pack.py" --self-test
+run_gate "opf-prompt-pack"             python3 -I -B "$here/check_opf_prompt_pack.py"
 run_gate "opf-oplock-selftest"         python3 -I -B "$here/_opf_oplock.py" --self-test
 run_gate "opf-init-substrate-selftest" python3 -I -B "$here/_opf_init_substrate.py" --self-test
 run_gate "opf-init-builders-selftest"  python3 -I -B "$here/_opf_init.py" --self-test
@@ -45,6 +58,7 @@ run_gate "commonmark-headings-selftest" python3 -I -B "$here/selftest_commonmark
 run_gate "commonmark-conformance"      python3 -I -B "$here/selftest_commonmark_conformance.py"
 
 if [ "$failed" -ne 0 ]; then
+  echo "FAILED GATES: ${failed_names}"
   echo "OPF STANDALONE SUBSET: FAILED"
   exit 1
 fi

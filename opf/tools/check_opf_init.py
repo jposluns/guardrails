@@ -75,6 +75,16 @@ def _snapshot(root):
 
 
 def _suite(invoke):
+    """Isolate fixture configuration and restore the caller even on failure."""
+    import tempfile
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
+            return _suite_isolated(invoke)
+
+
+def _suite_isolated(invoke):
     """Run parser, publication, refusal, and preservation vectors against fresh fixtures."""
     try:
         import tomllib
@@ -175,7 +185,7 @@ def _suite(invoke):
 
         def git_input(root, args, data):
             # A stdin-fed fixture git call (git update-index --index-info reads the index entry from
-            # stdin); _run_git has no stdin channel. Runs under _opf_observe._scrubbed_env (PATH and the
+            # stdin). Runs under _opf_observe._scrubbed_env (PATH and the
             # isolated HOME carried over, global/system config neutralized, and EVERY ambient GIT_* variable
             # dropped), so an inherited GIT_INDEX_FILE / GIT_DIR / GIT_WORK_TREE / GIT_OBJECT_DIRECTORY /
             # GIT_COMMON_DIR cannot redirect this write to a caller's external index or repository; it stays
@@ -210,34 +220,16 @@ def _suite(invoke):
             # subprocess init via inherited os.environ; the saved values are restored in the finally below.
             home = base / "home"
             home.mkdir()
-            saved_env = {name: os.environ.get(name)
-                         for name in ("HOME", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS",
-                                      "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
-                                      "GIT_CONFIG_COUNT", "GIT_CONFIG",
-                                      "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_NOSYSTEM",
-                                      "GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE",
-                                      "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR")}
+            saved_env = dict(os.environ)
             # Even a broken parser that ignores --root defaults into this isolated, non-git directory.
             # Restore the caller's cwd before TemporaryDirectory removes the fixture.
             saved_cwd = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
             try:
-                os.environ["HOME"] = str(home)
-                os.environ.pop("XDG_CONFIG_HOME", None)
-                os.environ.pop("XDG_CONFIG_DIRS", None)
-                os.environ.pop("GIT_CONFIG_GLOBAL", None)
-                os.environ.pop("GIT_CONFIG_SYSTEM", None)
-                os.environ.pop("GIT_CONFIG_COUNT", None)
-                os.environ.pop("GIT_CONFIG", None)
-                os.environ.pop("GIT_CONFIG_PARAMETERS", None)
-                os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
-                # Drop any inherited index/dir/object redirection so no fixture git call (the subprocess
-                # init, and git_input's stdin-fed writes above all) inherits a caller's GIT_INDEX_FILE and
-                # mutates an external index (test-hermeticity); saved above, restored in the finally below.
-                os.environ.pop("GIT_INDEX_FILE", None)
-                os.environ.pop("GIT_DIR", None)
-                os.environ.pop("GIT_WORK_TREE", None)
-                os.environ.pop("GIT_OBJECT_DIRECTORY", None)
-                os.environ.pop("GIT_COMMON_DIR", None)
+                # Use the OPF-local allowlist before mutating os.environ, retaining PATH.
+                # The subprocess init must not inherit an unenumerated GIT_* selector.
+                fixture_env = dict(_opf_observe._scrubbed_env(), HOME=str(home))
+                os.environ.clear()
+                os.environ.update(fixture_env)
                 os.chdir(base)
                 parser_root = base / "parser"
                 parser_root.mkdir()
@@ -1062,11 +1054,8 @@ def _suite(invoke):
                       lazy_data is None and any("seed" in n and ("absent" in n or "unreadable" in n)
                                                 for n in lazy_notes))
             finally:
-                for name, value in saved_env.items():
-                    if value is None:
-                        os.environ.pop(name, None)
-                    else:
-                        os.environ[name] = value
+                os.environ.clear()
+                os.environ.update(saved_env)
                 try:
                     os.fchdir(saved_cwd)
                 finally:
