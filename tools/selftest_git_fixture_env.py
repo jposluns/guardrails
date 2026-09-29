@@ -1365,6 +1365,7 @@ OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/check_opf_init_contract.py": "Source-free contract matcher vectors.",
     "opf/tools/check_opf_init_observe.py": "Observation vectors with mocked git subprocesses.",
     "opf/tools/check_opf_init_p0.py": "P0 store validation and runner registration vectors.",
+    "opf/tools/check_opf_prompt_pack.py": "Prompt-pack schema and drift vectors over filesystem fixtures.",
     "opf/tools/selftest_commonmark_conformance.py": "CommonMark parser conformance vectors.",
     "opf/tools/selftest_commonmark_headings.py": "Heading selection and vendor-manifest fixtures.",
 }
