@@ -250,18 +250,9 @@ def _execution_plan(snapshot, frozen, run_id):
 # --- authority: the frozen snapshot and the durable acceptance ------------------------------------------
 
 def _locate_run(root_fd, run_id, homes):
-    """Exactly one homes location may hold the run; duplicates are ambiguous, never first-readable."""
-    found = []
-    for rel in _opf_import._import_run_locations(run_id, homes):
-        st = _journal._lstat_contained(root_fd, rel)
-        if st is not None:
-            if not stat.S_ISDIR(st.st_mode):
-                raise _cannot("staging location {} is not a directory".format(rel))
-            found.append(rel)
-    if len(found) != 1:
-        raise _cannot("run {} has {} staging locations ({}); exactly one is required".format(
-            run_id, len(found), ", ".join(found) or "none"))
-    return found[0]
+    """Exactly one homes location may hold the run; the single locator authority lives in _opf_import
+    (_locate_import_run), shared with review and apply so no reader can drift."""
+    return _opf_import._locate_import_run(root_fd, run_id, homes)
 
 
 def _validated_snapshot(store_root, run_rel, homes):

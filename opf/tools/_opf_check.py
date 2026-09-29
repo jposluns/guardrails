@@ -2620,7 +2620,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     staged_ids = []
     try:
         staged_ids = _opf_import._sibling_ids(root_fd, machine_rel, _opf_import._roster(),
-                                              registered_vendors)
+                                              registered_vendors, homes=homes)
     except _opf_import._StageError as exc:
         if exc.verdict == _opf_import.FINDING:
             rep.finding("C-STAGING: {}".format(exc.message))

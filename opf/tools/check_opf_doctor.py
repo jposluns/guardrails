@@ -517,6 +517,38 @@ def _self_test_isolated():
             empty.mkdir()
             expect("not-adopted-root", _run_doctor(empty, capture=True), EXIT_OK)
 
+            # PR C (doctor-homes2-staged-collision): on a homes-2 store, a staged id in the typed
+            # `staging/ingest` home that equals an active id is a C-ID-SPACE finding, because the
+            # C-STAGING enumeration is generation-aware (every staging home of the generation). Red
+            # before PR C: the legacy-only enumeration missed the typed home, so no finding appeared
+            # (fail-open). In-process through validate_store: homes-2 activation is a patched-manifest
+            # test fixture (imp._self_test_homes2_active), which a doctor child process cannot see.
+            from unittest.mock import patch as _patch
+            import _opf_check
+            import _opf_import as imp
+            staged2 = base / "homes2-staged"
+            staged2.mkdir()
+            _write_machine(staged2, clean_machine())
+            _write_product(staged2)
+            sib = "imp-20260101T000000Z-4444444444444444"
+            sib_dir = staged2 / _opf_store.stage_run("ingest", sib) / "candidate"
+            sib_dir.mkdir(parents=True)
+            (sib_dir / "backlog_item.index.toml").write_text(
+                _opf_emit.emit(idx([bi(1, "open")])), encoding="utf-8")
+            with imp._self_test_homes2_active(staged2):
+                sv = _opf_check.validate_store(_opf_store.resolve_store(staged2))
+            if not any("BI-1" in m for m in sv.by_check.get("C-ID-SPACE", ())):
+                failures.append("homes2-staged-collision: no C-ID-SPACE duplicate finding for the "
+                                "typed-home staged BI-1 (got {})".format(sv.by_check.get("C-ID-SPACE")))
+            # Mutation red: a legacy-only staging roster on homes 2 loses the typed-home id and the
+            # collision finding disappears (the fail-open this vector guards against).
+            with imp._self_test_homes2_active(staged2), \
+                    _patch.object(imp, "_staging_run_roots", lambda homes: (imp.IMPORTS_REL,)):
+                mut = _opf_check.validate_store(_opf_store.resolve_store(staged2))
+            if any("BI-1" in m for m in mut.by_check.get("C-ID-SPACE", ())):
+                failures.append("homes2-staged-collision-mutant: the legacy-only enumeration still "
+                                "reports the typed-home collision (the vector would not red)")
+
             # The CI floor (enforcement pack, U16). --require-store leaves the clean store's verdict at 0 (an
             # over-broad flag that refused every store fails this) and turns the non-adopter root into 2
             # (reverting the flag's NOT-ADOPTED branch returns 0 there, failing it).

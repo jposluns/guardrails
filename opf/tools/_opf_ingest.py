@@ -1306,8 +1306,9 @@ def sort_candidate_rows(candidates, migrate_rows):
 # --- the disposition PLANNER (MIG-PR3): compose a triaged worksheet + options into a staged inert plan ---
 
 def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonce):
-    """Compose a triaged disposition WORKSHEET + its --ingest-options into a STAGED, INERT plan under
-    `.working/imports/<run-id>/` via _opf_import.plan_import. NEVER manufactures acceptance.json; every
+    """Compose a triaged disposition WORKSHEET + its --ingest-options into a STAGED, INERT plan in the
+    store generation's staging home (`.working/imports/<run-id>/` on homes 1, the typed
+    `staging/ingest/<run-id>/` home on homes 2) via _opf_import.plan_import. NEVER manufactures acceptance.json; every
     ingest source stays unmapped/legacy_fragment; apply/promotion is refused (ingest-actions.toml, the
     refusal marker, staged as the FIRST ingest artefact and ahead of the review artefacts, so a partial
     staging failure can never leave a reviewable-but-unmarked run; round-2 P1-1). Each source is resolved

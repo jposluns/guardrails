@@ -835,8 +835,40 @@ def _dir_entries_no_symlink(store_root_fd, rel):
         _close_fd(pfd, rel)
 
 
-def _sibling_ids(store_root_fd, machine_rel, roster, registered_vendors=frozenset(), skip_run_id=None):
-    """Enumerate staged ids across sibling runs under `.working/imports/`.
+def _staging_run_roots(homes):
+    """The store-relative staging roots a generation's import runs may occupy: the single roster both the
+    R6 sibling enumeration (_sibling_ids, hence doctor C-STAGING) and the run locations
+    (_import_run_locations) derive from, so the write side and every reader cannot drift. Homes 1 has only
+    the legacy `.working/imports` root; homes 2 adds the typed `staging/import` and `staging/ingest` homes
+    (spec 4.2). Anything else raises ValueError, matching _import_run_locations."""
+    if type(homes) is int and homes == 1:
+        return (IMPORTS_REL,)
+    if type(homes) is int and homes == 2:
+        return (IMPORTS_REL, _opf_store.STAGING_REL + "/import", _opf_store.STAGING_REL + "/ingest")
+    raise ValueError("unknown homes generation: {!r}".format(homes))
+
+
+def _staging_write_rel(run_id, homes, kind):
+    """Where a NEW run of `kind` ("import" or "ingest") stages for this generation. Homes 1 keeps the
+    legacy `.working/imports/<run-id>` location byte-identically; homes 2 stages in the typed
+    `staging/<kind>` home (_opf_store.stage_run; spec 4.2/14.1). The IMPORTS_REL / IMPORT_OPS_REL /
+    IMPORT_ARCHIVE_REL constants are untouched (the inert-import pin)."""
+    if kind not in ("import", "ingest"):
+        raise ValueError("unknown staging kind: {!r}".format(kind))
+    if type(homes) is int and homes == 1:
+        return "{}/{}".format(IMPORTS_REL, run_id)
+    if type(homes) is int and homes == 2:
+        return _opf_store.stage_run(kind, run_id)
+    raise ValueError("unknown homes generation: {!r}".format(homes))
+
+
+def _sibling_ids(store_root_fd, machine_rel, roster, registered_vendors=frozenset(), skip_run_id=None, *,
+                 homes):
+    """Enumerate staged ids across sibling runs in every staging root of the store's generation
+    (_staging_run_roots: `.working/imports/` on homes 1, plus the typed `staging/import` and
+    `staging/ingest` homes on homes 2). `homes` is a required keyword so no caller silently reads the
+    legacy-only roster on a homes-2 store. A run id present in more than one root is ambiguous and
+    fail-closed, naming both locations.
 
     Every candidate/fragments index is read through _record_ids. Baseline and importer records receive
     complete validation; ANY non-empty module-tier sibling index is CANNOT-EVALUATE until the module
@@ -865,31 +897,36 @@ def _sibling_ids(store_root_fd, machine_rel, roster, registered_vendors=frozense
             "{!r} and the machine store carries TOML records only (spec 14.1). The legacy content needs "
             "manual review and relocation (no automatic dual-location fallback, no automatic "
             "migration).".format(legacy_rel, IMPORTS_REL))
-    imports_rel = IMPORTS_REL
-    runs = _dir_entries_no_symlink(store_root_fd, imports_rel)
-    if runs is None:
-        return []
-
     ids = []
-    for run in runs:
-        if skip_run_id is not None and run == skip_run_id:
+    run_root = {}   # run name -> the first root holding it (a second root is fail-closed ambiguity)
+    for imports_rel in _staging_run_roots(homes):
+        runs = _dir_entries_no_symlink(store_root_fd, imports_rel)
+        if runs is None:
             continue
-        for sub in ("candidate", "fragments"):
-            sub_rel = "{}/{}/{}".format(imports_rel, run, sub)
-            names = _list_contained(store_root_fd, sub_rel)
-            if names is None:
+        for run in runs:
+            if run in run_root:
+                raise _cannot("run {!r} is staged in two locations ({}/{} and {}/{}); an ambiguous run "
+                              "is fail-closed, never first-readable".format(
+                                  run, run_root[run], run, imports_rel, run))
+            run_root[run] = imports_rel
+            if skip_run_id is not None and run == skip_run_id:
                 continue
-            for entry in names:
-                if entry.endswith(".index.toml"):
-                    expected_type = entry[:-len(".index.toml")]
-                elif entry == "worklog.toml":
-                    expected_type = "worklog"
-                else:
+            for sub in ("candidate", "fragments"):
+                sub_rel = "{}/{}/{}".format(imports_rel, run, sub)
+                names = _list_contained(store_root_fd, sub_rel)
+                if names is None:
                     continue
-                rel = "{}/{}".format(sub_rel, entry)
-                ids.extend(_record_ids(
-                    _read_toml(store_root_fd, rel), rel, roster, expected_type,
-                    registered_vendors))
+                for entry in names:
+                    if entry.endswith(".index.toml"):
+                        expected_type = entry[:-len(".index.toml")]
+                    elif entry == "worklog.toml":
+                        expected_type = "worklog"
+                    else:
+                        continue
+                    rel = "{}/{}".format(sub_rel, entry)
+                    ids.extend(_record_ids(
+                        _read_toml(store_root_fd, rel), rel, roster, expected_type,
+                        registered_vendors))
     return ids
 
 
@@ -1007,7 +1044,7 @@ def _active_store_ids(store_root_fd, machine_rel, active_types, roster,
 
 
 def _uniqueness_union(store_root_fd, machine_rel, active_types, roster, minted_ids,
-                      registered_vendors=frozenset(), skip_run_id=None):
+                      registered_vendors=frozenset(), skip_run_id=None, *, homes):
     """The R6 uniqueness union (spec 11): this run's minted ids plus every id already present anywhere a
     minted id could collide, the WHOLE active store (every ENABLED active type index, the active worklog,
     the archive) and every sibling staging run. One assembly path, shared by the pre-write check and the
@@ -1018,7 +1055,7 @@ def _uniqueness_union(store_root_fd, machine_rel, active_types, roster, minted_i
     union = list(minted_ids)
     union.extend(_active_store_ids(store_root_fd, machine_rel, active_types, roster, registered_vendors))
     union.extend(_sibling_ids(store_root_fd, machine_rel, roster, registered_vendors,
-                              skip_run_id=skip_run_id))
+                              skip_run_id=skip_run_id, homes=homes))
     return union
 
 
@@ -1082,10 +1119,11 @@ def _tile_spans(rows, source_len, where):
 
 # --- the staging step --------------------------------------------------------------------------------
 
-def stage_import(product_root, import_set, plan, *, now, run_nonce):
+def stage_import(product_root, import_set, plan, *, now, run_nonce, _kind="import"):
     """Validate an enumerated import set against an untrusted mapping plan and, on a full pass, stage the
-    byte-canonical candidate under `.working/imports/<run-id>/` (store scope; spec 14.1). Writes only the
-    `.working/imports/` staging root (created if absent) and the new run directory beneath it; the active
+    byte-canonical candidate in the store generation's staging home (store scope; spec 14.1/4.2):
+    `.working/imports/<run-id>/` on homes 1, the typed `staging/<_kind>/<run-id>/` home on homes 2. Writes
+    only that staging root (created if absent) and the new run directory beneath it; the active
     store, its counters, indexes, archive, and the sources are read-only. Returns a StageResult; fail-closed
     on anything unreadable, malformed, exotic, or outside the supported subset, never a silent clean pass."""
     try:
@@ -1095,6 +1133,8 @@ def stage_import(product_root, import_set, plan, *, now, run_nonce):
     try:
         _require_utc(now)
         _require_nonce(run_nonce)
+        if _kind not in ("import", "ingest"):
+            raise _cannot("staging kind {!r} is not import or ingest (fail-closed)".format(_kind))
         if not (isinstance(import_set, (list, tuple)) and all(isinstance(p, str) for p in import_set)):
             raise _cannot("import_set must be a list of source-path strings")
         # MINOR-5: product_root is the only public argument not type-guarded; a non-path value would flow
@@ -1120,6 +1160,9 @@ def stage_import(product_root, import_set, plan, *, now, run_nonce):
             raise _cannot("store manifest is not VALID ({}: {})".format(
                 mv.status, "; ".join(mv.findings)))
         machine_rel = resolution.machine_rel
+        # The store's homes generation, derived ONCE per entry point from the authoritative manifest (the
+        # same derivation as _store_homes); it selects the staging home every write below uses.
+        homes = _opf_store.homes_generation({"opf": mv.base if isinstance(mv.base, dict) else {}})
 
         try:
             product_root_fd = _opf_store._open_root_fd(Path(os.path.abspath(product_root)))
@@ -1141,7 +1184,8 @@ def stage_import(product_root, import_set, plan, *, now, run_nonce):
             # have themselves opened it is CANNOT-EVALUATE, not an uncaught escape from stage_import.
             raise _cannot("cannot open store root {!r} ({})".format(resolution.store_root, exc))
         try:
-            return _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce)
+            return _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce,
+                                   homes=homes, kind=_kind)
         finally:
             os.close(store_root_fd)
     except _StageError as exc:
@@ -1272,9 +1316,10 @@ def _validate_candidate_model(rec, roster, where):
     return roster[rtype].namespace
 
 
-def _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce):
+def _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce, *, homes, kind):
     """The core: validate the plan against the sources, mint ids, build the candidate models, run the R6
-    and counters gates, and stage the byte-canonical run directory. Returns a StageResult."""
+    and counters gates, and stage the byte-canonical run directory in the generation's staging home.
+    Returns a StageResult."""
     roster = _roster()
     stamp = _rfc3339(now)
 
@@ -1292,7 +1337,7 @@ def _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce):
             raise _finding("source {!r} has no plan.fragments entry (every source must be mapped)".format(sp))
 
     run_id = _run_id(sources, plan_bytes, now, run_nonce)
-    run_rel = "{}/{}".format(IMPORTS_REL, run_id)   # store-scope `.working/imports/<run-id>` (spec 14.1)
+    run_rel = _staging_write_rel(run_id, homes, kind)   # the generation's staging home (spec 14.1/4.2)
 
     # --- counters: validate, then mint above the recorded high-water --------------------------------
     counters_rel = "{}/counters.toml".format(machine_rel)
@@ -1544,7 +1589,8 @@ def _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce):
     # destinations, and every sibling run. A non-empty module-tier index, unreadable/symlinked tier, or
     # archive destination that cannot confirm its declared id is CANNOT-EVALUATE, never partially seated.
     dup_findings = _opf_schema.check_unique_ids(
-        _uniqueness_union(store_root_fd, machine_rel, active_types, roster, minted_ids, registered_vendors))
+        _uniqueness_union(store_root_fd, machine_rel, active_types, roster, minted_ids, registered_vendors,
+                          homes=homes))
     if dup_findings:
         raise _finding("R6 id uniqueness: {}".format("; ".join(dup_findings)))
 
@@ -1577,7 +1623,7 @@ def _stage_resolved(store_root_fd, machine_rel, sources, plan, now, run_nonce):
     run_rel_result = _write_run(store_root_fd, machine_rel, run_id, run_rel, plan_bytes, sources, now,
                                 run_nonce, mapping_states, candidate_records, lf_records, worklog_records,
                                 working_high, state_counts, active_types, roster, minted_ids,
-                                registered_vendors)
+                                registered_vendors, homes=homes)
     return StageResult(CLEAN, [], run_id=run_id, run_rel=run_rel_result, mapping_states=mapping_states,
                        staged_ids=minted_ids, new_high_water=working_high, promotion_ready=True,
                        migration_incomplete=bool(lf_records))
@@ -1710,7 +1756,7 @@ def _run_report_model(run_id, plan_bytes, inventory_digest, state_counts, lf_pre
 
 def _write_run(store_root_fd, machine_rel, run_id, run_rel, plan_bytes, sources, now, run_nonce,
                mapping_states, candidate_records, lf_records, worklog_records, working_high, state_counts,
-               active_types, roster, minted_ids, registered_vendors=frozenset()):
+               active_types, roster, minted_ids, registered_vendors=frozenset(), *, homes):
     """Emit every file as byte-canonical U8 output (source BODIES verbatim), then stage the run directory
     in two ordered apply_ops passes. Pass 1 claims the exclusive run-dir mkdir (the atomic pool claim: a
     pre-existing run directory is refused) and writes this run's index and provenance files, so its minted
@@ -1777,15 +1823,21 @@ def _write_run(store_root_fd, machine_rel, run_id, run_rel, plan_bytes, sources,
 
     # --- pass 1: claim the exclusive run dir and stage every file EXCEPT report.toml ------------------
     ops = []
-    imports_rel = IMPORTS_REL   # store-scope `.working/imports` staging root (spec 14.1)
-    imports_st = _journal._lstat_contained(store_root_fd, imports_rel)
-    if imports_st is None:
-        # The `.working/imports/` staging ROOT (spec 14) is created if absent: part of the staging area, not
-        # the active store (F1); its parent `.working` always exists on a resolved store. A race surfaces as
-        # a JournalError -> CANNOT-EVALUATE.
-        ops.append({"op": "mkdir", "path": imports_rel, "poststate": {"kind": "dir", "mode": DIR_MODE}})
-    elif not stat.S_ISDIR(imports_st.st_mode):
-        raise _cannot("{} exists but is not a directory (fail-closed)".format(imports_rel))
+    # The staging ROOT chain of run_rel (spec 14): every ancestor below `.working` (which always exists on
+    # a resolved store) is created if absent - `.working/imports` on homes 1, `.working/staging` then
+    # `.working/staging/<kind>` on homes 2. Part of the staging area, not the active store (F1). A race
+    # surfaces as a JournalError -> CANNOT-EVALUATE.
+    parent_chain = []
+    parent_rel = run_rel.rsplit("/", 1)[0]
+    while parent_rel != _opf_store.WORKING_DIRNAME:
+        parent_chain.append(parent_rel)
+        parent_rel = parent_rel.rsplit("/", 1)[0]
+    for parent_rel in reversed(parent_chain):
+        parent_st = _journal._lstat_contained(store_root_fd, parent_rel)
+        if parent_st is None:
+            ops.append({"op": "mkdir", "path": parent_rel, "poststate": {"kind": "dir", "mode": DIR_MODE}})
+        elif not stat.S_ISDIR(parent_st.st_mode):
+            raise _cannot("{} exists but is not a directory (fail-closed)".format(parent_rel))
     ops.append({"op": "mkdir", "path": run_rel, "poststate": {"kind": "dir", "mode": DIR_MODE}})
     ops.append({"op": "mkdir", "path": run_rel + "/candidate",
                 "poststate": {"kind": "dir", "mode": DIR_MODE}})
@@ -1819,7 +1871,7 @@ def _write_run(store_root_fd, machine_rel, run_id, run_rel, plan_bytes, sources,
     # _uniqueness_union directly.
     recheck = _opf_schema.check_unique_ids(
         _uniqueness_union(store_root_fd, machine_rel, active_types, roster, minted_ids,
-                          registered_vendors, skip_run_id=run_id))
+                          registered_vendors, skip_run_id=run_id, homes=homes))
     if recheck:
         raise _cannot("R6 re-check after run-dir claim: a concurrent proposal collides ({}); report.toml "
                       "withheld, partial run left as named evidence".format("; ".join(recheck)))
@@ -2581,8 +2633,8 @@ def _validate_staged_ingest_bundle(bundle, run_id):
 
 def plan_import(product_root, import_set, *, proposals=None, importer_proposals=None,
                 candidates_draft=None, ingest_actions=None, ingest_review_inputs=None, now, run_nonce):
-    """Produce a candidate mapping PLAN over a scanned import set and STAGE it under
-    `.working/imports/<run-id>/` (spec 14.1), plus the review surface. This is the operation-layer plan
+    """Produce a candidate mapping PLAN over a scanned import set and STAGE it in the store generation's
+    staging home (spec 14.1/4.2; `.working/imports/<run-id>/` on homes 1), plus the review surface. This is the operation-layer plan
     step; it composes the read-only `scan_import` (the single enumeration source of truth, so a plan is
     never built over a stale inventory) with the settled `stage_import` staging primitive, then writes the
     inventory and IMPORT-REPORT.md review artefacts beside the candidate. It never mutates the active store.
@@ -2634,7 +2686,12 @@ def plan_import(product_root, import_set, *, proposals=None, importer_proposals=
         # mechanically mapped). Handed to the settled staging classifier, which mints a legacy_fragment
         # quarantine record per fragment and stages the byte-canonical candidate run dir.
         plan = _baseline_plan(scan.sources)
-        result = stage_import(product_root, import_set, plan, now=now, run_nonce=run_nonce)
+        # An ingest plan (ANY ingest-only input present: the same predicates the artefact writers below
+        # gate on) stages in the generation's ingest home; an ordinary plan stages in the import home.
+        ingest_run = (candidates_draft is not None or ingest_actions is not None
+                      or ingest_review_inputs is not None)
+        result = stage_import(product_root, import_set, plan, now=now, run_nonce=run_nonce,
+                              _kind="ingest" if ingest_run else "import")
         if result.verdict != CLEAN:
             return PlanResult(result.verdict, result.findings, run_id=result.run_id,
                               run_rel=result.run_rel, migration_incomplete=result.migration_incomplete)
@@ -3253,8 +3310,36 @@ def _import_run_locations(run_id, homes):
     raise ValueError("unknown homes generation: {!r}".format(homes))
 
 
+def _locate_import_run(store_root_fd, run_id, homes):
+    """Exactly one homes location may hold the run; duplicates are ambiguous, never first-readable."""
+    found = []
+    for rel in _import_run_locations(run_id, homes):
+        st = _journal._lstat_contained(store_root_fd, rel)
+        if st is not None:
+            if not stat.S_ISDIR(st.st_mode):
+                raise _cannot("staging location {} is not a directory".format(rel))
+            found.append(rel)
+    if len(found) != 1:
+        raise _cannot("run {} has {} staging locations ({}); exactly one is required".format(
+            run_id, len(found), ", ".join(found) or "none"))
+    return found[0]
+
+
 def _import_run_dir(resolution, run_id, homes):
-    return os.path.join(resolution.store_root, _import_run_locations(run_id, homes)[0])
+    """The staged run directory, shared by every ingest-acceptance entry point: the literal legacy
+    location on homes 1 (no probe; byte-identical to the pre-typed behaviour), the ONE located
+    registered home on homes 2 (_locate_import_run; ambiguity is fail-closed)."""
+    if type(homes) is int and homes == 1:
+        return os.path.join(resolution.store_root, _import_run_locations(run_id, homes)[0])
+    try:
+        store_root_fd = _opf_store._open_store_root_fd(
+            resolution.store_root, resolution.pointer_source != "default")
+    except OSError as exc:
+        raise _cannot("cannot open store root {!r} ({})".format(resolution.store_root, exc))
+    try:
+        return os.path.join(resolution.store_root, _locate_import_run(store_root_fd, run_id, homes))
+    finally:
+        os.close(store_root_fd)
 
 
 def _require_review_gate(run_dir, homes):
@@ -3759,7 +3844,6 @@ def review_import(product_root, run_id, *, actor, decisions, now, ingest=None, c
             raise _cannot("run-id {!r} does not match the run-id grammar (fail-closed)".format(run_id))
 
         resolution = _resolve_store_for_review(product_root)
-        run_rel = "{}/{}".format(IMPORTS_REL, run_id)
         try:
             store_root_fd = _opf_store._open_store_root_fd(
                 resolution.store_root, resolution.pointer_source != "default")
@@ -3767,6 +3851,12 @@ def review_import(product_root, run_id, *, actor, decisions, now, ingest=None, c
             raise _cannot("cannot open store root {!r} ({})".format(resolution.store_root, exc))
         try:
             homes = _store_homes(resolution)
+            # Homes 1 keeps the literal legacy location (message- and vector-identical); homes 2 locates
+            # the run in exactly one registered home (legacy or typed; ambiguity is fail-closed).
+            if homes == 2:
+                run_rel = _locate_import_run(store_root_fd, run_id, homes)
+            else:
+                run_rel = "{}/{}".format(IMPORTS_REL, run_id)
             marker = _ingest_run_marker(store_root_fd, run_rel, homes)
             if marker is not None:
                 try:
@@ -3876,11 +3966,16 @@ def review_import_interactive(product_root, run_id, *, actor, now, in_stream=Non
             return ReviewResult(CANNOT_EVALUATE,
                                 ["run-id does not match the run-id grammar (fail-closed)"])
         resolution = _resolve_store_for_review(product_root)
-        run_rel = "{}/{}".format(IMPORTS_REL, run_id)
         store_root_fd = _opf_store._open_store_root_fd(
             resolution.store_root, resolution.pointer_source != "default")
         try:
-            marker = _ingest_run_marker(store_root_fd, run_rel, _store_homes(resolution))
+            homes = _store_homes(resolution)
+            # Homes 1 keeps the literal legacy location; homes 2 locates the run (see review_import).
+            if homes == 2:
+                run_rel = _locate_import_run(store_root_fd, run_id, homes)
+            else:
+                run_rel = "{}/{}".format(IMPORTS_REL, run_id)
+            marker = _ingest_run_marker(store_root_fd, run_rel, homes)
             if marker is not None:
                 try:
                     return _interactive_ingest_review(resolution, run_id, actor, now, stdin, stdout, clock)
@@ -4692,13 +4787,24 @@ def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
         except OSError as exc:
             raise _cannot("cannot open store root {!r} ({})".format(resolution.store_root, exc))
         try:
-            marker_name = _ingest_run_marker(_ingest_root_fd, run_rel, _store_homes(resolution))
+            homes = _store_homes(resolution)
+            # Homes 1 keeps the literal legacy run_rel (message- and vector-identical); homes 2 locates
+            # the run in exactly one registered home, so the marker probe reads the home the run holds.
+            if homes == 2:
+                run_rel = _locate_import_run(_ingest_root_fd, run_id, homes)
+            marker_name = _ingest_run_marker(_ingest_root_fd, run_rel, homes)
         finally:
             os.close(_ingest_root_fd)
         if marker_name is not None:
             detail = _ingest_acceptance_explanation(resolution, run_id)
             raise _cannot("run {!r} is a root-ingest disposition plan (carries {}); ingest disposition "
                           "execution is unavailable; nothing promoted. {}".format(run_id, marker_name, detail))
+        if homes == 2:
+            # The D-c fail-closed interim (spec 4.2 / 14.1): ordinary promotion's journal, transaction
+            # record, and archive all live under `.aiqt/`, which homes 2 forbids OPF to write. Refuse
+            # BEFORE any journal or lock work, so a homes-2 apply mutates nothing.
+            raise _cannot("ordinary import promotion writes its journal, transaction record and archive "
+                          "under .aiqt/, which homes 2 forbids (spec 4.2); nothing promoted")
         journal_root = Path(resolution.store_root) / IMPORT_JOURNAL_REL
 
         try:
@@ -6201,6 +6307,167 @@ def _self_test_homes2_active(root):
     return active()
 
 
+def _self_test_homes2_staging(check, build_store, bi_candidate, bi_index_text, NOW, NONCE):
+    """PR C vectors: generation-aware staging homes, the widened R6 union, the one run locator, and the
+    homes-2 ordinary-apply refusal (the D-c fail-closed interim). The homes-1 legs are byte-identical
+    controls; every homes-2 leg is red on the legacy-only (pre-PR C) staging and enumeration."""
+    import shutil
+    from unittest.mock import patch
+    this = sys.modules[__name__]
+    src_body = "hello staging body"
+
+    def all_decisions(run_dir):
+        inv = tomllib.loads((run_dir / "inventory.toml").read_text())
+        mp = tomllib.loads((run_dir / "mappings.toml").read_text())
+        by_key = dict(((r["source_path"], tuple(r["span"])), r) for r in mp["mapping"])
+        out = []
+        for fr in inv["fragment"]:
+            row = by_key[(fr["source_path"], tuple(fr["span"]))]
+            out.append(dict(fragment_id=fr["fragment_id"], decision="accept",
+                            origin=row["origin"], proposed_state=row["state"]))
+        return out
+
+    def tree_snapshot(root):
+        return dict((str(p.relative_to(root)), p.read_bytes())
+                    for p in sorted(Path(root).rglob("*")) if p.is_file())
+
+    def plan_bi(source_len):
+        row = dict(span=[0, source_len], state="mapped", origin="baseline", record=bi_candidate())
+        return dict(fragments={"a.txt": [row]})
+
+    # V1 stage-homes1-legacy-location: the homes-1 write location and its parents are byte-identical.
+    root1, _m1 = build_store(sources={"a.txt": src_body})
+    pr1 = plan_import(root1, ["a.txt"], now=NOW, run_nonce=NONCE)
+    check("stage-homes1-legacy-location", pr1.verdict == 0
+          and pr1.run_rel == ".working/imports/" + (pr1.run_id or "MISSING")
+          and not (root1 / ".working" / "staging").exists())
+
+    # V7 r6-homes1-typed-ignored: on homes 1 the typed staging names are ordinary content, never read.
+    sib7 = "imp-20260101T000000Z-1111111111111111"
+    root7, _m7 = build_store(sources={"a.txt": src_body}, working_extra={
+        "staging/import/" + sib7 + "/candidate/backlog_item.index.toml": bi_index_text()})
+    check("r6-homes1-typed-ignored",
+          stage_import(root7, ["a.txt"], plan_bi(len(src_body)), now=NOW, run_nonce=NONCE).verdict == 0)
+
+    # V12 sibling-ids-homes-required: the enumerator refuses an unsupplied generation outright.
+    try:
+        _sibling_ids(0, "x", {})
+        homes_required = False
+    except TypeError:
+        homes_required = True
+    except Exception:  # noqa: BLE001  any non-TypeError outcome is a clean vector failure, never a crash
+        homes_required = False
+    check("sibling-ids-homes-required", homes_required)
+
+    # V2 stage-homes2-import-typed: an ordinary homes-2 plan stages in the typed import home.
+    root2, _m2 = build_store(sources={"a.txt": src_body})
+    with _self_test_homes2_active(root2):
+        pr2 = plan_import(root2, ["a.txt"], now=NOW, run_nonce=NONCE)
+        check("stage-homes2-import-typed", pr2.verdict == 0
+              and pr2.run_rel == _opf_store.stage_run("import", pr2.run_id or "MISSING")
+              and not (root2 / ".working" / "imports").exists())
+        run_dir2 = root2 / _opf_store.stage_run("import", pr2.run_id or "MISSING")
+
+        # V8 review-homes2-typed-located: review locates the typed run and captures acceptance there.
+        rr2 = review_import(root2, pr2.run_id, actor="R",
+                            decisions=all_decisions(root2 / pr2.run_rel), now=NOW)
+        check("review-homes2-typed-located", rr2.verdict == 0
+              and (run_dir2 / ACCEPTANCE_NAME).is_file())
+
+        # V9 review-homes2-ambiguous: the same run in two homes refuses; the tree is byte-unchanged.
+        legacy_rel2 = IMPORTS_REL + "/" + (pr2.run_id or "MISSING")
+        other_rel2 = (legacy_rel2 if pr2.run_rel != legacy_rel2
+                      else _opf_store.stage_run("import", pr2.run_id or "MISSING"))
+        other2 = root2 / other_rel2
+        other2.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(str(root2 / pr2.run_rel), str(other2))
+        before9 = tree_snapshot(root2)
+        rr9 = review_import(root2, pr2.run_id, actor="R",
+                            decisions=all_decisions(root2 / pr2.run_rel), now=NOW)
+        check("review-homes2-ambiguous", rr9.verdict == 2
+              and "2 staging locations" in rr9.findings[0]
+              and tree_snapshot(root2) == before9)
+        shutil.rmtree(str(other2))
+        other2.parent.rmdir()
+
+        # V10 apply-homes2-refused-no-aiqt + V13(c): the reviewed ordinary run refuses BEFORE any journal
+        # or lock work: no `.aiqt/` appears, the tree is byte-unchanged, and the journal preparer is
+        # never entered (a mutant moving the refusal after ensure_journal_dirs turns both red).
+        before10 = tree_snapshot(root2)
+        with patch.object(_journal, "ensure_journal_dirs",
+                          wraps=_journal.ensure_journal_dirs) as journal_probe:
+            ar10 = apply_import(root2, pr2.run_id, now=NOW)
+        check("apply-homes2-refused-no-aiqt", ar10.verdict == 2 and ar10.promoted is False
+              and "homes 2 forbids (spec 4.2)" in ar10.findings[0]
+              and not (root2 / ".aiqt").exists()
+              and tree_snapshot(root2) == before10)
+        check("apply-homes2-no-journal-prepared", journal_probe.call_count == 0)
+
+    # V3 stage-homes2-ingest-typed: an ingest-marked plan stages in the typed ingest home (the kind
+    # threads plan_import -> stage_import -> _staging_write_rel).
+    root3, _m3 = build_store(sources={"a.txt": src_body})
+    with _self_test_homes2_active(root3):
+        pr3 = plan_import(root3, ["a.txt"], ingest_actions=[], now=NOW, run_nonce=NONCE)
+        typed3 = root3 / _opf_store.stage_run("ingest", pr3.run_id or "MISSING")
+        check("stage-homes2-ingest-typed", pr3.verdict == 0
+              and pr3.run_rel == _opf_store.stage_run("ingest", pr3.run_id or "MISSING")
+              and (typed3 / INGEST_ACTIONS_NAME).is_file())
+        # V11 apply-homes2-ingest-marker: the marker probe reads the LOCATED typed home. The rename below
+        # is a no-op here (the run already stages typed) and forces the typed home on legacy-staging
+        # code, where the legacy-rel probe misses the marker and this refusal never fires (the red).
+        legacy3 = root3 / IMPORTS_REL / (pr3.run_id or "MISSING")
+        if legacy3.is_dir() and not typed3.is_dir():
+            typed3.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(str(legacy3), str(typed3))
+        ar11 = apply_import(root3, pr3.run_id, now=NOW)
+        check("apply-homes2-ingest-marker", ar11.verdict == 2
+              and "root-ingest disposition plan" in ar11.findings[0])
+
+    # V4 r6-homes2-typed-sibling + V13(a): a typed-home sibling's ids enter the R6 union; a mutant
+    # legacy-only roster on homes 2 loses them and fails open to a CLEAN stage.
+    sib4 = "imp-20260101T000000Z-2222222222222222"
+    root4, _m4 = build_store(sources={"a.txt": src_body}, working_extra={
+        "staging/import/" + sib4 + "/candidate/backlog_item.index.toml": bi_index_text()})
+    with _self_test_homes2_active(root4):
+        res4 = stage_import(root4, ["a.txt"], plan_bi(len(src_body)), now=NOW, run_nonce=NONCE)
+        check("r6-homes2-typed-sibling", res4.verdict == 1
+              and res4.findings[0].startswith("R6 id uniqueness"))
+        with patch.object(this, "_staging_run_roots", lambda homes: (IMPORTS_REL,)):
+            mut_a = stage_import(root4, ["a.txt"], plan_bi(len(src_body)), now=NOW, run_nonce="mut-a")
+        check("r6-homes2-mutant-legacy-roster-fails-open", mut_a.verdict == 0)
+
+    # V13(b): a write location that ignores the generation stages at the legacy path on homes 2, so the
+    # V2 location assertion reds against it.
+    rootb, _mb = build_store(sources={"a.txt": src_body})
+    with _self_test_homes2_active(rootb):
+        with patch.object(this, "_staging_write_rel",
+                          lambda run_id, homes, kind: IMPORTS_REL + "/" + run_id):
+            mut_b = plan_import(rootb, ["a.txt"], now=NOW, run_nonce=NONCE)
+        check("stage-homes2-mutant-legacy-write-rel", mut_b.verdict == 0
+              and mut_b.run_rel == IMPORTS_REL + "/" + (mut_b.run_id or "MISSING"))
+
+    # V6 r6-homes2-ambiguous-run: one run id in two roots is fail-closed, naming both locations.
+    sib6 = "imp-20260101T000000Z-3333333333333333"
+    idx6 = bi_index_text()
+    root6, _m6 = build_store(sources={"a.txt": src_body}, working_extra={
+        "imports/" + sib6 + "/candidate/backlog_item.index.toml": idx6,
+        "staging/import/" + sib6 + "/candidate/backlog_item.index.toml": idx6})
+    res6 = _opf_store.resolve_store(root6)
+    fd6 = _opf_store._open_store_root_fd(res6.store_root, res6.pointer_source != "default")
+    try:
+        try:
+            _sibling_ids(fd6, res6.machine_rel, _roster(), homes=2)
+            outcome6 = None
+        except Exception as exc:  # noqa: BLE001  the vector asserts the exact refusal class below
+            outcome6 = exc
+    finally:
+        os.close(fd6)
+    check("r6-homes2-ambiguous-run", isinstance(outcome6, _StageError)
+          and outcome6.verdict == 2
+          and (IMPORTS_REL + "/" + sib6) in outcome6.message
+          and _opf_store.stage_run("import", sib6) in outcome6.message)
+
+
 def _self_test_ingest_capture_homes2(root, run, now, check, stamp):
     """Positive capture control on an activated homes-2 store (no activation patch on capture)."""
     import copy
@@ -6873,10 +7140,10 @@ def self_test_isolated():
             active_typesA = _active_types(fdA, resolA.machine_rel)
             hit = _opf_schema.check_unique_ids(
                 _uniqueness_union(fdA, resolA.machine_rel, active_typesA, _roster(), ["BI-1"],
-                                  skip_run_id=None))
+                                  skip_run_id=None, homes=1))
             miss = _opf_schema.check_unique_ids(
                 _uniqueness_union(fdA, resolA.machine_rel, active_typesA, _roster(), ["BI-1"],
-                                  skip_run_id=sib_run))
+                                  skip_run_id=sib_run, homes=1))
         finally:
             os.close(fdA)
         check("F2-recheck-detects-on-disk-collision", bool(hit))
@@ -9465,6 +9732,10 @@ def self_test_isolated():
         check("G7-observe-import-fail-git-identity-degraded-empty", ctxG7["git_identity"] == "")
         check("G7-observe-import-fail-os-user-best-effort", ctxG7["os_user"] == _user_g7)
         check("G7-observe-import-fail-hostname-best-effort", ctxG7["hostname"] == _host_g7)
+
+        # PR C: generation-aware staging homes, the R6 union across them, the run locator, and the
+        # homes-2 ordinary-apply refusal.
+        _self_test_homes2_staging(check, build_store, bi_candidate, bi_index_text, NOW, NONCE)
 
     finally:
         shutil.rmtree(base, ignore_errors=True)
