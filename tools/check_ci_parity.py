@@ -47,7 +47,8 @@ blocks or the top-level directory-binding line before the first gate, unbalanced
 if/fi nesting in the runner, a duplicate else or an empty then or else branch,
 any character outside printable ASCII (0x20-0x7E) plus tab and newline in
 either input file, job content without a job mapping, a run_gate()
-dispatcher body outside its recognized shape, a run_gate word (label or argument)
+dispatcher body outside its recognized shape, a run_gate() function definition
+inside an if branch, a run_gate word (label or argument)
 outside the gate-line character allowlist, a masked runtime-value flag in the
 workflow whose expression is not reviewed, and a runner
 assignment to failed or failed_names other than the top-level initializer before the
@@ -103,7 +104,11 @@ plus tab and newline: Python's splitlines() also breaks a line at \v, \f,
 Unicode spaces such as U+00A0, while bash breaks lines only at \n and reads
 each of those bytes as an ordinary word character, so outside that alphabet
 the lines this gate validates are not the lines bash executes. Inside that
-alphabet a line break is exactly \n for both. Every run_gate
+alphabet a line break is exactly \n for both. The standalone OPF runner,
+which vector 26 and the selftest roster hold to this same grammar, is
+screened the same way on its RAW text inside the ONE shared adapter
+(adapt_standalone_runner), before the adapter's own line split and newline
+rejoin could erase a forbidden character. Every run_gate
 line is screened by ONE character-allowlist rule over every word after quote
 removal: the label must fully match [a-z0-9][a-z0-9-]* (every label in the two
 real runners does) and every other word must fully match [A-Za-z0-9_./=:-]+, a
@@ -126,21 +131,44 @@ still screens every runner line first, so a masked ${...:?...} abort spelling
 is refused twice over; a self-test fixture pins that rule's own diagnostic and
 fails without it. The if/else/fi structure is tracked per block: a duplicate
 else and an empty then or else branch are each refused (bash refuses both, so
-such a file never runs at all), and the gitleaks-block lines (the PATH append,
-the gitleaks_rc capture and the gitleaks exit-code echo) are accepted only
-inside their real blocks AND branches, as notrun=0, set and cd are already
+such a file never runs at all); a run_gate() { function definition is
+accepted only at top level outside every if frame, because bash runs a
+definition as one ordinary, successfully-exiting statement, so a definition
+inside a branch both fills the branch and replaces $?, which this grammar
+formerly counted as neither; and the gitleaks-block lines (the PATH append,
+the gitleaks_rc capture and the gitleaks exit-code echo) and the FAILED
+GATES echo are accepted only inside their real blocks AND branches, as
+notrun=0, set and cd are already
 position-checked: the PATH append only in the HOME guard's then branch, which
 has just proven HOME non-empty; gitleaks_rc=$? only as the first statement of
-the gitleaks failure branch, where $? is still the gitleaks exit code; and the
-exit-code echo only after that capture in the same branch. A copy placed
+the gitleaks failure branch, where $? is still the gitleaks exit code; the
+exit-code echo only after that capture in the same branch; and the FAILED
+GATES echo only in the then branch of the terminal failed check, after the
+top-level failed_names initializer. A copy placed
 anywhere else, including the HOME guard's else branch, is refused, so an
-accepted runner cannot end early under set -u through an unbound HOME or
-gitleaks_rc, and cannot echo a stale gitleaks exit code. What the grammar
-accepts and still cannot see into is exactly three surfaces: the content of a
-gate script the runner invokes; the environment the runner inherits, which can
-change what an accepted literal line resolves to at runtime; and any bash
-parsing behaviour this hand-written grammar does not model beyond the checks
-named above, tracked as backlog item RUNNER-STATIC-GRAMMAR-HARDENING.
+accepted runner cannot end early under set -u through an unbound HOME,
+gitleaks_rc or failed_names, and cannot echo a stale gitleaks exit code.
+What the grammar accepts and still cannot see into are these four surfaces.
+One: the content of a gate script the runner invokes. Two: the environment
+the runner inherits, which can change what an accepted literal line resolves
+to at runtime. Three: the runner-internal ORDER of the remaining accepted
+literal lines beyond the position-checked ones. No non-position-checked
+scaffold echo or assignment expands anything that can be unbound, so
+relocating one rewords the log (a stray RESULT: PASS echo or a notrun=1
+mid-roster) without touching an exit code; the recognized [ ] test lines do
+expand failure state, so a copy relocated above its initializer still ends
+the runner loudly under set -u before any gate, the same bounded early-exit
+class as the closed HOME, gitleaks_rc and failed_names placements. A
+divergence in this surface is loud (an early non-zero exit or a reworded
+summary), never a silent pass, a skipped gate or a masked failure. Four: any
+bash parsing behaviour this hand-written grammar does not model beyond the
+checks named above. One known instance: the if-frame push keys on the
+literal "; then" spelling while gitleaks member detection is token-based, so
+a header spelled with extra whitespace before then is counted as a member
+without opening a frame; in place that fails closed here (unbalanced-if),
+and bash refuses such a rearranged file at parse time before any gate runs.
+Surfaces three and four are tracked as backlog item
+RUNNER-STATIC-GRAMMAR-HARDENING.
 The --self-test backs the rules at runtime with a scratch copy
 of the live runner: no gate failing, gitleaks and leaks failing together, gitleaks failing alone,
 and each registered gate failing alone. Those scenarios run in parallel, so every
@@ -666,8 +694,13 @@ HOME_GUARD_LINE = (
     '[ -n "${HOME:-}" ] && '
     '[ -x "$HOME/.local/bin/gitleaks" ]; then')
 
+# The terminal failed check: its then branch is the one place the FAILED
+# GATES echo is accepted, the way the gitleaks-block lines are bound to
+# their real blocks.
+FAILED_CHECK_LINE = 'if [ "$failed" -ne 0 ]; then'
+
 RUNNER_TEST_LINES = frozenset({
-    'if [ "$failed" -ne 0 ]; then',
+    FAILED_CHECK_LINE,
     'if [ "$notrun" -ne 0 ]; then',
     HOME_GUARD_LINE,
     'if command -v gitleaks >/dev/null 2>&1; then',
@@ -685,6 +718,12 @@ PATH_APPEND_LINE = 'PATH="$PATH:$HOME/.local/bin"'
 GITLEAKS_RC_LINE = "gitleaks_rc=$?"
 GITLEAKS_FAILED_ECHO = (
     'echo "GATE FAILED: secrets (gitleaks) (exit ${gitleaks_rc})"')
+# The FAILED GATES echo expands ${failed_names}, so it receives the same
+# treatment: accepted only in the then branch of the terminal failed check
+# (FAILED_CHECK_LINE), after the top-level failed_names initializer.
+# Relocated above that initializer, ${failed_names} is unbound and set -u
+# ends the runner at that line before the first gate.
+FAILED_GATES_ECHO = 'echo "FAILED GATES: ${failed_names}"'
 
 # The only non-gate, non-test scaffold lines the two real runners contain outside
 # run_gate(), the failure-state initializers and updates, and the position-checked
@@ -699,8 +738,9 @@ GITLEAKS_FAILED_ECHO = (
 # set -u (x=$BASH_ENV, echo "$stub_log"). notrun=0 is accepted only at top level
 # before the first gate, because a later reset would hide the NOT RUN disclaimer.
 # The gitleaks-block lines (PATH_APPEND_LINE, GITLEAKS_RC_LINE and
-# GITLEAKS_FAILED_ECHO) are deliberately NOT members here: extract_local
-# accepts each of them only inside its real block.
+# GITLEAKS_FAILED_ECHO) and FAILED_GATES_ECHO are deliberately NOT members
+# here: extract_local accepts each of them only inside its real block and
+# branch.
 RUNNER_SCAFFOLD_LINES = frozenset({
     # tools/run_all_checks.sh
     "export PYTHONDONTWRITEBYTECODE=1",
@@ -711,7 +751,6 @@ RUNNER_SCAFFOLD_LINES = frozenset({
     'echo "NOT RUN: gitleaks is not on PATH locally. CI still runs it, so this is a gap"',
     'echo "  in THIS run only, not in the pipeline. Install it to close the gap:"',
     'echo "  see the pinned version and checksum in .github/workflows/quality.yml"',
-    'echo "FAILED GATES: ${failed_names}"',
     'echo "RESULT: FAIL"',
     'echo "RESULT: PASS, but one or more gates did NOT RUN locally (see above)"',
     'echo "RESULT: PASS"',
@@ -849,6 +888,41 @@ def _text_format_diagnostic(text, source):
     )
 
 
+# The standalone OPF runner is held to the same grammar as the local runner
+# after ONE adaptation, shared by vector 26 and
+# tools/selftest_git_fixture_env.py: the validated directory binding and the
+# terminal exit 0 are removed and the "$here/ paths are rebased. The
+# character screen runs FIRST, on the RAW text: splitlines() below breaks a
+# line at the very characters the screen exists to refuse (\v, \f, \x1c,
+# \x1d, \x1e, \x85, U+2028, U+2029), and the newline rejoin would erase
+# them, so screening only the adapted text would validate lines bash never
+# runs.
+STANDALONE_SOURCE = "opf/tools/run_all_checks.sh"
+STANDALONE_BINDING = 'here="$(cd "$(dirname "$0")" && pwd)" || exit 2'
+
+
+def adapt_standalone_runner(text):
+    """Return (adapted_text, diagnostic) for the standalone OPF runner;
+    exactly one of the two is None. The raw text is screened against the
+    character allowlist before any splitlines()."""
+    format_diagnostic = _text_format_diagnostic(text, STANDALONE_SOURCE)
+    if format_diagnostic is not None:
+        return None, format_diagnostic
+    lines = text.splitlines()
+    if lines.count(STANDALONE_BINDING) != 1 or lines[-1:] != ["exit 0"]:
+        return None, _diagnostic(
+            STANDALONE_SOURCE,
+            0,
+            "standalone-scaffold",
+            "unsupported standalone runner scaffold: expected exactly one "
+            "directory-binding line and a terminal exit 0",
+        )
+    lines[lines.index(STANDALONE_BINDING)] = (
+        "# validated standalone directory binding")
+    lines[-1] = "# validated terminal exit"
+    return "\n".join(lines).replace('"$here/', '"opf/tools/'), None
+
+
 def extract_local(text):
     """Extract normalized members from tools/run_all_checks.sh."""
     source = LOCAL_SOURCE
@@ -912,6 +986,26 @@ def extract_local(text):
                 function_body.append(stripped)
             continue
         if stripped == "run_gate() {":
+            if if_stack:
+                # bash runs a function definition as one ordinary,
+                # successfully-exiting statement, so a definition inside a
+                # branch both fills the branch and replaces $?; skipping it
+                # uncounted formerly let a copied definition ahead of
+                # gitleaks_rc=$? stale that capture, and made a
+                # definition-only branch read as empty. The definition is
+                # accepted only at top level outside every if frame, where
+                # the real runners put it.
+                frame = if_stack[-1]
+                frame["else_count" if frame["in_else"] else "then_count"] += 1
+                diagnostics.append(_diagnostic(
+                    source,
+                    line_number,
+                    "function-position",
+                    "run_gate() function definition inside an if branch; a "
+                    "definition is accepted only at top level, because bash "
+                    "runs it as an ordinary successful statement, filling "
+                    "the branch and replacing $?",
+                ))
             in_function = True
             function_body = []
             continue
@@ -948,6 +1042,7 @@ def extract_local(text):
                 "then_count": 0,
                 "else_count": 0,
                 "home_guard": stripped == HOME_GUARD_LINE,
+                "failed_check": stripped == FAILED_CHECK_LINE,
                 "gitleaks": False,
                 "gitleaks_rc_set": False,
             })
@@ -1225,6 +1320,15 @@ def extract_local(text):
             scaffold = (bool(if_stack) and if_stack[-1]["gitleaks"]
                         and if_stack[-1]["in_else"]
                         and if_stack[-1]["gitleaks_rc_set"])
+        elif stripped == FAILED_GATES_ECHO:
+            # Only where the real runners put it: the then branch of the
+            # terminal failed check, after the top-level failed_names
+            # initializer. Anywhere earlier or in any other frame,
+            # ${failed_names} can be unbound, and set -u then ends the
+            # runner at this line, losing the whole roster.
+            scaffold = (bool(if_stack) and if_stack[-1]["failed_check"]
+                        and not if_stack[-1]["in_else"]
+                        and "failed_names" in initialized)
         elif stripped in RUNNER_SCAFFOLD_LINES:
             # Exact membership decides; the named-expansion screen is belt and
             # braces so a future scaffold addition cannot widen the expansion
@@ -3445,10 +3549,10 @@ def self_test():
         live_extraction = extract_local(live_runner)
         if live_extraction.diagnostics:
             failures.append("26 live runner: {!r}".format(live_extraction.diagnostics))
-        # The standalone OPF runner, adapted exactly as
-        # tools/selftest_git_fixture_env.py adapts it (validated directory
-        # binding and terminal exit 0 removed, $here rebased), must also give
-        # zero diagnostics under the same grammar.
+        # The standalone OPF runner, adapted through the ONE shared
+        # adapter tools/selftest_git_fixture_env.py also uses (validated
+        # directory binding and terminal exit 0 removed, $here rebased),
+        # must give zero diagnostics under the same grammar.
         try:
             opf_runner = (
                 ROOT / "opf" / "tools" / "run_all_checks.sh"
@@ -3457,21 +3561,36 @@ def self_test():
             failures.append(
                 "26 cannot read standalone runner: {!r}".format(exc))
         else:
-            opf_binding = (
-                'here="$(cd "$(dirname "$0")" && pwd)" || exit 2')
-            opf_lines = opf_runner.splitlines()
-            if opf_lines.count(opf_binding) != 1 or opf_lines[-1] != "exit 0":
-                failures.append("26 standalone runner scaffold drift")
+            adapted, adapter_diagnostic = adapt_standalone_runner(opf_runner)
+            if adapter_diagnostic is not None:
+                failures.append(
+                    "26 standalone runner adapter: {!r}".format(
+                        adapter_diagnostic))
             else:
-                opf_lines[opf_lines.index(opf_binding)] = "# validated binding"
-                opf_lines[-1] = "# validated terminal exit"
-                adapted = "\n".join(opf_lines).replace(
-                    '"$here/', '"opf/tools/')
                 adapted_diagnostics = extract_local(adapted).diagnostics
                 if adapted_diagnostics:
                     failures.append(
                         "26 adapted standalone runner: {!r}".format(
                             adapted_diagnostics))
+            # codex qa9 MAJOR-1: the adapter screens the RAW text, so a
+            # forbidden character cannot vanish in its splitlines() and
+            # newline rejoin before extract_local's own screen. A form feed
+            # after a comment hides the next line from bash (the gate never
+            # runs) while a split-then-rejoin would turn it into a newline
+            # the grammar accepts. Fails without the raw-text screen.
+            opf_form_feed = opf_runner.replace(
+                '\nrun_gate "opf-homes-selftest"',
+                '\n# hidden\frun_gate "opf-homes-selftest"', 1)
+            if opf_form_feed == opf_runner:
+                failures.append("26 standalone byte fixture drift")
+            else:
+                ff_adapted, ff_diagnostic = adapt_standalone_runner(
+                    opf_form_feed)
+                if (ff_diagnostic is None
+                        or ff_diagnostic.code != "text-format"):
+                    failures.append(
+                        "26 form feed in the standalone runner was not "
+                        "refused on the raw text")
         def mutate(*edits):
             """Apply (old, new) edits to the live runner; None if an old text is not unique."""
             mutant = live_runner
@@ -3838,6 +3957,51 @@ def self_test():
                          for item in extract_local(mutant).diagnostics):
                 failures.append(
                     "26 branch structure was not rejected: " + name)
+        # codex qa9 MINOR-1: bash runs a function definition as one
+        # ordinary, successfully-exiting statement, so a definition inside
+        # an if branch both fills the branch and replaces $?; skipped
+        # uncounted, a copy of the runner's own run_gate() definition ahead
+        # of gitleaks_rc=$? kept the capture "first" while bash handed it
+        # the definition's status (0, never the gitleaks exit code), and a
+        # definition-only branch was refused as empty although bash accepts
+        # it. Both shapes are refused as function-position; each fixture
+        # fails without the in-branch refusal.
+        function_start = live_runner.index("run_gate() {")
+        run_gate_function = live_runner[
+            function_start:
+            live_runner.index("\n}\n", function_start) + len("\n}\n")]
+        function_fixtures = (
+            ("function definition ahead of the gitleaks_rc capture",
+             mutate(("    gitleaks_rc=$?\n",
+                     run_gate_function + "    gitleaks_rc=$?\n"))),
+            ("function definition as a branch's only statement",
+             mutate(('    echo "PASS: gitleaks found no leaks"\n',
+                     run_gate_function))),
+        )
+        for name, mutant in function_fixtures:
+            if mutant is None:
+                failures.append("26 function fixture drift: " + name)
+            elif not any(item.code == "function-position"
+                         for item in extract_local(mutant).diagnostics):
+                failures.append(
+                    "26 in-branch function definition was not refused: "
+                    + name)
+        # claude qa9 MINOR-2 (D1): the FAILED GATES echo expands
+        # ${failed_names}, so it is position-checked like the
+        # gitleaks-block lines: accepted only in the then branch of the
+        # terminal failed check, after the top-level initializer. Relocated
+        # to top level ahead of the initializers, ${failed_names} is
+        # unbound and set -u ends the runner at that line before the first
+        # gate. Fails without the position check.
+        relocated_echo = mutate((
+            "export PYTHONDONTWRITEBYTECODE=1\n",
+            "export PYTHONDONTWRITEBYTECODE=1\n"
+            'echo "FAILED GATES: ${failed_names}"\n'))
+        if relocated_echo is None:
+            failures.append("26 relocation fixture drift: FAILED GATES echo")
+        elif not any(item.code == "unclassified-line"
+                     for item in extract_local(relocated_echo).diagnostics):
+            failures.append("26 relocated FAILED GATES echo was not refused")
         # qa6 masked-value rejections, now behind two independent screens. In
         # the LOCAL runner the word allowlist refuses every $-carrying gate
         # word outright (run-gate-word), so a masked flag value never reaches

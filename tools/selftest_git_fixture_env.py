@@ -392,15 +392,20 @@ def _command_identity(argv):
 
 def _registered_selftests(root=ROOT):
     """Parse every registry before selecting self-tests; preserve exact script arguments.
-    Reuse CI-parity's fail-closed shell/YAML grammar. Only the standalone runner's
-    validated directory binding and terminal exit need normalization.
+    Reuse CI-parity's fail-closed shell/YAML grammar. The standalone runner is
+    normalized through check_ci_parity.adapt_standalone_runner, the ONE shared
+    adapter, which screens the raw text against the character allowlist before
+    its own line split, then removes the validated directory binding and
+    terminal exit; any adapter diagnostic refuses the roster here.
     Declaration coverage only: selection uses a selftest_ basename or an explicit
     --self-test, --selftest or --suite flag, not fixture-building behaviour.
     Other entry modes, unregistered entries and conditional reachability are outside
     this inventory. Manifest runners also run directly, because the
     execution gate deliberately sanitizes its child environment.
     """
-    from check_ci_parity import extract_local, extract_ci, _strip_comment, _tokenize, normalize
+    from check_ci_parity import (
+        adapt_standalone_runner, extract_local, extract_ci, _strip_comment,
+        _tokenize, normalize)
     from check_selftest_execution import _manifest_suites
 
     commands = set()
@@ -409,13 +414,12 @@ def _registered_selftests(root=ROOT):
                               (".github/workflows/quality.yml", extract_ci)):
         source = (root / relative).read_text(encoding="utf-8")
         if relative.startswith("opf/"):
-            binding = 'here="$(cd "$(dirname "$0")" && pwd)" || exit 2'
-            lines = source.splitlines()
-            if lines.count(binding) != 1 or lines[-1] != "exit 0":
-                raise ValueError("unsupported standalone runner scaffold")
-            lines[lines.index(binding)] = "# validated standalone directory binding"
-            lines[-1] = "# validated terminal exit"
-            source = "\n".join(lines).replace('"$here/', '"opf/tools/')
+            source, adapter_diagnostic = adapt_standalone_runner(source)
+            if adapter_diagnostic is not None:
+                if adapter_diagnostic.code == "standalone-scaffold":
+                    raise ValueError("unsupported standalone runner scaffold")
+                raise ValueError("{}: registry diagnostics: {}".format(
+                    relative, (adapter_diagnostic,)))
         result = extract(source)
         if result.diagnostics:
             raise ValueError("{}: registry diagnostics: {}".format(relative, result.diagnostics))
@@ -868,6 +872,15 @@ def _roster_checks():
              opf + ": empty registry"),
             ("roster/standalone-scaffold-refused", opf, binding + "\n" + binding + "\nexit 0\n",
              "unsupported standalone runner scaffold"),
+            # The shared adapter screens the RAW text, so the form feed is
+            # refused before the adapter's line split and newline rejoin
+            # could erase it; split first, this text adapts into a clean
+            # roster and the guard never fires.
+            ("roster/standalone-text-format-refused", opf,
+             binding + "\n" + state
+             + 'run_gate "probe-selftest" python3 -I -B tools/check_secrets.py --self-test\n'
+             + "# hidden\fexit 0\n",
+             opf + ": registry diagnostics:"),
             ("roster/unparseable-ci-refused", ci,
              ci_text + '\n      - run: python3 -I -B tools/check_secrets.py --self-test | cat\n',
              ci + ": registry diagnostics:"),
