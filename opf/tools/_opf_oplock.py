@@ -7618,7 +7618,16 @@ def _st_f8_1_codex_route(root):
         if event == "line" and frame.f_lineno == build[0] and not sent:
             sent.append(True)
             os.kill(os.getpid(), signal.SIGINT)
-            time.sleep(0.05)              # the kernel delivers it to the unblocked thread
+            # The kernel delivers it to the unblocked thread, and the pending Python-level handler
+            # then runs on this (main) thread mid-wait, still at this traced line; the parent waits
+            # for the handler's recorded fork event rather than a fixed 0.05 s sleep, which could lose
+            # the delivery race to scheduling latency on a loaded host. The forked child (a different
+            # pid, no event of its own) leaves at once and continues the acquisition forward. The
+            # deadline is a hang guard only: on expiry the exactly-one-fork assertion reports the
+            # missing delivery; elapsed time never carries the verdict.
+            give_up = time.monotonic() + 10.0
+            while os.getpid() == top and not record["events"] and time.monotonic() < give_up:
+                time.sleep(0.005)
         return local
 
     baseline = _st_open_fds()
@@ -8262,8 +8271,14 @@ def _st_f9_1_case(root, line, marks):
             if event == "call" and frame.f_code is claim_code and not paused.is_set():
                 holding["b"] = True
                 paused.set()
-                resume.wait(1.0)          # bounded: the fork handler resumes it sooner
+                # B resumes only when signalled: by the fork handler once the forked child was
+                # collected (after=resume.set), or by A once its take_ownership is seen looping,
+                # contending on the claim lock B holds (see local below). No timer decides how
+                # long B holds; the 30 s wait is a hang guard whose expiry FAILS B's release
+                # loudly (asserted as "B's release completes"), never an auto-resume.
+                signalled = resume.wait(30)
                 holding["b"] = False
+                assert signalled, "B was never resumed: the fork handler or A must signal it"
             return None
 
         sys.settrace(hook)
@@ -8280,12 +8295,18 @@ def _st_f9_1_case(root, line, marks):
     _st_bounded_fork_handler(record, lambda: holding["b"], 15, after=resume.set)
     own = _ReleaseScope.take_ownership.__code__
     sent = []
+    seen = set()
 
     def local(frame, event, arg):
-        if event == "line" and frame.f_lineno == line and not sent:
-            sent.append(True)
-            sys.settrace(None)
-            os.kill(os.getpid(), signal.SIGINT)
+        if event == "line":
+            if frame.f_lineno == line and not sent:
+                sent.append(True)
+                sys.settrace(None)
+                os.kill(os.getpid(), signal.SIGINT)
+            elif frame.f_lineno in seen:
+                resume.set()      # a repeated line: A loops in take_ownership, contending on the
+            else:                 # claim lock B holds, so B's hold has served its purpose
+                seen.add(frame.f_lineno)
         return local
 
     other = threading.Thread(target=second, daemon=True)
