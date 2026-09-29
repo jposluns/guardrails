@@ -1320,9 +1320,14 @@ def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None):
                 raise
             if not isinstance(exc, ProcessLookupError):
                 # A leader this escalation could NOT kill is a survivor:
-                # the outcome names it and never claims the tree (fix 2z,
-                # gemini F1). ProcessLookupError alone proves the leader
-                # already exited.
+                # the flag downgrades any "tree" claim, and the outcome
+                # names the leader only where it can carry it -- a
+                # would-be "tree" becomes a partial naming the subject,
+                # a payload-carrying "partial" adds it; the no-guardian
+                # ("subject-only", None) and ("partial", None) outcomes
+                # stay unnamed (fix 2z, gemini F1; scoped fix 16, QA37
+                # codex MINOR). ProcessLookupError alone proves the
+                # leader already exited.
                 leader_kill_failed = True
                 if isinstance(pending, _PENDING_CANCELLATIONS):
                     # fix 14 (QA35 codex MAJOR): with a cancellation

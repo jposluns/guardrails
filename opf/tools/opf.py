@@ -3813,6 +3813,12 @@ def _watchdog_completion_case(mode):
                 assert time.monotonic() < bound, note
                 time.sleep(0.005)
 
+        def await_pgid(target, note):
+            bound = time.monotonic() + 30
+            while os.getpgid(target) != target:
+                assert time.monotonic() < bound, note
+                time.sleep(0.005)
+
         def frozen_pair(directory):
             leader_file = Path(directory, "leader")
             frozen_file = Path(directory, "frozen")
@@ -3841,7 +3847,18 @@ def _watchdog_completion_case(mode):
             await_file(leader_file, "the model leader never appeared")
             await_file(frozen_file, "the model guardian never froze")
             await_state(guardian, ("T",), "the model guardian did not stop")
-            return guardian, int(leader_file.read_text(encoding="ascii"))
+            # The guardian publishes the leader pid at fork, but the
+            # leader runs its own setsid: the caller's subject freeze
+            # could land FIRST, pinning the leader in this test
+            # process's group for good, so the guardian-anchored
+            # census found no group member, no census ran, and the
+            # injected census failure was never raised -- the
+            # intermittent "fixture was accepted" flake (fix 16,
+            # QA37 claude). Hand the pair out only once the leader
+            # holds its own group.
+            leader = int(leader_file.read_text(encoding="ascii"))
+            await_pgid(leader, "the model leader never took its own group")
+            return guardian, leader
 
         # Leg 1: the held-pidfd subject SIGKILL survives a raising census;
         # the census exception still propagates. The pre-fix escalation
@@ -4598,14 +4615,23 @@ def _watchdog_completion_case(mode):
         # 14, QA35 codex/claude MINOR) -- checked like any other
         # call site (QA32 codex BLOCKER 2; a class statement after a
         # capture already fails closed), and the deferral makes
-        # the READ the execution point (fix 15, QA36 codex MAJOR):
-        # a spelled __annotations__/__annotate__ access evaluates
-        # every deferred annotation of its receiver with no
-        # ast.Call at the read site, so every scan that restricts
-        # calls rejects that access outright -- and every INDIRECT
-        # evaluation path (getattr, vars, an annotationlib/inspect/
-        # typing reader) is itself a call those scans already
-        # reject -- while an UNREAD annotation stays accepted. A
+        # the READ the execution point (fix 15, QA36 codex MAJOR).
+        # Of that read-triggered deferred-evaluation grammar this
+        # leg recognizes EXACTLY one shape: a spelled
+        # __annotations__/__annotate__ attribute access, rejected
+        # wherever annotation_reads runs -- over a capture's
+        # successors, inside a boundary-routed cleanup step, and in
+        # a cancellation-capable handler body -- while an UNREAD
+        # annotation stays accepted. An INDIRECT evaluation path
+        # (getattr, vars, an annotationlib/inspect/typing reader)
+        # is itself a call, rejected only where a call scan
+        # actually runs -- a recognized capture handler's
+        # boundary-call arguments are exempt from that scan -- and
+        # every OTHER read-triggered lazy construct (PEP 695 type
+        # parameters and aliases among them) is not recognized at
+        # all: both limits are DISCLOSED open-grammar residual
+        # classes below, held by leg 19, not by this leg (fix 16,
+        # QA37 codex/claude MAJOR). A
         # handler whose capture
         # target collides with its own `as` name, and a handler that
         # overwrites its bound name or an alias of it before its
@@ -4647,7 +4673,26 @@ def _watchdog_completion_case(mode):
         #     (QA32 claude MAJOR 1);
         #   - module-level shadowing of a BUILTIN name: resolve_call's
         #     builtin clearance checks function-local bindings only
-        #     (QA32 codex BLOCKER 5 / claude MINOR 1).
+        #     (QA32 codex BLOCKER 5 / claude MINOR 1);
+        #   - deferred evaluation AT LARGE: annotation_reads
+        #     recognizes only the spelled __annotations__/
+        #     __annotate__ attribute access, so any OTHER
+        #     read-triggered lazy construct evades it -- a PEP 695
+        #     type parameter's __bound__/__constraints__/__default__
+        #     read, a `type` alias's __value__ read, and whatever
+        #     lazy grammar a later interpreter adds -- executing
+        #     deferred expressions with no call and no recognized
+        #     attribute at the read site (fix 16, QA37 codex/claude
+        #     MAJOR; both reproductions are pinned below as
+        #     accepted-here, caught-by-leg-19 vectors);
+        #   - calls inside a RECOGNIZED capture handler's
+        #     boundary-call arguments: the capture branch hands the
+        #     handler to deferred_capture_sound and moves on before
+        #     the handler-body call scan runs, so an indirect
+        #     annotation reader -- or any other call -- spelled in
+        #     those arguments runs while the captured exception is
+        #     in flight (fix 16, QA37 codex MAJOR; pinned below the
+        #     same way).
         # These classes are RESIDUAL, not enforced: their absence
         # from the emit module is a review invariant, and a mutation
         # inside one of them evades this leg while leg 19 still holds
@@ -5491,14 +5536,23 @@ def _watchdog_completion_case(mode):
             # in its annotations, with NO ast.Call at the read site
             # for the call scans to see. This walks the same
             # executes-now region as direct_calls -- a nested def's or
-            # lambda's body, and its still-unread annotations, stay
-            # deferred and accepted -- and yields every attribute
-            # access spelled with an evaluating name, in ANY
-            # expression context (a store or delete is suspect too:
-            # fail closed). Every INDIRECT evaluation path -- getattr,
-            # vars, an annotationlib/inspect/typing reader -- is
-            # itself a call the surrounding scans already restrict
-            # wherever this scan runs.
+            # lambda's body, its still-unread annotations, and a
+            # LOCAL AnnAssign's annotation expression (which never
+            # evaluates on the pinned interpreter, fix 16, QA37
+            # codex MINOR) stay deferred and accepted -- and yields
+            # every attribute access spelled with an evaluating
+            # name, in ANY expression context (a store or delete is
+            # suspect too: fail closed). That one attribute shape is
+            # the WHOLE recognized grammar: an INDIRECT evaluation
+            # path -- getattr, vars, an annotationlib/inspect/typing
+            # reader -- is a call, rejected only where a call scan
+            # actually runs (a recognized capture handler's
+            # boundary-call arguments are exempt from that scan),
+            # and every OTHER read-triggered lazy construct (PEP 695
+            # type parameters and aliases among them) is not
+            # recognized at all -- both are DISCLOSED residual
+            # classes at the head of this leg, held by leg 19
+            # (fix 16, QA37 codex/claude MAJOR).
             stack = list(body)
             while stack:
                 node = stack.pop()
@@ -5510,6 +5564,17 @@ def _watchdog_completion_case(mode):
                                  if default is not None)
                     if not isinstance(node, ast.Lambda):
                         stack.extend(node.decorator_list)
+                    continue
+                if isinstance(node, ast.AnnAssign):
+                    # a LOCAL annotation expression never evaluates
+                    # (fix 12/14): scanning it over-rejected an
+                    # unevaluated deferred-read spelling (fix 16,
+                    # QA37 codex MINOR) -- only the target and the
+                    # value can execute here, so only they are
+                    # walked
+                    stack.append(node.target)
+                    if node.value is not None:
+                        stack.append(node.value)
                     continue
                 if (isinstance(node, ast.Attribute)
                         and node.attr in annotation_evaluators):
@@ -6721,6 +6786,153 @@ def _watchdog_completion_case(mode):
                     successors_after(function, capturing,
                                      "vector:codex36-annotation-read"),
                     "interrupted", "vector:codex36-annotation-read"))
+
+        # QA37 codex MINOR (fix 16, over-rejection pin): a LOCAL
+        # AnnAssign's annotation expression never evaluates on the
+        # pinned interpreter, so a deferred-read spelling inside it
+        # runs nothing and must be ACCEPTED -- while the same
+        # spelling in an AnnAssign's VALUE executes at the statement
+        # and stays rejected.
+        unevaluated = ast.parse(textwrap.dedent("""
+            def step():
+                marker: step.__annotations__
+            """)).body[0]
+        assert not list(annotation_reads(unevaluated.body)), (
+            "an unevaluated local annotation was scanned as a "
+            "deferred-annotation READ (fix 16, QA37 codex MINOR)")
+        evaluated = ast.parse(textwrap.dedent("""
+            def step():
+                marker: object = step.__annotations__
+            """)).body[0]
+        assert [access.attr for access
+                in annotation_reads(evaluated.body)] \
+            == ["__annotations__"], (
+            "an annotation READ in an AnnAssign VALUE executes at "
+            "the statement and must stay rejected (fix 15/16)")
+
+        # QA37 codex/claude MAJOR (fix 16): DISCLOSED-RESIDUAL pins.
+        # Under PD-335-TAIL option 2 and the fix-16 scope decision,
+        # leg 11 is a tripwire over an OPEN grammar and the two
+        # QA37 classes are disclosed, not enforced (scanner
+        # hardening for them is recorded follow-up work in the
+        # maintainer backlog, not a fix-16 change). Each pin
+        # therefore proves BOTH halves of the disclosure: the
+        # mutation shape is ACCEPTED by this leg's machinery (the
+        # tripwire does not see it), and executing that shape with
+        # a cancellation pending and the module-owned cleanup
+        # replaced by an injected fault reproduces exactly the
+        # displacement leg 19's matrix catches (behavioural_case
+        # refuses any run whose outward exception is not the
+        # pending cancellation).
+        pep695_read_source = """
+            def mutant(self):
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                def unused[T: abandon_unfinished()]():
+                    pass
+                unused.__type_params__[0].__bound__
+                if interrupted is not None:
+                    raise interrupted
+            """
+        handler_argument_source = """
+            def mutant(self):
+                def unused(value: abandon_unfinished()):
+                    pass
+                interrupted = None
+                try:
+                    wait()
+                except BaseException as exc:
+                    _cleanup_boundary(
+                        exc if isinstance(exc, _PENDING_CANCELLATIONS)
+                        else None,
+                        release_launcher, "parked launcher release",
+                        **(getattr(unused, "__annotations__") and {}))
+                    interrupted = exc
+                if interrupted is not None:
+                    raise interrupted
+            """
+
+        # ACCEPTED by leg 11 (claude QA37): the PEP 695 lazy read is
+        # attribute-shaped but spells neither recognized name, and
+        # the type parameter's bound is walked by no call scan, so
+        # the successor walk accepts the whole shape.
+        function, capturing = leg11_vector(pep695_read_source)
+        assert not list(annotation_reads(function.body)), (
+            "the PEP 695 lazy read is expected to evade "
+            "annotation_reads -- it is DISCLOSED, not enforced "
+            "(fix 16, QA37 claude MAJOR)")
+        deferred_capture_sound(
+            function,
+            successors_after(function, capturing,
+                             "vector:claude37-pep695-read"),
+            "interrupted", "vector:claude37-pep695-read")
+
+        # ACCEPTED by leg 11 (codex QA37): the handler is the
+        # RECOGNIZED capture shape -- exactly that recognition
+        # exempts its boundary-call arguments from the handler-body
+        # call scan, so the indirect reader spelled there is never
+        # seen.
+        function, capturing = leg11_vector(handler_argument_source)
+        handler = capturing.handlers[0]
+        assert not list(annotation_reads(handler.body)), (
+            "the indirect reader in the boundary-call arguments is "
+            "expected to evade annotation_reads -- it is a call, "
+            "not a recognized attribute read; DISCLOSED, not "
+            "enforced (fix 16, QA37 codex MAJOR)")
+        assert capture_shape(handler.body, handler.name) \
+            == "interrupted", (
+            "the mutated handler must still be the RECOGNIZED "
+            "capture shape: that recognition is what exempts its "
+            "boundary-call arguments from the handler-body call "
+            "scan (fix 16, QA37 codex MAJOR)")
+        deferred_capture_sound(
+            function,
+            successors_after(function, capturing,
+                             "vector:codex37-handler-args"),
+            "interrupted", "vector:codex37-handler-args")
+
+        # CAUGHT by leg 19: run each accepted shape for real, the
+        # way the behavioural matrix drives a site -- a cancellation
+        # pending, the module-owned cleanup replaced by an injected
+        # fault -- and require the fault to DISPLACE the
+        # cancellation, which is precisely the outcome
+        # behavioural_case (leg 19) refuses on every closure site.
+        def displaced_outward(source):
+            def wait():
+                raise TimeoutError("pending cancellation")
+
+            def abandon_unfinished():
+                raise RuntimeError("injected cleanup fault")
+
+            namespace = {
+                "_cleanup_boundary": emit._cleanup_boundary,
+                "_PENDING_CANCELLATIONS":
+                    emit._PENDING_CANCELLATIONS,
+                "wait": wait,
+                "abandon_unfinished": abandon_unfinished,
+                "release_launcher": lambda: None,
+            }
+            exec(compile(textwrap.dedent(source),
+                         "<leg 11 QA37 vector>", "exec"), namespace)
+            try:
+                namespace["mutant"](None)
+            except BaseException as exc:
+                return exc
+            raise AssertionError(
+                "the disclosed QA37 mutation shape completed "
+                "without raising (fix 16)")
+
+        for label, source in (
+                ("claude37-pep695-read", pep695_read_source),
+                ("codex37-handler-args", handler_argument_source)):
+            outward = displaced_outward(source)
+            assert (type(outward) is RuntimeError
+                    and str(outward) == "injected cleanup fault"), (
+                "a disclosed QA37 residual shape did not reproduce "
+                "the displacement leg 19 catches (fix 16, QA37 "
+                "codex/claude MAJOR)", label, repr(outward))
 
         # Leg 12 (QA27 codex BLOCKER 1): a TimeoutError raised at the
         # subject SIGSTOP stays the outward exception when the held-pidfd
