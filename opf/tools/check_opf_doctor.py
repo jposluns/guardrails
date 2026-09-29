@@ -43,12 +43,23 @@ step to 2, and an interpreter that VANISHES after a passing doctor fails the ren
 the usage guard (a surplus operand) exits 2 with NO step launched; the recipe run by a RELATIVE
 path under a hostile CDPATH naming a decoy pack still resolves its own directory and returns the true
 verdict; a committed clean store with ONE declared, planner-populated view red-flags end to end once the
-view is edited (render --check 1, doctor 1, recipe 1) while both recipe runs leave every entry under the
-root outside .git/ identical (lstat kind, mode, content digest, symlink target) and the directory set, the
-ref set, the LOCAL git configuration and the .git/hooks tree unchanged (the read-only claim, held as a
-check); and the GitHub Actions template is held POSITIVELY to its own stated discipline (exactly one
-non-comment run: line, its normalized text the verbatim `run: sh opf/enforcement/ci/opf-ci.sh .`, and no
-non-comment if: or continue-on-error key). The stub exists because the real tool cannot isolate the render step: a
+view is edited (render --check 1, doctor 1, recipe 1) while both recipe runs leave the read-only snapshot
+unchanged, covering EXACTLY: every entry under the root with only the TOP-LEVEL .git directory pruned (a
+nested .git directory below the root is walked like any other entry), by lstat kind, mode, content digest
+and symlink target; the directory set; the root directory's and the .git/hooks directory's OWN lstat
+records (so a chmod of either reds); the ref set; the LOCAL git configuration; the .git/hooks tree; the
+INDEX as git sees it (`git ls-files -s -z`, so an update-index --force-remove or rm --cached reds); and
+.git/info/exclude; while HEAD itself (a detach or symbolic-ref retarget), the object store (including
+objects/info/alternates), reflogs and other .git metadata files (e.g. info/attributes, description) stay
+UNCOVERED by that snapshot; each covered leg is held red by its own per-write mutant fixture. The abnormal
+sig:15 vectors run AGAIN with SIGTERM inherited as SIG_IGN (a preexec in the recipe launch), so removing
+the recording stub's SIG_DFL restore reds the ordinary suite. And the GitHub Actions template is held to
+EXACT TEXT: its whole text with full-line comments and blank lines removed (and nothing else normalized)
+must equal the module's canonical constant _WORKFLOW_CANONICAL verbatim, so ANY added or changed key
+(shell:, env:, defaults:, if:, continue-on-error:, quoted, space-padded or aliased, at step, job or
+workflow level), any run: continuation line or trailer, a flow mapping, a second step, or a rewritten on:
+block reds it, while full-line comments stay free to change; each reported bypass spelling is held red by
+its own mutant fixture. The stub exists because the real tool cannot isolate the render step: a
 drifted view fails doctor's own C-VIEW-DRIFT too, so only the stub proves the render invocation is still
 present, ordered, exactly argued, and forwarded. Each committed fixture is `git init` +
 `git add` + `git commit`ed so the `tracked` and `prior` observations _opf_observe.gather derives from HEAD are
@@ -67,6 +78,34 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))  # for the self-test's 
 EXIT_OK = 0
 EXIT_FINDING = 1
 EXIT_ERROR = 2
+
+# The GitHub Actions template's canonical EFFECTIVE text: the shipped file's whole text with
+# full-line comments and blank lines removed, and NOTHING else normalized (no whitespace, quote or
+# case folding). The self-test holds opf/enforcement/ci/github-actions.yml to EXACT equality with
+# this constant, so any added or changed non-comment line reds the gate while the template's
+# comment lines stay free to change. Editing the template deliberately means updating this
+# constant in the same change.
+_WORKFLOW_CANONICAL = """\
+name: OPF
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  opf:
+    name: OPF store integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: OPF CI floor (doctor --require-store, then render --check)
+        run: sh opf/enforcement/ci/opf-ci.sh ."""
 
 
 def _run_doctor(root, capture, extra=()):
@@ -117,6 +156,7 @@ def _self_test_isolated():
     import hashlib
     import io
     import shutil
+    import signal
     import stat
     import tempfile
 
@@ -291,7 +331,8 @@ def _self_test_isolated():
         _git(root, home, "add", "-A")
         _git(root, home, "commit", "-m", "seed store")
 
-    def _run_ci_recipe(root, tool=None, extra_env=None, extra_args=(), cwd=None, recipe=None):
+    def _run_ci_recipe(root, tool=None, extra_env=None, extra_args=(), cwd=None, recipe=None,
+                       preexec=None):
         """Run the shipped CI recipe (opf/enforcement/ci/opf-ci.sh) over `root` with this interpreter as
         OPF_PYTHON, returning its exit status unmasked. A `root` of None omits the ROOT operand entirely
         (the recipe's documented no-operand invocation: ROOT defaults to the child's current directory,
@@ -301,7 +342,9 @@ def _self_test_isolated():
         per-verb exit codes, an OPF_PYTHON override for the launch-failure vectors, or a hostile CDPATH).
         `extra_args` appends operands after the root (the usage-guard vector), `cwd` sets the child's
         working directory, and `recipe` substitutes a recipe path passed VERBATIM (the CDPATH vector runs
-        a COPY by a RELATIVE path; the default stays the shipped recipe, absolute). A missing `sh`, a
+        a COPY by a RELATIVE path; the default stays the shipped recipe, absolute). `preexec` is
+        forwarded to subprocess.run as preexec_fn (the SIGTERM-inherited-as-SIG_IGN vectors ignore
+        SIGTERM in the child before exec). A missing `sh`, a
         missing shipped recipe, or a launch failure raises OSError (a harness error, exit 2 via
         _classify)."""
         sh = shutil.which("sh")
@@ -321,7 +364,8 @@ def _self_test_isolated():
             argv.append(str(root))
         argv += [str(a) for a in extra_args]
         proc = subprocess.run(argv, env=env, cwd=None if cwd is None else str(cwd),
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              preexec_fn=preexec)
         return proc.returncode
 
     def _run_render_check(root):
@@ -340,19 +384,26 @@ def _self_test_isolated():
         return proc.returncode
 
     def _tree_digest(root, home):
-        """A snapshot asserting the recipe's read-only claim, five-legged: every entry under `root`
-        outside .git/ recorded through os.lstat (relpath -> kind, mode, and a regular file's sha256 or
-        a symlink's TARGET, never followed, so a chmod, a planted symlink, or a swapped entry kind is a
-        visible write), the SORTED DIRECTORY LISTING outside .git/ (a created directory, even an empty
-        one, is a write the entry records alone cannot see), the full `git for-each-ref` output (a
-        written ref, e.g. a planted tag, is a repository write even though its bytes live under .git/),
-        the LOCAL repository configuration (`git config --local --list -z`: doctor's observation gather
-        READS repository config, so a config write is store-visible even though it lives under .git/),
-        and the .git/hooks tree recorded the same lstat way (a planted or edited hook is store-side
-        behaviour). Other .git/ file CONTENTS are excluded because the doctor step's observation gather
-        runs read-only git commands whose internal bookkeeping is not a store write; the ref, config
-        and hooks legs cover the .git/ writes that ARE store-visible. A failing git probe raises
-        OSError (a harness error, exit 2 via _classify)."""
+        """A snapshot asserting the recipe's read-only claim. It covers EXACTLY these legs: (1) every
+        entry under `root` recorded through os.lstat (relpath -> kind, mode, and a regular file's
+        sha256 or a symlink's TARGET, never followed, so a chmod, a planted symlink, or a swapped
+        entry kind is a visible write), with ONLY the top-level .git directory pruned; a .git
+        directory anywhere BELOW the root is walked and recorded like any other entry; (2) the SORTED
+        DIRECTORY LISTING under the same pruning (a created directory, even an empty one, is a write
+        the entry records alone cannot see); (3) the lstat records of the root directory ITSELF and
+        of the .git/hooks directory ITSELF (a chmod of either is a write the walks alone cannot see);
+        (4) the full `git for-each-ref` output (a written ref, e.g. a planted tag, is a repository
+        write even though its bytes live under .git/); (5) the LOCAL repository configuration
+        (`git config --local --list -z`: doctor's observation gather READS repository config, so a
+        config write is store-visible even though it lives under .git/); (6) the .git/hooks tree
+        recorded the same lstat way (a planted or edited hook is store-side behaviour); (7) the INDEX
+        as git sees it (`git ls-files -s -z`: stage, mode, blob id and path per tracked entry, so an
+        `update-index --force-remove` or `rm --cached` is a visible write); and (8) the
+        .git/info/exclude file's lstat record. NOT covered, so a write there does NOT red this
+        snapshot: HEAD itself (a detach or a symbolic-ref retarget), the object store including
+        objects/info/alternates, reflogs, and other .git metadata files (e.g. info/attributes,
+        description, FETCH_HEAD). A failing git probe raises OSError (a harness error, exit 2 via
+        _classify)."""
         def _lstat_entry(path):
             st = os.lstat(path)
             if stat.S_ISLNK(st.st_mode):
@@ -362,10 +413,19 @@ def _self_test_isolated():
                     return ("file", st.st_mode, hashlib.sha256(fh.read()).hexdigest())
             return ("other", st.st_mode, "")
 
-        entries = {}
+        def _lstat_entry_or_absent(path):
+            # A recorded ABSENCE, so deleting the entry (itself a write) still flips the snapshot to
+            # a mismatch (exit 1) rather than crashing the probe to a harness exit 2.
+            try:
+                return _lstat_entry(path)
+            except FileNotFoundError:
+                return ("absent", 0, "")
+
+        entries = {".": _lstat_entry(str(root))}
         dirs = []
         for dirpath, dirnames, filenames in os.walk(str(root)):
-            dirnames[:] = [d for d in dirnames if d != ".git"]
+            if dirpath == str(root):
+                dirnames[:] = [d for d in dirnames if d != ".git"]
             dirs.append(str(Path(dirpath).relative_to(root)))
             for name in dirnames + filenames:
                 p = Path(dirpath) / name
@@ -384,13 +444,15 @@ def _self_test_isolated():
 
         refs = _git_probe("for-each-ref")
         config = _git_probe("config", "--local", "--list", "-z")
-        hooks = {}
+        index = _git_probe("ls-files", "-s", "-z")
         hooks_dir = os.path.join(str(root), ".git", "hooks")
+        hooks = {".": _lstat_entry_or_absent(hooks_dir)}
         for dirpath, dirnames, filenames in os.walk(hooks_dir):
             for name in dirnames + filenames:
                 path = os.path.join(dirpath, name)
                 hooks[os.path.relpath(path, hooks_dir)] = _lstat_entry(path)
-        return entries, sorted(dirs), refs, config, hooks
+        exclude = _lstat_entry_or_absent(os.path.join(str(root), ".git", "info", "exclude"))
+        return entries, sorted(dirs), refs, config, hooks, index, exclude
 
     def _doctor_suite():
         """Build synthetic COMMITTED stores and assert the 0/1/2/0 doctor contract end to end through opf.py.
@@ -479,15 +541,17 @@ def _self_test_isolated():
                 encoding="utf-8")
             stub_serial = [0]
 
-            def _run_recipe_stubbed(rc_doctor=0, rc_render=0, no_operand=False):
+            def _run_recipe_stubbed(rc_doctor=0, rc_render=0, no_operand=False, preexec=None):
                 """Run the recipe over the clean store with the stub as OPF_TOOL; returns (exit status,
                 the recorded invocations as argv lists). With `no_operand` the ROOT operand is omitted
                 and the clean store becomes the child's WORKING DIRECTORY instead (the recipe's
-                documented default), so the recorded --root is the literal `.`."""
+                documented default), so the recorded --root is the literal `.`. `preexec` is
+                forwarded to the recipe launch (the SIGTERM-inherited-as-SIG_IGN vectors)."""
                 stub_serial[0] += 1
                 log = base / "stub-log-{}".format(stub_serial[0])
                 rc = _run_ci_recipe(None if no_operand else clean,
-                                    cwd=clean if no_operand else None, tool=stub, extra_env=dict(
+                                    cwd=clean if no_operand else None, tool=stub, preexec=preexec,
+                                    extra_env=dict(
                     OPF_STUB_LOG=str(log), OPF_STUB_RC_DOCTOR=str(rc_doctor),
                     OPF_STUB_RC_RENDER=str(rc_render)))
                 calls = []
@@ -581,6 +645,21 @@ def _self_test_isolated():
                 rc, calls = _run_recipe_stubbed(rc_render=bad)
                 expect("ci-recipe-render-abnormal-{}".format(bad),
                        (rc, [c[0] for c in calls]), (EXIT_ERROR, ["doctor", "render"]))
+            # The sig:15 vectors AGAIN with SIGTERM inherited as SIG_IGN (set by a preexec in the
+            # recipe launch; a non-interactive sh keeps an entry-ignored signal ignored, and the stub
+            # inherits it). The stub must restore SIG_DFL before killing itself for its death to be a
+            # GENUINE signal death; without that restore the ignored kill falls through to
+            # int('sig:15') and the stub exits 1 instead, so deleting the stub's
+            # signal.signal(..., SIG_DFL) line reds these two vectors in the ORDINARY suite (the
+            # regression guard the plain sig:15 vectors above cannot provide).
+            def _inherit_sigterm_ignored():
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            rc, calls = _run_recipe_stubbed(rc_doctor="sig:15", preexec=_inherit_sigterm_ignored)
+            expect("ci-recipe-doctor-abnormal-sig:15-inherited-ignored",
+                   (rc, [c[0] for c in calls]), (EXIT_ERROR, ["doctor"]))
+            rc, calls = _run_recipe_stubbed(rc_render="sig:15", preexec=_inherit_sigterm_ignored)
+            expect("ci-recipe-render-abnormal-sig:15-inherited-ignored",
+                   (rc, [c[0] for c in calls]), (EXIT_ERROR, ["doctor", "render"]))
             # The usage guard: a surplus operand is a usage error (exit 2) and NO step runs (the stub
             # log is never created), so a deleted guard cannot silently check the first operand and
             # ignore the rest.
@@ -616,27 +695,80 @@ def _self_test_isolated():
             expect("ci-recipe-relative-path-hostile-cdpath",
                    (rc, [c[0] for c in cd_calls]), (EXIT_OK, ["doctor", "render"]))
             # The GitHub Actions template is held to its own stated discipline (a template nothing runs
-            # in this repository would otherwise drift as prose), asserted POSITIVELY rather than by a
-            # blocklist of bad spellings: among the non-comment lines there is EXACTLY ONE run: key and
-            # its whitespace-normalized text is the verbatim recipe invocation (so any trailer such as
-            # `|| true`, `|| :`, `|| exit 0` or `; true`, a substituted command, a block-scalar rewrite,
-            # or a second run: line reds it), and NO line carries an if: or continue-on-error key (a
-            # skipping condition or a masked failure is a check that cannot fail, which the template's
-            # own comment calls decorative). Comment lines are excluded because that comment names the
-            # forbidden key; a leading `- ` is stripped so a step-item key reads the same as a mapping
-            # key.
+            # in this repository would otherwise drift as prose) by EXACT TEXT, not a line pattern: the
+            # template's whole text with full-line comments and blank lines removed (and NOTHING else
+            # normalized) must equal _WORKFLOW_CANONICAL verbatim. Any added key (shell:, env:,
+            # defaults:, if:, continue-on-error:, quoted, space-padded or aliased, at step, job or
+            # workflow level), any run: continuation line or trailer, a flow mapping, a second step, or
+            # a rewritten on: block therefore reds; only full-line comments and blank lines stay free
+            # to change. Editing the template deliberately means updating the constant in the same
+            # change. Each bypass spelling reported against the older line-pattern assertion is held
+            # red below by its own mutant fixture.
             workflow = (Path(__file__).resolve().parent.parent / "enforcement" / "ci"
                         / "github-actions.yml")
-            wf_lines = [" ".join(ln.split()) for ln in
-                        workflow.read_text(encoding="utf-8").splitlines()
-                        if not ln.lstrip().startswith("#")]
-            wf_keyed = [ln[2:] if ln.startswith("- ") else ln for ln in wf_lines]
-            expect("workflow-single-verbatim-run-line",
-                   [ln for ln in wf_keyed if ln.split(":", 1)[0] == "run"],
-                   ["run: sh opf/enforcement/ci/opf-ci.sh ."])
-            expect("workflow-no-verdict-masking-key",
-                   [ln for ln in wf_keyed
-                    if ln.split(":", 1)[0] in ("if", "continue-on-error")], [])
+
+            def _wf_effective(text):
+                return "\n".join(ln for ln in text.splitlines()
+                                 if ln.strip() and not ln.lstrip().startswith("#"))
+
+            expect("workflow-exact-effective-text",
+                   _wf_effective(workflow.read_text(encoding="utf-8")), _WORKFLOW_CANONICAL)
+            expect("workflow-comment-and-blank-lines-free",
+                   _wf_effective("# a template comment may change freely\n\n" + _WORKFLOW_CANONICAL),
+                   _WORKFLOW_CANONICAL)
+            # The mutant fixtures: every bypass spelling reported against the older line-pattern
+            # assertion, applied to the canonical text; each effective text must DIFFER from the
+            # canonical (red). A no-op replace leaves the mutant equal to the canonical, so a stale
+            # needle fails its own fixture (fail-closed).
+            wf_run = "        run: sh opf/enforcement/ci/opf-ci.sh ."
+            wf_step = "      - name: OPF CI floor (doctor --require-store, then render --check)"
+            wf_job = "    runs-on: ubuntu-latest"
+            wf_mutants = (
+                ("run-continuation-trailer", _WORKFLOW_CANONICAL.replace(
+                    wf_run, wf_run + "\n          || true")),
+                ("run-inline-trailer", _WORKFLOW_CANONICAL.replace(wf_run, wf_run + " || true")),
+                ("second-run-step", _WORKFLOW_CANONICAL.replace(
+                    wf_run, wf_run + "\n      - name: mask\n        run: echo skipped")),
+                ("second-step-flow-mapping", _WORKFLOW_CANONICAL.replace(
+                    wf_run, wf_run + "\n      - {name: mask, run: 'true'}")),
+                ("step-shell-exit-zero", _WORKFLOW_CANONICAL.replace(
+                    wf_run, wf_run + '\n        shell: bash -c "{0}; exit 0"')),
+                ("step-shell-true", _WORKFLOW_CANONICAL.replace(
+                    wf_run, wf_run + "\n        shell: true {0}")),
+                ("step-env-opf-python", _WORKFLOW_CANONICAL.replace(
+                    wf_run, wf_run + "\n        env:\n          OPF_PYTHON: 'true'")),
+                ("step-env-opf-tool", _WORKFLOW_CANONICAL.replace(
+                    wf_run, wf_run + "\n        env:\n          OPF_TOOL: /dev/null")),
+                ("workflow-env-opf-python", _WORKFLOW_CANONICAL.replace(
+                    "name: OPF\non:", "name: OPF\nenv:\n  OPF_PYTHON: 'true'\non:")),
+                ("job-defaults-flow", _WORKFLOW_CANONICAL.replace(
+                    wf_job, wf_job + "\n    defaults: {run: {shell: 'true {0}'}}")),
+                ("job-defaults-block", _WORKFLOW_CANONICAL.replace(
+                    wf_job, wf_job + "\n    defaults:\n      run:\n        shell: 'true {0}'")),
+                ("step-plain-if", _WORKFLOW_CANONICAL.replace(wf_run, wf_run + "\n        if: false")),
+                ("step-single-quoted-if", _WORKFLOW_CANONICAL.replace(
+                    wf_run, wf_run + "\n        'if': false")),
+                ("step-double-quoted-if", _WORKFLOW_CANONICAL.replace(
+                    wf_run, wf_run + '\n        "if": false')),
+                ("step-space-padded-if", _WORKFLOW_CANONICAL.replace(
+                    wf_run, wf_run + "\n        if : false")),
+                ("job-double-quoted-if", _WORKFLOW_CANONICAL.replace(
+                    wf_job, wf_job + '\n    "if": false')),
+                ("step-quoted-continue-on-error", _WORKFLOW_CANONICAL.replace(
+                    wf_run, wf_run + '\n        "continue-on-error": true')),
+                ("alias-if-key", _WORKFLOW_CANONICAL.replace(
+                    "permissions:", "x-key: &k if\npermissions:").replace(
+                    wf_run, wf_run + "\n        *k : false")),
+                ("on-workflow-dispatch-only", _WORKFLOW_CANONICAL.replace(
+                    "on:\n  pull_request:\n  push:\n    branches: [main]",
+                    "on:\n  workflow_dispatch:")),
+                ("preceding-github-script-step", _WORKFLOW_CANONICAL.replace(
+                    wf_step, "      - uses: actions/github-script@v7\n        with:\n"
+                    "          script: overwrite opf-ci.sh\n" + wf_step)),
+            )
+            for wf_label, wf_mutant in wf_mutants:
+                expect("workflow-mutant-reds-{}".format(wf_label),
+                       _wf_effective(wf_mutant) == _WORKFLOW_CANONICAL, False)
 
             # --- The recipe end to end over a REAL drifted view (U16): a committed clean store
             # with ONE declared view, populated through the U4 engine's own public planner
@@ -677,6 +809,46 @@ def _self_test_isolated():
             before = _tree_digest(viewed, home)
             expect("ci-recipe-drifted-viewed-store", _run_ci_recipe(viewed), EXIT_FINDING)
             expect("ci-recipe-drifted-run-read-only", _tree_digest(viewed, home) == before, True)
+
+            # Read-only-snapshot per-write mutant fixtures: each write below is one reported bypass
+            # of the older snapshot, applied directly to the fixture tree; each must CHANGE the
+            # digest (red). A FRESH before is taken per vector, so the writes are cumulative and
+            # never undone (the viewed store is not used again; the tempdir is removed in the
+            # finally). The two index writes red via the ls-files leg, the nested .git write via the
+            # top-level-only .git prune, the exclude write via the info/exclude leg, and the two
+            # chmods via the root's and the hooks directory's own lstat records.
+            def _snapshot_sees(label, mutate):
+                before_m = _tree_digest(viewed, home)
+                mutate()
+                expect("readonly-snapshot-sees-{}".format(label),
+                       _tree_digest(viewed, home) != before_m, True)
+
+            def _chmod_flip(path):
+                os.chmod(path, stat.S_IMODE(os.lstat(path).st_mode) ^ 0o010)
+
+            def _nested_git_write():
+                # exist_ok, and an own filename: if a hostile recipe already planted this nested
+                # .git, the read-only vectors above are already red; this fixture then still runs
+                # (adding its own file) instead of crashing the suite to a harness 2 that would
+                # swallow the recorded failures.
+                nested = viewed / _opf_store.WORKING_DIRNAME / ".git"
+                nested.mkdir(exist_ok=True)
+                (nested / "wrote-fixture").write_text("x\n", encoding="utf-8")
+
+            def _exclude_append():
+                with open(str(viewed / ".git" / "info" / "exclude"), "a", encoding="utf-8") as fh:
+                    fh.write("VERSION\n")
+
+            _snapshot_sees("index-update-index-force-remove",
+                           lambda: _git(viewed, home, "update-index", "--force-remove",
+                                        "{}/{}".format(machine_rel, _opf_store.MANIFEST_NAME)))
+            _snapshot_sees("index-rm-cached",
+                           lambda: _git(viewed, home, "rm", "-q", "--cached", "VERSION"))
+            _snapshot_sees("nested-git-dir-write", _nested_git_write)
+            _snapshot_sees("git-info-exclude-write", _exclude_append)
+            _snapshot_sees("root-dir-chmod", lambda: _chmod_flip(str(viewed)))
+            _snapshot_sees("hooks-dir-chmod",
+                           lambda: _chmod_flip(str(viewed / ".git" / "hooks")))
 
             # Child-LAUNCH failure -> exit 2 (cannot-evaluate), never a false verdict. Inject an OSError at the
             # launch call (an OS refusal to fork under RLIMIT_NPROC pressure surfaces as BlockingIOError);
@@ -779,10 +951,16 @@ def _self_test_isolated():
               "interpreter before doctor, an interpreter vanishing before render), a surplus operand a "
               "usage 2 with no step run, a relative invocation under a hostile CDPATH -> the true "
               "verdict, a committed drifted view -> 1 end to end (render --check, doctor, "
-              "recipe), both recipe runs read-only (entries under the root outside .git/ identical by "
-              "lstat kind/mode/content/target, directories, refs, local git config and .git/hooks "
-              "unchanged), the workflow template held positively (exactly one non-comment run: line, "
-              "verbatim `run: sh opf/enforcement/ci/opf-ci.sh .`, no if: or continue-on-error key); "
+              "recipe), both recipe runs read-only over EXACTLY this snapshot (every entry under the "
+              "root with only the top-level .git pruned, nested .git dirs walked, by lstat "
+              "kind/mode/content/target; the directory set; the root and .git/hooks directory "
+              "records; refs; local git config; the .git/hooks tree; the index via ls-files -s -z; "
+              "and .git/info/exclude; HEAD itself, the object store including alternates, reflogs "
+              "and other .git metadata stay uncovered), per-write mutant fixtures red on each "
+              "covered snapshot leg, the sig:15 abnormal vectors repeated with SIGTERM inherited "
+              "ignored (the stub's SIG_DFL restore guarded), the workflow template equal by EXACT "
+              "TEXT to the canonical constant after dropping only comment and blank lines (any "
+              "other edit reds, per-spelling mutant fixtures red); "
               "child-launch failure -> 2; no-repo-root -> 2; invalid-git-marker -> 2; "
               "relative-toplevel probe -> None (exit 2); "
               "git executable absolutized (relative which() -> absolute argv[0]); "
