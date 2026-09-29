@@ -5522,6 +5522,18 @@ def _watchdog_completion_case(mode):
                                                   args=[],
                                                   keywords=[]))
                     continue
+                if isinstance(node, ast.AnnAssign):
+                    # a LOCAL annotation expression never evaluates on
+                    # the pinned interpreter, so a call spelled inside
+                    # it runs nothing: walking it over-rejected an
+                    # unevaluated spelling that annotation_reads below
+                    # already skips (fix 17, QA38 codex/claude MINOR)
+                    # -- only the target and the value can execute
+                    # here, so only they are walked
+                    stack.append(node.target)
+                    if node.value is not None:
+                        stack.append(node.value)
+                    continue
                 if isinstance(node, ast.Call):
                     yield node
                 stack.extend(ast.iter_child_nodes(node))
@@ -5538,8 +5550,10 @@ def _watchdog_completion_case(mode):
             # executes-now region as direct_calls -- a nested def's or
             # lambda's body, its still-unread annotations, and a
             # LOCAL AnnAssign's annotation expression (which never
-            # evaluates on the pinned interpreter, fix 16, QA37
-            # codex MINOR) stay deferred and accepted -- and yields
+            # evaluates on the pinned interpreter and is skipped by
+            # BOTH scanners: fix 16, QA37 codex MINOR; fix 17, QA38
+            # codex/claude MINOR) stay deferred and accepted -- and
+            # yields
             # every attribute access spelled with an evaluating
             # name, in ANY expression context (a store or delete is
             # suspect too: fail closed). That one attribute shape is
@@ -6810,6 +6824,32 @@ def _watchdog_completion_case(mode):
             "an annotation READ in an AnnAssign VALUE executes at "
             "the statement and must stay rejected (fix 15/16)")
 
+        # QA38 codex/claude MINOR (fix 17, over-rejection pin): the
+        # CALL scan holds the same region -- direct_calls used to
+        # walk the AnnAssign annotation annotation_reads skips, so a
+        # call spelled in an unevaluated local annotation
+        # (`marker: getattr(kill_leader, "__annotations__")`) was
+        # over-rejected though it runs nothing. Both scanners now
+        # skip the annotation, and both still see the VALUE, which
+        # executes at the statement.
+        unevaluated_call = ast.parse(textwrap.dedent("""
+            def step():
+                marker: getattr(step, "__annotations__")
+            """)).body[0]
+        assert not list(direct_calls(unevaluated_call.body)), (
+            "a call inside an unevaluated local annotation was "
+            "scanned as an executing call (fix 17, QA38 "
+            "codex/claude MINOR)")
+        evaluated_call = ast.parse(textwrap.dedent("""
+            def step():
+                marker: object = getattr(step, "__annotations__")
+            """)).body[0]
+        assert [call_target(call)[:2] for call
+                in direct_calls(evaluated_call.body)] \
+            == [("name", "getattr")], (
+            "a call in an AnnAssign VALUE executes at the statement "
+            "and must stay seen (fix 17)")
+
         # QA37 codex/claude MAJOR (fix 16): DISCLOSED-RESIDUAL pins.
         # Under PD-335-TAIL option 2 and the fix-16 scope decision,
         # leg 11 is a tripwire over an OPEN grammar and the two
@@ -7322,7 +7362,17 @@ def _watchdog_completion_case(mode):
         # site shifts its label's source-order ordinals, stranding
         # that ordinal's case as stale). Reproduced for the
         # unfinished-launch abandonment site during fix 11 and for
-        # both owned-handle cleanup sites during fix 12.
+        # both owned-handle cleanup sites during fix 12. fix 17
+        # (QA38 codex BLOCKER, reproduced by the orchestrator): the
+        # matrix drove every site in exactly ONE fixture state, so a
+        # displacement CONDITIONED on a state the fixture never took
+        # -- `pending = exc if not self.armed else None` at
+        # _finish_close's capture, with the finish fixture pinned
+        # armed=False -- passed every case. Each case therefore now
+        # runs once per fixture state its member's own code branches
+        # on, DERIVED per site from the member AST (derived_overrides
+        # below), and that exact QA38 mutation is pinned red after
+        # the matrix.
         lifecycle_sites = set()
         for member_key in scope:
             member_calls = [
@@ -7356,25 +7406,108 @@ def _watchdog_completion_case(mode):
                 frontier.extend((node.__cause__, node.__context__))
             return members
 
-        def behavioural_case(label, driver, cancellation, fault):
+        flip_stand_in = types.SimpleNamespace()
+
+        def derived_overrides(member_key):
+            # fix 17 (QA38 codex BLOCKER): the driven fixture states
+            # are DERIVED from the site's own code, never hand-listed.
+            # Every self.<attr> read inside an If/While/IfExp test of
+            # the member (nested defs included) names an attribute the
+            # site branches on; a bare truthiness read contributes
+            # both booleans, a constant comparison contributes that
+            # constant, and a None comparison contributes None plus a
+            # non-None stand-in. Each case then runs once per
+            # single-attribute deviation on top of its fixture's
+            # default state, so a displacement conditioned on any one
+            # branched-on state is driven.
+            if not member_key.startswith("m:"):
+                return [{}]
+            truthy, consts = set(), {}
+            for node in ast.walk(scope[member_key]):
+                if not isinstance(node, (ast.If, ast.While,
+                                         ast.IfExp)):
+                    continue
+                in_compare = set()
+                for leaf in ast.walk(node.test):
+                    if not isinstance(leaf, ast.Compare):
+                        continue
+                    sides = [leaf.left, *leaf.comparators]
+                    for side in sides:
+                        in_compare.update(
+                            id(part) for part in ast.walk(side))
+                    names = [side.attr for side in sides
+                             if isinstance(side, ast.Attribute)
+                             and isinstance(side.value, ast.Name)
+                             and side.value.id == "self"]
+                    values = [side.value for side in sides
+                              if isinstance(side, ast.Constant)]
+                    for name in names:
+                        bucket = consts.setdefault(name, [])
+                        for value in values:
+                            if not any(value is known
+                                       or value == known
+                                       for known in bucket):
+                                bucket.append(value)
+                for leaf in ast.walk(node.test):
+                    if (isinstance(leaf, ast.Attribute)
+                            and isinstance(leaf.value, ast.Name)
+                            and leaf.value.id == "self"
+                            and id(leaf) not in in_compare):
+                        truthy.add(leaf.attr)
+            overrides = [{}]
+            for attr in sorted(set(truthy) | set(consts)):
+                states = [False, True] if attr in truthy else []
+                for value in consts.get(attr, ()):
+                    if not any(value is known or value == known
+                               for known in states):
+                        states.append(value)
+                if any(value is None
+                       for value in consts.get(attr, ())):
+                    states.append(flip_stand_in)
+                overrides.extend({attr: value} for value in states)
+            return overrides
+
+        def behavioural_case(label, driver, cancellation, fault,
+                             state):
+            # fix 17 (QA38 codex BLOCKER): each case runs under every
+            # derived fixture state. A raise binds a traceback, so
+            # whether the pending point and the injected step actually
+            # FIRED under this state is observable on the objects
+            # themselves. A FIRED cancellation must be the outward
+            # exception -- a state-conditioned displacement is exactly
+            # what this refuses -- and a FIRED fault must stay
+            # reachable in its chain; a flipped state that routes
+            # around the pending point makes that run vacuous, and the
+            # DEFAULT state must never be vacuous: there both must
+            # fire, which keeps the pre-fix-17 strictness.
+            outward = None
             try:
-                driver(cancellation, fault)
-            except BaseException as outward:
+                driver(cancellation, fault, state)
+            except BaseException as exc:
+                outward = exc
+            if cancellation.__traceback__ is not None:
+                assert outward is not None, (
+                    "the pending cancellation was swallowed (fix 11)",
+                    label, type(cancellation).__name__,
+                    sorted(state))
                 assert outward is cancellation, (
                     "the injected cleanup fault displaced the pending "
                     "cancellation (fix 11, behavioural guarantee)",
-                    label, type(cancellation).__name__, repr(outward))
-                assert any(node is fault
-                           for node in chain_members(outward)), (
-                    "the injected cleanup fault was dropped from the "
-                    "cancellation's chain (fix 11)", label,
-                    type(cancellation).__name__)
-                return
-            raise AssertionError((
-                "the pending cancellation was swallowed (fix 11)",
-                label, type(cancellation).__name__))
+                    label, type(cancellation).__name__,
+                    repr(outward), sorted(state))
+                if fault.__traceback__ is not None:
+                    assert any(node is fault
+                               for node in chain_members(outward)), (
+                        "the injected cleanup fault was dropped from "
+                        "the cancellation's chain (fix 11)", label,
+                        type(cancellation).__name__, sorted(state))
+            assert state or (cancellation.__traceback__ is not None
+                             and fault.__traceback__ is not None), (
+                "the default-state case went vacuous: its pending "
+                "point or its injected fault never fired (fix 17)",
+                label)
 
-        def stat_close_driver(cancellation, fault):
+        def stat_close_driver(cancellation, fault, state):
             # pending point: the /proc stat read; cleanup: the
             # descriptor close routed as the boundary step.
             def fake_open(path, flags):
@@ -7391,7 +7524,7 @@ def _watchdog_completion_case(mode):
                     patch.object(os, "close", fake_close)):
                 emit._fixture_stat_fields(4321)
 
-        def member_close_driver(cancellation, fault):
+        def member_close_driver(cancellation, fault, state):
             # pending point: the verified member send; cleanup: that
             # member's pidfd close.
             def fake_listdir(path):
@@ -7423,7 +7556,7 @@ def _watchdog_completion_case(mode):
                 emit._fixture_kill_group_members(6060, signal.SIGKILL,
                                                  set([7777]))
 
-        def subject_kill_driver(cancellation, fault):
+        def subject_kill_driver(cancellation, fault, state):
             # pending point: the subject freeze; cleanup: the
             # held-pidfd SIGKILL (the leg 12 shape, all three types).
             def fake_send(fd, signum, *args):
@@ -7436,13 +7569,23 @@ def _watchdog_completion_case(mode):
             with patch.object(signal, "pidfd_send_signal", fake_send):
                 emit._fixture_escalate_subject(11999, 987003)
 
-        def escalate_fake():
-            return types.SimpleNamespace(
+        def escalate_fake(state):
+            fake = types.SimpleNamespace(
                 pid=11888, pidfd=987004, subject_pid=None,
                 subject_pidfd=None, _subject_kill=None,
                 _subject_skipped=None)
+            vars(fake).update(state)
+            return fake
 
-        def backstop_driver(cancellation, fault):
+        def fake_escalate_subject(subject, subject_fd, *,
+                                  guardian_pid=None):
+            # a flipped subject_pidfd state walks into the subject
+            # escalation before this site's own cleanup runs: keep
+            # that path hermetic -- no real signals -- and
+            # outcome-free (fix 17, QA38 codex BLOCKER)
+            return None
+
+        def backstop_driver(cancellation, fault, state):
             # pending point: the kill helper raises the cancellation,
             # which is pending for the backstop step; cleanup: the
             # direct backstop send.
@@ -7458,10 +7601,12 @@ def _watchdog_completion_case(mode):
             with patch.object(signal, "pidfd_send_signal",
                               fake_send), (
                     patch.object(emit, "_fixture_signal",
-                                 fake_helper)):
-                emit._FixtureProcess._escalate(escalate_fake())
+                                 fake_helper)), (
+                    patch.object(emit, "_fixture_escalate_subject",
+                                 fake_escalate_subject)):
+                emit._FixtureProcess._escalate(escalate_fake(state))
 
-        def guardian_kill_driver(cancellation, fault):
+        def guardian_kill_driver(cancellation, fault, state):
             # pending point: the guardian freeze; cleanup: the
             # guardian-kill step (helper fault, backstop delivers).
             def fake_send(fd, signum, *args):
@@ -7476,10 +7621,12 @@ def _watchdog_completion_case(mode):
             with patch.object(signal, "pidfd_send_signal",
                               fake_send), (
                     patch.object(emit, "_fixture_signal",
-                                 fake_helper)):
-                emit._FixtureProcess._escalate(escalate_fake())
+                                 fake_helper)), (
+                    patch.object(emit, "_fixture_escalate_subject",
+                                 fake_escalate_subject)):
+                emit._FixtureProcess._escalate(escalate_fake(state))
 
-        def mask_restore_driver(cancellation, fault):
+        def mask_restore_driver(cancellation, fault, state):
             # pending point: the masked close body; cleanup: the
             # sigmask restore.
             def fake_sigmask(how, mask):
@@ -7493,27 +7640,35 @@ def _watchdog_completion_case(mode):
 
             fake = types.SimpleNamespace(
                 _close_masked=raising_close_masked)
+            vars(fake).update(state)
             with patch.object(signal, "pthread_sigmask",
                               fake_sigmask), (
                     patch.object(emit, "_fixture_mask_cancellation",
                                  lambda: None)):
                 emit._FixtureProcess.close(fake)
 
-        def masked_fake(cancellation, launcher=True):
+        def masked_fake(cancellation, state, launcher=True):
             # _close_masked's pending point on every path: the
             # coordinated close raises the cancellation into the
             # backstop handler.
             def raising_coordinated():
                 raise cancellation
 
-            return types.SimpleNamespace(
+            fake = types.SimpleNamespace(
                 _launcher=object() if launcher else None,
                 _abandoned=False,
                 _go=types.SimpleNamespace(set=lambda: None),
-                _close_coordinated=raising_coordinated)
+                _close_coordinated=raising_coordinated,
+                # a flipped state can route past the step under test
+                # into the other owner steps: they must then behave,
+                # never blow up on a missing attribute (fix 17)
+                _abandon_unfinished_launch=lambda: False,
+                _interrupt_collect=lambda: None)
+            vars(fake).update(state)
+            return fake
 
-        def masked_release_driver(cancellation, fault):
-            fake = masked_fake(cancellation)
+        def masked_release_driver(cancellation, fault, state):
+            fake = masked_fake(cancellation, state)
 
             def raising_set():
                 raise fault
@@ -7521,8 +7676,8 @@ def _watchdog_completion_case(mode):
             fake._go = types.SimpleNamespace(set=raising_set)
             emit._FixtureProcess._close_masked(fake)
 
-        def masked_abandon_driver(cancellation, fault):
-            fake = masked_fake(cancellation)
+        def masked_abandon_driver(cancellation, fault, state):
+            fake = masked_fake(cancellation, state)
 
             def raising_abandon():
                 raise fault
@@ -7530,8 +7685,8 @@ def _watchdog_completion_case(mode):
             fake._abandon_unfinished_launch = raising_abandon
             emit._FixtureProcess._close_masked(fake)
 
-        def masked_interrupt_driver(cancellation, fault):
-            fake = masked_fake(cancellation, launcher=False)
+        def masked_interrupt_driver(cancellation, fault, state):
+            fake = masked_fake(cancellation, state, launcher=False)
 
             def raising_interrupt():
                 raise fault
@@ -7539,20 +7694,25 @@ def _watchdog_completion_case(mode):
             fake._interrupt_collect = raising_interrupt
             emit._FixtureProcess._close_masked(fake)
 
-        def coordinated_fake(cancellation, abandon):
+        def coordinated_fake(cancellation, abandon, state):
             # _close_coordinated's pending point: the launch-completion
             # wait raises the cancellation into the capturing handler.
             def raising_wait(timeout):
                 raise cancellation
 
-            return types.SimpleNamespace(
+            fake = types.SimpleNamespace(
                 _launcher=object(), _launch_lock=threading.Lock(),
                 _abandoned=False, _cancelled=False,
                 _go=types.SimpleNamespace(set=lambda: None),
                 _launched=types.SimpleNamespace(wait=raising_wait),
-                _abandon_unfinished_launch=abandon)
+                _abandon_unfinished_launch=abandon,
+                # a state flipped off the launcher path falls through
+                # to the plain collection finish (fix 17)
+                _finish_close=lambda: None)
+            vars(fake).update(state)
+            return fake
 
-        def coordinated_release_driver(cancellation, fault):
+        def coordinated_release_driver(cancellation, fault, state):
             released = []
 
             def go_set():
@@ -7560,36 +7720,41 @@ def _watchdog_completion_case(mode):
                 if len(released) > 1:
                     raise fault  # the handler's parked-launcher re-set
 
-            fake = coordinated_fake(cancellation, lambda: False)
+            fake = coordinated_fake(cancellation, lambda: False,
+                                    state)
             fake._go = types.SimpleNamespace(set=go_set)
             emit._FixtureProcess._close_coordinated(fake)
 
-        def coordinated_abandon_driver(cancellation, fault):
+        def coordinated_abandon_driver(cancellation, fault, state):
             def raising_abandon():
                 raise fault
 
-            fake = coordinated_fake(cancellation, raising_abandon)
+            fake = coordinated_fake(cancellation, raising_abandon,
+                                    state)
             emit._FixtureProcess._close_coordinated(fake)
 
-        def coordinated_refusal_driver(cancellation, fault):
+        def coordinated_refusal_driver(cancellation, fault, state):
             def raising_refusal(message):
                 raise fault
 
-            fake = coordinated_fake(cancellation, lambda: True)
+            fake = coordinated_fake(cancellation, lambda: True,
+                                    state)
             with patch.object(emit, "ChildStatusUnavailable",
                               raising_refusal):
                 emit._FixtureProcess._close_coordinated(fake)
 
-        def coordinated_finish_driver(cancellation, fault):
+        def coordinated_finish_driver(cancellation, fault, state):
             def raising_finish():
                 raise fault
 
-            fake = coordinated_fake(cancellation, lambda: False)
+            fake = coordinated_fake(cancellation, lambda: False,
+                                    state)
             fake._finish_close = raising_finish
             emit._FixtureProcess._close_coordinated(fake)
 
-        def finish_fake(cancellation, report_close=None, pidfd=None,
-                        subject_pidfd=None, interrupt=None):
+        def finish_fake(cancellation, state, report_close=None,
+                        pidfd=None, subject_pidfd=None,
+                        interrupt=None):
             # _finish_close's collection-side pending point: the
             # receipt read raises the cancellation as the
             # collection's first step; cancellation=None drives a
@@ -7601,7 +7766,7 @@ def _watchdog_completion_case(mode):
                     raise cancellation
 
             closing = types.SimpleNamespace(close=lambda: None)
-            return types.SimpleNamespace(
+            fake = types.SimpleNamespace(
                 pid=None, collected=True, armed=False,
                 unresolved=False, pidfd=pidfd,
                 subject_pidfd=subject_pidfd, subject_pid=None,
@@ -7610,10 +7775,18 @@ def _watchdog_completion_case(mode):
                 control=closing, peer=closing,
                 _recv_subject=raising_recv,
                 _interrupt_collect=interrupt or (lambda: None),
+                # a flipped state (unresolved=True) walks the
+                # failure-recording path a default-state run never
+                # takes: record-and-return, subject addressed as a
+                # no-op (fix 17)
+                _record_failure=lambda failure: failure,
+                _address_failed_subject=lambda: None,
                 report=types.SimpleNamespace(
                     close=report_close or (lambda: None)))
+            vars(fake).update(state)
+            return fake
 
-        def finish_report_driver(cancellation, fault):
+        def finish_report_driver(cancellation, fault, state):
             # the normal-path "report channel close" call: the
             # cancellation comes from the collection, the fault from
             # the report close.
@@ -7621,40 +7794,43 @@ def _watchdog_completion_case(mode):
                 raise fault
 
             emit._FixtureProcess._finish_close(
-                finish_fake(cancellation,
+                finish_fake(cancellation, state,
                             report_close=raising_report_close))
 
-        def finish_tail_pending_driver(cancellation, fault):
+        def finish_tail_pending_driver(cancellation, fault, state):
             # the exceptional-path "report channel close" call: the
             # cancellation is BORN in the subject pidfd close (the
             # owned-handle cleanup itself), the fault in the
             # boundary's step, the report close (fix 12, QA33
             # claude/codex BLOCKER).
             def fake_close(fd):
-                assert fd == 987007, fd
-                raise cancellation
+                if fd == 987007:
+                    raise cancellation
+                return None  # a flip-introduced fd closes cleanly
 
             def raising_report_close():
                 raise fault
 
-            fake = finish_fake(None, subject_pidfd=987007,
+            fake = finish_fake(None, state, subject_pidfd=987007,
                                report_close=raising_report_close)
             with patch.object(os, "close", fake_close):
                 emit._FixtureProcess._finish_close(fake)
 
-        def finish_subject_driver(cancellation, fault):
+        def finish_subject_driver(cancellation, fault, state):
             # the normal-path "subject pidfd and report close" call:
             # the cancellation comes from the collection, the fault
             # from the subject pidfd close.
             def fake_close(fd):
-                assert fd == 987007, fd
-                raise fault
+                if fd == 987007:
+                    raise fault
+                return None  # a flip-introduced fd closes cleanly
 
-            fake = finish_fake(cancellation, subject_pidfd=987007)
+            fake = finish_fake(cancellation, state,
+                               subject_pidfd=987007)
             with patch.object(os, "close", fake_close):
                 emit._FixtureProcess._finish_close(fake)
 
-        def finish_head_pending_driver(cancellation, fault):
+        def finish_head_pending_driver(cancellation, fault, state):
             # the exceptional-path "subject pidfd and report close"
             # call: the cancellation is BORN in the guardian pidfd
             # close, the fault in the boundary's step -- the subject
@@ -7663,28 +7839,30 @@ def _watchdog_completion_case(mode):
             def fake_close(fd):
                 if fd == 987006:
                     raise cancellation
-                assert fd == 987007, fd
-                raise fault
+                if fd == 987007:
+                    raise fault
+                return None  # a flip-introduced fd closes cleanly
 
-            fake = finish_fake(None, pidfd=987006,
+            fake = finish_fake(None, state, pidfd=987006,
                                subject_pidfd=987007)
             with patch.object(os, "close", fake_close):
                 emit._FixtureProcess._finish_close(fake)
 
-        def finish_interrupt_driver(cancellation, fault):
+        def finish_interrupt_driver(cancellation, fault, state):
             def raising_interrupt():
                 raise fault
 
             emit._FixtureProcess._finish_close(
-                finish_fake(cancellation,
+                finish_fake(cancellation, state,
                             interrupt=raising_interrupt))
 
-        def finish_handles_driver(cancellation, fault):
+        def finish_handles_driver(cancellation, fault, state):
             def fake_close(fd):
-                assert fd == 987006, fd
-                raise fault
+                if fd == 987006:
+                    raise fault
+                return None  # a flip-introduced fd closes cleanly
 
-            fake = finish_fake(cancellation, pidfd=987006)
+            fake = finish_fake(cancellation, state, pidfd=987006)
             with patch.object(os, "close", fake_close):
                 emit._FixtureProcess._finish_close(fake)
 
@@ -7764,12 +7942,23 @@ def _watchdog_completion_case(mode):
             "PD-335-TAIL option 2)",
             sorted(lifecycle_sites
                    ^ set(behavioural_drivers)))
+        site_overrides = dict(
+            (member_key, derived_overrides(member_key))
+            for member_key in set(
+                site[0] for site in lifecycle_sites))
+        assert any("armed" in override for override in site_overrides[
+                "m:_FixtureProcess._finish_close"]), (
+            "the derived _finish_close state list lost the armed "
+            "flip that catches the pinned QA38 state-conditioned "
+            "displacement (fix 17)")
         for case_label in sorted(behavioural_drivers):
-            for cancellation_type in pending_cancellations:
-                behavioural_case(
-                    case_label, behavioural_drivers[case_label],
-                    cancellation_type("pending cancellation"),
-                    RuntimeError("injected cleanup fault"))
+            for override in site_overrides[case_label[0]]:
+                for cancellation_type in pending_cancellations:
+                    behavioural_case(
+                        case_label, behavioural_drivers[case_label],
+                        cancellation_type("pending cancellation"),
+                        RuntimeError("injected cleanup fault"),
+                        dict(override))
         # fix 14 (QA35 codex MAJOR): a RuntimeError fault crosses the
         # two SIGKILL steps' own `except (ProcessLookupError, OSError)`
         # / OSError filters untouched, so the matrix above never saw
@@ -7791,15 +7980,68 @@ def _watchdog_completion_case(mode):
              "direct guardian SIGKILL backstop", 0))
         for case_label in syscall_fault_sites:
             assert case_label in behavioural_drivers, case_label
-            for cancellation_type in pending_cancellations:
-                for syscall_fault in (
-                        PermissionError(1, "injected cleanup fault"),
-                        OSError(9, "injected cleanup fault")):
-                    behavioural_case(
-                        case_label,
-                        behavioural_drivers[case_label],
-                        cancellation_type("pending cancellation"),
-                        syscall_fault)
+            for override in site_overrides[case_label[0]]:
+                for cancellation_type in pending_cancellations:
+                    for syscall_fault in (
+                            PermissionError(1,
+                                            "injected cleanup fault"),
+                            OSError(9, "injected cleanup fault")):
+                        behavioural_case(
+                            case_label,
+                            behavioural_drivers[case_label],
+                            cancellation_type("pending cancellation"),
+                            syscall_fault,
+                            dict(override))
+
+        # fix 17 (QA38 codex BLOCKER, reproduced by the
+        # orchestrator): the state-conditioned displacement itself,
+        # pinned. Rebuild _finish_close from the module's own AST
+        # with its capture `pending = exc` replaced by the QA38
+        # mutation `pending = exc if not self.armed else None`, and
+        # require the armed-state run of the held-descriptor case to
+        # go RED against it: with the fixture armed the mutant
+        # captures nothing, so the injected close fault displaces
+        # the pending cancellation -- the exact escape the derived
+        # states above exist to catch. The same armed run is green
+        # on the real member, driven in the matrix above.
+        import copy
+        mutant_member = copy.deepcopy(
+            scope["m:_FixtureProcess._finish_close"])
+        capture_assigns = [
+            node for node in ast.walk(mutant_member)
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "pending"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "exc"]
+        assert len(capture_assigns) == 1, (
+            "the pinned QA38 mutation site (`pending = exc` inside "
+            "_finish_close) is no longer unique (fix 17)",
+            len(capture_assigns))
+        capture_assigns[0].value = ast.parse(
+            "exc if not self.armed else None", mode="eval").body
+        mutant_namespace = dict(vars(emit))
+        exec(compile(ast.fix_missing_locations(ast.Module(
+                body=[mutant_member], type_ignores=[])),
+             "<fix 17 QA38 pinned mutant>", "exec"),
+             mutant_namespace)
+        try:
+            with patch.object(emit._FixtureProcess, "_finish_close",
+                              mutant_namespace["_finish_close"]):
+                behavioural_case(
+                    ("m:_FixtureProcess._finish_close",
+                     "held descriptor and report close", 0),
+                    finish_handles_driver,
+                    TimeoutError("pending cancellation"),
+                    RuntimeError("injected cleanup fault"),
+                    dict(armed=True))
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(
+                "the pinned QA38 state-conditioned mutation was NOT "
+                "caught by the armed-state behavioural run (fix 17)")
     elif mode == "receipt-high-fd":
         import fcntl
         import resource

@@ -1319,34 +1319,37 @@ def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None):
             if isinstance(exc, (TimeoutError, InterruptedError)):
                 raise
             if not isinstance(exc, ProcessLookupError):
-                # A leader this escalation could NOT kill is a survivor:
-                # the flag downgrades any "tree" claim, and the outcome
-                # names the leader only where it can carry it -- a
-                # would-be "tree" becomes a partial naming the subject,
-                # a payload-carrying "partial" adds it; the no-guardian
-                # ("subject-only", None) and ("partial", None) outcomes
-                # stay unnamed (fix 2z, gemini F1; scoped fix 16, QA37
-                # codex MINOR). ProcessLookupError alone proves the
-                # leader already exited.
+                # A leader this escalation could NOT kill is a
+                # survivor; ProcessLookupError alone proves the leader
+                # already exited. THIS line only sets the survivor
+                # flag. What the flag does happens BELOW, after the
+                # kill finally, where this function computes its
+                # return value: a would-be "tree" claim becomes a
+                # partial naming the subject, a payload-carrying
+                # "partial" adds the subject, and the no-guardian
+                # ("subject-only", None) and ("partial", None)
+                # outcomes stay unnamed (fix 2z, gemini F1; scoped
+                # fix 16, QA37 codex MINOR; reworded fix 17, QA38
+                # gemini).
                 leader_kill_failed = True
                 if isinstance(pending, _PENDING_CANCELLATIONS):
-                    # fix 14 (QA35 codex MAJOR): with a cancellation
-                    # already pending the survivor flag alone would drop
-                    # this kill failure from the cancellation's chain --
-                    # the docstring promises it stays reachable beneath
-                    # it -- so re-raise the failure into the boundary,
-                    # which attaches it beneath the pending cancellation
-                    # and re-raises the cancellation itself. With
-                    # nothing pending (or an ordinary failure pending)
-                    # the flag stays the whole record, exactly as
-                    # before, and the survivor is named only where the
-                    # outcome can carry it: a "tree" claim is
-                    # downgraded to a partial naming the subject, and
-                    # a payload-carrying "partial" adds it. An
-                    # ordinary failure that re-raises leaves NO
-                    # outcome, and the no-guardian ("subject-only",
-                    # None) and ("partial", None) outcomes stay
-                    # unnamed (fix 15, QA36 codex/claude MINOR).
+                    # THIS branch runs only with a cancellation
+                    # already pending (fix 14, QA35 codex MAJOR): the
+                    # survivor flag alone would drop this kill failure
+                    # from the cancellation's chain -- the docstring
+                    # promises it stays reachable beneath it -- so
+                    # re-raise the failure into the boundary, which
+                    # attaches it beneath the pending cancellation and
+                    # re-raises the cancellation itself. With nothing
+                    # pending, or an ordinary failure pending, this
+                    # branch is NOT taken: kill_leader returns with
+                    # only the flag set, the flag stays the whole
+                    # record of this kill failure, and naming the
+                    # survivor is the outcome handling BELOW -- which
+                    # an ordinary pending failure that re-raises past
+                    # it never reaches, leaving NO outcome (fix 15,
+                    # QA36 codex/claude MINOR; reworded fix 17, QA38
+                    # gemini).
                     raise
 
     try:
