@@ -7372,7 +7372,22 @@ def _watchdog_completion_case(mode):
         # runs once per fixture state its member's own code branches
         # on, DERIVED per site from the member AST (derived_overrides
         # below), and that exact QA38 mutation is pinned red after
-        # the matrix.
+        # the matrix. fix 18 (QA39 claude BLOCKER / gemini BLOCKER,
+        # maintainer decision 2026-09-29): the derivation is a
+        # BOUNDED, DISCLOSED guarantee, not widened here. Leg 19
+        # derives exactly the self-attributes read inside an
+        # If/While/IfExp TEST of the member and drives ONE deviation
+        # at a time; it does NOT drive multi-attribute combinations,
+        # conditions carried through locals or other data flow, or
+        # state never read in a branch test. The two QA39 vectors in
+        # those classes -- a displacement conditioned on _failure
+        # read through a local, and one conditioned on armed AND
+        # unresolved together -- are pinned red after the QA38 pin,
+        # each driven by the one targeted fixture state that fires
+        # it. A flipped state that routes around the pending point
+        # still makes that run vacuous, as disclosed at
+        # behavioural_case; only the DEFAULT state must never be
+        # vacuous.
         lifecycle_sites = set()
         for member_key in scope:
             member_calls = [
@@ -7419,7 +7434,16 @@ def _watchdog_completion_case(mode):
             # non-None stand-in. Each case then runs once per
             # single-attribute deviation on top of its fixture's
             # default state, so a displacement conditioned on any one
-            # branched-on state is driven.
+            # branched-on state is driven. That is EXACTLY the bound
+            # (fix 18, QA39 claude/gemini BLOCKERs, maintainer
+            # decision 2026-09-29): self-attributes read inside an
+            # If/While/IfExp TEST, one deviation at a time. It does
+            # NOT drive multi-attribute combinations, conditions
+            # carried through locals or other data flow, or state
+            # never read in a branch test; the bound is not widened
+            # here -- the found QA39 vectors in those classes are
+            # pinned red after the matrix, and the bound is disclosed
+            # at the leg 19 head.
             if not member_key.startswith("m:"):
                 return [{}]
             truthy, consts = set(), {}
@@ -8042,6 +8066,94 @@ def _watchdog_completion_case(mode):
             raise AssertionError(
                 "the pinned QA38 state-conditioned mutation was NOT "
                 "caught by the armed-state behavioural run (fix 17)")
+
+        # fix 18 (QA39 claude BLOCKER / gemini BLOCKER, maintainer
+        # decision 2026-09-29): the two found state-conditioned
+        # displacements OUTSIDE derived_overrides' disclosed bound,
+        # pinned as vectors that must go RED. Each rebuilds
+        # _finish_close from the module's own AST with the mutation
+        # inserted right after the same unique capture `pending =
+        # exc` the QA38 pin locates -- the capture line itself stays
+        # pristine and unique for that pin -- and drives the
+        # held-descriptor case under the ONE targeted fixture state
+        # that fires the displacement, a state the derived matrix
+        # never drives (that is the escape): (a) the condition read
+        # through a LOCAL (`ok = self._failure is None`), fired by
+        # _failure set -- never derived, because _failure is read in
+        # an IfExp BODY and branched on via the `failure` local, not
+        # spelled in any branch test; (b) the MULTI-ATTRIBUTE
+        # condition (`if self.armed and self.unresolved`), fired by
+        # armed and unresolved together -- each attribute is derived
+        # alone, but the matrix runs single-attribute deviations
+        # only. Each targeted state is first proven green on the
+        # real member, so a RED against the mutant is attributable
+        # to the mutation alone.
+        pinned_vectors = (
+            ("ok = self._failure is None\n"
+             "if not ok:\n"
+             "    pending = None",
+             dict(_failure=RuntimeError("recorded failure")),
+             "locals-conditioned (QA39 claude)"),
+            ("if self.armed and self.unresolved:\n"
+             "    pending = None",
+             dict(armed=True, unresolved=True),
+             "multi-attribute-conditioned (QA39 gemini)"),
+        )
+        for mutation_source, pin_state, vector in pinned_vectors:
+            behavioural_case(
+                ("m:_FixtureProcess._finish_close",
+                 "held descriptor and report close", 0),
+                finish_handles_driver,
+                TimeoutError("pending cancellation"),
+                RuntimeError("injected cleanup fault"),
+                dict(pin_state))
+            mutant_member = copy.deepcopy(
+                scope["m:_FixtureProcess._finish_close"])
+            capture_assigns = [
+                node for node in ast.walk(mutant_member)
+                if isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "pending"
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "exc"]
+            assert len(capture_assigns) == 1, (
+                "the pinned QA39 mutation site (`pending = exc` "
+                "inside _finish_close) is no longer unique "
+                "(fix 18)", len(capture_assigns))
+            holders = [
+                node for node in ast.walk(mutant_member)
+                if isinstance(getattr(node, "body", None), list)
+                and capture_assigns[0] in node.body]
+            assert len(holders) == 1, (
+                "the pinned QA39 capture's holding body is not "
+                "unique (fix 18)", len(holders))
+            at = holders[0].body.index(capture_assigns[0])
+            holders[0].body[at + 1:at + 1] = ast.parse(
+                mutation_source).body
+            mutant_namespace = dict(vars(emit))
+            exec(compile(ast.fix_missing_locations(ast.Module(
+                    body=[mutant_member], type_ignores=[])),
+                 "<fix 18 QA39 pinned mutant>", "exec"),
+                 mutant_namespace)
+            try:
+                with patch.object(
+                        emit._FixtureProcess, "_finish_close",
+                        mutant_namespace["_finish_close"]):
+                    behavioural_case(
+                        ("m:_FixtureProcess._finish_close",
+                         "held descriptor and report close", 0),
+                        finish_handles_driver,
+                        TimeoutError("pending cancellation"),
+                        RuntimeError("injected cleanup fault"),
+                        dict(pin_state))
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError(
+                    "the pinned QA39 " + vector + " mutation was "
+                    "NOT caught by its targeted behavioural run "
+                    "(fix 18)")
     elif mode == "receipt-high-fd":
         import fcntl
         import resource

@@ -1323,13 +1323,15 @@ def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None):
                 # survivor; ProcessLookupError alone proves the leader
                 # already exited. THIS line only sets the survivor
                 # flag. What the flag does happens BELOW, after the
-                # kill finally, where this function computes its
-                # return value: a would-be "tree" claim becomes a
+                # kill finally, where the enclosing
+                # _fixture_escalate_subject computes its return
+                # value: a would-be "tree" claim becomes a
                 # partial naming the subject, a payload-carrying
                 # "partial" adds the subject, and the no-guardian
                 # ("subject-only", None) and ("partial", None)
                 # outcomes stay unnamed (fix 2z, gemini F1; scoped
                 # fix 16, QA37 codex MINOR; reworded fix 17, QA38
+                # gemini; enclosing function named fix 18, QA39
                 # gemini).
                 leader_kill_failed = True
                 if isinstance(pending, _PENDING_CANCELLATIONS):
