@@ -1867,11 +1867,21 @@ def _auto_maintenance_children(workdir, env):
 # `-c`/`--config-env` marker whose VALUE slot's config KEY is unreadable (no resolvable
 # literal and no literal "key=" prefix; an unknown-length value region included) as
 # POSSIBLY alias-defining, fail-closed: that unreadable value can BE an alias.*
-# definition. An unreadable VALUE slot whose config KEY is readable - a literal "key="
-# prefix ahead of an unreadable tail; the first '=' ends the key - does NOT end the
-# parse: an alias.* key records the defined name (the alias verdict never needs the
-# target), a pin key fails closed as stomped unless a LATER `-c` re-pins it (above),
-# and any other key is passed over. The alias verdict is unconditional because
+# definition. An unreadable VALUE slot whose config KEY head is readable - a literal
+# "key=" prefix ahead of an unreadable tail, trusted only when the tail provably
+# evaluates to str (any other tail can carry an __radd__ that REPLACES the whole value
+# at launch time, so the prefix proves nothing and the slot reads as having no
+# readable key, fail-closed above) - does NOT end the parse. For `-c` the first '='
+# ends the key (git 2.53), so the prefix fixes the WHOLE key: an alias.* key records
+# the defined name (the alias verdict never needs the target), a pin key fails closed
+# as stomped unless a LATER `-c` re-pins it (above), and any other key is passed over.
+# For `--config-env` git ends the key at the LAST '=' (verified on git 2.53:
+# `--config-env alias.seed=a.x=VAR` defines the alias `seed=a.x`, and the word
+# `seed=a.x` invokes it), so a fully resolved value is split there and a prefix fixes
+# only the key's HEAD - the SECTION at most, never the alias name: an alias.* head
+# ENDS the parse as the alias finding (the defined name is unreadable, so any later
+# word can invoke it), a pin-key head fails closed as stomped the same way, and any
+# other head is passed over. The alias verdict is unconditional because
 # the alias value is a new command line this scan cannot read,
 # a non-shell alias's own `-c` pairs apply AFTER the outer options with last-value-wins,
 # and a `!` shell alias runs an arbitrary command line that INHERITS the propagated command
@@ -1904,7 +1914,9 @@ def _auto_maintenance_children(workdir, env):
 # head), an alias.* definition whose `-c`/`--config-env` MARKER slot is itself
 # unresolved (the pair reads as ordinary unresolved slots, so it cannot mark the argv
 # alias-defining; an unreadable VALUE slot behind a RESOLVABLE marker is in reach,
-# above: a readable "key=" prefix keeps the parse going and anything else marks the
+# above: a readable provably-str "key=" prefix keeps the parse going - except a
+# `--config-env` alias.* prefix head, which is the alias finding outright, above -
+# and anything else marks the
 # argv POSSIBLY alias-defining, the alias finding at any unresolved ending), an
 # unresolved argv tail AFTER the three pins
 # are effective in option position with NO resolvable alias.* definition and NO
@@ -1970,8 +1982,11 @@ _SCAN_CONFIG_ENV_VALUE = "<config-env launch-time value>"
 # slots and every other `-`-leading token is treated as a bare flag (git itself REJECTS a
 # joined `-ckey=value` spelling, verified on git 2.53, so it cannot launch anything). `-c` and
 # `--config-env` are handled separately (their values carry, or override, the pins).
+# `--attr-source` consumes the following tree slot (verified on git 2.53: `git
+# --attr-source HEAD commit ...` reads HEAD as the option value and commit as the
+# subcommand).
 _SCAN_GIT_OPTION_ARG = frozenset(("-C", "--git-dir", "--work-tree", "--namespace",
-                                  "--super-prefix"))
+                                  "--super-prefix", "--attr-source"))
 _SCAN_GIT_HEAD_NAMES = ("git", "GIT", "_GIT", "GIT_BIN")
 # Each entry: (file, dotted qualname, covered launch KINDS, justification). One entry covers
 # ONLY the launch kinds it declares, so a justification written for an opaque python replay
@@ -2500,21 +2515,55 @@ def _scan_element_literal(node, func_node, module_consts, depth, launch=None):
     return None
 
 
+def _scan_provably_str(node, func_node, module_consts, depth, launch=None):
+    """True only when this `+` RIGHT operand provably evaluates to a str, so the left
+    operand is a true prefix of the launch-time value: a str literal, an f-string
+    (always str), a call spelled `str(...)` (trusted as the builtin), a concatenation
+    of provably-str operands, or an expression the resolver reads to a literal string.
+    Anything else - a call, a name, an attribute this scan cannot read - can carry an
+    __radd__ that REPLACES the whole value at launch time (str.__add__ returns
+    NotImplemented for a non-str right operand and Python falls back to the right
+    operand's __radd__, so no TypeError protects the prefix), and proves nothing."""
+    if depth <= 0 or node is None or node is _SCAN_OPEN:
+        return False
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, str)
+    if isinstance(node, ast.JoinedStr):
+        return True
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+            and node.func.id == "str":
+        return True
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _scan_provably_str(node.left, func_node, module_consts, depth - 1,
+                                  launch) \
+            and _scan_provably_str(node.right, func_node, module_consts, depth - 1,
+                                   launch)
+    return _scan_element_literal(node, func_node, module_consts, depth,
+                                 launch) is not None
+
+
 def _scan_value_key_prefix(node, func_node, module_consts, depth, launch=None):
     """The literal string a -c/--config-env VALUE expression provably STARTS with, within
     the resolver's bounds, or None: a "key=" + tail concatenation (or an f-string with a
-    literal head) determines the config KEY even when the tail is unreadable, because the
-    first '=' ends the key. A prefix without '=' proves nothing about the key - the
-    unreadable remainder can complete ANY key, an alias.* one included - and every caller
-    stays fail-closed on it. A `+` whose right side is not a str raises TypeError at the
-    call site before any process starts, so a resolvable left side is a true prefix of
-    the launch-time value."""
+    literal head) fixes the launch-time value's leading characters even when the tail is
+    unreadable. What that prefix fixes differs by marker (git 2.53): for `-c` the first
+    '=' ends the key, so a prefix through '=' fixes the WHOLE key; for `--config-env`
+    git ends the key at the LAST '=', so a prefix fixes the key's HEAD - the section at
+    most, never the alias name - and the callers route it fail-closed. A prefix without
+    '=' proves nothing about the key - the unreadable remainder can complete ANY key,
+    an alias.* one included - and every caller stays fail-closed on it. A `+`
+    contributes a prefix only when its RIGHT operand provably evaluates to a str
+    (_scan_provably_str above): any other right side can carry an __radd__ that
+    REPLACES the whole value at launch time, so the left side proves nothing there and
+    the prefix stays unreadable, fail-closed."""
     if depth <= 0 or node is None or node is _SCAN_OPEN:
         return None
     text = _scan_element_literal(node, func_node, module_consts, depth, launch)
     if text is not None:
         return text
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add) \
+            and _scan_provably_str(node.right, func_node, module_consts, depth - 1,
+                                   launch):
         return _scan_value_key_prefix(node.left, func_node, module_consts, depth - 1,
                                       launch)
     if isinstance(node, ast.JoinedStr) and node.values \
@@ -2563,13 +2612,22 @@ def _scan_git_argv_state(entries, func_node, module_consts, launch=None):
     or override it - an ordinary `!` alias INHERITS the `-c` pins and one that
     strips GIT_CONFIG_PARAMETERS removes them, verified on git 2.53 - so the
     expansion CAN defeat every argv and environment pin: never 'pinned',
-    whatever the outer options say). An unreadable `-c`/`--config-env` VALUE
-    slot whose config KEY IS readable - a literal "key=" prefix ahead of an
-    unreadable tail; the first '=' ends the key - never ends the parse: an
-    alias.* key records the defined name (the alias verdict needs the name,
-    never the target), a pin key is recorded on the unreadable-value sentinel
-    (stomped above, unless a LATER `-c` re-pins it), and any other key is
-    passed over. 'opaque'
+    whatever the outer options say). An unreadable `-c` VALUE slot whose
+    config KEY IS readable - a literal "key=" prefix ahead of an unreadable
+    tail; for `-c` the first '=' ends the key (git 2.53) - never ends the
+    parse: an alias.* key records the defined name (the alias verdict needs
+    the name, never the target), a pin key is recorded on the unreadable-value
+    sentinel (stomped above, unless a LATER `-c` re-pins it), and any other
+    key is passed over. An unreadable `--config-env` VALUE slot behind a
+    readable "key=" prefix fixes only the launch-time key's HEAD (git ends a
+    --config-env key at the LAST '=', verified on git 2.53, so the unreadable
+    tail can extend the key past any later '='): an alias.* head ends the
+    parse AS the alias finding (the defined name is unreadable, so any later
+    word can invoke it), a pin-key head records the same sentinel, and any
+    other head is passed over. Either prefix is trusted only when the
+    unreadable tail provably evaluates to str (_scan_provably_str: an
+    __radd__ on any other tail REPLACES the whole value at launch time);
+    otherwise the slot reads as having no readable key, above. 'opaque'
     when an unknown-length region, an unresolved slot, or a
     truncated option reaches the parser before the pins are effective in an argv
     that is neither alias-defining nor possibly alias-defining (with either, those
@@ -2609,6 +2667,9 @@ def _scan_git_argv_state(entries, func_node, module_consts, launch=None):
                                           _SCAN_RESOLVE_DEPTH, launch)
         if pre_token is None:
             continue
+        pre_config_env = pre_token == "--config-env" \
+            or pre_token.startswith("--config-env=")
+        pre_prefix_only = False
         if pre_token.startswith("--config-env="):
             pre_value = pre_token.partition("=")[2]
         elif pre_token in ("-c", "--config-env"):
@@ -2624,6 +2685,7 @@ def _scan_git_argv_state(entries, func_node, module_consts, launch=None):
                                               module_consts, _SCAN_RESOLVE_DEPTH,
                                               launch)
             if pre_value is None:
+                pre_prefix_only = True
                 pre_value = _scan_value_key_prefix(entries[pre + 1], func_node,
                                                    module_consts,
                                                    _SCAN_RESOLVE_DEPTH, launch)
@@ -2632,7 +2694,18 @@ def _scan_git_argv_state(entries, func_node, module_consts, launch=None):
                     break
         else:
             continue
-        if pre_value.partition("=")[0].lower().startswith("alias."):
+        # `-c` ends its key at the FIRST '='; `--config-env` ends its key at the
+        # LAST '=' (verified on git 2.53), so a fully resolved --config-env value
+        # is split with rpartition. A prefix-only value (a readable "key=" head
+        # over an unreadable tail) fixes only the key's leading characters - its
+        # first-'=' head is what the launch-time key is guaranteed to start with
+        # under either split - so it decides the SECTION at most and is checked
+        # with partition for both markers.
+        if pre_config_env and not pre_prefix_only:
+            pre_key = pre_value.rpartition("=")[0]
+        else:
+            pre_key = pre_value.partition("=")[0]
+        if pre_key.lower().startswith("alias."):
             alias_defined = True
             break
 
@@ -2710,6 +2783,7 @@ def _scan_git_argv_state(entries, func_node, module_consts, launch=None):
             index += 2
             continue
         if token == "--config-env" or token.startswith("--config-env="):
+            prefix_only = False
             if token == "--config-env":
                 if index + 1 >= len(entries) or entries[index + 1] is _SCAN_OPEN:
                     # Same fail-closed ending as the -c value slot above.
@@ -2719,9 +2793,10 @@ def _scan_git_argv_state(entries, func_node, module_consts, launch=None):
                 if value is None:
                     # Only the config KEY is ever needed here (the effective value
                     # is a launch-time environment read either way): a literal
-                    # "key=" prefix supplies it, and with no readable key the slot
-                    # can define an alias.*, so the parse ends as the alias
-                    # finding, fail-closed.
+                    # "key=" prefix supplies its leading characters, and with no
+                    # readable prefix the slot can define an alias.*, so the parse
+                    # ends as the alias finding, fail-closed.
+                    prefix_only = True
                     value = _scan_value_key_prefix(entries[index + 1], func_node,
                                                    module_consts,
                                                    _SCAN_RESOLVE_DEPTH, launch)
@@ -2731,7 +2806,25 @@ def _scan_git_argv_state(entries, func_node, module_consts, launch=None):
             else:
                 value = token.partition("=")[2]
                 step = 1
-            key = value.partition("=")[0].lower()
+            # git ends a --config-env key at the LAST '=' (verified on git 2.53:
+            # `--config-env alias.seed=a.x=VAR` defines the alias `seed=a.x` and
+            # the word `seed=a.x` invokes it), so a fully resolved value is split
+            # with rpartition. A prefix-only value fixes the launch-time key's
+            # leading characters only - the SECTION at most, never the alias NAME
+            # (the unreadable tail can extend the key past any later '='): an
+            # alias.* head ends the parse AS the alias finding (the defined name
+            # is unreadable, so any later word can invoke it), a pin-key head
+            # records the unreadable sentinel exactly like the resolved pin-key
+            # case below, and any other head is passed over.
+            if prefix_only:
+                key = value.partition("=")[0].lower()
+                if key.startswith("alias."):
+                    return "alias", None
+                if key in _SCAN_PIN_VALUES:
+                    pin_state[key] = _SCAN_CONFIG_ENV_VALUE
+                index += step
+                continue
+            key = value.rpartition("=")[0].lower()
             if key in _SCAN_PIN_VALUES:
                 # The effective value is an environment VARIABLE read at launch time,
                 # unreadable here. git applies -c and --config-env in COMMAND-LINE order
@@ -2744,8 +2837,9 @@ def _scan_git_argv_state(entries, func_node, module_consts, launch=None):
                 continue
             if key.startswith("alias."):
                 # An alias defined through --config-env: same continuation as -c above
-                # (the alias NAME is read from the key and recorded exactly like -c;
-                # only its TARGET is unreadable, which the alias verdict never needs).
+                # (the alias NAME is read from the key - everything before the LAST
+                # '=' - and recorded exactly like -c; only its TARGET is unreadable,
+                # which the alias verdict never needs).
                 alias_seen = True
                 alias_names.add(key[len("alias."):])
             index += step
@@ -3964,6 +4058,69 @@ _SCAN_CONTRACT_CASES = (
          "        subprocess.run(['git', 'commit', '--allow-empty', '-m', 'x'],",
          "                       env=env)", ""))),),
      "maintenance-triggering git launch"),
+    # Round-9 forms: the --config-env key-split, --attr-source value-slot and
+    # str-prefix __radd__ gaps round-9 review demonstrated (each red without the
+    # round-9 changes: git ends a --config-env key at the LAST '=', so the alias
+    # named by a fully resolved value is read with rpartition and a prefix-only
+    # value fixes the section at most, never the alias name; `--attr-source`
+    # consumes the following tree slot; and a `+` value prefix is trusted only
+    # when its right operand provably evaluates to str - an __radd__ on any other
+    # right operand replaces the whole value).
+    ("config-env-alias-subkey-unreadable",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _seed(var):",
+         "    subprocess.run(['git', '-c', 'gc.auto=0', '-c', 'gc.autoDetach=false',",
+         "                    '-c', 'maintenance.auto=false',",
+         "                    '--config-env', 'alias.seed=' + var,",
+         "                    'seed=a.x', '--allow-empty', '-m', 'x'])", ""))),),
+     "defines an alias.* in its own argv"),
+    ("config-env-alias-section-str-prefix",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _seed(var):",
+         "    subprocess.run(['git', '-c', 'gc.auto=0', '-c', 'gc.autoDetach=false',",
+         "                    '-c', 'maintenance.auto=false',",
+         "                    '--config-env', 'alias.seed=' + str(var),",
+         "                    'seed=a.x', '--allow-empty', '-m', 'x'])", ""))),),
+     "defines an alias.* in its own argv"),
+    ("config-env-alias-subkey-literal",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _seed():",
+         "    subprocess.run(['git', '-c', 'gc.auto=0', '-c', 'gc.autoDetach=false',",
+         "                    '-c', 'maintenance.auto=false',",
+         "                    '--config-env', 'alias.seed=a.x=FOO',",
+         "                    'seed=a.x', '--allow-empty', '-m', 'x'])", ""))),),
+     "defines an alias.* in its own argv"),
+    ("config-env-alias-subkey-joined",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _seed():",
+         "    subprocess.run(['git', '-c', 'gc.auto=0', '-c', 'gc.autoDetach=false',",
+         "                    '-c', 'maintenance.auto=false',",
+         "                    '--config-env=alias.seed=a.x=FOO',",
+         "                    'seed=a.x', '--allow-empty', '-m', 'x'])", ""))),),
+     "defines an alias.* in its own argv"),
+    ("attr-source-value-slot",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _seed():",
+         "    subprocess.run(['git', '--attr-source', 'HEAD',",
+         "                    'commit', '--allow-empty', '-m', 'x'])", ""))),),
+     "maintenance-triggering git launch"),
+    ("radd-value-replaces-str-prefix",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "class _K:",
+         "    def __radd__(self, other):",
+         "        return 'maintenance.auto=true'", "", "",
+         "def _seed():",
+         "    subprocess.run(['git', '-c', 'gc.auto=0', '-c', 'gc.autoDetach=false',",
+         "                    '-c', 'maintenance.auto=false',",
+         "                    '-c', 'core.hooksPath=' + _K(),",
+         "                    'commit', '--allow-empty', '-m', 'x'])", ""))),),
+     "defines an alias.* in its own argv"),
 )
 
 
