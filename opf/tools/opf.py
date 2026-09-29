@@ -4526,10 +4526,32 @@ def _watchdog_completion_case(mode):
         # into an imported module -- a proven module class instance is
         # resolved INTO the closure, no disclosed name may shadow a
         # module method, and any receiver that could be module-owned is
-        # a cannot-evaluate FAILURE.
+        # a cannot-evaluate FAILURE. Fix 10 (QA31 codex BLOCKER 1/2 /
+        # gemini BLOCKER b/c) holds both promises at class width: after
+        # a capture, every boundary call that can run while the capture
+        # may be pending passes exactly the CAPTURED NAME as its
+        # pending argument; the captured name must not be rebound by
+        # ANY binding form -- assignment in every syntactic shape, a
+        # walrus anywhere in an expression, a nested def or class name,
+        # a nonlocal/global reach-back, while the statement forms the
+        # walk does not model (for/with/except/del/import targets among
+        # them) already fail closed; a try that follows a capture is
+        # walked in FULL (body, else and finally), so a finally can no
+        # longer hide a rebinding or a foreign raise behind the old
+        # call-only scan; and an imported name counts as external only
+        # while the import is its ONLY binding anywhere in the module
+        # and no attribute assignment or setattr/delattr targets the
+        # module object -- a shadowing or poisoning binding drops the
+        # name back into the receiver-origin proof, where it resolves
+        # into the closure or is a cannot-evaluate FAILURE (name-level
+        # OVER-approximation: one poisoning site anywhere disqualifies
+        # the name module-wide, fail-closed by construction), and a
+        # boundary-step os/signal primitive clears only through an
+        # unpoisoned imported module name.
         import ast
         import builtins
         import inspect
+        import textwrap
 
         module_tree = ast.parse(inspect.getsource(emit))
         module_functions, module_methods, module_classes = {}, {}, {}
@@ -4546,13 +4568,88 @@ def _watchdog_completion_case(mode):
 
         # Names bound by a plain `import X` anywhere in the module: a
         # call through one is a call INTO another module -- external
-        # code, the DISCLOSED residual (PD-335), never enforced.
-        imported_modules = set()
-        for node in ast.walk(module_tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    imported_modules.add(
-                        alias.asname or alias.name.split(".")[0])
+        # code, the DISCLOSED residual (PD-335), never enforced. Fix 10
+        # (QA31 codex BLOCKER 2 / gemini BLOCKER c): the import must be
+        # the name's ONLY binding -- any other binding form anywhere in
+        # the module (assignment in every syntactic shape, a for/with/
+        # except/comprehension target, a walrus, a def/class/lambda
+        # name or parameter, a from-import, del, global/nonlocal)
+        # SHADOWS the name, and an attribute assignment (any name
+        # inside an assignment target's subtree counts, so `X.attr =`
+        # and `X[i].attr =` both reach X) or a setattr/delattr call
+        # POISONS the module object itself. Either disqualifies the
+        # name here, so a call through it falls back into the
+        # receiver-origin proof and fails closed instead of hiding
+        # module-owned cleanup behind an imported name.
+        def external_import_names(tree):
+            imported, shadowed = set(), set()
+
+            def shadow_targets(target):
+                for leaf in ast.walk(target):
+                    if isinstance(leaf, ast.Name):
+                        shadowed.add(leaf.id)
+
+            def shadow_params(spec):
+                for arg in (spec.posonlyargs + spec.args + spec.kwonlyargs
+                            + ([spec.vararg] if spec.vararg else [])
+                            + ([spec.kwarg] if spec.kwarg else [])):
+                    shadowed.add(arg.arg)
+
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        imported.add(
+                            alias.asname or alias.name.split(".")[0])
+                elif isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        shadow_targets(target)
+                elif isinstance(node, (ast.AnnAssign, ast.AugAssign,
+                                       ast.NamedExpr)):
+                    shadow_targets(node.target)
+                elif isinstance(node, (ast.For, ast.AsyncFor)):
+                    shadow_targets(node.target)
+                elif isinstance(node, ast.comprehension):
+                    shadow_targets(node.target)
+                elif isinstance(node, (ast.With, ast.AsyncWith)):
+                    for item in node.items:
+                        if item.optional_vars is not None:
+                            shadow_targets(item.optional_vars)
+                elif isinstance(node, ast.Delete):
+                    for target in node.targets:
+                        shadow_targets(target)
+                elif isinstance(node, ast.ExceptHandler):
+                    if node.name:
+                        shadowed.add(node.name)
+                elif isinstance(node, (ast.FunctionDef,
+                                       ast.AsyncFunctionDef)):
+                    shadowed.add(node.name)
+                    shadow_params(node.args)
+                elif isinstance(node, ast.Lambda):
+                    shadow_params(node.args)
+                elif isinstance(node, ast.ClassDef):
+                    shadowed.add(node.name)
+                elif isinstance(node, ast.ImportFrom):
+                    for alias in node.names:
+                        shadowed.add(alias.asname or alias.name)
+                elif isinstance(node, (ast.Global, ast.Nonlocal)):
+                    shadowed.update(node.names)
+                elif (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id in ("setattr", "delattr")
+                        and node.args
+                        and isinstance(node.args[0], ast.Name)):
+                    shadowed.add(node.args[0].id)
+            return imported - shadowed
+
+        imported_modules = external_import_names(module_tree)
+        # A poisoning regression that silently disqualifies a name the
+        # closure's disclosed primitives ride on must go red HERE,
+        # loudly, never surface as a cryptic receiver failure inside
+        # the scope walk.
+        assert set(["os", "signal", "select", "time", "errno",
+                    "threading"]) <= imported_modules, (
+            "an imported name the close lifecycle depends on lost its "
+            "external status (fix 10)", sorted(imported_modules))
 
         # The boundary machinery is the verified primitive the structure
         # routes through (legs 10 and 12..18 prove it dynamically); it is
@@ -4735,7 +4832,13 @@ def _watchdog_completion_case(mode):
                     if isinstance(func, ast.Attribute):
                         base = func.value
                         if (isinstance(base, ast.Name)
-                                and base.id in imported_modules):
+                                and base.id in imported_modules
+                                and base.id not in bindings
+                                and base.id not in poisoned):
+                            # fix 10 (QA31 codex BLOCKER 2): a name
+                            # this function binds ANYWHERE is not the
+                            # imported module here -- the receiver
+                            # stays unproven
                             return "extmodule"
                         if (isinstance(base, ast.Attribute)
                                 and isinstance(base.value, ast.Name)
@@ -4792,6 +4895,13 @@ def _watchdog_completion_case(mode):
                     break
             for name in poisoned:
                 kinds.pop(name, None)
+            # Fix 10 (QA31 codex BLOCKER 2): every name this function
+            # binds or poisons keeps an entry, so a local rebinding of
+            # an imported module name stays VISIBLE to resolve_call --
+            # "local" marks bound-but-unproven, which no clearing
+            # branch accepts.
+            for name in set(bindings) | poisoned:
+                kinds.setdefault(name, "local")
             return kinds, value_kind
 
         def resolve_call(func, where, nested, kinds, value_kind):
@@ -4816,7 +4926,14 @@ def _watchdog_completion_case(mode):
                             for inner in module_classes[name].body
                             if isinstance(inner, (ast.FunctionDef,
                                                   ast.AsyncFunctionDef))]
-                if callable(getattr(builtins, name, None)):
+                if (callable(getattr(builtins, name, None))
+                        and name not in kinds):
+                    # fix 10 (QA31 class width): a builtin-named call
+                    # clears only while the function itself never
+                    # binds that name -- the same shadowing discipline
+                    # as the imported-module names; a module-LEVEL
+                    # rebinding of a builtin name stays a disclosed
+                    # residual of the builtins clearance above
                     return None
                 raise AssertionError((
                     "cannot resolve a call edge in the close-lifecycle "
@@ -4833,7 +4950,16 @@ def _watchdog_completion_case(mode):
                             where, ast.dump(func))
                         return [("m:" + qual, node)
                                 for qual, node in targets]
-                    if base.id in imported_modules:
+                    if (base.id in imported_modules
+                            and base.id not in kinds):
+                        # fix 10 (QA31 codex BLOCKER 2 / gemini BLOCKER
+                        # c): the imported-name clearance holds only
+                        # while the import is the receiver's only
+                        # binding -- imported_modules already excludes
+                        # every module-wide shadowed or poisoned name,
+                        # and any function-local binding (an entry in
+                        # kinds, proven or "local") drops the receiver
+                        # into the origin proof below
                         return None
                     kind = kinds.get(base.id)
                     if kind == "extmodule":
@@ -5070,6 +5196,24 @@ def _watchdog_completion_case(mode):
                         and isinstance(stmt.value, ast.Call)
                         and call_target(stmt.value)[:2]
                         == ("name", "_cleanup_boundary")):
+                    call = stmt.value
+                    if captured is not None and not (
+                            call.args
+                            and isinstance(call.args[0], ast.Name)
+                            and call.args[0].id == captured):
+                        # fix 10 (QA31 codex BLOCKER 1): once the
+                        # handler has captured, a boundary call in it
+                        # must pass the captured object itself as
+                        # pending -- any other shape is NOT the
+                        # deferred-re-raise pattern
+                        return None
+                    if any(isinstance(leaf, ast.NamedExpr)
+                           and isinstance(leaf.target, ast.Name)
+                           and leaf.target.id == captured
+                           for leaf in ast.walk(stmt)):
+                        # a walrus hidden in the boundary call's own
+                        # arguments rebinds the capture (fix 10)
+                        return None
                     continue
                 return None
             return captured
@@ -5170,6 +5314,19 @@ def _watchdog_completion_case(mode):
                         "the captured exception may be pending (fix 9, "
                         "QA30 codex BLOCKER 1)", key,
                         ast.dump(call.func))
+                    if called[1] == "_cleanup_boundary":
+                        # fix 10 (QA31 codex BLOCKER 1): while the
+                        # capture may be pending, the boundary must
+                        # receive exactly the captured object -- any
+                        # other pending argument re-opens the
+                        # displacement the capture promised away
+                        assert (call.args
+                                and isinstance(call.args[0], ast.Name)
+                                and call.args[0].id == captured), (
+                            "a boundary call after a capture does not "
+                            "pass the captured object as its pending "
+                            "argument (fix 10, QA31 codex BLOCKER 1)",
+                            key, ast.dump(call)[:160])
 
             def is_none_guard(stmt):
                 return (isinstance(stmt, ast.If) and not stmt.orelse
@@ -5187,6 +5344,30 @@ def _watchdog_completion_case(mode):
                 for stmt in stmts:
                     if state in ("clear", "terminated"):
                         break
+                    for leaf in ast.walk(stmt):
+                        # fix 10 (QA31 codex BLOCKER 1): no binding
+                        # form may touch the captured name while it may
+                        # be pending -- a walrus hides inside any
+                        # expression and a nested def reaches the name
+                        # only through nonlocal/global, both scanned
+                        # over the WHOLE statement subtree here; a def
+                        # named like the capture is caught below, and
+                        # the statement forms the walk does not model
+                        # (for/with/except/del/import/class targets)
+                        # already fail closed
+                        assert not (isinstance(leaf, ast.NamedExpr)
+                                    and isinstance(leaf.target,
+                                                   ast.Name)
+                                    and leaf.target.id == captured), (
+                            "the captured name is rebound before its "
+                            "re-raise (fix 9/10, QA31 codex "
+                            "BLOCKER 1)", key)
+                        assert not (isinstance(leaf, (ast.Global,
+                                                      ast.Nonlocal))
+                                    and captured in leaf.names), (
+                            "the captured name is rebound before its "
+                            "re-raise (fix 9/10, QA31 codex "
+                            "BLOCKER 1)", key)
                     if isinstance(stmt, ast.Raise):
                         assert (isinstance(stmt.exc, ast.Name)
                                 and stmt.exc.id == captured
@@ -5224,22 +5405,55 @@ def _watchdog_completion_case(mode):
                             "a try with handlers follows a capture: "
                             "cannot evaluate the pending path -- FAILURE "
                             "(fix 9)", key)
-                        for inner in stmt.finalbody:
-                            protected_calls(inner)
-                        state = walk_block(stmt.body, "pending")
+                        # fix 10 (QA31 gemini BLOCKER b): the else and
+                        # finally bodies are walked in FULL under the
+                        # same rules -- the old call-only scan of the
+                        # finalbody let a zero-call finally rebind the
+                        # captured name or raise a foreign exception
+                        # over the in-flight re-raise
+                        body_state = walk_block(stmt.body, "pending")
+                        if stmt.orelse and body_state != "terminated":
+                            body_state = walk_block(stmt.orelse,
+                                                    body_state)
+                        final_state = (walk_block(stmt.finalbody,
+                                                  "pending")
+                                       if stmt.finalbody
+                                       else "pending")
+                        state = ("terminated"
+                                 if "terminated" in (body_state,
+                                                     final_state)
+                                 else "clear"
+                                 if "clear" in (body_state,
+                                                final_state)
+                                 else "pending")
                     elif isinstance(stmt, (ast.Assign, ast.AugAssign,
                                            ast.AnnAssign, ast.Expr)):
+                        # fix 10 (QA31 codex BLOCKER 1): EVERY
+                        # assignment form and EVERY target shape is
+                        # scanned -- an AnnAssign (with or without a
+                        # value), an AugAssign, and any name inside a
+                        # tuple, star, subscript or attribute target
                         for target in (stmt.targets
                                        if isinstance(stmt, ast.Assign)
-                                       else []):
-                            assert not (isinstance(target, ast.Name)
-                                        and target.id == captured), (
-                                "the captured name is rebound before "
-                                "its re-raise (fix 9)", key)
+                                       else []
+                                       if isinstance(stmt, ast.Expr)
+                                       else [stmt.target]):
+                            for leaf in ast.walk(target):
+                                assert not (isinstance(leaf, ast.Name)
+                                            and leaf.id == captured), (
+                                    "the captured name is rebound "
+                                    "before its re-raise (fix 9/10, "
+                                    "QA31 codex BLOCKER 1)", key)
                         protected_calls(stmt)
                     elif isinstance(stmt, (ast.Pass, ast.FunctionDef,
                                            ast.AsyncFunctionDef)):
-                        pass
+                        assert not (isinstance(
+                                        stmt, (ast.FunctionDef,
+                                               ast.AsyncFunctionDef))
+                                    and stmt.name == captured), (
+                            "the captured name is rebound before its "
+                            "re-raise (fix 9/10, QA31 codex "
+                            "BLOCKER 1)", key)
                     else:
                         raise AssertionError((
                             "cannot evaluate a statement that follows a "
@@ -5312,6 +5526,7 @@ def _watchdog_completion_case(mode):
                                 or called[0] == "attr"
                                 and (called[1], called[2])
                                 in step_primitives
+                                and called[1] in imported_modules
                                 or called[0] == "attr"
                                 and called[1] in ("self", "cls")
                                 and called[2] in module_methods
@@ -5378,6 +5593,178 @@ def _watchdog_completion_case(mode):
                             "cancellation-capable handler could displace "
                             "a pending cancellation (fix 7, QA28 codex "
                             "BLOCKER 1)", key, ast.dump(call.func))
+
+        # Leg 11 NEGATIVE VECTORS (fix 10, QA31): each reproduces a
+        # round-31 in-memory mutation and must be REJECTED by the
+        # structural machinery above -- by its named check, never
+        # accepted and never a crash. Every vector was verified
+        # ACCEPTED (red) by the fix-9 machinery at 7df50fda.
+        def leg11_vector(source):
+            function = ast.parse(textwrap.dedent(source)).body[0]
+            capturing = next(node for node in function.body
+                             if isinstance(node, try_nodes))
+            return function, capturing
+
+        def leg11_vector_rejected(label, check):
+            try:
+                check()
+            except AssertionError:
+                return
+            raise AssertionError((
+                "a QA31 mutation vector was ACCEPTED by leg 11 "
+                "(fix 10)", label))
+
+        # QA31 codex BLOCKER 1, mutation 1: the abandonment boundary's
+        # pending argument swapped off the captured name -- while the
+        # capture may be pending, a boundary call that passes ANY
+        # other name must be rejected.
+        function, capturing = leg11_vector("""
+            def mutant(self):
+                interrupted = None
+                launched = False
+                abandoned = False
+                try:
+                    launched = wait()
+                except BaseException as exc:
+                    interrupted = exc
+                if not launched and _cleanup_boundary(
+                        abandoned, abandon_unfinished,
+                        "unfinished-launch abandonment"):
+                    abandoned = True
+                if interrupted is not None:
+                    raise interrupted
+            """)
+        leg11_vector_rejected(
+            "codex mutation 1: boundary pending argument swapped to "
+            "another name",
+            lambda function=function, capturing=capturing:
+                deferred_capture_sound(
+                    successors_after(function, capturing,
+                                     "vector:codex-1"),
+                    "interrupted", "vector:codex-1"))
+
+        # QA31 codex BLOCKER 1, mutation 2: an AnnAssign rebinds the
+        # captured name after the capture -- every assignment form
+        # that can touch the captured name is a FAILURE.
+        function, capturing = leg11_vector("""
+            def mutant(self):
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                interrupted: object = None
+                if interrupted is not None:
+                    raise interrupted
+            """)
+        leg11_vector_rejected(
+            "codex mutation 2: AnnAssign rebinds the captured name",
+            lambda function=function, capturing=capturing:
+                deferred_capture_sound(
+                    successors_after(function, capturing,
+                                     "vector:codex-2"),
+                    "interrupted", "vector:codex-2"))
+
+        # Class-width companion (fix 10): a walrus hidden inside the
+        # boundary call's own arguments rebinds the captured name with
+        # zero calls for the old scan to see.
+        function, capturing = leg11_vector("""
+            def mutant(self):
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                _cleanup_boundary((interrupted := None) or interrupted,
+                                  finish_close, "owner collection")
+                if interrupted is not None:
+                    raise interrupted
+            """)
+        leg11_vector_rejected(
+            "walrus companion: boundary argument rebinds the captured "
+            "name",
+            lambda function=function, capturing=capturing:
+                deferred_capture_sound(
+                    successors_after(function, capturing,
+                                     "vector:walrus"),
+                    "interrupted", "vector:walrus"))
+
+        # QA31 gemini BLOCKER b: a zero-call finally after the capture
+        # rebinds the captured name and raises a bare exception class
+        # over the in-flight re-raise.
+        function, capturing = leg11_vector("""
+            def mutant(self):
+                try:
+                    wait()
+                except BaseException as exc:
+                    captured = exc
+                try:
+                    raise captured
+                finally:
+                    captured = None
+                    raise Exception
+            """)
+        leg11_vector_rejected(
+            "gemini finally mutation: rebinding and foreign raise "
+            "hidden in a finalbody",
+            lambda function=function, capturing=capturing:
+                deferred_capture_sound(
+                    successors_after(function, capturing,
+                                     "vector:gemini-b"),
+                    "captured", "vector:gemini-b"))
+
+        # QA31 codex BLOCKER 2: a local rebinding shadows an imported
+        # module name -- the receiver is NOT the module, and the
+        # origin proof must FAIL it, never clear it as external.
+        shadowing = ast.parse(textwrap.dedent("""
+            def mutant(self):
+                os = _qa31_object
+                os.poll()
+            """)).body[0]
+        vector_kinds, vector_value_kind = local_value_kinds(shadowing)
+        shadowed_call = next(
+            node for node in ast.walk(shadowing)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute))
+        leg11_vector_rejected(
+            "codex receiver mutation: shadowed import cleared as "
+            "external",
+            lambda call=shadowed_call, kinds=vector_kinds,
+                   value_kind=vector_value_kind:
+                resolve_call(call.func, "vector:codex-receiver",
+                             set(), kinds, value_kind))
+        assert vector_value_kind(shadowed_call) is None, (
+            "value_kind cleared a call through a shadowed import as "
+            "external (fix 10, QA31 codex BLOCKER 2)")
+
+        # QA31 gemini BLOCKER c: an attribute assignment (and a
+        # setattr) on an imported module poisons the NAME module-wide
+        # -- module-owned cleanup monkey-patched onto os must never
+        # clear as external.
+        poisoned_tree = ast.parse(textwrap.dedent("""
+            import os
+
+            class _Vector:
+                def _close(self):
+                    os.sneak_cleanup = self._module_owned_cleanup
+                    try:
+                        wait()
+                    except TimeoutError:
+                        os.sneak_cleanup()
+                        raise
+            """))
+        assert "os" not in external_import_names(poisoned_tree), (
+            "an attribute assignment on an imported module did not "
+            "poison the imported name: module-owned cleanup can hide "
+            "on the module object (fix 10, QA31 gemini BLOCKER c)")
+        setattr_tree = ast.parse(textwrap.dedent("""
+            import os
+            setattr(os, "sneak_cleanup", _fixture_signal)
+            """))
+        assert "os" not in external_import_names(setattr_tree), (
+            "a setattr on an imported module did not poison the "
+            "imported name (fix 10, QA31 gemini BLOCKER c)")
+        assert "os" in imported_modules, (
+            "the emit module itself poisons os: the disclosed os-level "
+            "primitives would fail closed, not clear (fix 10)")
 
         # Leg 12 (QA27 codex BLOCKER 1): a TimeoutError raised at the
         # subject SIGSTOP stays the outward exception when the held-pidfd
