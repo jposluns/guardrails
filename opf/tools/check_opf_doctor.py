@@ -29,19 +29,26 @@ of an immutable record body (a resurrection finding against the committed prior)
 unparseable manifest); and 0 (NOT APPLICABLE) on a non-adopter root. The enforcement-pack CI floor rides the
 same fixtures: `doctor --require-store` keeps 0 on the clean store and turns the non-adopter root into 2, and
 the shipped recipe opf/enforcement/ci/opf-ci.sh (doctor --require-store, then render --check) exits 0 on the
-clean store and 2 on the non-adopter root. Recipe-CONTRACT vectors hold the recipe itself durable:
-a RECORDING STUB tool asserts the exact invocation order and arguments (doctor --require-store, then render
---check, each over the given root, nothing else), per-step exit propagation (a doctor 1/2 stops the recipe
-before render; a render 1/2 is the recipe's exit), and abnormal-status normalization for BOTH steps (a child
-status of 3, 126 or 137, a genuine signal death, and a non-executable or missing OPF_PYTHON each become the
-recipe's cannot-evaluate 2, never a forwarded out-of-vocabulary status, a doctor abnormality stopping before
-render); the usage guard (a surplus operand) exits 2 with NO step launched; the recipe run by a RELATIVE
+clean store and 2 on the non-adopter root, in both the one-operand and the documented NO-OPERAND arity
+(root defaults to the recipe's current directory, exercised over a controlled working directory).
+Recipe-CONTRACT vectors hold the recipe itself durable: a RECORDING STUB tool asserts the exact invocation
+order and arguments (doctor --require-store, then render --check, each over the given root, nothing else)
+for the one-operand and the no-operand invocation (root `.`, with stubbed doctor/render failures forwarded,
+so a zero-operand short-circuit ahead of the steps cannot stay green), per-step exit propagation (a doctor
+1/2 stops the recipe before render; a render 1/2 is the recipe's exit), abnormal-status normalization for
+BOTH steps (a child status of 3, 126, 127 or 137 and a genuine signal death each become the recipe's
+cannot-evaluate 2, never a forwarded out-of-vocabulary status, a doctor abnormality stopping before render),
+and launch-failure normalization for BOTH steps (a missing or non-executable OPF_PYTHON fails the doctor
+step to 2, and an interpreter that VANISHES after a passing doctor fails the render step's own launch to 2);
+the usage guard (a surplus operand) exits 2 with NO step launched; the recipe run by a RELATIVE
 path under a hostile CDPATH naming a decoy pack still resolves its own directory and returns the true
 verdict; a committed clean store with ONE declared, planner-populated view red-flags end to end once the
-view is edited (render --check 1, doctor 1, recipe 1) while both recipe runs leave every file and directory
-outside .git/ identical and the ref set unchanged (the read-only claim, held as a check); and the GitHub
-Actions template is held to its own stated discipline (no non-comment line carries continue-on-error or a
-status-masking `|| true`). The stub exists because the real tool cannot isolate the render step: a
+view is edited (render --check 1, doctor 1, recipe 1) while both recipe runs leave every entry under the
+root outside .git/ identical (lstat kind, mode, content digest, symlink target) and the directory set, the
+ref set, the LOCAL git configuration and the .git/hooks tree unchanged (the read-only claim, held as a
+check); and the GitHub Actions template is held POSITIVELY to its own stated discipline (exactly one
+non-comment run: line, its normalized text the verbatim `run: sh opf/enforcement/ci/opf-ci.sh .`, and no
+non-comment if: or continue-on-error key). The stub exists because the real tool cannot isolate the render step: a
 drifted view fails doctor's own C-VIEW-DRIFT too, so only the stub proves the render invocation is still
 present, ordered, exactly argued, and forwarded. Each committed fixture is `git init` +
 `git add` + `git commit`ed so the `tracked` and `prior` observations _opf_observe.gather derives from HEAD are
@@ -110,6 +117,7 @@ def _self_test_isolated():
     import hashlib
     import io
     import shutil
+    import stat
     import tempfile
 
     import _opf_store     # noqa: E402  the store-tree / machine-store name constants
@@ -285,7 +293,9 @@ def _self_test_isolated():
 
     def _run_ci_recipe(root, tool=None, extra_env=None, extra_args=(), cwd=None, recipe=None):
         """Run the shipped CI recipe (opf/enforcement/ci/opf-ci.sh) over `root` with this interpreter as
-        OPF_PYTHON, returning its exit status unmasked. By default OPF_TOOL is popped so the recipe
+        OPF_PYTHON, returning its exit status unmasked. A `root` of None omits the ROOT operand entirely
+        (the recipe's documented no-operand invocation: ROOT defaults to the child's current directory,
+        so `cwd` supplies the root under test). By default OPF_TOOL is popped so the recipe
         exercises its default pack-relative opf.py path; `tool` sets OPF_TOOL instead (the recipe-contract
         vectors point it at the recording stub), and `extra_env` adds entries (the stub's log path and
         per-verb exit codes, an OPF_PYTHON override for the launch-failure vectors, or a hostile CDPATH).
@@ -306,7 +316,9 @@ def _self_test_isolated():
             env["OPF_TOOL"] = str(tool)
         if extra_env:
             env.update(extra_env)
-        argv = [os.path.abspath(sh), str(shipped) if recipe is None else str(recipe), str(root)]
+        argv = [os.path.abspath(sh), str(shipped) if recipe is None else str(recipe)]
+        if root is not None:
+            argv.append(str(root))
         argv += [str(a) for a in extra_args]
         proc = subprocess.run(argv, env=env, cwd=None if cwd is None else str(cwd),
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -328,31 +340,57 @@ def _self_test_isolated():
         return proc.returncode
 
     def _tree_digest(root, home):
-        """A snapshot asserting the recipe's read-only claim, three-legged: every file under `root`
-        outside .git/ (relpath -> sha256), the SORTED DIRECTORY LISTING outside .git/ (a created
-        directory, even an empty one, is a write the file digests alone cannot see), and the full
-        `git for-each-ref` output (a written ref, e.g. a planted tag, is a repository write even though
-        its bytes live under .git/). .git/ file CONTENTS are excluded because the doctor step's
-        observation gather runs read-only git commands whose internal bookkeeping is not a store write;
-        the ref leg covers the .git/ writes that ARE store-visible. A failing for-each-ref probe raises
+        """A snapshot asserting the recipe's read-only claim, five-legged: every entry under `root`
+        outside .git/ recorded through os.lstat (relpath -> kind, mode, and a regular file's sha256 or
+        a symlink's TARGET, never followed, so a chmod, a planted symlink, or a swapped entry kind is a
+        visible write), the SORTED DIRECTORY LISTING outside .git/ (a created directory, even an empty
+        one, is a write the entry records alone cannot see), the full `git for-each-ref` output (a
+        written ref, e.g. a planted tag, is a repository write even though its bytes live under .git/),
+        the LOCAL repository configuration (`git config --local --list -z`: doctor's observation gather
+        READS repository config, so a config write is store-visible even though it lives under .git/),
+        and the .git/hooks tree recorded the same lstat way (a planted or edited hook is store-side
+        behaviour). Other .git/ file CONTENTS are excluded because the doctor step's observation gather
+        runs read-only git commands whose internal bookkeeping is not a store write; the ref, config
+        and hooks legs cover the .git/ writes that ARE store-visible. A failing git probe raises
         OSError (a harness error, exit 2 via _classify)."""
-        digests = {}
+        def _lstat_entry(path):
+            st = os.lstat(path)
+            if stat.S_ISLNK(st.st_mode):
+                return ("link", st.st_mode, os.readlink(path))
+            if stat.S_ISREG(st.st_mode):
+                with open(path, "rb") as fh:
+                    return ("file", st.st_mode, hashlib.sha256(fh.read()).hexdigest())
+            return ("other", st.st_mode, "")
+
+        entries = {}
         dirs = []
         for dirpath, dirnames, filenames in os.walk(str(root)):
             dirnames[:] = [d for d in dirnames if d != ".git"]
             dirs.append(str(Path(dirpath).relative_to(root)))
-            for fname in filenames:
-                p = Path(dirpath) / fname
-                digests[str(p.relative_to(root))] = hashlib.sha256(p.read_bytes()).hexdigest()
-        try:
-            proc = subprocess.run([git, "--no-replace-objects", "-C", str(root), "for-each-ref"],
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                  env=_git_env(home), timeout=_GIT_TIMEOUT_S)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise OSError("git for-each-ref could not run in {} ({})".format(root, exc))
-        if proc.returncode != 0:
-            raise OSError("git for-each-ref failed in {} (rc {})".format(root, proc.returncode))
-        return digests, sorted(dirs), proc.stdout
+            for name in dirnames + filenames:
+                p = Path(dirpath) / name
+                entries[str(p.relative_to(root))] = _lstat_entry(str(p))
+
+        def _git_probe(*args):
+            try:
+                proc = subprocess.run([git, "--no-replace-objects", "-C", str(root)] + list(args),
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      env=_git_env(home), timeout=_GIT_TIMEOUT_S)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise OSError("git {} could not run in {} ({})".format(" ".join(args), root, exc))
+            if proc.returncode != 0:
+                raise OSError("git {} failed in {} (rc {})".format(" ".join(args), root, proc.returncode))
+            return proc.stdout
+
+        refs = _git_probe("for-each-ref")
+        config = _git_probe("config", "--local", "--list", "-z")
+        hooks = {}
+        hooks_dir = os.path.join(str(root), ".git", "hooks")
+        for dirpath, dirnames, filenames in os.walk(hooks_dir):
+            for name in dirnames + filenames:
+                path = os.path.join(dirpath, name)
+                hooks[os.path.relpath(path, hooks_dir)] = _lstat_entry(path)
+        return entries, sorted(dirs), refs, config, hooks
 
     def _doctor_suite():
         """Build synthetic COMMITTED stores and assert the 0/1/2/0 doctor contract end to end through opf.py.
@@ -410,6 +448,12 @@ def _self_test_isolated():
             # which reports NOT APPLICABLE and exits 0, failing this case).
             expect("ci-recipe-clean-store", _run_ci_recipe(clean), EXIT_OK)
             expect("ci-recipe-not-adopted-root", _run_ci_recipe(empty), EXIT_ERROR)
+            # The documented NO-OPERAND invocation (the recipe's `${1:-.}`: ROOT defaults to the child's
+            # current directory) must hold the SAME floor over a controlled working directory, because
+            # the operand-supplying vectors above cannot see a zero-operand short-circuit (e.g. a
+            # planted `[ "$#" -eq 0 ] && exit 0`): 0 on the clean store, 2 on the non-adopter directory.
+            expect("ci-recipe-no-operand-clean-store", _run_ci_recipe(None, cwd=clean), EXIT_OK)
+            expect("ci-recipe-no-operand-not-adopted-root", _run_ci_recipe(None, cwd=empty), EXIT_ERROR)
 
             # --- The recipe CONTRACT vectors (U16). A RECORDING STUB stands in for opf.py: it
             # appends its argv (after the script path) to OPF_STUB_LOG, one unit-separator-joined line per
@@ -421,23 +465,29 @@ def _self_test_isolated():
             # masked by a trailing `exit 0`; the stub isolates each step and reds all four mutations. -----
             stub = base / "stub_opf.py"
             stub.write_text(
-                "import os, sys\n"
+                "import os, signal, sys\n"
                 "with open(os.environ['OPF_STUB_LOG'], 'a', encoding='utf-8') as log:\n"
                 "    log.write(chr(31).join(sys.argv[1:]) + chr(10))\n"
+                "with open(os.environ['OPF_STUB_LOG'] + '.flags', 'a', encoding='utf-8') as log:\n"
+                "    log.write('{} {}'.format(sys.flags.isolated, sys.flags.dont_write_bytecode) + chr(10))\n"
                 "verb = sys.argv[1].upper() if len(sys.argv) > 1 else 'NONE'\n"
                 "rc = os.environ.get('OPF_STUB_RC_' + verb, '0')\n"
                 "if rc.startswith('sig:'):\n"
+                "    signal.signal(int(rc[4:]), signal.SIG_DFL)\n"
                 "    os.kill(os.getpid(), int(rc[4:]))\n"
                 "sys.exit(int(rc))\n",
                 encoding="utf-8")
             stub_serial = [0]
 
-            def _run_recipe_stubbed(rc_doctor=0, rc_render=0):
+            def _run_recipe_stubbed(rc_doctor=0, rc_render=0, no_operand=False):
                 """Run the recipe over the clean store with the stub as OPF_TOOL; returns (exit status,
-                the recorded invocations as argv lists)."""
+                the recorded invocations as argv lists). With `no_operand` the ROOT operand is omitted
+                and the clean store becomes the child's WORKING DIRECTORY instead (the recipe's
+                documented default), so the recorded --root is the literal `.`."""
                 stub_serial[0] += 1
                 log = base / "stub-log-{}".format(stub_serial[0])
-                rc = _run_ci_recipe(clean, tool=stub, extra_env=dict(
+                rc = _run_ci_recipe(None if no_operand else clean,
+                                    cwd=clean if no_operand else None, tool=stub, extra_env=dict(
                     OPF_STUB_LOG=str(log), OPF_STUB_RC_DOCTOR=str(rc_doctor),
                     OPF_STUB_RC_RENDER=str(rc_render)))
                 calls = []
@@ -452,6 +502,12 @@ def _self_test_isolated():
             expect("ci-recipe-order-and-args", _run_recipe_stubbed(), (EXIT_OK, [
                 ["doctor", "--require-store", "--root", str(clean)],
                 ["render", "--check", "--root", str(clean)]]))
+            # Both steps launch the tool isolated (-I -B): the stub records sys.flags.isolated and
+            # sys.flags.dont_write_bytecode per invocation, so dropping either flag reds this vector.
+            flags_log = base / "stub-log-{}.flags".format(stub_serial[0])
+            expect("ci-recipe-isolated-launch",
+                   flags_log.read_text(encoding="utf-8").splitlines() if flags_log.is_file() else [],
+                   ["1 1", "1 1"])
             # Render-failure propagation: doctor 0 + render 1/2 must exit 1/2 (a deleted render line or a
             # trailing status-masking `exit 0` returns 0 here and reds).
             rc, calls = _run_recipe_stubbed(rc_render=1)
@@ -469,6 +525,18 @@ def _self_test_isolated():
             rc, calls = _run_recipe_stubbed(rc_doctor=2)
             expect("ci-recipe-doctor-error-stops",
                    (rc, [c[0] for c in calls]), (EXIT_ERROR, ["doctor"]))
+            # The NO-OPERAND arity under the stub: the exact order and arguments hold with the default
+            # root `.` (nothing else), and a stubbed doctor or render failure is forwarded, so a
+            # zero-operand short-circuit ahead of the steps cannot stay green here either.
+            expect("ci-recipe-no-operand-order-and-args", _run_recipe_stubbed(no_operand=True),
+                   (EXIT_OK, [["doctor", "--require-store", "--root", "."],
+                              ["render", "--check", "--root", "."]]))
+            rc, calls = _run_recipe_stubbed(rc_doctor=1, no_operand=True)
+            expect("ci-recipe-no-operand-doctor-finding-stops",
+                   (rc, [c[0] for c in calls]), (EXIT_FINDING, ["doctor"]))
+            rc, calls = _run_recipe_stubbed(rc_render=2, no_operand=True)
+            expect("ci-recipe-no-operand-render-error-propagates",
+                   (rc, [c[0] for c in calls]), (EXIT_ERROR, ["doctor", "render"]))
             # Launch-failure normalization: a step that cannot launch at all (a missing interpreter, the
             # shell's own 127) is normalized to the recipe's cannot-evaluate 2, never surfaced as an
             # out-of-vocabulary status the caller could misread.
@@ -481,12 +549,32 @@ def _self_test_isolated():
             nonexec.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")  # never made executable: 126 by construction
             expect("ci-recipe-nonexec-interpreter",
                    _run_ci_recipe(clean, extra_env=dict(OPF_PYTHON=str(nonexec))), EXIT_ERROR)
+            # Launch failure of the SECOND step: doctor launches and PASSES, then the interpreter
+            # vanishes, so the failure (the shell's own 127) arises at render's OWN launch. The
+            # missing/non-executable vectors above fail before doctor ever runs, so only this vector
+            # witnesses launch-failure normalization on the render step; a passthrough special-casing
+            # render's 127 (mapping it to 0) reds here. The vanishing interpreter is a scratch symlink
+            # to this interpreter that the stand-in tool unlinks while handling the doctor verb.
+            vanishing = base / "vanishing-python"
+            os.symlink(sys.executable, str(vanishing))
+            vanish_tool = base / "vanishing_stub.py"
+            vanish_tool.write_text(
+                "import os, sys\n"
+                "if sys.argv[1:2] == ['doctor']:\n"
+                "    os.unlink(os.environ['OPF_PYTHON'])\n"
+                "sys.exit(0)\n",
+                encoding="utf-8")
+            expect("ci-recipe-render-launch-failure",
+                   _run_ci_recipe(clean, tool=vanish_tool,
+                                  extra_env=dict(OPF_PYTHON=str(vanishing))), EXIT_ERROR)
             # Abnormal-status normalization for BOTH steps: any child status outside the 0/1/2 verdict
-            # vocabulary (a tool bug's 3, a 126/137 launch or kill status leaking through, a genuine
-            # signal death) must surface as the recipe's cannot-evaluate 2, never forwarded as if it
-            # were a verdict and never masked to 0. A doctor abnormality stops before render (the same
-            # short-circuit the 1/2 vectors assert); a render abnormality follows both steps.
-            for bad in ("3", "126", "137", "sig:15"):
+            # vocabulary (a tool bug's 3, a 126/127/137 launch or kill status leaking through as a
+            # child EXIT status, a genuine signal death) must surface as the recipe's cannot-evaluate
+            # 2, never forwarded as if it were a verdict and never masked to 0 (a passthrough
+            # special-casing 127 reds on that value for either step). A doctor abnormality stops before
+            # render (the same short-circuit the 1/2 vectors assert); a render abnormality follows both
+            # steps.
+            for bad in ("3", "126", "127", "137", "sig:15"):
                 rc, calls = _run_recipe_stubbed(rc_doctor=bad)
                 expect("ci-recipe-doctor-abnormal-{}".format(bad),
                        (rc, [c[0] for c in calls]), (EXIT_ERROR, ["doctor"]))
@@ -528,18 +616,27 @@ def _self_test_isolated():
             expect("ci-recipe-relative-path-hostile-cdpath",
                    (rc, [c[0] for c in cd_calls]), (EXIT_OK, ["doctor", "render"]))
             # The GitHub Actions template is held to its own stated discipline (a template nothing runs
-            # in this repository would otherwise drift as prose): no NON-COMMENT line may carry
-            # continue-on-error, and none may mask a step's status with a `|| true` trailer. Comment
-            # lines are excluded because the template's own comment names the forbidden key.
+            # in this repository would otherwise drift as prose), asserted POSITIVELY rather than by a
+            # blocklist of bad spellings: among the non-comment lines there is EXACTLY ONE run: key and
+            # its whitespace-normalized text is the verbatim recipe invocation (so any trailer such as
+            # `|| true`, `|| :`, `|| exit 0` or `; true`, a substituted command, a block-scalar rewrite,
+            # or a second run: line reds it), and NO line carries an if: or continue-on-error key (a
+            # skipping condition or a masked failure is a check that cannot fail, which the template's
+            # own comment calls decorative). Comment lines are excluded because that comment names the
+            # forbidden key; a leading `- ` is stripped so a step-item key reads the same as a mapping
+            # key.
             workflow = (Path(__file__).resolve().parent.parent / "enforcement" / "ci"
                         / "github-actions.yml")
             wf_lines = [" ".join(ln.split()) for ln in
                         workflow.read_text(encoding="utf-8").splitlines()
                         if not ln.lstrip().startswith("#")]
-            expect("workflow-no-continue-on-error",
-                   [ln for ln in wf_lines if "continue-on-error" in ln], [])
-            expect("workflow-no-status-masking-trailer",
-                   [ln for ln in wf_lines if "|| true" in ln or "||true" in ln], [])
+            wf_keyed = [ln[2:] if ln.startswith("- ") else ln for ln in wf_lines]
+            expect("workflow-single-verbatim-run-line",
+                   [ln for ln in wf_keyed if ln.split(":", 1)[0] == "run"],
+                   ["run: sh opf/enforcement/ci/opf-ci.sh ."])
+            expect("workflow-no-verdict-masking-key",
+                   [ln for ln in wf_keyed
+                    if ln.split(":", 1)[0] in ("if", "continue-on-error")], [])
 
             # --- The recipe end to end over a REAL drifted view (U16): a committed clean store
             # with ONE declared view, populated through the U4 engine's own public planner
@@ -547,8 +644,8 @@ def _self_test_isolated():
             # re-committed. First witness the fixture is genuinely clean through BOTH recipe steps (0),
             # then witness the drift red-flags end to end: render --check itself exits 1, doctor exits 1
             # (C-VIEW-DRIFT is part of validate_store), and the recipe forwards the finding (1). Both
-            # recipe runs leave the files, directories and refs unchanged: the read-only claim, held as
-            # a check. ------------------------------------------------------------------------------
+            # recipe runs leave the entries (lstat kind, mode, content, symlink target), directories,
+            # refs, local git config and .git/hooks unchanged: the read-only claim, held as a check. --
             viewed = base / "viewed"
             viewed.mkdir()
             machine = clean_machine()
@@ -672,15 +769,20 @@ def _self_test_isolated():
     if rc == EXIT_OK:
         print("check_opf_doctor self-test: PASS (opf doctor returns 0 on a clean committed store / 1 after an "
               "immutable-body mutation vs the committed prior / 2 on a broken store / 0 NOT APPLICABLE, end to "
-              "end; --require-store -> 0 clean / 2 NOT-ADOPTED; CI recipe -> 0 clean / 2 NOT-ADOPTED; "
-              "recipe contract -> exact step order and arguments (doctor --require-store then render "
-              "--check), per-step 0/1/2 propagation with doctor failures stopping before render, abnormal "
-              "statuses (3/126/137, a signal death, a non-executable or missing interpreter) normalized "
-              "to 2 for BOTH steps with a doctor abnormality stopping before render, a surplus operand a "
+              "end; --require-store -> 0 clean / 2 NOT-ADOPTED; CI recipe -> 0 clean / 2 NOT-ADOPTED, in "
+              "the one-operand and the documented no-operand arity (root `.`, the child's working "
+              "directory); recipe contract -> exact step order and arguments (doctor --require-store "
+              "then render --check) for both arities with stubbed step failures forwarded, per-step "
+              "0/1/2 propagation with doctor failures stopping before render, abnormal statuses "
+              "(3/126/127/137, a signal death) normalized to 2 for BOTH steps with a doctor abnormality "
+              "stopping before render, launch failures -> 2 for BOTH steps (a missing or non-executable "
+              "interpreter before doctor, an interpreter vanishing before render), a surplus operand a "
               "usage 2 with no step run, a relative invocation under a hostile CDPATH -> the true "
               "verdict, a committed drifted view -> 1 end to end (render --check, doctor, "
-              "recipe), both recipe runs read-only (files and directories outside .git/ identical, refs "
-              "unchanged), the workflow template free of non-comment continue-on-error and `|| true`; "
+              "recipe), both recipe runs read-only (entries under the root outside .git/ identical by "
+              "lstat kind/mode/content/target, directories, refs, local git config and .git/hooks "
+              "unchanged), the workflow template held positively (exactly one non-comment run: line, "
+              "verbatim `run: sh opf/enforcement/ci/opf-ci.sh .`, no if: or continue-on-error key); "
               "child-launch failure -> 2; no-repo-root -> 2; invalid-git-marker -> 2; "
               "relative-toplevel probe -> None (exit 2); "
               "git executable absolutized (relative which() -> absolute argv[0]); "
