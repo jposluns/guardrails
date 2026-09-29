@@ -4155,9 +4155,18 @@ def _watchdog_completion_case(mode):
             assert (fake._subject_kill == "partial"
                     and fake._subject_skipped is None), (
                 fake._subject_kill, fake._subject_skipped)
-            assert state(leader) == "T", (
-                "the denied SIGKILL should leave the frozen subject",
-                state(leader))
+            # The subject freeze's SIGSTOP is queued when
+            # pidfd_send_signal returns, but /proc shows "T" only once
+            # the sleeping leader is next scheduled and completes the
+            # group-stop, so an immediate read can still observe
+            # "S"/"R" (QA36 codex: one intact run failed here while
+            # the diagnostic re-read already showed "T"). Wait bounded
+            # for the observed stopped state; a subject the denied
+            # SIGKILL nevertheless killed would show None/"Z" and
+            # fail this wait instead.
+            await_state(leader, ("T",),
+                        "the denied SIGKILL should leave the frozen "
+                        "subject stopped")
             fake.subject_pidfd = None  # a later pidfd-less close re-raises
             try:
                 emit._FixtureProcess._escalation_refusal(
@@ -4588,7 +4597,16 @@ def _watchdog_completion_case(mode):
         # nothing spelled inside one runs at definition time (fix
         # 14, QA35 codex/claude MINOR) -- checked like any other
         # call site (QA32 codex BLOCKER 2; a class statement after a
-        # capture already fails closed). A handler whose capture
+        # capture already fails closed), and the deferral makes
+        # the READ the execution point (fix 15, QA36 codex MAJOR):
+        # a spelled __annotations__/__annotate__ access evaluates
+        # every deferred annotation of its receiver with no
+        # ast.Call at the read site, so every scan that restricts
+        # calls rejects that access outright -- and every INDIRECT
+        # evaluation path (getattr, vars, an annotationlib/inspect/
+        # typing reader) is itself a call those scans already
+        # reject -- while an UNREAD annotation stays accepted. A
+        # handler whose capture
         # target collides with its own `as` name, and a handler that
         # overwrites its bound name or an alias of it before its
         # final raise, are FAILURES (QA32 codex BLOCKER 3). An
@@ -5431,7 +5449,11 @@ def _watchdog_completion_case(mode):
             # walked (fix 14, QA35 codex/claude MINOR: modeling them
             # as immediate calls falsely rejected a harmless
             # annotated nested def; the fix-11-era claim that they
-            # "execute now" was pre-3.14 semantics).
+            # "execute now" was pre-3.14 semantics). The deferral
+            # moves the execution point to the READ:
+            # annotation_reads below recognizes that access, and
+            # every scan that restricts calls rejects it too
+            # (fix 15, QA36 codex MAJOR).
             stack = list(body)
             while stack:
                 node = stack.pop()
@@ -5456,6 +5478,41 @@ def _watchdog_completion_case(mode):
                                                   keywords=[]))
                     continue
                 if isinstance(node, ast.Call):
+                    yield node
+                stack.extend(ast.iter_child_nodes(node))
+
+        annotation_evaluators = ("__annotations__", "__annotate__")
+
+        def annotation_reads(body):
+            # Under PEP 649 a def's annotations are deferred and their
+            # READ is the execution point (fix 15, QA36 codex MAJOR):
+            # touching a function's __annotations__ (or __annotate__,
+            # whose call evaluates them) runs every expression spelled
+            # in its annotations, with NO ast.Call at the read site
+            # for the call scans to see. This walks the same
+            # executes-now region as direct_calls -- a nested def's or
+            # lambda's body, and its still-unread annotations, stay
+            # deferred and accepted -- and yields every attribute
+            # access spelled with an evaluating name, in ANY
+            # expression context (a store or delete is suspect too:
+            # fail closed). Every INDIRECT evaluation path -- getattr,
+            # vars, an annotationlib/inspect/typing reader -- is
+            # itself a call the surrounding scans already restrict
+            # wherever this scan runs.
+            stack = list(body)
+            while stack:
+                node = stack.pop()
+                if isinstance(node, (ast.FunctionDef,
+                                     ast.AsyncFunctionDef, ast.Lambda)):
+                    spec = node.args
+                    stack.extend(spec.defaults)
+                    stack.extend(default for default in spec.kw_defaults
+                                 if default is not None)
+                    if not isinstance(node, ast.Lambda):
+                        stack.extend(node.decorator_list)
+                    continue
+                if (isinstance(node, ast.Attribute)
+                        and node.attr in annotation_evaluators):
                     yield node
                 stack.extend(ast.iter_child_nodes(node))
 
@@ -5615,6 +5672,13 @@ def _watchdog_completion_case(mode):
                             "pass the captured object as its pending "
                             "argument (fix 10, QA31 codex BLOCKER 1)",
                             key, ast.dump(call)[:160])
+                for access in annotation_reads([node]):
+                    raise AssertionError((
+                        "an annotation READ follows a capture: it "
+                        "evaluates deferred PEP 649 annotations -- "
+                        "code no call scan saw -- while the captured "
+                        "exception may be pending (fix 15, QA36 codex "
+                        "MAJOR)", key, access.attr))
 
             def is_none_guard(stmt):
                 return (isinstance(stmt, ast.If) and not stmt.orelse
@@ -5914,6 +5978,13 @@ def _watchdog_completion_case(mode):
                             "something that is neither in-module code "
                             "nor a disclosed primitive: FAILURE, never "
                             "a pass (fix 7/8)", key, ast.dump(call.func))
+                    for access in annotation_reads(target.body):
+                        raise AssertionError((
+                            "a boundary-routed cleanup step READS "
+                            "deferred annotations: the evaluation runs "
+                            "code the call scan above cannot see "
+                            "(fix 15, QA36 codex MAJOR)", key,
+                            access.attr))
                 if not isinstance(node, try_nodes):
                     continue
                 if node.finalbody:
@@ -5946,6 +6017,13 @@ def _watchdog_completion_case(mode):
                             or guard_covers(handler.body[0], required,
                                             handler.name, key)):
                         continue
+                    for access in annotation_reads(handler.body):
+                        raise AssertionError((
+                            "an annotation READ inside a "
+                            "cancellation-capable handler evaluates "
+                            "deferred annotations over a "
+                            "possibly-pending exception (fix 15, QA36 "
+                            "codex MAJOR)", key, access.attr))
                     captured = capture_shape(handler.body, handler.name)
                     if captured is not None:
                         # Fix 9 (QA30 codex BLOCKER 1): the capture is a
@@ -6613,6 +6691,36 @@ def _watchdog_completion_case(mode):
             "gemini QA35 interpreter vector: leg 11 ran on a "
             "pre-PEP-649 interpreter without failing closed",
             lambda: leg11_interpreter_pinned((3, 13, 0)))
+
+        # QA36 codex MAJOR (fix 15): the PEP 649 deferral has an
+        # execution point -- READING the annotated def's
+        # __annotations__ invokes its generated __annotate__ and
+        # runs the module-owned cleanup spelled in the annotation,
+        # with no ast.Call anywhere at the read site. The read after
+        # the capture must be rejected while the UNREAD annotated
+        # def (the fix-14 acceptance pin above) stays accepted.
+        function, capturing = leg11_vector("""
+            def mutant(self):
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                def unused(value: abandon_unfinished()):
+                    pass
+                unused.__annotations__
+                if interrupted is not None:
+                    raise interrupted
+            """)
+        leg11_vector_rejected(
+            "codex QA36 annotation-read vector: reading a nested "
+            "def's __annotations__ after a capture evaluates its "
+            "deferred annotation",
+            lambda function=function, capturing=capturing:
+                deferred_capture_sound(
+                    function,
+                    successors_after(function, capturing,
+                                     "vector:codex36-annotation-read"),
+                    "interrupted", "vector:codex36-annotation-read"))
 
         # Leg 12 (QA27 codex BLOCKER 1): a TimeoutError raised at the
         # subject SIGSTOP stays the outward exception when the held-pidfd

@@ -1333,8 +1333,15 @@ def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None):
                     # which attaches it beneath the pending cancellation
                     # and re-raises the cancellation itself. With
                     # nothing pending (or an ordinary failure pending)
-                    # the flag stays the whole record and the survivor
-                    # is named in the outcome, exactly as before.
+                    # the flag stays the whole record, exactly as
+                    # before, and the survivor is named only where the
+                    # outcome can carry it: a "tree" claim is
+                    # downgraded to a partial naming the subject, and
+                    # a payload-carrying "partial" adds it. An
+                    # ordinary failure that re-raises leaves NO
+                    # outcome, and the no-guardian ("subject-only",
+                    # None) and ("partial", None) outcomes stay
+                    # unnamed (fix 15, QA36 codex/claude MINOR).
                     raise
 
     try:
