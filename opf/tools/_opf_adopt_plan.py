@@ -24,8 +24,16 @@ import-file row; import references are refused as decision inputs. A candidate
 at a planned managed destination (a declared view of the resolved or default
 manifest, or a path under the planned machine store) is occupying (spec 14.2):
 keep refuses, and any other disposition is preserved under the adoption archive.
+Occupancy covers only those declared views and machine-store paths; a deliverable
+such as the product-root VERSION is not a managed destination here.
+Every planned creation (move and preservation destinations, init-store,
+render-views and pack members, the receipt) needs observed absence unless an
+occupying source is archived from it first; a replacement needs matching
+observed bytes. init-store refuses a store that already resolves, and
+render-views writes exactly the planned declared views.
 The revision, release and anchor, prompt pack, enforcement contents and skip
-policy are caller inputs, shape-checked and digest-bound, never verified here.
+policy are caller inputs, shape-checked and digest-bound, never verified here;
+enforcement members are tied to the ops installing them, never to a real pack.
 Inventory reads detect ordinary concurrent edits, not a coherent filesystem
 snapshot or an adversarial writer restoring stat values. Re-observe at apply.
 """
@@ -430,7 +438,15 @@ def _managed_destinations(doc, views):
     its manifest's declared view targets; otherwise the plan targets the store
     init-store would create: the default machine subdirectory and the default
     manifest's views. The machine subtree is covered whole, as the unmanaged-overlap
-    check treats it."""
+    check treats it.
+
+    DISCLOSED-RESIDUAL (disclose-guard-residuals): occupancy is limited to those
+    declared views and machine-store paths. Deliverable destinations outside
+    .working (the product-root VERSION, CHANGELOG.md, release notes) are not
+    classified here, so a keep there registers [unmanaged] rather than refusing,
+    and a move there is accepted once its absence is observed. Spec 14 and 14.2
+    also name those destinations; closing the gap is left to the deliverable
+    registry, not claimed by this planner."""
     if doc["resolution"]["status"] == store.RESOLVED:
         return doc["resolution"]["machine_rel"], frozenset(views)
     import _opf_init
@@ -439,17 +455,40 @@ def _managed_destinations(doc, views):
             frozenset(v["target"] for v in default["views"].values()))
 
 
+def _observed_kinds(observation):
+    """The observation's entry kinds by path."""
+    return {row["path"]: row["kind"] for row in observation["entries"]}
+
+
+def _observed_absent(kinds, path):
+    """Whether the observation proves `path` absent: its own entry is absent, or its
+    nearest observed ancestor is absent or a directory the walk enumerated without
+    meeting it. An excluded or unobserved ancestor proves nothing, and a file or
+    directory at the path, or a file ancestor, is an occupied destination."""
+    probe = path
+    while True:
+        kind = kinds.get(probe)
+        if kind is not None:
+            return kind == "absent" or (probe != path and kind == "directory")
+        if "/" not in probe:
+            return False
+        probe = probe.rsplit("/", 1)[0]
+
+
 def _decisions(observation, decisions, run_id, managed):
     """Per-candidate dispositions -> (disposition ops, plan-v2 source rows, unresolved).
 
     `managed` is (machine_rel, view_targets) from _managed_destinations. A candidate
     at a declared view or under the planned machine store occupies a managed
     destination (spec 14.2): keep refuses, and any other disposition is preserved
-    under the adoption archive, a move included."""
+    under the adoption archive, a move included. A move destination and every
+    preservation destination alike need observed absence (an occupied destination
+    is a collision, never an overwrite)."""
     if type(decisions) is not list:
         raise PlanError("decisions must be a list")
     machine_rel, view_targets = managed
     files = {row["path"]: row for row in observation["entries"] if row["kind"] == "file"}
+    kinds = _observed_kinds(observation)
     wanted = set(observation["candidates"])
     seen = set()
     ops = []
@@ -481,10 +520,10 @@ def _decisions(observation, decisions, run_id, managed):
             source["preservation"] = store.retire_preimage(run_id, path)
         elif disposition == "move" and set(row) == required | {"destination"}:
             destination = _path(row["destination"])
-            target = next((r for r in observation["entries"] if r["path"] == destination), None)
-            # Only directly observed absence is accepted; declare a move destination
-            # in targets when investigating, then pass the same targets to plan.
-            if target is None or target["kind"] != "absent":
+            # Only observed absence is accepted: the destination's own absent entry, or an
+            # absent or walked ancestor. Declare a destination outside the walked roots in
+            # targets when investigating, then pass the same targets to plan.
+            if not _observed_absent(kinds, destination):
                 raise PlanError("move destination has no observed absence")
             ops.append({"op": "move-file", "source": path,
                         "destination": destination, "source_digest": digest})
@@ -495,6 +534,9 @@ def _decisions(observation, decisions, run_id, managed):
             source["preservation"] = store.retire_preimage(run_id, path)
         else:
             raise PlanError("unknown disposition or incompatible decision fields")
+        if "preservation" in source and not _observed_absent(kinds, source["preservation"]):
+            raise PlanError("preservation destination has no observed absence: {!r}".format(
+                source["preservation"]))
         sources.append(source)
         unresolved.remove(path)
     return ops, sorted(sources, key=lambda r: r["path"]), sorted(unresolved)
@@ -505,9 +547,10 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
     """Re-investigate, bind to the reviewed inventory, then purely freeze the proposal.
 
     ops is an ordered list of additional PR-A vocabulary rows. It has no authority:
-    release member digests, generated postimages, hook diffs and receipts remain
-    unverified inputs to later PRs. No generic op can substitute for the explicit
-    per-candidate dispositions below.
+    release and enforcement member digests, generated init and view postimages, hook
+    diffs and receipt digests remain unverified inputs to later PRs, though every
+    file they name is bound in the effects and checked against the observed tree. No
+    generic op can substitute for the explicit per-candidate dispositions below.
 
     bindings carries exactly the caller-supplied plan-v2 inputs
     (schema.PLAN_BINDING_INPUTS). The store identity comes from the observation
@@ -542,9 +585,8 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
             for field, value in row.items():
                 if schema._FIELD_KINDS.get(field) in ("filepath", "dirpath") and value != ".":
                     _path(value)
-            if row["op"] == "install-pack":
-                for member in row["members"]:
-                    _path(member["path"])
+            for member in row.get("members", ()):
+                _path(member["path"])
         managed = _managed_destinations(doc, views)
         disposition_ops, source_rows, unresolved = _decisions(doc, decisions, run_id, managed)
         for row in disposition_ops:
@@ -569,6 +611,8 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
         inventory_doc = tomllib.loads(inventory_bytes.decode("utf-8"))
         instant = now.strftime("%Y-%m-%dT%H:%M:%SZ")
         ordered = _order_ops(disposition_ops, ops)
+        effects = schema.derive_effects(ordered, source_rows)
+        _check_planned_effects(doc, ordered, source_rows, effects, managed)
         proposal = {
             "format": schema.PLAN_FORMAT, "schema": schema.SCHEMA_VERSION,
             "product": product,
@@ -579,7 +623,7 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
             "store": {"store_root": ".", "machine_rel": managed[0],
                       "adoption": doc["ancestry"]["adoption"]},
             "sources": source_rows,
-            "effects": schema.derive_effects(ordered, source_rows),
+            "effects": effects,
             "release": bindings["release"],
             "prompt_pack": bindings["prompt_pack"],
             "enforcement": bindings["enforcement"],
@@ -595,6 +639,32 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
                            inventory=inventory_bytes, plan=frozen)
     except (ValueError, UnicodeError, RecursionError, EmitError) as exc:
         return AdoptResult(store.CANNOT_EVALUATE, [str(exc)], observation=observed.observation)
+
+
+def _check_planned_effects(observation, ops, sources, effects, managed):
+    """Bind the program's effects to the observed tree and the planned store (spec
+    14.1, 14.2). init-store refuses a store that already resolves; render-views
+    writes exactly the planned declared views; every creation needs observed
+    absence unless an occupying source is archived and removed from that path first;
+    and every replacement or repointing names an observed file with its old bytes."""
+    resolved = observation["resolution"]["status"] == store.RESOLVED
+    for row in ops:
+        if row["op"] == "init-store" and resolved:
+            raise PlanError("init-store names a store that already resolves")
+        if row["op"] == "render-views":
+            rendered = sorted(schema._compose(row["store_root"], m["path"]) for m in row["members"])
+            if rendered != sorted(managed[1]):
+                raise PlanError("render-views members are not exactly the planned declared views")
+    kinds = _observed_kinds(observation)
+    archived = set(row["path"] for row in sources if row["occupying"])
+    for row in effects["creations"]:
+        if row["path"] not in archived and not _observed_absent(kinds, row["path"]):
+            raise PlanError("planned creation has no observed absence: {!r}".format(row["path"]))
+    files = {row["path"]: row["digest"] for row in observation["entries"] if row["kind"] == "file"}
+    for row in effects["replacements"] + effects["repointings"]:
+        if files.get(row["path"]) != row["old_digest"]:
+            raise PlanError("planned replacement does not match its observed bytes: {!r}".format(
+                row["path"]))
 
 
 def _order_ops(dispositions, additional):
@@ -635,20 +705,32 @@ def self_test():
             self.now = datetime.datetime(2026, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc)
             self.decision = {"path": "legacy.md", "disposition": "keep", "actor": "fixture"}
             self.bindings = schema.canonical_plan_bindings()
+            self.with_init = True
+
+        def all_targets(self):
+            # The pre-commit hook lies outside every walked root, so its absence is a declared target.
+            return sorted(set(self.targets) | {".opf/hooks/pre-commit"})
+
+        def base_ops(self):
+            # Scaffold the default store (unless one resolves) and plant every enforcement member.
+            init = {"op": "init-store", "store_root": ".",
+                    "members": [{"path": ".working/toml/manifest.toml", "digest": _digest(b"m")}]}
+            pack = schema.enforcement_install_op(self.bindings["enforcement"])
+            return ([init] if self.with_init else []) + [pack]
 
         def observation(self):
-            result = investigate(self.root, sources=self.sources, targets=self.targets)
+            result = investigate(self.root, sources=self.sources, targets=self.all_targets())
             self.assertEqual(result.status, store.VALID, result.findings)
             return result
 
         def make_plan(self, observation=None, decisions=None, **changes):
             observation = observation or self.observation()
             args = dict(
-                sources=self.sources, targets=self.targets,
+                sources=self.sources, targets=self.all_targets(),
                 expected_observation_digest=tomllib.loads(
                     observation.observation.decode())["observation_digest"],
                 product="opf", decisions=[self.decision] if decisions is None else decisions,
-                ops=[{"op": "init-store", "store_root": "."}],
+                ops=self.base_ops(),
                 now=self.now, run_nonce="0123456789abcdef", bindings=self.bindings,
             )
             args.update(changes)
@@ -741,9 +823,9 @@ def self_test():
                                              "disposition": "migrate", "occupying": False,
                                              "preservation": preserved}])
             self.assertEqual(p["import_policy"]["scope"], ["legacy.md"])
-            self.assertEqual(p["effects"]["creations"], [{"path": preserved, "digest": digest}])
+            self.assertIn({"path": preserved, "digest": digest}, p["effects"]["creations"])
             self.assertEqual(p["effects"]["removals"], [{"path": "legacy.md", "digest": digest}])
-            self.assertEqual([row["op"] for row in p["ops"]], ["init-store"])
+            self.assertEqual([row["op"] for row in p["ops"]], ["init-store", "install-pack"])
             self.assertEqual(before, self.snapshot())
             self.assertFalse((self.root / ".working").exists())
             # Import references are no longer decision inputs: an old acceptance cannot ride the plan.
@@ -769,7 +851,13 @@ def self_test():
             self.assertEqual(p["sources"], [{"path": "legacy.md", "digest": digest,
                                              "disposition": "retire", "occupying": False,
                                              "preservation": preserved}])
-            self.assertEqual(p["effects"], {"creations": [{"path": preserved, "digest": digest}],
+            # The exact effects: the preservation copy, the scaffolded manifest and every enforcement
+            # member, each tied to the op that writes it, beside the retire removal.
+            pack = [dict(m) for row in self.bindings["enforcement"] for m in row["members"]]
+            manifest = {"path": ".working/toml/manifest.toml", "digest": _digest(b"m")}
+            creations = sorted([{"path": preserved, "digest": digest}, manifest] + pack,
+                               key=lambda r: sorted(r.items()))
+            self.assertEqual(p["effects"], {"creations": creations,
                                             "replacements": [], "removals": [{"path": "legacy.md",
                                                                                "digest": digest}],
                                             "repointings": []})
@@ -792,7 +880,14 @@ def self_test():
                     ("missing-platform",
                      dict(self.bindings, enforcement=self.bindings["enforcement"][:-1])),
                     ("bad-prompt-version", dict(self.bindings, prompt_pack=dict(
-                        self.bindings["prompt_pack"], version="latest")))):
+                        self.bindings["prompt_pack"], version="latest"))),
+                    # every residual disclosure omitted, and one means' required disclosure omitted
+                    ("residuals-none", dict(self.bindings, enforcement=[
+                        dict(row, residuals=["none"]) for row in self.bindings["enforcement"]])),
+                    ("pre-commit-residual-omitted", dict(self.bindings, enforcement=[
+                        dict(row, residuals=["canonical-hand-edits", "same-user-tampering"])
+                        if row["platform"] == "pre-commit" else row
+                        for row in self.bindings["enforcement"]]))):
                 with self.subTest(label):
                     result = self.make_plan(bindings=bindings)
                     self.assertNotEqual(result.status, store.VALID)
@@ -859,6 +954,101 @@ def self_test():
                     result = self.make_plan(decisions=[dict(decision, destination=destination)])
                     self.assertEqual(result.status, status, result.findings)
 
+        def test_store_identity_and_generated_effects(self):
+            # The init, render and receipt outputs are exact effects, each at the frozen store. Another
+            # store and an outside receipt are observed absent, so the store binding refuses them.
+            import _opf_init
+            self.targets = self.targets + ["other-product", "receipt.toml"]
+            views = tomllib.loads(_opf_init.build_manifest())["views"].values()
+            views = sorted(v["target"] for v in views)
+            render = {"op": "render-views", "store_root": ".",
+                      "members": [{"path": v, "digest": _digest(v.encode())} for v in views]}
+            receipt = {"op": "record-adoption", "receipt_path": ".working/toml/adoption.toml",
+                       "receipt_core_digest": _digest(b"r")}
+            result = self.make_plan(ops=self.base_ops() + [render, receipt])
+            self.assertEqual(result.status, store.VALID, result.findings)
+            created = tomllib.loads(result.plan.decode())["effects"]["creations"]
+            for row in ([{"path": ".working/toml/manifest.toml", "digest": _digest(b"m")},
+                         {"path": ".working/toml/adoption.toml", "digest": _digest(b"r")}]
+                        + [{"path": v, "digest": _digest(v.encode())} for v in views]):
+                self.assertIn(row, created)
+            init, pack = self.base_ops()
+            other_machine = [{"path": ".working/data/manifest.toml", "digest": _digest(b"m")}]
+            for label, ops, status in (
+                    # an op targeting another store contradicts the frozen store identity
+                    ("other-store", [dict(init, store_root="other-product"), pack], store.INVALID),
+                    ("receipt-outside-store", [init, pack, dict(receipt, receipt_path="receipt.toml")],
+                     store.INVALID),
+                    ("other-machine-store", [dict(init, members=other_machine), pack], store.INVALID),
+                    # render-views writes exactly the declared views, at the frozen store
+                    ("other-render-store", [init, pack, dict(render, store_root="other-product")],
+                     store.CANNOT_EVALUATE),
+                    ("render-missing-view", [init, pack, dict(render, members=render["members"][1:])],
+                     store.CANNOT_EVALUATE),
+                    # an enforcement member no op installs
+                    ("enforcement-uninstalled", [init], store.INVALID)):
+                with self.subTest(label):
+                    result = self.make_plan(ops=ops)
+                    self.assertEqual(result.status, status, result.findings)
+                    self.assertIsNone(result.plan)
+
+        def test_hook_replacement_binds_observed_bytes(self):
+            # A deny hook merged into an existing registration is a replacement tied to its enforcement
+            # member, and its old digest must be the observed bytes.
+            (self.root / ".claude").mkdir()
+            (self.root / ".claude/settings.json").write_bytes(b"{}\n")
+            member = self.bindings["enforcement"][2]["members"][0]
+            others = [row for row in self.bindings["enforcement"] if row["platform"] != "claude-code"]
+            hook = {"op": "enable-hook", "registration_path": ".claude/settings.json",
+                    "plugin_entry": "opf", "old_digest": _digest(b"{}\n"),
+                    "new_digest": member["digest"]}
+            ops = self.base_ops()[:1] + [schema.enforcement_install_op(others)]
+            result = self.make_plan(ops=ops + [hook])
+            self.assertEqual(result.status, store.VALID, result.findings)
+            self.assertEqual(tomllib.loads(result.plan.decode())["effects"]["replacements"], [
+                {"path": ".claude/settings.json", "old_digest": hook["old_digest"],
+                 "new_digest": member["digest"]}])
+            for label, ops in (("stale-old-digest", ops + [dict(hook, old_digest=_digest(b"x"))]),
+                               ("planted-over-existing", self.base_ops())):
+                with self.subTest(label):
+                    self.assertEqual(self.make_plan(ops=ops).status, store.CANNOT_EVALUATE)
+
+        def test_effect_collisions(self):
+            (self.root / "other.md").write_bytes(b"other\n")
+            self.sources = ["legacy.md", "other.md"]
+            self.targets = ["archive/x.md", ".working/archive/moved"]
+            move = dict(self.decision, disposition="move", destination="archive/x.md")
+            # two moves to one destination are a collision, never frozen VALID
+            result = self.make_plan(decisions=[move, dict(move, path="other.md")])
+            self.assertEqual(result.status, store.INVALID)
+            self.assertIsNone(result.plan)
+            # the Move archive root is a directory home, never a file target
+            home = dict(move, destination=".working/archive/moved")
+            result = self.make_plan(decisions=[home, dict(self.decision, path="other.md")])
+            self.assertEqual(result.status, store.INVALID)
+            # a caller creation on a preservation destination, or on a source left live, collides
+            retire = dict(self.decision, disposition="retire")
+            preserved = store.retire_preimage("adopt-20260102T030405Z-0123456789abcdef", "legacy.md")
+            create = {"op": "create-file", "content_digest": _digest(b"c")}
+            for path, status in ((preserved, store.INVALID), ("other.md", store.CANNOT_EVALUATE)):
+                with self.subTest(create=path):
+                    result = self.make_plan(decisions=[retire, dict(self.decision, path="other.md")],
+                                            ops=self.base_ops() + [dict(create, path=path)])
+                    self.assertEqual(result.status, status, result.findings)
+                    self.assertIsNone(result.plan)
+
+        def test_preservation_destination_occupied(self):
+            # A preservation destination is checked for occupancy exactly as a move destination is:
+            # bytes already at this run's adoption archive path refuse the plan, never an overwrite.
+            preserved = store.retire_preimage("adopt-20260102T030405Z-0123456789abcdef", "legacy.md")
+            (self.root / preserved).parent.mkdir(parents=True)
+            (self.root / preserved).write_bytes(b"planted\n")
+            decisions = [dict(self.decision, disposition="retire"), dict(self.decision, path=preserved)]
+            result = self.make_plan(decisions=decisions)
+            self.assertEqual(result.status, store.CANNOT_EVALUATE)
+            self.assertIsNone(result.plan)
+            self.assertEqual((self.root / preserved).read_bytes(), b"planted\n")
+
         def test_foreign_working_preserves_resolver_status(self):
             (self.root / ".working").mkdir()
             (self.root / ".working/notes.md").write_bytes(b"notes")
@@ -883,6 +1073,11 @@ def self_test():
             self.assertIn(".gemini/settings.json", [row["path"] for row in doc["entries"]])
             # Detection by path only: a platform surface is not an adoption candidate.
             self.assertNotIn(".gemini/settings.json", doc["candidates"])
+            # A pre-existing platform file is never overwritten: planting GEMINI.md over it collides,
+            # and the same row bound to an absent path beneath the walked .gemini directory plans.
+            self.assertEqual(self.make_plan().status, store.CANNOT_EVALUATE)
+            gemini = [{"path": ".gemini/opf.md", "digest": _digest(b"g")}]
+            self.bindings["enforcement"][4]["members"] = gemini
             self.assertEqual(self.make_plan().status, store.VALID)
 
         def test_ancestry_marks_re_adoption(self):
@@ -1022,7 +1217,10 @@ def self_test():
                              [row["path"] for row in doc["entries"]])
             self.assertEqual(investigate(self.root, sources=[".working/private"]).status,
                              store.CANNOT_EVALUATE)
-            # The plan binds the resolved machine store and its re-adoption ancestry.
+            # init-store over a store that already resolves contradicts the frozen identity; the plan
+            # binds the resolved machine store and its re-adoption ancestry.
+            self.assertEqual(self.make_plan(result).status, store.CANNOT_EVALUATE)
+            self.with_init = False
             planned = self.make_plan(result)
             self.assertEqual(planned.status, store.VALID, planned.findings)
             self.assertEqual(tomllib.loads(planned.plan.decode())["store"],

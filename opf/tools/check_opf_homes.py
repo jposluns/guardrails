@@ -1854,11 +1854,16 @@ def boundary_self_test():
                 patch.object(planning, "_read_rel", return_value=emit.emit_checked(model).encode()), \
                 patch.object(store._journal, "_open_parent", side_effect=FileNotFoundError), \
                 patch.object(adopt, "validate_plan", wraps=adopt.validate_plan) as frozen:
-            observed = planning.investigate(Path("/store"), sources=[])
+            # Every planned creation needs observed absence, so the root-level ones are declared targets; the
+            # enforcement members are installed by the pack row the frozen plan ties them to.
+            bindings = adopt.canonical_plan_bindings()
+            targets = ["notes.txt", ".opf/hooks/pre-commit"]
+            observed = planning.investigate(Path("/store"), sources=[], targets=targets)
             result = planning.plan(
-                Path("/store"), sources=[], product="opf", decisions=[], ops=[op],
+                Path("/store"), sources=[], targets=targets, product="opf", decisions=[],
+                ops=[op, adopt.enforcement_install_op(bindings["enforcement"])],
                 expected_observation_digest=tomllib.loads(observed.observation.decode())["observation_digest"],
-                now=utc, run_nonce="0123456789abcdef", bindings=adopt.canonical_plan_bindings())
+                now=utc, run_nonce="0123456789abcdef", bindings=bindings)
         return result, [c.kwargs.get("homes") for c in frozen.call_args_list]
 
     homes2_plan, _ = planned(2, control_op)
