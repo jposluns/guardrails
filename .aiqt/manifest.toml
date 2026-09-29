@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "ac5b646d503058b7b447110150955901fc0ed31982d215d3323e99aa5fb54f10"
+tree-sha256 = "f383ef2e476816c9d0ff8f962b10448195c296697b0f7681f4994aea09148f38"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2586,8 +2586,8 @@ sha256 = "a46820ca0b072c9e64ae3c79754656c5fce9e266b9167b050f262ef9b4fde57a"
 
 [[sources]]
 path = "opf/tools/_opf_check.py"
-bytes = 310550
-sha256 = "5e4d4b2e71539c1de3fbca151e1ea2fa8fa9c8cd82d56bfc80e104059be5f2a5"
+bytes = 310563
+sha256 = "ab380236c4b9523dda9b836d388e93fb91c9de63bf086abcf3b2a07a67c99e53"
 
 [[sources]]
 path = "opf/tools/_opf_emit.py"
@@ -2606,8 +2606,8 @@ sha256 = "ac720ef06983b60b38a7f26bcbe39ebb770786bab3ac8ec11cb5ca2b6455d2b1"
 
 [[sources]]
 path = "opf/tools/_opf_import.py"
-bytes = 621252
-sha256 = "a7a7d43edd1eb80877945d8ad0415b8c755dbed93b10f31af1e6361077fa0179"
+bytes = 637760
+sha256 = "c9d1345798355b55d2c44dd607da69a55e3bb2c9cc53326a6f08f07178b091ce"
 
 [[sources]]
 path = "opf/tools/_opf_importers.py"
@@ -2616,13 +2616,13 @@ sha256 = "102971467db4b42932709a7e6e62eb197f849e3b1664928764fe18bf50e80e33"
 
 [[sources]]
 path = "opf/tools/_opf_ingest.py"
-bytes = 312486
-sha256 = "a70d4ca922c612c4fa1e1f742c2783ad0cf540c7b6dd5cdbbf30fec291d753fb"
+bytes = 312590
+sha256 = "1f373ab02326dbeaa528b6b6caee5f2b04310d52c4cb82d716d33246d465d83d"
 
 [[sources]]
 path = "opf/tools/_opf_ingest_apply.py"
-bytes = 238334
-sha256 = "6ec1855fd000313e9dd03360f7f8aa1c5bf2ee9af0a311ff9b9cd43e53cad6db"
+bytes = 237963
+sha256 = "b85880e69a7ccbe695409ea8180956a4745ff3dfb2e55bfb811fe667807e887c"
 
 [[sources]]
 path = "opf/tools/_opf_init.py"
@@ -2856,8 +2856,8 @@ sha256 = "363663005882dabe4f01b43e28926f4093bce4d718a4e67bfa13b7318a9a3247"
 
 [[sources]]
 path = "opf/tools/check_opf_doctor.py"
-bytes = 78937
-sha256 = "b6da97ddc3bf78c2004f479d0b783fbcaebb45dafcc65ead02af15e7ab347490"
+bytes = 81256
+sha256 = "fb6895e4de5318b2c4b2dcfb60db18e0235165470ab234fa6014ee66556e8fde"
 
 [[sources]]
 path = "opf/tools/check_opf_drift.py"
