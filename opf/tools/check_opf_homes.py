@@ -1880,18 +1880,39 @@ def boundary_self_test():
     with patch.object(planning, "_decisions", return_value=([control_retire], [control_source], [])):
         retired, _ = planned(2, dict(create, path="notes.txt"))
         legacy_retired, _ = planned(1, dict(create, path="notes.txt"))
+    # A move beneath the Move archive is the generation-dependent disposition: spec 14.2 permits that explicit
+    # destination, so the legacy generation plans it, while the homes-2 operand refusal reaches it.
+    control_move = dict(op="move-file", source="notes.md", destination=".working/archive/moved/notes.md",
+                        source_digest="sha256:" + "0" * 64)
+    move_source = dict(path="notes.md", digest=control_move["source_digest"], disposition="move", occupying=False,
+                       preservation=control_move["destination"])
+    with patch.object(planning, "_decisions", return_value=([control_move], [move_source], [])):
+        moved, _ = planned(2, dict(create, path="notes.txt"))
+        legacy_moved, legacy_moved_frozen = planned(1, dict(create, path="notes.txt"))
+        activated_plan, activated_frozen = planned(1, dict(create, path="notes.txt"), supported=2)
     check("plan-homes2-control-disposition-refused", lambda: retired.status == store.INVALID
           and retired.findings == tuple(adopt.validate_op(control_retire, homes=2).findings) != ())
-    check("plan-legacy-control-disposition-planned", lambda: legacy_retired.status == store.VALID)
-    check("plan-legacy-control-op-planned", lambda: legacy_plan.status == store.VALID and legacy_frozen == [1])
-    activated_plan, activated_frozen = planned(1, control_op, supported=2)
+    check("plan-homes2-control-move-refused", lambda: moved.status == store.INVALID
+          and moved.findings == tuple(adopt.validate_op(control_move, homes=2).findings) != ())
+    # Adoption refuses the control area in the legacy generation too (spec 14.2 carries no homes qualifier):
+    # the legacy op check admits these rows, and the frozen plan's revalidation at the store's own
+    # generation refuses them.
+    check("plan-legacy-control-disposition-refused", lambda: legacy_retired.status == store.INVALID
+          and legacy_retired.plan is None and "plan sources[0] path '.working/journals/file' selects the reserved "
+          "store control area as adoption content (spec 14.2)" in legacy_retired.findings)
+    check("plan-legacy-control-op-refused", lambda: legacy_plan.status == store.INVALID and legacy_plan.plan is None
+          and legacy_frozen == [1]
+          and "plan writes '.working/journals/file' into the reserved store control area (spec 14.2)"
+          in legacy_plan.findings)
+    check("plan-legacy-control-move-planned", lambda: legacy_moved.status == store.VALID
+          and legacy_moved_frozen == [1])
     check("plan-activated-legacy-generation", lambda: activated_plan.status == store.VALID
           and activated_frozen == [1])
     check("plan-homes2-frozen-plan-bound", lambda: ordinary_plan.status == store.VALID and ordinary_frozen == [2])
     check("plan-validate-homes2-refused", lambda: adopt.validate_plan(
-        tomllib.loads(legacy_plan.plan.decode()), homes=2).status == store.INVALID)
+        tomllib.loads(legacy_moved.plan.decode()), homes=2).status == store.INVALID)
     check("plan-validate-legacy-unchanged", lambda: adopt.validate_plan(
-        tomllib.loads(legacy_plan.plan.decode())).status == store.VALID)
+        tomllib.loads(legacy_moved.plan.decode())).status == store.VALID)
 
     same_root = SimpleNamespace(status=store.RESOLVED, machine_rel=machine, store_root=Path("/store"),
                                 product_root=Path("/store"), pointer_source="default", detail="")
