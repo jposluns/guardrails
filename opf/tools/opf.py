@@ -294,6 +294,19 @@ def _watchdog_isolation_self_test():
     return EXIT_FINDING if failed else EXIT_OK
 
 
+# F-335-LOAD-FLAKE-PIPE-STALL: the execution-latency ceiling is a
+# scheduling bound, not a correctness deadline. Worst observed
+# `cancelled - start` for the pipe-stall and transient-census cases under
+# 24 dedicated CPU-pressure workers on a 16-CPU host already running at
+# loadavg ~16-37 (12 runs, 2026-09-28): 0.343 s against the requested
+# 0.25 s timeout -- a worst scheduling overshoot of 0.093 s. The bound
+# allows 50x that measured overshoot (0.25 + 50 x 0.093 ~= 4.9, rounded
+# to 5.0 s). It still discriminates a late parent deadline: the
+# deadline-flips mutant forces a timeout ABOVE this bound and must stay
+# red, and the per-case subprocess budget still bounds a hang.
+_DEADLINE_EXECUTION_BOUND = 5.0
+
+
 def _watchdog_deadline_case(mode):
     """Private subprocess: at-fork hooks cannot be unregistered, so never install them in the runner."""
     import signal
@@ -396,7 +409,8 @@ def _watchdog_deadline_case(mode):
         drains = [row for row in rows if row[0] == "drain"]
         cancelled = min(cancellations) if cancellations else None
         # Execution latency ends at the observed signal, never at cleanup end.
-        execution_ok = cancelled is not None and 0.25 <= cancelled - start < 1.5
+        execution_ok = (cancelled is not None and
+                        0.25 <= cancelled - start < _DEADLINE_EXECUTION_BOUND)
         # Cleanup is checked against its own declared deadline. One second is
         # allowed separately for receipt delivery and parent scheduling.
         cleanup_limit = max([row[2] for row in drains] or
@@ -757,7 +771,11 @@ def _watchdog_completion_case(mode):
     elif mode == "deadline-flips":
         real_run = emit.run_bounded
         def late(thunk, **kwargs):
-            return real_run(thunk, **dict(kwargs, timeout_s=2))
+            # The forced timeout sits ABOVE the measured execution bound,
+            # so the late parent deadline stays red under any load the
+            # bound itself tolerates (F-335-LOAD-FLAKE-PIPE-STALL).
+            return real_run(thunk, **dict(
+                kwargs, timeout_s=_DEADLINE_EXECUTION_BOUND + 1))
         with patch.object(emit, "run_bounded", late):
             assert _watchdog_deadline_case("pipe-stall") == EXIT_FINDING
         import time
@@ -770,7 +788,15 @@ def _watchdog_completion_case(mode):
                 first[0] = False
                 return False
             return real_signal(*args, **kwargs)
-        with patch.object(emit, "_fixture_signal", census_only):
+        # The swallowed first send provably delays the observed cancel past
+        # the 1.6 s transient-census window, so THIS red keys on that
+        # window, not on the load-tolerant shared bound: pinning the bound
+        # to the window keeps the mutant red under any load (load only
+        # delays the retried send further; F-335-LOAD-FLAKE-PIPE-STALL).
+        import sys as sys_module
+        runner_module = sys_module.modules[_watchdog_deadline_case.__module__]
+        with patch.object(emit, "_fixture_signal", census_only), \
+                patch.object(runner_module, "_DEADLINE_EXECUTION_BOUND", 1.6):
             assert _watchdog_deadline_case("transient-census") == EXIT_FINDING
     elif mode == "subject-setup":
         real_subreaper, real_setsid = emit._fixture_subreaper, os.setsid
@@ -4198,19 +4224,23 @@ def _watchdog_completion_case(mode):
         assert os.WIFSIGNALED(raw) and os.WTERMSIG(raw) == signal.SIGKILL, raw
         os.close(guardian_fd)
 
-        # Leg 10 (QA26 codex BLOCKER; QA26 claude MINOR 1): ONE exception
-        # boundary spans the guardian-kill cleanup, direct backstop
-        # included. The full matrix -- pending (none, ordinary,
-        # cancellation) x helper (ok, ordinary, cancellation) x backstop
-        # (ok, OSError, non-OSError, cancellation) -- proves a pending
-        # cancellation ALWAYS stays the outward exception with every later
-        # failure chained beneath it AND with its own pre-existing chain
-        # intact (a triple fault must not unlink it), while every
+        # Leg 10 (QA26 codex BLOCKER; QA26 claude MINOR 1; QA27 codex):
+        # ONE exception boundary spans the guardian-kill cleanup, direct
+        # backstop included. The full matrix -- pending (none, ordinary,
+        # cancellation with an implicit context, cancellation with an
+        # EXPLICIT __cause__) x helper (ok, ordinary, cancellation) x
+        # backstop (ok, OSError, non-OSError, cancellation), 48
+        # combinations -- proves a pending cancellation ALWAYS stays the
+        # outward exception with every later failure kept REACHABLE
+        # beneath it as an exception object AND with its own pre-existing
+        # chain intact (a triple fault must not unlink it), while every
         # no-pending combination keeps its round-24 outward exception. The
         # pre-fix finally excluded cancellation-typed helper failures from
         # restoration and let a non-OSError backstop fault escape its
         # OSError-only handler (both displaced the pending cancellation),
-        # and its raise-from rewrote the cancellation's __context__.
+        # its raise-from rewrote the cancellation's __context__, and with
+        # an explicit __cause__ it kept only a repr note, never the
+        # failure object (QA27 codex chain retention).
         guardian = os.fork()
         if guardian == 0:
             time.sleep(3600)
@@ -4250,6 +4280,9 @@ def _watchdog_completion_case(mode):
                             raise ValueError("pre-existing chain")
                         except ValueError:
                             raise TimeoutError("pending cancellation")
+                    if pending_kind == "cancellation-cause":
+                        raise TimeoutError("pending cancellation") from (
+                            ValueError("explicit cause"))
                     return None
                 assert signum == signal.SIGKILL, signum
                 backstop_calls.append(True)
@@ -4284,7 +4317,13 @@ def _watchdog_completion_case(mode):
                 combo, backstop_calls)
             return combo, outward
 
-        for pending_kind in ("none", "ordinary", "cancellation"):
+        # The explicit-cause rows compare the cancellation's own
+        # __context__ against the no-failure control row's: whatever the
+        # ambient handled exception was at construction, the boundary must
+        # never rewrite it.
+        explicit_context = [None]
+        for pending_kind in ("none", "ordinary", "cancellation",
+                             "cancellation-cause"):
             for helper_kind in ("ok", "ordinary", "cancellation"):
                 for backstop_kind in ("ok", "oserror", "non-oserror",
                                       "cancellation"):
@@ -4297,7 +4336,8 @@ def _watchdog_completion_case(mode):
                     else:
                         boundary = "backstop " + backstop_kind
                     boundary_sig = boundary_signature(boundary)
-                    if pending_kind == "cancellation":
+                    if pending_kind in ("cancellation",
+                                        "cancellation-cause"):
                         expected = "TimeoutError: pending cancellation"
                     elif boundary_sig is not None:
                         expected = boundary_sig
@@ -4332,6 +4372,47 @@ def _watchdog_completion_case(mode):
                                     "the helper failure was dropped from "
                                     "the chain", combo,
                                     signature(outward.__cause__.__context__))
+                    elif pending_kind == "cancellation-cause":
+                        # QA27 codex: an EXPLICIT __cause__ on the pending
+                        # cancellation survives untouched, and a cleanup
+                        # failure stays reachable as an EXCEPTION OBJECT,
+                        # appended at the tail of the pre-existing chain,
+                        # never reduced to a repr note.
+                        assert (signature(outward.__cause__)
+                                == "ValueError: explicit cause"), (
+                            "the explicit cause was rewritten", combo,
+                            signature(outward.__cause__))
+                        if boundary is None:
+                            explicit_context[0] = signature(
+                                outward.__context__)
+                            assert outward.__cause__.__context__ is None, (
+                                combo,
+                                signature(outward.__cause__.__context__))
+                        else:
+                            assert (signature(outward.__context__)
+                                    == explicit_context[0]), (
+                                "the pending cancellation's own "
+                                "__context__ was rewritten", combo,
+                                signature(outward.__context__),
+                                explicit_context[0])
+                            assert (signature(outward.__cause__.__context__)
+                                    == boundary_sig), (
+                                "the cleanup failure was not kept "
+                                "reachable beneath the explicit cause "
+                                "(QA27 codex)", combo,
+                                signature(outward.__cause__.__context__),
+                                boundary_sig)
+                            if boundary.startswith("backstop "):
+                                helper_sig = boundary_signature(
+                                    "helper " + helper_kind)
+                                assert (signature(
+                                            outward.__cause__
+                                            .__context__.__context__)
+                                        == helper_sig), (
+                                    "the helper failure was dropped from "
+                                    "the chain", combo,
+                                    signature(outward.__cause__
+                                              .__context__.__context__))
                     elif pending_kind == "ordinary" and boundary is not None:
                         chain, node, seen = [], outward, set()
                         while node is not None and id(node) not in seen:
@@ -4347,6 +4428,268 @@ def _watchdog_completion_case(mode):
         waited, raw = os.waitpid(guardian, 0)
         assert waited == guardian and os.WIFSIGNALED(raw), (waited, raw)
         os.close(guardian_fd)
+
+        # Leg 11 (fix 6, premise change): the pending-cancellation boundary
+        # is STRUCTURAL. QA25, QA26 and QA27 each found one more hand-coded
+        # cleanup site in the escalation path that let a later failure
+        # replace a pending cancellation; this leg turns red if any finally
+        # there stops routing its cleanup through emit._cleanup_boundary,
+        # or if any cancellation-capable except handler there can swallow
+        # or replace an in-flight cancellation: handler bodies re-raise
+        # only via a bare `raise`, and a handler that does not end in one
+        # must open with the isinstance cancellation guard or be preceded
+        # in the same try by a bare-raising (TimeoutError,
+        # InterruptedError) handler.
+        import ast
+        import inspect
+        import textwrap
+        escalation_scope = (
+            emit._fixture_escalate_subject,
+            emit._FixtureProcess._escalate,
+            emit._FixtureProcess._address_failed_subject,
+        )
+        cancellation_capable = {"BaseException", "Exception", "OSError",
+                                "TimeoutError", "InterruptedError",
+                                "KeyboardInterrupt"}
+
+        def handler_names(handler):
+            node = handler.type
+            if node is None:
+                return {"BaseException"}
+            elts = node.elts if isinstance(node, ast.Tuple) else [node]
+            return {e.id for e in elts if isinstance(e, ast.Name)}
+
+        def bare_raise_only(body):
+            return (len(body) == 1 and isinstance(body[0], ast.Raise)
+                    and body[0].exc is None)
+
+        def ends_in_bare_raise(body):
+            return isinstance(body[-1], ast.Raise) and body[-1].exc is None
+
+        def opens_with_cancellation_guard(body):
+            stmt = body[0]
+            if not (isinstance(stmt, ast.If) and not stmt.orelse
+                    and bare_raise_only(stmt.body)):
+                return False
+            test = stmt.test
+            if not (isinstance(test, ast.Call)
+                    and isinstance(test.func, ast.Name)
+                    and test.func.id == "isinstance"
+                    and len(test.args) == 2):
+                return False
+            classes = test.args[1]
+            elts = (classes.elts if isinstance(classes, ast.Tuple)
+                    else [classes])
+            names = {e.id for e in elts if isinstance(e, ast.Name)}
+            return {"TimeoutError", "InterruptedError"} <= names
+
+        for function in escalation_scope:
+            tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Try):
+                    continue
+                if node.finalbody:
+                    assert (len(node.finalbody) == 1
+                            and isinstance(node.finalbody[0], ast.Expr)
+                            and isinstance(node.finalbody[0].value,
+                                           ast.Call)), (
+                        "an escalation-path finally does not route "
+                        "through the shared boundary (fix 6)",
+                        function.__qualname__)
+                    called = node.finalbody[0].value.func
+                    name = (called.id if isinstance(called, ast.Name)
+                            else called.attr
+                            if isinstance(called, ast.Attribute) else None)
+                    assert name == "_cleanup_boundary", (
+                        "an escalation-path finally calls something other "
+                        "than _cleanup_boundary (fix 6)",
+                        function.__qualname__, name)
+                for handler in node.handlers:
+                    for inner in ast.walk(handler):
+                        if isinstance(inner, ast.Raise):
+                            assert inner.exc is None, (
+                                "an escalation-path handler raises a NEW "
+                                "exception over a possibly-pending "
+                                "cancellation (fix 6)",
+                                function.__qualname__)
+                    if not (handler_names(handler) & cancellation_capable):
+                        continue
+                    earlier = node.handlers[:node.handlers.index(handler)]
+                    guarded_before = any(
+                        {"TimeoutError", "InterruptedError"}
+                        <= handler_names(h) and bare_raise_only(h.body)
+                        for h in earlier)
+                    assert (ends_in_bare_raise(handler.body)
+                            or opens_with_cancellation_guard(handler.body)
+                            or guarded_before), (
+                        "an escalation-path handler can swallow or "
+                        "replace a pending cancellation without the "
+                        "boundary (fix 6)", function.__qualname__)
+
+        # Leg 12 (QA27 codex BLOCKER 1): a TimeoutError raised at the
+        # subject SIGSTOP stays the outward exception when the held-pidfd
+        # subject SIGKILL in the finally itself fails -- with an ordinary
+        # RuntimeError or with a cancellation-typed InterruptedError --
+        # and the kill failure is chained beneath it. The pre-fix finally
+        # had no boundary: the later failure replaced the pending
+        # cancellation (both variants reproduced at 74334f09).
+        for kill_failure in (RuntimeError, InterruptedError):
+            sent = []
+
+            def sequence_stub(target_fd, signum, *args, _fail=kill_failure):
+                assert target_fd == 1099, (target_fd, signum)
+                sent.append(signum)
+                if signum == signal.SIGSTOP:
+                    raise TimeoutError("pending cancellation")
+                assert signum == signal.SIGKILL, signum
+                raise _fail("subject kill failure")
+
+            with patch.object(signal, "pidfd_send_signal", sequence_stub):
+                try:
+                    emit._fixture_escalate_subject(11999, 1099)
+                except TimeoutError as exc:
+                    assert type(exc.__cause__) is kill_failure, (
+                        "the subject kill failure was not chained beneath "
+                        "the pending cancellation", exc.__cause__)
+                except BaseException as exc:
+                    raise AssertionError(
+                        "the subject kill failure displaced the pending "
+                        "cancellation (QA27 codex BLOCKER 1)",
+                        kill_failure.__name__, repr(exc))
+                else:
+                    raise AssertionError(
+                        "the escalation did not propagate")
+            assert sent == [signal.SIGSTOP, signal.SIGKILL], sent
+
+        # Leg 13 (QA27 codex BLOCKER 1, matrix gap): the same sequence at
+        # the _escalate tier WITH a supplied subject receipt. The
+        # cancellation propagates out of the subject cleanup with the
+        # kill failure beneath it, records NO subject accounting (the
+        # interrupt owner re-sends the idempotent receipt kill), and the
+        # guardian cleanup still runs. The pre-fix tier let the
+        # RuntimeError escape the subject helper and recorded "partial"
+        # for a cleanup a cancellation had interrupted.
+        helper_kills = []
+        fake = types.SimpleNamespace(
+            pid=11888, pidfd=1098, subject_pid=11999, subject_pidfd=1099,
+            _subject_kill=None, _subject_skipped=None)
+
+        def receipt_stub(target_fd, signum, *args):
+            if target_fd == 1098:
+                return None  # the guardian freeze succeeds
+            assert target_fd == 1099, (target_fd, signum)
+            if signum == signal.SIGSTOP:
+                raise TimeoutError("pending cancellation")
+            assert signum == signal.SIGKILL, signum
+            raise RuntimeError("subject kill failure")
+
+        def record_helper(pid, signum, pidfd=None, *, group=True):
+            helper_kills.append((pid, signum))
+            return True
+
+        with patch.object(signal, "pidfd_send_signal", receipt_stub), (
+                patch.object(emit, "_fixture_signal", record_helper)):
+            try:
+                emit._FixtureProcess._escalate(fake)
+            except TimeoutError as exc:
+                assert type(exc.__cause__) is RuntimeError, (
+                    "the subject kill failure was not chained",
+                    exc.__cause__)
+            except BaseException as exc:
+                raise AssertionError(
+                    "the subject kill failure displaced the pending "
+                    "cancellation at the _escalate tier (QA27 codex "
+                    "BLOCKER 1)", repr(exc))
+            else:
+                raise AssertionError("the escalation did not propagate")
+        assert (fake._subject_kill is None
+                and fake._subject_skipped is None), (
+            "a cancellation-interrupted subject cleanup was recorded",
+            fake._subject_kill, fake._subject_skipped)
+        assert helper_kills == [(11888, signal.SIGKILL)], helper_kills
+
+        # Leg 14 (QA27 codex BLOCKER 2): with an EXPLICIT __cause__ on
+        # the pending cancellation, the attachment appends the cleanup
+        # failure at the tail of the pre-existing chain -- the exception
+        # OBJECT, never a repr -- and no diagnostic runs outside the
+        # boundary's protection: a cleanup failure whose __repr__ raises
+        # cannot displace the cancellation. The pre-fix diagnostic path
+        # ran repr(suppressed) in the open and the injected ValueError
+        # became the outward exception despite a successful backstop.
+        class _HostileRepr(RuntimeError):
+            def __repr__(self):
+                raise ValueError("hostile repr")
+
+        hostile = _HostileRepr("helper failure")
+        fake = types.SimpleNamespace(
+            pid=11888, pidfd=1098, subject_pid=None, subject_pidfd=None,
+            _subject_kill=None, _subject_skipped=None)
+
+        def caused_freeze(target_fd, signum, *args):
+            if signum == signal.SIGSTOP:
+                raise TimeoutError("pending cancellation") from (
+                    IndexError("explicit cause"))
+            assert signum == signal.SIGKILL, signum
+            return None  # the direct backstop succeeds
+
+        with patch.object(signal, "pidfd_send_signal", caused_freeze), (
+                patch.object(emit, "_fixture_signal",
+                             side_effect=hostile)):
+            try:
+                emit._FixtureProcess._escalate(fake)
+            except TimeoutError as exc:
+                assert type(exc.__cause__) is IndexError, (
+                    "the explicit cause was rewritten", exc.__cause__)
+                assert exc.__cause__.__context__ is hostile, (
+                    "the cleanup failure object was not kept reachable "
+                    "beneath the explicit cause (QA27 codex)",
+                    exc.__cause__.__context__)
+            except BaseException as exc:
+                raise AssertionError(
+                    "a raising __repr__ displaced the pending "
+                    "cancellation (QA27 codex BLOCKER 2)",
+                    type(exc).__name__)
+            else:
+                raise AssertionError("the escalation did not propagate")
+
+        # Leg 15 (QA27 codex BLOCKER 2, degraded path): when NO acyclic
+        # attachment exists (the pending cancellation's own chain is
+        # cyclic), the boundary degrades to a note -- and even there
+        # every diagnostic runs inside the protection, so the raising
+        # __repr__ only degrades the note text, never the outward
+        # exception.
+        hostile = _HostileRepr("helper failure")
+        fake = types.SimpleNamespace(
+            pid=11888, pidfd=1098, subject_pid=None, subject_pidfd=None,
+            _subject_kill=None, _subject_skipped=None)
+
+        def cyclic_freeze(target_fd, signum, *args):
+            if signum == signal.SIGSTOP:
+                explicit = IndexError("explicit cause")
+                cancellation = TimeoutError("pending cancellation")
+                explicit.__context__ = cancellation
+                raise cancellation from explicit
+            assert signum == signal.SIGKILL, signum
+            return None
+
+        with patch.object(signal, "pidfd_send_signal", cyclic_freeze), (
+                patch.object(emit, "_fixture_signal",
+                             side_effect=hostile)):
+            try:
+                emit._FixtureProcess._escalate(fake)
+            except TimeoutError as exc:
+                notes = getattr(exc, "__notes__", [])
+                assert any("unrepresentable _HostileRepr" in note
+                           for note in notes), (
+                    "the degraded note fallback did not name the "
+                    "suppressed failure", notes)
+            except BaseException as exc:
+                raise AssertionError(
+                    "the degraded diagnostic path displaced the pending "
+                    "cancellation (QA27 codex BLOCKER 2)",
+                    type(exc).__name__)
+            else:
+                raise AssertionError("the escalation did not propagate")
     elif mode == "receipt-high-fd":
         import fcntl
         import resource

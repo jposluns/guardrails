@@ -1030,6 +1030,116 @@ def _fixture_verify_group_kill(group):
         time.sleep(0.005)
 
 
+# Fix 6 (QA27 codex BLOCKER 1/2; premise change): pending-cancellation
+# priority is ONE shared boundary, never a per-site idiom. Every cleanup
+# step in the escalation path (_fixture_escalate_subject, _escalate) runs
+# through _cleanup_boundary below, and an AST structural leg in
+# `opf.py --self-test` (census-exception) turns red if any finally there
+# stops routing through it. KeyboardInterrupt joins TimeoutError and
+# InterruptedError in the pending set: all three carry cancellation
+# semantics a later cleanup failure must never displace.
+_PENDING_CANCELLATIONS = (TimeoutError, InterruptedError, KeyboardInterrupt)
+
+
+def _chain_ids(exc):
+    """ids of every exception reachable from exc over __cause__ and
+    __context__ edges, exc included, cycle-guarded."""
+    seen, frontier = set(), [exc]
+    while frontier:
+        node = frontier.pop()
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        frontier.append(node.__cause__)
+        frontier.append(node.__context__)
+    return seen
+
+
+def _attach_beneath(pending, suppressed, site):
+    """Keep `suppressed` reachable beneath `pending` WITHOUT rewriting
+    pending's own pre-existing chain (QA26 claude MINOR 1): first drop
+    suppressed's implicit back-edge to pending (set when it was raised
+    inside the caller's finally), so the outward chain stays acyclic;
+    then attach the suppressed EXCEPTION OBJECT as pending.__cause__ when
+    that slot is free, else append it at the tail of pending's displayed
+    cause/context chain (QA27 codex: the object and its own chain stay
+    reachable, never just a repr), and only when no acyclic attachment
+    exists -- the two chains already share a node, or a cycle occupies
+    the tail slots -- fall back to a note naming the site and the
+    suppressed failure. Every diagnostic here, repr included, runs inside
+    the caller's protection (_cleanup_boundary), so a raising __repr__ or
+    hostile chain attribute can never displace the cancellation (QA27
+    codex BLOCKER 2)."""
+    tail, seen = suppressed, set()
+    while tail is not None and id(tail) not in seen:
+        seen.add(id(tail))
+        if tail.__context__ is pending:
+            tail.__context__ = None
+            break
+        tail = tail.__context__
+    pending_chain = _chain_ids(pending)
+    if id(suppressed) in pending_chain:
+        return  # already reachable beneath the pending cancellation
+    if not (pending_chain & _chain_ids(suppressed)):
+        if pending.__cause__ is None:
+            keep = pending.__suppress_context__
+            pending.__cause__ = suppressed
+            pending.__suppress_context__ = keep
+            return
+        tail, seen = pending, set()
+        while id(tail) not in seen:
+            seen.add(id(tail))
+            below = (tail.__cause__ if tail.__cause__ is not None
+                     else tail.__context__)
+            if below is None:
+                break
+            tail = below
+        if tail.__cause__ is None and tail.__context__ is None:
+            tail.__context__ = suppressed
+            return
+    try:
+        detail = repr(suppressed)
+    except BaseException:
+        detail = "<unrepresentable " + type(suppressed).__name__ + ">"
+    pending.add_note(site + " failure kept beneath this pending "
+                     "cancellation: " + detail)
+
+
+def _cleanup_boundary(pending, step, site):
+    """The ONE exception boundary every escalation-path cleanup step runs
+    through (fix 6: QA25, QA26 and QA27 each closed one more hand-coded
+    site; this helper closes the site class). `pending` is the exception
+    already propagating into the caller's finally (None when the caller
+    completed normally); `step` is the cleanup callable; `site` names the
+    step for diagnostics. Contract, exactly: a step that returns changes
+    nothing; a step failure with NO pending cancellation
+    (_PENDING_CANCELLATIONS) propagates unchanged, behaviour-identical to
+    the hand-coded sites this replaces; a step failure WITH a pending
+    cancellation never displaces it -- the cancellation is re-raised as
+    the outward exception, its pre-existing __cause__/__context__ chain
+    intact, the step's failure kept reachable beneath it by
+    _attach_beneath (cause slot, else chain tail, else, only when no
+    acyclic attachment exists, a note), and the whole attachment, every
+    walk and repr included, runs inside this boundary's own protection,
+    so a hostile exception degrades the attachment, never the outward
+    exception (QA27 codex BLOCKER 2). The re-raise happens OUTSIDE the
+    handler that caught the step's failure, so CPython leaves the
+    cancellation's __context__ untouched (QA26 claude MINOR 1)."""
+    try:
+        return step()
+    except BaseException as cleanup_exc:
+        if not isinstance(pending, _PENDING_CANCELLATIONS):
+            raise
+        suppressed = cleanup_exc
+    try:
+        _attach_beneath(pending, suppressed, site)
+    except BaseException:
+        # Attachment is best-effort by contract: even a failure inside
+        # the attachment machinery never displaces the cancellation.
+        pass
+    raise pending
+
+
 def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None):
     """Kill a receipt-identified subject, addressing OWNERSHIP-VERIFIED
     targets only, each through its own pidfd -- NEVER a numeric group kill,
@@ -1051,7 +1161,11 @@ def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None):
     leader (the census excludes the leader; its held-pidfd SIGKILL runs
     last, fix 2y codex F2), and the subject SIGKILL is EXCEPTION-SAFE (fix
     2z, codex BLOCKER 3): a raising census never strands the frozen leader,
-    and the census exception still propagates after the kill. The "tree"
+    and the census exception still propagates after the kill -- through the
+    shared _cleanup_boundary (fix 6, QA27 codex BLOCKER 1), so a
+    cancellation already propagating (a TimeoutError raised at the freeze)
+    stays the outward exception even when that SIGKILL itself fails, the
+    kill failure kept reachable beneath it. The "tree"
     outcome rests on OBSERVATION, never on the kill sends alone (fix 2z,
     premise change; maintainer ruling PD-335-TREE-CLAIM-STALL): while the
     guardian stays frozen, a bounded verification census
@@ -1081,6 +1195,25 @@ def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None):
     import signal
     outcome = ("subject-only", None)
     leader_kill_failed = False
+    pending = None
+
+    def kill_leader():
+        # The held-pidfd subject SIGKILL runs even if the freeze or the
+        # census raised (fix 2z, codex BLOCKER 3); the earlier exception
+        # still propagates, after the kill, through _cleanup_boundary.
+        nonlocal leader_kill_failed
+        try:
+            signal.pidfd_send_signal(subject_fd, signal.SIGKILL)
+        except (ProcessLookupError, OSError) as exc:
+            if isinstance(exc, (TimeoutError, InterruptedError)):
+                raise
+            if not isinstance(exc, ProcessLookupError):
+                # A leader this escalation could NOT kill is a survivor:
+                # the outcome names it and never claims the tree (fix 2z,
+                # gemini F1). ProcessLookupError alone proves the leader
+                # already exited.
+                leader_kill_failed = True
+
     try:
         # The freeze runs INSIDE the kill protection (round 24, codex
         # boundary): an exception here -- a re-raised cancellation, or a
@@ -1103,21 +1236,14 @@ def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None):
                 outcome = ("partial", (sorted(skipped), sorted(unverifiable)))
             else:
                 outcome = ("tree", [])
+    except BaseException as exc:
+        # Capture the exception already propagating into the kill finally:
+        # a pending cancellation must stay the outward exception even when
+        # the held-pidfd SIGKILL itself fails (fix 6, QA27 codex BLOCKER 1).
+        pending = exc
+        raise
     finally:
-        # The held-pidfd subject SIGKILL runs even if the census raised (fix
-        # 2z, codex BLOCKER 3); the census exception still propagates, after
-        # the kill.
-        try:
-            signal.pidfd_send_signal(subject_fd, signal.SIGKILL)
-        except (ProcessLookupError, OSError) as exc:
-            if isinstance(exc, (TimeoutError, InterruptedError)):
-                raise
-            if not isinstance(exc, ProcessLookupError):
-                # A leader this escalation could NOT kill is a survivor: the
-                # outcome names it and never claims the tree (fix 2z, gemini
-                # F1). ProcessLookupError alone proves the leader already
-                # exited.
-                leader_kill_failed = True
+        _cleanup_boundary(pending, kill_leader, "held-pidfd subject SIGKILL")
     if outcome[0] == "tree":
         # The kill sends alone never license the claim (fix 2z): observe the
         # group to quiescence while the guardian stays frozen.
@@ -1928,13 +2054,19 @@ class _FixtureProcess:
         ownership-checked kill helper itself fails, the guardian is still
         SIGKILLed directly through its held, identity-safe pidfd, where a
         cancellation propagates with the helper's failure chained as its
-        context (round 24, codex BLOCKER 2), and ONE exception boundary
-        spans that whole cleanup, direct backstop included: a cancellation
-        ALREADY propagating into it stays the OUTWARD exception, EVERY
-        later failure -- helper or backstop, ordinary or cancellation --
-        chained beneath it, never promoted over it, with the
-        cancellation's own pre-existing chain kept intact (QA25 codex;
-        QA26 codex closed the class) -- and an ordinary census
+        context (round 24, codex BLOCKER 2), and ONE shared exception
+        boundary (_cleanup_boundary, fix 6) spans that whole cleanup,
+        direct backstop included: a cancellation ALREADY propagating into
+        it stays the OUTWARD exception, never displaced, its own
+        pre-existing chain kept intact, and every later failure -- helper
+        or backstop, ordinary or cancellation -- is kept REACHABLE beneath
+        it: attached as its __cause__ when that slot is free, else
+        appended at the tail of its existing cause/context chain, else
+        (only when no acyclic attachment exists) named in a note, with
+        every diagnostic computed inside the boundary's protection so a
+        raising __repr__ never escapes over it (QA25/QA26 codex; QA27
+        codex BLOCKER 1/2 closed the site class at the boundary) -- and an
+        ordinary census
         failure that escaped the escalation helper records the kill that
         DID run ("partial", members unknown; the helper's own protection
         ran the held-pidfd SIGKILL, whose delivery is only ever worded as
@@ -1947,6 +2079,40 @@ class _FixtureProcess:
         import signal
         frozen = False
         pending = None
+
+        def kill_guardian():
+            # The guardian SIGKILL is exception-safe (fix 2z, codex
+            # BLOCKER 3): a raising subject cleanup never strands a frozen
+            # guardian; _cleanup_boundary spans this WHOLE step, direct
+            # backstop included (QA26 codex; fix 6).
+            try:
+                _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
+            except BaseException:
+                # Even the ownership-checked helper failing (e.g. the
+                # same census fault reaching its own group census) must
+                # not strand the frozen guardian: its held pidfd is
+                # identity-safe, SIGKILL it directly, then let the
+                # failure propagate.
+                if self.pidfd is not None:
+                    try:
+                        signal.pidfd_send_signal(self.pidfd,
+                                                 signal.SIGKILL)
+                    except (TimeoutError, InterruptedError):
+                        # A cancellation during the direct backstop
+                        # propagates, carrying the helper's failure as
+                        # its __context__ (round 24, codex BLOCKER 2);
+                        # _cleanup_boundary still keeps a PENDING
+                        # cancellation outward over it (QA26 codex).
+                        raise
+                    except OSError:
+                        # An ordinary delivery failure is out of moves:
+                        # the helper's own failure propagates below. A
+                        # non-OSError backstop fault falls through to
+                        # _cleanup_boundary instead of displacing a
+                        # pending cancellation (QA26 codex).
+                        pass
+                raise
+
         try:
             # The freeze runs INSIDE the guardian-kill protection (round 24,
             # codex boundary): an exception here must still reach the
@@ -1984,79 +2150,13 @@ class _FixtureProcess:
             # Capture the exception ALREADY propagating into the
             # guardian-kill finally: a pending cancellation must stay the
             # outward exception even when the cleanup below fails (QA25
-            # codex).
+            # codex; fix 6 routes the whole step through the one shared
+            # boundary).
             pending = exc
             raise
         finally:
-            # The guardian SIGKILL is exception-safe (fix 2z, codex BLOCKER
-            # 3): a raising subject cleanup never strands a frozen guardian
-            # -- and ONE exception boundary spans the WHOLE cleanup, direct
-            # backstop included (QA26 codex): a pending cancellation always
-            # stays the outward exception, whatever the cleanup raises.
-            suppressed = None
-            try:
-                try:
-                    _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
-                except BaseException:
-                    # Even the ownership-checked helper failing (e.g. the
-                    # same census fault reaching its own group census) must
-                    # not strand the frozen guardian: its held pidfd is
-                    # identity-safe, SIGKILL it directly, then let the
-                    # failure propagate.
-                    if self.pidfd is not None:
-                        try:
-                            signal.pidfd_send_signal(self.pidfd,
-                                                     signal.SIGKILL)
-                        except (TimeoutError, InterruptedError):
-                            # A cancellation during the direct backstop
-                            # propagates, carrying the helper's failure as
-                            # its __context__ (round 24, codex BLOCKER 2);
-                            # the boundary below still keeps a PENDING
-                            # cancellation outward over it (QA26 codex).
-                            raise
-                        except OSError:
-                            # An ordinary delivery failure is out of moves:
-                            # the helper's own failure propagates below. A
-                            # non-OSError backstop fault falls through to
-                            # the boundary instead of displacing a pending
-                            # cancellation (QA26 codex).
-                            pass
-                    raise
-            except BaseException as cleanup_exc:
-                # A cancellation ALREADY propagating into this finally stays
-                # the OUTWARD exception: EVERY later failure -- helper or
-                # backstop, ordinary or cancellation -- is chained beneath
-                # it, never promoted over it (QA25 codex; QA26 codex closed
-                # the class, not the instances).
-                if not isinstance(pending, (TimeoutError, InterruptedError)):
-                    raise
-                suppressed = cleanup_exc
-            if suppressed is not None:
-                # Chain the suppressed cleanup failure beneath the pending
-                # cancellation WITHOUT rewriting the cancellation's own
-                # pre-existing chain (QA26 claude MINOR 1): pending is the
-                # exception this finally is already handling, so re-raising
-                # it here leaves its __context__ intact, where the previous
-                # raise-from inside the handler above unlinked it. The
-                # suppressed failure's implicit back-edge to pending (set
-                # when it was raised inside this finally) is dropped so the
-                # outward chain stays acyclic.
-                tail, seen = suppressed, set()
-                while tail is not None and id(tail) not in seen:
-                    seen.add(id(tail))
-                    if tail.__context__ is pending:
-                        tail.__context__ = None
-                        break
-                    tail = tail.__context__
-                if pending.__cause__ is None:
-                    keep = pending.__suppress_context__
-                    pending.__cause__ = suppressed
-                    pending.__suppress_context__ = keep
-                else:
-                    pending.add_note(
-                        "guardian-kill cleanup failure kept beneath this "
-                        "pending cancellation: " + repr(suppressed))
-                raise pending
+            _cleanup_boundary(pending, kill_guardian,
+                              "guardian-kill cleanup")
 
     def _abandon_unfinished_launch(self):
         """Decide, under the launch lock, who owns an unfinished launch: if the
