@@ -67,9 +67,9 @@ files are served from this repository's main branch; for a raw download, use
 | File | SHA-256 | Link |
 |---|---|---|
 | `clock-inject.py` | `65fe1cae733f72d2f82b884b9bb710310b0b6ad0dcccd8c874c5f2bdd2e25386` | [clock-inject.py](clock-inject.py) |
-| `future-stamp-write.py` | `100c592b66179924d0e149a56132be6f6e6cb815469931b0ae28627e57455403` | [future-stamp-write.py](future-stamp-write.py) |
+| `future-stamp-write.py` | `5140ca137886b06b7a52d0fd7647464cb91c3ac81de0f0319e419e49f61a1595` | [future-stamp-write.py](future-stamp-write.py) |
 | `record-remove-check.py` | `815563da687c461408c3c584f84adf2080958402ab17798129ba281723b2ee9f` | [record-remove-check.py](record-remove-check.py) |
-| `stamp-truth-stop.py` | `abc638deae9c2b28af3e16d6033fbccfe3f277157d805298771a3e8c008a2f9a` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `stamp-truth-stop.py` | `4b62e200f3e8bd28a9c3ac4e73e85aeba9dec28d24a43ad95d253d0a3521bf35` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `06129bcf4fe5ff65100a55ddb35d8e51db927e33ab41311dd6c4785929937fdd` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `286295b9949eda2a6e9bcc919095d9bf14e181578c5e5085381c6106d6a934fd` | [ungated-record.py](ungated-record.py) |
 

@@ -1986,7 +1986,8 @@ def _self_test():
     # growth() samples CPU time (time.process_time), which a preemption never advances, and retries with a
     # larger repetition multiplier, the same for both sizes, until every sample of the round it returns is at
     # least FLOOR seconds of measured work; a floor met only during a separate calibration round could rest
-    # on a stalled clock read while the measured samples stayed in the noise.
+    # on a stalled clock read while the measured samples stayed in the noise. A run the cap cannot lift
+    # above the floor is refused (cannot measure above the floor), never returned as sub-noise samples.
     HANG_TIMEOUT = 120  # seconds: a child's hang guard only, far above any child's own run (a few seconds)
     GROWTH = 8
     LINEAR_LIMIT = 2.0  # GROWTH growth: about 1 when linear, about GROWTH when quadratic
@@ -2006,14 +2007,19 @@ def _self_test():
                   "            for size, out in zip((n, GROWTH * n), times):\n"
                   "                out.append(sample(size, mult))\n"
                   "        fastest = min(min(times[0]), min(times[1]))\n"
-                  "        if fastest >= FLOOR or mult >= 1 << 20:\n"
+                  "        if fastest >= FLOOR:\n"
                   "            return min(times[0]), min(times[1])\n"
+                  "        if mult >= 1 << 20:\n"
+                  "            raise RuntimeError('cannot measure above the floor: the fastest sample is '\n"
+                  "                               '%%.6f s at the multiplier cap' %% fastest)\n"
                   "        mult = min(max(mult * 2, int(mult * FLOOR / max(fastest, 1e-9)) + 1), 1 << 20)\n") % GROWTH
 
     def growth_in_child(run_src, n, reps=5):
         """Time GROWTH runs of run(n) and one of run(GROWTH * n), where the source `run_src` defines run, in a
         fresh interpreter under HANG_TIMEOUT (sizes interleaved, best of `reps` each); return (small, large) in
-        seconds. A child that fails (an assert in run included) raises AssertionError with its stderr."""
+        CPU seconds (time.process_time), every returned sample at least FLOOR. A child that fails (an assert
+        in run included, and a run too cheap to measure above the floor) raises AssertionError with its
+        stderr."""
         code = CHILD_HEAD + GROWTH_SRC + run_src + "print(json.dumps(growth(%d, run, %d)))\n" % (n, reps)
         r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
                            timeout=HANG_TIMEOUT)
@@ -2052,8 +2058,12 @@ def _self_test():
         """Count, in a fresh interpreter, the WORK of one fn(n) and one fn(GROWTH * n), where `setup_src`
         defines fn: the line events run in this module's frames and the bytes newly allocated (tracemalloc,
         sampled at every opcode of those frames, so a join's result is counted before its inputs are freed).
-        Returns (lines_small, alloc_small, lines_large, alloc_large); no clock is read, so the counts are the
-        same on a loaded host as on an idle one. A child that fails raises AssertionError with its stderr."""
+        Returns (lines_small, alloc_small, lines_large, alloc_large); no clock is read, so load never moves
+        the counts: line counts are exact, and allocated-byte counts are approximately stable (about 1
+        percent of jitter with the child's random hash seed, far inside LINEAR_LIMIT). Counting sees
+        Python-frame steps and allocations only; work inside one C call that allocates nothing is invisible
+        to it (QA round 2), so every counted test keeps a CPU-clock growth check beside it. A child that
+        fails raises AssertionError with its stderr."""
         code = CHILD_HEAD + COUNTED_SRC + setup_src + \
             "print(json.dumps(counted(lambda: fn(%d)) + counted(lambda: fn(GROWTH * %d))))\n" % (n, n)
         r = subprocess.run([sys.executable, "-I", "-B", "-c", code], capture_output=True, text=True,
@@ -2420,6 +2430,21 @@ def _self_test():
                 "    m.check_message('Session elapsed' * (n // 5) + '\\nSession ' + '-' * (2 * n), 0, 0, 'x', 0)\n",
                 12500)
             self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
+
+        def test_growth_refuses_sub_floor_samples(self):
+            # QA round 2 (codex 3): at the multiplier cap growth() returned sub-floor samples, voiding the
+            # every-sample floor; it now fails closed. The child's CPU clock is replaced by a counter that
+            # barely advances, so the cap is reached the same way on any host
+            with self.assertRaises(AssertionError) as ctx:
+                growth_in_child(
+                    "ticks = [0.0]\n"
+                    "def _fake_clock():\n"
+                    "    ticks[0] += 1e-09\n"
+                    "    return ticks[0]\n"
+                    "time.process_time = _fake_clock\n"
+                    "def run(n):\n"
+                    "    pass\n", 1000, 1)
+            self.assertIn("cannot measure above the floor", str(ctx.exception))
 
         # -- which messages --
         def test_only_after_last_genuine_user(self):
@@ -2856,12 +2881,14 @@ def _self_test():
             self.assertLess(max(parsed), 32 << 20, parsed)
             self.assertLessEqual(max(parsed), MAX_RECORD_BYTES, parsed)
             # the ASSEMBLY of a record under the bound is linear too: no pread or json.loads count sees the
-            # joining of pieces, so it is COUNTED, not timed, in a child with CHUNK cut to 4 KiB (each record
-            # spans many pieces): the line events run in this module's frames and the bytes newly allocated
-            # while _reverse_records assembles one record, at n and at GROWTH * n. The counts are
-            # deterministic, so host speed and load never enter the verdict; a quadratic assembly (one that
-            # re-joins or re-scans the growing tail) grows the GROWTH * n count faster than GROWTH and
-            # leaves the linear band
+            # joining of pieces, so it is checked twice, in children with CHUNK cut to 4 KiB (each record
+            # spans many pieces). First COUNTED work (line events in this module's frames and the bytes newly
+            # allocated while _reverse_records assembles one record, at n and at GROWTH * n): load never
+            # moves the counts (line counts exact, allocated bytes about 1 percent of hash-seed jitter), and
+            # a Python-frame re-scan or an allocating re-join of the growing tail leaves the linear band. The
+            # counts CANNOT see a C-level, allocation-free quadratic (one C call re-scanning an accumulated
+            # buffer adds no line events and no net allocation, QA round 2), so a CPU-clock growth check runs
+            # beside them below; both must hold
             n = 384 << 10
             lines_small, alloc_small, lines_large, alloc_large = counted_in_child(
                 "import os\n"
@@ -2883,6 +2910,34 @@ def _self_test():
             self.assertLessEqual(GROWTH * n + 100, MAX_RECORD_BYTES)  # both sizes are assembled, not dropped
             self.assertLess(lines_large / (GROWTH * lines_small), LINEAR_LIMIT, (lines_small, lines_large))
             self.assertLess(alloc_large / (GROWTH * alloc_small), LINEAR_LIMIT, (alloc_small, alloc_large))
+            # and the same assembly TIMED on the CPU clock (growth_in_child), which does see C-level work:
+            # QA round 2's mutant (bytearray += piece, then a C-level find over the accumulated buffer per
+            # piece) is counted-invisible yet time-quadratic (3.9x here). Smaller sizes than the counted
+            # pair, and a smaller CHUNK: cache misses are charged to CPU time, so when the 8x record's
+            # working set outgrows a cache level the ratio absorbs the host's cache pressure, not just this
+            # code's work (measured on CORRECT code: 2.4x to 3.9x at 384 KiB and up under a cache-hostile
+            # neighbor, against 0.9x at these sizes under the same load). At 32 KiB both records stay
+            # resident in any per-core cache, and CHUNK 2048 keeps the piece counts high (16 against 128),
+            # which is what a per-piece re-scan or re-join grows with
+            nt = 32 << 10
+            small, large = growth_in_child(
+                "import os\n"
+                "m.CHUNK = 2048\n"
+                "d = tempfile.mkdtemp(dir=%r)\n"
+                "for size in (%d, GROWTH * %d):\n"
+                "    with open(os.path.join(d, str(size)), 'w') as f:\n"
+                "        f.write(json.dumps({'type': 'user', 'message': {'content': [\n"
+                "            {'type': 'tool_result', 'content': 'x' * size}]}}) + '\\n')\n"
+                "def run(size):\n"
+                "    p = os.path.join(d, str(size))\n"
+                "    fd = os.open(p, os.O_RDONLY)\n"
+                "    try:\n"
+                "        recs = list(m._reverse_records(fd, os.path.getsize(p)))\n"
+                "    finally:\n"
+                "        os.close(fd)\n"
+                "    assert len(recs) == 1 and recs[0][1] is not None and len(recs[0][1]) > size, len(recs)\n"
+                % (self.tmp, nt, nt), nt, 3)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
         def test_reverse_records_exact_with_offsets(self):
             lines = [b"a" * n for n in (0, 1, CHUNK - 1, CHUNK, CHUNK + 1, 3 * CHUNK + 7, 5)]
@@ -3012,8 +3067,9 @@ def _self_test():
             self.assertEqual(check_message(line, to_us(self.now), None, "x", BEHIND_US), [])
             r = check_message("next " + "2099-01-01T00:00Z x " * 50000, to_us(self.now), None, "x", BEHIND_US)
             self.assertEqual(len(r), 1)  # deduplicated
-            # linear: the growth of COUNTED work (see counted_in_child) from n to GROWTH * n stamps; the
-            # round-3 defect sliced the growing line prefix per claim, which the allocated-bytes count sees
+            # linear twice over: first the growth of COUNTED work (see counted_in_child) from n to
+            # GROWTH * n stamps; the round-3 defect sliced the growing line prefix per claim, which the
+            # allocated-bytes count sees
             lines_small, alloc_small, lines_large, alloc_large = counted_in_child(
                 "now = m.to_us(datetime.datetime(2026, 9, 23, 17, 45, tzinfo=UTC))\n"
                 "def fn(n):\n"
@@ -3022,6 +3078,16 @@ def _self_test():
                 "    assert len(r) == 1, r\n", 12500)
             self.assertLess(lines_large / (GROWTH * lines_small), LINEAR_LIMIT, (lines_small, lines_large))
             self.assertLess(alloc_large / (GROWTH * alloc_small), LINEAR_LIMIT, (alloc_small, alloc_large))
+            # and the same shape TIMED on the CPU clock (growth_in_child), which does see C-level work: QA
+            # round 2's mutant (line.count over the growing prefix, every 16th claim) allocates nothing and
+            # adds no line events, so only the timed frame catches it
+            small, large = growth_in_child(
+                "now = m.to_us(datetime.datetime(2026, 9, 23, 17, 45, tzinfo=UTC))\n"
+                "def run(n):\n"
+                "    assert m.check_message('2026-09-23T17:45Z ' * n, now, None, 'x', m.BEHIND_US) == []\n"
+                "    r = m.check_message('next ' + '2099-01-01T00:00Z x ' * (n // 2), now, None, 'x', m.BEHIND_US)\n"
+                "    assert len(r) == 1, r\n", 12500, 3)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
         def test_r5_many_distinct_violations_linear_and_bounded(self):
             # finding (codex r4): add() scanned the growing violation list (quadratic in distinct violations)
@@ -3030,10 +3096,11 @@ def _self_test():
             self.assertEqual(len(set(lits)), 40000)
             r = self.final(" ".join(lits))
             self.assertEqual(r.count(" in your final message: "), MAX_REPORTED)
-            # linear: the growth of COUNTED work (see counted_in_child: line events and allocated bytes in
-            # this module's frames) from n to GROWTH * n distinct violations (up to 40,000); a timed frame here
-            # read 2.744x on a loaded 16-core host with every sample above the floor, an allocator and cache
-            # size effect of the 40,000-entry working set, which counting removes
+            # linear twice over: first the growth of COUNTED work (see counted_in_child: line events and
+            # allocated bytes in this module's frames) from n to GROWTH * n distinct violations (up to
+            # 40,000); a WALL-clock frame here read 2.744x on a loaded 16-core host with every sample above
+            # the floor, an allocator and cache size effect of the 40,000-entry working set, which counting
+            # removes and the CPU clock does not reward
             lines_small, alloc_small, lines_large, alloc_large = counted_in_child(
                 "lits = [f'2099-{1 + i %% 12:02d}-{1 + (i // 12) %% 28:02d}T{(i // 336) %% 24:02d}:"
                 "{(i // 8064) %% 60:02d}Z' for i in range(40000)]\n"
@@ -3045,6 +3112,18 @@ def _self_test():
                 % self.tmp, 5000)
             self.assertLess(lines_large / (GROWTH * lines_small), LINEAR_LIMIT, (lines_small, lines_large))
             self.assertLess(alloc_large / (GROWTH * alloc_small), LINEAR_LIMIT, (alloc_small, alloc_large))
+            # and the same shape TIMED on the CPU clock (growth_in_child), which does see C-level,
+            # allocation-free work the counts cannot (QA round 2)
+            small, large = growth_in_child(
+                "lits = [f'2099-{1 + i %% 12:02d}-{1 + (i // 12) %% 28:02d}T{(i // 336) %% 24:02d}:"
+                "{(i // 8064) %% 60:02d}Z' for i in range(40000)]\n"
+                "now = datetime.datetime(2026, 9, 23, 17, 45, tzinfo=UTC)\n"
+                "start = datetime.datetime(2026, 9, 23, 14, 18, tzinfo=UTC)\n"
+                "def run(n):\n"
+                "    sd = tempfile.mkdtemp(dir=%r)\n"
+                "    assert m.evaluate({'last_assistant_message': ' '.join(lits[:n])}, now, start, sd)\n"
+                % self.tmp, 5000, 3)
+            self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
             self.assertIn(f"... and {40000 - MAX_REPORTED} more distinct violation(s) not listed", r)
 
         def test_r4_threat_model_stated(self):

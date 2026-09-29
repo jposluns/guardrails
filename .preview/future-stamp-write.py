@@ -3564,7 +3564,8 @@ def _self_test():
         # interleaved() retries with a larger repetition multiplier, the same for every size, until every
         # sample of the round it returns is at least FLOOR seconds of measured work; a floor met only during
         # a separate calibration round could rest on a stalled clock read while the measured samples stayed
-        # in the noise
+        # in the noise. A run the cap cannot lift above the floor is refused (cannot measure above the
+        # floor), never returned as sub-noise samples
         "FLOOR = 0.1\n"
         "def _sample(n, run, mult):\n"
         "    t0 = time.process_time()\n"
@@ -3579,8 +3580,11 @@ def _self_test():
         "            for n, out in zip(sizes, times):\n"
         "                out.append(_sample(n, run, mult))\n"
         "        fastest = min(min(t) for t in times)\n"
-        "        if fastest >= FLOOR or mult >= 1 << 20:\n"
+        "        if fastest >= FLOOR:\n"
         "            return [min(t) for t in times]\n"
+        "        if mult >= 1 << 20:\n"
+        "            raise RuntimeError('cannot measure above the floor: the fastest sample is '\n"
+        "                               '%%.6f s at the multiplier cap' %% fastest)\n"
         "        mult = min(max(mult * 2, int(mult * FLOOR / max(fastest, 1e-9)) + 1), 1 << 20)\n"
         "def ratio(n, run, reps=5):\n"
         "    def same_work(k):\n"
@@ -6182,6 +6186,23 @@ def _self_test():
                 self.assertIn("run_timed(code, HANG_TIMEOUT)", src)
                 self.assertNotIn("best(2 * n, r)", src)
             # a wall-clock bound in any test is rejected by test_no_wall_clock_verdict (an AST scan)
+
+        def test_interleaved_refuses_sub_floor_samples(self):
+            # QA round 2 (codex 3): at the multiplier cap interleaved() returned sub-floor samples, voiding
+            # the every-sample floor; it now fails closed. The child's CPU clock is replaced by a counter
+            # that barely advances, so the cap is reached the same way on any host
+            code = TIMED_PRELUDE + (
+                "ticks = [0.0]\n"
+                "def _fake_clock():\n"
+                "    ticks[0] += 1e-09\n"
+                "    return ticks[0]\n"
+                "time.process_time = _fake_clock\n"
+                "def run(n):\n"
+                "    pass\n"
+                "print(json.dumps(interleaved((1000, 8000), run, 1)))\n")
+            with self.assertRaises(AssertionError) as ctx:
+                run_timed(code, HANG_TIMEOUT)
+            self.assertIn("cannot measure above the floor", str(ctx.exception))
 
         def test_r32_disclosures(self):
             doc = " ".join(__doc__.split())
