@@ -4478,10 +4478,21 @@ def _watchdog_completion_case(mode):
         # Leg 11 (fix 6, premise change; fix 7, QA28; fix 8, QA29 codex
         # BLOCKER 2 / claude MAJOR 1, MINOR 2 / gemini BLOCKER; maintainer
         # ruling PD-335, narrow and disclose; fix 9, QA30 codex BLOCKER
-        # 1/2 / claude MINOR 1/2/3): the pending-cancellation
-        # boundary is STRUCTURAL, its scope is COMPUTED over the whole
-        # close lifecycle, and the computation FAILS CLOSED on every call
-        # edge it cannot resolve. The GUARANTEE is scoped to cleanup the
+        # 1/2 / claude MINOR 1/2/3; fix 11, QA32, maintainer ruling
+        # PD-335-TAIL option 2): the pending-cancellation boundary is
+        # checked structurally as a TRIPWIRE over RECOGNIZED SHAPES --
+        # not a whole-language proof. Python's open grammar
+        # (reflection, dynamic namespaces, pattern bindings) means a
+        # static scan cannot enumerate every way module-owned cleanup
+        # could be hidden or a capture subverted; the GUARANTEE
+        # therefore rests on the BEHAVIOURAL matrix (leg 19 below),
+        # which drives every module-owned cleanup site in the computed
+        # closure with a real pending cancellation plus a real cleanup
+        # fault, the site list DERIVED from that closure so a new site
+        # without a behavioural case fails the self-test. Within the
+        # shapes it recognizes, this leg's scope is COMPUTED over the
+        # whole close lifecycle and the computation FAILS CLOSED on
+        # every call edge it cannot resolve. The GUARANTEE is scoped to cleanup the
         # module OWNS: every module-owned cleanup reachable from the
         # lifecycle entry points (_FixtureProcess.close, _finish_close,
         # _interrupt_collect, _escalate, _address_failed_subject) routes
@@ -4529,27 +4540,79 @@ def _watchdog_completion_case(mode):
         # resolved INTO the closure, no disclosed name may shadow a
         # module method, and any receiver that could be module-owned is
         # a cannot-evaluate FAILURE. Fix 10 (QA31 codex BLOCKER 1/2 /
-        # gemini BLOCKER b/c) holds both promises at class width: after
-        # a capture, every boundary call that can run while the capture
-        # may be pending passes exactly the CAPTURED NAME as its
-        # pending argument; the captured name must not be rebound by
-        # ANY binding form -- assignment in every syntactic shape, a
-        # walrus anywhere in an expression, a nested def or class name,
-        # a nonlocal/global reach-back, while the statement forms the
-        # walk does not model (for/with/except/del/import targets among
-        # them) already fail closed; a try that follows a capture is
-        # walked in FULL (body, else and finally), so a finally can no
-        # longer hide a rebinding or a foreign raise behind the old
-        # call-only scan; and an imported name counts as external only
-        # while the import is its ONLY binding anywhere in the module
-        # and no attribute assignment or setattr/delattr targets the
-        # module object -- a shadowing or poisoning binding drops the
-        # name back into the receiver-origin proof, where it resolves
-        # into the closure or is a cannot-evaluate FAILURE (name-level
-        # OVER-approximation: one poisoning site anywhere disqualifies
-        # the name module-wide, fail-closed by construction), and a
-        # boundary-step os/signal primitive clears only through an
-        # unpoisoned imported module name.
+        # gemini BLOCKER b/c) and fix 11 (QA32) hold both promises at
+        # the width of the MODELED shapes: after a capture, every
+        # boundary call that can run while the capture may be pending
+        # passes exactly the CAPTURED NAME as its pending argument,
+        # and EVERY boundary call in the closure passes a pending
+        # argument of a recognized shape -- a bare name, or the
+        # module's cancellation-conditional expression -- any other
+        # shape is a cannot-evaluate FAILURE (QA32 claude BLOCKER 2:
+        # shape recognition is the tripwire; that the name holds the
+        # RIGHT object at runtime is what leg 19 checks at every
+        # site). The captured name must not be rebound by any binding
+        # form the walk MODELS: assignment in every modeled syntactic
+        # shape (a bare annotation with no value binds nothing and is
+        # NOT a rebinding, QA32 codex MINOR), a walrus anywhere in an
+        # expression, a nested def or class name, and a
+        # nonlocal/global of the captured name ANYWHERE in the
+        # function, nested defs included (QA32 claude BLOCKER 1) --
+        # while the statement forms the walk does not model
+        # (for/with/except/del/import targets among them) fail
+        # closed, as does a call-free yield/await suspension point
+        # after a capture (QA32 claude MINOR 2). A try that follows a
+        # capture is walked in FULL (body, else and finally), the
+        # capturing try's OWN finally is walked as a successor (QA32
+        # codex BLOCKER 1), and a nested def or lambda after a
+        # capture has its definition-time work -- decorators,
+        # parameter defaults, annotations -- checked like any other
+        # call site (QA32 codex BLOCKER 2; a class statement after a
+        # capture already fails closed). A handler whose capture
+        # target collides with its own `as` name, and a handler that
+        # overwrites its bound name or an alias of it before its
+        # final raise, are FAILURES (QA32 codex BLOCKER 3). An
+        # imported name counts as external only while the import is
+        # its only binding AMONG THE BINDING AND MUTATION FORMS THE
+        # SCAN BELOW MODELS and no modeled attribute assignment or
+        # unqualified setattr/delattr targets the module object -- a
+        # shadowing or poisoning binding drops the name back into the
+        # receiver-origin proof, where it resolves into the closure
+        # or is a cannot-evaluate FAILURE (name-level
+        # OVER-approximation: one poisoning site anywhere
+        # disqualifies the name module-wide, fail-closed by
+        # construction), and a boundary-step os/signal primitive
+        # clears only through an unpoisoned imported module name.
+        # DISCLOSED OPEN-GRAMMAR RESIDUAL CLASSES (fix 11, QA32,
+        # PD-335-TAIL option 2) -- shapes this tripwire does NOT
+        # recognize and does NOT enforce against; each could hide
+        # module-owned cleanup from this leg or launder it as
+        # external, so they are disclosed here, where leg 11 is
+        # defined, and leg 19's behavioural matrix -- not this leg --
+        # is what holds every known cleanup site to the guarantee:
+        #   - match/case pattern bindings (capture, sequence and
+        #     mapping patterns bind names past both binding scanners,
+        #     QA32 codex BLOCKER 4);
+        #   - reflective module or namespace mutation: a qualified
+        #     setattr (builtins.setattr), sys.modules stores,
+        #     importlib / __import__, and stores through
+        #     globals()/vars()/module __dict__ (QA32 codex BLOCKER 4
+        #     / claude MAJOR 2; QA31 gemini c);
+        #   - one module imported under TWO names: poisoning one
+        #     alias leaves the other cleared, though both reference
+        #     the same mutated module object (QA32 codex BLOCKER 4);
+        #   - escape of an imported module as a VALUE (alias = os):
+        #     mutation through the escaped reference never poisons
+        #     the imported name (QA32 gemini c);
+        #   - a module self-import: a plain import of the emit module
+        #     itself makes module-owned code clear as "external"
+        #     (QA32 claude MAJOR 1);
+        #   - module-level shadowing of a BUILTIN name: resolve_call's
+        #     builtin clearance checks function-local bindings only
+        #     (QA32 codex BLOCKER 5 / claude MINOR 1).
+        # These classes are RESIDUAL, not enforced: their absence
+        # from the emit module is a review invariant, and a mutation
+        # inside one of them evades this leg while leg 19 still holds
+        # every existing boundary site to its runtime behaviour.
         import ast
         import builtins
         import inspect
@@ -4578,11 +4641,19 @@ def _watchdog_completion_case(mode):
         # name or parameter, a from-import, del, global/nonlocal)
         # SHADOWS the name, and an attribute assignment (any name
         # inside an assignment target's subtree counts, so `X.attr =`
-        # and `X[i].attr =` both reach X) or a setattr/delattr call
-        # POISONS the module object itself. Either disqualifies the
-        # name here, so a call through it falls back into the
-        # receiver-origin proof and fails closed instead of hiding
-        # module-owned cleanup behind an imported name.
+        # and `X[i].attr =` both reach X) or an UNQUALIFIED
+        # setattr/delattr call POISONS the module object itself.
+        # Either disqualifies the name here, so a call through it
+        # falls back into the receiver-origin proof and fails closed
+        # instead of hiding module-owned cleanup behind an imported
+        # name. This scan models exactly the forms its walk below
+        # enumerates and NO MORE (fix 11, QA32 codex BLOCKER 4 /
+        # gemini c): pattern bindings, reflective mutation (a
+        # qualified setattr, sys.modules, importlib, __import__,
+        # globals()/vars()/__dict__ stores), a second import alias of
+        # the same module, escape of the module as a value, and a
+        # self-import of the emit module are the DISCLOSED residual
+        # classes at the leg 11 header, not enforced here.
         def external_import_names(tree):
             imported, shadowed = set(), set()
 
@@ -4933,9 +5004,14 @@ def _watchdog_completion_case(mode):
                     # fix 10 (QA31 class width): a builtin-named call
                     # clears only while the function itself never
                     # binds that name -- the same shadowing discipline
-                    # as the imported-module names; a module-LEVEL
-                    # rebinding of a builtin name stays a disclosed
-                    # residual of the builtins clearance above
+                    # as the imported-module names. A module-LEVEL
+                    # rebinding of a builtin name is NOT caught here:
+                    # it is one of the disclosed open-grammar residual
+                    # classes at the leg 11 header (fix 11, QA32 codex
+                    # BLOCKER 5 / claude MINOR 1) -- it could route
+                    # module-owned cleanup through a cleared builtin
+                    # name, and only the behavioural matrix (leg 19)
+                    # holds such a site to the guarantee.
                     return None
                 raise AssertionError((
                     "cannot resolve a call edge in the close-lifecycle "
@@ -5123,6 +5199,57 @@ def _watchdog_completion_case(mode):
             return (len(body) == 1 and isinstance(body[0], ast.Raise)
                     and body[0].exc is None)
 
+        def rebound_names(stmt):
+            # Every name the statement subtree may BIND (fix 11, QA32
+            # codex BLOCKER 3): assignment targets in every modeled
+            # shape, a walrus, for/with/except/del/import targets,
+            # def/class names, global/nonlocal declarations. A bare
+            # annotation with no value binds nothing (QA32 codex
+            # MINOR). The walk descends into nested defs;
+            # over-collection only ever REMOVES an alias, so it fails
+            # closed.
+            bound = set()
+
+            def target_names(target):
+                for sub in ast.walk(target):
+                    if isinstance(sub, ast.Name):
+                        bound.add(sub.id)
+
+            for leaf in ast.walk(stmt):
+                if isinstance(leaf, ast.Assign):
+                    for target in leaf.targets:
+                        target_names(target)
+                elif isinstance(leaf, (ast.AugAssign, ast.NamedExpr)):
+                    target_names(leaf.target)
+                elif isinstance(leaf, ast.AnnAssign):
+                    if leaf.value is not None:
+                        target_names(leaf.target)
+                elif isinstance(leaf, (ast.For, ast.AsyncFor)):
+                    target_names(leaf.target)
+                elif isinstance(leaf, ast.comprehension):
+                    target_names(leaf.target)
+                elif isinstance(leaf, (ast.With, ast.AsyncWith)):
+                    for item in leaf.items:
+                        if item.optional_vars is not None:
+                            target_names(item.optional_vars)
+                elif isinstance(leaf, ast.ExceptHandler):
+                    if leaf.name:
+                        bound.add(leaf.name)
+                elif isinstance(leaf, (ast.FunctionDef,
+                                       ast.AsyncFunctionDef,
+                                       ast.ClassDef)):
+                    bound.add(leaf.name)
+                elif isinstance(leaf, (ast.Import, ast.ImportFrom)):
+                    for alias in leaf.names:
+                        bound.add(alias.asname
+                                  or alias.name.split(".")[0])
+                elif isinstance(leaf, (ast.Global, ast.Nonlocal)):
+                    bound.update(leaf.names)
+                elif isinstance(leaf, ast.Delete):
+                    for target in leaf.targets:
+                        target_names(target)
+            return bound
+
         def ends_in_raise(body, bound):
             # A bare re-raise, or the deferred re-raise of the handler's
             # OWN captured object: a final `raise <name>` counts only
@@ -5130,6 +5257,13 @@ def _watchdog_completion_case(mode):
             # from it in this handler (fix 9, QA30 claude MINOR 1:
             # any-Name acceptance let a handler end in a raise of an
             # unrelated pre-existing object while swallowing the caught
+            # cancellation) -- and the alias must SURVIVE to the raise:
+            # any later binding of an alias by anything but a fresh
+            # alias-of-alias assignment DISCARDS it, so a handler that
+            # overwrites its bound name or an alias before the final
+            # raise no longer counts (fix 11, QA32 codex BLOCKER 3:
+            # `interrupted: object = None; raise interrupted` raised
+            # the overwritten object while swallowing the caught
             # cancellation).
             last = body[-1]
             if not isinstance(last, ast.Raise):
@@ -5146,6 +5280,10 @@ def _watchdog_completion_case(mode):
                         and isinstance(stmt.value, ast.Name)
                         and stmt.value.id in aliases):
                     aliases.add(stmt.targets[0].id)
+                    continue
+                aliases -= rebound_names(stmt)
+                if not aliases:
+                    return False
             return last.exc.id in aliases
 
         def guard_covers(stmt, required, bound, where):
@@ -5193,6 +5331,13 @@ def _watchdog_completion_case(mode):
                     if captured is not None:
                         return None
                     captured = stmt.targets[0].id
+                    assert captured != bound, (
+                        "a capture reuses the handler's own bound "
+                        "name: Python DELETES that binding when the "
+                        "handler exits, so every later use of the "
+                        "capture reads an unbound name and the "
+                        "cancellation is lost -- FAILURE (fix 11, "
+                        "QA32 codex BLOCKER 3)")
                     continue
                 if (isinstance(stmt, ast.Expr)
                         and isinstance(stmt.value, ast.Call)
@@ -5222,12 +5367,31 @@ def _watchdog_completion_case(mode):
 
         def direct_calls(body):
             # Calls this block itself executes: a nested def runs only
-            # when invoked, so its body is checked where it is routed.
+            # when invoked, so its BODY is checked where it is routed
+            # -- but the definition statement itself EXECUTES its
+            # decorators, parameter defaults and annotations in the
+            # enclosing scope, so those are walked here (fix 11, QA32
+            # codex BLOCKER 2: a default expression ran unprotected
+            # cleanup right after a capture).
             stack = list(body)
             while stack:
                 node = stack.pop()
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
                                      ast.Lambda)):
+                    spec = node.args
+                    stack.extend(spec.defaults)
+                    stack.extend(default for default in spec.kw_defaults
+                                 if default is not None)
+                    for arg in (spec.posonlyargs + spec.args
+                                + spec.kwonlyargs
+                                + ([spec.vararg] if spec.vararg else [])
+                                + ([spec.kwarg] if spec.kwarg else [])):
+                        if arg.annotation is not None:
+                            stack.append(arg.annotation)
+                    if not isinstance(node, ast.Lambda):
+                        stack.extend(node.decorator_list)
+                        if node.returns is not None:
+                            stack.append(node.returns)
                     continue
                 if isinstance(node, ast.Call):
                     yield node
@@ -5246,6 +5410,44 @@ def _watchdog_completion_case(mode):
                     and func.value.value.id in ("self", "cls")):
                 return ("selfattr", func.value.attr, func.attr)
             return ("opaque", ast.dump(func))
+
+        def boundary_pending_shape(pending_arg, key):
+            # fix 11 (QA32 claude BLOCKER 2, PD-335-TAIL option 2): the
+            # pending argument of EVERY boundary call in the closure
+            # must be a RECOGNIZED shape -- a bare name, or exactly the
+            # module's cancellation-conditional expression `<name> if
+            # isinstance(<same name>, _PENDING_CANCELLATIONS) else
+            # <None or bare name>`. Anything else -- an inverted
+            # conditional, a conditional guarding a DIFFERENT name, a
+            # computed expression -- is a cannot-evaluate FAILURE.
+            # This recognizes the SHAPE only; that the name holds the
+            # right object at runtime is what the behavioural matrix
+            # (leg 19) checks at every site.
+            if isinstance(pending_arg, ast.Name):
+                return
+            if (isinstance(pending_arg, ast.IfExp)
+                    and isinstance(pending_arg.body, ast.Name)
+                    and isinstance(pending_arg.test, ast.Call)
+                    and isinstance(pending_arg.test.func, ast.Name)
+                    and pending_arg.test.func.id == "isinstance"
+                    and len(pending_arg.test.args) == 2
+                    and not pending_arg.test.keywords
+                    and isinstance(pending_arg.test.args[0], ast.Name)
+                    and pending_arg.test.args[0].id
+                    == pending_arg.body.id
+                    and isinstance(pending_arg.test.args[1], ast.Name)
+                    and pending_arg.test.args[1].id
+                    == "_PENDING_CANCELLATIONS"
+                    and (isinstance(pending_arg.orelse, ast.Name)
+                         or (isinstance(pending_arg.orelse,
+                                        ast.Constant)
+                             and pending_arg.orelse.value is None))):
+                return
+            raise AssertionError((
+                "a boundary call's pending argument is not a "
+                "recognized shape: cannot evaluate what is pending "
+                "at this site -- FAILURE (fix 11, QA32 claude "
+                "BLOCKER 2)", key, ast.dump(pending_arg)[:160]))
 
         def successors_after(function, target, key):
             # The statements that can run after `target` completes,
@@ -5266,7 +5468,15 @@ def _watchdog_completion_case(mode):
             def find(body):
                 for index, stmt in enumerate(body):
                     if stmt is target:
-                        return [body[index + 1:]]
+                        # fix 11 (QA32 codex BLOCKER 1): the capturing
+                        # try's OWN finally runs after its handler
+                        # completes, while the capture may be pending
+                        # -- it is a successor under the same rules
+                        # (its else is not: with the capture taken,
+                        # the else body cannot have run)
+                        return [list(getattr(target, "finalbody",
+                                             None) or ()),
+                                body[index + 1:]]
                     for field, inner in blocks(stmt):
                         path = find(inner)
                         if path is None:
@@ -5294,7 +5504,8 @@ def _watchdog_completion_case(mode):
                 "(fix 9)", key)
             return [stmt for block in path for stmt in block]
 
-        def deferred_capture_sound(successors, captured, key):
+        def deferred_capture_sound(function, successors, captured,
+                                   key):
             # Fix 9 (QA30 codex BLOCKER 1 / claude MINOR 1): after a
             # capturing handler, walk everything that can still run.
             # While the captured object may be pending, a statement may
@@ -5302,11 +5513,24 @@ def _watchdog_completion_case(mode):
             # rebinds the captured name, and a raise may raise only THAT
             # captured object; an `if <captured> is not None` guard whose
             # body ends in that re-raise discharges the capture, so the
-            # code after it runs only with the capture empty. A shape
-            # this walk does not model is a cannot-evaluate FAILURE, and
-            # a path that could complete with the capture still pending
-            # is a FAILURE: the function would swallow the captured
-            # cancellation by returning normally.
+            # code after it runs only with the capture empty. A
+            # STATEMENT form this walk does not model and a call-free
+            # yield/await suspension point (fix 11, QA32 claude MINOR
+            # 2) are cannot-evaluate FAILURES, and a path that could
+            # complete with the capture still pending is a FAILURE:
+            # the function would swallow the captured cancellation by
+            # returning normally. A nonlocal/global of the captured
+            # name ANYWHERE in the function -- a pre-capture nested
+            # def used as a boundary step can rebind the capture with
+            # zero post-capture binding leaves -- is a FAILURE too
+            # (fix 11, QA32 claude BLOCKER 1).
+            for leaf in ast.walk(function):
+                assert not (isinstance(leaf, (ast.Global, ast.Nonlocal))
+                            and captured in leaf.names), (
+                    "a nonlocal/global reach-back can rebind the "
+                    "captured name from anywhere in the function "
+                    "(fix 11, QA32 claude BLOCKER 1)", key)
+
             def protected_calls(node):
                 for call in direct_calls([node]):
                     called = call_target(call)
@@ -5370,6 +5594,15 @@ def _watchdog_completion_case(mode):
                             "the captured name is rebound before its "
                             "re-raise (fix 9/10, QA31 codex "
                             "BLOCKER 1)", key)
+                        assert not isinstance(leaf, (ast.Yield,
+                                                     ast.YieldFrom,
+                                                     ast.Await)), (
+                            "a suspension point follows a capture: "
+                            "cannot evaluate what runs -- or never "
+                            "runs, for a dropped generator or "
+                            "coroutine -- while the captured "
+                            "exception is pending: FAILURE (fix 11, "
+                            "QA32 claude MINOR 2)", key)
                     if isinstance(stmt, ast.Raise):
                         assert (isinstance(stmt.exc, ast.Name)
                                 and stmt.exc.id == captured
@@ -5432,13 +5665,19 @@ def _watchdog_completion_case(mode):
                                            ast.AnnAssign, ast.Expr)):
                         # fix 10 (QA31 codex BLOCKER 1): EVERY
                         # assignment form and EVERY target shape is
-                        # scanned -- an AnnAssign (with or without a
-                        # value), an AugAssign, and any name inside a
-                        # tuple, star, subscript or attribute target
+                        # scanned -- an AnnAssign with a value, an
+                        # AugAssign, and any name inside a tuple,
+                        # star, subscript or attribute target; a bare
+                        # annotation with NO value binds nothing at
+                        # runtime and is not a rebinding (fix 11,
+                        # QA32 codex MINOR)
                         for target in (stmt.targets
                                        if isinstance(stmt, ast.Assign)
                                        else []
                                        if isinstance(stmt, ast.Expr)
+                                       or (isinstance(stmt,
+                                                      ast.AnnAssign)
+                                           and stmt.value is None)
                                        else [stmt.target]):
                             for leaf in ast.walk(target):
                                 assert not (isinstance(leaf, ast.Name)
@@ -5456,6 +5695,16 @@ def _watchdog_completion_case(mode):
                             "the captured name is rebound before its "
                             "re-raise (fix 9/10, QA31 codex "
                             "BLOCKER 1)", key)
+                        if isinstance(stmt, (ast.FunctionDef,
+                                             ast.AsyncFunctionDef)):
+                            # fix 11 (QA32 codex BLOCKER 2): the
+                            # definition EXECUTES its decorators,
+                            # defaults and annotations now, while the
+                            # capture may be pending -- checked like
+                            # any other call site (direct_calls
+                            # yields exactly that definition-time
+                            # work)
+                            protected_calls(stmt)
                     else:
                         raise AssertionError((
                             "cannot evaluate a statement that follows a "
@@ -5506,6 +5755,7 @@ def _watchdog_completion_case(mode):
                                 and pending_arg.value is None), (
                         "a boundary call hard-wires pending=None (fix 7)",
                         key)
+                    boundary_pending_shape(pending_arg, key)
                     step = node.args[1]
                     assert isinstance(step, ast.Name), (
                         "cannot resolve a boundary step statically: "
@@ -5580,6 +5830,7 @@ def _watchdog_completion_case(mode):
                         # the boundary, and every path re-raises exactly
                         # that object.
                         deferred_capture_sound(
+                            function,
                             successors_after(function, node, key),
                             captured, key)
                         continue
@@ -5596,11 +5847,13 @@ def _watchdog_completion_case(mode):
                             "a pending cancellation (fix 7, QA28 codex "
                             "BLOCKER 1)", key, ast.dump(call.func))
 
-        # Leg 11 NEGATIVE VECTORS (fix 10, QA31): each reproduces a
-        # round-31 in-memory mutation and must be REJECTED by the
-        # structural machinery above -- by its named check, never
-        # accepted and never a crash. Every vector was verified
-        # ACCEPTED (red) by the fix-9 machinery at 7df50fda.
+        # Leg 11 NEGATIVE VECTORS (fix 10, QA31; fix 11, QA32): each
+        # reproduces an in-memory QA mutation and must be REJECTED by
+        # the structural machinery above -- by its named check, never
+        # accepted and never a crash. Every QA31 vector was verified
+        # ACCEPTED (red) by the fix-9 machinery at 7df50fda; every
+        # QA32 vector was verified ACCEPTED (red) by the fix-10
+        # machinery at 7182a86e.
         def leg11_vector(source):
             function = ast.parse(textwrap.dedent(source)).body[0]
             capturing = next(node for node in function.body
@@ -5613,8 +5866,8 @@ def _watchdog_completion_case(mode):
             except AssertionError:
                 return
             raise AssertionError((
-                "a QA31 mutation vector was ACCEPTED by leg 11 "
-                "(fix 10)", label))
+                "a QA31/QA32 mutation vector was ACCEPTED by leg 11 "
+                "(fix 10/11)", label))
 
         # QA31 codex BLOCKER 1, mutation 1: the abandonment boundary's
         # pending argument swapped off the captured name -- while the
@@ -5641,6 +5894,7 @@ def _watchdog_completion_case(mode):
             "another name",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
+                    function,
                     successors_after(function, capturing,
                                      "vector:codex-1"),
                     "interrupted", "vector:codex-1"))
@@ -5662,6 +5916,7 @@ def _watchdog_completion_case(mode):
             "codex mutation 2: AnnAssign rebinds the captured name",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
+                    function,
                     successors_after(function, capturing,
                                      "vector:codex-2"),
                     "interrupted", "vector:codex-2"))
@@ -5685,6 +5940,7 @@ def _watchdog_completion_case(mode):
             "name",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
+                    function,
                     successors_after(function, capturing,
                                      "vector:walrus"),
                     "interrupted", "vector:walrus"))
@@ -5709,6 +5965,7 @@ def _watchdog_completion_case(mode):
             "hidden in a finalbody",
             lambda function=function, capturing=capturing:
                 deferred_capture_sound(
+                    function,
                     successors_after(function, capturing,
                                      "vector:gemini-b"),
                     "captured", "vector:gemini-b"))
@@ -5767,6 +6024,223 @@ def _watchdog_completion_case(mode):
         assert "os" in imported_modules, (
             "the emit module itself poisons os: the disclosed os-level "
             "primitives would fail closed, not clear (fix 10)")
+
+        # QA32 codex BLOCKER 1: the capturing try's OWN finally is a
+        # successor -- a boundary call there with a swapped pending
+        # argument must be rejected while the capture may be pending.
+        function, capturing = leg11_vector("""
+            def mutant(self):
+                abandoned = False
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                finally:
+                    _cleanup_boundary(abandoned, abandon_unfinished,
+                                      "capture finally")
+                if interrupted is not None:
+                    raise interrupted
+            """)
+        leg11_vector_rejected(
+            "codex QA32 finally vector: swapped pending argument in "
+            "the capturing try's own finalbody",
+            lambda function=function, capturing=capturing:
+                deferred_capture_sound(
+                    function,
+                    successors_after(function, capturing,
+                                     "vector:codex32-1"),
+                    "interrupted", "vector:codex32-1"))
+
+        # QA32 codex BLOCKER 2: a nested def's parameter DEFAULT
+        # executes at the definition, right after the capture.
+        function, capturing = leg11_vector("""
+            def mutant(self):
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                def sneak(arg=abandon_unfinished()):
+                    pass
+                if interrupted is not None:
+                    raise interrupted
+            """)
+        leg11_vector_rejected(
+            "codex QA32 default vector: unprotected cleanup in a "
+            "nested def's default after a capture",
+            lambda function=function, capturing=capturing:
+                deferred_capture_sound(
+                    function,
+                    successors_after(function, capturing,
+                                     "vector:codex32-2"),
+                    "interrupted", "vector:codex32-2"))
+
+        # QA32 codex BLOCKER 3, form 1: the capture target collides
+        # with the handler's own `as` name -- Python deletes that
+        # binding at handler exit, so the later re-raise reads an
+        # unbound name and the cancellation is lost.
+        function, capturing = leg11_vector("""
+            def mutant(self):
+                interrupted = None
+                try:
+                    wait()
+                except BaseException as interrupted:
+                    interrupted = interrupted
+                if interrupted is not None:
+                    raise interrupted
+            """)
+        leg11_vector_rejected(
+            "codex QA32 as-name vector: capture reuses the handler's "
+            "bound name",
+            lambda handler=capturing.handlers[0]:
+                capture_shape(handler.body, handler.name))
+
+        # QA32 codex BLOCKER 3, form 2: an overwrite between the
+        # capture alias and the final raise -- ends_in_raise must
+        # discard the overwritten alias, never keep trusting it.
+        function, capturing = leg11_vector("""
+            def mutant(self):
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                    interrupted: object = None
+                    raise interrupted
+            """)
+        overwriting = capturing.handlers[0]
+        assert not ends_in_raise(overwriting.body, overwriting.name), (
+            "a handler that overwrites its capture alias before the "
+            "final raise was accepted (fix 11, QA32 codex BLOCKER 3)")
+
+        # QA32 claude BLOCKER 1: a pre-capture nested def -- usable as
+        # a boundary step -- reaches the captured name back through
+        # nonlocal and rebinds it with zero post-capture binding
+        # leaves and zero calls for the old scans to see.
+        function, capturing = leg11_vector("""
+            def mutant(self):
+                interrupted = None
+                def abandon_step():
+                    nonlocal interrupted
+                    interrupted = None
+                    return abandon_unfinished()
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                _cleanup_boundary(interrupted, abandon_step,
+                                  "unfinished-launch abandonment")
+                if interrupted is not None:
+                    raise interrupted
+            """)
+        leg11_vector_rejected(
+            "claude QA32 nonlocal vector: a nested def rebinds the "
+            "captured name through nonlocal",
+            lambda function=function, capturing=capturing:
+                deferred_capture_sound(
+                    function,
+                    successors_after(function, capturing,
+                                     "vector:claude32-1"),
+                    "interrupted", "vector:claude32-1"))
+
+        # QA32 claude BLOCKER 2: the pending argument at ANY boundary
+        # call must be a recognized shape. The two real shapes stay
+        # accepted; the inverted conditional and a conditional
+        # guarding a DIFFERENT name are rejected.
+        def vector_pending_arg(source):
+            return ast.parse(
+                textwrap.dedent(source)).body[0].value.args[0]
+
+        boundary_pending_shape(vector_pending_arg("""
+            _cleanup_boundary(
+                exc if isinstance(exc, _PENDING_CANCELLATIONS)
+                else None, release_launcher, "parked launcher release")
+            """), "vector:claude32-2-accept")
+        boundary_pending_shape(vector_pending_arg("""
+            _cleanup_boundary(
+                tail_exc if isinstance(tail_exc,
+                                       _PENDING_CANCELLATIONS)
+                else pending, close_report, "report channel close")
+            """), "vector:claude32-2-accept")
+        leg11_vector_rejected(
+            "claude QA32 inversion vector: inverted conditional "
+            "pending argument",
+            lambda arg=vector_pending_arg("""
+                _cleanup_boundary(
+                    None if isinstance(exc, _PENDING_CANCELLATIONS)
+                    else exc, release_launcher,
+                    "parked launcher release")
+                """): boundary_pending_shape(arg, "vector:claude32-2a"))
+        leg11_vector_rejected(
+            "claude QA32 swapped-guard vector: the conditional guards "
+            "a different name than it passes",
+            lambda arg=vector_pending_arg("""
+                _cleanup_boundary(
+                    pending if isinstance(exc, _PENDING_CANCELLATIONS)
+                    else None, release_launcher,
+                    "parked launcher release")
+                """): boundary_pending_shape(arg, "vector:claude32-2b"))
+
+        # QA32 claude MINOR 2: a call-free suspension point after a
+        # capture parks the function while the capture is pending -- a
+        # dropped generator or coroutine would swallow the
+        # cancellation without any call for the walk to see.
+        function, capturing = leg11_vector("""
+            def mutant(self):
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                yield
+                if interrupted is not None:
+                    raise interrupted
+            """)
+        leg11_vector_rejected(
+            "claude QA32 yield vector: call-free suspension after a "
+            "capture",
+            lambda function=function, capturing=capturing:
+                deferred_capture_sound(
+                    function,
+                    successors_after(function, capturing,
+                                     "vector:claude32-3"),
+                    "interrupted", "vector:claude32-3"))
+        function, capturing = leg11_vector("""
+            async def mutant(self):
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                await self._parked
+                if interrupted is not None:
+                    raise interrupted
+            """)
+        leg11_vector_rejected(
+            "claude QA32 await vector: call-free suspension after a "
+            "capture",
+            lambda function=function, capturing=capturing:
+                deferred_capture_sound(
+                    function,
+                    successors_after(function, capturing,
+                                     "vector:claude32-4"),
+                    "interrupted", "vector:claude32-4"))
+
+        # QA32 codex MINOR (over-rejection pin): a bare annotation
+        # with no value binds nothing at runtime -- it must be
+        # ACCEPTED, with the guarded re-raise still discharging the
+        # capture.
+        function, capturing = leg11_vector("""
+            def mutant(self):
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                interrupted: object
+                if interrupted is not None:
+                    raise interrupted
+            """)
+        deferred_capture_sound(
+            function,
+            successors_after(function, capturing,
+                             "vector:codex32-minor"),
+            "interrupted", "vector:codex32-minor")
 
         # Leg 12 (QA27 codex BLOCKER 1): a TimeoutError raised at the
         # subject SIGSTOP stays the outward exception when the held-pidfd
@@ -6123,6 +6597,402 @@ def _watchdog_completion_case(mode):
             "recorded (fix 7, QA28 claude MINOR 3)",
             fake._subject_kill, fake._subject_skipped)
         assert helper_kills == [(11888, signal.SIGKILL)], helper_kills
+
+        # Leg 19 (fix 11, QA32, maintainer ruling PD-335-TAIL option
+        # 2): the BEHAVIOURAL guarantee leg 11's tripwire defers to.
+        # For EVERY module-owned cleanup site in the computed
+        # close-lifecycle closure -- every (member, site) pair naming
+        # a _cleanup_boundary call -- drive the member with each
+        # pending-cancellation type raised at that site's pending
+        # point AND an ordinary fault injected into that cleanup
+        # step, and assert the ORIGINAL cancellation object
+        # propagates outward with the cleanup fault reachable in its
+        # chain. The site list is DERIVED from the closure leg 11
+        # computed, so a boundary site added to the lifecycle without
+        # a case here fails this leg. Granularity: one case per
+        # (member, site-string) pair; calls sharing one site string
+        # inside one member share its case. Red-on-revert: replacing
+        # a site's boundary call with a direct cleanup call makes its
+        # case fail (the injected fault displaces the cancellation);
+        # reproduced for the unfinished-launch abandonment site
+        # during fix 11.
+        lifecycle_sites = set()
+        for member_key in scope:
+            for node in ast.walk(scope[member_key]):
+                if (isinstance(node, ast.Call)
+                        and call_target(node)[:2]
+                        == ("name", "_cleanup_boundary")):
+                    assert (len(node.args) >= 3
+                            and isinstance(node.args[2], ast.Constant)
+                            and isinstance(node.args[2].value, str)), (
+                        "a boundary site label is not a string "
+                        "literal: the behavioural matrix cannot name "
+                        "it (fix 11)", member_key)
+                    lifecycle_sites.add((member_key,
+                                         node.args[2].value))
+
+        def chain_members(exc):
+            seen, frontier, members = set(), [exc], []
+            while frontier:
+                node = frontier.pop()
+                if node is None or id(node) in seen:
+                    continue
+                seen.add(id(node))
+                members.append(node)
+                frontier.extend((node.__cause__, node.__context__))
+            return members
+
+        def behavioural_case(label, driver, cancellation, fault):
+            try:
+                driver(cancellation, fault)
+            except BaseException as outward:
+                assert outward is cancellation, (
+                    "the injected cleanup fault displaced the pending "
+                    "cancellation (fix 11, behavioural guarantee)",
+                    label, type(cancellation).__name__, repr(outward))
+                assert any(node is fault
+                           for node in chain_members(outward)), (
+                    "the injected cleanup fault was dropped from the "
+                    "cancellation's chain (fix 11)", label,
+                    type(cancellation).__name__)
+                return
+            raise AssertionError((
+                "the pending cancellation was swallowed (fix 11)",
+                label, type(cancellation).__name__))
+
+        def stat_close_driver(cancellation, fault):
+            # pending point: the /proc stat read; cleanup: the
+            # descriptor close routed as the boundary step.
+            def fake_open(path, flags):
+                return 987001
+
+            def fake_read(fd, size):
+                raise cancellation
+
+            def fake_close(fd):
+                raise fault
+
+            with patch.object(os, "open", fake_open), (
+                    patch.object(os, "read", fake_read)), (
+                    patch.object(os, "close", fake_close)):
+                emit._fixture_stat_fields(4321)
+
+        def member_close_driver(cancellation, fault):
+            # pending point: the verified member send; cleanup: that
+            # member's pidfd close.
+            def fake_listdir(path):
+                assert str(path) == "/proc", path
+                return ["4242"]
+
+            def fake_stat_fields(target):
+                return [b"S", b"7777", b"6060"]
+
+            def fake_pidfd(target):
+                return 987002
+
+            def fake_send(fd, signum, *args):
+                assert fd == 987002, (fd, signum)
+                raise cancellation
+
+            def fake_close(fd):
+                assert fd == 987002, fd
+                raise fault
+
+            with patch.object(os, "listdir", fake_listdir), (
+                    patch.object(emit, "_fixture_stat_fields",
+                                 fake_stat_fields)), (
+                    patch.object(emit, "_fixture_pidfd",
+                                 fake_pidfd)), (
+                    patch.object(signal, "pidfd_send_signal",
+                                 fake_send)), (
+                    patch.object(os, "close", fake_close)):
+                emit._fixture_kill_group_members(6060, signal.SIGKILL,
+                                                 set([7777]))
+
+        def subject_kill_driver(cancellation, fault):
+            # pending point: the subject freeze; cleanup: the
+            # held-pidfd SIGKILL (the leg 12 shape, all three types).
+            def fake_send(fd, signum, *args):
+                assert fd == 987003, (fd, signum)
+                if signum == signal.SIGSTOP:
+                    raise cancellation
+                assert signum == signal.SIGKILL, signum
+                raise fault
+
+            with patch.object(signal, "pidfd_send_signal", fake_send):
+                emit._fixture_escalate_subject(11999, 987003)
+
+        def escalate_fake():
+            return types.SimpleNamespace(
+                pid=11888, pidfd=987004, subject_pid=None,
+                subject_pidfd=None, _subject_kill=None,
+                _subject_skipped=None)
+
+        def backstop_driver(cancellation, fault):
+            # pending point: the kill helper raises the cancellation,
+            # which is pending for the backstop step; cleanup: the
+            # direct backstop send.
+            def fake_send(fd, signum, *args):
+                if signum == signal.SIGSTOP:
+                    return None  # the freeze succeeds
+                assert signum == signal.SIGKILL, signum
+                raise fault
+
+            def fake_helper(pid, signum, pidfd=None, *, group=True):
+                raise cancellation
+
+            with patch.object(signal, "pidfd_send_signal",
+                              fake_send), (
+                    patch.object(emit, "_fixture_signal",
+                                 fake_helper)):
+                emit._FixtureProcess._escalate(escalate_fake())
+
+        def guardian_kill_driver(cancellation, fault):
+            # pending point: the guardian freeze; cleanup: the
+            # guardian-kill step (helper fault, backstop delivers).
+            def fake_send(fd, signum, *args):
+                if signum == signal.SIGSTOP:
+                    raise cancellation
+                assert signum == signal.SIGKILL, signum
+                return None  # the direct backstop succeeds
+
+            def fake_helper(pid, signum, pidfd=None, *, group=True):
+                raise fault
+
+            with patch.object(signal, "pidfd_send_signal",
+                              fake_send), (
+                    patch.object(emit, "_fixture_signal",
+                                 fake_helper)):
+                emit._FixtureProcess._escalate(escalate_fake())
+
+        def mask_restore_driver(cancellation, fault):
+            # pending point: the masked close body; cleanup: the
+            # sigmask restore.
+            def fake_sigmask(how, mask):
+                if how == signal.SIG_BLOCK:
+                    return set()
+                assert how == signal.SIG_SETMASK, how
+                raise fault
+
+            def raising_close_masked():
+                raise cancellation
+
+            fake = types.SimpleNamespace(
+                _close_masked=raising_close_masked)
+            with patch.object(signal, "pthread_sigmask",
+                              fake_sigmask), (
+                    patch.object(emit, "_fixture_mask_cancellation",
+                                 lambda: None)):
+                emit._FixtureProcess.close(fake)
+
+        def masked_fake(cancellation, launcher=True):
+            # _close_masked's pending point on every path: the
+            # coordinated close raises the cancellation into the
+            # backstop handler.
+            def raising_coordinated():
+                raise cancellation
+
+            return types.SimpleNamespace(
+                _launcher=object() if launcher else None,
+                _abandoned=False,
+                _go=types.SimpleNamespace(set=lambda: None),
+                _close_coordinated=raising_coordinated)
+
+        def masked_release_driver(cancellation, fault):
+            fake = masked_fake(cancellation)
+
+            def raising_set():
+                raise fault
+
+            fake._go = types.SimpleNamespace(set=raising_set)
+            emit._FixtureProcess._close_masked(fake)
+
+        def masked_abandon_driver(cancellation, fault):
+            fake = masked_fake(cancellation)
+
+            def raising_abandon():
+                raise fault
+
+            fake._abandon_unfinished_launch = raising_abandon
+            emit._FixtureProcess._close_masked(fake)
+
+        def masked_interrupt_driver(cancellation, fault):
+            fake = masked_fake(cancellation, launcher=False)
+
+            def raising_interrupt():
+                raise fault
+
+            fake._interrupt_collect = raising_interrupt
+            emit._FixtureProcess._close_masked(fake)
+
+        def coordinated_fake(cancellation, abandon):
+            # _close_coordinated's pending point: the launch-completion
+            # wait raises the cancellation into the capturing handler.
+            def raising_wait(timeout):
+                raise cancellation
+
+            return types.SimpleNamespace(
+                _launcher=object(), _launch_lock=threading.Lock(),
+                _abandoned=False, _cancelled=False,
+                _go=types.SimpleNamespace(set=lambda: None),
+                _launched=types.SimpleNamespace(wait=raising_wait),
+                _abandon_unfinished_launch=abandon)
+
+        def coordinated_release_driver(cancellation, fault):
+            released = []
+
+            def go_set():
+                released.append(True)
+                if len(released) > 1:
+                    raise fault  # the handler's parked-launcher re-set
+
+            fake = coordinated_fake(cancellation, lambda: False)
+            fake._go = types.SimpleNamespace(set=go_set)
+            emit._FixtureProcess._close_coordinated(fake)
+
+        def coordinated_abandon_driver(cancellation, fault):
+            def raising_abandon():
+                raise fault
+
+            fake = coordinated_fake(cancellation, raising_abandon)
+            emit._FixtureProcess._close_coordinated(fake)
+
+        def coordinated_refusal_driver(cancellation, fault):
+            def raising_refusal(message):
+                raise fault
+
+            fake = coordinated_fake(cancellation, lambda: True)
+            with patch.object(emit, "ChildStatusUnavailable",
+                              raising_refusal):
+                emit._FixtureProcess._close_coordinated(fake)
+
+        def coordinated_finish_driver(cancellation, fault):
+            def raising_finish():
+                raise fault
+
+            fake = coordinated_fake(cancellation, lambda: False)
+            fake._finish_close = raising_finish
+            emit._FixtureProcess._close_coordinated(fake)
+
+        def finish_fake(cancellation, report_close=None, pidfd=None,
+                        subject_pidfd=None, interrupt=None):
+            # _finish_close's pending point: the receipt read raises
+            # the cancellation as the collection's first step.
+            def raising_recv():
+                raise cancellation
+
+            return types.SimpleNamespace(
+                pid=None, collected=True, armed=False,
+                unresolved=False, pidfd=pidfd,
+                subject_pidfd=subject_pidfd, subject_pid=None,
+                _subject_kill=None, _subject_skipped=None,
+                _failure=None, cleaned=False,
+                _recv_subject=raising_recv,
+                _interrupt_collect=interrupt or (lambda: None),
+                report=types.SimpleNamespace(
+                    close=report_close or (lambda: None)))
+
+        def finish_report_driver(cancellation, fault):
+            def raising_report_close():
+                raise fault
+
+            emit._FixtureProcess._finish_close(
+                finish_fake(cancellation,
+                            report_close=raising_report_close))
+
+        def finish_subject_driver(cancellation, fault):
+            def fake_close(fd):
+                assert fd == 987007, fd
+                raise fault
+
+            fake = finish_fake(cancellation, subject_pidfd=987007)
+            with patch.object(os, "close", fake_close):
+                emit._FixtureProcess._finish_close(fake)
+
+        def finish_interrupt_driver(cancellation, fault):
+            def raising_interrupt():
+                raise fault
+
+            emit._FixtureProcess._finish_close(
+                finish_fake(cancellation,
+                            interrupt=raising_interrupt))
+
+        def finish_handles_driver(cancellation, fault):
+            def fake_close(fd):
+                assert fd == 987006, fd
+                raise fault
+
+            fake = finish_fake(cancellation, pidfd=987006)
+            with patch.object(os, "close", fake_close):
+                emit._FixtureProcess._finish_close(fake)
+
+        behavioural_drivers = dict()
+        behavioural_drivers[
+            ("f:_fixture_stat_fields",
+             "stat descriptor close")] = stat_close_driver
+        behavioural_drivers[
+            ("f:_fixture_kill_group_members",
+             "member pidfd close")] = member_close_driver
+        behavioural_drivers[
+            ("f:_fixture_escalate_subject",
+             "held-pidfd subject SIGKILL")] = subject_kill_driver
+        behavioural_drivers[
+            ("m:_FixtureProcess._escalate",
+             "direct guardian SIGKILL backstop")] = backstop_driver
+        behavioural_drivers[
+            ("m:_FixtureProcess._escalate",
+             "guardian-kill cleanup")] = guardian_kill_driver
+        behavioural_drivers[
+            ("m:_FixtureProcess.close",
+             "cancellation mask restore")] = mask_restore_driver
+        behavioural_drivers[
+            ("m:_FixtureProcess._close_masked",
+             "parked launcher release")] = masked_release_driver
+        behavioural_drivers[
+            ("m:_FixtureProcess._close_masked",
+             "unfinished-launch abandonment")] = masked_abandon_driver
+        behavioural_drivers[
+            ("m:_FixtureProcess._close_masked",
+             "interrupt-owner collection")] = masked_interrupt_driver
+        behavioural_drivers[
+            ("m:_FixtureProcess._close_coordinated",
+             "parked launcher release")] = coordinated_release_driver
+        behavioural_drivers[
+            ("m:_FixtureProcess._close_coordinated",
+             "unfinished-launch abandonment")
+            ] = coordinated_abandon_driver
+        behavioural_drivers[
+            ("m:_FixtureProcess._close_coordinated",
+             "abandonment refusal")] = coordinated_refusal_driver
+        behavioural_drivers[
+            ("m:_FixtureProcess._close_coordinated",
+             "owner collection finish")] = coordinated_finish_driver
+        behavioural_drivers[
+            ("m:_FixtureProcess._finish_close",
+             "report channel close")] = finish_report_driver
+        behavioural_drivers[
+            ("m:_FixtureProcess._finish_close",
+             "subject pidfd and report close")] = finish_subject_driver
+        behavioural_drivers[
+            ("m:_FixtureProcess._finish_close",
+             "interrupt-owner collection")] = finish_interrupt_driver
+        behavioural_drivers[
+            ("m:_FixtureProcess._finish_close",
+             "held descriptor and report close")
+            ] = finish_handles_driver
+        assert lifecycle_sites == set(behavioural_drivers), (
+            "the behavioural matrix does not cover the computed "
+            "boundary-site list exactly: every module-owned cleanup "
+            "site needs a fault-injection case, and every case must "
+            "name a real site (fix 11, PD-335-TAIL option 2)",
+            sorted(lifecycle_sites
+                   ^ set(behavioural_drivers)))
+        for case_label in sorted(behavioural_drivers):
+            for cancellation_type in pending_cancellations:
+                behavioural_case(
+                    case_label, behavioural_drivers[case_label],
+                    cancellation_type("pending cancellation"),
+                    RuntimeError("injected cleanup fault"))
     elif mode == "receipt-high-fd":
         import fcntl
         import resource
