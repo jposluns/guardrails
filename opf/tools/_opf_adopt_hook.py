@@ -34,7 +34,8 @@ platform's next load, and the file usually already carries the adopter's own sec
      unparseable JSON, silently disabling the adopter's EXISTING hooks, including their own
      guardrails. Mitigation: structured parse -> model merge -> deterministic re-emit; anything
      unrecognized refuses rather than merges; the emitted bytes are verified to reparse to exactly
-     the prior model plus the one inserted entry (the record writer's canonical-bytes discipline).
+     the prior model plus the one inserted entry, under a TYPE-AWARE comparison (a number and a
+     same-lexeme string never compare equal; the record writer's canonical-bytes discipline).
   3. TOCTOU / drifted preimage. The file changed between plan and apply. Mitigation is the op
      wiring's `old_digest` precondition on live bytes (drift refuses into a fresh plan, never a
      merge over unknown content); this library is pure over the bytes it is handed.
@@ -66,7 +67,10 @@ this library cannot decide under v1 assumptions (undecodable/unparseable bytes, 
 key, a non-finite constant or a number outside the finite double range, a JSON null anywhere in the
 recognized hooks surface (null is refused by name, never read as absence and never crashed on), a
 wrong container type, an out-of-vocabulary closed token such as an unknown hook event or hook type,
-an oversize file, a merged emission that would exceed the same size bound); INVALID for a decodable
+an oversize file, a merged emission that would exceed the same size bound, nesting deep enough to
+exhaust parser recursion, a CHANGED merge whose re-emission would exhaust emission recursion
+(roughly the interpreter recursion limit; an already-merged file of the same depth still no-ops,
+because the no-op path returns its own bytes without re-emitting)); INVALID for a decodable
 table that violates the closed v1 schema (an unknown key, a wrong-typed or control-character-
 carrying field, a malformed candidate entry, an existing conflicting entry). Both refuse; neither
 yields bytes to write.
@@ -183,10 +187,25 @@ def _no_constant(name):
 
 class _Number(str):
     """A JSON number carried as its exact source lexeme (a str subclass), so a changed merge
-    re-emits the adopter's own number spellings verbatim (1E2 stays 1E2, 1.000 stays 1.000). Every
-    field check that needs a parsed STRING excludes this type (_is_json_string)."""
+    re-emits the adopter's own number spellings verbatim (1E2 stays 1E2, 1.000 stays 1.000).
+    Comparison is TYPE-AWARE: a _Number equals only another _Number with the same lexeme, NEVER a
+    plain str, so the in-merge reparse verification sees an emitter that turns a number into a
+    same-lexeme string or a digit string into a number (threat model 2). Every field check that
+    needs a parsed STRING also excludes this type by isinstance (_is_json_string)."""
 
     __slots__ = ()
+
+    def __eq__(self, other):
+        if isinstance(other, _Number):
+            return str.__eq__(self, other)
+        return False
+
+    def __ne__(self, other):
+        # explicit: without this, str.__ne__ inherited through the MRO would compare lexemes.
+        return not self.__eq__(other)
+
+    # equal _Numbers hash as their lexeme; colliding with the plain str's hash is harmless.
+    __hash__ = str.__hash__
 
 
 def _parse_number(lexeme):
@@ -202,7 +221,7 @@ def _parse(raw):
     """Strict JSON parse of registration bytes. Raises _ParseRefusal (also for undecodable bytes, a
     number outside the finite double range, and parser recursion exhaustion); callers map that to
     CANNOT-EVALUATE. Numbers come back as _Number lexemes (never a lossy float), and the merge and
-    no-op paths share this one parse, so both refuse the same inputs."""
+    no-op paths share this one parse, so a parse-level refusal is shared by both."""
     try:
         return json.loads(raw.decode("utf-8"), object_pairs_hook=_no_duplicate_pairs,
                           parse_constant=_no_constant, parse_float=_parse_number,
@@ -216,8 +235,11 @@ def _emit(model):
     Strings are escaped by the json serializer with ensure_ascii=False, so the adopter's non-ASCII
     text is preserved verbatim (never rewritten to \\uXXXX, which used to triple non-ASCII files
     and break the size-bound idempotence); _Number lexemes re-emit exactly as parsed. Emission is a
-    fixed point under _parse for any model _parse can produce. Raises _ParseRefusal on a value no
-    parsed model can contain (a non-finite float, a non-string key, a foreign type); the residual
+    fixed point under _parse for every model it emits AT ALL: a parseable model carrying an escaped
+    unpaired surrogate refuses here instead (below). Raises _ParseRefusal on that surrogate and on
+    a value no parsed model can contain (a non-finite float, a non-string key, a foreign type), and
+    RecursionError on nesting near the interpreter recursion limit (roughly 1000 levels, dependent
+    on the caller's remaining stack); merge_registration maps both to CANNOT-EVALUATE. The residual
     reformatting of a changed merge is disclosed in the module docstring."""
     out = []
     _emit_value(model, 0, out)
@@ -295,7 +317,14 @@ def _is_json_number(value):
         return True
     if isinstance(value, bool):
         return False
-    return isinstance(value, (int, float)) and math.isfinite(value)
+    if not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        # a code-built int outside the double range (10**400 say): refuse as not a v1 number,
+        # never raise (the exposed-validator "refuse, never raise" discipline).
+        return False
 
 
 def _null_refusal(value, where):
@@ -457,7 +486,10 @@ def merge_registration(old_bytes, plugin_entry):
     existing conflicting registration of the same entry, any unrecognized format or shape, JSON null
     in the recognized hooks surface, a number outside the finite double range, and a merged emission
     that would exceed MAX_REGISTRATION_BYTES all refuse fail-closed. The no-op path and the merge
-    path share the same parse and validation, so they refuse the same inputs."""
+    path share the same parse and validation, so parse-level and shape-level refusals are
+    identical; content that only EMISSION refuses (an escaped unpaired surrogate, nesting past
+    the emission recursion depth) still no-ops when the file is already merged, because the
+    no-op returns the file's own bytes without re-emitting."""
     if isinstance(old_bytes, bytearray):
         old_bytes = bytes(old_bytes)
     if not isinstance(old_bytes, bytes):
@@ -538,10 +570,14 @@ def canonical_registration():
 
 
 # The self-test purity harness's module-level half: ONE audit hook per process (audit hooks cannot
-# be removed once added), inert unless self_test arms it around a harnessed merge. The enforced net
-# is exactly: the audited event named "open" plus every audited event under the namespaces below;
-# the os-level entry points CPython does NOT audit (os.stat among them) are denied by mock patches
-# inside self_test instead. Nothing broader is claimed or enforced by the harness.
+# be removed once added), inert unless self_test arms it around a harnessed merge. The harness is a
+# DOUBLE net, enforced exactly and nothing broader: this hook refuses the audited event named
+# "open" plus every audited event under the namespaces below; the os-level entry points CPython
+# does NOT audit are denied by self_test's mock patches of stat, lstat, access, open, readlink,
+# fstat, statvfs, write and pipe on BOTH os and the module os re-exports them from (posix on this
+# platform), plus io.open, builtins.open, socket.socket and subprocess.Popen. Unaudited, unmocked
+# entry points (a raw ctypes syscall, an unlisted os function) are excluded by review of this
+# module's imports, not by the harness; per-layer canaries in self_test keep each layer honest.
 _PURITY_HARNESS = dict(installed=False, armed=False, effects=[])
 _PURITY_EVENT_PREFIXES = ("os.", "socket.", "subprocess.", "shutil.", "glob.", "tempfile.")
 
@@ -555,12 +591,14 @@ def _purity_audit(event, args):
 
 
 def self_test():
-    """Fail-closed invariants over synthetic vectors, judged on returned statuses and bytes, never by
-    grepping output. The representative successful merge and no-op run under a REFUSING purity
-    harness whose exact boundary is: the audit net above (_purity_audit) plus mock denials for
-    os.stat/os.lstat/os.access/os.open/io.open/builtins.open/socket.socket/subprocess.Popen. That
-    enumerated double net is what the harness enforces; anything outside it (a raw ctypes syscall,
-    say) is excluded by review of this module's imports, not by the harness."""
+    """Fail-closed invariants over synthetic vectors, judged on returned statuses, findings and
+    bytes, never by grepping output. The representative successful merge and no-op run under a
+    REFUSING purity harness whose exact boundary is: the audit net above (_purity_audit) plus mock
+    denials of stat, lstat, access, open, readlink, fstat, statvfs, write and pipe (patched on os
+    AND on the module os re-exports them from), and of io.open, builtins.open, socket.socket and
+    subprocess.Popen. That enumerated double net is what the harness enforces, and one impure
+    canary per layer must come back refused AND recorded; anything outside the net (a raw ctypes
+    syscall, say) is excluded by review of this module's imports, not by the harness."""
     failures = []
     checked = [0]
 
@@ -588,6 +626,8 @@ def self_test():
     # 1: the successful merge, computed under the refusing purity harness (the docstring above and
     # the module-level comment state its exact boundary; a denial is BOTH recorded and raised, so a
     # harnessed merge that touches the boundary comes back refused with the effect on record).
+    import builtins
+    import contextlib
     import io
     import os
     import socket
@@ -604,17 +644,24 @@ def self_test():
             raise RuntimeError("purity harness refused {} during merge_registration".format(name))
         return _deny
 
+    # the mock half of the double net: os-level entry points CPython does not audit, denied on
+    # BOTH the os module and the module os re-exports them from (posix here), so a posix.stat
+    # spelling cannot slip past an os.stat patch; plus the open/socket/subprocess seams.
+    os_impl = sys.modules.get(os.name)
+    denied = [(io, "open"), (builtins, "open"), (socket, "socket"), (subprocess, "Popen")]
+    for fn in ("stat", "lstat", "access", "open", "readlink", "fstat",
+               "statvfs", "write", "pipe"):
+        denied.append((os, fn))
+        if os_impl is not None and hasattr(os_impl, fn):
+            denied.append((os_impl, fn))
+
     def merge_under_harness(raw, token):
         effects = []
         _PURITY_HARNESS["effects"] = effects
-        with mock.patch.object(os, "stat", deny("os.stat", effects)), \
-                mock.patch.object(os, "lstat", deny("os.lstat", effects)), \
-                mock.patch.object(os, "access", deny("os.access", effects)), \
-                mock.patch.object(os, "open", deny("os.open", effects)), \
-                mock.patch.object(io, "open", deny("io.open", effects)), \
-                mock.patch("builtins.open", deny("open", effects)), \
-                mock.patch.object(socket, "socket", deny("socket.socket", effects)), \
-                mock.patch.object(subprocess, "Popen", deny("subprocess.Popen", effects)):
+        with contextlib.ExitStack() as stack:
+            for mod, fn in denied:
+                stack.enter_context(mock.patch.object(
+                    mod, fn, deny("{}.{}".format(mod.__name__, fn), effects)))
             _PURITY_HARNESS["armed"] = True
             try:
                 result = merge_registration(raw, token)
@@ -648,11 +695,41 @@ def self_test():
     del model["hooks"][ENTRY_EVENT]
     check("merge-preserves-prior-model", model == _parse(old))
 
+    # 1b: each layer of the double net is itself DISCRIMINATING: a deliberately impure merge (a
+    # canary read smuggled into emission) must come back REFUSED with the effect on record. One
+    # canary per layer: an AUDITED unmocked call (os.listdir) for the audit hook, an unaudited
+    # os-module call (os.fstat) for the os mocks, and the re-export spelling for the os_impl
+    # mocks. Disabling a layer turns exactly its canary red.
+    real_emit = _emit
+    canaries = (
+        ("audit-hook", "os.listdir", lambda: os.listdir(".")),
+        ("os-mock", "os.fstat", lambda: os.fstat(0)),
+        ("os-impl-mock", "{}.stat".format(os.name),
+         lambda: getattr(sys.modules[os.name], "stat")(__file__)),
+    )
+    for cname, recorded, impurity in canaries:
+        def _impure_emit(value, _impurity=impurity):
+            _impurity()
+            return real_emit(value)
+        try:
+            globals()["_emit"] = _impure_emit
+            impure, impure_effects = merge_under_harness(old, entry)
+        finally:
+            globals()["_emit"] = real_emit
+        check("impure-canary-{}-refused".format(cname),
+              impure.status is CANNOT_EVALUATE and impure.new_bytes is None)
+        check("impure-canary-{}-recorded".format(cname), recorded in impure_effects)
+
     # 2: byte-exactness. Emission is a FIXED POINT: merge -> emit -> reparse -> re-emit is stable.
     check("emit-fixed-point", _emit(_parse(merged.new_bytes)) == merged.new_bytes)
     two = merge_registration(old, entry)
     check("merge-deterministic",
           (two.new_bytes, two.new_digest) == (merged.new_bytes, merged.new_digest))
+    # sorted-key emission checked at the BYTE level with an insertion order that differs from
+    # sorted order, so dropping the sort in _emit_value turns exactly this red.
+    check("emit-sorted-keys-bytes",
+          _emit(_parse(b'{"env":{"b":1,"a":2}}'))
+          == b'{\n  "env": {\n    "a": 2,\n    "b": 1\n  }\n}\n')
 
     # 2b: preservation of untouched adopter content (threat model 2). Non-ASCII text re-emits as
     # raw UTF-8 (never \uXXXX-rewritten) and number lexemes re-emit exactly as spelled; only
@@ -756,8 +833,6 @@ def self_test():
     # that silently drops an untouched adopter key (a corruption the inserted-entry check alone
     # cannot see), the merge must refuse and return no bytes; removing the verification guard in
     # merge_registration turns exactly this red.
-    real_emit = _emit
-
     def _corrupt_emit(value):
         if isinstance(value, dict) and "permissions" in value:
             value = dict(value)
@@ -771,6 +846,96 @@ def self_test():
         globals()["_emit"] = real_emit
     check("corrupt-emission-refuses",
           broken.status is CANNOT_EVALUATE and broken.new_bytes is None)
+
+    # 5c: the verification is TYPE-AWARE. An emitter that rewrites value TYPES while keeping the
+    # lexeme, numbers re-emitted as quoted strings or digit strings re-emitted as bare numbers,
+    # must refuse: the reparse comparison sees the change because a _Number never equals a plain
+    # str (reverting _Number to plain lexeme equality turns these red); the honest emitter keeps
+    # the same inputs VALID.
+    check("number-never-equals-string",
+          _Number("1") != "1" and "1" != _Number("1") and not _Number("1") == "1"
+          and _parse(b'{"env":{"x":"1"}}') != _parse(b'{"env":{"x":1}}'))
+
+    def _numbers_as_strings(value):
+        if isinstance(value, _Number):
+            return str(value)  # the exact lexeme, re-emitted as a QUOTED JSON string
+        if isinstance(value, dict):
+            return {key: _numbers_as_strings(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [_numbers_as_strings(item) for item in value]
+        return value
+
+    def _digit_strings_as_numbers(value):
+        if _is_json_string(value) and value.isdigit():
+            return _Number(value)  # the exact characters, re-emitted as a BARE number
+        if isinstance(value, dict):
+            return {key: _digit_strings_as_numbers(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [_digit_strings_as_numbers(item) for item in value]
+        return value
+
+    for name, raw, rewrite in (
+            ("number-as-string", b'{"env":{"n":1,"f":2.5}}', _numbers_as_strings),
+            ("digit-string-as-number", b'{"env":{"PORT":"8080"}}',
+             _digit_strings_as_numbers)):
+        honest = merge_registration(raw, entry)
+        check("type-vector-{}-valid".format(name),
+              honest.status is VALID and honest.changed is True)
+
+        def _retyping_emit(value, _rewrite=rewrite):
+            return real_emit(_rewrite(value))
+
+        try:
+            globals()["_emit"] = _retyping_emit
+            retyped = merge_registration(raw, entry)
+        finally:
+            globals()["_emit"] = real_emit
+        check("type-change-{}-refuses".format(name),
+              retyped.status is CANNOT_EVALUATE and retyped.new_bytes is None)
+
+    # 5d: the inserted-entry (tail) guard is discriminating on its own NAMED finding: an emitter
+    # that silently DROPS the just-inserted entry must refuse with the tail guard's finding
+    # (without the guard the combined verification clause still refuses, but with its own finding
+    # instead, so this vector pins the guard itself).
+    own_first = (b'{"hooks":{"PreToolUse":[{"hooks":[{"command":"adopter-own",'
+                 b'"type":"command"}],"matcher":"Bash"}]}}')
+    check("own-first-honest-valid", merge_registration(own_first, entry).status is VALID)
+
+    def _drop_inserted_emit(value):
+        if (isinstance(value, dict) and "hooks" in value and isinstance(value["hooks"], dict)
+                and ENTRY_EVENT in value["hooks"] and value["hooks"][ENTRY_EVENT]):
+            value = dict(value)
+            value["hooks"] = dict(value["hooks"])
+            value["hooks"][ENTRY_EVENT] = value["hooks"][ENTRY_EVENT][:-1]
+        return real_emit(value)
+
+    try:
+        globals()["_emit"] = _drop_inserted_emit
+        dropped = merge_registration(own_first, entry)
+    finally:
+        globals()["_emit"] = real_emit
+    check("dropped-entry-refuses-at-tail-guard",
+          dropped.status is CANNOT_EVALUATE and dropped.new_bytes is None
+          and any("inserted entry not found" in f for f in dropped.findings))
+
+    # 5e: the byte-level fixed-point clause is discriminating: an emitter whose FIRST emission
+    # carries a trailing pad (same model, noncanonical bytes) must refuse; without the
+    # _emit(reparsed) != new_bytes clause those noncanonical bytes would ship as VALID.
+    pad_once = [b" "]
+
+    def _padded_once_emit(value):
+        data = real_emit(value)
+        if pad_once:
+            return data + pad_once.pop()
+        return data
+
+    try:
+        globals()["_emit"] = _padded_once_emit
+        padded = merge_registration(old, entry)
+    finally:
+        globals()["_emit"] = real_emit
+    check("noncanonical-emission-refuses",
+          padded.status is CANNOT_EVALUATE and padded.new_bytes is None)
 
     # 6: injection vectors: a control character anywhere in the candidate entry refuses (threat
     # model 5), across the whole code-point space; so does one in an EXISTING registered command.
@@ -829,8 +994,18 @@ def self_test():
               merge_registration(raw, entry).status is CANNOT_EVALUATE)
     check("nonbytes-input-cannot-eval", merge_registration("{}", entry).status is CANNOT_EVALUATE)
     check("bytearray-input-accepted", merge_registration(bytearray(old), entry).status is VALID)
-    check("oversize-cannot-eval",
-          merge_registration(b" " * (MAX_REGISTRATION_BYTES + 1), entry).status is CANNOT_EVALUATE)
+    # the oversize vector is VALID, ALREADY-MERGED JSON over the bound: without the input size
+    # guard it would sail through parse and validation and return a VALID no-op of its own bytes
+    # (the no-op path never re-emits, so the output bound cannot catch it), so removing that guard
+    # turns exactly this red.
+    big_merged = (b'{"hooks":{"PreToolUse":[{"hooks":[{"command":"opf-governance",'
+                  b'"type":"command"}],"matcher":"*"}]},"env":{"x":"'
+                  + b"a" * MAX_REGISTRATION_BYTES + b'"}}')
+    check("oversize-vector-is-over-bound", len(big_merged) > MAX_REGISTRATION_BYTES)
+    big = merge_registration(big_merged, entry)
+    check("oversize-valid-json-cannot-eval",
+          big.status is CANNOT_EVALUATE and big.new_bytes is None
+          and any("exceeds" in f for f in big.findings))
 
     # 7b: numeric overflow refuses at parse on BOTH paths (they share the one parse), never an
     # uncaught exception and never VALID; and a merged emission that would exceed the input's own
@@ -854,6 +1029,19 @@ def self_test():
     check("merged-output-over-bound-refuses",
           over.status is CANNOT_EVALUATE and over.new_bytes is None
           and any("exceed" in f for f in over.findings))
+
+    # 7c: recursion exhaustion refuses, never an uncaught exception, on BOTH paths: deep top-level
+    # nesting exhausts the PARSER (mapped by _parse's RecursionError handler), and nesting that
+    # parses but exceeds the Python-level emission depth (roughly the interpreter recursion limit)
+    # exhausts EMISSION on the changed-merge path (mapped by the merge verification handler);
+    # dropping either RecursionError handler turns its vector into an uncaught crash here.
+    deep_parse = b"[" * 100000 + b"]" * 100000
+    r = merge_registration(deep_parse, entry)
+    check("deep-nesting-parse-cannot-eval", r.status is CANNOT_EVALUATE and r.new_bytes is None)
+    deep_env = b'{"env":' + b"[" * 2000 + b"]" * 2000 + b"}"
+    r = merge_registration(deep_env, entry)
+    check("deep-nesting-emission-cannot-eval",
+          r.status is CANNOT_EVALUATE and r.new_bytes is None)
 
     # 8: an existing CONFLICTING registration of the same entry refuses: same command under another
     # matcher, under another event, or beside extra entries is never treated as already-merged.
@@ -926,6 +1114,15 @@ def self_test():
           validate_registration_model(dict(hooks=None)).status is CANNOT_EVALUATE)
     check("model-canonical-valid",
           validate_registration_model(canonical_registration()).status is VALID)
+    # an integer outside the double range refuses (never an OverflowError), whether the model came
+    # through stdlib json.loads (the wiring slice may parse that way) or was code-built.
+    check("model-huge-int-timeout-refuses",
+          validate_registration_model(json.loads(
+              b'{"hooks":{"Stop":[{"hooks":[{"command":"x","type":"command",'
+              b'"timeout":' + b"9" * 400 + b'}]}]}}')).status is INVALID)
+    check("model-code-built-huge-int-refuses",
+          validate_registration_model({"hooks": {"Stop": [{"hooks": [
+              {"command": "x", "type": "command", "timeout": 10 ** 400}]}]}}).status is INVALID)
 
     if failures:
         print("OPF-ADOPT-HOOK SELF-TEST: FAIL ({} of {} checks failed)".format(
