@@ -1371,17 +1371,21 @@ class _FixtureProcess:
     pidfd, so a live guardian's pid/pgid cannot be recycled), then the
     receipt-identified subject's tree is SIGKILLed under GUARDIAN OWNERSHIP
     (fix 2y): while the frozen guardian lives it is the tree's subreaper, so
-    every member is verified through its OWN pidfd against /proc -- group
-    membership AND a CURRENT parent chain reaching the guardian anchor,
+    every observed member is verified through its OWN pidfd against /proc
+    -- group membership AND a CURRENT parent chain reaching the guardian
+    anchor,
     re-checked AFTER the pidfd is opened -- NEVER a numeric killpg and NEVER
     a census anchored on the subject's bare numeric pid (QA20 claude F1,
     QA21 codex F3, fix 2y codex F1: only unreapability pins a pid or pgid
     NUMBER against reuse; neither a held pidfd nor SIGSTOP delivery does).
     Members die BEFORE the leader (the census excludes the leader; its
     held-pidfd SIGKILL runs last), so no member is stranded by its leader's
-    death, and every member the census could not address is accounted (fix
-    2y codex F2). The "tree" claim then rests on OBSERVATION, never on the
-    kill sends alone (fix 2z; maintainer ruling PD-335-TREE-CLAIM-STALL):
+    death, and every observed member the census could not address is
+    accounted (fix 2y codex F2; a member no census observed -- the
+    disclosed fork-race and pid-wraparound residual -- can be neither
+    addressed nor accounted, per the ruling PD-335-TREE-CLAIM-STALL). The
+    "tree" claim then rests on OBSERVATION, never on the kill sends alone
+    (fix 2z; maintainer ruling PD-335-TREE-CLAIM-STALL):
     while the guardian stays frozen, a bounded verification census must
     observe NO live, signalable group member in TWO CONSECUTIVE clean
     passes -- an observation, never a proof (a continuously forking chain
@@ -1924,10 +1928,13 @@ class _FixtureProcess:
         ownership-checked kill helper itself fails, the guardian is still
         SIGKILLed directly through its held, identity-safe pidfd, where a
         cancellation propagates with the helper's failure chained as its
-        context (round 24, codex BLOCKER 2), and a cancellation ALREADY
-        propagating into that cleanup stays the OUTWARD exception, any
-        ordinary cleanup failure chained beneath it, never promoted over
-        it (QA25 codex) -- and an ordinary census
+        context (round 24, codex BLOCKER 2), and ONE exception boundary
+        spans that whole cleanup, direct backstop included: a cancellation
+        ALREADY propagating into it stays the OUTWARD exception, EVERY
+        later failure -- helper or backstop, ordinary or cancellation --
+        chained beneath it, never promoted over it, with the
+        cancellation's own pre-existing chain kept intact (QA25 codex;
+        QA26 codex closed the class) -- and an ordinary census
         failure that escaped the escalation helper records the kill that
         DID run ("partial", members unknown; the helper's own protection
         ran the held-pidfd SIGKILL, whose delivery is only ever worded as
@@ -1982,38 +1989,74 @@ class _FixtureProcess:
             raise
         finally:
             # The guardian SIGKILL is exception-safe (fix 2z, codex BLOCKER
-            # 3): a raising subject cleanup never strands a frozen guardian.
+            # 3): a raising subject cleanup never strands a frozen guardian
+            # -- and ONE exception boundary spans the WHOLE cleanup, direct
+            # backstop included (QA26 codex): a pending cancellation always
+            # stays the outward exception, whatever the cleanup raises.
+            suppressed = None
             try:
-                _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
-            except BaseException as cleanup_exc:
-                # Even the ownership-checked helper failing (e.g. the same
-                # census fault reaching its own group census) must not strand
-                # the frozen guardian: its held pidfd is identity-safe,
-                # SIGKILL it directly, then let the failure propagate.
-                if self.pidfd is not None:
-                    try:
-                        signal.pidfd_send_signal(self.pidfd, signal.SIGKILL)
-                    except OSError as exc:
-                        # A cancellation during the direct backstop must
-                        # propagate, carrying the helper's failure as its
-                        # __context__ (round 24, codex BLOCKER 2), beneath a
-                        # pending cancellation where one is already
-                        # propagating (QA25 codex); any other delivery
-                        # failure is out of moves and the original failure
-                        # propagates below.
-                        if isinstance(exc, (TimeoutError, InterruptedError)):
-                            if isinstance(pending,
-                                          (TimeoutError, InterruptedError)):
-                                raise pending from exc
+                try:
+                    _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
+                except BaseException:
+                    # Even the ownership-checked helper failing (e.g. the
+                    # same census fault reaching its own group census) must
+                    # not strand the frozen guardian: its held pidfd is
+                    # identity-safe, SIGKILL it directly, then let the
+                    # failure propagate.
+                    if self.pidfd is not None:
+                        try:
+                            signal.pidfd_send_signal(self.pidfd,
+                                                     signal.SIGKILL)
+                        except (TimeoutError, InterruptedError):
+                            # A cancellation during the direct backstop
+                            # propagates, carrying the helper's failure as
+                            # its __context__ (round 24, codex BLOCKER 2);
+                            # the boundary below still keeps a PENDING
+                            # cancellation outward over it (QA26 codex).
                             raise
+                        except OSError:
+                            # An ordinary delivery failure is out of moves:
+                            # the helper's own failure propagates below. A
+                            # non-OSError backstop fault falls through to
+                            # the boundary instead of displacing a pending
+                            # cancellation (QA26 codex).
+                            pass
+                    raise
+            except BaseException as cleanup_exc:
                 # A cancellation ALREADY propagating into this finally stays
-                # the OUTWARD exception: an ordinary cleanup failure is
-                # chained beneath it, never promoted over it (QA25 codex).
-                if (isinstance(pending, (TimeoutError, InterruptedError))
-                        and not isinstance(
-                            cleanup_exc, (TimeoutError, InterruptedError))):
-                    raise pending from cleanup_exc
-                raise
+                # the OUTWARD exception: EVERY later failure -- helper or
+                # backstop, ordinary or cancellation -- is chained beneath
+                # it, never promoted over it (QA25 codex; QA26 codex closed
+                # the class, not the instances).
+                if not isinstance(pending, (TimeoutError, InterruptedError)):
+                    raise
+                suppressed = cleanup_exc
+            if suppressed is not None:
+                # Chain the suppressed cleanup failure beneath the pending
+                # cancellation WITHOUT rewriting the cancellation's own
+                # pre-existing chain (QA26 claude MINOR 1): pending is the
+                # exception this finally is already handling, so re-raising
+                # it here leaves its __context__ intact, where the previous
+                # raise-from inside the handler above unlinked it. The
+                # suppressed failure's implicit back-edge to pending (set
+                # when it was raised inside this finally) is dropped so the
+                # outward chain stays acyclic.
+                tail, seen = suppressed, set()
+                while tail is not None and id(tail) not in seen:
+                    seen.add(id(tail))
+                    if tail.__context__ is pending:
+                        tail.__context__ = None
+                        break
+                    tail = tail.__context__
+                if pending.__cause__ is None:
+                    keep = pending.__suppress_context__
+                    pending.__cause__ = suppressed
+                    pending.__suppress_context__ = keep
+                else:
+                    pending.add_note(
+                        "guardian-kill cleanup failure kept beneath this "
+                        "pending cancellation: " + repr(suppressed))
+                raise pending
 
     def _abandon_unfinished_launch(self):
         """Decide, under the launch lock, who owns an unfinished launch: if the
@@ -2158,7 +2201,10 @@ class _FixtureProcess:
 
     def _escalation_refusal(self, failure):
         """Annotate an escalated refusal with ONLY what the escalation
-        actually did (QA19 F3), accounting every member (fix 2y, codex F2):
+        actually did (QA19 F3), accounting every observed member (fix 2y,
+        codex F2; a member no census observed -- the disclosed fork-race
+        and pid-wraparound residual -- can be neither addressed nor
+        accounted, per the ruling PD-335-TREE-CLAIM-STALL):
         "subject tree killed" is claimed ONLY when the guardian-anchored
         census addressed every OBSERVED member (a census can only address
         members it observed) AND the bounded post-kill verification

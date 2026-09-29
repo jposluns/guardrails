@@ -3758,6 +3758,12 @@ def _watchdog_completion_case(mode):
         # (codex) adds pending-cancellation priority: a cancellation ALREADY
         # propagating into the guardian-kill finally stays the outward
         # exception, an ordinary kill-helper failure chained beneath it.
+        # QA26 (codex) closes that priority as a CLASS: one exception
+        # boundary spans the whole cleanup, direct backstop included, so
+        # EVERY later failure -- helper or backstop, ordinary or
+        # cancellation -- stays beneath a pending cancellation; QA26
+        # (claude MINOR 1) keeps the cancellation's own pre-existing chain
+        # intact while doing so.
         def state(target):
             try:
                 stat = Path("/proc", str(target), "stat").read_bytes()
@@ -3914,6 +3920,17 @@ def _watchdog_completion_case(mode):
         # worded as an observation with its residual, never a proof.
         assert "an observation, not a proof" in relabel, (
             "the tree claim was not worded as an observation", relabel)
+        # QA26 claude MINOR 4: pin the narrowed claim and its residual.
+        # Reverting to the stronger "every member addressed" wording or
+        # dropping the ruling-mandated residual disclosure turns this red.
+        assert "every observed member addressed" in relabel, (
+            "the observed-members claim was dropped", relabel)
+        assert "every member addressed" not in relabel, (
+            "the tree claim regressed to the complete-member wording",
+            relabel)
+        assert ("a continuously forking chain or pid wraparound can "
+                "evade it") in relabel, (
+            "the residual disclosure was dropped", relabel)
 
         # Leg 4 (round 24, codex boundary, subject freeze site): the subject
         # SIGSTOP runs INSIDE the kill protection, so a raising freeze -- a
@@ -4179,6 +4196,156 @@ def _watchdog_completion_case(mode):
                 "the direct guardian backstop never delivered its SIGKILL")
             time.sleep(0.005)
         assert os.WIFSIGNALED(raw) and os.WTERMSIG(raw) == signal.SIGKILL, raw
+        os.close(guardian_fd)
+
+        # Leg 10 (QA26 codex BLOCKER; QA26 claude MINOR 1): ONE exception
+        # boundary spans the guardian-kill cleanup, direct backstop
+        # included. The full matrix -- pending (none, ordinary,
+        # cancellation) x helper (ok, ordinary, cancellation) x backstop
+        # (ok, OSError, non-OSError, cancellation) -- proves a pending
+        # cancellation ALWAYS stays the outward exception with every later
+        # failure chained beneath it AND with its own pre-existing chain
+        # intact (a triple fault must not unlink it), while every
+        # no-pending combination keeps its round-24 outward exception. The
+        # pre-fix finally excluded cancellation-typed helper failures from
+        # restoration and let a non-OSError backstop fault escape its
+        # OSError-only handler (both displaced the pending cancellation),
+        # and its raise-from rewrote the cancellation's __context__.
+        guardian = os.fork()
+        if guardian == 0:
+            time.sleep(3600)
+            os._exit(0)
+        guardian_fd = os.pidfd_open(guardian)
+
+        def signature(exc):
+            if exc is None:
+                return None
+            return type(exc).__name__ + ": " + str(exc)
+
+        def boundary_signature(boundary):
+            if boundary == "helper ordinary":
+                return "RuntimeError: helper ordinary"
+            if boundary == "helper cancellation":
+                return "InterruptedError: helper cancellation"
+            if boundary == "backstop non-oserror":
+                return "IndexError: backstop non-OSError"
+            if boundary == "backstop cancellation":
+                return "InterruptedError: backstop cancellation"
+            return None
+
+        def run_combo(pending_kind, helper_kind, backstop_kind):
+            fake = types.SimpleNamespace(
+                pid=guardian, pidfd=guardian_fd,
+                subject_pid=None, subject_pidfd=None,
+                _subject_kill=None, _subject_skipped=None)
+            backstop_calls = []
+
+            def stub_pidfd_signal(target_fd, signum, *args):
+                assert target_fd == guardian_fd, (target_fd, signum)
+                if signum == signal.SIGSTOP:
+                    if pending_kind == "ordinary":
+                        raise RuntimeError("pending ordinary")
+                    if pending_kind == "cancellation":
+                        try:
+                            raise ValueError("pre-existing chain")
+                        except ValueError:
+                            raise TimeoutError("pending cancellation")
+                    return None
+                assert signum == signal.SIGKILL, signum
+                backstop_calls.append(True)
+                if backstop_kind == "oserror":
+                    raise PermissionError(1, "backstop OSError")
+                if backstop_kind == "non-oserror":
+                    raise IndexError("backstop non-OSError")
+                if backstop_kind == "cancellation":
+                    raise InterruptedError("backstop cancellation")
+                return None
+
+            def stub_helper(pid, signum, pidfd=None, *, group=True):
+                if helper_kind == "ordinary":
+                    raise RuntimeError("helper ordinary")
+                if helper_kind == "cancellation":
+                    raise InterruptedError("helper cancellation")
+                return True
+
+            outward = None
+            with patch.object(emit, "_fixture_signal", stub_helper), (
+                    patch.object(signal, "pidfd_send_signal",
+                                 stub_pidfd_signal)):
+                try:
+                    emit._FixtureProcess._escalate(fake)
+                except BaseException as exc:
+                    outward = exc
+            combo = (pending_kind, helper_kind, backstop_kind)
+            assert (fake._subject_kill is None
+                    and fake._subject_skipped is None), (
+                combo, fake._subject_kill, fake._subject_skipped)
+            assert len(backstop_calls) == (0 if helper_kind == "ok" else 1), (
+                combo, backstop_calls)
+            return combo, outward
+
+        for pending_kind in ("none", "ordinary", "cancellation"):
+            for helper_kind in ("ok", "ordinary", "cancellation"):
+                for backstop_kind in ("ok", "oserror", "non-oserror",
+                                      "cancellation"):
+                    combo, outward = run_combo(
+                        pending_kind, helper_kind, backstop_kind)
+                    if helper_kind == "ok":
+                        boundary = None
+                    elif backstop_kind in ("ok", "oserror"):
+                        boundary = "helper " + helper_kind
+                    else:
+                        boundary = "backstop " + backstop_kind
+                    boundary_sig = boundary_signature(boundary)
+                    if pending_kind == "cancellation":
+                        expected = "TimeoutError: pending cancellation"
+                    elif boundary_sig is not None:
+                        expected = boundary_sig
+                    elif pending_kind == "ordinary":
+                        expected = "RuntimeError: pending ordinary"
+                    else:
+                        expected = None
+                    assert signature(outward) == expected, (
+                        "the outward exception was displaced (QA26 codex)",
+                        combo, signature(outward), expected)
+                    if pending_kind == "cancellation":
+                        assert (signature(outward.__context__)
+                                == "ValueError: pre-existing chain"), (
+                            "the pending cancellation's pre-existing chain "
+                            "was rewritten (QA26 claude MINOR 1)", combo,
+                            signature(outward.__context__))
+                        if boundary is None:
+                            assert outward.__cause__ is None, (
+                                combo, signature(outward.__cause__))
+                        else:
+                            assert (signature(outward.__cause__)
+                                    == boundary_sig), (
+                                "the cleanup failure was not chained "
+                                "beneath the pending cancellation", combo,
+                                signature(outward.__cause__), boundary_sig)
+                            if boundary.startswith("backstop "):
+                                helper_sig = boundary_signature(
+                                    "helper " + helper_kind)
+                                assert (signature(
+                                            outward.__cause__.__context__)
+                                        == helper_sig), (
+                                    "the helper failure was dropped from "
+                                    "the chain", combo,
+                                    signature(outward.__cause__.__context__))
+                    elif pending_kind == "ordinary" and boundary is not None:
+                        chain, node, seen = [], outward, set()
+                        while node is not None and id(node) not in seen:
+                            seen.add(id(node))
+                            chain.append(signature(node))
+                            node = node.__cause__ or node.__context__
+                        assert "RuntimeError: pending ordinary" in chain, (
+                            "the pending ordinary failure was dropped from "
+                            "the chain", combo, chain)
+        # Every guardian-directed signal was stubbed, none delivered: the
+        # guardian survives for this hygiene kill.
+        os.kill(guardian, signal.SIGKILL)
+        waited, raw = os.waitpid(guardian, 0)
+        assert waited == guardian and os.WIFSIGNALED(raw), (waited, raw)
         os.close(guardian_fd)
     elif mode == "receipt-high-fd":
         import fcntl
