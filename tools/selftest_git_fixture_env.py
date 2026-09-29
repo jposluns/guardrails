@@ -1838,7 +1838,9 @@ def _auto_maintenance_children(workdir, env):
 # slot), a tracked argv or env NAME whose resolution is invalidated (never trusted): a
 # subscript write, an insert/remove/pop/clear/sort/reverse/update/setdefault call, a del,
 # or a non-additive augmented assignment in its own scope; a bare-name alias binding of it
-# in its own scope; or ANY mutation, growth, aliasing, or global/nonlocal declaration of
+# in its own scope; a bare-name REBINDING of it through a walrus target, a for-statement
+# target, a `with ... as` target, or an `except ... as` name in its own scope; or ANY
+# mutation, growth, aliasing, or global/nonlocal declaration of
 # it inside a nested same-module scope (this scan does not order cross-scope calls, so a
 # module constant a helper function grows, or an enclosing argv a closure rewrites, is
 # invalidated outright; a nested LOCAL that merely shadows the name through one of those
@@ -1855,7 +1857,11 @@ def _auto_maintenance_children(workdir, env):
 # pin key whose LAST option-position setting is a `--config-env` is the same finding (its
 # launch-time environment value is unreadable here; -c and --config-env apply in
 # command-line order on git 2.53, last value wins, so a LATER `-c` re-pin restores the
-# pin). A
+# pin). A subcommand WORD that matches an alias.* defined in the SAME argv - or an
+# unresolved tail behind effective pins with such an alias defined - is a FINDING no pin or
+# coverage absorbs: the alias value is a new command line this scan cannot read, a non-shell
+# alias's own `-c` pairs apply AFTER the outer options with last-value-wins, and a `!` shell
+# alias strips the propagated command scope (verified on git 2.53). A
 # launch whose resolved SUBCOMMAND is not maintenance-triggering is out of scope (a trigger
 # word in operand position, `git show commit`, is not a launch of that trigger). A scrub or
 # lifecycle call covers a launch only from a covering SCOPE: the launch's own function, an
@@ -1875,12 +1881,22 @@ def _auto_maintenance_children(workdir, env):
 # multiprocessing or asyncio target=), a git launch INSIDE a launched script or behind a
 # non-git wrapper program (an `env`/`sh`/`bash`/interpreter head ends the analysis at that
 # head), an unresolved `-c` VALUE slot, an unresolved argv tail AFTER the three pins are
-# effective in option position (the pinned-funnel idiom passes subcommand and operands there;
-# the parse ends at the first unresolved token, so even a RESOLVED re-enable spelled after it
-# is out of this scan's reach), and a mutation of a tracked argv or env reached WITHOUT a
-# bare-name binding: through tuple unpacking, a container element, an object attribute, a
-# function that receives the object as an argument, or another module (a bare-name alias IS
-# tracked and invalidates resolution). Those forms stay covered by review posture, not
+# effective in option position with NO alias.* defined in the same argv (the pinned-funnel
+# idiom passes subcommand and operands there; the parse ends at the first unresolved token,
+# so even a RESOLVED re-enable spelled after it is out of this scan's reach; with a same-argv
+# alias defined that tail is a finding instead, above), a mutation of a tracked argv or env
+# reached WITHOUT a bare-name binding: through tuple unpacking, a container element, an
+# object attribute, a function that receives the object as an argument, or another module (a
+# bare-name alias IS tracked and invalidates resolution, and so does a bare-name REBINDING
+# through an assignment, a walrus target, a for-statement target, a `with ... as` target, or
+# an `except ... as` name), a mutation spelled as a direct mutator METHOD outside the tracked
+# enumeration (append/extend/insert/remove/pop/clear/sort/reverse/update/setdefault/
+# __setitem__/__delitem__ are read; dict.popitem, or an in-place dunder called as a method,
+# env.__ior__(...) or args.__iadd__(...), is not), a bare-name binding this scan does not
+# read as one (a tuple or starred unpacking target, a match-case capture pattern), and a
+# function PARAMETER that shares its name with a module-level variable (parameters are not
+# read as bindings, so the launch resolves through the module value while Python passes the
+# caller's argument). Those forms stay covered by review posture, not
 # mechanics.
 _SCAN_DIRS = ("tools", "opf/tools")
 _SCAN_LAUNCH_NAMES = frozenset(("run", "Popen", "call", "check_call", "check_output",
@@ -2136,7 +2152,11 @@ def _scan_local_assigns(func_node, name, launch=None):
     augmented assignment: only += is growth - `args *= 0` EMPTIES the list, so every
     other operator invalidates), when the scope binds the object to ANOTHER bare name (an
     alias `other = name`: a later mutation through the alias is invisible to this
-    per-name reading, so the alias itself invalidates), when a NESTED same-module scope
+    per-name reading, so the alias itself invalidates), when the scope REBINDS the name
+    through a walrus target, a for-statement target, a `with ... as` target, or an
+    `except ... as` name (this scan does not order control flow or merge branches, so a
+    rebound name is invalidated outright, fail-closed, exactly like a second
+    assignment), when a NESTED same-module scope
     mutates, grows, aliases, or declares global/nonlocal the name (this scan does not
     order cross-scope calls, so a helper that grows a module constant or a closure that
     rewrites an enclosing argv invalidates it outright; a nested local that merely
@@ -2144,7 +2164,13 @@ def _scan_local_assigns(func_node, name, launch=None):
     invalidates too, fail-closed), or - when <launch> is the
     launch point's (lineno, col_offset) - when ANY binding or growth of the name sits AFTER
     that point: this scan does not order control flow, so a pin appended after the launch
-    is never credited to it and the resolution is invalidated outright."""
+    is never credited to it and the resolution is invalidated outright. Two DISCLOSED
+    residuals bound this reading (review posture, not mechanics): a mutator METHOD
+    outside the enumerated set is NOT read as mutation (dict.popitem, or an in-place
+    dunder called as a method: env.__ior__(...), args.__iadd__(...)), and a function
+    PARAMETER is never read as a binding, so a parameter that shares its name with a
+    module-level constant leaves this scope's reading empty and the callers fall back
+    to the MODULE value while Python passes the caller's argument."""
     plain, extend, mutated = [], [], False
     if func_node is None:
         return plain, extend, mutated
@@ -2176,9 +2202,24 @@ def _scan_local_assigns(func_node, name, launch=None):
             elif isinstance(node.value, ast.Name) and node.value.id == name:
                 mutated = True
         elif isinstance(node, ast.NamedExpr):
-            if isinstance(node.value, ast.Name) and node.value.id == name \
-                    and not (isinstance(node.target, ast.Name)
-                             and node.target.id == name):
+            if isinstance(node.target, ast.Name) and node.target.id == name:
+                # A walrus REBINDING of the name: a binding this reading does not
+                # order or merge, so it invalidates outright, fail-closed.
+                mutated = True
+            elif isinstance(node.value, ast.Name) and node.value.id == name:
+                mutated = True
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            if isinstance(node.target, ast.Name) and node.target.id == name:
+                # A for-target REBINDING of the name: same invalidation.
+                mutated = True
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            if any(isinstance(item.optional_vars, ast.Name)
+                   and item.optional_vars.id == name for item in node.items):
+                # A `with ... as` REBINDING of the name: same invalidation.
+                mutated = True
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name == name:
+                # An `except ... as` REBINDING of the name: same invalidation.
                 mutated = True
         elif isinstance(node, ast.AugAssign):
             if isinstance(node.target, ast.Name) and node.target.id == name:
@@ -2264,7 +2305,12 @@ def _scan_flatten(expr, func_node, module_consts, depth, launch=None):
     """(ordered argv entries, open) within the resolver's bounds: literal lists and tuples,
     + concatenation, list()/tuple() wrapping, starred splices, and Name resolution through a
     single same-scope assignment (with its append/extend growth as tail entries) or a
-    module-level literal. Each entry is a single-slot AST node, or the _SCAN_OPEN marker where
+    module-level literal (a function PARAMETER is not read as a binding, so a parameter
+    that shares its name with a module-level constant resolves through the MODULE value
+    while Python passes the caller's argument, and a mutator method outside
+    _scan_local_assigns' enumerated set - args.__iadd__(...) - is not read as mutation:
+    both disclosed residuals, held by review posture, not mechanics). Each entry is a
+    single-slot AST node, or the _SCAN_OPEN marker where
     an unknown-length region the resolver cannot reduce sits, so a POSITIONAL reading knows
     exactly where its knowledge ends (a marker at the head hides the program; a marker
     after effective pins ENDS the positional parse there, so anything spelled beyond it -
@@ -2431,18 +2477,27 @@ def _scan_git_argv_state(entries, func_node, module_consts, launch=None):
     pin value, or its LAST option-position setting is a `--config-env` (that value is an
     environment VARIABLE read at launch time, unreadable here, and it outranks every
     environment-scope pin, so no env coverage can absorb it); 'subcommand' with the
-    resolved subcommand token when the pins are not effective; 'opaque' when an
-    unknown-length region, an unresolved slot, an unreadable `-c` value, or a truncated
-    option reaches the parser before the pins are effective, or when a SUBCOMMAND is
-    reached after an alias.* option with the pins not effective (an alias.* option never
-    ENDS the parse: config evaluation continues through it with last-value-wins, so an
-    adverse pin BEFORE the alias is still overridden by a later re-pin and a stomp AFTER
-    the alias is still detected - but a command-scope alias can remap ANY later word to
-    another subcommand, so the subcommand token itself is never trusted unless the pins
-    are effective, in which case the launch is pinned whatever the word maps to); 'end'
+    resolved subcommand token when the pins are not effective; 'alias' when the
+    resolved subcommand WORD matches an alias.* name defined in this SAME argv,
+    whatever the pin state, or when the parse ends at an unresolved region with the
+    pins effective and a same-argv alias.* defined (the invoked alias VALUE is a new
+    command line this parse cannot read: a non-shell alias's own `-c` pairs apply
+    AFTER the outer options with last-value-wins, and a `!` shell alias strips the
+    propagated command scope, so the alias defeats every argv and environment pin,
+    verified on git 2.53 - never 'pinned', whatever the outer options say); 'opaque'
+    when an unknown-length region, an unresolved slot, an unreadable `-c` value, or a
+    truncated option reaches the parser before the pins are effective, or when a
+    SUBCOMMAND that matches no same-argv alias.* name is reached after an alias.*
+    option with the pins not effective (an alias.* option never ENDS the parse: config
+    evaluation continues through it with last-value-wins, so an adverse pin BEFORE the
+    alias is still overridden by a later re-pin and a stomp AFTER the alias is still
+    detected; a word other than the defined names is not remapped by the same-argv
+    aliases, but with the pins not effective this parse keeps it coverage-gated,
+    fail-closed); 'end'
     for a fully resolved argv that never reaches a subcommand."""
     pin_state = dict()
     alias_seen = False
+    alias_names = set()
 
     def _verdict(sub):
         for key, value in _SCAN_PIN_VALUES.items():
@@ -2461,7 +2516,12 @@ def _scan_git_argv_state(entries, func_node, module_consts, launch=None):
             token = _scan_element_literal(entry, func_node, module_consts,
                                           _SCAN_RESOLVE_DEPTH, launch)
         if token is None:
-            return _verdict(None) or ("opaque", None)
+            state = _verdict(None)
+            if state is not None and state[0] == "pinned" and alias_seen:
+                # The unresolved region can spell a defined alias name: the
+                # pinned-funnel trust never extends across a same-argv alias.
+                return "alias", None
+            return state or ("opaque", None)
         if token == "-c":
             if index + 1 >= len(entries) or entries[index + 1] is _SCAN_OPEN:
                 return "opaque", None
@@ -2475,9 +2535,11 @@ def _scan_git_argv_state(entries, func_node, module_consts, launch=None):
                 # git keeps applying later -c/--config-env values with last-value-wins,
                 # so the parse continues through it (an adverse pin before the alias is
                 # still overridden by a later re-pin; a stomp after it is still
-                # detected). Only the eventual SUBCOMMAND becomes untrustworthy - the
-                # alias can remap any later word - handled at the subcommand verdict.
+                # detected). The defined NAME is recorded: a word equal to it INVOKES
+                # the alias (the unconditional 'alias' verdict below), and any other
+                # word stays untrusted while the pins are not effective.
                 alias_seen = True
+                alias_names.add(key[len("alias."):])
                 index += 2
                 continue
             if key in _SCAN_PIN_VALUES:
@@ -2510,9 +2572,10 @@ def _scan_git_argv_state(entries, func_node, module_consts, launch=None):
                 continue
             if key.startswith("alias."):
                 # An alias defined through --config-env: same continuation as -c above
-                # (the alias TARGET is unreadable here, but that only widens which
-                # words the subcommand verdict must distrust, which alias_seen does).
+                # (the alias NAME is read from the key and recorded exactly like -c;
+                # only its TARGET is unreadable, which the alias verdict never needs).
                 alias_seen = True
+                alias_names.add(key[len("alias."):])
             index += step
             continue
         if token in _SCAN_GIT_OPTION_ARG:
@@ -2524,6 +2587,11 @@ def _scan_git_argv_state(entries, func_node, module_consts, launch=None):
         if token.startswith("-") and token != "-":
             index += 1
             continue
+        if token.lower() in alias_names:
+            # This word INVOKES an alias defined in this same argv: the alias value
+            # is a new command line this parse cannot read, and it defeats every
+            # argv and environment pin (docstring above) - never 'pinned'.
+            return "alias", None
         state = _verdict(token)
         if state is not None:
             return state
@@ -2641,11 +2709,19 @@ def _scan_env_covered(expr, func_node, module_consts, func_defs, scope_scrubbed,
     effective pins. An env NAME counts only while its resolution is intact: an in-place
     mutation (env.update / env.setdefault / a subscript write / a del), ANY splice growth
     or augmented assignment (env |= {...} rewrites entries wholesale), an alias binding,
+    a rebinding through a walrus target, a for-statement target, a `with ... as` target,
+    or an `except ... as` name,
     or - via <launch>, the launch point's (lineno, col_offset) - any binding of the name
     at or after the launch invalidates coverage outright (this scan does not order
     control flow or read mutation arguments, so a mutated derivation is never trusted,
     fail-closed). <launch> bounds the launch's OWN scope only: it does not follow the
-    one-level function-return resolution into another scope's line numbers."""
+    one-level function-return resolution into another scope's line numbers. Two
+    DISCLOSED residuals bound this reading (review posture, not mechanics): a mutator
+    METHOD outside _scan_local_assigns' enumerated set is not read as mutation
+    (dict.popitem, or an in-place dunder called as a method: env.__ior__(...)), and a
+    function PARAMETER is not read as a binding, so an env parameter that shares its
+    name with a module-level variable resolves through the MODULE value while Python
+    passes the caller's argument."""
     if expr is None or depth <= 0:
         return False
     if isinstance(expr, ast.Call):
@@ -2989,6 +3065,22 @@ def _maintenance_pin_scan(root, allow_missing_files=False):
                             " every environment pin, so no scrub or covered env protects"
                             " it); remove the override or justify it in"
                             " _SCAN_ALLOWED_UNPINNED" % (rel, call.lineno, qualname))
+                    continue
+                if status == "alias":
+                    # The argv defines an alias.* and reaches a word that can invoke
+                    # it: the alias expansion is a command line this scan cannot
+                    # read, a non-shell alias's `-c` pairs apply after the outer
+                    # options and a `!` alias strips the propagated command scope
+                    # (git 2.53), so no argv pin, environment pin, scrub, or covered
+                    # env protects the launch.
+                    if not absorbed(key, "git"):
+                        findings.append(
+                            "%s:%d %s: git launch that defines an alias.* in its own"
+                            " argv and reaches a word that can invoke it (cannot"
+                            " evaluate the alias expansion, which outranks every argv"
+                            " and environment pin); drop the same-argv alias or"
+                            " justify it in _SCAN_ALLOWED_UNPINNED"
+                            % (rel, call.lineno, qualname))
                     continue
                 # Remaining: a maintenance-triggering subcommand, or a git argv this scan
                 # cannot resolve past the option region. Both are acceptable only under a
@@ -3518,6 +3610,67 @@ _SCAN_CONTRACT_CASES = (
          "_HAS_RUNNER = getattr(asyncio, 'Runner', None)", "",
          "print(_HAS_RUNNER)", ""))),),
      None),
+    # Round-6 forms: the same-argv alias remap and the bare-name rebinding gaps round-6
+    # review demonstrated (each red without the round-6 parser and resolver changes).
+    ("alias-remap-defeats-pins",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _seed():",
+         "    subprocess.run(['git', '-c', 'gc.auto=0', '-c', 'gc.autoDetach=false',",
+         "                    '-c', 'maintenance.auto=false',",
+         "                    '-c', 'alias.seed=-c maintenance.auto=true commit',",
+         "                    'seed', '--allow-empty', '-m', 'x'])", ""))),),
+     "defines an alias.* in its own argv"),
+    ("alias-open-tail",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _seed(word):",
+         "    subprocess.run(['git', '-c', 'gc.auto=0', '-c', 'gc.autoDetach=false',",
+         "                    '-c', 'maintenance.auto=false',",
+         "                    '-c', 'alias.seed=-c maintenance.auto=true commit',",
+         "                    word])", ""))),),
+     "defines an alias.* in its own argv"),
+    ("argv-walrus-rebind",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _seed():",
+         "    args = ['git', '-c', 'gc.auto=0', '-c', 'gc.autoDetach=false',",
+         "            '-c', 'maintenance.auto=false', 'commit', '--allow-empty',",
+         "            '-m', 'x']",
+         "    (args := ['git', 'maintenance', 'run'])",
+         "    subprocess.run(args)", ""))),),
+     "cannot resolve"),
+    ("argv-for-rebind",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _seed():",
+         "    args = ['git', '-c', 'gc.auto=0', '-c', 'gc.autoDetach=false',",
+         "            '-c', 'maintenance.auto=false', 'commit', '--allow-empty',",
+         "            '-m', 'x']",
+         "    for args in [['git', 'maintenance', 'run']]:",
+         "        pass",
+         "    subprocess.run(args)", ""))),),
+     "cannot resolve"),
+    ("env-walrus-rebind",
+     (("tools/planted.py", "\n".join((
+         "import os", "import subprocess", "",
+         "from _git_fixture_env import git_fixture_env", "", "",
+         "def _seed():",
+         "    env = git_fixture_env()",
+         "    (env := dict(os.environ))",
+         "    subprocess.run(['git', 'commit', '--allow-empty', '-m', 'x'],",
+         "                   env=env)", ""))),),
+     "maintenance-triggering git launch"),
+    ("env-with-rebind",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "",
+         "from _git_fixture_env import git_fixture_env", "", "",
+         "def _seed(handle):",
+         "    env = git_fixture_env()",
+         "    with handle as env:",
+         "        subprocess.run(['git', 'commit', '--allow-empty', '-m', 'x'],",
+         "                       env=env)", ""))),),
+     "maintenance-triggering git launch"),
 )
 
 
