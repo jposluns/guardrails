@@ -7374,19 +7374,40 @@ def _watchdog_completion_case(mode):
         # below), and that exact QA38 mutation is pinned red after
         # the matrix. fix 18 (QA39 claude BLOCKER / gemini BLOCKER,
         # maintainer decision 2026-09-29): the derivation is a
-        # BOUNDED, DISCLOSED guarantee, not widened here. Leg 19
-        # derives exactly the self-attributes read inside an
-        # If/While/IfExp TEST of the member and drives ONE deviation
-        # at a time; it does NOT drive multi-attribute combinations,
-        # conditions carried through locals or other data flow, or
-        # state never read in a branch test. The two QA39 vectors in
-        # those classes -- a displacement conditioned on _failure
-        # read through a local, and one conditioned on armed AND
+        # BOUNDED, DISCLOSED guarantee, not widened past its
+        # spelled grammar. fix 19 (QA40 claude/codex/gemini
+        # BLOCKER, maintainer decision 2026-09-29): the bound is
+        # legitimate only while its claim matches its code EXACTLY,
+        # and the pre-fix recognizer missed two ordinary spellings
+        # of a DIRECT single-attribute branch test the claim said
+        # were driven. Leg 19 derives exactly the self-attributes
+        # read inside an If/While/IfExp TEST of the member and
+        # drives ONE deviation at a time; the recognized grammar
+        # is: a bare truthiness read contributes both booleans; a
+        # read that is itself a comparison side contributes every
+        # constant that comparison spells -- bare constant sides
+        # plus the members of tuple/list/set literal sides made
+        # only of constants (a frozenset() call wrapping such a
+        # literal included); a read nested anywhere DEEPER inside a
+        # comparison side (in a call, a subscript, an attribute
+        # chain, any expression) contributes both booleans plus
+        # those same spelled constants; a spelled None also
+        # contributes a non-None stand-in. It does NOT drive
+        # multi-attribute combinations, conditions carried through
+        # locals or other data flow, state never read in a branch
+        # test, or firing values not spelled as constants in the
+        # test (computed or non-literal values). The two QA39
+        # vectors -- a displacement conditioned on _failure read
+        # through a local, and one conditioned on armed AND
         # unresolved together -- are pinned red after the QA38 pin,
         # each driven by the one targeted fixture state that fires
-        # it. A flipped state that routes around the pending point
-        # still makes that run vacuous, as disclosed at
-        # behavioural_case; only the DEFAULT state must never be
+        # it; the two QA40 spellings INSIDE the bound -- a
+        # constant-tuple membership test and an attribute nested in
+        # a call on a comparison side -- are pinned red after
+        # those, each driven by states the derivation itself
+        # recognizes. A flipped state that routes around the
+        # pending point still makes that run vacuous, as disclosed
+        # at behavioural_case; only the DEFAULT state must never be
         # vacuous.
         lifecycle_sites = set()
         for member_key in scope:
@@ -7423,31 +7444,70 @@ def _watchdog_completion_case(mode):
 
         flip_stand_in = types.SimpleNamespace()
 
-        def derived_overrides(member_key):
+        def derived_overrides(member_key, member=None):
             # fix 17 (QA38 codex BLOCKER): the driven fixture states
             # are DERIVED from the site's own code, never hand-listed.
             # Every self.<attr> read inside an If/While/IfExp test of
             # the member (nested defs included) names an attribute the
-            # site branches on; a bare truthiness read contributes
-            # both booleans, a constant comparison contributes that
-            # constant, and a None comparison contributes None plus a
-            # non-None stand-in. Each case then runs once per
-            # single-attribute deviation on top of its fixture's
-            # default state, so a displacement conditioned on any one
-            # branched-on state is driven. That is EXACTLY the bound
-            # (fix 18, QA39 claude/gemini BLOCKERs, maintainer
-            # decision 2026-09-29): self-attributes read inside an
-            # If/While/IfExp TEST, one deviation at a time. It does
-            # NOT drive multi-attribute combinations, conditions
-            # carried through locals or other data flow, or state
-            # never read in a branch test; the bound is not widened
-            # here -- the found QA39 vectors in those classes are
-            # pinned red after the matrix, and the bound is disclosed
-            # at the leg 19 head.
+            # site branches on. fix 19 (QA40 claude/codex/gemini
+            # BLOCKER, maintainer decision 2026-09-29): the
+            # recognized grammar, stated exactly:
+            #   - a read outside any comparison (a bare truthiness
+            #     read) contributes both booleans;
+            #   - a read that is itself a comparison side
+            #     contributes every constant that comparison
+            #     spells: bare constant sides plus the members of
+            #     tuple/list/set literal sides made only of
+            #     constants (a frozenset() call wrapping such a
+            #     literal included);
+            #   - a read nested anywhere deeper inside a comparison
+            #     side (in a call, a subscript, an attribute chain,
+            #     any expression) contributes both booleans plus
+            #     those same spelled constants;
+            #   - a spelled None also contributes a non-None
+            #     stand-in.
+            # Each case then runs once per single-attribute
+            # deviation on top of its fixture's default state, so a
+            # displacement conditioned on any one state spelled
+            # that way is driven. That is EXACTLY the bound (fix
+            # 18, QA39 claude/gemini BLOCKERs; fix 19, QA40;
+            # maintainer decisions 2026-09-29): it does NOT drive
+            # multi-attribute combinations, conditions carried
+            # through locals or other data flow, state never read
+            # in a branch test, or firing values not spelled as
+            # constants in the test (computed or non-literal
+            # values); the bound is not widened here -- the found
+            # QA39 vectors in those classes are pinned red after
+            # the matrix, and the bound is disclosed at the leg 19
+            # head. A pin passes `member` to derive from a mutant
+            # or probe body; the matrix itself always derives from
+            # the member's own committed AST.
             if not member_key.startswith("m:"):
                 return [{}]
+            if member is None:
+                member = scope[member_key]
+
+            def spelled_constants(side):
+                # the constants a comparison side spells (fix 19)
+                if isinstance(side, ast.Constant):
+                    return [side.value]
+                container = side
+                if (isinstance(container, ast.Call)
+                        and isinstance(container.func, ast.Name)
+                        and container.func.id == "frozenset"
+                        and len(container.args) == 1
+                        and not container.keywords):
+                    container = container.args[0]
+                if (isinstance(container, (ast.Tuple, ast.List,
+                                           ast.Set))
+                        and all(isinstance(item, ast.Constant)
+                                for item in container.elts)):
+                    return [item.value
+                            for item in container.elts]
+                return []
+
             truthy, consts = set(), {}
-            for node in ast.walk(scope[member_key]):
+            for node in ast.walk(member):
                 if not isinstance(node, (ast.If, ast.While,
                                          ast.IfExp)):
                     continue
@@ -7456,22 +7516,28 @@ def _watchdog_completion_case(mode):
                     if not isinstance(leaf, ast.Compare):
                         continue
                     sides = [leaf.left, *leaf.comparators]
+                    side_ids = set(id(side) for side in sides)
                     for side in sides:
                         in_compare.update(
                             id(part) for part in ast.walk(side))
-                    names = [side.attr for side in sides
-                             if isinstance(side, ast.Attribute)
-                             and isinstance(side.value, ast.Name)
-                             and side.value.id == "self"]
-                    values = [side.value for side in sides
-                              if isinstance(side, ast.Constant)]
-                    for name in names:
-                        bucket = consts.setdefault(name, [])
-                        for value in values:
-                            if not any(value is known
-                                       or value == known
-                                       for known in bucket):
-                                bucket.append(value)
+                    values = [value for side in sides
+                              for value in spelled_constants(side)]
+                    for side in sides:
+                        for part in ast.walk(side):
+                            if not (isinstance(part, ast.Attribute)
+                                    and isinstance(part.value,
+                                                   ast.Name)
+                                    and part.value.id == "self"):
+                                continue
+                            if id(part) not in side_ids:
+                                truthy.add(part.attr)
+                            bucket = consts.setdefault(
+                                part.attr, [])
+                            for value in values:
+                                if not any(value is known
+                                           or value == known
+                                           for known in bucket):
+                                    bucket.append(value)
                 for leaf in ast.walk(node.test):
                     if (isinstance(leaf, ast.Attribute)
                             and isinstance(leaf.value, ast.Name)
@@ -8154,6 +8220,124 @@ def _watchdog_completion_case(mode):
                     "the pinned QA39 " + vector + " mutation was "
                     "NOT caught by its targeted behavioural run "
                     "(fix 18)")
+
+        # fix 19 (QA40 claude/codex/gemini BLOCKER, maintainer
+        # decision 2026-09-29): the recognizer missed two ORDINARY
+        # spellings of a DIRECT single-attribute branch test that
+        # the fix 18 disclosure claimed were driven -- a
+        # constant-tuple membership test (comparison values were
+        # taken from bare constant sides only, so container members
+        # were never derived) and an attribute nested in a call on
+        # a comparison side (neither named nor truthy). Both
+        # spellings sit INSIDE the disclosed bound, so each must be
+        # driven by the ORDINARY matrix, never by a hand-picked
+        # state: each pin first derives the fixture states from a
+        # probe member holding ONLY the mutated branch and requires
+        # the spelling's own states among them -- red-on-revert for
+        # the recognizer clause itself -- then rebuilds
+        # _finish_close from the module's own AST with the mutation
+        # inserted right after the same unique capture `pending =
+        # exc` (the capture line stays pristine and unique for the
+        # QA38/QA39 pins), requires the firing states among the
+        # states derived from that mutant member (what the matrix
+        # would drive if this branch were committed code), and
+        # requires every firing state to turn the mutant RED. Each
+        # firing state is first proven green on the real member, so
+        # a RED against the mutant is attributable to the mutation
+        # alone.
+        fix19_vectors = (
+            ("if self._subject_kill in (\"tree\", \"partial\"):\n"
+             "    pending = None",
+             (dict(_subject_kill="tree"),
+              dict(_subject_kill="partial")),
+             (dict(_subject_kill="tree"),
+              dict(_subject_kill="partial")),
+             "container-membership (QA40)"),
+            ("if bool(self.armed) == True:\n"
+             "    pending = None",
+             (dict(armed=False), dict(armed=True)),
+             (dict(armed=True),),
+             "call-nested-attribute (QA40)"),
+        )
+        for (mutation_source, derived_states, firing_states,
+             vector) in fix19_vectors:
+            probe_member = ast.parse(
+                "def probe(self):\n" + "".join(
+                    "    " + line + "\n"
+                    for line in
+                    mutation_source.splitlines())).body[0]
+            probe_overrides = derived_overrides(
+                "m:probe", probe_member)
+            for derived_state in derived_states:
+                assert derived_state in probe_overrides, (
+                    "the derivation no longer recognizes this "
+                    "ordinary branch-test spelling: the leg 19 "
+                    "claim would again be broader than its code "
+                    "(fix 19)", vector, derived_state)
+            mutant_member = copy.deepcopy(
+                scope["m:_FixtureProcess._finish_close"])
+            capture_assigns = [
+                node for node in ast.walk(mutant_member)
+                if isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "pending"
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "exc"]
+            assert len(capture_assigns) == 1, (
+                "the pinned QA40 mutation site (`pending = exc` "
+                "inside _finish_close) is no longer unique "
+                "(fix 19)", len(capture_assigns))
+            holders = [
+                node for node in ast.walk(mutant_member)
+                if isinstance(getattr(node, "body", None), list)
+                and capture_assigns[0] in node.body]
+            assert len(holders) == 1, (
+                "the pinned QA40 capture's holding body is not "
+                "unique (fix 19)", len(holders))
+            at = holders[0].body.index(capture_assigns[0])
+            holders[0].body[at + 1:at + 1] = ast.parse(
+                mutation_source).body
+            mutant_overrides = derived_overrides(
+                "m:_FixtureProcess._finish_close", mutant_member)
+            for firing_state in firing_states:
+                assert firing_state in mutant_overrides, (
+                    "the ordinary matrix would not drive this "
+                    "QA40 firing state on a member containing "
+                    "the mutated branch (fix 19)", vector,
+                    firing_state)
+            mutant_namespace = dict(vars(emit))
+            exec(compile(ast.fix_missing_locations(ast.Module(
+                    body=[mutant_member], type_ignores=[])),
+                 "<fix 19 QA40 pinned mutant>", "exec"),
+                 mutant_namespace)
+            for pin_state in firing_states:
+                behavioural_case(
+                    ("m:_FixtureProcess._finish_close",
+                     "held descriptor and report close", 0),
+                    finish_handles_driver,
+                    TimeoutError("pending cancellation"),
+                    RuntimeError("injected cleanup fault"),
+                    dict(pin_state))
+                try:
+                    with patch.object(
+                            emit._FixtureProcess, "_finish_close",
+                            mutant_namespace["_finish_close"]):
+                        behavioural_case(
+                            ("m:_FixtureProcess._finish_close",
+                             "held descriptor and report close",
+                             0),
+                            finish_handles_driver,
+                            TimeoutError("pending cancellation"),
+                            RuntimeError("injected cleanup fault"),
+                            dict(pin_state))
+                except AssertionError:
+                    pass
+                else:
+                    raise AssertionError(
+                        "the pinned QA40 " + vector + " mutation "
+                        "was NOT caught by its derived-state "
+                        "behavioural run (fix 19)")
     elif mode == "receipt-high-fd":
         import fcntl
         import resource
