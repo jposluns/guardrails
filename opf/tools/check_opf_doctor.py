@@ -51,15 +51,25 @@ records (so a chmod of either reds); the ref set; the LOCAL git configuration; t
 INDEX as git sees it (`git ls-files -s -z`, so an update-index --force-remove or rm --cached reds); and
 .git/info/exclude; while HEAD itself (a detach or symbolic-ref retarget), the object store (including
 objects/info/alternates), reflogs and other .git metadata files (e.g. info/attributes, description) stay
-UNCOVERED by that snapshot; each covered leg is held red by its own per-write mutant fixture. The abnormal
+UNCOVERED by that snapshot; each covered leg is held red by its own per-write mutant fixture (a planted
+tag for the ref set, a local-config write, a hook-file write, a file content edit, a symlink plant and
+retarget, a file chmod, the two index writes, the exclude write, a nested .git write, the root and
+hooks-directory chmods, and an empty mkdir; the directory-set leg is pure defence in depth, every walked
+directory being already an entry record, so its mkdir fixture is equally held by the entry leg). The abnormal
 sig:15 vectors run AGAIN with SIGTERM inherited as SIG_IGN (a preexec in the recipe launch), so removing
 the recording stub's SIG_DFL restore reds the ordinary suite. And the GitHub Actions template is held to
-EXACT TEXT: its whole text with full-line comments and blank lines removed (and nothing else normalized)
-must equal the module's canonical constant _WORKFLOW_CANONICAL verbatim, so ANY added or changed key
+EXACT TEXT over a BYTE GATE: the file is read as RAW BYTES and any byte outside printable ASCII
+(0x20-0x7E) plus newline (0x0A) is REFUSED before any comment or blank-line reduction (a tab, a CR, a
+BOM and any other control or non-ASCII byte red the gate, closing the Unicode-whitespace bypass where
+Python's broad str whitespace read a U+00A0-led line as a comment that YAML, whose whitespace is only
+space and tab, reads as verdict-masking scalar content); the survivor is decoded STRICTLY as ASCII, and
+only then must its text with full-line comments and blank lines removed (and nothing else normalized)
+equal the module's canonical constant _WORKFLOW_CANONICAL verbatim, so ANY added or changed key
 (shell:, env:, defaults:, if:, continue-on-error:, quoted, space-padded or aliased, at step, job or
 workflow level), any run: continuation line or trailer, a flow mapping, a second step, or a rewritten on:
-block reds it, while full-line comments stay free to change; each reported bypass spelling is held red by
-its own mutant fixture. The stub exists because the real tool cannot isolate the render step: a
+block reds it, while full-line ASCII comments stay free to change; each reported bypass spelling and each
+refused byte class is held red by its own mutant fixture. The stub exists because the real tool cannot
+isolate the render step: a
 drifted view fails doctor's own C-VIEW-DRIFT too, so only the stub proves the render invocation is still
 present, ordered, exactly argued, and forwarded. Each committed fixture is `git init` +
 `git add` + `git commit`ed so the `tracked` and `prior` observations _opf_observe.gather derives from HEAD are
@@ -81,10 +91,12 @@ EXIT_ERROR = 2
 
 # The GitHub Actions template's canonical EFFECTIVE text: the shipped file's whole text with
 # full-line comments and blank lines removed, and NOTHING else normalized (no whitespace, quote or
-# case folding). The self-test holds opf/enforcement/ci/github-actions.yml to EXACT equality with
-# this constant, so any added or changed non-comment line reds the gate while the template's
-# comment lines stay free to change. Editing the template deliberately means updating this
-# constant in the same change.
+# case folding). The self-test first BYTE-GATES the shipped file (raw bytes; anything outside
+# printable ASCII plus newline REFUSES, so a tab, a CR, a BOM or any control or non-ASCII byte
+# reds before any reduction), then holds opf/enforcement/ci/github-actions.yml to EXACT equality
+# with this constant, so any added or changed non-comment line reds the gate while the template's
+# full-line ASCII comment lines stay free to change. Editing the template deliberately means
+# updating this constant in the same change.
 _WORKFLOW_CANONICAL = """\
 name: OPF
 on:
@@ -389,8 +401,9 @@ def _self_test_isolated():
         sha256 or a symlink's TARGET, never followed, so a chmod, a planted symlink, or a swapped
         entry kind is a visible write), with ONLY the top-level .git directory pruned; a .git
         directory anywhere BELOW the root is walked and recorded like any other entry; (2) the SORTED
-        DIRECTORY LISTING under the same pruning (a created directory, even an empty one, is a write
-        the entry records alone cannot see); (3) the lstat records of the root directory ITSELF and
+        DIRECTORY LISTING under the same pruning (pure defence in depth: every walked directory is
+        already an entry record, so this leg adds redundancy, not reach); (3) the lstat records of the
+        root directory ITSELF and
         of the .git/hooks directory ITSELF (a chmod of either is a write the walks alone cannot see);
         (4) the full `git for-each-ref` output (a written ref, e.g. a planted tag, is a repository
         write even though its bytes live under .git/); (5) the LOCAL repository configuration
@@ -695,26 +708,46 @@ def _self_test_isolated():
             expect("ci-recipe-relative-path-hostile-cdpath",
                    (rc, [c[0] for c in cd_calls]), (EXIT_OK, ["doctor", "render"]))
             # The GitHub Actions template is held to its own stated discipline (a template nothing runs
-            # in this repository would otherwise drift as prose) by EXACT TEXT, not a line pattern: the
+            # in this repository would otherwise drift as prose) by EXACT TEXT over a BYTE GATE, not a
+            # line pattern: the file is read as RAW BYTES and any byte outside printable ASCII
+            # (0x20-0x7E) plus newline (0x0A) REFUSES before any comment or blank-line reduction, the
+            # survivor is decoded strictly as ASCII, and only then must the
             # template's whole text with full-line comments and blank lines removed (and NOTHING else
-            # normalized) must equal _WORKFLOW_CANONICAL verbatim. Any added key (shell:, env:,
+            # normalized) equal _WORKFLOW_CANONICAL verbatim. Any added key (shell:, env:,
             # defaults:, if:, continue-on-error:, quoted, space-padded or aliased, at step, job or
             # workflow level), any run: continuation line or trailer, a flow mapping, a second step, or
-            # a rewritten on: block therefore reds; only full-line comments and blank lines stay free
-            # to change. Editing the template deliberately means updating the constant in the same
-            # change. Each bypass spelling reported against the older line-pattern assertion is held
+            # a rewritten on: block therefore reds; only full-line ASCII comments and blank lines stay
+            # free to change. Editing the template deliberately means updating the constant in the same
+            # change. Each bypass spelling reported against the older line-pattern assertion, and each
+            # refused byte class (the reported U+00A0-led 'comment' continuation that YAML reads as
+            # verdict-masking scalar content, a tab, a CR, a BOM), is held
             # red below by its own mutant fixture.
             workflow = (Path(__file__).resolve().parent.parent / "enforcement" / "ci"
                         / "github-actions.yml")
 
-            def _wf_effective(text):
-                return "\n".join(ln for ln in text.splitlines()
-                                 if ln.strip() and not ln.lstrip().startswith("#"))
+            def _wf_effective(data):
+                # Defined over RAW BYTES first: Python's str whitespace is a SUPERSET of YAML's
+                # (str.strip removes U+00A0 and friends; str.splitlines also splits U+0085,
+                # U+2028 and U+2029), so a str-level reduction can read a Unicode-whitespace-led
+                # "#" line as a comment that YAML reads as verdict-masking scalar content. Any
+                # byte outside printable ASCII (0x20-0x7E) plus newline (0x0A) therefore REFUSES
+                # before any comment or blank-line stripping (that covers a tab, a CR, a BOM and
+                # every other control or non-ASCII byte); the survivor is decoded STRICTLY as
+                # ASCII, split on "\n" alone, and a line is dropped only when it is empty or all
+                # SPACES or when its first non-space character is "#".
+                bad = sorted(set(b for b in data if b != 0x0A and not 0x20 <= b <= 0x7E))
+                if bad:
+                    return ("REFUSED: byte(s) outside printable ASCII plus newline: "
+                            + " ".join("0x" + format(b, "02x") for b in bad))
+                text = data.decode("ascii")  # cannot fail after the byte gate; strict by intent
+                return "\n".join(ln for ln in text.split("\n")
+                                 if ln.strip(" ") and not ln.lstrip(" ").startswith("#"))
 
             expect("workflow-exact-effective-text",
-                   _wf_effective(workflow.read_text(encoding="utf-8")), _WORKFLOW_CANONICAL)
+                   _wf_effective(workflow.read_bytes()), _WORKFLOW_CANONICAL)
             expect("workflow-comment-and-blank-lines-free",
-                   _wf_effective("# a template comment may change freely\n\n" + _WORKFLOW_CANONICAL),
+                   _wf_effective(("# a template comment may change freely\n\n"
+                                  + _WORKFLOW_CANONICAL).encode("ascii")),
                    _WORKFLOW_CANONICAL)
             # The mutant fixtures: every bypass spelling reported against the older line-pattern
             # assertion, applied to the canonical text; each effective text must DIFFER from the
@@ -768,7 +801,29 @@ def _self_test_isolated():
             )
             for wf_label, wf_mutant in wf_mutants:
                 expect("workflow-mutant-reds-{}".format(wf_label),
-                       _wf_effective(wf_mutant) == _WORKFLOW_CANONICAL, False)
+                       _wf_effective(wf_mutant.encode("ascii")) == _WORKFLOW_CANONICAL, False)
+            # Byte-gate mutant fixtures: each plants a byte outside printable ASCII plus newline
+            # and must be REFUSED outright (unequal to the canonical AND flagged as a refusal,
+            # never reduced to an equal text). The first two are the reported bypass: a run:
+            # continuation led by Unicode whitespace (U+00A0, U+3000) and then "#", which the
+            # older str-based reduction stripped as a comment while YAML, whose whitespace is
+            # only space and tab, reads it as scalar content whose "|| true" masks the step's
+            # verdict. The tab, CRLF and BOM plants pin the other refused byte classes.
+            wf_byte_mutants = (
+                ("unicode-nbsp-comment-continuation", _WORKFLOW_CANONICAL.replace(
+                    wf_run, wf_run + "\n          \u00a0# || true").encode("utf-8")),
+                ("unicode-ideographic-space-comment-continuation", _WORKFLOW_CANONICAL.replace(
+                    wf_run, wf_run + "\n          \u3000# || true").encode("utf-8")),
+                ("tab-led-comment-line", _WORKFLOW_CANONICAL.replace(
+                    wf_run, wf_run + "\n\t# a tab-led comment").encode("utf-8")),
+                ("crlf-line-endings", _WORKFLOW_CANONICAL.replace("\n", "\r\n").encode("utf-8")),
+                ("utf8-bom-prefix", b"\xef\xbb\xbf" + _WORKFLOW_CANONICAL.encode("utf-8")),
+            )
+            for wf_label, wf_data in wf_byte_mutants:
+                wf_eff = _wf_effective(wf_data)
+                expect("workflow-mutant-refused-{}".format(wf_label),
+                       (wf_eff != _WORKFLOW_CANONICAL, wf_eff.startswith("REFUSED")),
+                       (True, True))
 
             # --- The recipe end to end over a REAL drifted view (U16): a committed clean store
             # with ONE declared view, populated through the U4 engine's own public planner
@@ -776,8 +831,10 @@ def _self_test_isolated():
             # re-committed. First witness the fixture is genuinely clean through BOTH recipe steps (0),
             # then witness the drift red-flags end to end: render --check itself exits 1, doctor exits 1
             # (C-VIEW-DRIFT is part of validate_store), and the recipe forwards the finding (1). Both
-            # recipe runs leave the entries (lstat kind, mode, content, symlink target), directories,
-            # refs, local git config and .git/hooks unchanged: the read-only claim, held as a check. --
+            # recipe runs leave the WHOLE _tree_digest snapshot unchanged (entries by lstat kind, mode,
+            # content and symlink target; directories; the root and .git/hooks directory records; refs;
+            # local git config; the .git/hooks tree; the index; and .git/info/exclude): the read-only
+            # claim, held as a check. --
             viewed = base / "viewed"
             viewed.mkdir()
             machine = clean_machine()
@@ -810,13 +867,20 @@ def _self_test_isolated():
             expect("ci-recipe-drifted-viewed-store", _run_ci_recipe(viewed), EXIT_FINDING)
             expect("ci-recipe-drifted-run-read-only", _tree_digest(viewed, home) == before, True)
 
-            # Read-only-snapshot per-write mutant fixtures: each write below is one reported bypass
-            # of the older snapshot, applied directly to the fixture tree; each must CHANGE the
+            # Read-only-snapshot per-write mutant fixtures: one write per covered snapshot leg
+            # (the first six are the reported bypasses of the older snapshot), applied directly
+            # to the fixture tree; each must CHANGE the
             # digest (red). A FRESH before is taken per vector, so the writes are cumulative and
             # never undone (the viewed store is not used again; the tempdir is removed in the
             # finally). The two index writes red via the ls-files leg, the nested .git write via the
             # top-level-only .git prune, the exclude write via the info/exclude leg, and the two
-            # chmods via the root's and the hooks directory's own lstat records.
+            # chmods via the root's and the hooks directory's own lstat records. The remaining legs
+            # are each held by their own write: a planted tag via the ref set, a config write via
+            # the local configuration, a hook file via the .git/hooks tree walk, a content edit via
+            # the entry CONTENT DIGEST alone (kind and mode unchanged), a symlink plant and a
+            # retarget via the entry kind and TARGET alone, a file chmod via the entry MODE alone,
+            # and an empty mkdir via the directory listing (which the entry records subsume, so
+            # that leg is redundancy, not reach).
             def _snapshot_sees(label, mutate):
                 before_m = _tree_digest(viewed, home)
                 mutate()
@@ -849,6 +913,29 @@ def _self_test_isolated():
             _snapshot_sees("root-dir-chmod", lambda: _chmod_flip(str(viewed)))
             _snapshot_sees("hooks-dir-chmod",
                            lambda: _chmod_flip(str(viewed / ".git" / "hooks")))
+            _snapshot_sees("ref-write",
+                           lambda: _git(viewed, home, "tag", "opf-selftest-tag"))
+            _snapshot_sees("local-config-write",
+                           lambda: _git(viewed, home, "config", "--local", "opf.selftest", "wrote"))
+            _snapshot_sees("hook-file-write",
+                           lambda: (viewed / ".git" / "hooks" / "pre-commit").write_text(
+                               "#!/bin/sh\nexit 0\n", encoding="utf-8"))
+            _snapshot_sees("file-content-edit",
+                           lambda: (viewed / "VERSION").write_text("0.0.0-selftest\n",
+                                                                   encoding="utf-8"))
+            _snapshot_sees("file-chmod", lambda: _chmod_flip(str(viewed / "VERSION")))
+            _snapshot_sees("symlink-plant",
+                           lambda: os.symlink("VERSION", str(viewed / "selftest-link")))
+
+            def _symlink_retarget():
+                # Same kind and (constant) symlink mode; only the recorded TARGET changes, so
+                # this write is visible through the target component alone.
+                os.remove(str(viewed / "selftest-link"))
+                os.symlink("selftest-retargeted", str(viewed / "selftest-link"))
+
+            _snapshot_sees("symlink-retarget", _symlink_retarget)
+            _snapshot_sees("empty-dir-mkdir",
+                           lambda: (viewed / "selftest-empty-dir").mkdir())
 
             # Child-LAUNCH failure -> exit 2 (cannot-evaluate), never a false verdict. Inject an OSError at the
             # launch call (an OS refusal to fork under RLIMIT_NPROC pressure surfaces as BlockingIOError);
@@ -957,10 +1044,15 @@ def _self_test_isolated():
               "records; refs; local git config; the .git/hooks tree; the index via ls-files -s -z; "
               "and .git/info/exclude; HEAD itself, the object store including alternates, reflogs "
               "and other .git metadata stay uncovered), per-write mutant fixtures red on each "
-              "covered snapshot leg, the sig:15 abnormal vectors repeated with SIGTERM inherited "
-              "ignored (the stub's SIG_DFL restore guarded), the workflow template equal by EXACT "
-              "TEXT to the canonical constant after dropping only comment and blank lines (any "
-              "other edit reds, per-spelling mutant fixtures red); "
+              "covered snapshot leg (ref, local config, hook file, the two index writes, exclude, "
+              "nested .git, content edit, symlink plant and retarget, file chmod, root and "
+              "hooks-dir chmods, empty mkdir; the directory-set leg is redundancy the entry "
+              "records subsume), the sig:15 abnormal vectors repeated with SIGTERM inherited "
+              "ignored (the stub's SIG_DFL restore guarded), the workflow template BYTE-GATED "
+              "(raw bytes; any byte outside printable ASCII plus newline refused before any "
+              "reduction: tab, CR, BOM, any control or non-ASCII byte) then equal by EXACT "
+              "TEXT to the canonical constant after dropping only ASCII comment and blank lines "
+              "(any other edit reds, per-spelling and per-byte-class mutant fixtures red); "
               "child-launch failure -> 2; no-repo-root -> 2; invalid-git-marker -> 2; "
               "relative-toplevel probe -> None (exit 2); "
               "git executable absolutized (relative which() -> absolute argv[0]); "
