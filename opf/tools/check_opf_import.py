@@ -485,6 +485,13 @@ def _journal_binds_record(jfd, txn, txn_bytes, run_id, txn_rel):
 # retained store root still use readable descriptors. Platforms without O_PATH retain the stricter fallback.
 _DIR_ID_FLAGS = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW
 
+# The two-home re-check (_registered_run_store_fd) opens a roster entry of ANY final type, purely to read
+# its identity by fstat on the resulting descriptor. Both arms follow only the final symlink (no O_NOFOLLOW:
+# a roster symlink must resolve so the object it names is the one identified). Platforms without O_PATH
+# retain the stricter read-permission fallback here too, with O_NONBLOCK so the open itself can never block
+# on a FIFO with no writer or on a device; no bytes are ever read through this descriptor.
+_ALIAS_ID_FLAGS = getattr(os, "O_PATH", os.O_RDONLY | os.O_NONBLOCK)
+
 
 def _bind_run_name(fd, name):
     """B1: bind the run's identity name to its descriptor. Every store-relative location and record path is
@@ -1894,11 +1901,16 @@ def _registered_run_store_fd(rd, generation):
                     # registered home (a copy is another inode), so the bound home is re-checked
                     # over the locator's own roster (_import_run_locations, never a second
                     # enumeration). A non-bound roster location is the SAME home only when the
-                    # object it holds IS the opened run: one O_PATH open beneath the bound root
-                    # (following only a final symlink), identity read by fstat ON that
+                    # object it holds IS the opened run: one identity open beneath the bound
+                    # root (_ALIAS_ID_FLAGS: O_PATH, or the guarded read-permission fallback,
+                    # following only a final symlink either way), identity read by fstat ON that
                     # descriptor, never a second name resolution a swap could race. The
-                    # same-root-alias topology (a roster symlink to the bound run itself)
-                    # therefore stays registered, while EVERY other present entry -- a directory
+                    # same-run alias (a roster symlink to the bound run itself) is graded
+                    # registered by THIS gate only: the shared locator refuses that store at
+                    # use (it lstats the roster entry no-follow and refuses a symlink as "is
+                    # not a directory"), so review and apply refuse the alias fail-closed and
+                    # its green grade is not consumable there; gate/locator parity holds for
+                    # second runs only. EVERY other present entry -- a directory
                     # (the same-id copy), a symlink to any other object, a dangling symlink, any
                     # other type -- is a second home, refused with the shared locator's message.
                     # An entry whose open resolves nowhere is classified once no-follow: still
@@ -1921,7 +1933,7 @@ def _registered_run_store_fd(rd, generation):
                             continue
                         try:
                             try:
-                                ofd = os.open(name, os.O_PATH, dir_fd=pfd)
+                                ofd = os.open(name, _ALIAS_ID_FLAGS, dir_fd=pfd)
                             except FileNotFoundError:
                                 if _journal._lstat_at(pfd, name) is not None:
                                     found.append(other)
@@ -6231,6 +6243,28 @@ def _self_test_isolated():
             th_alias = check_staged_run(th_typed, homes=2)
             expect("homes2-same-run-symlink-stays-registered",
                    all(ok for ok, _d in th_alias.values()))
+            # --- PR C fix 3 (no-O_PATH platforms): the alias re-check derives its identity-open
+            # flags through the module's guarded _ALIAS_ID_FLAGS, never a bare os.O_PATH (Python
+            # defines O_PATH only on Linux). Simulated by DELETING os.O_PATH and forcing the
+            # constant onto its documented fallback arm, O_RDONLY | O_NONBLOCK (create=True keeps
+            # the pre-fix source importable so the red run FAILS these vectors rather than
+            # erroring). Mutation confirmed present first: on the unguarded `os.O_PATH` open this
+            # same simulation turned BOTH clean controls red (the AttributeError fails every
+            # binding-dependent check), while the fallback must keep them green.
+            _saved_o_path = os.O_PATH
+            del os.O_PATH
+            try:
+                with unittest.mock.patch.object(gate_module, "_ALIAS_ID_FLAGS",
+                                                os.O_RDONLY | os.O_NONBLOCK, create=True):
+                    th_no_opath_alias = check_staged_run(th_typed, homes=2)
+                    os.unlink(str(th_legacy))
+                    th_no_opath_single = check_staged_run(th_typed, homes=2)
+            finally:
+                os.O_PATH = _saved_o_path
+            expect("homes2-no-opath-same-run-alias-stays-registered",
+                   all(ok for ok, _d in th_no_opath_alias.values()))
+            expect("homes2-no-opath-single-home-control",
+                   all(ok for ok, _d in th_no_opath_single.values()))
 
         expect("module-self-test", imp.self_test() == 0)
     except OSError as exc:
