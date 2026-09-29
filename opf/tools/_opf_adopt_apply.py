@@ -16,19 +16,26 @@ rendering, receipt writing, the completion checks, retirement, and the CLI verb 
 Outside its own self-test fixtures this module is dead code until those slices land.
 
 Preserve-first (spec 14.2), enforced over the composed op list BEFORE any transaction opens: a live file
-is removed ONLY as the second half of a pair whose first half, earlier in the SAME transaction, creates
-its byte-identical archive copy at `.working/archive/adoption/<run-id>/<source-path>`. The copy's create
-op carries the plan digest as its content digest, which the journal verifies against the staged bytes and
-fsyncs (file and parent) before the next op runs, and the removal carries the same digest and mode as a
+is removed, OR OVERWRITTEN BY A `write` (which destroys the live bytes exactly as a removal does), ONLY
+as the second half of a pair whose first half, earlier in the SAME transaction, creates its byte-identical
+archive copy at `.working/archive/adoption/<run-id>/<source-path>`. The copy's create op carries the plan
+digest as its content digest, which the journal verifies against the staged bytes, RE-READS from the
+written destination and digest-verifies again (a spec 14.2 verification checkpoint), and fsyncs (file and
+parent) before the next op runs, and the removal or write carries the same digest and mode as a
 `source-poststate` pin, which the journal verifies at preimage capture under its lock. So the copy is
-verified and durably committed before the source is removed, never reversed and never split across
-transactions, and a pre-commit abort (the journal's reverse-order rollback) restores the source from its
-digest-checked preimage BEFORE it discards the copy. A source whose live bytes no longer match its plan
-digest is drifted and is never archived or removed. A non-occupying source takes only its retirement
-preimage at apply and stays frozen in place (its removal waits for the green completion check, a later
-slice). The adoption archive and every evidence bundle are immutable: an op may only create beneath this
-run's own archive, this run's own bundle, or the Move root, never write, remove, or rmdir anything under
-`.working/archive/` or `.working/imported/`, and never create in another run's home.
+verified on disk and durably committed before the source is destroyed, never reversed and never split
+across transactions, and a pre-commit abort (the journal's reverse-order rollback) restores the source
+from its digest-checked preimage, RE-READS and digest-verifies the restored live bytes, and only then
+discards the copy or reports a prestate (the rollback-side checkpoint). A source whose live bytes no
+longer match its plan digest is drifted and is never archived or removed. A non-occupying source takes
+only its retirement preimage at apply and stays frozen in place (its removal waits for the green
+completion check, a later slice). An `rmdir` may target ONLY a directory this same transaction created; a
+pre-existing live directory is never removed by this shell. The store control roots
+(`_opf_store.STORE_ROOT_CONTROL_DIRS`: `.git/` and `.aiqt/`, the adoption journal's own tree included) are
+never apply operands of ANY kind. The adoption archive and every evidence bundle are immutable: an op may
+only create beneath this run's own archive, this run's own bundle, or the Move root, never write, remove,
+or rmdir anything under `.working/archive/` or `.working/imported/`, and never create in another run's
+home.
 
 The adoption journal root is `.aiqt/adopt/journal` at the PRODUCT root: the homes-1 legacy journal family
 of `.aiqt/record/journal` and `.aiqt/import/journal`. It is anchored there, never under the store, because
@@ -49,7 +56,11 @@ approved work takes a fresh plan with its own run id (spec 14.1).
 
 Single-writer lease (spec 5.7): this slice carries NO lease join, so a transaction REFUSES, before writing
 anything, when the product root resolves a store (RESOLVED) or when a pointer names a store outside the
-product root. A first adoption has no store and so no lease home; the pre-store single-writer control is
+product root, and EVERY other store posture that cannot be evaluated (a malformed or unreadable pointer,
+multiple machine stores, an undiscoverable root) refuses too (spec 14.2: an unreadable declaration or
+detected input fails closed). Only the two first-adoption states adoption exists for are admitted:
+NOT-ADOPTED, and a present `.working/` at the DEFAULT location carrying no valid manifest, re-proved by a
+fresh discovery. A first adoption has no store and so no lease home; the pre-store single-writer control is
 the coupled-init substrate's operation lock, which joins with the init-store slice. Disclosed residuals of
 this slice, none of them a relaxation: bundle MEMBERSHIP (an off-inventory file inside a bundle) is not
 reconciled here, only listed payloads; containment registration of the archive, Move and evidence homes on
@@ -98,7 +109,8 @@ FILE_MODE = 0o644
 _NONCE_RE = re.compile(r"^[0-9a-f]{16}\Z")
 # The store-tree control homes this engine may create beneath and never rewrite (spec 4.2, 14.2).
 _CONTROL_HOMES = (store.ARCHIVE_REL, store.IMPORTED_REL)
-_MOVED_ROOT = store.ARCHIVE_REL + "/moved"
+# The Move root, derived from the public Move-destination constructor (spec 14.2), never re-spelled.
+_MOVED_ROOT = store.moved_dest("x").rsplit("/", 1)[0]
 
 
 class AdoptApplyError(Exception):
@@ -351,7 +363,9 @@ def _verify_bundle_at(root_fd, run_id, bundle):
 # --- composition: preserve-first, derived inventories, immutable homes (spec 4.2, 14.2) ---------------
 
 def _archive_root(run_id):
-    return "{}/{}".format(store.ARCHIVE_REL, store._home_run(KIND, run_id))
+    """This run's whole adoption-archive home, derived from the public retire-preimage constructor
+    (spec 4.2), never composed from private helpers."""
+    return archive_rel(run_id, "x").rsplit("/", 1)[0]
 
 
 def _bundle_root_inventory(run_id, path):
@@ -468,13 +482,21 @@ class ApplyOps:
 
 def check_apply_ops(run_id, phase, ops, staged):
     """Re-prove the shell's invariants over ONE finished op list, pure and before any transaction
-    opens; returns the findings (empty means admissible). Preserve-first: every removal carries a pinned
-    digest and mode and follows, in this same list, the create of its archive copy with that same digest
-    (spec 14.2). Immutable homes: under `.working/archive/` and `.working/imported/` only a create beneath
-    this run's own archive, own bundle, or the Move root (and the mkdirs leading there) is allowed, never
-    a write, remove, or rmdir, and never another run's home (spec 14.2, 4.2). One op per path. The final
-    op, and the only bundle-root inventory, is this transaction's own inventory, byte-equal to the
-    inventory derived from the list's retained bytes (spec 4.2)."""
+    opens; returns the findings (empty means admissible). Preserve-first: every removal AND every write
+    (which destroys the live bytes exactly as a removal does) carries a pinned digest and mode and
+    follows, in this same list, the create of its archive copy with that same digest (spec 14.2); a write
+    additionally needs staged bytes matching its own content digest, like a create. An rmdir may target
+    only a directory an earlier mkdir in this same list creates (so, under one-op-per-path, no live
+    directory is ever removed by this shell). The store control roots (_opf_store.STORE_ROOT_CONTROL_DIRS:
+    `.git/` and `.aiqt/`, the adoption journal's own tree included) are never operands of any kind.
+    Immutable homes: under `.working/archive/` and `.working/imported/` only a create beneath this run's
+    own archive, own bundle, or the Move root (and the mkdirs leading there) is allowed, never a write,
+    remove, or rmdir, and never another run's home (spec 14.2, 4.2). One op per path. The final op, and
+    the only bundle-root inventory, is this transaction's own inventory, byte-equal to the inventory
+    derived from the list's retained bytes (spec 4.2). Spec 4.2 MAY lets a phase inventory publish in the
+    same transaction as the base to claim a promotion receipt without a digest cycle; this shell has no
+    receipt to claim, so it deliberately takes the STRICTER exactly-one-inventory rule, and the receipt
+    slice may relax it with its own vectors."""
     target = inventory_rel(run_id, phase)
     roots = (evidence_home_rel(run_id), _archive_root(run_id), _MOVED_ROOT)
     if not isinstance(ops, list) or not ops or not isinstance(staged, dict):
@@ -482,6 +504,7 @@ def check_apply_ops(run_id, phase, ops, staged):
     findings = []
     seen = set()
     created = {}
+    made_dirs = set()
     for i, op in enumerate(ops):
         where = "op[{}]".format(i)
         if (not isinstance(op, dict) or op.get("op") not in _journal.OP_KINDS
@@ -489,6 +512,11 @@ def check_apply_ops(run_id, phase, ops, staged):
             findings.append("{} is not a contained journal op".format(where))
             continue
         kind, path = op["op"], op["path"]
+        if any(_within(path, top) for top in store.STORE_ROOT_CONTROL_DIRS):
+            findings.append("{} would {} {!r} under a store control root; the version-control area and "
+                            "the adoption journal's own tree are never apply operands "
+                            "(fail-closed)".format(where, kind, path))
+            continue
         if path in seen:
             findings.append("{} touches {!r} a second time (one op per path)".format(where, path))
         seen.add(path)
@@ -509,19 +537,32 @@ def check_apply_ops(run_id, phase, ops, staged):
                 findings.append("{} create {!r} has no staged bytes matching its content digest".format(
                     where, path))
             created[path] = digest
-        elif kind == "remove":
+        elif kind == "mkdir":
+            made_dirs.add(path)
+        elif kind == "rmdir":
+            if path not in made_dirs:
+                findings.append("{} rmdirs {!r}, which this transaction did not create; a live directory "
+                                "is never removed by the apply shell (fail-closed)".format(where, path))
+        elif kind in ("remove", "write"):
+            verb = "removes" if kind == "remove" else "overwrites"
+            if kind == "write":
+                digest = (op.get("poststate") or {}).get("content-sha256")
+                data = staged.get(path)
+                if not isinstance(data, bytes) or _sha256(data) != digest:
+                    findings.append("{} write {!r} has no staged bytes matching its content digest".format(
+                        where, path))
             pin = op.get("source-poststate")
             if not (isinstance(pin, dict) and pin.get("kind") == "file" and isinstance(pin.get("sha256"), str)
                     and isinstance(pin.get("mode"), int)):
-                findings.append("{} removes {!r} without a pinned file digest and mode "
-                                "(source-poststate)".format(where, path))
+                findings.append("{} {} {!r} without a pinned file digest and mode "
+                                "(source-poststate)".format(where, verb, path))
             elif archive_rel(run_id, path) not in created:
-                findings.append("{} removes {!r} before, or without, its archive copy earlier in this "
-                                "transaction: preserve-first, verify then remove, never reversed or split "
-                                "(spec 14.2)".format(where, path))
+                findings.append("{} {} {!r} before, or without, its archive copy earlier in this "
+                                "transaction: preserve-first, verify then destroy, never reversed or split "
+                                "(spec 14.2)".format(where, verb, path))
             elif created.get(archive_rel(run_id, path)) != pin["sha256"]:
-                findings.append("{} removes {!r} whose pinned digest differs from its archive copy's "
-                                "content digest".format(where, path))
+                findings.append("{} {} {!r} whose pinned digest differs from its archive copy's "
+                                "content digest".format(where, verb, path))
     inventories = [i for i, op in enumerate(ops)
                    if isinstance(op, dict) and op.get("op") == "create" and isinstance(op.get("path"), str)
                    and _bundle_root_inventory(run_id, op["path"])]
@@ -593,8 +634,10 @@ def reconcile(product_root):
     required to resolve as a store, and this function never resolves it), rolling an open one FORWARD
     when every poststate already verifies, else BACK from its durable preimages, under the journal's own
     lock. A lock held by a possibly-live owner refuses (never seized); a confirmed-dead owner's lock is
-    broken only through `_journal.reconcile_and_claim_stale`. Returns the (transaction, outcome) pairs.
-    The interrupted run itself stays refused, so the operator inspects the reconciled tree first."""
+    broken only through `_journal.reconcile_and_claim_stale`. Returns the (transaction, outcome) pairs;
+    on the stale-lock path each outcome names what the break's own recovery DID (rolled-forward or
+    rolled-back), never 'terminal' for work this call performed. The interrupted run itself stays
+    refused, so the operator inspects the reconciled tree first."""
     root_fd = _open_product_root(product_root)
     journal_root = _journal_root(product_root)
     outcomes = []
@@ -617,7 +660,12 @@ def reconcile(product_root):
                 if owner is not None and not _journal.owner_confirmed_dead(owner):
                     raise AdoptApplyError("the adoption journal lock is held by a possibly-live owner "
                                           "(pid {}); it is never seized (fail-closed)".format(owner.get("pid")))
+                stale = None
                 if owner is not None:
+                    # The stale-lock break reconciles every transaction ITSELF (under its arbitration
+                    # lock), so the idempotent recover() re-run below would read each one 'terminal'.
+                    # Record the pre-break states so the reported outcome names what that recovery DID.
+                    stale = {t.name: _journal.classify_state(jr_fd, t) for t in txns}
                     if _journal.reconcile_and_claim_stale(journal_root, jr_fd, root_fd,
                                                           SESSION_ID) != "acquired":
                         raise AdoptApplyError("the adoption journal lock became live during "
@@ -626,7 +674,12 @@ def reconcile(product_root):
                     _journal.acquire_lock(journal_root, SESSION_ID)
                 try:
                     for txn in txns:
-                        outcomes.append((txn.name, _journal.recover(jr_fd, txn, root_fd)))
+                        outcome = _journal.recover(jr_fd, txn, root_fd)
+                        if stale is not None and stale.get(txn.name) == "open" and outcome == "terminal":
+                            outcome = ("rolled-forward"
+                                       if _journal.classify_state(jr_fd, txn) == "complete"
+                                       else "rolled-back")
+                        outcomes.append((txn.name, outcome))
                 finally:
                     _journal.release_lock(journal_root)
             finally:
@@ -639,28 +692,97 @@ def reconcile(product_root):
     return outcomes
 
 
+def _default_store_present_without_manifest(product_root):
+    """True ONLY for the one CANNOT-EVALUATE posture adoption exists for (spec 14.2): neither pointer file
+    exists (the resolver reached the DEFAULT location) and a FRESH discovery at the product root reports
+    `.working/` present with no machine store ("present": a foreign store-shaped tree awaiting
+    dispositions). "multiple" (ambiguous), "one" (a store raced in), "absent" (the resolver's
+    cannot-evaluate came from something else), and every discovery error read False (fail-closed)."""
+    try:
+        root_fd = _open_product_root(product_root)
+    except AdoptApplyError:
+        return False
+    try:
+        try:
+            status, _machine, _detail = store.discover_machine_store(root_fd, Path(product_root))
+        except (store.StoreError, OSError):
+            return False
+    finally:
+        os.close(root_fd)
+    return status == "present"
+
+
 def _store_posture_or_refuse(product_root):
     """Spec 5.7: a run MUST hold the single-writer lease before mutating a store, and this slice has no
-    lease join. A product root that resolves a store therefore refuses, as does a pointer naming a store
-    outside the product root. NOT-ADOPTED and a foreign `.working/` without a manifest (the first-adoption
-    states adoption exists for) have no store and so no lease home."""
+    lease join, so a product root that resolves a store refuses, and a pointer that resolves one OUTSIDE
+    the product root is refused by name (adoption evidence and archives belong at that store root, which
+    this slice does not support). Spec 14.2: every OTHER posture that cannot be evaluated (a malformed or
+    unreadable pointer, multiple machine stores, an undiscoverable root) fails closed too. ONLY the two
+    first-adoption states adoption exists for are admitted, neither of which has a store or a lease home:
+    NOT-ADOPTED, and the DEFAULT location's `.working/` present WITHOUT a valid manifest, re-proved by a
+    fresh discovery (never inferred from the resolver's detail text)."""
     res = store.resolve_store(product_root)
     if res.status == store.RESOLVED:
+        if res.pointer_source != "default" and (
+                res.store_root is None
+                or Path(os.path.abspath(res.store_root)) != Path(os.path.abspath(product_root))):
+            raise AdoptApplyError("a pointer ({}) names a store outside the product root; adoption "
+                                  "evidence and archives belong at that store root, which this slice "
+                                  "does not support (fail-closed)".format(res.pointer_source))
         raise AdoptApplyError("the product root resolves a store ({}); this apply shell carries no "
                               "single-writer lease join yet (spec 5.7), so it refuses before writing "
                               "(fail-closed)".format(res.machine_rel))
-    if res.pointer_source not in (None, "default") and (
-            res.store_root is None or Path(os.path.abspath(res.store_root)) != Path(product_root)):
-        raise AdoptApplyError("a pointer ({}) names a store outside the product root; adoption evidence "
-                              "and archives belong at that store root, which this slice does not "
-                              "support (fail-closed)".format(res.pointer_source))
+    if res.status == store.NOT_ADOPTED:
+        return
+    if res.pointer_source == "default" and _default_store_present_without_manifest(product_root):
+        return
+    raise AdoptApplyError("the store posture cannot be evaluated ({}); an ambiguous, malformed or "
+                          "unreadable store input refuses before anything is written (spec 14.2, "
+                          "fail-closed)".format(res.detail))
+
+
+def _committed_base_or_refuse(root_fd, journal_root, run_id, phase):
+    """Spec 4.2, 14.1: a phase transaction extends the run's COMMITTED base, so it requires the base
+    journal transaction to classify complete AND the live inventory.toml to hold the exact bytes that
+    transaction's INTENT published (bytes check_apply_ops proved derived and valid when the base
+    composed). An inventory.toml on disk alone, hand-planted or swapped since the commit, never admits a
+    phase (fail-closed)."""
+    base_rel = inventory_rel(run_id)
+    try:
+        if _journal._lstat_contained(root_fd, JOURNAL_REL + "/" + run_id) is None:
+            raise AdoptApplyError("phase {!r} needs the run's COMMITTED base transaction, and none "
+                                  "exists; an inventory.toml on disk never stands in for it (spec 4.2); "
+                                  "nothing written (fail-closed)".format(phase))
+        jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
+        try:
+            if _journal.classify_state(jr_fd, journal_root / run_id) != "complete":
+                raise AdoptApplyError("phase {!r} needs the run's COMMITTED base transaction, and {!r} "
+                                      "is not complete; nothing written (fail-closed)".format(
+                                          phase, run_id))
+            frames, _torn, _good = _journal.read_frames(jr_fd, journal_root / run_id)
+            intent = _journal._first(frames, _journal.F_INTENT)
+        finally:
+            _journal._close_fd_quietly(jr_fd)
+    except (_journal.JournalError, OSError) as exc:
+        raise AdoptApplyError("cannot inspect the run's base transaction ({}); fail-closed".format(exc))
+    ops = intent.get("ops", []) if isinstance(intent, dict) else []
+    published = next(((op.get("poststate") or {}).get("content-sha256") for op in ops
+                      if isinstance(op, dict) and op.get("op") == "create"
+                      and op.get("path") == base_rel), None)
+    fst, data = _read_live(root_fd, base_rel)
+    if published is None or fst is None or _sha256(data) != published:
+        raise AdoptApplyError("phase {!r} needs the base inventory.toml the committed base transaction "
+                              "published, and the live bytes are missing or do not match that "
+                              "transaction's INTENT digest (spec 4.2); nothing written "
+                              "(fail-closed)".format(phase))
 
 
 def run_adopt_transaction(product_root, run_id, compose, phase=None):
     """ONE journaled adoption transaction, the run's base transaction or one later phase's, through the
-    shared 9.3 engine. Refusals BEFORE anything is written, in order: containment, the store posture
-    (no lease join, spec 5.7), a non-clean journal (reconcile-first), an existing transaction of this
-    run and phase, and for a phase a missing committed inventory.toml (spec 4.2). Then, under the journal
+    shared 9.3 engine. Refusals BEFORE anything is written, in order: containment, a non-clean journal
+    (reconcile-first: the adoption journal is inspected FIRST, per the module docstring), the store
+    posture (no lease join, spec 5.7), an existing transaction of this run and phase, and for a phase
+    anything but a committed, INTENT-digest-matched base inventory.toml (spec 4.2). Then, under the journal
     lock so observation and the journal's own capture are contiguous, compose(ops) fills a fresh ApplyOps
     against the live tree, the derived inventory seals it, and check_apply_ops re-proves every invariant;
     a refusal there releases the lock with nothing written beyond the journal directories. A failure that
@@ -677,8 +799,8 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
             _journal.require_containment()
         except _journal.JournalError as exc:
             raise AdoptApplyError("{} (fail-closed)".format(exc))
-        _store_posture_or_refuse(product_root)
         journal_clean_or_refuse(root_fd, journal_root)
+        _store_posture_or_refuse(product_root)
         try:
             prior = _journal._lstat_contained(root_fd, JOURNAL_REL + "/" + txn)
         except (_journal.JournalError, OSError) as exc:
@@ -687,9 +809,8 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
             raise AdoptApplyError("run {} already has its transaction {!r}: one run takes one transaction "
                                   "per phase, and changing approved work takes a fresh plan with its own run "
                                   "id (spec 14.1); nothing written (fail-closed)".format(run_id, txn))
-        if phase is not None and _read_live(root_fd, inventory_rel(run_id))[0] is None:
-            raise AdoptApplyError("phase {!r} needs the run's committed inventory.toml; a phase inventory "
-                                  "never stands in for it (spec 4.2)".format(phase))
+        if phase is not None:
+            _committed_base_or_refuse(root_fd, journal_root, run_id, phase)
         try:
             _journal.ensure_journal_dirs(root_fd, JOURNAL_REL)
             jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
@@ -835,6 +956,7 @@ def self_test():
 
 
 def _self_test_checks():
+    import json
     import tempfile
     from unittest import mock
 
@@ -858,6 +980,20 @@ def _self_test_checks():
         except AdoptApplyError as exc:
             return None, str(exc)
 
+    def dead_pid():
+        """A pid with POSITIVE evidence of death (ProcessLookupError on signal 0), for the stale-lock
+        vector. Nothing is spawned or signalled; EPERM or any ambiguity keeps searching."""
+        pid = (1 << 22) - 1
+        for _ in range(4096):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return pid
+            except OSError:
+                pass
+            pid -= 1
+        return None
+
     ZERO = "0" * 64
     now = datetime.datetime(2026, 9, 17, 12, 0, 0, tzinfo=datetime.timezone.utc)
     VALID, INVALID, CANNOT = store.VALID, store.INVALID, store.CANNOT_EVALUATE
@@ -880,8 +1016,9 @@ def _self_test_checks():
     other_run = mint_run_id(now, "fedcba9876543210")
     check("mint-run-id-grammar", is_run_id(rid) and rid == "adopt-20260917T120000Z-0123456789abcdef")
     check("mint-run-id-deterministic", mint_run_id(now, "0123456789abcdef") == rid)
-    check("mint-naive-now-refused", refusal(mint_run_id, now.replace(tzinfo=None), "0123456789abcdef"))
-    check("mint-bad-nonce-refused", refusal(mint_run_id, now, "XYZ"))
+    check("mint-naive-now-refused",
+          "aware UTC" in (refusal(mint_run_id, now.replace(tzinfo=None), "0123456789abcdef") or ""))
+    check("mint-bad-nonce-refused", "16 lowercase hex" in (refusal(mint_run_id, now, "XYZ") or ""))
     vectors = (rid, "imp-20260917T120000Z-0123456789abcdef", "adopt-20260917T120000Z-../escapes/xx",
                "adopt-20260917T120000Z-0123456789ABCDEF", "adopt-2026091T120000Z-0123456789abcdef", 7, None)
     check("run-id-store-and-schema-grammars-agree",
@@ -899,8 +1036,16 @@ def _self_test_checks():
     check("homes-archive-from-store",
           archive_rel(rid, "a/b.md") == store.retire_preimage(rid, "a/b.md")
           == ".working/archive/adoption/" + rid + "/a/b.md")
-    check("homes-bad-phase-refused", refusal(inventory_rel, rid, "Bad"))
-    check("homes-bad-run-refused", refusal(evidence_home_rel, "imp-20260917T120000Z-0123456789abcdef"))
+    check("homes-bad-phase-refused",
+          "invalid evidence inventory phase" in (refusal(inventory_rel, rid, "Bad") or ""))
+    check("homes-bad-run-refused", "invalid adoption run-id" in
+          (refusal(evidence_home_rel, "imp-20260917T120000Z-0123456789abcdef") or ""))
+    # item 11: the Move root and this run's archive root DERIVE from the public store constructors.
+    check("homes-moved-root-from-store",
+          _MOVED_ROOT == ".working/archive/moved" and store.moved_dest("a/b.md") == _MOVED_ROOT + "/a/b.md")
+    check("homes-archive-root-from-store",
+          _archive_root(rid) == ".working/archive/adoption/" + rid
+          and archive_rel(rid, "a/b.md") == _archive_root(rid) + "/a/b.md")
 
     # 3: inventory grading is the doctor's (spec 4.2): emit -> reparse -> re-emit is a byte fixed point; a
     # path claimed twice and every malformed row are CANNOT-EVALUATE; the legacy format is the named finding.
@@ -943,7 +1088,23 @@ def _self_test_checks():
         ok = variant()
         ok["file"][0]["path"] = path
         check("inventory-{}-path-valid".format(label), validate_inventory(ok, rid).status == VALID)
-    check("emit-malformed-refused", refusal(emit_inventory, rid, [dict(path="docs/x.md", size=1, sha256=ZERO)]))
+    check("emit-malformed-refused", "inventory refused" in
+          (refusal(emit_inventory, rid, [dict(path="docs/x.md", size=1, sha256=ZERO)]) or ""))
+
+    # 3b: a path claimed by BOTH the base and a phase inventory of one bundle cannot evaluate (the
+    # verifier's cross-inventory duplicate-claim guard, over a hand-built bundle).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        _root3 = Path(temp).resolve()
+        _payload_rel = home + "/payload/a.md"
+        (_root3 / _payload_rel).parent.mkdir(parents=True)
+        (_root3 / _payload_rel).write_bytes(b"alpha\n")
+        (_root3 / inventory_rel(rid)).write_bytes(
+            emit_inventory(rid, [inventory_row(_payload_rel, b"alpha\n")]))
+        (_root3 / inventory_rel(rid, "completion")).write_bytes(
+            emit_inventory(rid, [inventory_row(_payload_rel, b"alpha\n")]))
+        crossed = verify_bundle(_root3, rid)
+        check("verify-cross-inventory-duplicate-cannot-eval",
+              crossed.status == CANNOT and any("more than one inventory" in f for f in crossed.findings))
 
     # 4: the op-list invariants, over hand-built lists (check_apply_ops is pure).
     src, body = ".working/TODO.md", b"todo\n"
@@ -1000,6 +1161,40 @@ def _self_test_checks():
         [c(copy, body), _pinned_remove(src, body, FILE_MODE),
          dict(op="write", path=src, poststate=dict(kind="file", **{"content-sha256": _sha256(body)}))],
         {copy: body, src: body}))))
+    # a write over a live path destroys its bytes exactly as a removal does, so it takes the SAME pinned,
+    # same-transaction, digest-verified archive-copy pairing (spec 14.2); an rmdir may target only a
+    # directory this transaction created; and the store control roots (_opf_store.STORE_ROOT_CONTROL_DIRS,
+    # the adoption journal's own tree included) are never operands of any kind.
+    new_body = b"# rendered view\n"
+
+    def w(path, payload, pin=None):
+        post = dict(kind="file")
+        post["content-sha256"] = _sha256(payload)
+        op = dict(op="write", path=path, poststate=post)
+        if pin is not None:
+            op["source-poststate"] = dict(kind="file", mode=FILE_MODE, sha256=_sha256(pin))
+        return op
+
+    check("compose-unpinned-write-refused", any("source-poststate" in f for f in findings_of(
+        *sealed([w(src, new_body)], {src: new_body}))))
+    check("compose-write-without-copy-refused", any("preserve-first" in f for f in findings_of(
+        *sealed([w(src, new_body, pin=body)], {src: new_body}))))
+    check("compose-write-pin-copy-mismatch-refused", any("differs" in f for f in findings_of(
+        *sealed([c(copy, b"other\n"), w(src, new_body, pin=body)],
+                {copy: b"other\n", src: new_body}))))
+    check("compose-paired-write-admitted", findings_of(
+        *sealed([c(copy, body), w(src, new_body, pin=body)], {copy: body, src: new_body})) == [])
+    check("compose-live-rmdir-refused", any("did not create" in f for f in findings_of(
+        *sealed([dict(op="rmdir", path="legacy/empty", poststate=dict(kind="absent"))], {}))))
+    check("compose-control-root-create-refused", any("control root" in f for f in findings_of(
+        *sealed([c(".git/hooks/post-checkout", body)], {".git/hooks/post-checkout": body}))))
+    journal_file = JOURNAL_REL + "/x/frames.log"
+    check("compose-journal-remove-refused", any("control root" in f for f in findings_of(
+        *sealed([c(archive_rel(rid, journal_file), body), _pinned_remove(journal_file, body, FILE_MODE)],
+                {archive_rel(rid, journal_file): body}))))
+    mv = store.moved_dest("legacy/OLD.md")
+    check("derive-rows-claims-move-destination",
+          derive_rows(rid, [c(mv, body)], {mv: body}) == [inventory_row(mv, body)])
 
     # 5: the journaled shell over throwaway fixtures. An occupied view destination and an occupying
     # machine-store file (a foreign manifest-shaped file, so no store resolves) are archived preserve-first
@@ -1091,6 +1286,26 @@ def _self_test_checks():
               saved is not None and verify_bundle(root, rid).status == CANNOT)
         if saved is not None:
             base.write_bytes(saved)
+        # an op against the adoption journal's own tree (a store control root) is refused, so a committed
+        # record can never be archived away by a later run.
+        frames_rel = JOURNAL_REL + "/" + rid + "/frames.log"
+        frames_bytes = (root / frames_rel).read_bytes()
+        journal_hit = refusal(run_adopt_transaction, root, other_run, lambda ops: ops.archive_occupying(
+            frames_rel, plan_digest(frames_bytes)))
+        check("apply-journal-operand-refused",
+              journal_hit is not None and "control root" in journal_hit
+              and (root / frames_rel).read_bytes() == frames_bytes and txn_state(root, rid) == "complete")
+        # the phase gate binds the LIVE inventory.toml to the committed base transaction's INTENT digest,
+        # so bytes swapped after the commit refuse a later phase.
+        swapped = emit_inventory(rid, [inventory_row(home + "/decoy.md", b"decoy\n")])
+        base.write_bytes(swapped)
+        drifted_base = refusal(run_adopt_transaction, root, rid, lambda ops: ops.create(
+            evidence_home_rel(rid) + "/audit/result.toml", b"green = true\n"), phase="audit")
+        check("phase-swapped-inventory-refused",
+              saved is not None and swapped != saved and drifted_base is not None
+              and "INTENT" in drifted_base)
+        if saved is not None:
+            base.write_bytes(saved)
 
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root, files = fixture(temp)
@@ -1102,6 +1317,13 @@ def _self_test_checks():
         check("drifted-source-refused", drifted is not None and "drifted" in drifted)
         check("drifted-source-writes-nothing", snapshot(root) == before and lock_free(root)
               and not (root / JOURNAL_REL / rid).exists())
+        # a hand-planted inventory.toml with NO base journal transaction never admits a phase (spec 4.2).
+        planted = root / inventory_rel(rid)
+        planted.parent.mkdir(parents=True, exist_ok=True)
+        planted.write_bytes(b"not toml")
+        forged = refusal(run_adopt_transaction, root, rid, lambda ops: ops.create(
+            evidence_home_rel(rid) + "/completion/result.toml", b"x\n"), phase="completion")
+        check("phase-planted-inventory-refused", forged is not None and "never stands in" in forged)
 
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         import _opf_init
@@ -1113,6 +1335,90 @@ def _self_test_checks():
         check("resolved-store-refused-without-lease",
               store.resolve_store(root).status == store.RESOLVED and leased is not None and "lease" in leased)
         check("resolved-store-writes-nothing", snapshot(root) == before and not (root / ".aiqt").exists())
+
+    # 5b: hand-built op lists through the EXECUTABLE shell: a write over a live path, an rmdir of a live
+    # directory, and a create under a store control root are each refused before the transaction opens,
+    # the tree untouched.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        (root / "legacy/empty").mkdir(parents=True)
+        before = snapshot(root)
+
+        def hand_write(ops):
+            new = b"# rendered view\n"
+            post = dict(kind="file")
+            post["content-sha256"] = _sha256(new)
+            ops.ops.append(dict(op="write", path=".working/TODO.md", poststate=post))
+            ops.staged[".working/TODO.md"] = new
+
+        overwrote = refusal(run_adopt_transaction, root, rid, hand_write)
+        check("apply-hand-built-write-refused",
+              overwrote is not None and "source-poststate" in overwrote
+              and (root / ".working/TODO.md").read_bytes() == files[".working/TODO.md"]
+              and not (root / archive_rel(rid, ".working/TODO.md")).exists())
+
+        def hand_rmdir(ops):
+            ops.ops.append(dict(op="rmdir", path="legacy/empty", poststate=dict(kind="absent")))
+
+        deleted = refusal(run_adopt_transaction, root, rid, hand_rmdir)
+        check("apply-hand-built-rmdir-refused",
+              deleted is not None and "did not create" in deleted and (root / "legacy/empty").is_dir())
+        hooked = refusal(run_adopt_transaction, root, rid, lambda ops: ops.create(
+            ".git/hooks/post-checkout", b"#!/bin/sh\necho hi\n", mode=0o755))
+        check("apply-control-root-create-refused",
+              hooked is not None and "control root" in hooked and not (root / ".git").exists()
+              and snapshot(root) == before and lock_free(root))
+
+    # 5c: the store-posture gate fails closed on EVERY cannot-evaluate posture except the one
+    # first-adoption state the fixtures above already exercise (a present default .working/ without a
+    # valid manifest): two machine stores (ambiguous), a malformed pointer, and a pointer resolving a
+    # store OUTSIDE the product root each refuse with nothing written; NOT-ADOPTED is admitted.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        import _opf_init
+        root = Path(temp).resolve()
+        for sub in ("toml", "other"):
+            (root / ".working" / sub).mkdir(parents=True)
+            (root / ".working" / sub / "manifest.toml").write_text(_opf_init.build_manifest(),
+                                                                   encoding="utf-8")
+        before = snapshot(root)
+        twin = refusal(run_adopt_transaction, root, rid, lambda ops: ops.archive_occupying(
+            ".working/toml/manifest.toml",
+            plan_digest((root / ".working/toml/manifest.toml").read_bytes())))
+        check("posture-multiple-stores-refused",
+              store.resolve_store(root).status == CANNOT and twin is not None
+              and "cannot be evaluated" in twin and snapshot(root) == before
+              and not (root / ".aiqt").exists())
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = Path(temp).resolve()
+        (root / ".opf.toml").write_bytes(b"this is [not toml")
+        pointed = refusal(run_adopt_transaction, root, rid,
+                          lambda ops: ops.create(evidence_home_rel(rid) + "/x.md", b"x\n"))
+        check("posture-malformed-pointer-refused",
+              store.resolve_store(root).status == CANNOT and pointed is not None
+              and "cannot be evaluated" in pointed and not (root / ".aiqt").exists())
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        import _opf_init
+        pair = Path(temp).resolve()
+        root, outside = pair / "product", pair / "elsewhere"
+        (outside / ".working/toml").mkdir(parents=True)
+        (outside / ".working/toml/manifest.toml").write_text(_opf_init.build_manifest(), encoding="utf-8")
+        root.mkdir()
+        (root / ".opf.toml").write_text('[store]\ntarget = "dir:' + str(outside) + '"\n', encoding="utf-8")
+        outward = refusal(run_adopt_transaction, root, rid,
+                          lambda ops: ops.create(evidence_home_rel(rid) + "/x.md", b"x\n"))
+        check("posture-outside-pointer-refused",
+              store.resolve_store(root).status == store.RESOLVED and outward is not None
+              and "outside the product root" in outward
+              and not (root / ".aiqt").exists() and not (root / ".working").exists())
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = Path(temp).resolve()
+        (root / "legacy").mkdir()
+        (root / "legacy/RULES.md").write_bytes(b"old rules\n")
+        was_unadopted = store.resolve_store(root).status == store.NOT_ADOPTED
+        fresh, _why = attempt(run_adopt_transaction, root, rid,
+                              lambda ops: ops.preserve("legacy/RULES.md", plan_digest(b"old rules\n")))
+        check("not-adopted-root-admitted",
+              was_unadopted and fresh == rid and verify_bundle(root, rid).status == VALID)
 
     # 6: the pre-commit abort. A failure at the final op (after both removals) rolls the one transaction
     # back in reverse order: each source is restored byte-identical before its archive copy is discarded.
@@ -1131,6 +1437,132 @@ def _self_test_checks():
         check("abort-rolls-back", aborted is not None and "rolled back" in aborted
               and txn_state(root, rid) == "rolled-back" and lock_free(root))
         check("abort-restores-prestate", snapshot(root) == before)
+
+    # 6b: the spec 14.2 apply-side verification checkpoint. A same-length fault injected into the archive
+    # copy's own destination write (the staged bytes verify; the DISK bytes differ) is caught by the
+    # journal's read-back BEFORE the paired source removal runs: at every after-apply seam each source is
+    # either live and byte-identical or archived byte-identically, and the transaction rolls back.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        before = snapshot(root)
+        target = archive_rel(rid, ".working/TODO.md")
+        armed = []
+        real_verify = _journal._verify_staged_digest
+
+        def arming_verify(op, payload):
+            real_verify(op, payload)
+            if op["path"] == target:
+                armed.append(True)
+
+        real_write = _journal._write_all
+
+        def faulty_write(fd, data):
+            if armed:
+                armed.clear()
+                data = b"X" * len(data)      # same length, wrong bytes: only a read-back can catch it
+            return real_write(fd, data)
+
+        def preserved_now():
+            for pth, payload in files.items():
+                live, cp = root / pth, root / archive_rel(rid, pth)
+                if live.exists() and live.read_bytes() == payload:
+                    continue
+                if cp.exists() and cp.read_bytes() == payload:
+                    continue
+                return False
+            return True
+
+        seams = []
+
+        def observing_kill(name):
+            if name.startswith("after-apply-"):
+                seams.append(preserved_now())
+
+        with mock.patch.object(_journal, "_verify_staged_digest", arming_verify), \
+                mock.patch.object(_journal, "_write_all", faulty_write), \
+                mock.patch.object(_journal, "_kill_point", observing_kill):
+            corrupt = refusal(run_adopt_transaction, root, rid, compose_full(files))
+        check("archive-write-fault-never-leaves-source-unpreserved", bool(seams) and all(seams))
+        check("archive-write-fault-rolls-back",
+              corrupt is not None and "rolled back" in corrupt and snapshot(root) == before
+              and lock_free(root))
+
+    # 6c: the spec 14.2 rollback-side checkpoint. A fault injected into the SOURCE-restoring write of a
+    # genuine rollback is caught by the restored-bytes read-back: the reversal STOPS before the aborted
+    # run's archive copy is discarded and before any prestate is reported, the journal lock is RETAINED
+    # so the next run refuses into reconcile(), and the explicit reconcile then completes the rollback.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        before = snapshot(root)
+        src2 = ".working/TODO.md"
+        real_verify = _journal._verify_staged_digest
+
+        def failing_inventory(op, payload):
+            if op["path"] == inventory_rel(rid):
+                raise _journal.JournalError("injected failure at the inventory publication")
+            return real_verify(op, payload)
+
+        armed = []
+        real_restore = _journal._restore_preimage
+
+        def arming_restore(jr_fd, txn_dir, rfd, op, op_index=0):
+            if op.get("op") == "remove" and op.get("path") == src2:
+                armed.append(True)
+            return real_restore(jr_fd, txn_dir, rfd, op, op_index)
+
+        real_write = _journal._write_all
+
+        def faulty_write(fd, data):
+            if armed:
+                armed.clear()
+                data = b"X" * len(data)
+            return real_write(fd, data)
+
+        with mock.patch.object(_journal, "_verify_staged_digest", failing_inventory), \
+                mock.patch.object(_journal, "_restore_preimage", arming_restore), \
+                mock.patch.object(_journal, "_write_all", faulty_write):
+            faulted = refusal(run_adopt_transaction, root, rid, compose_full(files))
+        check("restore-fault-never-reports-prestate",
+              faulted is not None and "rolled back" not in faulted and "reconcile" in faulted)
+        check("restore-fault-retains-archive",
+              (root / archive_rel(rid, src2)).exists()
+              and (root / archive_rel(rid, src2)).read_bytes() == files[src2])
+        check("restore-fault-retains-lock", not lock_free(root))
+        _journal.release_lock(_journal_root(root))   # the crashed owner, in this in-process simulation
+        check("restore-fault-reconciles-to-prestate",
+              (rid, "rolled-back") in reconcile(root) and snapshot(root) == before and lock_free(root))
+
+    # 6d: rollback ORDER is pinned, not only final equality: at the moment each archive copy's create-undo
+    # discards it, its source has ALREADY been restored byte-identical (spec 14.2: restore, verify, then
+    # discard, never reversed), so a reversal that unlinks the copies first goes red here.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        before = snapshot(root)
+        real_verify = _journal._verify_staged_digest
+
+        def failing_inventory(op, payload):
+            if op["path"] == inventory_rel(rid):
+                raise _journal.JournalError("injected failure at the inventory publication")
+            return real_verify(op, payload)
+
+        real_restore = _journal._restore_preimage
+        arch = _archive_root(rid) + "/"
+        misordered = []
+
+        def watching_restore(jr_fd, txn_dir, rfd, op, op_index=0):
+            if op.get("op") == "create" and str(op.get("path", "")).startswith(arch):
+                source = op["path"][len(arch):]
+                live = root / source
+                if source in files and not (live.exists() and live.read_bytes() == files[source]):
+                    misordered.append(op["path"])
+            return real_restore(jr_fd, txn_dir, rfd, op, op_index)
+
+        with mock.patch.object(_journal, "_verify_staged_digest", failing_inventory), \
+                mock.patch.object(_journal, "_restore_preimage", watching_restore):
+            aborted2 = refusal(run_adopt_transaction, root, rid, compose_full(files))
+        check("abort-restores-sources-before-archive-discard",
+              aborted2 is not None and "rolled back" in aborted2 and not misordered
+              and snapshot(root) == before and lock_free(root))
 
     # 7: an interrupted apply (INTENT without a terminal frame, through the journal's kill-point seam)
     # refuses every later run until the EXPLICIT reconcile, which works from the journal alone and never
@@ -1186,6 +1618,48 @@ def _self_test_checks():
               txn_state(root, rid) == "complete" and verify_bundle(root, rid).status == VALID
               and not (root / ".working/TODO.md").exists())
 
+    # 7b: the reconcile-first ORDER: with BOTH an open transaction and a resolvable store present, the
+    # refusal is the journal's (the operator is pointed at reconcile()), never the lease refusal the
+    # posture gate would raise, because the journal is inspected FIRST (the module-docstring discipline).
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        import _opf_init
+        root, files = fixture(temp)
+        man = ".working/toml/manifest.toml"
+        mid = interrupt_when(lambda: (root / archive_rel(rid, man)).exists())
+        with mock.patch.object(_journal, "_kill_point", mid):
+            try:
+                run_adopt_transaction(root, rid, compose_full(files))
+            except (_Interrupt, AdoptApplyError):
+                pass
+        (root / man).write_text(_opf_init.build_manifest(), encoding="utf-8")
+        ordered = refusal(run_adopt_transaction, root, other_run, compose_full(files))
+        check("journal-checked-before-store-posture",
+              store.resolve_store(root).status == store.RESOLVED and txn_state(root, rid) == "open"
+              and ordered is not None and "reconcile" in ordered and "lease" not in ordered)
+
+    # 7c: a confirmed-dead owner's stale lock is broken only through _journal.reconcile_and_claim_stale,
+    # and reconcile() reports the TRUE outcome of the recovery that break performed, never 'terminal' for
+    # its own work.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        before = snapshot(root)
+        man = ".working/toml/manifest.toml"
+        mid = interrupt_when(lambda: (root / archive_rel(rid, man)).exists() and (root / man).exists())
+        with mock.patch.object(_journal, "_kill_point", mid):
+            try:
+                run_adopt_transaction(root, rid, compose_full(files))
+            except (_Interrupt, AdoptApplyError):
+                pass
+        dead = dead_pid()
+        owner_row = dict(uid=os.getuid(), pid=dead, session="opf-adopt-selftest-dead",
+                         utc="2026-09-17T12:00:00Z")
+        owner_row["pid-start"] = ""
+        (_journal_root(root) / "lock").write_text(json.dumps(owner_row), encoding="utf-8")
+        outcomes = reconcile(root) if dead is not None else []
+        check("stale-lock-reconcile-reports-true-outcomes",
+              dead is not None and txn_state(root, rid) == "rolled-back"
+              and (rid, "rolled-back") in outcomes and snapshot(root) == before and lock_free(root))
+
     # 8: a held journal lock refuses a transaction and a reconcile (never seized).
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
         root, files = fixture(temp)
@@ -1196,8 +1670,10 @@ def _self_test_checks():
         finally:
             os.close(root_fd)
         _journal.acquire_lock(journal_root, "opf-adopt-selftest-peer")
-        check("held-lock-refuses-transaction", refusal(run_adopt_transaction, root, rid, compose_full(files)))
-        check("held-lock-refuses-reconcile", refusal(reconcile, root))
+        check("held-lock-refuses-transaction", "it is never seized" in
+              (refusal(run_adopt_transaction, root, rid, compose_full(files)) or ""))
+        check("held-lock-refuses-reconcile",
+              "possibly-live owner" in (refusal(reconcile, root) or ""))
         _journal.release_lock(journal_root)
 
     # 9: live re-observation over a throwaway fixture.
@@ -1210,8 +1686,10 @@ def _self_test_checks():
             check("observe-absent", observe_live(root_fd, "missing.md") == dict(kind="absent"))
             seen = observe_live(root_fd, "legacy.md")
             check("observe-file-digest", seen.get("size") == 7 and seen.get("sha256") == _sha256(b"legacy\n"))
-            check("observe-symlink-refused", refusal(observe_live, root_fd, "link.md"))
-            check("observe-traversal-refused", refusal(observe_live, root_fd, "../escape"))
+            check("observe-symlink-refused",
+                  "not a regular file" in (refusal(observe_live, root_fd, "link.md") or ""))
+            check("observe-traversal-refused",
+                  "not a contained relative file path" in (refusal(observe_live, root_fd, "../escape") or ""))
         finally:
             os.close(root_fd)
 

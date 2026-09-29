@@ -1274,13 +1274,33 @@ def _verify_staged_digest(op, data):
                            "INTENT poststate content-sha256)".format(op["path"]))
 
 
+def _read_back_verify(fd, expected_sha, path, what):
+    """Spec 14.2 verification checkpoint: RE-READ the bytes just written through the SAME still-open
+    descriptor (never a re-resolved path) and digest-verify them against the recorded expectation BEFORE
+    the sequence moves on, so an archived copy is proven on disk before its source removal runs, and a
+    rollback's restored live bytes are proven before the aborted run's copy is discarded or a prestate is
+    reported. A mismatch (a torn, short, or faulty write) raises JournalError and fails closed."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(fd, 1 << 20)
+        if not chunk:
+            break
+        digest.update(chunk)
+    if digest.hexdigest() != expected_sha:
+        raise JournalError("{}: the {} bytes re-read from disk do not match their recorded digest "
+                           "(verification checkpoint, spec 14.2); failing closed".format(path, what))
+
+
 def apply_ops(root_fd, ops, staged_reader):
     """9.3 step 5: fd-bound prestate check and mutation beneath the pre-opened directory handle, no-
     follow, by final component; never a re-resolved absolute path between check and write. ops are in
     dependency order (parents before children for creates, children before parents for removes), so
-    reversed(ops) is the normative reverse-dependency rollback order. Every write is fsync'd and every
-    touched entry's parent directory is fsync'd (step 6). Any prestate mismatch raises JournalError and
-    the caller rolls back from the preimages."""
+    reversed(ops) is the normative reverse-dependency rollback order. Every write is fsync'd, RE-READ
+    from the destination and digest-verified against its INTENT poststate before the next op runs (the
+    spec 14.2 verification checkpoint: a removal paired with an archive copy runs only after that copy's
+    on-disk bytes verified), and every touched entry's parent directory is fsync'd (step 6). Any prestate
+    mismatch raises JournalError and the caller rolls back from the preimages."""
     for i, op in enumerate(ops):
         try:
             pfd, name = _open_parent(root_fd, op["path"])
@@ -1299,10 +1319,13 @@ def apply_ops(root_fd, ops, staged_reader):
                     _maybe_torn_payload(fd, data, i)
                     _write_all(fd, data)
                     os.fsync(fd)
+                    _read_back_verify(fd, op["poststate"]["content-sha256"], op["path"], "written")
                 finally:
                     os.close(fd)
             elif kind == "create":
-                fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                # O_RDWR (not O_WRONLY): the spec 14.2 checkpoint re-reads the written bytes through this
+                # same descriptor; creation-time access is granted regardless of the created mode.
+                fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW,
                              op["poststate"]["mode"], dir_fd=pfd)
                 try:
                     os.fchmod(fd, op["poststate"]["mode"])   # pin exact perms (umask independence)
@@ -1311,6 +1334,7 @@ def apply_ops(root_fd, ops, staged_reader):
                     _maybe_torn_payload(fd, data, i)
                     _write_all(fd, data)
                     os.fsync(fd)
+                    _read_back_verify(fd, op["poststate"]["content-sha256"], op["path"], "written")
                 finally:
                     os.close(fd)
             elif kind == "remove":
@@ -1470,6 +1494,10 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
                     _write_all(fd, data)
                     os.fchmod(fd, prestate["mode"])
                     os.fsync(fd)
+                    # Spec 14.2 rollback checkpoint: the restored live bytes verify BEFORE this restore
+                    # returns, so the reversal never discards the aborted run's archive copy (a later
+                    # create-undo in the reverse order) or reports a prestate over a faulty restore.
+                    _read_back_verify(fd, prestate["sha256"], path, "restored")
                 finally:
                     os.close(fd)
             else:                                     # a racing external writer left a non-regular file where a regular file is expected: fail closed
@@ -1482,11 +1510,14 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
 
 
 def _recreate_file(pfd, name, data, mode):
-    fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, mode, dir_fd=pfd)
+    # O_RDWR (not O_WRONLY): the spec 14.2 rollback checkpoint re-reads the restored bytes through this
+    # same descriptor before the reversal moves on (see _read_back_verify).
+    fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, mode, dir_fd=pfd)
     try:
         os.fchmod(fd, mode)
         _write_all(fd, data)
         os.fsync(fd)
+        _read_back_verify(fd, hashlib.sha256(data).hexdigest(), name, "restored")
     finally:
         os.close(fd)
 
