@@ -7425,8 +7425,9 @@ def _watchdog_completion_case(mode):
         # accident) -- for
         # example a dict display side, a container compared by
         # equality as a whole value (its spelled members are
-        # driven, the container value itself is never a driven
-        # state), or a computed or otherwise non-literal value.
+        # driven, the container value itself is never derived as a
+        # state, though the default state may hold it by accident),
+        # or a computed or otherwise non-literal value.
         # The two QA39
         # vectors -- a displacement conditioned on _failure read
         # through a local, and one conditioned on armed AND
@@ -7532,8 +7533,9 @@ def _watchdog_completion_case(mode):
             # still fire one by accident) -- for example
             # a dict display side, a container compared by
             # equality as a whole value (its spelled members are
-            # driven, the container value itself is never a driven
-            # state), or a computed or otherwise non-literal
+            # driven, the container value itself is never derived
+            # as a state, though the default state may hold it by
+            # accident), or a computed or otherwise non-literal
             # value; the bound is not widened here -- the found
             # QA39 vectors in those classes are pinned red after
             # the matrix, and the bound is disclosed at the leg 19
