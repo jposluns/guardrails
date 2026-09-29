@@ -119,6 +119,14 @@
       "target": ".claude/rules/security/"
     },
     {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_worker_pack.py",
+      "sources": [
+        ".aiqt/core/profiles/worker-pack.md"
+      ],
+      "target": ".claude/worker-pack.md"
+    },
+    {
       "kind": "tree",
       "regenerate": "python3 tools/gen_cursor.py",
       "sources": [
