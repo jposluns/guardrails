@@ -4486,10 +4486,11 @@ def _watchdog_completion_case(mode):
         # static scan cannot enumerate every way module-owned cleanup
         # could be hidden or a capture subverted; the GUARANTEE
         # therefore rests on the BEHAVIOURAL matrix (leg 19 below),
-        # which drives every module-owned cleanup site in the computed
-        # closure with a real pending cancellation plus a real cleanup
-        # fault, the site list DERIVED from that closure so a new site
-        # without a behavioural case fails the self-test. Within the
+        # which drives every module-owned cleanup CALL SITE in the
+        # computed closure with a real pending cancellation plus a
+        # real cleanup fault, the site list DERIVED from that closure
+        # so a new call site without a behavioural case fails the
+        # self-test. Within the
         # shapes it recognizes, this leg's scope is COMPUTED over the
         # whole close lifecycle and the computation FAILS CLOSED on
         # every call edge it cannot resolve. The GUARANTEE is scoped to cleanup the
@@ -4612,7 +4613,10 @@ def _watchdog_completion_case(mode):
         # These classes are RESIDUAL, not enforced: their absence
         # from the emit module is a review invariant, and a mutation
         # inside one of them evades this leg while leg 19 still holds
-        # every existing boundary site to its runtime behaviour.
+        # every existing boundary CALL SITE -- each driven at its own
+        # pending point, the cancellations born inside owned-handle
+        # cleanup included (fix 12, QA33 claude/codex BLOCKER) -- to
+        # its runtime behaviour.
         import ast
         import builtins
         import inspect
@@ -5389,7 +5393,18 @@ def _watchdog_completion_case(mode):
                         if arg.annotation is not None:
                             stack.append(arg.annotation)
                     if not isinstance(node, ast.Lambda):
-                        stack.extend(node.decorator_list)
+                        for decorator in node.decorator_list:
+                            # applying a decorator CALLS it with the
+                            # function -- with no ast.Call node when
+                            # the decorator is bare (fix 12, QA33
+                            # codex MAJOR) -- so the application is
+                            # modeled as a call of the decorator
+                            # expression itself; a call-shaped
+                            # decorator (whose RESULT is applied) has
+                            # an unresolvable callee and fails closed
+                            stack.append(ast.Call(func=decorator,
+                                                  args=[],
+                                                  keywords=[]))
                         if node.returns is not None:
                             stack.append(node.returns)
                     continue
@@ -5570,7 +5585,8 @@ def _watchdog_completion_case(mode):
                 for stmt in stmts:
                     if state in ("clear", "terminated"):
                         break
-                    for leaf in ast.walk(stmt):
+                    leaves = [(stmt, False)]
+                    while leaves:
                         # fix 10 (QA31 codex BLOCKER 1): no binding
                         # form may touch the captured name while it may
                         # be pending -- a walrus hides inside any
@@ -5581,6 +5597,13 @@ def _watchdog_completion_case(mode):
                         # the statement forms the walk does not model
                         # (for/with/except/del/import/class targets)
                         # already fail closed
+                        leaf, nested_def = leaves.pop()
+                        leaves.extend(
+                            (child, nested_def or isinstance(
+                                leaf, (ast.FunctionDef,
+                                       ast.AsyncFunctionDef,
+                                       ast.Lambda)))
+                            for child in ast.iter_child_nodes(leaf))
                         assert not (isinstance(leaf, ast.NamedExpr)
                                     and isinstance(leaf.target,
                                                    ast.Name)
@@ -5594,9 +5617,15 @@ def _watchdog_completion_case(mode):
                             "the captured name is rebound before its "
                             "re-raise (fix 9/10, QA31 codex "
                             "BLOCKER 1)", key)
-                        assert not isinstance(leaf, (ast.Yield,
-                                                     ast.YieldFrom,
-                                                     ast.Await)), (
+                        # a yield/await INSIDE a nested def or
+                        # lambda suspends THAT function when it is
+                        # called, never this one, so it is no
+                        # suspension point here (fix 12, QA33 codex
+                        # MINOR); its body is checked where it is
+                        # routed
+                        assert nested_def or not isinstance(
+                            leaf, (ast.Yield, ast.YieldFrom,
+                                   ast.Await)), (
                             "a suspension point follows a capture: "
                             "cannot evaluate what runs -- or never "
                             "runs, for a dropped generator or "
@@ -5685,7 +5714,19 @@ def _watchdog_completion_case(mode):
                                     "the captured name is rebound "
                                     "before its re-raise (fix 9/10, "
                                     "QA31 codex BLOCKER 1)", key)
-                        protected_calls(stmt)
+                        if isinstance(stmt, ast.AnnAssign):
+                            # a LOCAL annotation expression never
+                            # executes (fix 12, QA33 codex MINOR: a
+                            # call spelled inside a bare AnnAssign's
+                            # annotation runs nothing); only the
+                            # value -- and a non-simple target's
+                            # subexpressions -- can run here
+                            if not isinstance(stmt.target, ast.Name):
+                                protected_calls(stmt.target)
+                            if stmt.value is not None:
+                                protected_calls(stmt.value)
+                        else:
+                            protected_calls(stmt)
                     elif isinstance(stmt, (ast.Pass, ast.FunctionDef,
                                            ast.AsyncFunctionDef)):
                         assert not (isinstance(
@@ -6242,6 +6283,72 @@ def _watchdog_completion_case(mode):
                              "vector:codex32-minor"),
             "interrupted", "vector:codex32-minor")
 
+        # QA33 codex MAJOR (fix 12): applying a BARE decorator right
+        # after the capture calls it with the function -- with no
+        # ast.Call node anywhere in the tree -- so the
+        # definition-time work check must model the application
+        # itself and reject it like any other unprotected call.
+        function, capturing = leg11_vector("""
+            def mutant(self):
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                @cleanup_decorator
+                def extra():
+                    pass
+                if interrupted is not None:
+                    raise interrupted
+            """)
+        leg11_vector_rejected(
+            "codex QA33 decorator vector: a bare decorator applied "
+            "after a capture",
+            lambda function=function, capturing=capturing:
+                deferred_capture_sound(
+                    function,
+                    successors_after(function, capturing,
+                                     "vector:codex33-major"),
+                    "interrupted", "vector:codex33-major"))
+
+        # QA33 codex MINOR (fix 12, over-rejection pins): a LOCAL
+        # annotation never evaluates its annotation expression, so a
+        # call spelled inside a bare AnnAssign's annotation runs
+        # nothing and must be ACCEPTED; a yield inside a NESTED def
+        # suspends that function when it is called, never the
+        # enclosing one, so defining such a generator after the
+        # capture must be ACCEPTED too.
+        function, capturing = leg11_vector("""
+            def mutant(self):
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                interrupted: BaseException | type(None)
+                if interrupted is not None:
+                    raise interrupted
+            """)
+        deferred_capture_sound(
+            function,
+            successors_after(function, capturing,
+                             "vector:codex33-minor-annotation"),
+            "interrupted", "vector:codex33-minor-annotation")
+        function, capturing = leg11_vector("""
+            def mutant(self):
+                try:
+                    wait()
+                except BaseException as exc:
+                    interrupted = exc
+                def unused_generator():
+                    yield 1
+                if interrupted is not None:
+                    raise interrupted
+            """)
+        deferred_capture_sound(
+            function,
+            successors_after(function, capturing,
+                             "vector:codex33-minor-yield"),
+            "interrupted", "vector:codex33-minor-yield")
+
         # Leg 12 (QA27 codex BLOCKER 1): a TimeoutError raised at the
         # subject SIGSTOP stays the outward exception when the held-pidfd
         # subject SIGKILL in the finally itself fails -- with an ordinary
@@ -6599,37 +6706,55 @@ def _watchdog_completion_case(mode):
         assert helper_kills == [(11888, signal.SIGKILL)], helper_kills
 
         # Leg 19 (fix 11, QA32, maintainer ruling PD-335-TAIL option
-        # 2): the BEHAVIOURAL guarantee leg 11's tripwire defers to.
-        # For EVERY module-owned cleanup site in the computed
-        # close-lifecycle closure -- every (member, site) pair naming
-        # a _cleanup_boundary call -- drive the member with each
-        # pending-cancellation type raised at that site's pending
+        # 2; fix 12, QA33 claude/codex BLOCKER): the BEHAVIOURAL
+        # guarantee leg 11's tripwire defers to. For EVERY
+        # _cleanup_boundary CALL SITE in the computed close-lifecycle
+        # closure -- keyed (member, site-string, source-order
+        # ordinal), so two calls sharing one label inside one member
+        # hold SEPARATE cases -- drive the member with each
+        # pending-cancellation type raised at that call's OWN pending
         # point AND an ordinary fault injected into that cleanup
         # step, and assert the ORIGINAL cancellation object
         # propagates outward with the cleanup fault reachable in its
-        # chain. The site list is DERIVED from the closure leg 11
-        # computed, so a boundary site added to the lifecycle without
-        # a case here fails this leg. Granularity: one case per
-        # (member, site-string) pair; calls sharing one site string
-        # inside one member share its case. Red-on-revert: replacing
-        # a site's boundary call with a direct cleanup call makes its
-        # case fail (the injected fault displaces the cancellation);
-        # reproduced for the unfinished-launch abandonment site
-        # during fix 11.
+        # chain. For _finish_close's two exceptional-path calls the
+        # pending point is a cancellation BORN inside the
+        # owned-handle cleanup itself (raised by close_subject_pidfd
+        # / close_guardian_pidfd), the displacement class QA33 found
+        # unpinned under the old (member, label) keying. The site
+        # list is DERIVED from the closure leg 11 computed, so a
+        # boundary call added to the lifecycle without a case here --
+        # a NEW call reusing an existing label included -- fails the
+        # coverage assert below. Red-on-revert: replacing a boundary
+        # call with a direct cleanup call makes its case fail (the
+        # injected fault displaces the cancellation) at every call
+        # site where no enclosing boundary carries the same pending
+        # value; at _finish_close's two normal-path calls the
+        # enclosing boundary does, so a revert there leaves the
+        # driven behaviour intact -- leg 11's tripwire, not this
+        # leg, is what rejects the direct call. Reproduced for the
+        # unfinished-launch abandonment site during fix 11 and for
+        # both owned-handle cleanup sites during fix 12.
         lifecycle_sites = set()
         for member_key in scope:
-            for node in ast.walk(scope[member_key]):
+            member_calls = [
+                node for node in ast.walk(scope[member_key])
                 if (isinstance(node, ast.Call)
-                        and call_target(node)[:2]
-                        == ("name", "_cleanup_boundary")):
-                    assert (len(node.args) >= 3
-                            and isinstance(node.args[2], ast.Constant)
-                            and isinstance(node.args[2].value, str)), (
-                        "a boundary site label is not a string "
-                        "literal: the behavioural matrix cannot name "
-                        "it (fix 11)", member_key)
-                    lifecycle_sites.add((member_key,
-                                         node.args[2].value))
+                    and call_target(node)[:2]
+                    == ("name", "_cleanup_boundary"))]
+            member_calls.sort(
+                key=lambda node: (node.lineno, node.col_offset))
+            label_ordinals = {}
+            for node in member_calls:
+                assert (len(node.args) >= 3
+                        and isinstance(node.args[2], ast.Constant)
+                        and isinstance(node.args[2].value, str)), (
+                    "a boundary site label is not a string "
+                    "literal: the behavioural matrix cannot name "
+                    "it (fix 11)", member_key)
+                label = node.args[2].value
+                ordinal = label_ordinals.get(label, 0)
+                label_ordinals[label] = ordinal + 1
+                lifecycle_sites.add((member_key, label, ordinal))
 
         def chain_members(exc):
             seen, frontier, members = set(), [exc], []
@@ -6876,23 +7001,33 @@ def _watchdog_completion_case(mode):
 
         def finish_fake(cancellation, report_close=None, pidfd=None,
                         subject_pidfd=None, interrupt=None):
-            # _finish_close's pending point: the receipt read raises
-            # the cancellation as the collection's first step.
+            # _finish_close's collection-side pending point: the
+            # receipt read raises the cancellation as the
+            # collection's first step; cancellation=None drives a
+            # normally-completing collection, for the cases whose
+            # cancellation is BORN in the owned-handle cleanup
+            # (fix 12, QA33 claude/codex BLOCKER).
             def raising_recv():
-                raise cancellation
+                if cancellation is not None:
+                    raise cancellation
 
+            closing = types.SimpleNamespace(close=lambda: None)
             return types.SimpleNamespace(
                 pid=None, collected=True, armed=False,
                 unresolved=False, pidfd=pidfd,
                 subject_pidfd=subject_pidfd, subject_pid=None,
                 _subject_kill=None, _subject_skipped=None,
                 _failure=None, cleaned=False,
+                control=closing, peer=closing,
                 _recv_subject=raising_recv,
                 _interrupt_collect=interrupt or (lambda: None),
                 report=types.SimpleNamespace(
                     close=report_close or (lambda: None)))
 
         def finish_report_driver(cancellation, fault):
+            # the normal-path "report channel close" call: the
+            # cancellation comes from the collection, the fault from
+            # the report close.
             def raising_report_close():
                 raise fault
 
@@ -6900,12 +7035,50 @@ def _watchdog_completion_case(mode):
                 finish_fake(cancellation,
                             report_close=raising_report_close))
 
+        def finish_tail_pending_driver(cancellation, fault):
+            # the exceptional-path "report channel close" call: the
+            # cancellation is BORN in the subject pidfd close (the
+            # owned-handle cleanup itself), the fault in the
+            # boundary's step, the report close (fix 12, QA33
+            # claude/codex BLOCKER).
+            def fake_close(fd):
+                assert fd == 987007, fd
+                raise cancellation
+
+            def raising_report_close():
+                raise fault
+
+            fake = finish_fake(None, subject_pidfd=987007,
+                               report_close=raising_report_close)
+            with patch.object(os, "close", fake_close):
+                emit._FixtureProcess._finish_close(fake)
+
         def finish_subject_driver(cancellation, fault):
+            # the normal-path "subject pidfd and report close" call:
+            # the cancellation comes from the collection, the fault
+            # from the subject pidfd close.
             def fake_close(fd):
                 assert fd == 987007, fd
                 raise fault
 
             fake = finish_fake(cancellation, subject_pidfd=987007)
+            with patch.object(os, "close", fake_close):
+                emit._FixtureProcess._finish_close(fake)
+
+        def finish_head_pending_driver(cancellation, fault):
+            # the exceptional-path "subject pidfd and report close"
+            # call: the cancellation is BORN in the guardian pidfd
+            # close, the fault in the boundary's step -- the subject
+            # pidfd close inside the tail (fix 12, QA33 claude/codex
+            # BLOCKER).
+            def fake_close(fd):
+                if fd == 987006:
+                    raise cancellation
+                assert fd == 987007, fd
+                raise fault
+
+            fake = finish_fake(None, pidfd=987006,
+                               subject_pidfd=987007)
             with patch.object(os, "close", fake_close):
                 emit._FixtureProcess._finish_close(fake)
 
@@ -6929,62 +7102,77 @@ def _watchdog_completion_case(mode):
         behavioural_drivers = dict()
         behavioural_drivers[
             ("f:_fixture_stat_fields",
-             "stat descriptor close")] = stat_close_driver
+             "stat descriptor close", 0)] = stat_close_driver
         behavioural_drivers[
             ("f:_fixture_kill_group_members",
-             "member pidfd close")] = member_close_driver
+             "member pidfd close", 0)] = member_close_driver
         behavioural_drivers[
             ("f:_fixture_escalate_subject",
-             "held-pidfd subject SIGKILL")] = subject_kill_driver
+             "held-pidfd subject SIGKILL", 0)] = subject_kill_driver
         behavioural_drivers[
             ("m:_FixtureProcess._escalate",
-             "direct guardian SIGKILL backstop")] = backstop_driver
+             "direct guardian SIGKILL backstop", 0)] = backstop_driver
         behavioural_drivers[
             ("m:_FixtureProcess._escalate",
-             "guardian-kill cleanup")] = guardian_kill_driver
+             "guardian-kill cleanup", 0)] = guardian_kill_driver
         behavioural_drivers[
             ("m:_FixtureProcess.close",
-             "cancellation mask restore")] = mask_restore_driver
+             "cancellation mask restore", 0)] = mask_restore_driver
         behavioural_drivers[
             ("m:_FixtureProcess._close_masked",
-             "parked launcher release")] = masked_release_driver
+             "parked launcher release", 0)] = masked_release_driver
         behavioural_drivers[
             ("m:_FixtureProcess._close_masked",
-             "unfinished-launch abandonment")] = masked_abandon_driver
+             "unfinished-launch abandonment",
+             0)] = masked_abandon_driver
         behavioural_drivers[
             ("m:_FixtureProcess._close_masked",
-             "interrupt-owner collection")] = masked_interrupt_driver
+             "interrupt-owner collection",
+             0)] = masked_interrupt_driver
         behavioural_drivers[
             ("m:_FixtureProcess._close_coordinated",
-             "parked launcher release")] = coordinated_release_driver
+             "parked launcher release",
+             0)] = coordinated_release_driver
         behavioural_drivers[
             ("m:_FixtureProcess._close_coordinated",
-             "unfinished-launch abandonment")
-            ] = coordinated_abandon_driver
+             "unfinished-launch abandonment",
+             0)] = coordinated_abandon_driver
         behavioural_drivers[
             ("m:_FixtureProcess._close_coordinated",
-             "abandonment refusal")] = coordinated_refusal_driver
+             "abandonment refusal", 0)] = coordinated_refusal_driver
         behavioural_drivers[
             ("m:_FixtureProcess._close_coordinated",
-             "owner collection finish")] = coordinated_finish_driver
+             "owner collection finish",
+             0)] = coordinated_finish_driver
         behavioural_drivers[
             ("m:_FixtureProcess._finish_close",
-             "report channel close")] = finish_report_driver
+             "report channel close", 0)] = finish_tail_pending_driver
         behavioural_drivers[
             ("m:_FixtureProcess._finish_close",
-             "subject pidfd and report close")] = finish_subject_driver
+             "report channel close", 1)] = finish_report_driver
         behavioural_drivers[
             ("m:_FixtureProcess._finish_close",
-             "interrupt-owner collection")] = finish_interrupt_driver
+             "subject pidfd and report close",
+             0)] = finish_head_pending_driver
         behavioural_drivers[
             ("m:_FixtureProcess._finish_close",
-             "held descriptor and report close")
-            ] = finish_handles_driver
+             "subject pidfd and report close",
+             1)] = finish_subject_driver
+        behavioural_drivers[
+            ("m:_FixtureProcess._finish_close",
+             "interrupt-owner collection",
+             0)] = finish_interrupt_driver
+        behavioural_drivers[
+            ("m:_FixtureProcess._finish_close",
+             "held descriptor and report close",
+             0)] = finish_handles_driver
         assert lifecycle_sites == set(behavioural_drivers), (
             "the behavioural matrix does not cover the computed "
-            "boundary-site list exactly: every module-owned cleanup "
-            "site needs a fault-injection case, and every case must "
-            "name a real site (fix 11, PD-335-TAIL option 2)",
+            "boundary call-site list exactly: every module-owned "
+            "cleanup call site needs a fault-injection case -- a "
+            "NEW call reusing an existing label included -- and "
+            "every case must name a real call site (fix 11/12, "
+            "PD-335-TAIL option 2)",
             sorted(lifecycle_sites
                    ^ set(behavioural_drivers)))
         for case_label in sorted(behavioural_drivers):
