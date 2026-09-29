@@ -44,7 +44,8 @@ GENSRC_OUTPUTS = (
 )
 RENDERERS_REL = ".aiqt/core/renderers.toml"
 # The declared adapter renderers, in a fixed bytewise renderer-id order for a deterministic render.
-RENDERERS = ("gen_agents", "gen_adapters", "gen_claude", "gen_cursor", "gen_rules", "gen_skill")
+RENDERERS = ("gen_agents", "gen_adapters", "gen_claude", "gen_cursor", "gen_rules", "gen_skill",
+             "gen_worker_pack")
 
 
 class GateError(Exception):

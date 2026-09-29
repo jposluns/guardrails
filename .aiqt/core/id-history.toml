@@ -2985,3 +2985,31 @@ born-release = "1.1.0"
 [[born]]
 id = "tsthrm.19"
 born-release = "1.1.0"
+
+[[born]]
+id = "citint"
+born-release = "1.1.0"
+
+[[born]]
+id = "citint.1"
+born-release = "1.1.0"
+
+[[born]]
+id = "citint.2"
+born-release = "1.1.0"
+
+[[born]]
+id = "citint.3"
+born-release = "1.1.0"
+
+[[born]]
+id = "attint"
+born-release = "1.1.0"
+
+[[born]]
+id = "attint.1"
+born-release = "1.1.0"
+
+[[born]]
+id = "attint.2"
+born-release = "1.1.0"
