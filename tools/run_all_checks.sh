@@ -104,6 +104,8 @@ run_gate "opf-ingest-apply-selftest" python3 -I -B opf/tools/_opf_ingest_apply.p
 run_gate "opf-adopt-selftest" python3 -I -B opf/tools/_opf_adopt.py --self-test
 run_gate "opf-adopt-hook-selftest" python3 -I -B opf/tools/_opf_adopt_hook.py --self-test
 run_gate "opf-pack-manifest-selftest" python3 -I -B opf/tools/_opf_pack_manifest.py --self-test
+run_gate "opf-prompt-pack-selftest" python3 -I -B opf/tools/check_opf_prompt_pack.py --self-test
+run_gate "opf-prompt-pack" python3 -I -B opf/tools/check_opf_prompt_pack.py
 run_gate "opf-oplock-selftest" python3 -I -B opf/tools/_opf_oplock.py --self-test
 run_gate "opf-init-substrate-selftest" python3 -I -B opf/tools/_opf_init_substrate.py --self-test
 run_gate "opf-init-builders-selftest" python3 -I -B opf/tools/_opf_init.py --self-test
