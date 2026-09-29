@@ -2319,7 +2319,10 @@ def _gitignore_reconciliation_self_test(check):
             return env
 
         def run_git(cwd, *args):
-            proc = subprocess.run([git, "-C", str(cwd)] + list(args), stdout=subprocess.PIPE,
+            # The three maintenance pins keep automatic gc/maintenance from writing into .git
+            # behind a later read-only assertion.
+            proc = subprocess.run([git, "-C", str(cwd), "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
+                                   "-c", "maintenance.auto=false"] + list(args), stdout=subprocess.PIPE,
                                   stderr=subprocess.STDOUT, env=fixture_env(), timeout=60)
             if proc.returncode != 0:
                 raise RuntimeError("fixture git {} failed: {}".format(args, proc.stdout))
@@ -2399,8 +2402,13 @@ def _gitignore_reconciliation_self_test(check):
             check("gi-tracked-staging", lambda: any(
                 h.startswith("tracked-control-path") and ".working/staging/import/f" in h
                 for h in holds8))
-            check("gi-tracked-staging-readonly",
-                  lambda: (index_digest(repo8), tree_snapshot(repo8)) == before)
+            after8 = (index_digest(repo8), tree_snapshot(repo8))
+            if after8 != before:
+                # Name what moved, so a failure on another git version is diagnosable from the log.
+                print("gi-tracked-staging-readonly: index changed={} tree added={} removed={}".format(
+                    after8[0] != before[0], sorted(set(after8[1]) - set(before[1])),
+                    sorted(set(before[1]) - set(after8[1]))), file=sys.stderr)
+            check("gi-tracked-staging-readonly", lambda: after8 == before)
 
             # I9: a tracked journals path holds identically.
             repo9, root9 = tracked_fixture("tracked-journals", ".working/journals/ingest/x")
