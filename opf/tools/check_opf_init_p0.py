@@ -736,7 +736,12 @@ def runner_red_checks(expected):
 
     for status in (1, 2, 7):
         own_failure(source, status)
-    propagation = '  if "$@"; then :; else failed=1; fi'
+    propagation = ('  if "$@"; then :; else\n'
+                   '    local rc=$?\n'
+                   '    failed=1\n'
+                   '    failed_names="${failed_names:+${failed_names}, }${name}"\n'
+                   '    echo "GATE FAILED: ${name} (exit ${rc})"\n'
+                   '  fi')
     if source.count(propagation) != 1:
         raise AssertionError(identity + "/red-fixture")
 
