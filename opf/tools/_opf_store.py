@@ -2311,7 +2311,12 @@ def self_test():
                 except _journal.JournalError:
                     return "REFUSED"
                 return "ACCEPTED"
-            return run_bounded(probe, timeout_s=2, keep_fds=keep_fds) == "REFUSED"
+            # The bound is a hang guard, not a latency claim: correct code refuses in microseconds, but
+            # PR #363 measured the in-process armed window at up to 73 ms under pinned-CPU contention
+            # (24 busy siblings on one CPU), where 2 s gave only 27x against the required 50x; this probe
+            # also pays a child start-up, so the bound is 20 s (above 270x on that measurement), costing
+            # time only when a hang regression exists.
+            return run_bounded(probe, timeout_s=20, keep_fds=keep_fds) == "REFUSED"
 
         # M2: _read_contained does not hang on a writer-less FIFO (the raced regular-file->FIFO swap); it
         # returns a fail-closed JournalError at once. The non-OSError marker makes a blocking regression a
