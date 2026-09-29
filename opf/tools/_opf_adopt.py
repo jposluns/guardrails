@@ -2472,7 +2472,8 @@ def self_test():
             ("move-into-sub-store-moved", sub_plan, _sub_move("sub/.working/archive/moved/moved.md"))):
         check("plan-v2-{}-valid".format(label), _mutated(base, mutate, True) == VALID)
 
-    # 17: U8 fix round 3 discriminators. Each vector FAILS if its corresponding fix is reverted.
+    # 17: U8 fix round 3 discriminators. Each refusal vector FAILS if its corresponding fix is reverted; the
+    # re-adoption keep-chain counter-vector passes either way and guards against over-refusal.
     # 17a (fix 1): preservation destinations compose under a non-root store_root. A retire source of the
     # `sub` store is preserved inside the frozen store, at sub/.working/archive/adoption/<run>/..., and a
     # preservation at the product-root archive home, outside the frozen store, is refused (spec 14.2).
