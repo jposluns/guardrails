@@ -1858,11 +1858,21 @@ def _auto_maintenance_children(workdir, env):
 # pin key whose LAST option-position setting is a `--config-env` is the same finding (its
 # launch-time environment value is unreadable here; -c and --config-env apply in
 # command-line order on git 2.53, last value wins, so a LATER `-c` re-pin restores the
-# pin). A subcommand WORD that matches an alias.* defined in the SAME argv - or an
-# unresolved tail behind effective pins with such an alias defined - is a FINDING no pin or
-# coverage absorbs: the alias value is a new command line this scan cannot read, a non-shell
-# alias's own `-c` pairs apply AFTER the outer options with last-value-wins, and a `!` shell
-# alias strips the propagated command scope (verified on git 2.53). A
+# pin). A subcommand WORD that matches an alias.* defined in the SAME argv - or ANY parse
+# that ends at an unresolved region while a resolvable alias.* definition sits anywhere in
+# the argv (a pre-pass reads every resolvable `-c`/`--config-env` alias.* pair, one spelled
+# AFTER an unresolved slot included), whatever the pin state or env coverage - is a FINDING
+# no pin or coverage absorbs: the alias value is a new command line this scan cannot read,
+# a non-shell alias's own `-c` pairs apply AFTER the outer options with last-value-wins,
+# and a `!` shell alias runs an arbitrary command line that INHERITS the propagated command
+# scope (an ordinary `!` alias sees the outer `-c` pins through GIT_CONFIG_PARAMETERS) yet
+# can drop or override it (`!env -u GIT_CONFIG_PARAMETERS git ...` strips exactly those
+# pins; both behaviours verified on git 2.53), so the expansion CAN defeat every argv and
+# environment pin. An alias.* whose name matches a git BUILT-IN (alias.version=..., then
+# `version`) stays this same conservative finding: git 2.53 ignores an alias that shadows
+# a built-in and runs the built-in, but the built-in set belongs to whatever git RUNS at
+# launch time and is unreadable here, so no built-in name list is trusted (disclosed; a
+# reviewed _SCAN_ALLOWED_UNPINNED justification can absorb a specific audited site). A
 # launch whose resolved SUBCOMMAND is not maintenance-triggering is out of scope (a trigger
 # word in operand position, `git show commit`, is not a launch of that trigger). A scrub or
 # lifecycle call covers a launch only from a covering SCOPE: the launch's own function, an
@@ -1881,11 +1891,15 @@ def _auto_maintenance_children(workdir, env):
 # rather than called (an alias `launch = subprocess.run`, a launcher stored in a container, a
 # multiprocessing or asyncio target=), a git launch INSIDE a launched script or behind a
 # non-git wrapper program (an `env`/`sh`/`bash`/interpreter head ends the analysis at that
-# head), an unresolved `-c` VALUE slot, an unresolved argv tail AFTER the three pins are
-# effective in option position with NO alias.* defined in the same argv (the pinned-funnel
-# idiom passes subcommand and operands there; the parse ends at the first unresolved token,
-# so even a RESOLVED re-enable spelled after it is out of this scan's reach; with a same-argv
-# alias defined that tail is a finding instead, above), a mutation of a tracked argv or env
+# head), an unresolved `-c` VALUE slot (an alias.* definition whose `-c`/`--config-env`
+# marker or value slot is itself unresolved is out of the alias pre-pass's reach too, so
+# it cannot mark the argv alias-defining), an unresolved argv tail AFTER the three pins
+# are effective in option position with NO resolvable alias.* definition anywhere in the
+# same argv (the pinned-funnel idiom passes subcommand and operands there; the parse ends
+# at the first unresolved token, so even a RESOLVED re-enable spelled after it is out of
+# this scan's reach; with a resolvable same-argv alias.* definition - spelled before OR
+# after that token - the parse end is the alias finding instead, above), a mutation of a
+# tracked argv or env
 # reached WITHOUT a bare-name binding: through tuple unpacking, a container element, an
 # object attribute, a function that receives the object as an argument, or another module (a
 # bare-name alias IS tracked and invalidates resolution, and so does a bare-name REBINDING
@@ -2019,6 +2033,12 @@ _SCAN_ALLOWED_UNPINNED = (
      "cannot-evaluate head: replays the REGISTERED hook entry's own dispatcher command (a"
      " python3 hook-script argv from the hooks registry), not a git launch; the suite's"
      " lifecycle PATH wrapper pins any git a hook child resolves through PATH"),
+    ("opf/tools/_opf_adopt_hook.py", "self_test", ("unresolved",),
+     "cannot-evaluate argv: the sandbox-mock seam canary calls subprocess.Popen(None)"
+     " to prove the mock net denies the subprocess seam; with the mocks in place the"
+     " deny stub raises before any launch reaches the seam, and with a REVERTED mock"
+     " the real Popen raises TypeError at once (None is not a valid argv), so no"
+     " process is ever launched and no git run can occur"),
     ("opf/tools/_opf_observe.py", "_capture_bounded", ("unresolved",),
      "cannot-evaluate funnel: the bounded-read launcher receives argv and env from its"
      " callers; every caller is a read-only observation (rev-parse/config/cat-file family),"
@@ -2480,12 +2500,22 @@ def _scan_git_argv_state(entries, func_node, module_consts, launch=None):
     environment-scope pin, so no env coverage can absorb it); 'subcommand' with the
     resolved subcommand token when the pins are not effective; 'alias' when the
     resolved subcommand WORD matches an alias.* name defined in this SAME argv,
-    whatever the pin state, or when the parse ends at an unresolved region with the
-    pins effective and a same-argv alias.* defined (the invoked alias VALUE is a new
-    command line this parse cannot read: a non-shell alias's own `-c` pairs apply
-    AFTER the outer options with last-value-wins, and a `!` shell alias strips the
-    propagated command scope, so the alias defeats every argv and environment pin,
-    verified on git 2.53 - never 'pinned', whatever the outer options say); 'opaque'
+    whatever the pin state (a name matching a git BUILT-IN included: git 2.53
+    ignores an alias that shadows a built-in and runs the built-in, but the
+    launch-time git's built-in set is unreadable here, so no name list is
+    trusted and the conservative finding stays, disclosed above), or when the
+    parse ends at ANY unresolved region while a resolvable alias.* definition
+    sits anywhere in the argv - the pre-pass below reads every resolvable
+    `-c`/`--config-env` alias.* pair, one spelled AFTER an unresolved slot this
+    positional parse stops at included - whatever the pin state or env coverage
+    (the invoked alias VALUE is a new command line this parse cannot read: a
+    non-shell alias's own `-c` pairs apply AFTER the outer options with
+    last-value-wins, and a `!` shell alias runs an arbitrary command line that
+    inherits the propagated command scope, GIT_CONFIG_PARAMETERS, yet can drop
+    or override it - an ordinary `!` alias INHERITS the `-c` pins and one that
+    strips GIT_CONFIG_PARAMETERS removes them, verified on git 2.53 - so the
+    expansion CAN defeat every argv and environment pin: never 'pinned',
+    whatever the outer options say); 'opaque'
     when an unknown-length region, an unresolved slot, an unreadable `-c` value, or a
     truncated option reaches the parser before the pins are effective, or when a
     SUBCOMMAND that matches no same-argv alias.* name is reached after an alias.*
@@ -2499,6 +2529,39 @@ def _scan_git_argv_state(entries, func_node, module_consts, launch=None):
     pin_state = dict()
     alias_seen = False
     alias_names = set()
+    # Pre-pass: alias.* definitions readable ANYWHERE in the argv. The positional
+    # parse below stops at the first unresolved entry, so an alias.* pair spelled
+    # AFTER such a slot is invisible to it while git can still read the pair as
+    # global-option config at launch time (the slot may resolve to an option
+    # there). Whether a pair sits inside the global-option region cannot be
+    # established past an unresolved slot, so ANY resolvable `-c`/`--config-env`
+    # pair carrying an alias.* key marks the argv alias-defining, fail-closed:
+    # over-reading a pair git would treat as subcommand operands can only ADD a
+    # conservative finding when the parse also ends at an unresolved region,
+    # never hide one (a parse that never ends unresolved never consults this
+    # flag).
+    alias_defined = False
+    for pre in range(1, len(entries)):
+        pre_entry = entries[pre]
+        if pre_entry is _SCAN_OPEN:
+            continue
+        pre_token = _scan_element_literal(pre_entry, func_node, module_consts,
+                                          _SCAN_RESOLVE_DEPTH, launch)
+        if pre_token is None:
+            continue
+        if pre_token.startswith("--config-env="):
+            pre_value = pre_token.partition("=")[2]
+        elif pre_token in ("-c", "--config-env") and pre + 1 < len(entries) \
+                and entries[pre + 1] is not _SCAN_OPEN:
+            pre_value = _scan_element_literal(entries[pre + 1], func_node,
+                                              module_consts, _SCAN_RESOLVE_DEPTH,
+                                              launch)
+        else:
+            continue
+        if pre_value is not None \
+                and pre_value.partition("=")[0].lower().startswith("alias."):
+            alias_defined = True
+            break
 
     def _verdict(sub):
         for key, value in _SCAN_PIN_VALUES.items():
@@ -2517,11 +2580,14 @@ def _scan_git_argv_state(entries, func_node, module_consts, launch=None):
             token = _scan_element_literal(entry, func_node, module_consts,
                                           _SCAN_RESOLVE_DEPTH, launch)
         if token is None:
-            state = _verdict(None)
-            if state is not None and state[0] == "pinned" and alias_seen:
-                # The unresolved region can spell a defined alias name: the
-                # pinned-funnel trust never extends across a same-argv alias.
+            if alias_defined:
+                # The unresolved region can spell a defined alias name and the
+                # alias expansion can defeat every argv and environment pin
+                # (docstring above): the alias finding, whatever the pin state
+                # (pinned, stomped, or neither) and whatever env= coverage the
+                # launch would otherwise get credit for.
                 return "alias", None
+            state = _verdict(None)
             return state or ("opaque", None)
         if token == "-c":
             if index + 1 >= len(entries) or entries[index + 1] is _SCAN_OPEN:
@@ -3068,19 +3134,22 @@ def _maintenance_pin_scan(root, allow_missing_files=False):
                             " _SCAN_ALLOWED_UNPINNED" % (rel, call.lineno, qualname))
                     continue
                 if status == "alias":
-                    # The argv defines an alias.* and reaches a word that can invoke
+                    # The argv defines an alias.* and the parse reaches a word that
+                    # can invoke it, or ends at an unresolved region that can spell
                     # it: the alias expansion is a command line this scan cannot
                     # read, a non-shell alias's `-c` pairs apply after the outer
-                    # options and a `!` alias strips the propagated command scope
-                    # (git 2.53), so no argv pin, environment pin, scrub, or covered
-                    # env protects the launch.
+                    # options with last-value-wins, and a `!` alias runs an
+                    # arbitrary command line that inherits the propagated command
+                    # scope (GIT_CONFIG_PARAMETERS) yet can drop or override it
+                    # (git 2.53), so no argv pin, environment pin, scrub, or
+                    # covered env is trusted to protect the launch.
                     if not absorbed(key, "git"):
                         findings.append(
                             "%s:%d %s: git launch that defines an alias.* in its own"
-                            " argv and reaches a word that can invoke it (cannot"
-                            " evaluate the alias expansion, which outranks every argv"
-                            " and environment pin); drop the same-argv alias or"
-                            " justify it in _SCAN_ALLOWED_UNPINNED"
+                            " argv and reaches a word or unresolved region that can"
+                            " invoke it (cannot evaluate the alias expansion, which"
+                            " can defeat every argv and environment pin); drop the"
+                            " same-argv alias or justify it in _SCAN_ALLOWED_UNPINNED"
                             % (rel, call.lineno, qualname))
                     continue
                 # Remaining: a maintenance-triggering subcommand, or a git argv this scan
@@ -3630,6 +3699,38 @@ _SCAN_CONTRACT_CASES = (
          "                    '-c', 'maintenance.auto=false',",
          "                    '-c', 'alias.seed=-c maintenance.auto=true commit',",
          "                    word])", ""))),),
+     "defines an alias.* in its own argv"),
+    # Round-7 forms: the alias-defining argv gaps round-7 review demonstrated (the
+    # first two red without the alias pre-pass and the unconditional
+    # unresolved-region alias verdict; the third pins the DISCLOSED conservative
+    # finding for an alias whose name matches a git built-in: git 2.53 ignores the
+    # alias and runs the built-in, but the launch-time built-in set is unreadable
+    # statically, so the conservative finding must not silently regress to clean).
+    ("alias-open-tail-covered-env",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "",
+         "from _git_fixture_env import git_fixture_env", "", "",
+         "def _seed(word):",
+         "    env = git_fixture_env()",
+         "    subprocess.run(['git', '-c', 'alias.seed=-c maintenance.auto=true commit',",
+         "                    word], env=env)", ""))),),
+     "defines an alias.* in its own argv"),
+    ("alias-after-unresolved-slot",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _seed(flag):",
+         "    subprocess.run(['git', '-c', 'gc.auto=0', '-c', 'gc.autoDetach=false',",
+         "                    '-c', 'maintenance.auto=false', flag,",
+         "                    '-c', 'alias.seed=-c maintenance.auto=true commit',",
+         "                    'seed', '--allow-empty', '-m', 'x'])", ""))),),
+     "defines an alias.* in its own argv"),
+    ("alias-builtin-name-conservative",
+     (("tools/planted.py", "\n".join((
+         "import subprocess", "", "",
+         "def _seed():",
+         "    subprocess.run(['git', '-c', 'gc.auto=0', '-c', 'gc.autoDetach=false',",
+         "                    '-c', 'maintenance.auto=false',",
+         "                    '-c', 'alias.version=!exit 73', 'version'])", ""))),),
      "defines an alias.* in its own argv"),
     ("argv-walrus-rebind",
      (("tools/planted.py", "\n".join((
