@@ -793,17 +793,48 @@ _FIXTURE_UNREADABLE = object()
 
 
 def _fixture_stat_fields(target):
-    """Read the post-comm fields of /proc/<target>/stat. Returns the fields;
-    None ONLY for an ABSENT entry (FileNotFoundError/ProcessLookupError: the
-    process exited or raced away mid-read -- the only OSErrors that read as
-    exited, fix 2z codex BLOCKER 2 / gemini F2); or _FIXTURE_UNREADABLE for
-    an entry that exists but cannot be read (e.g. EACCES/EIO), which is never
-    proof of exit. TimeoutError/InterruptedError are OSError subclasses
-    carrying deadline/cancellation semantics and PROPAGATE (fix 2y, codex
-    F3); non-I/O failures (a parse defect) propagate too."""
-    from pathlib import Path
+    """Read the post-comm fields of /proc/<target>/stat, through os.open and
+    os.read with the descriptor close routed as a _cleanup_boundary step
+    (fix 8, QA29 codex BLOCKER 1 / claude MINOR 1: Path.read_bytes hid a
+    standard-library context manager whose INTERNAL close ran outside every
+    boundary, so a read-born cancellation could be displaced before this
+    function's handler saw it; module-owned cleanup only ever runs through
+    the boundary, maintainer ruling PD-335). Returns the fields; None ONLY
+    for an ABSENT entry (FileNotFoundError/ProcessLookupError: the process
+    exited or raced away mid-read -- the only OSErrors that read as exited,
+    fix 2z codex BLOCKER 2 / gemini F2); or _FIXTURE_UNREADABLE for an entry
+    that exists but cannot be read (e.g. EACCES/EIO), which is never proof
+    of exit. TimeoutError/InterruptedError are OSError subclasses carrying
+    deadline/cancellation semantics and PROPAGATE (fix 2y, codex F3);
+    non-I/O failures (a parse defect) propagate too."""
+    import os
+    fd = None
+    pending = None
+    stat = b""
+
+    def close_stat_fd():
+        if fd is not None:
+            os.close(fd)
+
     try:
-        stat = Path("/proc", str(target), "stat").read_bytes()
+        try:
+            fd = os.open("/proc/" + str(target) + "/stat",
+                         os.O_RDONLY | os.O_CLOEXEC)
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                stat += chunk
+        except BaseException as exc:
+            # Capture the exception already propagating into the close
+            # below (fix 8, QA29 codex BLOCKER 1): a read-born
+            # cancellation must stay the outward exception even when the
+            # descriptor close itself fails.
+            pending = exc
+            raise
+        finally:
+            _cleanup_boundary(pending, close_stat_fd,
+                              "stat descriptor close")
     except OSError as exc:
         if isinstance(exc, (TimeoutError, InterruptedError)):
             raise
@@ -1044,23 +1075,38 @@ def _fixture_verify_group_kill(group):
 
 # Fix 6 (QA27 codex BLOCKER 1/2; premise change): pending-cancellation
 # priority is ONE shared boundary, never a per-site idiom. Fix 7 (QA28
-# codex BLOCKER 1/2, claude MINOR 1, gemini MAJOR 1) closes the SCOPE
-# class too: every cleanup reached from the escalation entry points --
-# the in-module call-graph closure of _FixtureProcess._escalate and
-# _FixtureProcess._address_failed_subject, the member census's per-pidfd
-# close included -- runs through _cleanup_boundary below, and an AST
-# structural leg in `opf.py --self-test` (census-exception) COMPUTES that
-# closure from the module source each run: a finally there that stops
-# routing through the boundary, a with statement (cleanup in an __exit__
-# the leg cannot see), or a cleanup call the leg cannot resolve to an
-# in-module function or an allowlisted primitive turns it red as
-# cannot-evaluate, never a silent pass. A cancellation raised BY a
-# cleanup step becomes the pending cancellation for every later step in
-# that cleanup sequence (QA28 codex BLOCKER 1). KeyboardInterrupt joins
-# TimeoutError and InterruptedError in the pending set, and the tiers
-# are harmonized (QA28 claude MINOR 3): at the boundary AND at the
-# recording/retry tier, a cleanup a cancellation interrupted records
-# nothing, whichever of the three cancellation types it was.
+# codex BLOCKER 1/2, claude MINOR 1, gemini MAJOR 1) made the scope
+# COMPUTED. Fix 8 (QA29 codex BLOCKER 1/2, claude MAJOR 1 / MINOR 1/2,
+# gemini BLOCKER / MAJOR; maintainer ruling PD-335, narrow and
+# disclose) scopes the guarantee to what this module OWNS and widens it
+# to the whole close lifecycle: every MODULE-OWNED cleanup reachable
+# from the lifecycle entry points -- _FixtureProcess.close,
+# _finish_close, _interrupt_collect, _escalate and
+# _address_failed_subject -- runs through _cleanup_boundary below, and
+# an AST structural leg in `opf.py --self-test` (census-exception)
+# COMPUTES that closure from the module source each run and FAILS
+# CLOSED on what it cannot resolve: a call edge that is not in-module
+# code, a builtin, a declared stdlib module, or one of the leg's
+# DISCLOSED external-object primitives is a cannot-evaluate FAILURE,
+# never a silent pass -- aliased calls, attribute calls and function
+# references passed as arguments, boundary steps included, are resolved
+# and traversed or turn the leg red (fix 8, QA29 codex BLOCKER 2 /
+# claude MAJOR 1). DISCLOSED RESIDUAL (PD-335): the guarantee covers
+# cleanup this module OWNS; cleanup that runs INSIDE the standard
+# library or other external code -- a stdlib helper's internal context
+# manager (the Path.read_bytes class, QA29 codex BLOCKER 1), socket and
+# file close internals, threading lock release -- is disclosed, never
+# an enforced property, which is why the module's own /proc reads go
+# through os.open/os.read with the descriptor close as a boundary step.
+# A cancellation raised BY a cleanup step becomes the pending
+# cancellation for every later step in that cleanup sequence (QA28
+# codex BLOCKER 1). KeyboardInterrupt joins TimeoutError and
+# InterruptedError in the pending set, and the tiers are harmonized
+# (QA28 claude MINOR 3; QA29 gemini MAJOR: the direct guardian
+# backstop's cancellation tier is one explicit _PENDING_CANCELLATIONS
+# guard): at the boundary AND at the recording/retry tier, a cleanup a
+# cancellation interrupted records nothing, whichever of the three
+# cancellation types it was.
 _PENDING_CANCELLATIONS = (TimeoutError, InterruptedError, KeyboardInterrupt)
 
 
@@ -2161,9 +2207,15 @@ class _FixtureProcess:
                     try:
                         signal.pidfd_send_signal(self.pidfd,
                                                  signal.SIGKILL)
-                    except OSError as exc:
-                        if isinstance(exc, (TimeoutError,
-                                            InterruptedError)):
+                    except BaseException as exc:
+                        # ONE explicit cancellation tier (fix 8, QA29
+                        # gemini MAJOR): TimeoutError, InterruptedError
+                        # and KeyboardInterrupt propagate identically
+                        # from the backstop send, into the boundary
+                        # that runs this step.
+                        if isinstance(exc, _PENDING_CANCELLATIONS):
+                            raise
+                        if not isinstance(exc, OSError):
                             raise
                         # An ordinary delivery failure is out of moves:
                         # the helper's own failure propagates below.
@@ -2259,11 +2311,27 @@ class _FixtureProcess:
         # thread, and for non-signal asynchronous exceptions, which no mask
         # can stop.
         prior = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        pending = None
+
+        def restore_sigmask():
+            signal.pthread_sigmask(signal.SIG_SETMASK, prior)
+
         try:
             _fixture_mask_cancellation()
             self._close_masked()
+        except BaseException as exc:
+            # Capture the exception already propagating into the restore
+            # (fix 8): the mask restore is module-owned cleanup, routed
+            # through the shared boundary, so the KeyboardInterrupt a
+            # masked cancellation delivers AT the restore lands inside
+            # the boundary -- a cancellation already outward stays
+            # outward, and a normal completion still raises the
+            # delivered interrupt itself, exactly as before.
+            pending = exc
+            raise
         finally:
-            signal.pthread_sigmask(signal.SIG_SETMASK, prior)
+            _cleanup_boundary(pending, restore_sigmask,
+                              "cancellation mask restore")
 
     def _close_masked(self):
         # Coordinated launch lifecycle FIRST, before any resource is disposed. The
@@ -2280,19 +2348,40 @@ class _FixtureProcess:
         # (QA19 F2): the launcher for an unrecorded launch (abandoned under the
         # launch lock before re-raising), or this close(), which finishes
         # collecting before re-raising.
+        def release_launcher():
+            self._go.set()
+
+        def abandon_unfinished():
+            return self._abandon_unfinished_launch()
+
+        def interrupt_collect():
+            self._interrupt_collect()
+
         try:
             self._close_coordinated()
         except ChildStatusUnavailable:
             raise
-        except BaseException:
+        except BaseException as exc:
             # Backstop for an exception landing on a coordination boundary the
             # inner guards do not cover (a pre-mask interpreter flag, under the
-            # masked design): never escape without an owner.
+            # masked design): never escape without an owner. Every step here
+            # is module-owned cleanup and routes through the shared boundary
+            # (fix 8), so a failing release, abandonment decision or
+            # interrupt collection never displaces the cancellation it
+            # serves.
             if self._launcher is not None:
-                self._go.set()
-                if self._abandoned or self._abandon_unfinished_launch():
+                _cleanup_boundary(
+                    exc if isinstance(exc, _PENDING_CANCELLATIONS)
+                    else None,
+                    release_launcher, "parked launcher release")
+                if self._abandoned or _cleanup_boundary(
+                        exc if isinstance(exc, _PENDING_CANCELLATIONS)
+                        else None,
+                        abandon_unfinished, "unfinished-launch abandonment"):
                     raise
-            self._interrupt_collect()
+            _cleanup_boundary(
+                exc if isinstance(exc, _PENDING_CANCELLATIONS) else None,
+                interrupt_collect, "interrupt-owner collection")
             raise
 
     def _close_coordinated(self):
@@ -2303,14 +2392,24 @@ class _FixtureProcess:
             interrupted = None
             if not abandoned:
                 launched = False
+
+                def release_launcher():
+                    self._go.set()
+
                 try:
                     self._go.set()
                     launched = self._launched.wait(2 * _FIXTURE_CLEANUP_GRACE)
                 except BaseException as exc:  # noqa: BLE001 - ownership survives cancellation
                     # A cancellation in the gap before the release must never
-                    # leave the launcher parked: release it (idempotent), then
-                    # decide ownership below exactly as on a timeout.
-                    self._go.set()
+                    # leave the launcher parked: release it (idempotent,
+                    # through the shared boundary, fix 8, so a release fault
+                    # never displaces the cancellation), then decide ownership
+                    # below exactly as on a timeout; every later path
+                    # re-raises the captured exception.
+                    _cleanup_boundary(
+                        exc if isinstance(exc, _PENDING_CANCELLATIONS)
+                        else None,
+                        release_launcher, "parked launcher release")
                     interrupted = exc
                 if not launched and self._abandon_unfinished_launch():
                     abandoned = True
@@ -2358,7 +2457,12 @@ class _FixtureProcess:
         while time.monotonic() < deadline:
             try:
                 waited, _raw = os.waitpid(self.pid, os.WNOHANG)
-            except OSError:
+            except OSError as exc:
+                # Narrowed (fix 8): deadline/cancellation semantics
+                # propagate; only a genuine reap failure ends this
+                # bounded wait.
+                if isinstance(exc, (TimeoutError, InterruptedError)):
+                    raise
                 return
             if waited == self.pid:
                 self.collected = True
@@ -2499,6 +2603,58 @@ class _FixtureProcess:
         import select
         import signal
         import time
+        pending = None
+
+        def close_guardian_pidfd():
+            fd = self.pidfd
+            if fd is not None:
+                os.close(fd)
+                self.pidfd = None
+
+        def close_subject_pidfd():
+            fd = self.subject_pidfd
+            if fd is not None:
+                os.close(fd)
+                self.subject_pidfd = None
+
+        def close_report():
+            self.report.close()
+
+        def close_tail():
+            # Subject pidfd, then the report channel: a failure in the
+            # subject close never skips the report close, and a
+            # cancellation BORN in the subject close is pending for it
+            # (the fix 7 rule, extended to this sequence by fix 8).
+            try:
+                close_subject_pidfd()
+            except BaseException as tail_exc:
+                _cleanup_boundary(
+                    tail_exc if isinstance(tail_exc,
+                                           _PENDING_CANCELLATIONS)
+                    else pending,
+                    close_report, "report channel close")
+                raise
+            _cleanup_boundary(pending, close_report,
+                              "report channel close")
+
+        def close_owned_handles():
+            # Guardian pidfd first, then the tail: every owned handle is
+            # disposed even when an earlier close fails.
+            try:
+                close_guardian_pidfd()
+            except BaseException as head_exc:
+                _cleanup_boundary(
+                    head_exc if isinstance(head_exc,
+                                           _PENDING_CANCELLATIONS)
+                    else pending,
+                    close_tail, "subject pidfd and report close")
+                raise
+            _cleanup_boundary(pending, close_tail,
+                              "subject pidfd and report close")
+
+        def interrupt_collect():
+            self._interrupt_collect()
+
         try:
             escalated = False
             try:
@@ -2601,16 +2757,26 @@ class _FixtureProcess:
                     self._escalation_refusal(failure)
             except ChildStatusUnavailable:
                 raise
-            except BaseException:
-                self._interrupt_collect()
+            except BaseException as exc:
+                # The interrupt owner is module-owned cleanup too
+                # (fix 8): routed through the boundary, a collection
+                # failure can never displace the cancellation it serves.
+                _cleanup_boundary(
+                    exc if isinstance(exc, _PENDING_CANCELLATIONS)
+                    else None,
+                    interrupt_collect, "interrupt-owner collection")
                 raise
+        except BaseException as exc:
+            # Capture the exception already propagating into the
+            # descriptor close below (fix 8, QA29 gemini BLOCKER): these
+            # closes ran in a bare finally OUTSIDE any boundary, so an
+            # os.close failure could displace a cancellation raised
+            # anywhere in this collection.
+            pending = exc
+            raise
         finally:
-            for name in ("pidfd", "subject_pidfd"):
-                fd = getattr(self, name)
-                if fd is not None:
-                    os.close(fd)
-                    setattr(self, name, None)
-            self.report.close()
+            _cleanup_boundary(pending, close_owned_handles,
+                              "held descriptor and report close")
 
 
 def _run_fixture_process(argv, *, timeout=120, cwd=None, env=None):

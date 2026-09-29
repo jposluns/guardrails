@@ -3481,14 +3481,16 @@ def _watchdog_completion_case(mode):
             refuses(TimeoutError, lambda: emit._fixture_group_pinned(
                 sentinel, zombie))
 
-        real_read_bytes = Path.read_bytes
+        real_os_open = os.open
 
-        def raising_read(target):
-            if str(target).startswith("/proc/"):
+        def raising_open(path, flags, *args, **kwargs):
+            # The census reads /proc through os.open (fix 8: no stdlib
+            # context manager hides the close from the boundary).
+            if str(path).startswith("/proc/"):
                 raise InterruptedError("census read interrupted")
-            return real_read_bytes(target)
+            return real_os_open(path, flags, *args, **kwargs)
 
-        with patch.object(Path, "read_bytes", raising_read):
+        with patch.object(os, "open", raising_open):
             refuses(InterruptedError, lambda: emit._fixture_kill_group_members(
                 sentinel, signal.SIGKILL, {os.getpid()}))
             refuses(InterruptedError, lambda: emit._fixture_group_pinned(
@@ -3604,15 +3606,15 @@ def _watchdog_completion_case(mode):
             guardian, leader, grandchild, _cue, _forked = frozen_tree(
                 Path(directory), forker=False)
             fd = os.pidfd_open(leader)
-            real_read_bytes = Path.read_bytes
+            real_os_open = os.open
             blocked = str(Path("/proc", str(grandchild), "stat"))
 
-            def unreadable(target):
-                if str(target) == blocked:
+            def unreadable(path, flags, *args, **kwargs):
+                if str(path) == blocked:
                     raise PermissionError(13, "injected unreadable census entry")
-                return real_read_bytes(target)
+                return real_os_open(path, flags, *args, **kwargs)
 
-            with patch.object(Path, "read_bytes", unreadable):
+            with patch.object(os, "open", unreadable):
                 outcome = emit._fixture_escalate_subject(
                     leader, fd, guardian_pid=guardian)
             assert outcome == ("partial", ([], [grandchild])), (
@@ -4471,49 +4473,71 @@ def _watchdog_completion_case(mode):
         assert waited == guardian and os.WIFSIGNALED(raw), (waited, raw)
         os.close(guardian_fd)
 
-        # Leg 11 (fix 6, premise change; fix 7, QA28 codex BLOCKER 2 /
-        # claude MINOR 1 / gemini MAJOR 1): the pending-cancellation
-        # boundary is STRUCTURAL and its scope is COMPUTED, never
-        # hand-named. QA25..QA27 each found one more hand-coded cleanup
-        # site, and QA28 found a cleanup inside a helper the hand-named
-        # three-function scope never covered, so this leg derives the
-        # scope from the module source EACH RUN: the in-module call-graph
-        # CLOSURE of the escalation entry points
-        # (_FixtureProcess._escalate and
-        # _FixtureProcess._address_failed_subject). Inside that closure
-        # it fails, as cannot-evaluate, anything it cannot statically
-        # clear: a finally that is not exactly one _cleanup_boundary
+        # Leg 11 (fix 6, premise change; fix 7, QA28; fix 8, QA29 codex
+        # BLOCKER 2 / claude MAJOR 1, MINOR 2 / gemini BLOCKER; maintainer
+        # ruling PD-335, narrow and disclose): the pending-cancellation
+        # boundary is STRUCTURAL, its scope is COMPUTED over the whole
+        # close lifecycle, and the computation FAILS CLOSED on every call
+        # edge it cannot resolve. The GUARANTEE is scoped to cleanup the
+        # module OWNS: every module-owned cleanup reachable from the
+        # lifecycle entry points (_FixtureProcess.close, _finish_close,
+        # _interrupt_collect, _escalate, _address_failed_subject) routes
+        # through _cleanup_boundary. DISCLOSED RESIDUAL (PD-335): calls
+        # INTO the standard library or other external code -- builtins,
+        # declared stdlib modules, the enumerated external-object
+        # primitives below, and the launch lock's with-statement
+        # __exit__ -- run cleanup this leg cannot see; they are disclosed,
+        # never an enforced property, and the module keeps them off its
+        # own cleanup paths (its /proc reads go through os.open/os.read
+        # with the close as a boundary step, never a hidden stdlib
+        # context manager, QA29 codex BLOCKER 1). Inside the closure the
+        # leg fails, as cannot-evaluate, anything it cannot statically
+        # clear: a call edge it cannot resolve -- an alias, a computed
+        # attribute, an undisclosed object method (QA29 claude MAJOR 1)
+        # -- a with statement other than the disclosed launch-lock
+        # shape, a finally that is not exactly one _cleanup_boundary
         # call, a boundary pending argument hard-wired to None, a
-        # boundary step or handler exception type it cannot resolve, a
-        # with statement (its __exit__ is cleanup this leg cannot see),
-        # an unprotected call inside a cancellation-capable handler, or a
-        # cleanup-step call that is neither an in-module function nor an
-        # allowlisted primitive (os.close / signal.pidfd_send_signal, the
-        # two deterministic kernel calls whose failures the boundary
-        # itself keeps beneath a pending cancellation). Handler
-        # hardening: handlers never raise a NEW exception, and a handler
-        # that can catch a cancellation must re-raise EVERY cancellation
-        # type it can catch (KeyboardInterrupt included where it reaches,
-        # fix 7 QA28 claude MINOR 3) before any unprotected work -- by
-        # being a bare re-raise, opening with the isinstance guard,
-        # standing after a bare-raising handler that already covers those
-        # types, or ending in a bare raise while calling nothing but
-        # isinstance and _cleanup_boundary on the way.
+        # boundary step it cannot resolve (every resolved step and every
+        # module function passed BY REFERENCE is also traversed, QA29
+        # codex BLOCKER 2), a handler exception type it cannot resolve,
+        # or unprotected work inside a cancellation-capable handler.
+        # Handler hardening: a handler that can catch a cancellation
+        # never CONSTRUCTS a new exception (re-raising a captured
+        # exception object stays legal: the deferred-re-raise pattern),
+        # and must re-raise EVERY cancellation type it can catch before
+        # any unprotected work -- by being a bare re-raise, opening with
+        # the isinstance guard ON ITS OWN BOUND NAME (QA29 claude MINOR
+        # 2), standing after a bare-raising handler that already covers
+        # those types, ending in a raise while calling nothing but
+        # isinstance and _cleanup_boundary, or capturing its exception
+        # for a deferred re-raise while doing nothing else but
+        # boundary-routed work.
         import ast
         import builtins
         import inspect
 
         module_tree = ast.parse(inspect.getsource(emit))
-        module_functions, module_methods = {}, {}
+        module_functions, module_methods, module_classes = {}, {}, {}
         for stmt in module_tree.body:
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 module_functions[stmt.name] = stmt
             elif isinstance(stmt, ast.ClassDef):
+                module_classes[stmt.name] = stmt
                 for inner in stmt.body:
                     if isinstance(inner, (ast.FunctionDef,
                                           ast.AsyncFunctionDef)):
                         module_methods.setdefault(inner.name, []).append(
                             (stmt.name + "." + inner.name, inner))
+
+        # Names bound by a plain `import X` anywhere in the module: a
+        # call through one is a call INTO another module -- external
+        # code, the DISCLOSED residual (PD-335), never enforced.
+        imported_modules = set()
+        for node in ast.walk(module_tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    imported_modules.add(
+                        alias.asname or alias.name.split(".")[0])
 
         # The boundary machinery is the verified primitive the structure
         # routes through (legs 10 and 12..18 prove it dynamically); it is
@@ -4522,23 +4546,114 @@ def _watchdog_completion_case(mode):
                               "_chain_ids"}
         pending_cancellations = (TimeoutError, InterruptedError,
                                  KeyboardInterrupt)
-        step_primitives = {("os", "close"), ("signal", "pidfd_send_signal")}
+        step_primitives = {("os", "close"),
+                           ("signal", "pidfd_send_signal"),
+                           ("signal", "pthread_sigmask")}
+        # DISCLOSED external-object touchpoints (PD-335): standard-library
+        # code on objects this module constructed. The boundary protects
+        # the module-owned CALL SITE; the callee's internals are the
+        # disclosed residual. A call this table does not name is a
+        # cannot-evaluate FAILURE until it is made in-module or disclosed
+        # here.
+        external_self_calls = {
+            ("control", "close"), ("peer", "close"),
+            ("report", "close"), ("report", "seek"), ("report", "read"),
+            ("_go", "set"), ("_launched", "wait"), ("_launched", "is_set"),
+        }
+        # Methods on module-local objects (container growth, str/bytes
+        # accessors, poll objects), disclosed by NAME; anything else is a
+        # cannot-evaluate FAILURE.
+        external_local_methods = {
+            "append", "add", "join", "format", "split", "rsplit",
+            "isdecimal", "decode", "register", "poll",
+        }
 
-        def called_edges(function):
+        def resolve_call(func, where, nested):
+            # Returns the in-module (key, node) targets a call edge
+            # reaches (empty when it stays inside this scope), or None
+            # when the callee is DISCLOSED external code; anything it
+            # cannot resolve is a cannot-evaluate FAILURE (fix 8, QA29
+            # claude MAJOR 1), never a silent pass.
+            if isinstance(func, ast.Name):
+                name = func.id
+                if name in boundary_internals or name in nested:
+                    return []
+                if name in module_functions:
+                    return [("f:" + name, module_functions[name])]
+                if name in module_classes:
+                    return [("m:" + module_classes[name].name + "."
+                             + inner.name, inner)
+                            for inner in module_classes[name].body
+                            if isinstance(inner, (ast.FunctionDef,
+                                                  ast.AsyncFunctionDef))]
+                if callable(getattr(builtins, name, None)):
+                    return None
+                raise AssertionError((
+                    "cannot resolve a call edge in the close-lifecycle "
+                    "closure: FAILURE, never a silent pass (fix 8, QA29 "
+                    "claude MAJOR 1)", where, ast.dump(func)))
+            if isinstance(func, ast.Attribute):
+                base = func.value
+                if isinstance(base, ast.Name):
+                    if base.id in ("self", "cls"):
+                        targets = module_methods.get(func.attr, ())
+                        assert targets, (
+                            "cannot resolve a self-method call in the "
+                            "close-lifecycle closure: FAILURE (fix 8)",
+                            where, ast.dump(func))
+                        return [("m:" + qual, node)
+                                for qual, node in targets]
+                    if base.id in imported_modules:
+                        return None
+                    if func.attr in external_local_methods:
+                        return None
+                    raise AssertionError((
+                        "cannot resolve an attribute call in the "
+                        "close-lifecycle closure: FAILURE (fix 8, QA29 "
+                        "claude MAJOR 1)", where, ast.dump(func)))
+                if (isinstance(base, ast.Attribute)
+                        and isinstance(base.value, ast.Name)
+                        and base.value.id in ("self", "cls")
+                        and (base.attr, func.attr) in external_self_calls):
+                    return None
+                if isinstance(base, ast.Constant):
+                    return None  # a str/bytes literal method is pure
+                if func.attr in external_local_methods:
+                    return None
+                raise AssertionError((
+                    "cannot resolve an attribute call in the "
+                    "close-lifecycle closure: FAILURE (fix 8, QA29 "
+                    "claude MAJOR 1)", where, ast.dump(func)))
+            raise AssertionError((
+                "cannot resolve a computed call in the close-lifecycle "
+                "closure: FAILURE (fix 8, QA29 claude MAJOR 1)", where,
+                ast.dump(func)))
+
+        def scope_edges(key, function):
+            nested = {inner.name for inner in ast.walk(function)
+                      if isinstance(inner, (ast.FunctionDef,
+                                            ast.AsyncFunctionDef))
+                      and inner is not function}
             for node in ast.walk(function):
-                if not isinstance(node, ast.Call):
-                    continue
-                func = node.func
-                if isinstance(func, ast.Name):
-                    if (func.id in module_functions
-                            and func.id not in boundary_internals):
-                        yield "f:" + func.id, module_functions[func.id]
-                elif (isinstance(func, ast.Attribute)
-                        and isinstance(func.value, ast.Name)
-                        and func.value.id in ("self", "cls")):
-                    for qualname, target in module_methods.get(
-                            func.attr, ()):
-                        yield "m:" + qualname, target
+                if isinstance(node, ast.Call):
+                    targets = resolve_call(node.func, key, nested)
+                    if targets:
+                        yield from targets
+                elif (isinstance(node, ast.Name)
+                        and isinstance(node.ctx, ast.Load)
+                        and node.id in module_functions
+                        and node.id not in boundary_internals):
+                    # A module function REFERENCED without a call --
+                    # passed as a boundary step or any other function
+                    # reference -- is traversed too: what it reaches is
+                    # reachable (fix 8, QA29 codex BLOCKER 2).
+                    yield "f:" + node.id, module_functions[node.id]
+                elif (isinstance(node, ast.Attribute)
+                        and isinstance(node.ctx, ast.Load)
+                        and isinstance(node.value, ast.Name)
+                        and node.value.id in ("self", "cls")):
+                    for qual, target in module_methods.get(node.attr, ()):
+                        yield "m:" + qual, target
 
         def method_node(qualname):
             for candidate, node in module_methods.get(
@@ -4546,21 +4661,21 @@ def _watchdog_completion_case(mode):
                 if candidate == qualname:
                     return node
             raise AssertionError(
-                ("an escalation entry point is missing (fix 7)", qualname))
+                ("a lifecycle entry point is missing (fix 7/8)", qualname))
 
         scope = {}
         frontier = [
-            ("m:_FixtureProcess._escalate",
-             method_node("_FixtureProcess._escalate")),
-            ("m:_FixtureProcess._address_failed_subject",
-             method_node("_FixtureProcess._address_failed_subject")),
+            ("m:_FixtureProcess." + name,
+             method_node("_FixtureProcess." + name))
+            for name in ("close", "_finish_close", "_interrupt_collect",
+                         "_escalate", "_address_failed_subject")
         ]
         while frontier:
             key, node = frontier.pop()
             if key in scope:
                 continue
             scope[key] = node
-            frontier.extend(called_edges(node))
+            frontier.extend(scope_edges(key, node))
         # A resolution regression that silently SHRINKS the computed
         # scope must go red, never pass vacuously: these members are
         # known reachable today.
@@ -4568,10 +4683,24 @@ def _watchdog_completion_case(mode):
                 "f:_fixture_kill_group_members",
                 "f:_fixture_group_pinned", "f:_fixture_verify_group_kill",
                 "f:_fixture_signal", "f:_fixture_stat_fields",
-                "f:_fixture_pidfd",
-                "m:_FixtureProcess._recv_subject"} <= set(scope), (
-            "the computed escalation closure lost known members (fix 7)",
-            sorted(scope))
+                "f:_fixture_pidfd", "f:_fixture_mask_cancellation",
+                "m:_FixtureProcess.close",
+                "m:_FixtureProcess._close_masked",
+                "m:_FixtureProcess._close_coordinated",
+                "m:_FixtureProcess._abandon_unfinished_launch",
+                "m:_FixtureProcess._finish_close",
+                "m:_FixtureProcess._interrupt_collect",
+                "m:_FixtureProcess._escalate",
+                "m:_FixtureProcess._address_failed_subject",
+                "m:_FixtureProcess._recv_subject",
+                "m:_FixtureProcess._read_report",
+                "m:_FixtureProcess._record_failure",
+                "m:_FixtureProcess._escalation_refusal",
+                "m:_FixtureProcess._unverified_refusal",
+                "m:_FixtureProcess._ownership_lost_refusal"} <= set(
+                    scope), (
+            "the computed close-lifecycle closure lost known members "
+            "(fix 7/8)", sorted(scope))
 
         def resolve_exception_classes(node, where):
             elts = node.elts if isinstance(node, ast.Tuple) else [node]
@@ -4583,9 +4712,11 @@ def _watchdog_completion_case(mode):
                         classes.extend(pending_cancellations)
                         continue
                     resolved = getattr(builtins, element.id, None)
+                    if resolved is None and element.id in module_classes:
+                        resolved = getattr(emit, element.id, None)
                 assert (isinstance(resolved, type)
                         and issubclass(resolved, BaseException)), (
-                    "cannot evaluate an escalation-path exception type "
+                    "cannot evaluate a close-lifecycle exception type "
                     "statically: FAILURE, never a pass (fix 7)", where,
                     ast.dump(element))
                 classes.append(resolved)
@@ -4602,12 +4733,20 @@ def _watchdog_completion_case(mode):
             return (len(body) == 1 and isinstance(body[0], ast.Raise)
                     and body[0].exc is None)
 
-        def ends_in_bare_raise(body):
-            return isinstance(body[-1], ast.Raise) and body[-1].exc is None
+        def ends_in_raise(body):
+            # A bare re-raise, or the deferred re-raise of a CAPTURED
+            # exception object (a bare Name, never a construction).
+            return (isinstance(body[-1], ast.Raise)
+                    and (body[-1].exc is None
+                         or isinstance(body[-1].exc, ast.Name)))
 
-        def guard_covers(stmt, required, where):
-            # `if isinstance(exc, (...)): raise` as the FIRST statement
-            # re-raises the named cancellations before any other work.
+        def guard_covers(stmt, required, bound, where):
+            # `if isinstance(<bound>, (...)): raise` as the FIRST
+            # statement re-raises the named cancellations before any
+            # other work; the subject must be the handler's OWN bound
+            # name (fix 8, QA29 claude MINOR 2).
+            if bound is None:
+                return False
             if not (isinstance(stmt, ast.If) and not stmt.orelse
                     and bare_raise_only(stmt.body)):
                 return False
@@ -4615,11 +4754,39 @@ def _watchdog_completion_case(mode):
             if not (isinstance(test, ast.Call)
                     and isinstance(test.func, ast.Name)
                     and test.func.id == "isinstance"
-                    and len(test.args) == 2):
+                    and len(test.args) == 2
+                    and isinstance(test.args[0], ast.Name)
+                    and test.args[0].id == bound):
                 return False
             classes = resolve_exception_classes(test.args[1], where)
             return all(any(issubclass(kind, cls) for cls in classes)
                        for kind in required)
+
+        def capture_shape(body, bound):
+            # `except ... as exc: <boundary-routed work>; captured = exc`
+            # -- the deferred-re-raise pattern (_close_coordinated): the
+            # handler captures the exception and does nothing else but
+            # boundary-routed calls; the enclosing code re-raises the
+            # captured object on every path (pinned dynamically by the
+            # close-cancel legs).
+            if bound is None:
+                return False
+            saw_capture = False
+            for stmt in body:
+                if (isinstance(stmt, ast.Assign)
+                        and len(stmt.targets) == 1
+                        and isinstance(stmt.targets[0], ast.Name)
+                        and isinstance(stmt.value, ast.Name)
+                        and stmt.value.id == bound):
+                    saw_capture = True
+                    continue
+                if (isinstance(stmt, ast.Expr)
+                        and isinstance(stmt.value, ast.Call)
+                        and call_target(stmt.value)[:2]
+                        == ("name", "_cleanup_boundary")):
+                    continue
+                return False
+            return saw_capture
 
         def direct_calls(body):
             # Calls this block itself executes: a nested def runs only
@@ -4641,6 +4808,11 @@ def _watchdog_completion_case(mode):
             if (isinstance(func, ast.Attribute)
                     and isinstance(func.value, ast.Name)):
                 return ("attr", func.value.id, func.attr)
+            if (isinstance(func, ast.Attribute)
+                    and isinstance(func.value, ast.Attribute)
+                    and isinstance(func.value.value, ast.Name)
+                    and func.value.value.id in ("self", "cls")):
+                return ("selfattr", func.value.attr, func.attr)
             return ("opaque", ast.dump(func))
 
         try_nodes = ((ast.Try, ast.TryStar) if hasattr(ast, "TryStar")
@@ -4652,11 +4824,25 @@ def _watchdog_completion_case(mode):
                                             ast.AsyncFunctionDef))
                       and inner is not function}
             for node in ast.walk(function):
-                assert not isinstance(node, (ast.With, ast.AsyncWith)), (
-                    "a with statement entered the escalation closure: its "
-                    "__exit__ is cleanup this leg cannot statically "
-                    "verify -- cannot-evaluate FAILURE (fix 7, QA28 "
-                    "claude MINOR 1 / gemini MAJOR 1)", key)
+                if isinstance(node, (ast.With, ast.AsyncWith)):
+                    assert (isinstance(node, ast.With)
+                            and len(node.items) == 1
+                            and node.items[0].optional_vars is None
+                            and isinstance(node.items[0].context_expr,
+                                           ast.Attribute)
+                            and isinstance(
+                                node.items[0].context_expr.value,
+                                ast.Name)
+                            and node.items[0].context_expr.value.id
+                            == "self"
+                            and node.items[0].context_expr.attr
+                            == "_launch_lock"), (
+                        "a with statement entered the close-lifecycle "
+                        "closure: its __exit__ is cleanup this leg cannot "
+                        "statically verify -- cannot-evaluate FAILURE; "
+                        "the one DISCLOSED shape is the launch-lock "
+                        "with statement (threading lock release, stdlib "
+                        "internals, PD-335 residual)", key)
                 if (isinstance(node, ast.Call)
                         and call_target(node)[:2]
                         == ("name", "_cleanup_boundary")):
@@ -4686,12 +4872,17 @@ def _watchdog_completion_case(mode):
                                     or called[1] in nested)
                                 or called[0] == "attr"
                                 and (called[1], called[2])
-                                in step_primitives), (
+                                in step_primitives
+                                or called[0] == "attr"
+                                and called[1] in ("self", "cls")
+                                and called[2] in module_methods
+                                or called[0] == "selfattr"
+                                and (called[1], called[2])
+                                in external_self_calls), (
                             "a boundary-routed cleanup step calls "
-                            "something that is neither an in-module "
-                            "function nor an allowlisted primitive: "
-                            "FAILURE, never a pass (fix 7)", key,
-                            ast.dump(call.func))
+                            "something that is neither in-module code "
+                            "nor a disclosed primitive: FAILURE, never "
+                            "a pass (fix 7/8)", key, ast.dump(call.func))
                 if not isinstance(node, try_nodes):
                     continue
                 if node.finalbody:
@@ -4701,18 +4892,20 @@ def _watchdog_completion_case(mode):
                                            ast.Call)
                             and call_target(node.finalbody[0].value)[:2]
                             == ("name", "_cleanup_boundary")), (
-                        "an escalation-path finally does not route "
-                        "through the shared boundary (fix 6/7)", key)
+                        "a close-lifecycle finally does not route "
+                        "through the shared boundary (fix 6/7/8)", key)
                 for handler in node.handlers:
-                    for inner in ast.walk(handler):
-                        assert not (isinstance(inner, ast.Raise)
-                                    and inner.exc is not None), (
-                            "an escalation-path handler raises a NEW "
-                            "exception over a possibly-pending "
-                            "cancellation (fix 6)", key)
                     required = catchable_cancellations(handler, key)
                     if not required:
                         continue
+                    for inner in ast.walk(handler):
+                        if (isinstance(inner, ast.Raise)
+                                and inner.exc is not None):
+                            assert isinstance(inner.exc, ast.Name), (
+                                "a cancellation-capable close-lifecycle "
+                                "handler CONSTRUCTS a new exception over "
+                                "a possibly-pending cancellation "
+                                "(fix 6/8)", key)
                     earlier = node.handlers[:node.handlers.index(handler)]
                     guarded_before = any(
                         bare_raise_only(h.body) and required
@@ -4720,10 +4913,11 @@ def _watchdog_completion_case(mode):
                         for h in earlier)
                     if (bare_raise_only(handler.body) or guarded_before
                             or guard_covers(handler.body[0], required,
-                                            key)):
+                                            handler.name, key)
+                            or capture_shape(handler.body, handler.name)):
                         continue
-                    assert ends_in_bare_raise(handler.body), (
-                        "an escalation-path handler can swallow or "
+                    assert ends_in_raise(handler.body), (
+                        "a close-lifecycle handler can swallow or "
                         "replace a pending cancellation without the "
                         "boundary (fix 6/7)", key)
                     for call in direct_calls(handler.body):
