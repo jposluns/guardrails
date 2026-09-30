@@ -2112,6 +2112,29 @@ _SCAN_ALLOWED_UNPINNED = (
     ("opf/tools/selftest_commonmark_conformance.py", "_run_matrix", ("unresolved",),
      "cannot-evaluate head: re-spawns this conformance harness under each named PATH-resolved"
      " python interpreter (an optional maintainer matrix); not a git launch"),
+    ("opf/tools/_opf_adopt_observe.py", "_runner_check.run_shell", ("unresolved",),
+     "cannot-evaluate head: a PATH-resolved bash running this self-test's interception probe"
+     " and the real opf/tools/run_all_checks.sh text or a red-leg text mutant of it; every"
+     " gate is a python3 run (the shimmed python3 fixture, a planted `exit 0` stub, or in"
+     " the scrubbed-environment leg sys.executable under env -i on a planted recursion"
+     " probe), the fixture's only real child is this module's own --vectors-only leg (its"
+     " git launches are scanned at their own sites), and no body spells a git command"),
+    ("opf/tools/_opf_adopt_observe.py", "_git_archive_fixture_isolated.git", ("unresolved",),
+     "cannot-evaluate head: os.path.abspath of shutil.which(\"git\", path=os.defpath); the"
+     " argv carries gc.auto=0, gc.autoDetach=false and maintenance.auto=false as literal"
+     " `-c` pairs in option position ahead of the caller's *args, under a private"
+     " HOME/XDG_CONFIG_HOME set by _git_archive_fixture, and the callers pass only"
+     " init/hash-object/update-index/write-tree/commit-tree/archive (none"
+     " maintenance-triggering)"),
+    ("opf/tools/_opf_adopt_observe.py", "self_test", ("unresolved",),
+     "cannot-evaluate head: os.path.abspath of shutil.which(\"openssl\", path=os.defpath),"
+     " the `openssl req -x509` builder of the disposable fixture TLS key/certificate pairs"
+     " (env PATH=os.defpath, OPENSSL_CONF=os.devnull); not a git launch"),
+    ("opf/tools/_opf_adopt_observe.py", "self_test.run_case.execute_mutant", ("os",),
+     "cannot-evaluate os launch: the TG-15/no-process-execution red-leg mutant of _unpack"
+     " calls os.system(\"true\"); it is patched in only for that case's mutated run, whose"
+     " gather runs inside deny_effects with os.system replaced by a refusing stub, so it"
+     " raises before any launch, and unrefused it runs the shell no-op `true`, never git"),
     ("opf/tools/_opf_pack_manifest.py", "_runner_red_checks.checked_environment", ("os",),
      "cannot-evaluate pass-through: the credential-red-check re-invokes the SAVED"
      " subprocess.Popen inside its patched side_effect after asserting the launch"
@@ -2149,6 +2172,14 @@ _SCAN_ALLOWED_UNPINNED = (
      "exec-based loader compiling a revert candidate's source into a fresh module"),
     ("opf/tools/check_opf_init_p0.py", "red_on_revert", ("dynamic",),
      "exec of the production module's source with one guard reverted (red-leg mutant)"),
+    ("opf/tools/_opf_adopt_observe.py", "_cancellation_self_test", ("dynamic",),
+     "exec of text mutants of this module's own function and class sources (and of"
+     " _opf_adopt.gather_release) with descriptor-cleanup, restore, lock, rollback, TLS, or"
+     " resolver-publication sites reverted (red-leg mutants); the exec only defines the"
+     " mutant function or class"),
+    ("opf/tools/_opf_adopt_observe.py", "self_test.source_mutant", ("dynamic",),
+     "exec of this module's own function source with exactly one guard site replaced"
+     " (red-leg mutant); the exec only defines the mutant function"),
 )
 
 
