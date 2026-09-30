@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T63)
+  check_opf_record.py --self-test                    the fixture suite (T1-T65)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -242,6 +242,14 @@ Each case runs on its own copy of that template; the root is removed in a finall
       records normally (flip: the fix-10 head's one except spanning the release and the emission)
   T63 T29's temporary global config is removed even when its write fails after creating the file,
       the write running inside the cleanup region (flip: the fix-10 head's write before it)
+  T64 a diagnostic print that itself fails never displaces the governing failure: a lease-release
+      failure (an error or an interrupt) and an emission failure each still govern the exit, and a
+      recovery refusal survives a lease-release failure of either kind (flips: the fix-11 head's
+      unprotected _conclude prints; its recovery-lease release handler)
+  T65 a SIGINT delivered by a line trace immediately before the _conclude call still releases the
+      single-writer claim exactly once, with the interrupt governing the exit: the release mark is
+      set inside _conclude, never by the caller before the call (flip: a release mark that reads as
+      already set, the fix-11 head's caller-side premature mark)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -759,7 +767,8 @@ def t9_lease(fx):
 
 
 def flip_t9():
-    def report_then_release(ctx, lease, report):
+    def report_then_release(ctx, lease, report, released):
+        released[0] = True
         record._emit_success(report)
         record._release(ctx, lease)
     return patch.object(record, "_conclude", report_then_release)
@@ -3776,7 +3785,8 @@ def t62_output_failure_not_release(fx):
 def flip_t62():
     """One except spanning the release and the emission (the fix-10 head): an output failure after a
     successful release prints the lease-release-failure text."""
-    def head_conclude(ctx, lease, report):
+    def head_conclude(ctx, lease, report, released):
+        released[0] = True
         try:
             record._release_guard(ctx, lease)
             record._emit_success(report)
@@ -3824,6 +3834,201 @@ def flip_t63():
         finally:
             gitconfig.unlink()
     return patch.object(sys.modules[__name__], "t29_launch_config", head_ordering)
+
+
+# --- T64, T65: the PR D fix-12 vectors ------------------------------------------------------------------
+
+# Fix 12: the diagnostic prints around the success path's release and emission, and the recovery
+# lease-release surfacing, are protected, so a failing stderr write (or a release interrupt) never
+# displaces the failure that governs the exit; and the success path's release mark is set inside
+# _conclude, never by the caller before the call, so an interrupt landing just before _conclude
+# still reaches the caller's cleanup release exactly once.
+T64_STDERR = "synthetic stderr failure"
+
+
+def _t64_failing_print(marker):
+    """A record-module print that fails with OSError exactly once, on the first text carrying marker."""
+    import builtins
+    fired = []
+
+    def failing(*args, **kwargs):
+        if not fired and any(isinstance(a, str) and marker in a for a in args):
+            fired.append(True)
+            raise OSError(5, T64_STDERR)
+        return builtins.print(*args, **kwargs)
+    return failing
+
+
+def _t64_refusing_recover():
+    raise record.RecordError("the original t64 recovery refusal")
+
+
+def t64_diagnostic_failure_never_governs(fx):
+    """A diagnostic print that itself fails never displaces the governing failure (PR D fix 12): a
+    lease-release failure still governs when the release-failure text cannot be written; an emission
+    failure still governs when the emission-failure text cannot be written; a release interrupt
+    propagates over the failing diagnostic; and a recovery refusal survives a lease-release
+    KeyboardInterrupt, and an OSError whose surfacing print fails, unchanged. The fix-11 head
+    propagated the stderr failure (or the release interrupt) instead, leaving the refusal or the
+    original failure only in __context__."""
+    env = fx.env
+    root = fx.case("t64-release-then-stderr")
+
+    def failing_release(*_args):
+        raise guard.WriteGuardError("synthetic release failure")
+    with patch.object(guard, "release_lease", failing_release), \
+            patch.object(record, "print", _t64_failing_print("the lease release failed"), create=True):
+        result = record_cli(env, root, CREATE)
+    refused(result, "synthetic release failure")
+    err = result[2]
+    assert T64_STDERR not in err, ("T64 the stderr failure never governs the release path", err[-800:])
+    assert "cannot evaluate: unexpected error" not in err, ("T64 never the backstop", err[-800:])
+    root = fx.case("t64-emit-then-stderr")
+
+    def failing_emit(report):
+        raise BrokenPipeError(32, "synthetic emission failure")
+    with patch.object(record, "_emit_success", failing_emit), \
+            patch.object(record, "print", _t64_failing_print("emitting the success report failed"),
+                         create=True):
+        rc, _out, err = record_cli(env, root, CREATE)
+    assert rc == 2, ("T64 the emission failure fails closed", rc, err[-800:])
+    assert "synthetic emission failure" in err, ("T64 the emission failure governs", err[-800:])
+    assert T64_STDERR not in err, ("T64 the stderr failure never governs the emission path", err[-800:])
+    assert not (Path(root) / LEASE).exists(), "T64 the lease was released before the emission"
+    root = fx.case("t64-release-interrupt")
+
+    def interrupted_release(*_args):
+        raise KeyboardInterrupt
+    caught = None
+    try:
+        with patch.object(guard, "release_lease", interrupted_release), \
+                patch.object(record, "print", _t64_failing_print("the lease release failed"),
+                             create=True):
+            record_cli(env, root, CREATE)
+    except KeyboardInterrupt as exc:
+        caught = exc
+    assert caught is not None, "T64 the release interrupt governs, never the stderr failure"
+    from types import SimpleNamespace
+    ctx = SimpleNamespace(root_fd=None, machine_rel=MACH)
+    for rel_exc in (KeyboardInterrupt(), OSError(5, "synthetic recovery release failure")):
+        def failing_rel(_ctx, _lease, exc=rel_exc):
+            raise exc
+        outcome = None
+        with patch.object(guard, "acquire_lease", lambda *_a: object()), \
+                patch.object(record, "_release", failing_rel), \
+                patch.object(record, "print", _t64_failing_print("releasing the lease failed"),
+                             create=True):
+            try:
+                record._with_recovery_lease(ctx, "open transaction(s) t64", _t64_refusing_recover)
+            except BaseException as exc:  # a displacing failure is reported by the assertion below
+                outcome = exc
+        assert isinstance(outcome, record.RecordError) and \
+            "the original t64 recovery refusal" in str(outcome), (
+                "T64 the recovery refusal governs", type(rel_exc).__name__, repr(outcome))
+
+
+def flip_t64_conclude():
+    """The fix-11 head's _conclude: unprotected diagnostic prints, so a failing stderr write displaces
+    the release or emission failure (the release mark is kept, as fix 12 sets it, isolating the
+    unprotected prints)."""
+    def head_conclude(ctx, lease, report, released):
+        released[0] = True
+        prn = getattr(record, "print", print)
+        try:
+            record._release_guard(ctx, lease)
+        except BaseException:
+            prn(record._release_failure_text(report), file=sys.stderr)
+            raise
+        try:
+            record._emit_success(report)
+        except BaseException:
+            prn(record._emit_failure_text(report), file=sys.stderr)
+            raise
+    return patch.object(record, "_conclude", head_conclude)
+
+
+def flip_t64_recovery():
+    """The fix-11 head's _with_recovery_lease release handler: except Exception, so a release
+    interrupt displaces the refusal, and an unprotected surfacing print."""
+    def head_with_recovery_lease(ctx, pending, recover):
+        try:
+            lease = guard.acquire_lease(ctx.root_fd, ctx.machine_rel, record.VERB)
+        except guard.WriteGuardError as exc:
+            raise record.RecordError("an interrupted opf record publication needs reconciliation "
+                                     "({}): {} (fail-closed)".format(pending, exc))
+        try:
+            result = recover()
+        except BaseException:
+            try:
+                record._release(ctx, lease)
+            except Exception as rel_exc:  # the head's width: an interrupt passes through
+                prn = getattr(record, "print", print)
+                prn("opf record: additionally, releasing the lease failed ({}); it may be left in "
+                    "place, and the failure above still governs.".format(rel_exc), file=sys.stderr)
+            raise
+        record._release(ctx, lease)
+        return result
+    return patch.object(record, "_with_recovery_lease", head_with_recovery_lease)
+
+
+def t65_interrupt_before_conclude(fx):
+    """A real SIGINT delivered by a line trace immediately before the _conclude call (where the
+    fix-11 head had already marked the release done on the previous line) still releases the
+    single-writer claim exactly once: the mark is set inside _conclude, so the caller's cleanup
+    releases, the interrupt governs the exit, and no success is reported. On the fix-11 head the
+    cleanup read the premature mark and skipped the release entirely, leaving the lease beside a
+    COMPLETE transaction (QA round 11, F2)."""
+    import inspect
+    import signal
+    env = fx.env
+    root = fx.case("t65-sigint-before-conclude")
+    releases = []
+    real = guard.release_lease
+
+    def counting(root_fd, machine_rel, payload, verb):
+        releases.append(True)
+        return real(root_fd, machine_rel, payload, verb)
+    lines, start = inspect.getsourcelines(record._run_operation)
+    offsets = [i for i, line in enumerate(lines) if "_conclude(" in line]
+    assert len(offsets) == 1, ("T65 the one _conclude call in _run_operation", offsets)
+    target = start + offsets[0]
+    fired = []
+
+    def local_trace(frame, event, arg):
+        if event == "line" and frame.f_lineno == target and not fired:
+            fired.append(True)
+            os.kill(os.getpid(), signal.SIGINT)
+        return local_trace
+
+    def global_trace(frame, event, arg):
+        return local_trace if frame.f_code is record._run_operation.__code__ else None
+    prior_trace = sys.gettrace()
+    prior_handler = signal.signal(signal.SIGINT, signal.default_int_handler)
+    caught = result = None
+    try:
+        sys.settrace(global_trace)
+        try:
+            with patch.object(guard, "release_lease", counting):
+                result = record_cli(env, root, CREATE)
+        except KeyboardInterrupt as exc:
+            caught = exc
+        finally:
+            sys.settrace(prior_trace)
+    finally:
+        signal.signal(signal.SIGINT, prior_handler)
+    assert fired, "T65 the trace delivered the SIGINT"
+    assert caught is not None, ("T65 the interrupt governs the exit", result)
+    assert len(releases) == 1, ("T65 the release is attempted exactly once", len(releases))
+    assert not (Path(root) / LEASE).exists(), "T65 the lease is in fact released"
+    states = journal_states(root)
+    assert list(states.values()) == ["complete"], ("T65 the publication committed", states)
+
+
+def flip_t65():
+    """The fix-11 head's premature mark: the release cell reads already-set before _conclude's release
+    attempt begins (the head's caller set it on the line before the call), so the interrupt landing
+    just before _conclude skips the release entirely."""
+    return patch.object(record, "_RELEASE_PENDING", (True,))
 
 
 # --- the runner ------------------------------------------------------------------------------------------------
@@ -3904,6 +4109,9 @@ TESTS = (
     ("T61-lock-create-failure-disclosed", t61_lock_create_failure_disclosed, flip_t61),
     ("T62-output-failure-not-release", t62_output_failure_not_release, flip_t62),
     ("T63-t29-cleanup-covers-the-write", t63_t29_cleanup_covers_the_write, flip_t63),
+    ("T64-diagnostic-failure-never-governs", t64_diagnostic_failure_never_governs,
+     (flip_t64_conclude, flip_t64_recovery)),
+    ("T65-interrupt-before-conclude", t65_interrupt_before_conclude, flip_t65),
 )
 
 
