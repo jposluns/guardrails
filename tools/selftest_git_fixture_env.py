@@ -1927,7 +1927,10 @@ def _auto_maintenance_children(workdir, env):
 # unresolved (the pair reads as ordinary unresolved slots, so it cannot mark the argv
 # alias-defining; a joined `--config-env=` token is such an unresolved marker when its
 # readable head stops short of the full `--config-env=` or its concatenation's right
-# operand is not a credited str form; an unreadable VALUE slot behind a RESOLVABLE
+# operand is not a credited str form, and that list is not exhaustive: a joined token
+# spelled through a Name bound elsewhere, `%` formatting or `.format` is not followed
+# either, so after the pins it scans clean inside this same residual; an unreadable
+# VALUE slot behind a RESOLVABLE
 # marker, or behind a readable joined `--config-env=` head, is in reach,
 # above: a readable credited "key=" prefix keeps the parse going - except a
 # `--config-env` alias.* prefix head, which is the alias finding outright, above -
@@ -2587,8 +2590,9 @@ def _scan_provably_str(node, func_node, module_consts, depth, launch=None):
     operand proves nothing either: its own __add__ or __radd__ decides the value
     (verified on Python 3.14). Anything else - a call, a name, an attribute this scan
     cannot read - can carry an __radd__ that REPLACES the whole value at launch time
-    (str.__add__ returns NotImplemented for a non-str right operand and Python falls
-    back to the right operand's __radd__, so no TypeError protects the prefix), and
+    (str defines no numeric __add__ slot, so the + operator consults the right
+    operand's __radd__ before str's sequence concatenation and no TypeError protects
+    the prefix; calling str.__add__ directly would raise instead), and
     is not credited."""
     if depth <= 0 or node is None or node is _SCAN_OPEN:
         return False
