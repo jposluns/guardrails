@@ -7372,8 +7372,11 @@ def _watchdog_completion_case(mode):
         # armed=False -- passed every case. Each case therefore now
         # runs once per fixture state DERIVED per site from its
         # member's own branch tests by the bounded grammar below
-        # (derived_overrides; single-attribute deviations only),
-        # and that exact QA38 mutation is pinned red after
+        # (derived_overrides; single-attribute deviations only;
+        # a module-function f: site derives nothing and runs its
+        # fixture's default state alone, and a deviation a site's
+        # driver overwrites before the member runs is not driven;
+        # fix 28, QA49), and that exact QA38 mutation is pinned red after
         # the matrix. fix 18 (QA39 claude BLOCKER / gemini BLOCKER,
         # maintainer decision 2026-09-29): the derivation is a
         # BOUNDED, DISCLOSED guarantee, not widened past its
@@ -7533,7 +7536,14 @@ def _watchdog_completion_case(mode):
             # 20, QA41; maintainer decisions 2026-09-29): it
             # carries NO guarantee for multi-attribute combinations,
             # conditions carried through locals or other data flow,
-            # state never read in a branch test, or firing values
+            # state never read in a branch test, a module-function
+            # f: site (the guard below returns its default state
+            # alone), an attribute whose generated deviation the
+            # site's driver replaces with its own value before the
+            # member runs (the masked and coordinated drivers
+            # install _go, _abandon_unfinished_launch,
+            # _interrupt_collect and _finish_close; fix 28, QA49
+            # claude/codex), or firing values
             # neither spelled as constants in a branch-test
             # comparison that reads that same attribute nor
             # contributed by the grammar above (a truthiness read's
