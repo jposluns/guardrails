@@ -6871,7 +6871,8 @@ def self_test_isolated():
         # Stage a real run over root4 through the retained engine, then `--apply` it WITHOUT a review: the
         # retired public apply_import refuses -> exit 2, and the store machine tree is byte-unchanged (nothing
         # promoted). The retained engine's promoted/idempotent/reject behaviour is covered by the module A1-A6
-        # checks above; the refusal text on each retired CLI mode is checked by opf.py's own opf-cli leg. An INDEPENDENT run-id-grammar literal for the operand.
+        # checks below (later in this function); the refusal text on each retired CLI mode is checked by
+        # opf.py's own opf-cli leg. An INDEPENDENT run-id-grammar literal for the operand.
         plan4 = plan_import(root4, ["a.txt"], now=NOW, run_nonce="verb-apply-pin")
         check("3-apply-plan-staged", plan4.verdict == 0 and bool(plan4.run_id))
         machine4_before = snapshot(machine4)

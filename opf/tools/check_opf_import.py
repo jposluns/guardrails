@@ -4020,7 +4020,8 @@ def _self_test_isolated():
                 entry["sha256"] = new_sha
         (run_dir / "report.toml").write_text(_opf_emit.emit(report), encoding="utf-8")
 
-    # Round-6 (test hermeticity): the genuine Group C controls drive a real in-process apply_import, so an
+    # Round-6 (test hermeticity): the genuine Group C controls drive the retained apply engine in-process
+    # (imp.apply_import, which _self_test binds to _apply_import through _opf_import._self_test_engine), so an
     # INHERITED journal crash-injection variable would kill this process mid-run; neutralize it for the whole
     # self-test and restore it in the finally (mirrors the module suite's R4-C2).
     import _journal as _journal_env
@@ -4466,9 +4467,10 @@ def _self_test_isolated():
             expect("pr4b-r7-disc-genuine-intent-" + vname,
                    _ts[0] is True and tc[0] is False and "transaction record" in tc[1])
 
-        # A GENUINE interrupted promotion: a real apply_import killed (the journal's own crash-injection point)
-        # right after it CREATED this run's transaction record and before the terminal run-dir deletion, so the
-        # producer's complete record, archive, lock, and open INTENT journal all exist beside the live run dir.
+        # A GENUINE interrupted promotion: the retained apply engine (imp._apply_import, in a child process)
+        # killed at the journal's own crash-injection point right after it CREATED this run's transaction
+        # record and before the terminal run-dir deletion, so the producer's complete record, archive, lock,
+        # and open INTENT journal all exist beside the live run dir.
         # The gate must refuse it (not terminal COMPLETE); after a genuine recover (rolled back) the run is
         # un-applied again and both Group C checks PASS (the genuine rolled-back control).
         c_root, c_run, _c_keep = genuine_reviewed()

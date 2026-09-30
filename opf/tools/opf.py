@@ -2719,9 +2719,10 @@ def _cli_self_test():
         # import verb ROUTING (OPF-IMPORT-VERB), judged on exit code only. These cases fail closed BEFORE
         # any store resolution, so they need no store on disk. A bare `import`, a token-parser error and a
         # duplicate mode are usage errors (exit 2); a well-parsed retired mode, whatever its companion
-        # flags, meets the operation layer's retirement refusal (also exit 2; the refusal/usage split is
-        # asserted in _import_leg below, and reverting the import dispatch routes these to the fail-closed
-        # KNOWN_VERBS branch, returning 2 where 0/1 is expected -- the wiring discriminator).
+        # flags, meets the operation layer's retirement refusal (also exit 2). Every row here expects 2, so
+        # these rows can tell neither the refusal from a usage error nor a reverted import dispatch (the
+        # fail-closed KNOWN_VERBS branch also returns 2) from the wired verb; _import_leg below makes both
+        # splits on the refusal text (present for a retired mode, absent for a token-parser usage error).
         _VALID_RID = "imp-20260101T000000Z-0123456789abcdef"   # syntactically valid; names no staged run
         expect(["import"], EXIT_MALFORMED)                       # bare: exactly one mode required
         expect(["import", "--root", "."], EXIT_MALFORMED)        # --root but no mode
@@ -2851,11 +2852,14 @@ def _cli_self_test():
         def _import_leg():
             """Build a VALID synthetic store and drive the retired import modes (spec 14.1), judged on exit
             codes, the refusal text AND observable side effects. Returns None on success or EXIT_MALFORMED
-            on a harness (fixture I/O) error. Vectors: over an adopted store holding a run the retained
-            engine staged and accepted, --scan, --plan, --review (batch and --interactive) and --apply each
-            exit 2 with the operation layer's retirement refusal and write nothing; over a NOT-ADOPTED root
-            only --scan, --plan and --apply are driven, each checked for exit 2 and the refusal text;
-            deleting one operation-layer refusal turns its row red. A malformed --set /
+            on a harness (fixture I/O) error. Vectors, each checked for exit 2 with the operation layer's
+            retirement refusal text, in three fixture phases: before any run is staged, --scan and --plan
+            over a NOT-ADOPTED root and over the adopted store, with the store tree byte-unchanged; after
+            the retained engine stages a run and before it is accepted, --review (batch and --interactive)
+            over that run, checked only for writing no acceptance.json; after the retained engine accepts
+            the run, --apply over it, over an unknown run and over the NOT-ADOPTED root, with the store tree
+            byte-unchanged. The NOT-ADOPTED root is never driven with --review, and its own tree is not
+            snapshotted. Deleting one operation-layer refusal turns its row red. A malformed --set /
             --decisions / --dispositions / --ingest-options file meets the same refusal, its reader never
             run, and so does a mode-specific argv violation (a missing or extra companion flag, a run-id
             outside the grammar): the refusal precedes the retired mode-combination validation (round-2
@@ -3164,8 +3168,11 @@ def _cli_self_test():
         print("opf cli self-test: PASS (verb routing: unknown/unwired verbs and render/doctor/import usage "
               "errors fail closed; render --check forwards to the U4 engine; doctor resolves + validates a "
               "store, NOT-ADOPTED -> 0 (2 with --require-store) and a garbage store -> 2; "
-              "import surfaces the retired --scan / --plan / --review / --apply refusal (spec 14.1) at exit 2 "
-              "over a NOT-ADOPTED root and over an accepted staged run, each mutating nothing, before any "
+              "import surfaces the retired --scan / --plan / --review / --apply refusal (spec 14.1) at exit 2: "
+              "--scan and --plan over a NOT-ADOPTED root and over the adopted store before any run is staged, "
+              "the store tree byte-unchanged; --review (batch and --interactive) over a staged run before its "
+              "acceptance, writing no acceptance.json; --apply over the accepted run, an unknown run and a "
+              "NOT-ADOPTED root, the store tree byte-unchanged; each refusal comes before any "
               "input reader AND before any mode-specific argv validation (a malformed --set / --decisions / "
               "--dispositions / --ingest-options, a missing or extra companion flag, and a run-id outside "
               "the grammar each meet the refusal; only a token-parser usage error precedes it); "
