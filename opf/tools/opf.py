@@ -7364,105 +7364,44 @@ def _watchdog_completion_case(mode):
         # stranding a case as stale). Reproduced for the
         # unfinished-launch abandonment site during fix 11 and for
         # both owned-handle cleanup sites during fix 12. fix 17
-        # (QA38 codex BLOCKER, reproduced by the orchestrator): the
-        # matrix drove every site in exactly ONE fixture state, so a
-        # displacement CONDITIONED on a state the fixture never took
-        # -- `pending = exc if not self.armed else None` at
-        # _finish_close's capture, with the finish fixture pinned
-        # armed=False -- passed every case. Each case therefore now
-        # runs once per fixture state DERIVED per site from its
-        # member's own branch tests by the bounded grammar below
-        # (derived_overrides; single-attribute deviations only;
-        # only an m: method-key site is derived, and a site with
-        # any other key, which the matrix builds only as an f:
-        # module-function key, runs its fixture's default state
-        # alone; a generated deviation is driven only where it
-        # becomes the attribute's EFFECTIVE value on the fixture,
-        # so one a driver overwrites before the member runs, or
-        # one on an attribute such as __class__ or __dict__ whose
-        # read ignores the fixture's instance dictionary, is not;
-        # both are listed at derived_overrides; fixes 28-29,
-        # QA49-50), and that exact QA38 mutation is pinned red after
-        # the matrix. fix 18 (QA39 claude BLOCKER / gemini BLOCKER,
-        # maintainer decision 2026-09-29): the derivation is a
-        # BOUNDED, DISCLOSED guarantee, not widened past its
-        # spelled grammar. fix 19 (QA40 claude/codex/gemini
-        # BLOCKER, maintainer decision 2026-09-29): the bound is
-        # legitimate only while its claim matches its code EXACTLY,
-        # and the pre-fix recognizer missed two ordinary spellings
-        # of a DIRECT single-attribute branch test the claim said
-        # were driven. Leg 19 derives exactly the self-attributes
-        # occurring (any syntactic self.<attr>, assignment targets
-        # included) inside an If/While/IfExp TEST of the member
-        # (nested defs included) and
-        # drives ONE deviation at a time; the recognized grammar
-        # is, in exact AST terms: a bare truthiness read (a self
-        # ast.Attribute in the test outside every ast.Compare)
-        # contributes both booleans; a read that is itself an
-        # ast.Compare side (the Compare's left or one of its
-        # comparators) contributes every constant that comparison
-        # spells, where a spelled constant is a bare ast.Constant
-        # side, an ast.UnaryOp side whose op is ast.UAdd or
-        # ast.USub and whose operand is an ast.Constant int, float,
-        # or complex (bool excluded), the sign applied, or a member
-        # of an ast.Tuple/ast.List/ast.Set side (an ast.Call of the
-        # bare name frozenset with exactly one such literal argument
-        # and no keywords included) whose every element is one of those two
-        # spellings (fix 20); a read nested anywhere DEEPER inside
-        # a comparison side (in a call, a subscript, an attribute
-        # chain, any expression) contributes both booleans plus
-        # those same spelled constants; a spelled None also
-        # contributes a non-None stand-in; and the driven states
-        # deduplicate TYPE-AWARE -- a value is a duplicate only
-        # when it is the same object, or has the same type and
-        # compares equal -- so type-distinct equal constants (2
-        # and 2.0, True and 1) are each their own driven state
-        # (fix 20, QA41 codex BLOCKER / claude MAJOR, maintainer
-        # decision 2026-09-29: spelled_constants accepted only
-        # ast.Constant, so a bare `-1` -- an ast.UnaryOp -- and any
-        # container holding one derived nothing, and both
-        # deduplications compared with plain ==, collapsing 2 into
-        # 2.0 and True into 1). It carries NO guarantee for
-        # multi-attribute combinations, conditions carried through
-        # locals or other data flow, state never read in a branch
-        # test, or firing values neither spelled as constants in a
-        # branch-test comparison that reads that same attribute nor
-        # contributed by the grammar above (a truthiness read's two
-        # booleans and a spelled None's non-None stand-in ARE
-        # contributed; constants pool per attribute across the
-        # member's tests, only from comparisons that read that
-        # attribute, and a constant spelled only against another
-        # attribute is never pooled to this one; `self.x != False`
-        # with no truthiness read of x is the shape), and the list
-        # closes with the exact
-        # complement: EVERY spelling outside the grammar above
-        # carries no derivation guarantee (any driven state, the
-        # default or a derived deviation, may still fire one by
-        # accident) -- for
-        # example a dict display side, a container compared by
-        # equality as a whole value (a qualifying literal's members
-        # are driven one at a time under the grammar above; the
-        # container value itself is not among the derived states and
-        # carries no guarantee, though any driven state may hold it
-        # by accident), or a computed or otherwise non-literal value.
-        # The two QA39
-        # vectors -- a displacement conditioned on _failure read
-        # through a local, and one conditioned on armed AND
-        # unresolved together -- are pinned red after the QA38 pin,
-        # each driven by the one targeted fixture state that fires
-        # it; the two QA40 spellings INSIDE the bound -- a
-        # constant-tuple membership test and an attribute nested in
-        # a call on a comparison side -- are pinned red after
-        # those, each driven by states the derivation itself
-        # recognizes; the two QA41 spellings INSIDE the bound -- a
-        # unary-minus constant comparison and a constant-tuple
-        # membership whose spelled int member ==-collapsed into a
-        # float member -- are pinned red after the QA40 pins (fix
-        # 20), likewise driven only by states the derivation
-        # itself recognizes. A flipped state that routes around the
-        # pending point still makes that run vacuous, as disclosed
-        # at behavioural_case; only the DEFAULT state must never be
-        # vacuous.
+        # (QA38 codex BLOCKER) made each case run under fixture
+        # states derived from its member's own code; fixes 18-30
+        # (QA39-51, maintainer decisions 2026-09-29/30) keep that
+        # derivation a BOUNDED, DISCLOSED guarantee whose claim
+        # matches its code EXACTLY, and converge it by construction:
+        # the bound below is stated verbatim at derived_overrides
+        # too, and the two copies are asserted identical. Pinned red
+        # after the matrix: the QA38 state-conditioned mutation; the
+        # two QA39 vectors outside the bound (a condition read
+        # through a local, a multi-attribute condition), each fired
+        # by its one targeted state; the QA40 and QA41 spellings,
+        # each driven only by states the derivation itself returns;
+        # and the fix 30 entry vectors (a special attribute, an
+        # unlisted and a stale driver overwrite, an unmangled
+        # private name) with the QA51 private-name mutation, driven
+        # by its mangled derived state.
+        # -- leg 19 bound (two identical copies, fix 30) --
+        # derived_overrides IS the authoritative grammar; no comment
+        # restates it. Every case runs under every fixture state
+        # derived_overrides returns for its member -- the default
+        # state plus single-attribute deviations derived from the
+        # member's own committed AST, a private name keyed as the
+        # compiler mangles it in a method of the member's class; a
+        # site whose key is not an m: method key derives none --
+        # with every pending-cancellation type. At member entry a
+        # deviation's key must be an attribute name the member's
+        # compiled code loads, and the fixture must yield the
+        # deviation's value under it; a deviation its driver
+        # deliberately replaces is listed in behavioural_overwrites
+        # (so it is not driven), and each listed entry is checked
+        # to still be replaced; any other deviation that is not the
+        # value read at entry fails the suite. Only the default
+        # state must fire both the pending point and the injected
+        # fault; a deviation that routes around either leaves that
+        # run vacuous. NO guarantee for multi-attribute
+        # combinations, for conditions carried through locals or
+        # other data flow, or for any spelling outside the grammar.
+        # -- end of leg 19 bound --
         lifecycle_sites = set()
         for member_key in scope:
             member_calls = [
@@ -7500,97 +7439,49 @@ def _watchdog_completion_case(mode):
 
         def derived_overrides(member_key, member=None):
             # fix 17 (QA38 codex BLOCKER): the driven fixture states
-            # are DERIVED from the site's own code, never hand-listed.
-            # Every syntactic self.<attr> (assignment targets
-            # included) inside an If/While/IfExp test of the member
-            # (nested defs included) is treated as an attribute the
-            # site branches on (an assignment target may not be one;
-            # that only adds states), though it yields a state only
-            # through the grammar below: a comparison side against
-            # a non-literal, such as `self.x == other`, yields none
-            # (fix 29, QA50). fix 19 (QA40 claude/codex/gemini
-            # BLOCKER) and fix 20 (QA41 codex BLOCKER / claude
-            # MAJOR), maintainer decisions 2026-09-29: the
-            # recognized grammar, stated in exact AST terms:
-            #   - a read outside any ast.Compare (a bare truthiness
-            #     read) contributes both booleans;
-            #   - a read that is itself an ast.Compare side (the
-            #     Compare's left or one of its comparators)
-            #     contributes every constant that comparison
-            #     spells, where a spelled constant is a bare
-            #     ast.Constant side, an ast.UnaryOp side whose op
-            #     is ast.UAdd or ast.USub and whose operand is an
-            #     ast.Constant int, float, or complex (bool
-            #     excluded), the sign applied (fix 20), or a member
-            #     of an ast.Tuple/ast.List/ast.Set side (an
-            #     ast.Call of the bare name frozenset with exactly
-            #     one such literal argument and no keywords included) whose every
-            #     element is one of those two spellings;
-            #   - a read nested anywhere deeper inside a comparison
-            #     side (in a call, a subscript, an attribute chain,
-            #     any expression) contributes both booleans plus
-            #     those same spelled constants;
-            #   - a spelled None also contributes a non-None
-            #     stand-in;
-            #   - the driven states deduplicate TYPE-AWARE: a value
-            #     is a duplicate only when it is the same object,
-            #     or has the same type and compares equal, so 2 and
-            #     2.0, or True and 1, are each their own driven
-            #     state (fix 20).
-            # Each case then runs once per single-attribute
-            # deviation on top of its fixture's default state, so a
-            # displacement conditioned on any one state spelled
-            # that way is driven. That is EXACTLY the bound (fix
-            # 18, QA39 claude/gemini BLOCKERs; fix 19, QA40; fix
-            # 20, QA41; maintainer decisions 2026-09-29): it
-            # carries NO guarantee for multi-attribute combinations,
-            # conditions carried through locals or other data flow,
-            # state never read in a branch test, a site whose key
-            # is not an m: method key (the guard below returns its
-            # default state alone; the matrix builds those only as
-            # f: module-function keys), a generated deviation that
-            # never becomes the attribute's effective value on the
-            # fixture: one the site's driver replaces before the
-            # member runs (masked release installs _go, masked
-            # abandon _abandon_unfinished_launch, masked interrupt
-            # _interrupt_collect, coordinated release _go and
-            # coordinated finish _finish_close; the coordinated
-            # abandon and refusal drivers install none), or one on
-            # an attribute whose read ignores the fixture's
-            # instance dictionary, such as __class__ or __dict__
-            # (fixes 28-29, QA49-50 claude/codex/gemini), or firing
-            # values
-            # neither spelled as constants in a branch-test
-            # comparison that reads that same attribute nor
-            # contributed by the grammar above (a truthiness read's
-            # two booleans and a spelled None's non-None stand-in ARE
-            # contributed; constants pool per attribute across the
-            # member's tests, only from comparisons that read that
-            # attribute, and a constant spelled only against another
-            # attribute is never pooled to this one; `self.x != False`
-            # with no truthiness read of x is the shape), and the list
-            # closes with the exact
-            # complement: EVERY spelling outside the grammar above
-            # carries no derivation guarantee (any driven state, the
-            # default or a derived deviation, may still fire one by
-            # accident) -- for example
-            # a dict display side, a container compared by
-            # equality as a whole value (a qualifying literal's
-            # members are driven one at a time under the grammar
-            # above; the container value itself is not among the
-            # derived states and carries no guarantee, though any
-            # driven state may hold it by accident), or a computed
-            # or otherwise non-literal
-            # value; the bound is not widened here -- the found
-            # QA39 vectors in those classes are pinned red after
-            # the matrix, and the bound is disclosed at the leg 19
-            # head. A pin passes `member` to derive from a mutant
-            # or probe body; the matrix itself always derives from
-            # the member's own committed AST.
+            # are DERIVED from the site's own code, never hand-listed;
+            # the code below IS the grammar (fixes 19-20, 30). A pin
+            # passes `member` to derive from a mutant or probe body;
+            # the matrix itself always derives from the member's own
+            # committed AST.
+            # -- leg 19 bound (two identical copies, fix 30) --
+            # derived_overrides IS the authoritative grammar; no comment
+            # restates it. Every case runs under every fixture state
+            # derived_overrides returns for its member -- the default
+            # state plus single-attribute deviations derived from the
+            # member's own committed AST, a private name keyed as the
+            # compiler mangles it in a method of the member's class; a
+            # site whose key is not an m: method key derives none --
+            # with every pending-cancellation type. At member entry a
+            # deviation's key must be an attribute name the member's
+            # compiled code loads, and the fixture must yield the
+            # deviation's value under it; a deviation its driver
+            # deliberately replaces is listed in behavioural_overwrites
+            # (so it is not driven), and each listed entry is checked
+            # to still be replaced; any other deviation that is not the
+            # value read at entry fails the suite. Only the default
+            # state must fire both the pending point and the injected
+            # fault; a deviation that routes around either leaves that
+            # run vacuous. NO guarantee for multi-attribute
+            # combinations, for conditions carried through locals or
+            # other data flow, or for any spelling outside the grammar.
+            # -- end of leg 19 bound --
             if not member_key.startswith("m:"):
                 return [{}]
             if member is None:
                 member = scope[member_key]
+            owner = member_key[2:].rpartition(".")[0].lstrip("_")
+
+            def compiled(attr):
+                # the name the compiler emits for self.<attr> in a
+                # method of the member's class: a private name is
+                # mangled (fix 30, QA51 claude/codex MAJOR -- keyed
+                # unmangled, `self.__x` derived a state on "__x"
+                # while the member read "_FixtureProcess__x")
+                if (owner and attr.startswith("__")
+                        and not attr.endswith("__")):
+                    return "_" + owner + attr
+                return attr
 
             def spelled_constants(side):
                 # the constants a comparison side spells (fix 19):
@@ -7660,9 +7551,9 @@ def _watchdog_completion_case(mode):
                                     and part.value.id == "self"):
                                 continue
                             if id(part) not in side_ids:
-                                truthy.add(part.attr)
+                                truthy.add(compiled(part.attr))
                             bucket = consts.setdefault(
-                                part.attr, [])
+                                compiled(part.attr), [])
                             for value in values:
                                 # type-aware: 2 never collapses
                                 # into 2.0, nor True into 1
@@ -7678,7 +7569,7 @@ def _watchdog_completion_case(mode):
                             and isinstance(leaf.value, ast.Name)
                             and leaf.value.id == "self"
                             and id(leaf) not in in_compare):
-                        truthy.add(leaf.attr)
+                        truthy.add(compiled(leaf.attr))
             overrides = [{}]
             for attr in sorted(set(truthy) | set(consts)):
                 states = [False, True] if attr in truthy else []
@@ -8171,6 +8062,110 @@ def _watchdog_completion_case(mode):
             "PD-335-TAIL option 2)",
             sorted(lifecycle_sites
                    ^ set(behavioural_drivers)))
+        # fix 30 (QA51 claude/codex MAJOR; orchestrator premise review
+        # 2026-09-30): the matrix ENFORCES the effective state instead
+        # of disclosing where a deviation is lost. The deliberate
+        # driver overwrites, keyed (case, attribute): each driver
+        # replaces its attribute after the state is installed, so a
+        # deviation there is never the value the member reads; every
+        # entry is checked below to still be replaced.
+        behavioural_overwrites = frozenset([
+            (("m:_FixtureProcess._close_masked",
+              "parked launcher release", 0), "_go"),
+            (("m:_FixtureProcess._close_masked",
+              "unfinished-launch abandonment", 0),
+             "_abandon_unfinished_launch"),
+            (("m:_FixtureProcess._close_masked",
+              "interrupt-owner collection", 0), "_interrupt_collect"),
+            (("m:_FixtureProcess._close_coordinated",
+              "parked launcher release", 0), "_go"),
+            (("m:_FixtureProcess._close_coordinated",
+              "owner collection finish", 0), "_finish_close"),
+        ])
+        ineffective_deviation = (
+            "a generated deviation is not the value the member reads "
+            "at entry: derive the name its compiled code loads, or "
+            "list a deliberate driver overwrite (fix 30)")
+        stale_overwrite = (
+            "a listed driver overwrite no longer replaces a value the "
+            "member reads at entry (fix 30)")
+        import dis
+
+        def entry_checked_case(label, driver, cancellation, fault,
+                               state, overwrites):
+            # the value the member reads is resolved through its OWN
+            # compiled code: a deviation's key must be an attribute
+            # name that code (nested code objects included) loads --
+            # so a private name counts only as the compiler mangled
+            # it -- and the fixture must yield the deviation's value
+            # under that name each time the member is entered
+            if not state:
+                behavioural_case(label, driver, cancellation, fault,
+                                 state)
+                return
+            assert label[0].startswith("m:"), (
+                "a deviation was generated for a site without an m: "
+                "method key (fix 30)", label, sorted(state))
+            owner_name, member_name = label[0][2:].rsplit(".", 1)
+            owner = getattr(emit, owner_name)
+            member = vars(owner)[member_name]
+            loads, codes = set(), [member.__code__]
+            while codes:
+                code = codes.pop()
+                codes.extend(const for const in code.co_consts
+                             if isinstance(const, types.CodeType))
+                loads.update(
+                    instruction.argval
+                    for instruction in dis.get_instructions(code)
+                    if instruction.opname in ("LOAD_ATTR",
+                                              "LOAD_METHOD"))
+            absent = object()
+            entries = []
+
+            def entered(self, *args, **kwargs):
+                entries.append(dict(
+                    (attr, getattr(self, attr, absent))
+                    for attr in state))
+                return member(self, *args, **kwargs)
+
+            outcome = None
+            with patch.object(owner, member_name, entered):
+                try:
+                    behavioural_case(label, driver, cancellation,
+                                     fault, state)
+                except AssertionError as exc:
+                    outcome = exc
+            for attr in sorted(state):
+                value = state[attr]
+                read = attr in loads and bool(entries)
+                matches = [seen is value
+                           or (type(seen) is type(value)
+                               and seen == value)
+                           for seen in (entry[attr]
+                                        for entry in entries)]
+                if (label, attr) in overwrites:
+                    if not read or any(matches):
+                        raise AssertionError(stale_overwrite, label,
+                                             attr)
+                elif not (read and all(matches)):
+                    raise AssertionError(ineffective_deviation, label,
+                                         attr, repr(value))
+            if outcome is not None:
+                raise outcome
+
+        def drive_matrix(case_labels, overrides, faults,
+                         overwrites=behavioural_overwrites):
+            for case_label in case_labels:
+                for override in overrides[case_label[0]]:
+                    for cancellation_type in pending_cancellations:
+                        for fault in faults():
+                            entry_checked_case(
+                                case_label,
+                                behavioural_drivers[case_label],
+                                cancellation_type(
+                                    "pending cancellation"),
+                                fault, dict(override), overwrites)
+
         site_overrides = dict(
             (member_key, derived_overrides(member_key))
             for member_key in set(
@@ -8180,14 +8175,8 @@ def _watchdog_completion_case(mode):
             "the derived _finish_close state list lost the armed "
             "flip that catches the pinned QA38 state-conditioned "
             "displacement (fix 17)")
-        for case_label in sorted(behavioural_drivers):
-            for override in site_overrides[case_label[0]]:
-                for cancellation_type in pending_cancellations:
-                    behavioural_case(
-                        case_label, behavioural_drivers[case_label],
-                        cancellation_type("pending cancellation"),
-                        RuntimeError("injected cleanup fault"),
-                        dict(override))
+        drive_matrix(sorted(behavioural_drivers), site_overrides,
+                     lambda: [RuntimeError("injected cleanup fault")])
         # fix 14 (QA35 codex MAJOR): a RuntimeError fault crosses the
         # two SIGKILL steps' own `except (ProcessLookupError, OSError)`
         # / OSError filters untouched, so the matrix above never saw
@@ -8209,18 +8198,21 @@ def _watchdog_completion_case(mode):
              "direct guardian SIGKILL backstop", 0))
         for case_label in syscall_fault_sites:
             assert case_label in behavioural_drivers, case_label
-            for override in site_overrides[case_label[0]]:
-                for cancellation_type in pending_cancellations:
-                    for syscall_fault in (
-                            PermissionError(1,
-                                            "injected cleanup fault"),
-                            OSError(9, "injected cleanup fault")):
-                        behavioural_case(
-                            case_label,
-                            behavioural_drivers[case_label],
-                            cancellation_type("pending cancellation"),
-                            syscall_fault,
-                            dict(override))
+        drive_matrix(syscall_fault_sites, site_overrides,
+                     lambda: [PermissionError(1,
+                                              "injected cleanup fault"),
+                              OSError(9, "injected cleanup fault")])
+        # fix 30: every listed overwrite still happens -- a fresh
+        # object planted on its attribute must not be the value the
+        # member reads at entry
+        for case_label, attr in sorted(behavioural_overwrites):
+            assert case_label in behavioural_drivers, (
+                "a listed driver overwrite names no matrix case "
+                "(fix 30)", case_label, attr)
+            drive_matrix(
+                [case_label],
+                dict([(case_label[0], [dict([(attr, object())])])]),
+                lambda: [RuntimeError("injected cleanup fault")])
 
         # fix 17 (QA38 codex BLOCKER, reproduced by the
         # orchestrator): the state-conditioned displacement itself,
@@ -8609,6 +8601,149 @@ def _watchdog_completion_case(mode):
                         "the pinned QA41 " + vector + " mutation "
                         "was NOT caught by its derived-state "
                         "behavioural run (fix 20)")
+
+        # fix 30 (QA51 claude/codex MAJOR; orchestrator premise review
+        # 2026-09-30): the entry check itself, pinned. Each planted
+        # deviation is driven through drive_matrix, the matrix's own
+        # path, and must go RED for exactly the entry reason: a
+        # special attribute whose read ignores the fixture's instance
+        # dictionary, a driver overwrite missing from the list (the
+        # same state passes while listed), and a listed overwrite that
+        # no longer happens. Then the QA51 private-name mutation:
+        # _finish_close rebuilt INSIDE a class named _FixtureProcess,
+        # so the compiler mangles it as it mangles the committed
+        # member, with a private-name branch inserted right after the
+        # same unique capture `pending = exc`. The derivation must
+        # return the MANGLED firing state, which is first proven green
+        # on the real member and must then turn the mutant RED
+        # behaviourally; the unmangled key -- the state the pre-fix
+        # derivation returned, which passed the mutant -- must go red
+        # at entry.
+        def entry_red(case_labels, overrides, overwrites, reason,
+                      vector):
+            try:
+                drive_matrix(case_labels, overrides,
+                             lambda: [RuntimeError(
+                                 "injected cleanup fault")],
+                             overwrites)
+            except AssertionError as exc:
+                entry_reasons = ((ineffective_deviation,),
+                                 (stale_overwrite,))
+                if reason is None:
+                    assert exc.args[:1] not in entry_reasons, (
+                        "the planted fix 30 vector went red at entry, "
+                        "not behaviourally", vector, exc.args)
+                else:
+                    assert exc.args[:1] == (reason,), (
+                        "the planted fix 30 vector went red for the "
+                        "wrong reason", vector, exc.args)
+            else:
+                raise AssertionError(
+                    "the planted fix 30 " + vector + " vector was NOT "
+                    "caught by the matrix (fix 30)")
+
+        held_case = ("m:_FixtureProcess._finish_close",
+                     "held descriptor and report close", 0)
+        release_case = ("m:_FixtureProcess._close_masked",
+                        "parked launcher release", 0)
+        abandon_case = ("m:_FixtureProcess._close_masked",
+                        "unfinished-launch abandonment", 0)
+        entry_red([held_case],
+                  dict([(held_case[0], [dict([("__class__", True)])])]),
+                  behavioural_overwrites, ineffective_deviation,
+                  "special-attribute")
+        drive_matrix([release_case],
+                     dict([(release_case[0], [dict(_go=True)])]),
+                     lambda: [RuntimeError("injected cleanup fault")])
+        entry_red([release_case],
+                  dict([(release_case[0], [dict(_go=True)])]),
+                  frozenset(), ineffective_deviation,
+                  "unlisted-overwrite")
+        entry_red([abandon_case],
+                  dict([(abandon_case[0], [dict(
+                      _go=types.SimpleNamespace(set=lambda: None))])]),
+                  frozenset([(abandon_case, "_go")]), stale_overwrite,
+                  "stale-overwrite")
+        mutant_member = copy.deepcopy(
+            scope["m:_FixtureProcess._finish_close"])
+        capture_assigns = [
+            node for node in ast.walk(mutant_member)
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "pending"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "exc"]
+        assert len(capture_assigns) == 1, (
+            "the pinned QA51 mutation site (`pending = exc` inside "
+            "_finish_close) is no longer unique (fix 30)",
+            len(capture_assigns))
+        holders = [
+            node for node in ast.walk(mutant_member)
+            if isinstance(getattr(node, "body", None), list)
+            and capture_assigns[0] in node.body]
+        assert len(holders) == 1, (
+            "the pinned QA51 capture's holding body is not unique "
+            "(fix 30)", len(holders))
+        at = holders[0].body.index(capture_assigns[0])
+        holders[0].body[at + 1:at + 1] = ast.parse(
+            "try:\n"
+            "    if self.__qa51 == 7:\n"
+            "        pending = None\n"
+            "except AttributeError:\n"
+            "    pass").body
+        mangled_state = dict(_FixtureProcess__qa51=7)
+        mutant_overrides = derived_overrides(
+            "m:_FixtureProcess._finish_close", mutant_member)
+        assert (driven_state(mangled_state, mutant_overrides)
+                and not any("__qa51" in override
+                            for override in mutant_overrides)), (
+            "the derivation no longer keys a private name as the "
+            "compiler mangles it (fix 30, QA51)", mutant_overrides)
+        mutant_class = ast.parse(
+            "class _FixtureProcess:\n    pass").body[0]
+        mutant_class.body = [mutant_member]
+        mutant_namespace = dict(vars(emit))
+        exec(compile(ast.fix_missing_locations(ast.Module(
+                body=[mutant_class], type_ignores=[])),
+             "<fix 30 QA51 pinned mutant>", "exec"),
+             mutant_namespace)
+        behavioural_case(held_case, finish_handles_driver,
+                         TimeoutError("pending cancellation"),
+                         RuntimeError("injected cleanup fault"),
+                         dict(mangled_state))
+        with patch.object(
+                emit._FixtureProcess, "_finish_close",
+                vars(mutant_namespace["_FixtureProcess"])[
+                    "_finish_close"]):
+            entry_red([held_case],
+                      dict([(held_case[0], [mangled_state])]),
+                      behavioural_overwrites, None,
+                      "mangled private-name mutation")
+            entry_red([held_case],
+                      dict([(held_case[0], [dict([("__qa51", 7)])])]),
+                      behavioural_overwrites, ineffective_deviation,
+                      "unmangled private-name")
+
+        # fix 30: the leg 19 bound is stated twice, at the leg 19 head
+        # and at derived_overrides, and the two copies must stay
+        # identical, so neither can drift from the other
+        bound_copies, bound_lines = [], None
+        for line in Path(__file__).read_text(
+                encoding="utf-8").splitlines():
+            text = line.strip()
+            if text == ("# -- leg 19 bound (two identical copies, "
+                        "fix 30) --"):
+                bound_lines = []
+            elif text == "# -- end of leg 19 bound --":
+                bound_copies.append(bound_lines)
+                bound_lines = None
+            elif bound_lines is not None:
+                bound_lines.append(text)
+        assert (len(bound_copies) == 2 and None not in bound_copies
+                and bound_copies[0] == bound_copies[1]), (
+            "the two copies of the leg 19 bound differ (fix 30)",
+            len(bound_copies))
     elif mode == "receipt-high-fd":
         import fcntl
         import resource
