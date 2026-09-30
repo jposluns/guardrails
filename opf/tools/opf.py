@@ -7382,7 +7382,9 @@ def _watchdog_completion_case(mode):
         # and the pre-fix recognizer missed two ordinary spellings
         # of a DIRECT single-attribute branch test the claim said
         # were driven. Leg 19 derives exactly the self-attributes
-        # read inside an If/While/IfExp TEST of the member and
+        # occurring (any syntactic self.<attr>, assignment targets
+        # included) inside an If/While/IfExp TEST of the member
+        # (nested defs included) and
         # drives ONE deviation at a time; the recognized grammar
         # is, in exact AST terms: a bare truthiness read (a self
         # ast.Attribute in the test outside every ast.Compare)
@@ -7413,15 +7415,16 @@ def _watchdog_completion_case(mode):
         # 2.0 and True into 1). It carries NO guarantee for
         # multi-attribute combinations, conditions carried through
         # locals or other data flow, state never read in a branch
-        # test, or firing values not spelled as constants in a
-        # branch-test comparison that reads that same attribute
-        # (constants pool per attribute across the member's tests,
-        # only from comparisons that read that attribute, and a
-        # truthiness read adds False and True, so such a value MAY
-        # still be driven, never guaranteed; a constant spelled only
-        # against another attribute is never pooled to this one; a
-        # test such as `self.x != False` is the shape), and the
-        # list closes with the exact
+        # test, or firing values neither spelled as constants in a
+        # branch-test comparison that reads that same attribute nor
+        # contributed by the grammar above (a truthiness read's two
+        # booleans and a spelled None's non-None stand-in ARE
+        # contributed; constants pool per attribute across the
+        # member's tests, only from comparisons that read that
+        # attribute, and a constant spelled only against another
+        # attribute is never pooled to this one; `self.x != False`
+        # with no truthiness read of x is the shape), and the list
+        # closes with the exact
         # complement: EVERY spelling outside the grammar above
         # carries no derivation guarantee (any driven state, the
         # default or a derived deviation, may still fire one by
@@ -7488,8 +7491,9 @@ def _watchdog_completion_case(mode):
         def derived_overrides(member_key, member=None):
             # fix 17 (QA38 codex BLOCKER): the driven fixture states
             # are DERIVED from the site's own code, never hand-listed.
-            # Every self.<attr> read inside an If/While/IfExp test of
-            # the member (nested defs included) names an attribute the
+            # Every syntactic self.<attr> (assignment targets
+            # included) inside an If/While/IfExp test of the member
+            # (nested defs included) names an attribute the
             # site branches on. fix 19 (QA40 claude/codex/gemini
             # BLOCKER) and fix 20 (QA41 codex BLOCKER / claude
             # MAJOR), maintainer decisions 2026-09-29: the
@@ -7528,15 +7532,20 @@ def _watchdog_completion_case(mode):
             # carries NO guarantee for multi-attribute combinations,
             # conditions carried through locals or other data flow,
             # state never read in a branch test, or firing values
-            # not spelled as constants in a branch-test comparison
-            # that reads that same attribute (constants pool per
-            # attribute, only from comparisons reading it, and
-            # truthiness booleans MAY still drive one, never
-            # guaranteed; for example
-            # `self.x != False`), and the list closes with the exact
+            # neither spelled as constants in a branch-test
+            # comparison that reads that same attribute nor
+            # contributed by the grammar above (a truthiness read's
+            # two booleans and a spelled None's non-None stand-in ARE
+            # contributed; constants pool per attribute across the
+            # member's tests, only from comparisons that read that
+            # attribute, and a constant spelled only against another
+            # attribute is never pooled to this one; `self.x != False`
+            # with no truthiness read of x is the shape), and the list
+            # closes with the exact
             # complement: EVERY spelling outside the grammar above
-            # carries no derivation guarantee (any driven state may
-            # still fire one by accident) -- for example
+            # carries no derivation guarantee (any driven state, the
+            # default or a derived deviation, may still fire one by
+            # accident) -- for example
             # a dict display side, a container compared by
             # equality as a whole value (a qualifying literal's
             # members are driven one at a time under the grammar
