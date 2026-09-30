@@ -539,8 +539,15 @@ class OpLockError(Exception):
     that acquisition had REMOVED before it failed, so a caller never words a refusal as having
     written nothing when it had: `recovered` (the stale records unlinked, in delete order),
     `recovered_operation` (the confirmed-dead holder's recorded operation, once the liveness gate
-    has passed) and `staging_removed` (the staging leftovers unlinked). An OpLockError raised before
-    that body carries none of them; no removal step runs before it."""
+    has passed) and `staging_removed` (the staging leftovers unlinked). PR D fix 7: it also reports
+    `created_removed`, each name the acquisition itself created and then unlinked (a publication's
+    retired staging name, a failed publication's cleanup, and the unwind's removal of its own new
+    records), so every unlink the acquisition performed is reported; the unwind's replacement error
+    and the forked-continuation refusal (_refuse_continuation) carry the same four reports. An
+    OpLockError raised before that body (acquire_operation's argument and host validation, and
+    _acquire_body's store-resolution refusal) carries none of them; no removal step runs before it.
+    An exception a signal handler raises where acquire_operation delivers a deferred signal is the
+    handler's own and carries none either."""
 
 
 class _UnlinkNotDurable(OpLockError):
@@ -856,14 +863,15 @@ class OpCapability:
                  "_anchor_ident", "_ctl_ident", "_machine_ident", "_active_ident", "_lease_ident",
                  "_active_bytes", "_lease_bytes",
                  "_acquirer_pid", "_acquirer_pid_start", "_released", "_claim", "_claimant",
-                 "init_root", "init_token", "recovered", "recovered_operation", "staging_removed")
+                 "init_root", "init_token", "recovered", "recovered_operation", "staging_removed",
+                 "created_removed")
 
     def __init__(self, op_id, holder, operation, store_root, machine_rel,
                  ctl_fd, machine_fd, anchor_fd, active_fd, lease_fd,
                  anchor_ident, ctl_ident, machine_ident, active_ident, lease_ident,
                  active_bytes, lease_bytes, acquirer_pid, acquirer_pid_start,
                  init_root=None, init_token=None, recovered=(), recovered_operation=None,
-                 staging_removed=()):
+                 staging_removed=(), created_removed=()):
         self.op_id = op_id
         self.holder = holder
         self.operation = operation
@@ -902,6 +910,10 @@ class OpCapability:
         # flock before stale classification, so a caller can say exactly what was cleared.
         self.recovered_operation = recovered_operation
         self.staging_removed = staging_removed
+        # PR D fix 7: the names this acquisition itself created and then unlinked, in removal order:
+        # on every capability acquire_operation returns, the retired staging names of its own two
+        # publications (the active record's, then the lease's).
+        self.created_removed = created_removed
 
 
 # --- small fail-closed primitives ---------------------------------------------------------------
@@ -2002,7 +2014,7 @@ def _recover_stale_verify(fd, ident, expected_bytes, label):
 # --- control-record create and verified unlink ------------------------------------------------------
 
 
-def _unlink_created_on_failure(dir_fd, names, fd):
+def _unlink_created_on_failure(dir_fd, names, fd, removed=None):
     """LOW-1: best-effort removal of the names a FAILED or INTERRUPTED publication bound to its new
     inode, so neither a staging leftover nor a final record the caller never received is stranded.
     `names` are the CANDIDATE names (the staging name first, then the final name once its os.link
@@ -2017,7 +2029,9 @@ def _unlink_created_on_failure(dir_fd, names, fd):
     substituted target is never removed. Returns None when every bound name was removed (or was
     already gone); returns a reason string NAMING the stranded leftover when one could not be
     removed, so the caller aggregates it into the raise rather than claim a clean unwind it did not
-    achieve (DEF-5: the disclosure stays accurate, the cleanup failure is never swallowed)."""
+    achieve (DEF-5: the disclosure stays accurate, the cleanup failure is never swallowed). Each name
+    whose unlink returns is appended to `removed` (a list) when given (PR D fix 7), so the caller
+    reports every name this cleanup removed, a later step's failure included."""
     if not names:
         return None
     shown = names[-1]
@@ -2059,6 +2073,8 @@ def _unlink_created_on_failure(dir_fd, names, fd):
             os.unlink(name, dir_fd=dir_fd)
         except OSError as exc:
             return "could not unlink the torn {} ({}); it is stranded".format(name, exc)
+        if removed is not None:
+            removed.append(name)
     try:
         os.fsync(dir_fd)
     except OSError as exc:
@@ -2066,7 +2082,8 @@ def _unlink_created_on_failure(dir_fd, names, fd):
     return None
 
 
-def _create_control_file(dir_fd, name, payload, label, owner=None, publisher_pid=None):
+def _create_control_file(dir_fd, name, payload, label, owner=None, publisher_pid=None,
+                         removed=None):
     """ATOMIC, exclusive publication of a control record (D1). The payload is written in full to a
     fresh staging file (O_CREAT|O_EXCL under a unique _staging_name) with the full-byte write loop
     and fsynced; only then is it published at `name` by os.link, which refuses an existing name
@@ -2102,21 +2119,33 @@ def _create_control_file(dir_fd, name, payload, label, owner=None, publisher_pid
     Fix round 9 (claude MED): every mutating step of the publication runs only in the process
     `publisher_pid` (_gated_step), the pid the operation began with: the acquisition passes the
     pid it captured at its entry, so a forked continuation of it is refused before it creates,
-    writes, links, or unlinks anything; without it, the pid at this call's entry is used."""
+    writes, links, or unlinks anything; without it, the pid at this call's entry is used.
+
+    PR D fix 7: with `removed` (a list), each name this publication unlinks is appended to it as
+    the unlink returns: its retired staging name, and whatever a failure's cleanup removed, so the
+    acquisition reports every unlink it performed."""
     if publisher_pid is None:
         publisher_pid = os.getpid()
     args = (dir_fd, name, _staging_name(name), payload, label)
     if owner is not None:
-        return _publish_staged(*args, owner, False, publisher_pid)
+        return _publish_staged(*args, owner, False, publisher_pid, removed)
     # The private owner encloses the whole publication as a context manager, and the body is ONE
     # call on the with statement's own line, deliberately: a line boundary between the body's end
     # and the owner's exit (as a separate return line inside the with would create) lies outside
     # every exception range, so an interruption landing there would skip the exit. Every boundary
     # of the body belongs to _publish_staged's own frame instead.
-    with _FdOwner() as own: return _publish_staged(*args, own, True, publisher_pid)
+    with _FdOwner() as own: return _publish_staged(*args, own, True, publisher_pid, removed)
 
 
-def _publish_staged(dir_fd, name, staging, payload, label, owner, transfer, publisher_pid):
+def _own_name_removed(name, staging, label):
+    """How a name a publication itself created and then unlinked is reported (PR D fix 7)."""
+    if name == staging:
+        return "the staging name {} of its own {} publication".format(staging, label)
+    return "its own just-published {} (removed by the failed publication's cleanup)".format(label)
+
+
+def _publish_staged(dir_fd, name, staging, payload, label, owner, transfer, publisher_pid,
+                    removed=None):
     """The body of _create_control_file (fix round 4, M). ONE protected region spans everything
     from the staging open to the return, so no line boundary after the staging descriptor's
     adoption lies outside the failure handler below (a nested try statement's own line is outside
@@ -2138,7 +2167,8 @@ def _publish_staged(dir_fd, name, staging, payload, label, owner, transfer, publ
     its entry), so a forked continuation is refused before it performs any of them rather than
     racing the publisher for the staging and final names. Fix round 9 (codex LOW): a close that an
     interruption cut short after ownership was cleared is reported as UNCONFIRMED, never as
-    closed."""
+    closed. PR D fix 7: each name it unlinks (the staging retire, and the failure cleanup's
+    removals) is appended to `removed` when given (_create_control_file)."""
     step = "create the staging file for"
     fd = None
     what = "{} {}".format(step, label)
@@ -2160,6 +2190,8 @@ def _publish_staged(dir_fd, name, staging, payload, label, owner, transfer, publ
         step = "retire the staging name of"
         _gated_step(publisher_pid, "retire the staging name of " + label, os.unlink, staging,
                     dir_fd=dir_fd)
+        if removed is not None:
+            removed.append(_own_name_removed(staging, staging, label))
         step = "fsync the directory of"
         _gated_step(publisher_pid, "fsync the directory of " + label, os.fsync, dir_fd)
         st = os.fstat(fd)
@@ -2210,13 +2242,16 @@ def _publish_staged(dir_fd, name, staging, payload, label, owner, transfer, publ
             else [staging, name]
         problems = []
         interrupt = None
+        gone = []
         try:
-            strand = _unlink_created_on_failure(dir_fd, candidates, fd)
+            strand = _unlink_created_on_failure(dir_fd, candidates, fd, gone)
         except BaseException as cexc:
             interrupt = cexc
             strand = ("the cleanup of the unpublished {} was interrupted, so a leftover may remain "
                       "(a staging leftover is removed as garbage by the next acquisition under the "
                       "anchor flock)".format(label))
+        if removed is not None:
+            removed.extend(_own_name_removed(n, staging, label) for n in gone)
         if strand is not None:
             problems.append(strand)
         close_problems, close_unconfirmed, close_interrupt = owner.close_guarded(fd) if owned \
@@ -2307,7 +2342,7 @@ def _set_record_mode(fd, label):
                               label, stat.S_IMODE(mode), _CONTROL_FILE_MODE))
 
 
-def _verified_unlink(dir_fd, name, ident, expected_bytes, label, outcome=None):
+def _verified_unlink(dir_fd, name, ident, expected_bytes, label, outcome=None, removed=None):
     """Remove a control record ONLY when it is verifiably the one this capability created: re-open
     no-follow, require a plain regular file with link count exactly 1, the retained (st_dev,
     st_ino) identity, the exact retained size, and byte equality with the retained payload; then a
@@ -2322,7 +2357,8 @@ def _verified_unlink(dir_fd, name, ident, expected_bytes, label, outcome=None):
     "unlinked" records, by OBSERVATION (a no-follow stat of the name, never bookkeeping the
     interruption could have skipped), whether the name no longer binds the verified record (True),
     still does (False), or could not be observed (None). The interruption itself propagates
-    unchanged."""
+    unchanged. PR D fix 7: once the unlink returns, `label` is appended to `removed` (a list) when
+    given, BEFORE the directory fsync, so a removal whose fsync then fails is still reported."""
     with _FdOwner() as owner:
         try:
             fd = owner.adopt(os.open(name, _FILE_READ_FLAGS, dir_fd=dir_fd))
@@ -2340,6 +2376,8 @@ def _verified_unlink(dir_fd, name, ident, expected_bytes, label, outcome=None):
     try:
         os.unlink(name, dir_fd=dir_fd)
         step = "fsync"
+        if removed is not None:
+            removed.append(label)
         os.fsync(dir_fd)
         if outcome is not None:
             outcome["done"] = True
@@ -2410,11 +2448,13 @@ def _recorded_operation(active_bytes):
     return tomllib.loads(active_bytes.decode("utf-8"))["operation"]
 
 
-def _tag_removals(exc, recovered, recovered_operation, staging_removed):
-    """PR D fix 6: record on an acquisition's OpLockError what it had removed before failing."""
+def _tag_removals(exc, recovered, recovered_operation, staging_removed, created_removed):
+    """PR D fix 6: record on an acquisition's OpLockError what it had removed before failing (fix
+    7: the names it had itself created and then unlinked included)."""
     exc.recovered = tuple(recovered)
     exc.recovered_operation = recovered_operation
     exc.staging_removed = tuple(staging_removed)
+    exc.created_removed = tuple(created_removed)
     return exc
 
 
@@ -2437,9 +2477,17 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
     record, so an interrupted recovery leaves only a lone active record that a later recovery can
     clear. Returns an OpCapability whose `recovered` names the stale records this acquisition
     cleared, in delete order (empty when it cleared none), `recovered_operation` the operation their
-    confirmed-dead holder recorded, and `staging_removed` the staging leftovers it removed; raises
-    OpLockError fail-closed on everything else, carrying the same three reports of what it had
-    removed before it failed (PR D fix 6). An
+    confirmed-dead holder recorded, `staging_removed` the staging leftovers it removed, and
+    `created_removed` the names it created and then unlinked itself (its publications' retired
+    staging names); raises OpLockError fail-closed on everything else. Which of those errors carry
+    the same four reports of what it had removed before it failed (PR D fix 6; fix 7): every
+    OpLockError raised by the protected body (_acquire_body, from the store-root open through the
+    capability's build, the unwind's own removals included, and the unwind's replacement error)
+    and the forked-continuation refusal (_refuse_continuation). The validation raises carry NONE:
+    the containment probe, the `recover` type check, the empty-nodename refusal, the holder and
+    operation field checks, and _acquire_body's store-resolution refusal, all raised before any
+    removal step; nor does an exception a signal handler raises when a deferred signal is
+    delivered (the handler's own). An
     interruption (a BaseException that is not an Exception) propagates as itself after the unwind.
     Everything after the argument validation runs with the Python-handled signals deferred (fix
     round 5): a signal arriving meanwhile is delivered only once the acquisition has either failed
@@ -2563,7 +2611,12 @@ def _refuse_continuation(cap, acquirer_pid):
     inherited descriptor copies, under its own deferral, then raise the refusal. The message states
     only what this refusal did (fix round 9, claude LOW): a forward step the continuation ran
     before reaching the hand-off is not observed here, and surfaces as the acquirer's own failure.
-    An interruption a close step raised propagates as itself, carrying the refusal as a note."""
+    An interruption a close step raised propagates as itself, carrying the refusal as a note.
+    PR D fix 7: the refusal carries the capability's four reports of what the acquisition removed
+    (_tag_removals). No removal runs in a forked continuation (each removal step is gated on the
+    acquirer's pid, _gated_step, and the failure cleanup and the unwind skip every unlink in a
+    forked child), so each reported removal is one the acquiring process performed before the
+    fork, and a caller never reads this refusal as an acquisition that removed nothing."""
     done = {}
     with _SignalDeferral(): _close_inherited(cap, done)
     text = ("acquisition refused in a forked continuation (pid {}) of the acquiring process (pid "
@@ -2574,7 +2627,8 @@ def _refuse_continuation(cap, acquirer_pid):
     if done["interrupt"] is not None:
         done["interrupt"].add_note("opf-oplock: " + text)
         raise done["interrupt"]
-    raise OpLockError(text)
+    raise _tag_removals(OpLockError(text), cap.recovered, cap.recovered_operation,
+                        cap.staging_removed, cap.created_removed)
 
 
 def _release_unreturned_forked(cap, exc, what):
@@ -2762,6 +2816,10 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
     recovered_operation = None
     removed_stale = []
     staging_removed = []
+    # PR D fix 7: the names this acquisition itself creates and then unlinks (its publications'
+    # retired staging names, a failed publication's cleanup, the unwind's removal of its own new
+    # records), so every unlink it performs is reported.
+    created_removed = []
     try:
         # Fix round 4: no nested try statement follows the first adoption in this body. A try
         # statement's own line lies outside every enclosing exception range, so an interruption
@@ -2879,11 +2937,13 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
         # lease's publication refuses a forked continuation before its first syscall.
         active_fd, active_ident = _create_control_file(ctl_fd, ACTIVE_NAME, active_payload,
                                                        "active record", owner=owner,
-                                                       publisher_pid=acquirer_pid)
+                                                       publisher_pid=acquirer_pid,
+                                                       removed=created_removed)
         lease_attempted = True
         lease_fd, lease_ident = _create_control_file(machine_fd, _opf_check.LEASE_NAME,
                                                      lease_payload, "lease", owner=owner,
-                                                     publisher_pid=acquirer_pid)
+                                                     publisher_pid=acquirer_pid,
+                                                     removed=created_removed)
 
         ctl_st = os.fstat(ctl_fd)
         # Close the store-root descriptor INSIDE the protected body, before ownership of the
@@ -2904,12 +2964,14 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
             active_ident=active_ident, lease_ident=lease_ident,
             active_bytes=active_payload, lease_bytes=lease_payload,
             acquirer_pid=acquirer_pid, acquirer_pid_start=acquirer_start, recovered=recovered,
-            recovered_operation=recovered_operation, staging_removed=tuple(staging_removed))
+            recovered_operation=recovered_operation, staging_removed=tuple(staging_removed),
+            created_removed=tuple(created_removed))
         owner.transfer_all()               # the capability now owns every retained descriptor
         return cap
     except BaseException as exc:
         if isinstance(exc, OpLockError):
-            _tag_removals(exc, removed_stale, recovered_operation, staging_removed)
+            _tag_removals(exc, removed_stale, recovered_operation, staging_removed,
+                          created_removed)
         # A capability already built and handed every descriptor (transfer_all is one assignment,
         # so the owner is then empty) but interrupted before it was returned is unwound like any
         # other failure: its descriptors come back to the owner in one step, closed below after the
@@ -2952,6 +3014,9 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
         # still present, or a presence check that cannot answer, KEEPS the owner-bearing active
         # record beside it, never leaving the lone owner-less lease no recovery can clear.
         unwind = []
+        # PR D fix 7: the unwind's own verified removals, reported (as created_removed) on the
+        # error this unwind raises.
+        unwound = []
         interrupt = None
         lease_removed = True
         lease_why = "the lease was not removed"
@@ -2959,7 +3024,7 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
             lease_outcome = {}
             try:
                 _verified_unlink(machine_fd, _opf_check.LEASE_NAME, lease_ident, lease_payload,
-                                 "lease (unwind)", lease_outcome)
+                                 "lease (unwind)", lease_outcome, unwound)
             except _UnlinkNotDurable as uexc:
                 # Fix round 8: the lease name WAS removed but not durably; the conservative order
                 # still keeps the active record, and the message says which step failed.
@@ -3005,7 +3070,7 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
             else:
                 try:
                     _verified_unlink(ctl_fd, ACTIVE_NAME, active_ident, active_payload,
-                                     "active record (unwind)")
+                                     "active record (unwind)", removed=unwound)
                 except (OpLockError, OSError) as uexc:
                     unwind.append(str(uexc))
                 except BaseException as uexc:
@@ -3030,6 +3095,7 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
             unwind.append(_unconfirmed_closes(len(close_unconfirmed), "control descriptor"))
         if interrupt is None:
             interrupt = close_interrupt
+        created_removed.extend("its own new " + n for n in unwound)
         if interrupt is not None and isinstance(exc, Exception):
             # An interruption raised by the unwind itself is re-raised after the full cleanup.
             detail = "; additionally the unwind failed: {}".format("; ".join(unwind)) if unwind else ""
@@ -3039,9 +3105,13 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
         if unwind and isinstance(exc, Exception):
             raise _tag_removals(OpLockError("{}; additionally the unwind failed: {}".format(
                 exc, "; ".join(unwind))), removed_stale, recovered_operation,
-                staging_removed) from exc
+                staging_removed, created_removed) from exc
         if unwind:
             exc.add_note("opf-oplock: additionally the unwind failed: {}".format("; ".join(unwind)))
+        if isinstance(exc, OpLockError):
+            # PR D fix 7: re-tagged after the unwind, so its own removals are reported too.
+            _tag_removals(exc, removed_stale, recovered_operation, staging_removed,
+                          created_removed)
         raise
 
 
@@ -4481,6 +4551,77 @@ def _t_x6_removal_reports(d, env):
     assert (getattr(contended, "recovered", None), getattr(contended, "recovered_operation", 0),
             getattr(contended, "staging_removed", None)) == ((), None, ()), \
         "a contended acquisition reports nothing removed"
+
+
+def _t_x7_every_unlink_reported(d, env):
+    """T-x7 (PR D fix 7): EVERY unlink an acquisition performs is reported. A capability names the
+    retired staging names of its own two publications (created_removed); a lease publication that
+    fails after the active record's publishes reports that staging retirement and the unwind's
+    removal of the new active record; a forked-continuation refusal carries the capability's reports
+    of the confirmed-dead records the acquisition removed. Before the fix the first failure carried
+    no report of either unlink and the continuation refusal carried none at all."""
+    root = _st_git_store(d, "repo", env)
+    active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
+    lease = _st_lease_path(root)
+
+    def own_staging(entry, name, label):
+        prefix = "the staging name ." + name + _STAGING_MARKER
+        suffix = " of its own {} publication".format(label)
+        return entry.startswith(prefix) and entry.endswith(suffix) \
+            and _is_staging_name(entry[len("the staging name "):-len(suffix)], name)
+
+    cap = acquire_operation(root, "op")
+    release_operation(cap)
+    got = getattr(cap, "created_removed", ())
+    assert len(got) == 2 and own_staging(got[0], ACTIVE_NAME, "active record") \
+        and own_staging(got[1], _opf_check.LEASE_NAME, "lease"), \
+        ("a capability reports its publications' retired staging names", got)
+    mod = sys.modules[__name__]
+    saved = mod._create_control_file
+
+    def _lease_fails(dir_fd, name, *a, **k):
+        if name == _opf_check.LEASE_NAME:
+            raise OpLockError("synthetic lease publication failure")
+        return saved(dir_fd, name, *a, **k)
+
+    mod._create_control_file = _lease_fails
+    failed = None
+    try:
+        acquire_operation(root, "op")
+    except OpLockError as exc:
+        failed = exc
+    finally:
+        mod._create_control_file = saved
+    assert failed is not None, "the synthetic lease publication failure must refuse"
+    assert (failed.recovered, failed.recovered_operation, failed.staging_removed) == ((), None, ()), \
+        "nothing stale was removed"
+    got = getattr(failed, "created_removed", ())
+    assert len(got) == 2 and own_staging(got[0], ACTIVE_NAME, "active record") \
+        and got[1] == "its own new active record (unwind)", \
+        ("the failure reports the staging retirement and the unwind's removal", got)
+    assert not os.path.exists(active) and not os.path.exists(lease), "the unwind left no record"
+    node = os.uname().nodename
+    dead_pid, dead_start = _st_reaped_child()
+    holder = _st_write_active_owned(root, dead_pid, dead_start, node, op_id="x7-op-id")
+    _st_write_lease_owned(root, holder=holder)
+    saved_handoff = mod._handoff
+    mod._handoff = lambda cap, acquirer_pid: mod._refuse_continuation(cap, acquirer_pid)
+    refused = None
+    try:
+        acquire_operation(root, "op", recover=True)
+    except OpLockError as exc:
+        refused = exc
+    finally:
+        mod._handoff = saved_handoff
+    assert refused is not None and "forked continuation" in str(refused), refused
+    assert (getattr(refused, "recovered", None), getattr(refused, "recovered_operation", None)) \
+        == (("lease", "active record"), "recovered-op"), \
+        "the continuation refusal carries the confirmed-dead records the acquisition removed"
+    assert getattr(refused, "staging_removed", None) == () \
+        and len(getattr(refused, "created_removed", ())) == 2, refused
+    os.unlink(active)                      # manual clear: the simulated continuation's records
+    os.unlink(lease)
+    release_operation(acquire_operation(root, "op"))
 
 
 def _t_r3_crosshost_refuses(d, env):
@@ -9335,7 +9476,8 @@ def self_test_isolated():
     the PR2 T-c/T-crit/T-med/T-low roster PLUS the PR2
     round-3 recovery-liveness witnesses (T-r3-live-recover-refuses, T-r3-dead-recover-proceeds,
     T-r3-crosshost-refuses), the PR D fix-6 removal-report witness (T-x6: an acquisition reports
-    what it removed, on its capability and on a failure after a removal), the LOW-4 coverage tests
+    what it removed, on its capability and on a failure after a removal) and its fix-7 extension
+    (T-x7: every unlink it performs, the forked-continuation refusal included), the LOW-4 coverage tests
     (T-c2-dirperms, T-c3-companion, T-h4-quote,
     T-c6-diffinode), the LOW-1 torn-write witness (T-low1-torn), and the recovery-hardening
     witnesses T-d1 to T-d5 (DEF-1 to DEF-5), and the round-2 witnesses T-r2-1 to T-r2-5 (recovery
@@ -9414,6 +9556,8 @@ def self_test_isolated():
         ("T-r3-dead recover PROCEEDS on a confirmed-dead holder", _t_r3_dead_recover_proceeds),
         ("T-x6 an acquisition reports what it removed, on success and on a failure after it",
          _t_x6_removal_reports),
+        ("T-x7 every unlink an acquisition performs is reported, the forked-continuation refusal "
+         "included", _t_x7_every_unlink_reported),
         ("T-r3-crosshost recover REFUSES a foreign-host holder", _t_r3_crosshost_refuses),
         ("T-c6/T-c7/T-med6 verified release preserves mismatches, legs collected",
          _t_c6_c7_med6_verified_release),
