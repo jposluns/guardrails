@@ -62,9 +62,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # Single-source the outcome model (U1) rather than re-declaring it, exactly as _opf_schema does.
 from _opf_store import VALID, INVALID, CANNOT_EVALUATE  # noqa: E402
 # Pure path constructors and names, never I/O: the adoption preimage home, the Move archive root and the
-# machine-store naming that a plan's preservation destinations and store identity are checked against.
+# machine-store naming that a plan's preservation destinations and store identity are checked against, and
+# the store-root control directories and pointers that no adoption destination may name.
 from _opf_store import (  # noqa: E402
-    ARCHIVE_REL, IMPORTED_REL, MANIFEST_NAME, RESERVED_MACHINE_SUBDIRS, WORKING_DIRNAME, retire_preimage)
+    ARCHIVE_REL, IMPORTED_REL, LOCAL_POINTER_REL, MANIFEST_NAME, POINTER_REL, RESERVED_MACHINE_SUBDIRS,
+    STORE_ROOT_CONTROL_DIRS, WORKING_DIRNAME, evidence_run, retire_preimage)
 # The shared bare SemVer grammar, for the release and prompt-pack versions a plan binds.
 from _semver import _parse as _parse_semver  # noqa: E402
 # The closed journal effect vocabulary, imported as INERT DATA (a tuple of primitive names). This is a
@@ -135,6 +137,9 @@ ENFORCEMENT_INSTALL_OPS = ("install-pack", "plant-governance", "enable-hook")
 # legacy imports tree homes 1 already reserves. The plan's own preservation copies under this run's adoption
 # archive and move destinations strictly beneath the Move archive are the only writes that land there.
 ADOPTION_CONTROL_ROOTS = tuple(WORKING_DIRNAME + "/" + name for name in RESERVED_MACHINE_SUBDIRS)
+# The store tree's own ignore file, where homes-2 init renders the managed block (spec 4.2). No adoption
+# destination may name it; composed under the store root like the control area.
+STORE_GITIGNORE_REL = WORKING_DIRNAME + "/.gitignore"
 # The import policy (spec 8.3 and 14.1): an absent historical field is accounted for by an `unrecorded` row
 # carrying one of these closed reasons, unmappable text is retained verbatim, and the skip policy says
 # whether a migrate-disposed source may complete through a recorded skip instead of an imported record.
@@ -231,6 +236,8 @@ _REVISION_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 # control roots, directory homes, adoption preimage homes and receipt check compose under store_root, while
 # source paths are spelled from the product root; the planner emits store_root ".", where the two frames
 # coincide, so the product-relative retire_preimage homes it records already satisfy the composed check.
+# validate_plan refuses any other store_root, so a plan is never judged in a root apply does not share
+# (apply resolves protected destinations at the product root).
 
 
 # --- result carrier (the U1 ManifestValidation / U2 RecordValidation idiom) --------------------------
@@ -852,9 +859,10 @@ def validate_plan(plan, homes=1):
     """Validate an AdoptionPlan (`opf.adoption.plan/v2`). A non-table is CANNOT-EVALUATE; an unknown
     product, a per-op out-of-vocabulary name, or an out-of-vocabulary binding token (the store's adoption
     kind, a source disposition, an enforcement platform or means, a completion check, the retirement rule,
-    an import-policy token) propagates CANNOT-EVALUATE; any other schema violation is INVALID. `homes` is
-    the store's active homes generation, applied to every op row as validate_op applies it and to every
-    source path."""
+    an import-policy token) propagates CANNOT-EVALUATE; any other schema violation is INVALID. The store
+    identity's store_root must be the product root ".", the one root the planner freezes and apply resolves.
+    `homes` is the store's active homes generation, applied to every op row as validate_op applies it and to
+    every source path."""
     if not isinstance(plan, dict):
         return _cannot("adoption plan is not a table")
     findings = []
@@ -989,6 +997,64 @@ def _in_control_area(path, root="."):
                for area in (_compose(root, name) for name in ADOPTION_CONTROL_ROOTS))
 
 
+def protected_destination(path, run_id=None, root="."):
+    """Why a product-relative path is a protected destination, or None when it is not. The planner
+    (validate_plan, for every move destination and archive preservation copy) and the apply shell
+    (_opf_adopt_apply.check_apply_ops, for every journal operand) both call this ONE predicate, so for any
+    one path it gives both sides the same answer. That is the whole parity claim: each side also applies
+    its own other rules, and the plan side's (its path shapes, the store-tree Move archive rule, the
+    control-area effect rule) may refuse a destination apply admits, which is the safe direction.
+    Protected: any path that is not a normalized, contained relative file path (_is_contained_filepath: an
+    empty, `.` or `..` segment, an absolute or backslash form, or a control character), refused here
+    whatever its callers already filter; a `.git` or `.aiqt` component at any depth
+    (STORE_ROOT_CONTROL_DIRS: the version-control area and AIQT's tree, the legacy adoption journal
+    included); the product-root pointers `.opf.toml` and `.opf.local.toml` (spec 4.3); the store control
+    area (ADOPTION_CONTROL_ROOTS, spec 14.2) other than strictly beneath this run's own adoption archive,
+    this run's own evidence bundle or the Move archive root; and the store tree's `.gitignore`. The control
+    area and `.gitignore` compose under the store root `root`; the pointers stay at the product root.
+    Protected names compare case-insensitively (str.casefold), so on a case-insensitive filesystem `.GIT/x`,
+    `.OPF.toml` or `.Working/staging/x` is protected too; the three exemptions match only their exact
+    spelling, so a case variant of an exempt home is protected.
+
+    DISCLOSED-RESIDUAL (disclose-guard-residuals): the planner applies this predicate to the destinations
+    its dispositions name (move destinations, archive preservation copies), not to caller-supplied op rows
+    (create-file, install-pack, plant-governance, render-views, init-store, record-adoption, enable-hook,
+    repoint-consumer) or source removals. Apply refuses every one of those at a protected path, so such a
+    plan fails closed at apply; the op slices that make those rows executable settle their own
+    exceptions. casefold is neither Unicode normalization nor every filesystem's case table: a filesystem
+    whose case mapping casefold does not share (for example one mapping U+0131, dotless i, to `I`) can
+    still alias a protected name."""
+    if not _is_contained_filepath(path):
+        return ("{!r} is not a normalized, contained relative file path (an empty, `.` or `..` segment, an "
+                "absolute or backslash form, or a control character), so it is never an adoption "
+                "destination or apply operand".format(path))
+    folded = path.casefold()
+    parts = folded.split("/")
+    for name in STORE_ROOT_CONTROL_DIRS:
+        if name.casefold() in parts:
+            return ("{!r} names the store control root {}/ at some depth: the version-control area and the "
+                    ".aiqt tree, the legacy adoption journal included, are never adoption destinations or "
+                    "apply operands".format(path, name))
+    for pointer in (POINTER_REL, LOCAL_POINTER_REL):
+        if _is_under(folded, pointer.casefold()):
+            return "{!r} is the store pointer {}, never an adoption destination (spec 4.3)".format(
+                path, pointer)
+    exempt = [_compose(root, ARCHIVE_REL + "/moved")]
+    home = _preimage_home(run_id, "f")
+    if home is not None:
+        exempt += [_compose(root, home.rsplit("/", 1)[0]), _compose(root, evidence_run("adoption", run_id))]
+    areas = [_compose(root, name).casefold() for name in ADOPTION_CONTROL_ROOTS]
+    if (any(_is_under(folded, area) or _is_under(area, folded) for area in areas)
+            and not any(path.startswith(e + "/") for e in exempt)):
+        return ("{!r} lies in the reserved store control area: adoption writes land there only beneath this "
+                "run's own adoption archive, its own evidence bundle or the Move archive root, and another "
+                "run's archive or bundle is immutable (spec 14.2, 4.2)".format(path))
+    gitignore = _compose(root, STORE_GITIGNORE_REL)
+    if _is_under(folded, gitignore.casefold()):
+        return "{!r} is the store tree's {}, never an adoption destination (spec 4.2)".format(path, gitignore)
+    return None
+
+
 def _validate_plan_bindings(plan, missing, findings):
     """Validate the plan-v2 binding tables (spec 14.1): the store identity, the tool release with its
     independent anchor, the prompt pack, the enforcement pack per platform with residuals, the completion
@@ -1001,6 +1067,12 @@ def _validate_plan_bindings(plan, missing, findings):
                 return _cannot("plan store.adoption {!r} is outside ADOPTION_KINDS".format(st["adoption"]))
             if "store_root" in st and not _is_contained_relpath(st["store_root"]):
                 findings.append("plan store.store_root is not a contained relative path")
+            elif "store_root" in st and st["store_root"] != ".":
+                # the planner freezes the product root and refuses a store outside it, and apply resolves
+                # protected destinations there, so a plan rooted elsewhere is refused rather than judged in
+                # a root apply does not share
+                findings.append("plan store.store_root {!r} is not the product root '.'".format(
+                    st["store_root"]))
             if "machine_rel" in st and not _is_machine_rel(st["machine_rel"]):
                 findings.append("plan store.machine_rel is not a direct, unreserved .working child")
     if "release" not in missing:
@@ -1139,7 +1211,8 @@ def _cross_check_plan(plan, missing, sources_clean, findings):
     effects the ops and sources name, those effects collide nowhere and write no control area, each keep,
     retire and move source matches exactly one register-unmanaged, retire-file or move-file row (and no such
     row lacks a source), a non-occupying move is preserved at its move destination, and the import scope is
-    exactly the migrate-disposed sources."""
+    exactly the migrate-disposed sources. No move destination and no archive preservation copy is a
+    protected destination (protected_destination, the one predicate the apply shell also applies)."""
     ops = plan["ops"]
     if any(row["op"] == "import-file" for row in ops):
         findings.append("plan carries an import-file row, but a migrate source is kept for post-adoption "
@@ -1147,18 +1220,33 @@ def _cross_check_plan(plan, missing, sources_clean, findings):
     frozen = _frozen_store(plan)
     root = frozen[0] if frozen is not None else "."
     tree, moved_root = _compose(root, WORKING_DIRNAME), _compose(root, ARCHIVE_REL + "/moved")
+    run_id = plan.get("run_id")
+    run_id = run_id if isinstance(run_id, str) and _RUN_ID_RE.match(run_id) else None
     for row in ops:
         # strictly beneath: the Move archive root is the directory later moves land in, never a file target
         if (row["op"] == "move-file" and _is_under(row["destination"], tree)
                 and not row["destination"].startswith(moved_root + "/")):
             findings.append("plan move-file destination {!r} is inside the store tree but not beneath "
                             "{}/ (spec 14.2)".format(row["destination"], moved_root))
+        # the destination predicate apply shares (protected_destination): no move lands on a protected path
+        protected = None
+        if row["op"] == "move-file":
+            protected = protected_destination(row["destination"], run_id, root)
+        if protected is not None:
+            findings.append("plan move-file destination is protected: " + protected)
     _store_identity_findings(plan, findings)
     _registration_chain_findings(plan, findings)
     _enforcement_install_findings(plan, findings)
     if not sources_clean:
         return                          # the source rows already carry a finding; nothing sound to compare
     sources = plan["sources"]
+    for row in sources:
+        # an archive preservation copy is a destination too: the shared predicate refuses a protected one
+        if row["disposition"] in ("retire", "migrate") or row["occupying"] is True:
+            protected = protected_destination(row["preservation"], run_id, root)
+            if protected is not None:
+                findings.append("plan source {!r} preservation is protected: {}".format(
+                    row["path"], protected))
     effects = derive_effects(ops, sources, store_manifest(plan.get("store")))
     if "effects" not in missing and plan["effects"] != effects:
         findings.append("plan effects do not equal the effects its ops and sources name")
@@ -2404,6 +2492,9 @@ def self_test():
                           "old_digest": _D5, "new_digest": _D4}
     _old_archive = ".working/archive/adoption/adopt-20250101T000000Z-0123456789abcdef/old.md"
     # A store rooted at `sub`: every store op names it, and its one source moves out of the store tree.
+    # validate_plan refuses it (K1 fix 1: the planner freezes store_root "." and apply resolves protected
+    # destinations there, so no plan is judged in a root apply does not share). The root-composed rules
+    # still take the frozen root, so _sub_findings runs them below that gate to keep them discriminated.
     sub_plan = copy.deepcopy(base_plan)
     for table in (sub_plan["store"], sub_plan["ops"][1], sub_plan["ops"][2]):
         table["store_root"] = "sub"
@@ -2413,7 +2504,17 @@ def self_test():
     sub_plan["sources"][0].update(disposition="move", preservation="elsewhere.md")
     sub_plan["effects"] = derive_effects(sub_plan["ops"], sub_plan["sources"],
                                          store_manifest(sub_plan["store"]))
-    check("plan-v2-sub-store-valid", validate_plan(sub_plan).status == VALID)
+    check("plan-v2-sub-store-root-refused", validate_plan(sub_plan).status == INVALID)
+
+    def _sub_findings(base, mutate=lambda p: None):
+        p = copy.deepcopy(base)
+        mutate(p)
+        p["effects"] = derive_effects(p["ops"], p["sources"], store_manifest(p["store"]))
+        findings = []
+        _validate_plan_sources(p["sources"], p["run_id"], 1, findings, _frozen_store(p)[0])
+        _cross_check_plan(p, [], not findings, findings)
+        return findings
+    check("plan-v2-sub-store-composed-rules-clean", _sub_findings(sub_plan) == [])
 
     def _sub_move(destination):
         return lambda p: (p["ops"][0].update(destination=destination),
@@ -2449,21 +2550,22 @@ def self_test():
             ("hook-in-control-area", base_plan, lambda p: p["ops"].append(_hook(".working/staging/x.json"))),
             # 16d: a first adoption carries the init-store row that scaffolds its store.
             ("first-adoption-without-init", base_plan, lambda p: p["ops"].pop(1)),
-            # 16e: the Move archive rule composes under a non-root store_root.
-            ("move-into-sub-store-outside-moved", sub_plan, _sub_move("sub/.working/toml/moved.md")),
             # 16f: init-store scaffolds only inside the store tree.
             ("init-member-at-version", base_plan, lambda p: p["ops"][1]["members"].append(
                 {"path": "VERSION", "digest": _D5})),
             ("init-member-outside-store", base_plan, lambda p: p["ops"][1]["members"].append(
                 {"path": "src/app.py", "digest": _D5}))):
         check("plan-v2-{}-invalid".format(label), _mutated(base, mutate, True) == INVALID)
+    # 16e: the Move archive rule composes under a non-root store_root (below the root gate).
+    check("plan-v2-move-into-sub-store-outside-moved-invalid",
+          _sub_findings(sub_plan, _sub_move("sub/.working/toml/moved.md")) != [])
     check("plan-v2-effects-omit-registration-invalid",
           _mutated(full, lambda p: p["effects"]["replacements"].clear()) == INVALID)
     check("effects-registration-rewrites-manifest", full["effects"]["replacements"] == [
         {"path": _MANIFEST, "old_digest": _D0, "new_digest": _D4}])
     # Counter-vectors: two keeps chain their registrations, a consumer outside the sources may be repointed,
-    # a re-adoption of a resolved store takes no init-store, and a move beneath the sub store's Move archive
-    # plans.
+    # a re-adoption of a resolved store takes no init-store, and (below the root gate) a move beneath the sub
+    # store's Move archive plans.
     for label, base, mutate in (
             ("two-registrations-chain", full, lambda p: (
                 p["sources"].append({"path": "adopter/KEEP2.md", "digest": _D5, "disposition": "keep",
@@ -2472,15 +2574,17 @@ def self_test():
                                  "new_digest": _D7}))),
             ("repoint-other-consumer", base_plan, lambda p: p["ops"].append(_repoint("docs/consumer.md"))),
             ("re-adoption-without-init", base_plan, lambda p: (
-                p["ops"].pop(1), p["store"].update(adoption="re-adoption"))),
-            ("move-into-sub-store-moved", sub_plan, _sub_move("sub/.working/archive/moved/moved.md"))):
+                p["ops"].pop(1), p["store"].update(adoption="re-adoption")))):
         check("plan-v2-{}-valid".format(label), _mutated(base, mutate, True) == VALID)
+    check("plan-v2-move-into-sub-store-moved-valid",
+          _sub_findings(sub_plan, _sub_move("sub/.working/archive/moved/moved.md")) == [])
 
     # 17: U8 fix round 3 discriminators. Each refusal vector FAILS if its corresponding fix is reverted; the
     # re-adoption keep-chain counter-vector passes either way and guards against over-refusal.
-    # 17a (fix 1): preservation destinations compose under a non-root store_root. A retire source of the
-    # `sub` store is preserved inside the frozen store, at sub/.working/archive/adoption/<run>/..., and a
-    # preservation at the product-root archive home, outside the frozen store, is refused (spec 14.2).
+    # 17a (fix 1): preservation destinations compose under a non-root store_root (below the root gate, see
+    # 16). A retire source of the `sub` store is preserved inside the frozen store, at
+    # sub/.working/archive/adoption/<run>/..., and a preservation at the product-root archive home, outside
+    # the frozen store, is refused (spec 14.2).
     sub_retire = copy.deepcopy(sub_plan)
     sub_retire["ops"][0] = {"op": "retire-file", "path": "legacy/RULES.md",
                             "preimage_digest": "sha256:" + "6" * 64}
@@ -2488,10 +2592,9 @@ def self_test():
                                     preservation="sub/" + home("legacy/RULES.md"))
     sub_retire["effects"] = derive_effects(sub_retire["ops"], sub_retire["sources"],
                                            store_manifest(sub_retire["store"]))
-    check("plan-v2-sub-store-preserved-in-store-valid", validate_plan(sub_retire).status == VALID)
-    check("plan-v2-sub-store-preservation-outside-store-invalid", _mutated(
-        sub_retire, lambda p: p["sources"][0].update(preservation=home("legacy/RULES.md")), True)
-        == INVALID)
+    check("plan-v2-sub-store-preserved-in-store-valid", _sub_findings(sub_retire) == [])
+    check("plan-v2-sub-store-preservation-outside-store-invalid", _sub_findings(
+        sub_retire, lambda p: p["sources"][0].update(preservation=home("legacy/RULES.md"))) != [])
     # 17b (fix 2): a file at the frozen store manifest is created only by init-store's scaffold. A
     # re-adoption of a resolved store (no init-store) whose program also creates the manifest would fork
     # the registration chain's one rewrite, so it is refused; the same re-adoption without that creation
@@ -2506,6 +2609,40 @@ def self_test():
     check("plan-v2-re-adoption-keep-chain-valid", _mutated(re_create, lambda p: None, True) == VALID)
     check("plan-v2-re-adoption-manifest-creation-invalid",
           _mutated(re_create, lambda p: p["ops"].append(_create(_MANIFEST)), True) == INVALID)
+
+    # 18: K1 fix round 1. Each refusal vector FAILS if its fix is reverted; the counter-vectors guard the
+    # predicate against over-refusal. (Fix 1, the product-root store_root gate, is plan-v2-sub-store-root-
+    # refused in 16.)
+    _rid = base_plan["run_id"]
+
+    def _protected(path):
+        """protected_destination's reason, or None. A raise is no reason: the predicate itself refuses
+        every malformed path rather than relying on its callers' filter."""
+        try:
+            return protected_destination(path, _rid)
+        except Exception:  # noqa: BLE001
+            return None
+    # 18a (fix 2): protected names compare case-insensitively, so a case-insensitive filesystem cannot
+    # alias .git, .aiqt, the pointers, the control area or the store .gitignore. The exemptions match only
+    # their exact spelling, so a case variant of the Move archive or of this run's homes is protected too.
+    for path in (".GIT/x", "docs/.Git/hooks/pre-commit", ".AIQT/x.md", "docs/.Aiqt/x.md", ".OPF.toml",
+                 ".Opf.Local.toml", ".OPF.TOML/x", ".Working/staging/x", ".WORKING/journals/x",
+                 ".working/Imports/x", ".working/ARCHIVE/adoption/x", ".Working/.gitignore",
+                 ".working/.GITIGNORE", ".Working/archive/moved/x.md"):
+        check("protected-casefold-" + path, _protected(path) is not None)
+    for path in (".working/archive/moved/legacy/x.md", retire_preimage(_rid, "legacy/x.md"),
+                 evidence_run("adoption", _rid) + "/x.md", ".working/TODO.md", "docs/gitnotes.md",
+                 "docs/.github/x.yml", "docs/.aiqtx/x.md", "opf.toml", ".working/gitignore"):
+        check("protected-ordinary-admitted-" + path, _protected(path) is None)
+    # 18b (fix 3): the predicate refuses any path that is not a normalized, contained relative file path,
+    # so a traversal spelling cannot reach the exemptions or step past a protected name.
+    for label, path in (("dotdot-into-control", ".working/archive/moved/../staging/x"),
+                        ("dotdot-to-pointer", ".working/archive/moved/../../.opf.toml"),
+                        ("dotdot-escape", "../outside.md"), ("absolute", "/etc/x"),
+                        ("backslash", "docs\\.git\\x"), ("empty", ""), ("repeated-slash", "docs//x.md"),
+                        ("dot-segment", "./docs/x.md"), ("trailing-slash", "docs/"), ("dot", "."),
+                        ("drive", "C:/x"), ("control-char", "docs/x\n.md"), ("non-str", None)):
+        check("protected-malformed-" + label, _protected(path) is not None)
 
     from _opf_adopt_observe import self_test as observing_self_test
     observing_rc = observing_self_test(vectors_only=True)
