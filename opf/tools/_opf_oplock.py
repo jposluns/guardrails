@@ -2970,9 +2970,11 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
         owner.transfer_all()               # the capability now owns every retained descriptor
         return cap
     except BaseException as exc:
-        # PR D fix 16: an OpLockError is tagged with the removal reports only after every resource
-        # below is released (the records removed, the descriptors closed, the anchor's lock given
-        # up), so no report-building step runs ahead of a release it could skip.
+        # PR D fix 16: the removal-report tagging runs after this process's own releases (in a
+        # forked child, after closing its inherited descriptors, never freeing the acquirer's
+        # records or lock), so tagging cannot skip a release; failure-message building inside
+        # the unwind is covered by the allocation-failure disclosure in _opf_record.py's module
+        # docstring.
         # A capability already built and handed every descriptor (transfer_all is one assignment,
         # so the owner is then empty) but interrupted before it was returned is unwound like any
         # other failure: its descriptors come back to the owner in one step, closed below after the
