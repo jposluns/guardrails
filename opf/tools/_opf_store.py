@@ -1240,8 +1240,7 @@ def _validate_base(base, findings):
             # tooling MUST refuse a 1.3.0 (or any above-supported) declaration rather than certify it
             # under legacy checks (spec 9.2). The one exception is the exact reserved homes-2 declaration
             # pair, spec_version 2.0.0 with homes = 2 (spec 4.2): homes_generation() gates its activation
-            # on SUPPORTED_HOMES, and the homes-migration planner must keep recognizing an
-            # already-migrated store idempotently. Both mismatch findings share this ONE emission site:
+            # on SUPPORTED_HOMES. Both mismatch findings share this ONE emission site:
             # the census in _opf_manifest_regressions pins the validator's reviewed emission-site set, and
             # a message selected above a shared censused append keeps each wording reviewable without
             # widening that set.

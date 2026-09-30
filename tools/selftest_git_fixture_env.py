@@ -1457,7 +1457,6 @@ OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
     "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",
     "opf/tools/check_opf_homes.py": "Homes contract and schema boundary vectors.",
-    "opf/tools/check_opf_homes_migrate.py": "Homes planning over materialized store fixtures.",
     "opf/tools/check_opf_init_contract.py": "Source-free contract matcher vectors.",
     "opf/tools/check_opf_init_observe.py": "Observation vectors with mocked git subprocesses.",
     "opf/tools/check_opf_init_p0.py": "P0 store validation and runner registration vectors.",

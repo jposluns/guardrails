@@ -19,8 +19,7 @@ over them, returning that engine's 0/1/2 contract (a NOT-ADOPTED root reports NO
 with `--require-store`, the enforcement-pack CI floor, it is a cannot-evaluate and exits 2 instead, so a
 repository whose store was removed cannot pass CI vacuously). Doctor is read-only; its
 observation gather is the caller-side git seam validate_store itself never touches. `upgrade` HAS landed
-(spec 9.2): `opf upgrade [--root DIR] [--homes-plan]`. With `--homes-plan`, it prints the homes-generation
-migration plan read-only and exits without upgrading. Otherwise it is the in-place, additive, idempotent
+(spec 9.2): `opf upgrade [--root DIR]` is the in-place, additive, idempotent
 upgrade from 1.0.0 or 1.1.0 to 1.2.0. The 1.1.0 schema delta changes only spec_version; declared views
 are then regenerated, so a stale committed view can change. The 1.0.0 path also applies the earlier
 schema delta
@@ -10598,7 +10597,6 @@ def _cmd_upgrade(rest):
     pre-existing untracked or ignored content in that scope refuses before mutation.""".format(
         to=_UPGRADE_TO)
     root = None
-    homes_plan = False
     i = 0
     while i < len(rest):
         tok = rest[i]
@@ -10616,28 +10614,11 @@ def _cmd_upgrade(rest):
                 return EXIT_MALFORMED
             root = val
             i += 2
-        elif tok == "--homes-plan":
-            if homes_plan:
-                print("opf upgrade: --homes-plan given more than once", file=sys.stderr)
-                return EXIT_MALFORMED
-            homes_plan = True
-            i += 1
         else:
             print("opf upgrade: unrecognized argument {!r}".format(tok), file=sys.stderr)
             return EXIT_MALFORMED
     root = root if root is not None else "."
     try:
-        if homes_plan:
-            # Deliberately lazy: existing schema upgrades and other verbs do not
-            # load the new planner. The complete text is formed before printing.
-            import _opf_homes_migrate
-            try:
-                text = _opf_homes_migrate.plan_homes_migration(root)
-            except _opf_homes_migrate.MigrationPlanError as exc:
-                raise _UpgradeError(
-                    "homes-plan cannot evaluate: {}".format(exc)) from exc
-            print(text, end="")
-            return EXIT_OK
         return _upgrade_run(root)
     except (_UpgradeError, _opf_write_guard.WriteGuardError) as exc:
         print("opf upgrade: refused: {}; exit 2".format(exc), file=sys.stderr)
@@ -11683,6 +11664,16 @@ def _cli_self_test():
                 # rides check_opf_upgrade.py --self-test end to end over a byte-pinned committed 1.0.0 store.
                 expect(["upgrade", "--root", not_adopted], EXIT_OK)
                 expect(["upgrade", "--root", broken], EXIT_MALFORMED)
+                # the upgrade parser accepts only one non-empty --root: the retired --homes-plan, a missing
+                # or empty --root, a repeated --root and an unknown option each exit 2, and the directory and
+                # file names under the fixture root after the loop match those before it (names only, compared
+                # once; the current directory an argument-less run would use is not checked)
+                tree_before = sorted((d, sorted(dn), sorted(fn)) for d, dn, fn in os.walk(base))
+                for bad in (["--homes-plan"], ["--root"], ["--root", ""],
+                            ["--root", not_adopted, "--root", not_adopted], ["--unknown"]):
+                    expect(["upgrade"] + bad, EXIT_MALFORMED)
+                if sorted((d, sorted(dn), sorted(fn)) for d, dn, fn in os.walk(base)) != tree_before:
+                    failures.append("a refused upgrade argument changed the fixture tree")
                 # absorb over the same synthetic roots: a NOT-ADOPTED root reports NOT APPLICABLE and returns
                 # 0 -- the wiring discriminator (reverting the absorb route sends `absorb` to the fail-closed
                 # KNOWN_VERBS branch, which returns 2 here, failing this case); a garbage store fails closed
