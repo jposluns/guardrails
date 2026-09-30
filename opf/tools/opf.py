@@ -7413,10 +7413,13 @@ def _watchdog_completion_case(mode):
         # 2.0 and True into 1). It carries NO guarantee for
         # multi-attribute combinations, conditions carried through
         # locals or other data flow, state never read in a branch
-        # test, or firing values not spelled as constants in the
-        # member's branch tests (constants pool across all of the
-        # member's tests and a truthiness read adds False and True,
-        # so such a value MAY still be driven, never guaranteed; a
+        # test, or firing values not spelled as constants in a
+        # branch-test comparison that reads that same attribute
+        # (constants pool per attribute across the member's tests,
+        # only from comparisons that read that attribute, and a
+        # truthiness read adds False and True, so such a value MAY
+        # still be driven, never guaranteed; a constant spelled only
+        # against another attribute is never pooled to this one; a
         # test such as `self.x != False` is the shape), and the
         # list closes with the exact
         # complement: EVERY spelling outside the grammar above
@@ -7525,9 +7528,11 @@ def _watchdog_completion_case(mode):
             # carries NO guarantee for multi-attribute combinations,
             # conditions carried through locals or other data flow,
             # state never read in a branch test, or firing values
-            # not spelled as constants in the member's branch tests
-            # (pooled constants and truthiness booleans MAY still
-            # drive one, never guaranteed; for example
+            # not spelled as constants in a branch-test comparison
+            # that reads that same attribute (constants pool per
+            # attribute, only from comparisons reading it, and
+            # truthiness booleans MAY still drive one, never
+            # guaranteed; for example
             # `self.x != False`), and the list closes with the exact
             # complement: EVERY spelling outside the grammar above
             # carries no derivation guarantee (any driven state may
