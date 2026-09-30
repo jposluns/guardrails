@@ -7385,7 +7385,10 @@ def _watchdog_completion_case(mode):
         # with the deviation, then through a cached member, on the
         # real member and on the QA38 mutant; a driver suspending
         # the observation; no free tool id; each state copy; a lost
-        # indentation and a marker's trailing whitespace).
+        # indentation and a marker's trailing whitespace); and the
+        # fix 33 vectors (an entry callback made to raise by its
+        # fixture, a caller's preregistered previous callback, a
+        # freed-then-retaken shared-name id).
         # -- leg 19 bound (two identical copies, fix 30) --
         # derived_overrides IS the authoritative grammar. Every case
         # runs under every fixture state derived_overrides returns
@@ -7398,9 +7401,15 @@ def _watchdog_completion_case(mode):
         # deviation the member must be entered, and at each entry --
         # each start of the member's own code object while its
         # driver runs, however the member is reached, observed on a
-        # free sys.monitoring tool id released on exit; a run whose
-        # observation cannot be held, or is not intact after its
-        # driver returns, fails -- the entry frame's self is the
+        # free sys.monitoring tool id taken under a name unique to
+        # the case; once its driver has returned, an id still
+        # carrying that name has its events cleared and is freed,
+        # and the caller's previous PY_START callback, returned
+        # when the check registered its own, is re-registered on
+        # it; an id freed and retaken under another name is left
+        # alone; a run whose observation cannot be held or is not
+        # intact after its driver returns, or whose entry callback
+        # itself raised, fails -- the entry frame's self is the
         # fixture, whose attribute under the deviation's key, read
         # once, must hold its value (type-aware) and the key must be
         # a name the member's compiled code, nested code included,
@@ -7419,10 +7428,17 @@ def _watchdog_completion_case(mode):
         # name from an object other than the fixture, or a member
         # read after entry that yields a value other than the entry
         # read's, or for an entry the interpreter does not report
-        # to that tool id: one made inside a trace, profile or
-        # monitoring callback, one made while a driver suspends the
-        # observation and restores it, or one of a copy of the
-        # member's code object.
+        # to that tool id as a PY_START of the member's own code
+        # object: one made inside a trace, profile or monitoring
+        # callback, one made while a driver suspends the
+        # observation and restores it, one of a copy of the
+        # member's code object, one made in another process, a
+        # forked child included, whose interpreter reports it only
+        # to that process's own copy of the observation, or a
+        # generator or coroutine resumption, which the interpreter
+        # reports as PY_RESUME, not PY_START -- only the first
+        # entry of a generator or coroutine is a start this check
+        # observes.
         # -- end of leg 19 bound --
         lifecycle_sites = set()
         for member_key in scope:
@@ -7478,9 +7494,15 @@ def _watchdog_completion_case(mode):
             # deviation the member must be entered, and at each entry --
             # each start of the member's own code object while its
             # driver runs, however the member is reached, observed on a
-            # free sys.monitoring tool id released on exit; a run whose
-            # observation cannot be held, or is not intact after its
-            # driver returns, fails -- the entry frame's self is the
+            # free sys.monitoring tool id taken under a name unique to
+            # the case; once its driver has returned, an id still
+            # carrying that name has its events cleared and is freed,
+            # and the caller's previous PY_START callback, returned
+            # when the check registered its own, is re-registered on
+            # it; an id freed and retaken under another name is left
+            # alone; a run whose observation cannot be held or is not
+            # intact after its driver returns, or whose entry callback
+            # itself raised, fails -- the entry frame's self is the
             # fixture, whose attribute under the deviation's key, read
             # once, must hold its value (type-aware) and the key must be
             # a name the member's compiled code, nested code included,
@@ -7499,10 +7521,17 @@ def _watchdog_completion_case(mode):
             # name from an object other than the fixture, or a member
             # read after entry that yields a value other than the entry
             # read's, or for an entry the interpreter does not report
-            # to that tool id: one made inside a trace, profile or
-            # monitoring callback, one made while a driver suspends the
-            # observation and restores it, or one of a copy of the
-            # member's code object.
+            # to that tool id as a PY_START of the member's own code
+            # object: one made inside a trace, profile or monitoring
+            # callback, one made while a driver suspends the
+            # observation and restores it, one of a copy of the
+            # member's code object, one made in another process, a
+            # forked child included, whose interpreter reports it only
+            # to that process's own copy of the observation, or a
+            # generator or coroutine resumption, which the interpreter
+            # reports as PY_RESUME, not PY_START -- only the first
+            # entry of a generator or coroutine is a start this check
+            # observes.
             # -- end of leg 19 bound --
             if not member_key.startswith("m:"):
                 return [{}]
@@ -8132,8 +8161,9 @@ def _watchdog_completion_case(mode):
         import dis
         unobserved_entries = (
             "the member's entries were not all observed: no free "
-            "sys.monitoring tool id, or the observation was not intact "
-            "when the driver returned (fix 32)")
+            "sys.monitoring tool id, the observation was not intact "
+            "when the driver returned, or the entry callback itself "
+            "failed (fix 32/33)")
         monitoring = sys.monitoring
         entry_event = monitoring.events.PY_START
         entry_tool_name = "opf leg 19 entry check"
@@ -8186,22 +8216,35 @@ def _watchdog_completion_case(mode):
                                               "LOAD_METHOD"))
             absent = object()
             entries = []
+            observation_failures = []
+            # fix 33 (QA54 codex MAJOR, claude MINOR 2): the case
+            # OWNS its id under a name unique to this case, so a
+            # freed-then-retaken id -- the shared prefix included --
+            # or a nested case's id is never mistaken for its own
+            case_tool_name = "%s %d" % (entry_tool_name, id(entries))
 
             def entered(started, offset):
                 # called in the entry frame: sys._getframe(1) is the
-                # member's own frame, its arguments already bound
-                frame = sys._getframe(1)
-                fixture = absent
-                if frame.f_code is started:
-                    fixture = frame.f_locals.get("self", absent)
-                entries.append(dict(
-                    (attr, getattr(fixture, attr, absent))
-                    for attr in state))
+                # member's own frame, its arguments already bound.
+                # fix 33 (QA54 codex BLOCKER): a failure HERE -- an
+                # attribute read raising, anything at all -- must
+                # never pass silently; it is recorded, and the check
+                # below fails the run on the record
+                try:
+                    frame = sys._getframe(1)
+                    fixture = absent
+                    if frame.f_code is started:
+                        fixture = frame.f_locals.get("self", absent)
+                    entries.append(dict(
+                        (attr, getattr(fixture, attr, absent))
+                        for attr in state))
+                except BaseException as exc:
+                    observation_failures.append(exc)
 
             tool = None
             for candidate in entry_tool_ids:
                 try:
-                    monitoring.use_tool_id(candidate, entry_tool_name)
+                    monitoring.use_tool_id(candidate, case_tool_name)
                 except ValueError:
                     continue
                 tool = candidate
@@ -8209,9 +8252,10 @@ def _watchdog_completion_case(mode):
             if tool is None:
                 raise AssertionError(unobserved_entries, label,
                                      "no free tool id")
-            outcome, intact = None, False
+            outcome, intact, previous = None, False, None
             try:
-                monitoring.register_callback(tool, entry_event, entered)
+                previous = monitoring.register_callback(
+                    tool, entry_event, entered)
                 monitoring.set_local_events(tool, member_code,
                                             entry_event)
                 try:
@@ -8219,18 +8263,31 @@ def _watchdog_completion_case(mode):
                                      fault, state)
                 except AssertionError as exc:
                     outcome = exc
-                intact = (monitoring.get_tool(tool) == entry_tool_name
+                intact = (monitoring.get_tool(tool) == case_tool_name
                           and monitoring.get_local_events(
                               tool, member_code) == entry_event)
             finally:
-                # release exactly the id this case took; an id a driver
-                # freed, and someone else then took, is left alone
-                if monitoring.get_tool(tool) == entry_tool_name:
+                # release exactly the id this case took; an id a
+                # driver freed, and someone else then took -- under
+                # the shared name included -- is left alone (fix 33)
+                if monitoring.get_tool(tool) == case_tool_name:
                     monitoring.set_local_events(tool, member_code, 0)
                     released = monitoring.register_callback(
                         tool, entry_event, None)
                     monitoring.free_tool_id(tool)
+                    # fix 33 (QA54 codex MAJOR): free_tool_id clears
+                    # the id's callbacks, so the caller's previous
+                    # PY_START callback -- registration needs no
+                    # claimed id -- is put back afterwards, restoring
+                    # the id exactly as this case found it
+                    if previous is not None:
+                        monitoring.register_callback(
+                            tool, entry_event, previous)
                     intact = intact and released is entered
+            if observation_failures:
+                raise AssertionError(unobserved_entries, label,
+                                     "the entry callback failed",
+                                     observation_failures)
             if not intact:
                 raise AssertionError(unobserved_entries, label,
                                      sorted(state))
@@ -8860,7 +8917,9 @@ def _watchdog_completion_case(mode):
 
         def suspending_driver(cancellation, fault, state):
             for tool in entry_tool_ids:
-                if monitoring.get_tool(tool) == entry_tool_name:
+                name = monitoring.get_tool(tool)
+                if name is not None and name.startswith(
+                        entry_tool_name):
                     monitoring.set_local_events(
                         tool, cached_finish.__code__, 0)
             clearing_driver(cancellation, fault, state)
@@ -8930,6 +8989,104 @@ def _watchdog_completion_case(mode):
                 for tool in entry_tool_ids] == tool_table, (
             "the entry check did not release its tool ids exactly "
             "(fix 32)", tool_table)
+        # fix 33 (QA54 codex BLOCKER): a deviation attribute whose
+        # read raises INSIDE the entry callback must fail the case.
+        # Pre-fix the entry went unrecorded, the raise surfaced as
+        # the driver's outward exception, and a nonempty deviation
+        # let the run pass silently.
+        class _QA54BrokenFixture(types.SimpleNamespace):
+            def __getattribute__(self, name):
+                if name == "armed":
+                    raise RuntimeError(
+                        "entry attribute read failed (fix 33)")
+                return super().__getattribute__(name)
+
+        def callback_faulting_driver(cancellation, fault, state):
+            # the first entry holds the deviation; the second enters
+            # through a fixture whose read raises in the callback
+            emit._FixtureProcess._finish_close(
+                finish_fake(None, state))
+
+            def fake_close(fd):
+                if fd == 987006:
+                    raise fault
+
+            broken = _QA54BrokenFixture(**vars(
+                finish_fake(cancellation, state, pidfd=987006)))
+            with patch.object(os, "close", fake_close):
+                cached_finish(broken)
+
+        with patch.dict(behavioural_drivers,
+                        dict([(held_case, callback_faulting_driver)])):
+            entry_red([held_case],
+                      dict([(held_case[0], [dict(armed=True)])]),
+                      behavioural_overwrites, unobserved_entries,
+                      "raising entry callback")
+        # fix 33 (QA54 codex MAJOR): a PY_START callback a caller
+        # registered on the id before the case -- registration needs
+        # no claimed id -- must be back, exactly, once the case has
+        # released the id; pre-fix it was discarded on registration
+        # and cleared on release
+        preregistered_entries = []
+
+        def preregistered_callback(started, offset):
+            preregistered_entries.append(started)
+
+        pre_tool = next(tool for tool in entry_tool_ids
+                        if monitoring.get_tool(tool) is None)
+        monitoring.register_callback(pre_tool, entry_event,
+                                     preregistered_callback)
+        try:
+            drive_matrix([held_case],
+                         dict([(held_case[0], [dict(armed=True)])]),
+                         lambda: [RuntimeError(
+                             "injected cleanup fault")])
+        finally:
+            restored = monitoring.register_callback(pre_tool,
+                                                    entry_event, None)
+        assert restored is preregistered_callback, (
+            "the caller's previous PY_START callback was not "
+            "restored exactly when the case released its tool id "
+            "(fix 33, QA54)", pre_tool, restored)
+        # fix 33 (QA54 codex MAJOR, claude MINOR 2): an id the driver
+        # frees and retakes under the SHARED name is not this case's
+        # id; the release leaves it alone (the run itself still goes
+        # red: its observation is gone). Pre-fix the release compared
+        # the shared name and freed the retaken id.
+        retaken = []
+
+        def retaking_driver(cancellation, fault, state):
+            for tool in entry_tool_ids:
+                name = monitoring.get_tool(tool)
+                if (name is not None
+                        and name.startswith(entry_tool_name)):
+                    monitoring.set_local_events(
+                        tool, cached_finish.__code__, 0)
+                    monitoring.register_callback(tool, entry_event,
+                                                 None)
+                    monitoring.free_tool_id(tool)
+                    monitoring.use_tool_id(tool, entry_tool_name)
+                    retaken.append(tool)
+            finish_handles_driver(cancellation, fault, state)
+
+        try:
+            with patch.dict(behavioural_drivers,
+                            dict([(held_case, retaking_driver)])):
+                entry_red([held_case],
+                          dict([(held_case[0], [dict(armed=True)])]),
+                          behavioural_overwrites, unobserved_entries,
+                          "freed-then-retaken id")
+            assert retaken and all(
+                monitoring.get_tool(tool) == entry_tool_name
+                for tool in retaken), (
+                "the release freed an id the driver had freed and "
+                "retaken under the shared name (fix 33, QA54)",
+                retaken,
+                [monitoring.get_tool(tool) for tool in retaken])
+        finally:
+            for tool in retaken:
+                if monitoring.get_tool(tool) == entry_tool_name:
+                    monitoring.free_tool_id(tool)
         mutant_member = copy.deepcopy(
             scope["m:_FixtureProcess._finish_close"])
         capture_assigns = [
