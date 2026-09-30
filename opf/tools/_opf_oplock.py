@@ -2250,12 +2250,13 @@ def _publish_staged(dir_fd, name, staging, payload, label, owner, transfer, publ
             strand = ("the cleanup of the unpublished {} was interrupted, so a leftover may remain "
                       "(a staging leftover is removed as garbage by the next acquisition under the "
                       "anchor flock)".format(label))
-        if removed is not None:
-            removed.extend(_own_name_removed(n, staging, label) for n in gone)
         if strand is not None:
             problems.append(strand)
         close_problems, close_unconfirmed, close_interrupt = owner.close_guarded(fd) if owned \
             else ([], [], None)
+        # PR D fix 16: the removal report is built only after the descriptor's close.
+        if removed is not None:
+            removed.extend(_own_name_removed(n, staging, label) for n in gone)
         # Fix round 9 (codex LOW): the close is named as it happened; "closed" only when it ran and
         # reported success, UNCONFIRMED when an interruption cut it short after ownership cleared.
         if not owned:
@@ -2969,9 +2970,9 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
         owner.transfer_all()               # the capability now owns every retained descriptor
         return cap
     except BaseException as exc:
-        if isinstance(exc, OpLockError):
-            _tag_removals(exc, removed_stale, recovered_operation, staging_removed,
-                          created_removed)
+        # PR D fix 16: an OpLockError is tagged with the removal reports only after every resource
+        # below is released (the records removed, the descriptors closed, the anchor's lock given
+        # up), so no report-building step runs ahead of a release it could skip.
         # A capability already built and handed every descriptor (transfer_all is one assignment,
         # so the owner is then empty) but interrupted before it was returned is unwound like any
         # other failure: its descriptors come back to the owner in one step, closed below after the
@@ -2986,6 +2987,9 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
             # belongs to one) and its records; it closes only its own descriptor copies, which
             # cannot free the lock the acquirer still references (fix round 9: release by close).
             problems, unconfirmed, interrupt = owner.close_all()
+            if isinstance(exc, OpLockError):
+                _tag_removals(exc, removed_stale, recovered_operation, staging_removed,
+                              created_removed)
             if unconfirmed:
                 closed = "{} ({!r})".format(_unconfirmed_closes(len(unconfirmed),
                                                                 "inherited descriptor"), interrupt)
@@ -3096,6 +3100,10 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
         if interrupt is None:
             interrupt = close_interrupt
         created_removed.extend("its own new " + n for n in unwound)
+        if isinstance(exc, OpLockError):
+            # PR D fix 7: tagged after the unwind, so its own removals are reported too.
+            _tag_removals(exc, removed_stale, recovered_operation, staging_removed,
+                          created_removed)
         if interrupt is not None and isinstance(exc, Exception):
             # An interruption raised by the unwind itself is re-raised after the full cleanup.
             detail = "; additionally the unwind failed: {}".format("; ".join(unwind)) if unwind else ""
@@ -3108,10 +3116,6 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
                 staging_removed, created_removed) from exc
         if unwind:
             exc.add_note("opf-oplock: additionally the unwind failed: {}".format("; ".join(unwind)))
-        if isinstance(exc, OpLockError):
-            # PR D fix 7: re-tagged after the unwind, so its own removals are reported too.
-            _tag_removals(exc, removed_stale, recovered_operation, staging_removed,
-                          created_removed)
         raise
 
 

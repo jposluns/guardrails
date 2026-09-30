@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T69)
+  check_opf_record.py --self-test                    the fixture suite (T1-T71)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -270,6 +270,14 @@ Each case runs on its own copy of that template; the root is removed in a finall
       and an allocation failure at the lock token, each leave no journal descriptor open, the original
       failure governing the exit (flip: the fix-14 head's _publish, whose token allocation precedes its
       cleanup region and whose release handler's re-raise skips the trailing close)
+  T70 an acquisition whose lease publication fails, and whose removal-report tagging then fails with
+      a MemoryError, still unwinds in full: no descriptor it adopted survives, it leaves no capability
+      record, and the anchor is free, so the next acquisition succeeds; untrapped, the original
+      OpLockError propagates carrying its removal reports (flip: the fix-15 head's _acquire_body,
+      whose failure handler tags the error before any release)
+  T71 the module residual list states once, beside the asynchronous-interrupt disclosure, that an
+      interpreter allocation failure may leave a lease, a capability record, a journal lock or a
+      descriptor for the next run's recovery (flip: the statement removed)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -4432,6 +4440,129 @@ def flip_t69():
     return patch.object(record, "_publish", head_publish)
 
 
+# --- T70-T71: the PR D fix-16 vectors -------------------------------------------------------------------
+
+import inspect
+
+ALLOCATION_RESIDUAL = ("clean exits only); an interpreter allocation failure (a MemoryError) may likewise "
+                       "leave a lease, an operation capability record, a journal lock or an open descriptor "
+                       "for the next run's recovery (PR D fix 16: no step makes a narrower promise under it);")
+
+
+def t70_tag_after_unwind(fx):
+    """An acquisition whose lease publication fails after its active record's published, and whose
+    removal-report tagging then fails with a MemoryError (a module-global `tuple` in _opf_oplock that
+    fails only when called from _tag_removals), still unwinds in full: the allocation failure escapes
+    with the original refusal as its context, no descriptor the acquisition adopted survives, neither
+    capability record is left, and the anchor is free, so the next acquisition succeeds. Untrapped, the
+    same failure propagates as the original OpLockError carrying its removal reports. On the fix-15 head
+    the handler tagged the error first, so the failure skipped the whole unwind, leaking every
+    descriptor with the anchor still locked (QA round 15, codex F1 and claude M1)."""
+    root = fx.case("t70-tag-after-unwind")
+    real_adopt, real_publish = _opf_oplock._FdOwner.adopt, _opf_oplock._create_control_file
+    adopted, fired = [], []
+
+    def recording_adopt(owner, fd):
+        real_adopt(owner, fd)
+        adopted.append([fd, _fd_identity(fd)])
+        return fd
+
+    def lease_publication_fails(dir_fd, name, *a, **k):
+        if name == opf_check.LEASE_NAME:
+            raise _opf_oplock.OpLockError("synthetic lease publication failure")
+        return real_publish(dir_fd, name, *a, **k)
+
+    def tuple_trap(*args):
+        if sys._getframe(1).f_code is _opf_oplock._tag_removals.__code__:
+            fired.append(True)
+            raise MemoryError("synthetic removal-report allocation failure")
+        return tuple(*args)
+    with imp._self_test_homes2_active(root):
+        with patch.object(_opf_oplock, "_create_control_file", lease_publication_fails):
+            try:
+                _opf_oplock.acquire_operation(str(root), record.VERB)
+            except _opf_oplock.OpLockError as exc:
+                control = exc
+            else:
+                raise AssertionError("T70 the synthetic lease publication failure must refuse")
+        assert "synthetic lease publication failure" in str(control), ("T70 the original failure", control)
+        assert (control.recovered, control.recovered_operation, control.staging_removed) == ((), None, ()), \
+            ("T70 nothing stale was removed", [getattr(control, name, None) for name in REPORTS])
+        got = getattr(control, "created_removed", ())
+        assert len(got) == 2 and re.fullmatch(own_staging_pattern(_opf_oplock.ACTIVE_NAME, "active record"),
+                                              got[0]) and got[1] == "its own new active record (unwind)", \
+            ("T70 the original OpLockError carries its removal reports", got)
+        with patch.object(_opf_oplock, "_create_control_file", lease_publication_fails), \
+                patch.object(_opf_oplock._FdOwner, "adopt", recording_adopt), \
+                patch.object(_opf_oplock, "tuple", tuple_trap, create=True):
+            try:
+                _opf_oplock.acquire_operation(str(root), record.VERB)
+            except (MemoryError, _opf_oplock.OpLockError) as exc:
+                failure = exc
+            else:
+                raise AssertionError("T70 the trapped acquisition must fail")
+        records = capability_records(root)
+        latest = dict((entry[0], entry) for entry in adopted)
+        alive = [fd for fd, identity in latest.values() if _fd_identity(fd) == identity]
+        try:
+            try:
+                cap = _opf_oplock.acquire_operation(str(root), record.VERB)
+            except _opf_oplock.OpLockError as exc:
+                probe = str(exc)
+            else:
+                _opf_oplock.release_operation(cap)
+                probe = None
+        finally:
+            for fd in alive:
+                os.close(fd)     # a red run leaks nothing, and frees the anchor, for later cases
+    assert fired, "T70 the removal-report allocation failed for real"
+    assert isinstance(failure, MemoryError), ("T70 the allocation failure escapes", failure)
+    assert isinstance(failure.__context__, _opf_oplock.OpLockError) \
+        and "synthetic lease publication failure" in str(failure.__context__), \
+        ("T70 the original refusal is the allocation failure's context", failure.__context__)
+    assert adopted, "T70 the acquisition adopted its descriptors for real"
+    assert not alive, ("T70 no descriptor the failed acquisition adopted survives", alive)
+    assert records == (False, False), ("T70 the unwind left no capability record", records)
+    assert probe is None, ("T70 the anchor is free: the next acquisition succeeds", probe)
+
+
+def flip_t70():
+    """The fix-15 head's _acquire_body: its failure handler tags an OpLockError with the removal reports
+    FIRST, ahead of every release in the unwind (the current body rebuilt with that tagging restored at
+    the handler's head)."""
+    source = inspect.getsource(_opf_oplock._acquire_body)
+    handler = "\n    except BaseException as exc:\n"
+    if source.count(handler) != 1:
+        raise Harness("flip_t70: the acquisition body's failure handler was not found once")
+    source = source.replace(handler, handler + "        if isinstance(exc, OpLockError):\n"
+                            "            _tag_removals(exc, removed_stale, recovered_operation, "
+                            "staging_removed, created_removed)\n")
+    namespace = {}
+    exec(compile(source, _opf_oplock.__file__, "exec"), vars(_opf_oplock), namespace)
+    return patch.object(_opf_oplock, "_acquire_body", namespace["_acquire_body"])
+
+
+def t71_allocation_residual_disclosed(fx):
+    """The module residual list states ONCE, directly after the asynchronous-interrupt disclosure, that
+    an interpreter allocation failure may leave a lease, a capability record, a journal lock or a
+    descriptor for the next run's recovery (PR D fix 16), with no per-site allocation promise."""
+    module, _guard = residual_texts()
+    assert module.count(ALLOCATION_RESIDUAL) == 1, ("T71 the allocation-failure residual is stated once",
+                                                    ALLOCATION_RESIDUAL)
+    assert module.count("interpreter allocation failure") == 1, "T71 it is stated exactly once"
+
+
+def flip_t71():
+    """Read the module residual list with the fix-16 statement removed."""
+    original = residual_texts
+    cut = ALLOCATION_RESIDUAL[len("clean exits only);"):-1]
+
+    def stripped():
+        module, guard_text = original()
+        return module.replace(cut, ""), guard_text
+    return patch.object(sys.modules[__name__], "residual_texts", stripped)
+
+
 # --- the runner ------------------------------------------------------------------------------------------------
 
 TESTS = (
@@ -4518,6 +4649,8 @@ TESTS = (
     ("T68-release-mark-before-acquisition", t68_release_mark_before_acquisition, flip_t68),
     ("T69-release-failure-closes-fd", t69_release_failure_closes_fd, flip_t69),
     ("T69-token-failure-closes-fd", t69_token_failure_closes_fd, flip_t69),
+    ("T70-tag-after-unwind", t70_tag_after_unwind, flip_t70),
+    ("T71-allocation-residual-disclosed", t71_allocation_residual_disclosed, flip_t71),
 )
 
 

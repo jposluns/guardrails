@@ -91,7 +91,10 @@ the generation's record journal home as local recovery evidence; the lease is no
 sync runtime in this build, so the guarantee is single-host single-writer); a signal
 delivered at any point may leave a lease, an operation capability record or a journal lock in place,
 which the next run's recovery handles (an asynchronous interrupt makes any narrower promise
-unkeepable, so release is described in this module for ordinary exceptions and clean exits only); two
+unkeepable, so release is described in this module for ordinary exceptions and clean exits only); an
+interpreter allocation failure (a MemoryError) may likewise leave a lease, an operation capability
+record, a journal lock or an open descriptor for the next run's recovery (PR D fix 16: no step makes a
+narrower promise under it); two
 branches allocating from
 the same committed counters can both claim an id, which spec 5.7's store-path merge policy and doctor's
 C-ID-SPACE check (not this verb) catch; the byte-reproduction precondition proves serialization only, so
