@@ -7373,10 +7373,16 @@ def _watchdog_completion_case(mode):
         # runs once per fixture state DERIVED per site from its
         # member's own branch tests by the bounded grammar below
         # (derived_overrides; single-attribute deviations only;
-        # a module-function f: site derives nothing and runs its
-        # fixture's default state alone, and a deviation a site's
-        # driver overwrites before the member runs is not driven;
-        # fix 28, QA49), and that exact QA38 mutation is pinned red after
+        # only an m: method-key site is derived, and a site with
+        # any other key, which the matrix builds only as an f:
+        # module-function key, runs its fixture's default state
+        # alone; a generated deviation is driven only where it
+        # becomes the attribute's EFFECTIVE value on the fixture,
+        # so one a driver overwrites before the member runs, or
+        # one on an attribute such as __class__ or __dict__ whose
+        # read ignores the fixture's instance dictionary, is not;
+        # both are listed at derived_overrides; fixes 28-29,
+        # QA49-50), and that exact QA38 mutation is pinned red after
         # the matrix. fix 18 (QA39 claude BLOCKER / gemini BLOCKER,
         # maintainer decision 2026-09-29): the derivation is a
         # BOUNDED, DISCLOSED guarantee, not widened past its
@@ -7499,7 +7505,10 @@ def _watchdog_completion_case(mode):
             # included) inside an If/While/IfExp test of the member
             # (nested defs included) is treated as an attribute the
             # site branches on (an assignment target may not be one;
-            # that only adds states). fix 19 (QA40 claude/codex/gemini
+            # that only adds states), though it yields a state only
+            # through the grammar below: a comparison side against
+            # a non-literal, such as `self.x == other`, yields none
+            # (fix 29, QA50). fix 19 (QA40 claude/codex/gemini
             # BLOCKER) and fix 20 (QA41 codex BLOCKER / claude
             # MAJOR), maintainer decisions 2026-09-29: the
             # recognized grammar, stated in exact AST terms:
@@ -7536,14 +7545,21 @@ def _watchdog_completion_case(mode):
             # 20, QA41; maintainer decisions 2026-09-29): it
             # carries NO guarantee for multi-attribute combinations,
             # conditions carried through locals or other data flow,
-            # state never read in a branch test, a module-function
-            # f: site (the guard below returns its default state
-            # alone), an attribute whose generated deviation the
-            # site's driver replaces with its own value before the
-            # member runs (the masked and coordinated drivers
-            # install _go, _abandon_unfinished_launch,
-            # _interrupt_collect and _finish_close; fix 28, QA49
-            # claude/codex), or firing values
+            # state never read in a branch test, a site whose key
+            # is not an m: method key (the guard below returns its
+            # default state alone; the matrix builds those only as
+            # f: module-function keys), a generated deviation that
+            # never becomes the attribute's effective value on the
+            # fixture: one the site's driver replaces before the
+            # member runs (masked release installs _go, masked
+            # abandon _abandon_unfinished_launch, masked interrupt
+            # _interrupt_collect, coordinated release _go and
+            # coordinated finish _finish_close; the coordinated
+            # abandon and refusal drivers install none), or one on
+            # an attribute whose read ignores the fixture's
+            # instance dictionary, such as __class__ or __dict__
+            # (fixes 28-29, QA49-50 claude/codex/gemini), or firing
+            # values
             # neither spelled as constants in a branch-test
             # comparison that reads that same attribute nor
             # contributed by the grammar above (a truthiness read's
