@@ -2510,7 +2510,11 @@ def _st_git_env(base):
 
 def _git(args, cwd, env, allow_fail=False, input_bytes=None):
     import subprocess
-    proc = subprocess.run(["git", "-C", cwd] + args, env=env, input=input_bytes,
+    # F-367: no DETACHED auto-gc/auto-maintenance may outlive a fixture commit and churn .git
+    # while a later read or the teardown rmtree traverses it.
+    proc = subprocess.run(["git", "-C", cwd,
+                           "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"] + args,
+                          env=env, input=input_bytes,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
     if proc.returncode != 0 and not allow_fail:
         raise RuntimeError("git {} failed: {}".format(args, proc.stderr.decode("utf-8", "replace")))
