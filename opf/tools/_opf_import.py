@@ -6858,9 +6858,9 @@ def self_test_isolated():
         # 3: verb wiring (OPF-IMPORT-VERB PR-B, converted from the F-373 dispatch-deferral vector). The
         # `import` verb is now WIRED (opf.py `_cmd_import`), but a bare `opf.py import` with NO mode is a
         # usage error (exactly one mode required) -> exit 2 and stages nothing; and `--apply <run-id>` on an
-        # UNREVIEWED run dispatches onto the now-real apply_import, which finds no acceptance.json and is not
-        # promotion-ready -> exit 2 (cannot-evaluate), mutating nothing (the 3-apply vector below drives that
-        # real apply path). Both cases exercise the live
+        # UNREVIEWED run dispatches onto the public apply_import, which is retired (spec 14.1) and refuses
+        # -> exit 2 (cannot-evaluate), mutating nothing (the 3-apply vector below checks the exit code and the
+        # unchanged store, not the refusal text). Both cases exercise the live
         # dispatcher through opf.py (the CLI round-trip lives in opf.py's own opf-cli self-test leg).
         opf_py = str(Path(__file__).resolve().parent / "opf.py")
         root4, machine4 = build_store(sources={"a.txt": src})
@@ -6868,11 +6868,10 @@ def self_test_isolated():
                                    capture_output=True)
         check("3-verb-no-mode-exits-2", cp_nomode.returncode == 2)
         check("3-verb-no-mode-stages-nothing", not (machine4.parent / "imports").exists())
-        # Stage a real run over root4, then `--apply` it WITHOUT a review: apply_import (PR-C, now real) finds
-        # no acceptance.json, so the run is not promotion-ready -> exit 2, and the store machine tree is
-        # byte-unchanged (nothing promoted). This exercises the live CLI dispatch onto the REAL apply layer;
-        # the full promoted/idempotent/reject behaviour is covered by the module A1-A6 checks above and the
-        # opf-cli self-test's own promoted/no-op vectors. An INDEPENDENT run-id-grammar literal for the operand.
+        # Stage a real run over root4 through the retained engine, then `--apply` it WITHOUT a review: the
+        # retired public apply_import refuses -> exit 2, and the store machine tree is byte-unchanged (nothing
+        # promoted). The retained engine's promoted/idempotent/reject behaviour is covered by the module A1-A6
+        # checks above; the refusal text on each retired CLI mode is checked by opf.py's own opf-cli leg. An INDEPENDENT run-id-grammar literal for the operand.
         plan4 = plan_import(root4, ["a.txt"], now=NOW, run_nonce="verb-apply-pin")
         check("3-apply-plan-staged", plan4.verdict == 0 and bool(plan4.run_id))
         machine4_before = snapshot(machine4)

@@ -2851,10 +2851,11 @@ def _cli_self_test():
         def _import_leg():
             """Build a VALID synthetic store and drive the retired import modes (spec 14.1), judged on exit
             codes, the refusal text AND observable side effects. Returns None on success or EXIT_MALFORMED
-            on a harness (fixture I/O) error. Vectors: --scan, --plan, --review (batch and --interactive)
-            and --apply each exit 2 with the operation layer's retirement refusal and write nothing, over a
-            NOT-ADOPTED root and over an adopted store holding a run the retained engine staged and
-            accepted; deleting one operation-layer refusal turns its row red. A malformed --set /
+            on a harness (fixture I/O) error. Vectors: over an adopted store holding a run the retained
+            engine staged and accepted, --scan, --plan, --review (batch and --interactive) and --apply each
+            exit 2 with the operation layer's retirement refusal and write nothing; over a NOT-ADOPTED root
+            only --scan, --plan and --apply are driven, each checked for exit 2 and the refusal text;
+            deleting one operation-layer refusal turns its row red. A malformed --set /
             --decisions / --dispositions / --ingest-options file meets the same refusal, its reader never
             run, and so does a mode-specific argv violation (a missing or extra companion flag, a run-id
             outside the grammar): the refusal precedes the retired mode-combination validation (round-2
