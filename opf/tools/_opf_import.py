@@ -6580,10 +6580,16 @@ def self_test():
     with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
         with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
                         GIT_CONFIG_NOSYSTEM="1"):
-            refused = _self_test_ordinary_refused()
-            with _self_test_engine():
-                rc = self_test_isolated()
-            return rc or refused
+            return _self_test_suites()
+
+
+def _self_test_suites():
+    """self_test's delegate, entered only inside its isolated configuration: the refusal suite, then the
+    engine suite inside _self_test_engine. Returns the engine suite's code, else the refusal suite's."""
+    refused = _self_test_ordinary_refused()
+    with _self_test_engine():
+        rc = self_test_isolated()
+    return rc or refused
 
 
 def self_test_isolated():
