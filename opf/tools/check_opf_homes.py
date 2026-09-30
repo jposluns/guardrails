@@ -2678,6 +2678,19 @@ def _gitignore_reconciliation_self_test(check):
                             guard.inspect_homes_gitignore, guard.verify_homes_gitignore_effective))
                         and observe._is_partial_clone(git, rootz, run=failing_disc) is True)
 
+            # ...and so is an enumerated promisor key whose non-UTF-8 name cannot be re-queried at all:
+            # Codex's round-4 reproduction, `[remote "up\xffstream"] promisor = garbage` over the
+            # installed block, a value git itself rejects (rc 128) through the byte-exact key; the
+            # default keeps the partial fallback.
+            repon, rootn = fixture("config-probe-nonutf8")
+            (rootn / ".working" / ".gitignore").write_bytes(block)
+            with open(repon / ".git" / "config", "ab") as config_fh:
+                config_fh.write(b'\n[remote "up\xffstream"]\n\tpromisor = garbage\n')
+            check("gi-config-probe-failure-nonutf8", lambda: all(guard_refuses(
+                lambda f=f: f(rootn, "init"), "partial-clone config probe failed") for f in (
+                    guard.inspect_homes_gitignore, guard.verify_homes_gitignore_effective))
+                and observe._is_partial_clone(git, rootn) is True)
+
             # A runtime configuration override the config-discovery probe would drop is a named
             # cannot-evaluate, never replayed: with core.ignoreCase=true supplied through
             # GIT_CONFIG_COUNT (Codex's reproduction) or a wrapper's `git -c` (GIT_CONFIG_PARAMETERS),

@@ -532,7 +532,8 @@ def _is_partial_clone(git, store_root, run=None, strict=False):
     alternate does not lazy-fetch). A probe that cannot RUN, or returns an rc other than 0 (found) or 1 (not
     found), is a cannot-determine that resolves to partial = keep checking -- the safe, fail-closed direction
     (guard-input-soundness, check-fails-closed-on-unreadable). A `strict` caller gets a RuntimeError for
-    each such probe failure instead (the enumerated-key re-query below included): the homes gitignore
+    each such probe failure instead (the enumerated-key re-query below included, and an enumerated key
+    whose non-UTF-8 name cannot be re-queried at all): the homes gitignore
     inspection sets it, since there a failed probe is cannot-evaluate, never a partial fallback whose
     availability check can still end clean; the default keeps the fallback for opf.py's init preflight.
     `run` is the git runner (default, resolved at call time: _run_git_config_discovery); the homes
@@ -577,10 +578,15 @@ def _is_partial_clone(git, store_root, run=None, strict=False):
         # bytes (e.g. `[remote "up\xffstream"]`) enumerates fine as raw bytes, but a lossy decode would mangle
         # it, so the --type=bool re-query below would ask for a DIFFERENT (nonexistent) key and read rc 1
         # (not found) -- which must NOT be mistaken for boolean-false / full. The key demonstrably EXISTS (it
-        # was just enumerated), so a name that cannot be re-queried is a cannot-determine -> partial.
+        # was just enumerated), so a name that cannot be re-queried is a cannot-determine -> partial, or
+        # raised when strict (git itself may reject its value, as for any other failed re-query).
         try:
             key = kb.decode("utf-8")
         except UnicodeDecodeError:
+            if strict:
+                raise RuntimeError("a partial-clone config probe failed (the enumerated promisor key {!r} is "
+                                   "not UTF-8, so it cannot be re-queried); partial-clone-ness cannot be "
+                                   "determined".format(kb))
             return True    # a non-UTF-8 promisor key name cannot be cleanly re-queried: fail-closed to partial
         val = run(git, store_root, ["config", "--type=bool", "--get-all", key])
         if not val.completed or val.rc != 0:
