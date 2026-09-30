@@ -7,8 +7,9 @@ yet manage and emits a digest-stamped DISPOSITION WORKSHEET, read-only. It WIRES
 (inert, like `--scan`). Named `_opf_ingest` (not `_opf_migrate`) so it does not collide with `opf migrate`,
 which stays store RELOCATION (OQ-1 ruled 2026-09-17). The importer layer, plan composition, review /
 acceptance, apply promotion, and the `opf adopt` verb wiring are LATER slices (MIG-PR2..PR6) and are NOT
-added here; `opf adopt` continues to hit the fail-closed `KNOWN_VERBS` dispatch, pinned by the module
-self-test's dispatch-deferral vector (consciously flipped at MIG-PR6).
+added here. The `opf adopt` verb wiring has since landed (OPF-ADOPT K9a wires the read-only plan and
+status subcommands), so the module self-test's dispatch vector now pins the verb WIRED (consciously
+flipped from the original dispatch-deferral pin), while `detect` stays unwired.
 
 Ratified design constraints applied (PD-OPF-MIGRATE-DESIGN OQ-2..7, ratified 2026-09-19):
   - OQ-2: the worksheet row shape is ACCEPTANCE-READY for the SHARED `opf.import.acceptance/v1` format that
@@ -4506,11 +4507,27 @@ def self_test_isolated():
 
         _self_test_planner(check, build_store, build_relocated, snapshot, symlink_supported)
 
-        # 13. dispatch-deferral: `opf adopt` is NOT wired; the fail-closed KNOWN_VERBS dispatch stands
-        #     (consciously flipped at MIG-PR6, which wires the verb).
+        # 13. dispatch-wiring (consciously FLIPPED from the original dispatch-deferral pin at OPF-ADOPT
+        #     K9a, which wires the verb read-only): `opf adopt` is a KNOWN_VERBS member whose dispatch
+        #     REACHES _cmd_adopt (plan/status land; the mutating subcommands still refuse fail-closed,
+        #     pinned by the opf-cli self-test leg), while `detect` stays UNWIRED (its fail-closed dispatch
+        #     stands). Routing is proved, not vocabulary: main() is driven with _cmd_adopt swapped for a
+        #     recorder, so removing the adopt dispatch branch (which falls through to the fail-closed
+        #     KNOWN_VERBS stub) fails this check even with KNOWN_VERBS unchanged.
+        import contextlib
+        import io
         import opf as _opf_cli
-        check("dispatch-deferral-adopt-unwired",
-              "adopt" not in _opf_cli.KNOWN_VERBS and "detect" not in _opf_cli.KNOWN_VERBS)
+        routed = []
+        real_cmd_adopt = _opf_cli._cmd_adopt
+        _opf_cli._cmd_adopt = lambda rest: routed.append(list(rest)) or _opf_cli.EXIT_OK
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                routed_rc = _opf_cli.main(["adopt", "status", "--root", str(base)])
+        finally:
+            _opf_cli._cmd_adopt = real_cmd_adopt
+        check("dispatch-wired-adopt-read-only",
+              "adopt" in _opf_cli.KNOWN_VERBS and "detect" not in _opf_cli.KNOWN_VERBS
+              and routed == [["status", "--root", str(base)]] and routed_rc == _opf_cli.EXIT_OK)
     except OSError as exc:
         print("OPF-INGEST SELF-TEST ERROR: harness error: {}".format(exc), file=sys.stderr)
         shutil.rmtree(str(base), ignore_errors=True)
@@ -4554,7 +4571,7 @@ def self_test_isolated():
           "(ENOSYS) skips a symlink vector while an EACCES propagates rather than masquerading as a silent "
           "skip (F9.2), the worksheet validates and catches vocab/digest/keyset/schema-type "
           "mutations, a source_path the contained reader rejects, and a non-string top-level key, and "
-          "`opf adopt` stays unwired.")
+          "the `opf adopt` verb is wired (OPF-ADOPT K9a) while `detect` stays unwired.")
     return 0
 
 

@@ -592,8 +592,9 @@ def _open_dir_nofollow(abspath):
     # returns until the return hands the last one to the caller. The protected region spans the root
     # open through the return itself. During a hand-off BOTH descriptors are held: the child is appended
     # BEFORE the parent leaves `held`, and the parent's ownership is cleared (popped) immediately before
-    # its close, so a failing parent close (on Linux the number is released even when close reports an
-    # error) can neither leak the child nor double-close the parent. Any failure or interruption closes
+    # its close, which runs through the confirm-then-release guard (round 7: a raising close is not
+    # assumed to have released its number), so a failing parent close can neither leak the child, retain
+    # the parent, nor double-close the parent. Any failure or interruption closes
     # every descriptor still held and re-raises. Residual (sub-line, disclosed): an interruption between
     # an open returning and its append, or between a pop and its close, leaks that one descriptor.
     held = []
@@ -602,12 +603,12 @@ def _open_dir_nofollow(abspath):
         held.append(os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY))
         for comp in parts[1:]:
             held.append(os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=held[-1]))
-            os.close(held.pop(-2))
+            _journal._close_fd_propagating(held.pop(-2))
         return held.pop()
     except BaseException as exc:
         while held:
             try:
-                os.close(held.pop())
+                _journal._close_fd_propagating(held.pop())
             except OSError as cexc:
                 exc.add_note("additionally the no-follow walk descriptor could not be closed ({})".format(
                     cexc))
@@ -628,6 +629,18 @@ def _read_toml_contained(root_fd, relpath):
     """Read and parse a contained TOML file beneath root_fd, no-follow. Returns the parsed dict, or None
     when the file (or a parent) is absent. StoreError (a cannot-evaluate) on an unreadable file, a
     refused symlink, or a TOML/parse error: an unreadable input is a failure, never an empty pass."""
+    data = _read_store_bytes_contained(root_fd, relpath)
+    if data is None:
+        return None
+    return _parse_store_toml(relpath, data)
+
+
+def _read_store_bytes_contained(root_fd, relpath):
+    """The byte half of _read_toml_contained: read a contained store CONTROL file's exact bytes beneath
+    root_fd, no-follow, singly-linked, capped. Returns the raw bytes, or None when the file (or a
+    parent) is absent; StoreError on any unreadable shape. Split out so the descriptor-bound discovery
+    (discover_machine_store_fd) can keep the EXACT bytes it parses for the resolved manifest rather
+    than re-opening it by path (round-5 defect 1)."""
     try:
         st = _journal._lstat_contained(root_fd, relpath)
     except (_journal.JournalError, OSError) as exc:
@@ -676,6 +689,12 @@ def _read_toml_contained(root_fd, relpath):
     if len(data) > MAX_STORE_READ_BYTES:
         raise StoreError("{} read {} bytes, over the {}-byte store-read cap (a raced swap or growth past "
                          "the pre-open size; fail-closed)".format(relpath, len(data), MAX_STORE_READ_BYTES))
+    return data
+
+
+def _parse_store_toml(relpath, data):
+    """The parse half of _read_toml_contained: parse store-control TOML bytes, with every
+    present-but-unparseable class mapped to a fail-closed StoreError."""
     try:
         return tomllib.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
@@ -698,12 +717,28 @@ def _immediate_subdirs(store_root_fd, working_rel):
     A symlinked entry is skipped (never followed). Returns a sorted list of names. Raises StoreError
     when `working_rel` is present but is not a directory or is a refused symlink; returns None when it
     is absent (the caller reads absence as "no store found" rather than as an error)."""
+    wfd = _open_working_dir_fd(store_root_fd, working_rel)
+    if wfd is None:
+        return None
+    try:
+        return _list_real_subdirs(wfd, working_rel)
+    finally:
+        os.close(wfd)
+
+
+def _open_working_dir_fd(store_root_fd, working_rel):
+    """The open half of _immediate_subdirs: open `working_rel` beneath store_root_fd no-follow and
+    return the directory fd, HELD (the caller owns and closes it), or None when it is absent. Split out
+    so the descriptor-bound discovery (discover_machine_store_fd) can keep the LISTING descriptor open
+    while it reads each listed manifest beneath it (round-5 defect 1). StoreError as
+    _immediate_subdirs: a present non-directory or a refused symlink fails closed."""
     try:
         pfd, name = _journal._open_parent(store_root_fd, working_rel)
     except FileNotFoundError:
         return None
     except (OSError, _journal.JournalError) as exc:
         raise StoreError("cannot open the store tree parent of {} ({})".format(working_rel, exc))
+    wfd = None
     try:
         try:
             wfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
@@ -714,26 +749,41 @@ def _immediate_subdirs(store_root_fd, working_rel):
         except OSError as exc:
             # O_NOFOLLOW refuses a symlinked .working with ELOOP: refused, not followed, fail-closed.
             raise StoreError("cannot open {} no-follow ({})".format(working_rel, exc))
-        try:
-            try:
-                names = sorted(os.listdir(wfd))
-            except OSError as exc:
-                # A listing I/O error (EIO, or a state change after the open) is fail-closed, never read as
-                # an empty (no-store) directory (check-fails-closed-on-unreadable).
-                raise StoreError("cannot list {} ({})".format(working_rel, exc))
-            subdirs = []
-            for entry in names:
-                try:
-                    est = os.stat(entry, dir_fd=wfd, follow_symlinks=False)
-                except OSError as exc:
-                    raise StoreError("cannot stat {}/{} ({})".format(working_rel, entry, exc))
-                if stat.S_ISDIR(est.st_mode):        # a real dir only; a symlink or file is not a store
-                    subdirs.append(entry)
-            return subdirs
-        finally:
-            os.close(wfd)
     finally:
-        os.close(pfd)
+        # ROUND-6 defect: the new descriptor is HELD in a local across the parent close, so a parent
+        # close that reports an error cannot abandon the return and leak the just-opened `working_rel`
+        # fd (one per discovery/resolution/investigation call). It is released quietly, the parent close
+        # runs through the confirm-then-release guard (round 7: a raising close is not assumed to have
+        # released its number, so the parent descriptor itself can never stay retained), and the close
+        # error keeps propagating fail-closed.
+        try:
+            _journal._close_fd_propagating(pfd)
+        except OSError:
+            if wfd is not None:
+                _journal._close_fd_quietly(wfd)
+            raise
+    return wfd
+
+
+def _list_real_subdirs(wfd, working_rel):
+    """The listing half of _immediate_subdirs: the sorted immediate real subdirectory names read
+    THROUGH the held `working_rel` descriptor, each entry stat'ed no-follow through that same
+    descriptor. A symlinked entry is skipped (never followed)."""
+    try:
+        names = sorted(os.listdir(wfd))
+    except OSError as exc:
+        # A listing I/O error (EIO, or a state change after the open) is fail-closed, never read as
+        # an empty (no-store) directory (check-fails-closed-on-unreadable).
+        raise StoreError("cannot list {} ({})".format(working_rel, exc))
+    subdirs = []
+    for entry in names:
+        try:
+            est = os.stat(entry, dir_fd=wfd, follow_symlinks=False)
+        except OSError as exc:
+            raise StoreError("cannot stat {}/{} ({})".format(working_rel, entry, exc))
+        if stat.S_ISDIR(est.st_mode):        # a real dir only; a symlink or file is not a store
+            subdirs.append(entry)
+    return subdirs
 
 
 # --- discovery (spec 4.5) ----------------------------------------------------------------------------
@@ -759,11 +809,56 @@ def discover_machine_store(store_root_fd, store_root, accept_tokens=None):
     subdirs = _immediate_subdirs(store_root_fd, WORKING_DIRNAME)
     if subdirs is None:
         return "absent", None, "{}/ is absent".format(WORKING_DIRNAME)
+    matches, legacy = _classify_working_names(
+        subdirs,
+        lambda name: _read_toml_contained(          # StoreError propagates (fail-closed)
+            store_root_fd, "{}/{}/{}".format(WORKING_DIRNAME, name, MANIFEST_NAME)),
+        accept)
+    return _discovery_result(matches, legacy)
+
+
+def discover_machine_store_fd(store_root_fd, accept_tokens=None):
+    """Descriptor-bound sibling of discover_machine_store (round-5 defect 1): the `.working` LISTING
+    descriptor is held for the whole discovery and every listed name's manifest is read BENEATH it,
+    so a `.working` swapped in after the listing is never read (the rounds-2-4 invariant: every name
+    read from a directory listing is read through the descriptor that listed it). Returns
+    (status, machine_dir, detail, manifest_raw): the discover_machine_store triple plus, when the
+    status is "one", the resolved manifest's EXACT bytes as read through the held descriptor (None
+    otherwise), so a descriptor-bound caller (resolve_store_fd, the adoption planner) parses the very
+    bytes discovery matched rather than re-opening the manifest by path. Statuses, details, StoreError
+    behaviour and `accept_tokens` are exactly discover_machine_store's."""
+    accept = (STANDARD_TOKEN,) if accept_tokens is None else tuple(accept_tokens)
+    wfd = _open_working_dir_fd(store_root_fd, WORKING_DIRNAME)
+    if wfd is None:
+        return "absent", None, "{}/ is absent".format(WORKING_DIRNAME), None
+    try:
+        names = _list_real_subdirs(wfd, WORKING_DIRNAME)
+        raws = {}
+
+        def load(name):
+            rel = "{}/{}".format(name, MANIFEST_NAME)
+            data = _read_store_bytes_contained(wfd, rel)   # StoreError propagates (fail-closed)
+            if data is None:
+                return None
+            parsed = _parse_store_toml("{}/{}".format(WORKING_DIRNAME, rel), data)
+            raws[name] = data
+            return parsed
+
+        matches, legacy = _classify_working_names(names, load, accept)
+        status, machine_dir, detail = _discovery_result(matches, legacy)
+        return status, machine_dir, detail, (raws.get(machine_dir) if status == "one" else None)
+    finally:
+        _journal._close_fd_propagating(wfd)
+
+
+def _classify_working_names(names, load, accept):
+    """The candidate classification both discovery variants share. `load(name)` returns the parsed
+    `.working/<name>/manifest.toml` (None when absent) through that variant's own read binding, raising
+    StoreError fail-closed on an unreadable or unparseable manifest. Returns (matches, legacy)."""
     matches = []
     legacy = []
-    for name in subdirs:
-        manifest_rel = "{}/{}/{}".format(WORKING_DIRNAME, name, MANIFEST_NAME)
-        data = _read_toml_contained(store_root_fd, manifest_rel)   # StoreError propagates (fail-closed)
+    for name in names:
+        data = load(name)
         if data is None:
             continue
         matched = False
@@ -781,6 +876,12 @@ def discover_machine_store(store_root_fd, store_root, accept_tokens=None):
             legacy_base = data.get(PRIOR_STANDARD_TOKEN)
             if isinstance(legacy_base, dict) and legacy_base.get("standard") == PRIOR_STANDARD_TOKEN:
                 legacy.append(name)
+    return matches, legacy
+
+
+def _discovery_result(matches, legacy):
+    """The (status, machine_dir, detail) verdict both discovery variants share (spec 4.5); raises
+    StoreError for a reserved sole match."""
     if not matches:
         base_detail = "{}/ is present but no {}/*/{} declares standard = {!r}".format(
             WORKING_DIRNAME, WORKING_DIRNAME, MANIFEST_NAME, STANDARD_TOKEN)
@@ -1012,6 +1113,77 @@ def _resolve_at(store_root, source, target, pointer, accept_tokens=None):
                           target=target)
     return Resolution(NOT_ADOPTED, "no store found ({}); opf init is the remedy".format(detail),
                       store_root=store_root, pointer_source=source)
+
+
+def resolve_store_fd(product_root_fd, product_root, accept_tokens=None):
+    """Descriptor-bound resolve_store (round-5 defect 1), for a caller that already HOLDS the product
+    root open and keeps that descriptor for every subsequent read (the adoption planner, which opened
+    it with the _open_dir_nofollow walk). Nothing is re-resolved by path: the pointer files are read
+    through the held descriptor, and discovery holds the `.working` listing descriptor and reads each
+    listed manifest beneath it (discover_machine_store_fd), so a product root or `.working` swapped
+    after the caller's open is never read. The held descriptor can bind only a store AT the product
+    root (the default location, or a pointer whose target resolves to the product root itself); a
+    pointer naming any OTHER root cannot be read through this descriptor and is CANNOT-EVALUATE
+    fail-closed (the planner refuses such companion/remote pointers before resolving; path-based
+    callers keep resolve_store). Returns (Resolution, manifest_raw): manifest_raw is the RESOLVED
+    manifest's exact bytes as read through the listing descriptor (None unless RESOLVED), so the
+    caller parses the same bytes discovery matched instead of re-opening the manifest by path.
+    `product_root` is the path the held descriptor was opened from, used only for pointer-target
+    resolution and reporting; `accept_tokens` as in resolve_store. Statuses and details follow
+    resolve_store/_resolve_at."""
+    product_root = Path(product_root)
+    if not _containment.probe():
+        return Resolution(CANNOT_EVALUATE, "race-free containment primitive absent; fail-closed",
+                          product_root=product_root), None
+    try:
+        local = _read_pointer_target(product_root_fd, LOCAL_POINTER_REL)
+        # The local override wins WHOLESALE (spec 4.3), exactly as in resolve_store (MAJOR 1).
+        committed = _read_pointer_target(product_root_fd, POINTER_REL) if local is None else None
+    except StoreError as exc:
+        return Resolution(CANNOT_EVALUATE, str(exc), product_root=product_root), None
+    pointer = local is not None or committed is not None
+    target = local if local is not None else committed
+    source = ("local-override" if local is not None
+              else "committed" if committed is not None else "default")
+    if pointer:
+        try:
+            store_root = _target_store_root(target, product_root)
+        except StoreError as exc:
+            return Resolution(CANNOT_EVALUATE, str(exc), target=target, pointer_source=source,
+                              product_root=product_root), None
+        if store_root != product_root:
+            return Resolution(
+                CANNOT_EVALUATE,
+                "pointer names a store at {}, outside the held product root {}; a descriptor-bound "
+                "resolution cannot bind it (fail-closed)".format(store_root, product_root),
+                target=target, pointer_source=source, product_root=product_root), None
+    try:
+        status, machine_dir, detail, manifest_raw = discover_machine_store_fd(
+            product_root_fd, accept_tokens=accept_tokens)
+    except StoreError as exc:
+        return Resolution(CANNOT_EVALUATE, str(exc), store_root=product_root, target=target,
+                          pointer_source=source, product_root=product_root), None
+    if status == "one":
+        return Resolution(RESOLVED, detail, store_root=product_root, machine_dir=machine_dir,
+                          machine_rel="{}/{}".format(WORKING_DIRNAME, machine_dir),
+                          pointer_source=source, target=target,
+                          product_root=product_root), manifest_raw
+    if status == "multiple":
+        return Resolution(CANNOT_EVALUATE, detail, store_root=product_root, pointer_source=source,
+                          target=target, product_root=product_root), None
+    # The same fail-closed split _resolve_at makes: a pointer that promised a store never falls back,
+    # a present-but-invalid default store never reads as absent (spec residual 17).
+    if pointer:
+        return Resolution(CANNOT_EVALUATE,
+                          "pointer resolves to {} but {}".format(product_root, detail),
+                          store_root=product_root, pointer_source=source, target=target,
+                          product_root=product_root), None
+    if status == "present":
+        return Resolution(CANNOT_EVALUATE, detail, store_root=product_root, pointer_source=source,
+                          target=target, product_root=product_root), None
+    return Resolution(NOT_ADOPTED, "no store found ({}); opf init is the remedy".format(detail),
+                      store_root=product_root, pointer_source=source,
+                      product_root=product_root), None
 
 
 # --- SemVer and base_compat helpers (spec 9.1) -------------------------------------------------------
@@ -2533,6 +2705,354 @@ def self_test():
                   _guard(lambda: resolve_store(n3_root).status) == CANNOT_EVALUATE)
         finally:
             _journal._read_contained = _real_rc
+
+        # ROUND-5 defect 3: _read_contained's cleanup closes the FILE fd and the PARENT fd each in its
+        # own try/finally, so a file close that reports an error (an EIO surfaced at close) cannot leak
+        # the parent descriptor. Inject the failure at the REAL close (the number is still released, as
+        # on Linux), then prove on the recorded descriptor that the parent is closed afterwards.
+        _r5_dir = base / "r5-close-leak"; _r5_dir.mkdir()
+        (_r5_dir / "f").write_bytes(b"x = 1\n")
+        _r5_root = os.open(str(_r5_dir), os.O_RDONLY | os.O_DIRECTORY)
+        _r5_seen = {}
+        _r5_real_open_parent = _journal._open_parent
+        _r5_real_close = os.close
+
+        def _r5_open_parent(root_fd, relpath):
+            pfd, name = _r5_real_open_parent(root_fd, relpath)
+            _r5_seen["pfd"] = pfd
+            return pfd, name
+
+        def _r5_close(fd):
+            _r5_real_close(fd)
+            if "pfd" in _r5_seen and fd != _r5_seen["pfd"] and "fired" not in _r5_seen:
+                # the first non-parent close after _open_parent returned is the FILE fd's close
+                _r5_seen["fired"] = True
+                raise OSError(5, "injected close failure")
+
+        _journal._open_parent = _r5_open_parent
+        os.close = _r5_close
+        try:
+            try:
+                _journal._read_contained(_r5_root, "f")
+                _r5_out = "returned"
+            except (OSError, _journal.JournalError):
+                _r5_out = "raised"
+        finally:
+            os.close = _r5_real_close
+            _journal._open_parent = _r5_real_open_parent
+        check("r5-file-close-injection-fired", _r5_seen.get("fired") is True and "pfd" in _r5_seen)
+        check("r5-file-close-error-propagates", _r5_out == "raised")
+        _r5_leaked = True
+        try:
+            os.fstat(_r5_seen.get("pfd", -1))
+        except OSError:
+            _r5_leaked = False
+        check("r5-parent-fd-closed-after-file-close-error", not _r5_leaked)
+        if _r5_leaked:                    # a pre-fix run leaks it; close so the failing suite stays clean
+            try:
+                os.close(_r5_seen["pfd"])
+            except OSError:
+                pass
+        os.close(_r5_root)
+
+        # ROUND-6 defect (K9a fix 6): _open_working_dir_fd returned the freshly-opened `.working`
+        # descriptor from inside a try whose finally closes the parent, so a parent close that reports
+        # an error (the number still released, as on Linux) abandoned the return and leaked the child:
+        # one descriptor per discovery/resolution/planner-investigation call. Inject the failure at the
+        # REAL parent close; the error still propagates fail-closed, and the child descriptor --
+        # recorded at its open -- is proven closed afterwards.
+        _r6 = build_store(manifest=manifest_text())
+        _r6_root = os.open(str(_r6), os.O_RDONLY | os.O_DIRECTORY)
+        _r6_seen = {}
+        _r6_real_open_parent = _journal._open_parent
+        _r6_real_open = os.open
+        _r6_real_close = os.close
+
+        def _r6_open_parent(root_fd, relpath):
+            pfd, name = _r6_real_open_parent(root_fd, relpath)
+            _r6_seen["pfd"] = pfd
+            return pfd, name
+
+        def _r6_open(*args, **kwargs):
+            fd = _r6_real_open(*args, **kwargs)
+            if kwargs.get("dir_fd") is not None and kwargs.get("dir_fd") == _r6_seen.get("pfd"):
+                _r6_seen["wfd"] = fd          # the child opened beneath the recorded parent
+            return fd
+
+        def _r6_close(fd):
+            _r6_real_close(fd)
+            if fd == _r6_seen.get("pfd") and "fired" not in _r6_seen:
+                _r6_seen["fired"] = True
+                raise OSError(5, "injected close failure")
+
+        _journal._open_parent = _r6_open_parent
+        os.open = _r6_open
+        os.close = _r6_close
+        try:
+            try:
+                _open_working_dir_fd(_r6_root, WORKING_DIRNAME)
+                _r6_out = "returned"
+            except OSError:
+                _r6_out = "raised"
+        finally:
+            os.close = _r6_real_close
+            os.open = _r6_real_open
+            _journal._open_parent = _r6_real_open_parent
+        check("r6-working-parent-close-injection-fired",
+              _r6_seen.get("fired") is True and "wfd" in _r6_seen)
+        check("r6-working-parent-close-error-propagates", _r6_out == "raised")
+        _r6_leaked = True
+        try:
+            os.fstat(_r6_seen.get("wfd", -1))
+        except OSError:
+            _r6_leaked = False
+        check("r6-working-fd-closed-after-parent-close-error", not _r6_leaked)
+        if _r6_leaked:                    # a pre-fix run leaks it; close so the failing suite stays clean
+            try:
+                os.close(_r6_seen["wfd"])
+            except OSError:
+                pass
+        os.close(_r6_root)
+
+        # ROUND-6 sibling: open_journal_root_from_path returned the freshly-opened journal-root
+        # descriptor from inside a try whose finally closes the operator-root fd, the same
+        # abandoned-return shape. Inject the failure at the REAL root close; the error still propagates
+        # fail-closed and the jr descriptor -- recorded at its open -- is proven closed afterwards.
+        _r6j = base / "r6-journal-close-leak"
+        (_r6j / "j" / "r").mkdir(parents=True)
+        _r6j_seen = {}
+        _r6j_real_odc = _journal._open_dir_contained
+
+        def _r6j_odc(root_fd, relpath):
+            _r6j_seen["root_fd"] = root_fd
+            fd = _r6j_real_odc(root_fd, relpath)
+            _r6j_seen["jr"] = fd
+            return fd
+
+        def _r6j_close(fd):
+            _r6_real_close(fd)
+            if fd == _r6j_seen.get("root_fd") and "fired" not in _r6j_seen:
+                _r6j_seen["fired"] = True
+                raise OSError(5, "injected close failure")
+
+        _journal._open_dir_contained = _r6j_odc
+        os.close = _r6j_close
+        try:
+            try:
+                _journal.open_journal_root_from_path(_r6j, "j/r")
+                _r6j_out = "returned"
+            except OSError:
+                _r6j_out = "raised"
+        finally:
+            os.close = _r6_real_close
+            _journal._open_dir_contained = _r6j_real_odc
+        check("r6-journal-root-close-injection-fired",
+              _r6j_seen.get("fired") is True and "jr" in _r6j_seen)
+        check("r6-journal-root-close-error-propagates", _r6j_out == "raised")
+        _r6j_leaked = True
+        try:
+            os.fstat(_r6j_seen.get("jr", -1))
+        except OSError:
+            _r6j_leaked = False
+        check("r6-journal-fd-closed-after-root-close-error", not _r6j_leaked)
+        if _r6j_leaked:                   # a pre-fix run leaks it; close so the failing suite stays clean
+            try:
+                os.close(_r6j_seen["jr"])
+            except OSError:
+                pass
+
+        # ROUND-7 (codex): a close that raises BEFORE releasing its descriptor (an EINTR/EIO reported
+        # with the number RETAINED) must not leak that descriptor: every parent close in the no-follow
+        # walk runs through the confirm-then-release guard (_journal._close_fd_propagating), which
+        # fstat-confirms the number is gone, releases a genuinely-retained number once (never a blind
+        # double close), and re-raises the original error. Inject a one-shot close that raises WITHOUT
+        # releasing; the error still propagates fail-closed and NO descriptor the walk opened survives.
+        _r7 = base / "r7-retained-close"
+        (_r7 / "d").mkdir(parents=True)
+        _r7_seen = {"opened": []}
+        _r7_real_open = os.open
+        _r7_real_close = os.close
+
+        def _r7_open(*args, **kwargs):
+            fd = _r7_real_open(*args, **kwargs)
+            _r7_seen["opened"].append(fd)
+            return fd
+
+        def _r7_close(fd):
+            if "fired" not in _r7_seen:
+                _r7_seen["fired"] = fd          # RETAINED: raise BEFORE releasing (the codex injection)
+                raise OSError(5, "injected retained-close failure")
+            _r7_real_close(fd)
+
+        os.open = _r7_open
+        os.close = _r7_close
+        try:
+            try:
+                _open_dir_nofollow(str(_r7 / "d"))
+                _r7_out = "returned"
+            except OSError:
+                _r7_out = "raised"
+        finally:
+            os.close = _r7_real_close
+            os.open = _r7_real_open
+        check("r7-nofollow-retained-close-injection-fired", "fired" in _r7_seen)
+        check("r7-nofollow-retained-close-error-propagates", _r7_out == "raised")
+        _r7_left = []
+        for _fd in _r7_seen["opened"]:
+            try:
+                os.fstat(_fd)
+            except OSError:
+                continue
+            _r7_left.append(_fd)
+        check("r7-nofollow-no-walk-descriptor-survives-retained-close", not _r7_left)
+        for _fd in _r7_left:              # a pre-fix run leaks one; close so the failing suite stays clean
+            try:
+                os.close(_fd)
+            except OSError:
+                pass
+
+        # ROUND-7 sibling on _open_working_dir_fd: the parent close raising with its number RETAINED
+        # (not the round-6 release-then-error shape) must release the parent AND the held `.working`
+        # child before the error propagates fail-closed.
+        _r7w = build_store(manifest=manifest_text())
+        _r7w_root = os.open(str(_r7w), os.O_RDONLY | os.O_DIRECTORY)
+        _r7w_seen = {}
+        _r7w_real_open_parent = _journal._open_parent
+        _r7w_real_open = os.open
+        _r7w_real_close = os.close
+
+        def _r7w_open_parent(root_fd, relpath):
+            pfd, name = _r7w_real_open_parent(root_fd, relpath)
+            _r7w_seen["pfd"] = pfd
+            return pfd, name
+
+        def _r7w_open(*args, **kwargs):
+            fd = _r7w_real_open(*args, **kwargs)
+            if kwargs.get("dir_fd") is not None and kwargs.get("dir_fd") == _r7w_seen.get("pfd"):
+                _r7w_seen["wfd"] = fd         # the child opened beneath the recorded parent
+            return fd
+
+        def _r7w_close(fd):
+            if fd == _r7w_seen.get("pfd") and "fired" not in _r7w_seen:
+                _r7w_seen["fired"] = True     # RETAINED: raise BEFORE releasing
+                raise OSError(5, "injected retained-close failure")
+            _r7w_real_close(fd)
+
+        _journal._open_parent = _r7w_open_parent
+        os.open = _r7w_open
+        os.close = _r7w_close
+        try:
+            try:
+                _open_working_dir_fd(_r7w_root, WORKING_DIRNAME)
+                _r7w_out = "returned"
+            except OSError:
+                _r7w_out = "raised"
+        finally:
+            os.close = _r7w_real_close
+            os.open = _r7w_real_open
+            _journal._open_parent = _r7w_real_open_parent
+        check("r7-working-retained-close-injection-fired",
+              _r7w_seen.get("fired") is True and "wfd" in _r7w_seen)
+        check("r7-working-retained-close-error-propagates", _r7w_out == "raised")
+        _r7w_left = []
+        for _fd in (_r7w_seen.get("pfd"), _r7w_seen.get("wfd")):
+            if _fd is None:
+                continue
+            try:
+                os.fstat(_fd)
+            except OSError:
+                continue
+            _r7w_left.append(_fd)
+        check("r7-working-no-descriptor-survives-retained-close", not _r7w_left)
+        for _fd in _r7w_left:             # a pre-fix run leaks the parent; close so the suite stays clean
+            try:
+                os.close(_fd)
+            except OSError:
+                pass
+        os.close(_r7w_root)
+
+        # ROUND-7 sibling on open_journal_root_from_path: the operator-root close raising with its
+        # number RETAINED must release the root AND the held journal-root fd before the error propagates.
+        _r7j = base / "r7-journal-retained-close"
+        (_r7j / "j" / "r").mkdir(parents=True)
+        _r7j_seen = {}
+        _r7j_real_odc = _journal._open_dir_contained
+        _r7j_real_close = os.close
+
+        def _r7j_odc(root_fd, relpath):
+            _r7j_seen["root_fd"] = root_fd
+            fd = _r7j_real_odc(root_fd, relpath)
+            _r7j_seen["jr"] = fd
+            return fd
+
+        def _r7j_close(fd):
+            if fd == _r7j_seen.get("root_fd") and "fired" not in _r7j_seen:
+                _r7j_seen["fired"] = True     # RETAINED: raise BEFORE releasing
+                raise OSError(5, "injected retained-close failure")
+            _r7j_real_close(fd)
+
+        _journal._open_dir_contained = _r7j_odc
+        os.close = _r7j_close
+        try:
+            try:
+                _journal.open_journal_root_from_path(_r7j, "j/r")
+                _r7j_out = "returned"
+            except OSError:
+                _r7j_out = "raised"
+        finally:
+            os.close = _r7j_real_close
+            _journal._open_dir_contained = _r7j_real_odc
+        check("r7-journal-retained-close-injection-fired",
+              _r7j_seen.get("fired") is True and "jr" in _r7j_seen)
+        check("r7-journal-retained-close-error-propagates", _r7j_out == "raised")
+        _r7j_left = []
+        for _fd in (_r7j_seen.get("root_fd"), _r7j_seen.get("jr")):
+            if _fd is None:
+                continue
+            try:
+                os.fstat(_fd)
+            except OSError:
+                continue
+            _r7j_left.append(_fd)
+        check("r7-journal-no-descriptor-survives-retained-close", not _r7j_left)
+        for _fd in _r7j_left:             # a pre-fix run leaks the root; close so the suite stays clean
+            try:
+                os.close(_fd)
+            except OSError:
+                pass
+
+        # ROUND-5 defect 1: the descriptor-bound resolver matches resolve_store over a held root. The
+        # default store resolves with the manifest's EXACT bytes (read through the .working listing
+        # descriptor), an empty root is NOT-ADOPTED, and a companion pointer (a store at another root)
+        # is refused fail-closed: it cannot be bound to the held descriptor (the planner refuses such
+        # pointers before resolving; path-based callers keep resolve_store).
+        _r5a = build_store(manifest=manifest_text())
+        _r5a_fd = os.open(str(_r5a), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            _r5a_res, _r5a_raw = resolve_store_fd(_r5a_fd, _r5a)
+        finally:
+            os.close(_r5a_fd)
+        check("r5-fd-default-resolved", _r5a_res.status == RESOLVED
+              and _r5a_res.machine_rel == "{}/{}".format(WORKING_DIRNAME, DEFAULT_MACHINE_SUBDIR))
+        check("r5-fd-manifest-bytes-exact",
+              _r5a_raw == (_r5a / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR / MANIFEST_NAME).read_bytes())
+        _r5b = build_store(make_working=False)
+        _r5b_fd = os.open(str(_r5b), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            _r5b_res, _r5b_raw = resolve_store_fd(_r5b_fd, _r5b)
+        finally:
+            os.close(_r5b_fd)
+        check("r5-fd-empty-not-adopted", _r5b_res.status == NOT_ADOPTED and _r5b_raw is None)
+        _r5c = build_store(make_working=False,
+                           pointer='[store]\ntarget = "dir:{}"\n'.format(_r5a))
+        _r5c_fd = os.open(str(_r5c), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            _r5c_res, _r5c_raw = resolve_store_fd(_r5c_fd, _r5c)
+        finally:
+            os.close(_r5c_fd)
+        check("r5-fd-companion-pointer-refused",
+              _r5c_res.status == CANNOT_EVALUATE and "outside the held product root" in _r5c_res.detail
+              and _r5c_raw is None)
 
         # NEW-4: an oversized-int key rendered into a finding message no longer crashes the validator: the
         # unknown-key idiom (_sorted_key_names) and the duplicate-namespace message both render through
