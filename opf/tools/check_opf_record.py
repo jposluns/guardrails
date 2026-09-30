@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T36)
+  check_opf_record.py --self-test                    the fixture suite (T1-T41)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -160,6 +160,21 @@ Each case runs on its own copy of that template; the root is removed in a finall
   T36 the journal home is reopened under the held capability: a home renamed aside and replaced by a
       peer's with an open transaction after the trigger read is planned from its current binding and
       rolled back (flip: plan through the trigger read's descriptor)
+  T37 a homes-2 capability leftover of another operation (a killed `ingest` holder) is reclaimed and
+      attributed to the operation its record names, never to opf record (flip: attribute every reclaim
+      to record)
+  T38 a recovery acquisition that removes a staging leftover and then refuses names the removal and
+      claims only that no record operand, journal or projection was written; a contended one says it
+      removed nothing (flip: the staging removal goes unreported)
+  T39 a recovery acquisition that deletes a dead holder's records and then fails names both deletes
+      and the holder's recorded operation (flip: the deletes go unreported)
+  T40 a refusal under the held recovery capability (an intervening operand edit) names the records
+      the acquisition already removed beside its journal-and-operands wording (flip: as T39)
+  T41 each residual list states exactly when another run is needed, marks the refused-leftover list
+      not exhaustive, names a refusal's removals and the homes-2 owning checkout, and the held plan
+      reopens the journal home only when present; a homes-1 record run never reclaims a dead
+      capability holder, and a live holder that releases normally lets the next run continue (flip:
+      read the texts with those statements removed)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -1958,9 +1973,9 @@ def t31_dead_capability(fx):
             assert all((Path(root) / record._opf_store.txn_record("record", name)).is_file()
                        for name, s in states.items() if s == "complete"), ("T31 the projection", label)
             result = record_cli(env, root, CREATE)
-            refused(result, "was reconciled")
-            assert "operation capability's lease and active record, left by a holder" in result[2], (
-                label, result[2][-800:])
+            refused(result, "were reclaimed before this operation")
+            assert "operation capability's lease and active record, left by an interrupted 'record' run " \
+                   "whose holder" in result[2], (label, result[2][-800:])
             assert not (Path(root) / LEASE).exists(), ("T31 the confirmed-dead lease is cleared", label)
             now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
             assert now == (post if want == ["complete"] else pre), ("T31 prestate, or poststate iff "
@@ -2042,9 +2057,9 @@ def t32_lone_active(fx):
             assert all((Path(root) / record._opf_store.txn_record("record", name)).is_file()
                        for name, s in states.items() if s == "complete"), ("T32 the projection", label)
             result = record_cli(env, root, CREATE)
-            refused(result, "was reconciled")
-            assert "operation capability's active record, left by a holder" in result[2], (label,
-                                                                                          result[2][-800:])
+            refused(result, "were reclaimed before this operation")
+            assert "operation capability's active record, left by an interrupted 'record' run whose " \
+                   "holder" in result[2], (label, result[2][-800:])
             assert not active_record(root).exists(), ("T32 the confirmed-dead active record is cleared", label)
             now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
             assert now == (post if want == ["complete"] else pre), ("T32 prestate, or poststate iff "
@@ -2120,12 +2135,15 @@ RESIDUAL_MODULE = ("On a homes-2 store the recovery trigger reads the operation 
                    "active record UNHELD")
 RESIDUAL_GUARD = "RESIDUAL: those trigger reads are unheld"
 # Fix 5: each list states that what recovery acts on and reports is re-derived under the held capability,
-# and that a sibling worktree's leftover is reclaimed from the checkout owning its machine store.
+# and that a sibling worktree's leftover is reclaimed from the checkout owning its machine store (fix 6:
+# a homes-2 record run there; the journal home reopened only when present).
 RESIDUAL_HELD_MODULE = ("the journal home, the plan and what recovery actually cleared are re-derived under "
                         "the held capability")
-RESIDUAL_HELD_GUARD = ("the journal home REOPENED, the plan re-read, and what the acquisition actually "
-                       "cleared taken from the capability itself")
-RESIDUAL_SIBLING = "a record run in the checkout owning that store reclaims it"
+RESIDUAL_HELD_GUARD = ("the journal home re-inspected (and REOPENED when present), the plan re-read, and what "
+                       "the acquisition actually cleared taken from the capability itself")
+RESIDUAL_SIBLING = "a homes-2 record run in the checkout owning that store reclaims it"
+RESIDUAL_BY_HAND_MODULE = "by hand for a record the gate cannot accept"
+RESIDUAL_BY_HAND_GUARD = "manual intervention for a record the gate cannot accept"
 
 
 def residual_texts():
@@ -2144,17 +2162,18 @@ def t34_residual_disclosed(fx):
     assert RESIDUAL_MODULE in module, "T34 the module residual list discloses the unheld trigger read"
     assert RESIDUAL_HELD_MODULE in module, "T34 the module residual list states the held re-derivation"
     assert RESIDUAL_SIBLING in module, "T34 the module residual list names the owning-checkout reclaim"
-    assert "cleared by hand" in module, "T34 the module residual list names the manual clearance"
+    assert RESIDUAL_BY_HAND_MODULE in module, "T34 the module residual list names the manual clearance"
     assert RESIDUAL_GUARD in guard, "T34 the record guard discloses the unheld trigger read"
     assert RESIDUAL_HELD_GUARD in guard, "T34 the record guard states the held re-derivation"
     assert RESIDUAL_SIBLING in guard, "T34 the record guard names the owning-checkout reclaim"
-    assert "needs manual intervention" in guard, "T34 the record guard names the refused leftovers"
+    assert RESIDUAL_BY_HAND_GUARD in guard, "T34 the record guard names the refused leftovers"
 
 
 def flip_t34():
     """Read the texts with the disclosure removed."""
     original = residual_texts
-    pins = (RESIDUAL_MODULE, RESIDUAL_GUARD, RESIDUAL_HELD_MODULE, RESIDUAL_HELD_GUARD, RESIDUAL_SIBLING)
+    pins = (RESIDUAL_MODULE, RESIDUAL_GUARD, RESIDUAL_HELD_MODULE, RESIDUAL_HELD_GUARD, RESIDUAL_SIBLING,
+            RESIDUAL_BY_HAND_MODULE, RESIDUAL_BY_HAND_GUARD)
 
     def stripped():
         texts = []
@@ -2194,7 +2213,8 @@ def t35_released_holder_not_reconciled(fx):
         finally:
             if held:
                 record._opf_oplock.release_operation(held.pop())
-        assert "was reconciled" not in result[2], ("T35 no reconciliation is reported", result[2][-800:])
+        assert "was reconciled" not in result[2] and "were reclaimed" not in result[2], \
+            ("T35 no reconciliation is reported", result[2][-800:])
         refused(result, "is not active in this build")
         now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
         assert now == pre, "T35 the operands are untouched"
@@ -2277,6 +2297,242 @@ def flip_t36():
     return patch.object(record, "_reconcile_capability_journal", stale_descriptor)
 
 
+# --- T37-T41: the PR D fix-6 vectors --------------------------------------------------------------------
+
+# A child that takes the operation capability for {operation} and dies holding it, leaving its lease and
+# active record with no journal work.
+DIE_HOLDING = """
+import os, sys
+sys.path.insert(0, {tools!r})
+import opf
+assert opf._bootstrap() == 0
+import _opf_oplock
+_opf_oplock.acquire_operation(sys.argv[1], {operation!r})
+os._exit(137)
+"""
+
+
+def die_holding(env, root, operation):
+    script = DIE_HOLDING.format(tools=str(TOOLS), operation=operation)
+    return subprocess.run([sys.executable, "-I", "-B", "-c", script, str(root)], capture_output=True,
+                          text=True, timeout=180, env=dict(env.vars)).returncode
+
+
+def capability_records(root):
+    return (Path(root) / LEASE).exists(), active_record(root).exists()
+
+
+def t37_reclaim_names_operation(fx):
+    """A homes-2 capability leftover of ANOTHER operation (an `ingest` holder killed holding it, no record
+    journal present) is reclaimed and attributed to the operation its record names, never to opf record:
+    the lead describes a capability reclamation, the outcome names 'ingest' and says the record run does
+    not examine that operation's journal work. The reviewed head reported "an interrupted opf record run
+    was reconciled"."""
+    env = fx.env
+    base = fx.case("t37-homes2-base")
+    with imp._self_test_homes2_active(base):
+        root = fx.case("t37-homes2-ingest", base)
+        assert die_holding(env, root, "ingest") == 137, "T37 the ingest holder is killed holding it"
+        assert capability_records(root) == (True, True), "T37 its lease and active record are left"
+        result = record_cli(env, root, CREATE)
+        refused(result, "the operation capability records an interrupted run left were reclaimed before "
+                        "this operation")
+        err = result[2]
+        assert "interrupted opf record run" not in err, ("T37 never attributed to opf record", err[-800:])
+        assert "left by an interrupted 'ingest' run whose holder" in err, ("T37 the operation named", err[-800:])
+        assert "any journal work of the 'ingest' operation is not examined here" in err, err[-800:]
+        assert capability_records(root) == (False, False), "T37 the confirmed-dead records are cleared"
+        assert not (Path(root) / TYPED_JOURNAL).exists(), "T37 no journal home is created"
+
+
+def flip_t37():
+    """Attribute every reclaim to opf record (the reviewed head's wording)."""
+    original = record._opf_oplock.acquire_operation
+
+    def as_record(store_root, operation, holder=None, recover=False):
+        cap = original(store_root, operation, holder=holder, recover=recover)
+        if cap.recovered:
+            cap.recovered_operation = record.VERB
+        return cap
+    return patch.object(record._opf_oplock, "acquire_operation", as_record)
+
+
+def t38_staging_removal_disclosed(fx):
+    """A recovery acquisition that removes a staging leftover and THEN refuses (a lone lease with no
+    paired active record) names the removed leftover and says only that no record operand, journal or
+    projection was written; the lone lease is kept. A contended acquisition, which removes nothing, says
+    so. The reviewed head said "Nothing was written" after deleting the staging file."""
+    env = fx.env
+    base = fx.case("t38-homes2-base")
+    with imp._self_test_homes2_active(base):
+        root = fx.case("t38-homes2-lone-lease", base)
+        cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
+        lease_bytes = (Path(root) / LEASE).read_bytes()
+        record._opf_oplock.release_operation(cap)
+        (Path(root) / LEASE).write_bytes(lease_bytes)
+        staging = _opf_oplock._staging_name(opf_check.LEASE_NAME)
+        (Path(root) / MACH / staging).write_bytes(b"a torn lease publication")
+        result = record_cli(env, root, CREATE)
+        refused(result, "a stale lease exists with no paired active record")
+        err = result[2]
+        assert "Nothing was written" not in err, ("T38 no nothing-written claim", err[-800:])
+        assert ("No record operand, record journal or projection was written, but before it failed the "
+                "acquisition removed lease staging leftover " + staging) in err, ("T38 the removal named",
+                                                                                 err[-800:])
+        assert (Path(root) / LEASE).exists() and not (Path(root) / MACH / staging).exists(), \
+            "T38 the lone lease is kept and the staging leftover removed"
+        root = fx.case("t38-homes2-contended", base)
+        held = record._opf_oplock.acquire_operation(str(root), record.VERB)
+        try:
+            before = snapshot(root)
+            result = record_cli(env, root, CREATE)
+            assert snapshot(root) == before, "T38 a contended acquisition removes nothing"
+        finally:
+            record._opf_oplock.release_operation(held)
+        refused(result, "and the acquisition removed nothing (fail-closed)")
+
+
+def flip_t38():
+    """The staging removal goes unreported (the reviewed head's acquisition reported no removal)."""
+    original = _opf_oplock._remove_staging_garbage
+    return patch.object(_opf_oplock, "_remove_staging_garbage",
+                        lambda dir_fd, name, label, removed=None: original(dir_fd, name, label))
+
+
+def flip_unreported_deletes():
+    """The recovery deletes go unreported (the reviewed head's acquisition reported none on a failure)."""
+    original = _opf_oplock._recover_stale
+    return patch.object(_opf_oplock, "_recover_stale",
+                        lambda dir_fd, name, ident, expected_bytes, label, removed=None:
+                        original(dir_fd, name, ident, expected_bytes, label))
+
+
+def t39_deletes_then_failure_disclosed(fx):
+    """A recovery acquisition that deletes a confirmed-dead holder's lease and active record and THEN
+    fails (its own publication refuses) names both deleted records and the holder's recorded operation,
+    never claiming nothing was written. The reviewed head said "Nothing was written" with both gone."""
+    env = fx.env
+    base = fx.case("t39-homes2-base")
+    with imp._self_test_homes2_active(base):
+        root = fx.case("t39-homes2-dead", base)
+        proc = child(env, root, CREATE, flip=HOMES2_CHILD_FLIP + DIE_BEFORE_PUBLISH)
+        assert proc.returncode == 137, ("T39 the holder is killed", proc.returncode, proc.stderr[-800:])
+        assert capability_records(root) == (True, True), "T39 its lease and active record are left"
+
+        def failing_publication(*a, **k):
+            raise _opf_oplock.OpLockError("synthetic publication failure after the recovery deletes")
+        with patch.object(_opf_oplock, "_create_control_file", failing_publication):
+            result = record_cli(env, root, CREATE)
+        refused(result, "synthetic publication failure after the recovery deletes")
+        err = result[2]
+        assert "Nothing was written" not in err, ("T39 no nothing-written claim", err[-800:])
+        assert ("before it failed the acquisition removed the stale operation capability lease and active "
+                "record of a holder its recovery gate confirmed dead (its recorded operation 'record')") \
+            in err, ("T39 the deletes named", err[-800:])
+        assert capability_records(root) == (False, False), "T39 both records were deleted"
+
+
+def t40_held_refusal_discloses(fx):
+    """A refusal raised under the held recovery capability (an intervening operand edit over the open
+    transaction a killed run left) names what the acquisition had already removed -- the dead holder's
+    lease and active record -- beside its own journal-and-operands wording; the transaction stays open
+    and the edit is kept. The reviewed head said "Nothing was written" with both records gone."""
+    env = fx.env
+    base = fx.case("t40-homes2-base")
+    with imp._self_test_homes2_active(base):
+        root = fx.case("t40-homes2-edit", base)
+        proc = child(env, root, CREATE, kill="after-apply-0", flip=HOMES2_CHILD_FLIP)
+        assert proc.returncode == 137, ("T40 the holder is killed mid-apply", proc.returncode,
+                                        proc.stderr[-800:])
+        edited = read(root, COUNTERS) + b"# an intervening edit\n"
+        (Path(root) / COUNTERS).write_bytes(edited)
+        result = record_cli(env, root, CREATE)
+        refused(result, "Nothing was written to the journal or to any operand; both are left exactly as found")
+        err = result[2]
+        assert ("Before this refusal, under the held capability, the recovery acquisition removed the stale "
+                "operation capability lease and active record of a holder its recovery gate confirmed dead") \
+            in err, ("T40 the removal named", err[-800:])
+        assert capability_records(root) == (False, False), "T40 the recovery acquisition cleared both records"
+        assert any(s == "open" for s in journal_states(root, TYPED_JOURNAL).values()), \
+            "T40 the transaction is left open"
+        assert read(root, COUNTERS) == edited, "T40 the intervening edit is kept"
+
+
+# Fix 6: what each residual list states, exactly (the reviewed head's lists overstated when another run
+# or the holder's death is needed, promised nothing written, presented the refused leftovers as complete,
+# and named a sibling's owning checkout regardless of its generation).
+FIX6_BOTH = ("is reclaimed and reconciled by this run",
+             "a homes-1 record run there never reclaims a capability record",
+             "the refusal naming whatever the acquisition removed before it refused",
+             "cannot be unlinked or fsynced during the recovery deletes")
+FIX6_MODULE = ("Only a run that takes the capability and dies after a trigger read that found nothing",
+               "until it releases normally, or exits and a later run confirms it dead",
+               "NOT an exhaustive list of the gate's and the deletes' refusals")
+FIX6_GUARD = ("Only a run that takes the capability and dies after trigger reads that found nothing",
+              "the holder releases normally, or exits and a later run confirms it dead",
+              "That last group is NOT exhaustive")
+FIX6_PLAN = "REOPENED whenever it is present (an absent home is re-read as absent under the held capability"
+FIX6_RETIRED = ("neither reclaims nor reconciles", "refuses this run with nothing written",
+                "refuses record runs, nothing written", "the journal home is ALWAYS re-inspected and REOPENED")
+
+
+def fix6_texts():
+    """(the module docstring, the record guard's, the held plan's), whitespace-normalized."""
+    module, guard = residual_texts()
+    return module, guard, " ".join((record._capability_recovery_plan.__doc__ or "").split())
+
+
+def t41_residuals_exact(fx):
+    """Each residual list states exactly when another run is needed: a leftover a run that took the
+    capability after the trigger read left before this run's recovery acquisition is reclaimed by this
+    run (T36); a possibly-live holder refuses until it releases normally or exits; the refused-leftover
+    list is marked not exhaustive; a refusal names what the acquisition removed; a sibling's leftover is
+    reclaimed only by a homes-2 run in its owning checkout; the held plan reopens the journal home only
+    when present. Two of those statements are exercised: a homes-1 record run never reclaims a dead
+    capability holder's records, and a live holder that releases normally lets the next run continue."""
+    module, guard, plan = fix6_texts()
+    for pin in FIX6_BOTH + FIX6_MODULE:
+        assert pin in module, ("T41 the module residual list states", pin)
+    for pin in FIX6_BOTH + FIX6_GUARD:
+        assert pin in guard, ("T41 the record guard states", pin)
+    assert FIX6_PLAN in plan, "T41 the held plan reopens the journal home only when present"
+    for retired in FIX6_RETIRED:
+        assert retired not in module and retired not in guard and retired not in plan, \
+            ("T41 the overstated wording is gone", retired)
+    env = fx.env
+    root = fx.case("t41-homes1-owner")
+    assert die_holding(env, root, record.VERB) == 137, "T41 the capability holder is killed holding it"
+    result = record_cli(env, root, CREATE)
+    refused(result, "holds the single-writer lease")
+    assert capability_records(root) == (True, True), "T41 a homes-1 record run never reclaims the records"
+    base = fx.case("t41-homes2-base")
+    with imp._self_test_homes2_active(base):
+        root = fx.case("t41-homes2-live", base)
+        held = record._opf_oplock.acquire_operation(str(root), record.VERB)
+        try:
+            refused(record_cli(env, root, CREATE), "never seized")
+        finally:
+            record._opf_oplock.release_operation(held)
+        result = record_cli(env, root, CREATE)
+        refused(result, "is not active in this build")
+        assert "was reconciled" not in result[2] and "were reclaimed" not in result[2], result[2][-800:]
+
+
+def flip_t41():
+    """Read the texts with the fix-6 statements removed."""
+    original = fix6_texts
+    pins = FIX6_BOTH + FIX6_MODULE + FIX6_GUARD + (FIX6_PLAN,)
+
+    def stripped():
+        texts = []
+        for text in original():
+            for pin in pins:
+                text = text.replace(pin, "")
+            texts.append(text)
+        return tuple(texts)
+    return patch.object(sys.modules[__name__], "fix6_texts", stripped)
+
+
 # --- the runner ------------------------------------------------------------------------------------------------
 
 TESTS = (
@@ -2327,6 +2583,11 @@ TESTS = (
     ("T34-trigger-residual-disclosed", t34_residual_disclosed, flip_t34),
     ("T35-released-holder-not-reconciled", t35_released_holder_not_reconciled, flip_t35),
     ("T36-journal-home-reopened", t36_journal_home_reopened, flip_t36),
+    ("T37-reclaim-names-operation", t37_reclaim_names_operation, flip_t37),
+    ("T38-staging-removal-disclosed", t38_staging_removal_disclosed, flip_t38),
+    ("T39-deletes-then-failure-disclosed", t39_deletes_then_failure_disclosed, flip_unreported_deletes),
+    ("T40-held-refusal-discloses", t40_held_refusal_discloses, flip_unreported_deletes),
+    ("T41-residuals-exact", t41_residuals_exact, flip_t41),
 )
 
 

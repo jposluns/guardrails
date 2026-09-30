@@ -97,16 +97,28 @@ restore then rewrites without re-checking, so an edit landing in that window, or
 byte prefix of the journaled preimage or planned bytes (read as a torn write), is not detected. On a
 homes-2 store the recovery trigger reads the operation capability's lease and active record UNHELD;
 the journal home, the plan and what recovery actually cleared are re-derived under the held
-capability, so a holder that releases after that read leaves no outcome and the run continues, but a
-run that acquires the capability after that read and dies leaves its records and any journal work for
-the next run. A leftover the capability's own recovery gate refuses refuses record runs, nothing
-written: an active record paired with a sibling worktree's still-present machine store until a record
-run in the checkout owning that store reclaims it (its holder confirmed dead there); a holder read as
-possibly live until it exits and a later run confirms it dead; and every other refused leftover (a lone
-owner-less lease, a cross-host holder or one with no usable nodename, a malformed owner identity, a
-record or its staging leftover that is not a regular file, a record failing the gate's schema or
-lease-pairing validation, the earlier schema-1 active record included, or one whose recorded machine
-store cannot be confirmed present or absent) until it is cleared by hand. A
+capability, so a holder that releases after that read leaves no outcome and the run continues, and
+what a run that took the capability after that read, and was dead by this run's recovery acquisition,
+left (its records, an open transaction) is reclaimed and reconciled by this run. Only a run that takes
+the capability and dies after a trigger read that found nothing (no recovery acquisition is then
+made), or after this run's recovery acquisition released, leaves its records and any journal work for
+a later run's trigger. A leftover the capability's own recovery gate refuses refuses record runs with
+no record operand, journal or projection written, the refusal naming whatever the acquisition removed
+before it refused (a staging leftover, or a confirmed-dead holder's record deleted before a later
+step failed): an active record paired with a sibling worktree's still-present machine store until a
+homes-2 record run in the checkout owning that store reclaims it (its holder confirmed dead there; a
+homes-1 record run there never reclaims a capability record, taking the single-writer lease instead,
+which a present capability lease refuses); a holder read as possibly live until it releases normally,
+or exits and a later run confirms it dead; and every other refused leftover until its cause is
+removed, by hand for a record the gate cannot accept and by a later run once a transient condition
+has passed. That last group is NOT an exhaustive list of the gate's and the deletes' refusals; among
+them are a lone owner-less lease, a cross-host holder or one with no usable nodename, a malformed
+owner identity, a record or its staging leftover that is not a plain singly-linked regular file, a
+record that cannot be opened, exceeds the record size cap, or is not a UTF-8 TOML table, a record
+failing the gate's schema or lease-pairing validation, the earlier schema-1 active record included,
+one whose recorded machine store cannot be confirmed present or absent, a staging leftover that
+cannot be removed or whose directory fsync fails, and a record that vanishes, changes identity or
+bytes, or cannot be unlinked or fsynced during the recovery deletes. A
 transition changes `status` and `updated_at` only, plus `proposed_from` (written when it lands a
 `/proposed` status, removed when it leaves one) and a pending_decision's resolution bundle (written by
 `open -> decided`, removed by the rejection of `decided/proposed`), so a target state that requires
@@ -1499,23 +1511,36 @@ def _reconcile_capability_journal(ctx):
     CONFIRMED-DEAD holder's records are cleared instead of refusing every later acquisition, while a
     live holder refuses it and is never seized. The reads below only decide whether recovery is
     needed at all; they are never acted on. RESIDUAL: those trigger reads are unheld. What recovery
-    acts on and reports is re-derived under the held capability -- the journal home REOPENED, the
-    plan re-read, and what the acquisition actually cleared taken from the capability itself
-    (OpCapability.recovered) -- so an outcome names only what this run's held acquisition cleared and
-    its held plan found: a holder that released in that window, with no journal work pending, yields
-    no outcome and this run continues, and a journal directory replaced in that window is planned
-    from its current binding. A run that acquires the capability after those reads and dies leaves
-    its records and any journal work for the next run's trigger (this run neither reclaims nor
-    reconciles them). A leftover the substrate's recovery gate refuses refuses this run with nothing
-    written, and keeps refusing record runs until: for an active record paired with a sibling
-    worktree's still-present machine store, a record run in the checkout owning that store reclaims
-    it (its holder confirmed dead there); for a holder read as possibly live, the holder exits and a
-    later run confirms it dead; every other refused leftover (a lone owner-less lease, a cross-host
-    holder or one with no usable nodename, a malformed owner identity, a record or its staging
-    leftover that is not a regular file, a record failing the gate's schema or lease-pairing
-    validation, the earlier schema-1 active record included, or one whose recorded machine store
-    cannot be confirmed present or absent) needs manual intervention. The homes-1 path (retired)
-    keeps its own lease rules unchanged."""
+    acts on and reports is re-derived under the held capability -- the journal home re-inspected
+    (and REOPENED when present), the plan re-read, and what the acquisition actually cleared taken
+    from the capability itself (OpCapability.recovered, recovered_operation and staging_removed) --
+    so an outcome names only what this run's held acquisition cleared and its held plan found, and
+    attributes a reclaimed leftover to the operation its record names: a holder that released in
+    that window, with no journal work pending, yields no outcome and this run continues; a journal
+    directory replaced in that window is planned from its current binding; and what a run that took
+    the capability after those reads, and was dead by the recovery acquisition, left (its records,
+    an open transaction) is reclaimed and reconciled by this run. Only a run that takes the
+    capability and dies after trigger reads that found nothing (no recovery acquisition is then
+    made), or after this run's recovery acquisition released, leaves its records and any journal
+    work for a later run's trigger. A leftover the substrate's recovery gate refuses refuses this
+    run with no record operand, journal or projection written, the refusal naming whatever the
+    acquisition removed before it refused (a staging leftover, or a confirmed-dead holder's record
+    deleted before a later step failed), and keeps refusing record runs until: for an active record
+    paired with a sibling worktree's still-present machine store, a homes-2 record run in the
+    checkout owning that store reclaims it (its holder confirmed dead there; a homes-1 record run
+    there never reclaims a capability record, taking the single-writer lease instead, which a
+    present capability lease refuses); for a holder read as possibly live, the holder releases
+    normally, or exits and a later run confirms it dead; every other refused leftover needs its
+    cause removed: manual intervention for a record the gate cannot accept, a later run once a
+    transient condition has passed. That last group is NOT exhaustive; among its refusals are a
+    lone owner-less lease, a cross-host holder or one with no usable nodename, a malformed owner
+    identity, a record or its staging leftover that is not a plain singly-linked regular file, a
+    record that cannot be opened, exceeds the record size cap, or is not a UTF-8 TOML table, a
+    record failing the gate's schema or lease-pairing validation, the earlier schema-1 active
+    record included, one whose recorded machine store cannot be confirmed present or absent, a
+    staging leftover that cannot be removed or whose directory fsync fails, and a record that
+    vanishes, changes identity or bytes, or cannot be unlinked or fsynced during the recovery
+    deletes. The homes-1 path (retired) keeps its own lease rules unchanged."""
     root_fd = ctx.root_fd
     rel = ctx.journal_rel
     leftover = _capability_leftover_present(ctx)
@@ -1545,12 +1570,17 @@ def _reconcile_capability_journal(ctx):
             _journal._close_fd_quietly(jr_fd)
     if not opened and not unprojected and not leftover:
         return
-    outcomes = _recover_capability_journal(ctx, opened, unprojected)
-    if outcomes is None:
+    result = _recover_capability_journal(ctx, opened, unprojected)
+    if result is None:
         return
-    raise RecordError("an interrupted opf record run was reconciled before this operation: {}. Nothing was "
-                      "recorded by this run. Inspect the store paths (git status) and run opf doctor, then "
-                      "re-run".format("; ".join(outcomes)))
+    # The lead names opf record only on record-journal evidence (a transaction this run reconciled);
+    # a reclaimed capability leftover alone is attributed by its outcome line to the operation its
+    # record names, which need not be record.
+    journal_reconciled, outcomes = result
+    lead = ("an interrupted opf record run was reconciled" if journal_reconciled else
+            "the operation capability records an interrupted run left were reclaimed")
+    raise RecordError("{} before this operation: {}. Nothing was recorded by this run. Inspect the store "
+                      "paths (git status) and run opf doctor, then re-run".format(lead, "; ".join(outcomes)))
 
 
 def _capability_leftover_present(ctx):
@@ -1617,10 +1647,12 @@ def _projection_missing(ctx, name):
 
 def _capability_recovery_plan(ctx):
     """(opened, unprojected): what the typed record journal needs reconciled, from a FRESH read --
-    the journal home is ALWAYS re-inspected and REOPENED here, never read through a descriptor or an
-    absence the unheld trigger read left, so a home created, or replaced by another directory, since
-    that read (a peer run that opened a transaction and was killed) is planned from its current
-    binding and reconciled by this run, and the outcome never reports nothing pending over open work.
+    the journal home is ALWAYS re-inspected here, and REOPENED whenever it is present (an absent home
+    is re-read as absent under the held capability, and plans nothing: it holds no transaction),
+    never read through a descriptor or an absence the unheld trigger read left, so a home created, or
+    replaced by another directory, since that read (a peer run that opened a transaction and was
+    killed) is planned from its current binding and reconciled by this run, and the outcome never
+    reports nothing pending over open work.
     Read-only. Meaningful only under the held operation capability: publication runs under the same
     capability, so a plan derived under it cannot miss a peer's completed publication."""
     rel = ctx.journal_rel
@@ -1659,8 +1691,8 @@ def _capability_journal_plan(ctx, jr_fd):
     if problems:
         raise RecordError(
             "an interrupted opf record publication cannot be reconciled without overwriting a change made "
-            "since it was interrupted: {}. Nothing was written; the journal and every operand are left "
-            "exactly as found. Either restore each path to its journaled preimage (under {}/<transaction>/"
+            "since it was interrupted: {}. Nothing was written to the journal or to any operand; both are "
+            "left exactly as found. Either restore each path to its journaled preimage (under {}/<transaction>/"
             "preimages, or from HEAD when it holds those bytes) and re-run, or keep the edit and retire the "
             "transaction by moving its directory out of {} yourself (fail-closed)".format(
                 "; ".join(problems), rel, rel))
@@ -1670,19 +1702,72 @@ def _capability_journal_plan(ctx, jr_fd):
     return opened, unprojected
 
 
-def _reclaimed_outcome(recovered, pending):
+def _removal_parts(recovered, operation, staging_removed):
+    """What an operation-capability acquisition reports it removed, in removal order: its staging
+    leftovers, then the stale records of the holder its recovery gate confirmed dead, with the
+    operation that holder's record names (PR D fix 6)."""
+    parts = list(staging_removed)
+    if recovered:
+        parts.append("the stale operation capability {} of a holder its recovery gate confirmed dead "
+                     "({})".format(" and ".join(recovered), "its recorded operation not reported"
+                                   if operation is None else "its recorded operation {!r}".format(operation)))
+    return parts
+
+
+def _acquisition_removals(exc):
+    """The sentence a failed recovery acquisition's refusal ends with: that no record operand, record
+    journal or projection was written, and exactly what the acquisition itself removed before it
+    failed, from the substrate's own report on its OpLockError, so a refusal never claims nothing was
+    written after a staging leftover or a confirmed-dead holder's record was removed (PR D fix 6). An
+    error raised before the acquisition's protected body carries no report; no removal runs there."""
+    parts = _removal_parts(getattr(exc, "recovered", ()), getattr(exc, "recovered_operation", None),
+                           getattr(exc, "staging_removed", ()))
+    if not parts:
+        return ("No record operand, record journal or projection was written, and the acquisition "
+                "removed nothing")
+    return ("No record operand, record journal or projection was written, but before it failed the "
+            "acquisition removed {}".format("; ".join(parts)))
+
+
+def _held_refusal(exc, cap, reconciled):
+    """A refusal raised under the held recovery capability, extended with what this run had already
+    done under it before refusing: what the acquisition removed (from the capability) and each
+    transaction already reconciled, so the refusal's own nothing-written wording, which speaks for
+    the journal and the operands of the refusing step, is never read as the whole run's (PR D fix 6).
+    None when this run had done nothing before it (the refusal then stands unchanged)."""
+    parts = _removal_parts(cap.recovered, cap.recovered_operation, cap.staging_removed)
+    done = ["the recovery acquisition removed " + "; ".join(parts)] if parts else []
+    if reconciled:
+        done.append("this run reconciled " + "; ".join(reconciled))
+    if not done:
+        return None
+    return "{}. Before this refusal, under the held capability, {}".format(exc, ", and ".join(done))
+
+
+def _reclaimed_outcome(cap, pending):
     """The outcome line for the capability records this run's recovery acquisition cleared, taken
-    from the held capability (OpCapability.recovered), never from the unheld trigger read. With no
-    journal work pending under the held capability it carries the operator's inspection advice."""
-    line = ("recovery cleared the operation capability's {}, left by a holder its recovery gate "
-            "confirmed dead, under the held capability".format(" and ".join(recovered)))
+    from the held capability (OpCapability.recovered, with recovered_operation naming the operation
+    the confirmed-dead holder's record names, so another operation's leftover is never attributed to
+    opf record, and staging_removed), never from the unheld trigger read. With no journal work
+    pending under the held capability it carries the operator's inspection advice."""
+    operation = cap.recovered_operation
+    line = ("recovery cleared the operation capability's {}, left by an interrupted {} run whose holder "
+            "its recovery gate confirmed dead, under the held capability".format(
+                " and ".join(cap.recovered), "(recorded operation not reported)" if operation is None
+                else repr(operation)))
+    if not pending:
+        line += (" with no record journal work pending (read under the held capability: no "
+                 "transaction open, every terminal one carrying its projection)")
+    if cap.staging_removed:
+        line += "; the acquisition also removed {}".format("; ".join(cap.staging_removed))
+    if operation is not None and operation != VERB:
+        line += ("; this run reconciles only the opf record journal, so any journal work of the {!r} "
+                 "operation is not examined here".format(operation))
     if pending:
         return line
-    return line + (" with no record journal work pending (read under the held capability: no "
-                   "transaction open, every terminal one carrying its projection). Any publication a "
-                   "COMPLETE transaction made is present in the working tree; whether its render and "
-                   "final doctor ran is not recorded by the journal, so run opf doctor before relying "
-                   "on it")
+    return line + (". Any publication a COMPLETE transaction made is present in the working tree; "
+                   "whether its render and final doctor ran is not recorded by the journal, so run opf "
+                   "doctor before relying on it")
 
 
 def _recover_capability_journal(ctx, opened, unprojected):
@@ -1690,15 +1775,20 @@ def _recover_capability_journal(ctx, opened, unprojected):
     a live holder; recover=True clears only a CONFIRMED-DEAD holder's leftover lease and active
     record, the same possibly-live-never-seized standard the homes-1 stale journal lock is held to),
     and the recovery plan is then re-derived UNDER the held capability (_capability_recovery_plan, which
-    reopens the journal home), so a peer publication that completed between the trigger read and this
-    acquisition is seen and kept, never rolled back as if it were the interruption's own write.
+    re-inspects the journal home and reopens it when present), so a peer publication that completed
+    between the trigger read and this acquisition is seen and kept, never rolled back as if it were
+    the interruption's own write.
     `opened` and `unprojected` are the unheld trigger read, used ONLY to describe the pending work in
     the acquisition refusal. The outcome is worded from the held observation alone: the records the
-    acquisition itself reports clearing (OpCapability.recovered) and the transactions the held plan
-    reconciles. Returns those outcome lines, or None when the acquisition cleared nothing and the plan
-    under the capability found nothing (a holder that released after the trigger read, say), so the
-    run continues. Each transaction is recovered through the capability-bound API, which re-validates
-    identity and the record header before any truncate or write, and publishes the terminal projection
+    acquisition itself reports clearing (OpCapability.recovered, with the operation its holder
+    recorded) and the transactions the held plan reconciles. Returns (whether a record journal
+    transaction was reconciled, those outcome lines), or None when the acquisition cleared nothing
+    and the plan under the capability found nothing (a holder that released after the trigger read,
+    say), so the run continues. A refusal states what was done before it: a failed acquisition names
+    what it removed (_acquisition_removals), and a refusal under the held capability names what the
+    acquisition removed and each transaction already reconciled (_held_refusal). Each transaction is
+    recovered through the capability-bound API, which re-validates identity and the record header
+    before any truncate or write, and publishes the terminal projection
     an interrupted run left missing; an already-terminal transaction reconciles to exactly that
     projection repair."""
     if opened:
@@ -1715,35 +1805,41 @@ def _recover_capability_journal(ctx, opened, unprojected):
         cap = _opf_oplock.acquire_operation(str(ctx.res.store_root), VERB, recover=True)
     except _opf_oplock.OpLockError as exc:
         raise RecordError("{}, and reconciliation writes the store, so it runs only under the operation "
-                          "capability: {} Nothing was written (fail-closed)".format(need, exc))
+                          "capability: {} {} (fail-closed)".format(need, exc, _acquisition_removals(exc)))
+    reconciled = []
     try:
-        recovered = cap.recovered
-        opened, unprojected = _capability_recovery_plan(ctx)
-        outcomes = [_reclaimed_outcome(recovered, opened or unprojected)] if recovered else []
-        for name in opened + [n for n in unprojected if n not in opened]:
-            try:
-                result = _opf_journal.recover_transaction(cap, "record", name)
-            except (_journal.JournalError, OSError, ValueError) as exc:
-                raise RecordError("the record journal transaction {} cannot be reconciled ({}); "
-                                  "fail-closed".format(name, exc))
-            if result == "rolled-forward":
-                outcomes.append("{} rolled FORWARD (its publication is present in the working tree, "
-                                "uncommitted; its render and final doctor never ran)".format(name))
-            elif result == "rolled-back":
-                outcomes.append("{} rolled BACK to its prestate".format(name))
-            elif result == "terminal":
-                outcomes.append("{} was already terminal; its terminal projection is published and the "
-                                "publication outcome is unchanged".format(name))
-            else:
-                raise RecordError("the record journal transaction {} did not reconcile to a terminal state "
-                                  "({}); fail-closed".format(name, result))
+        try:
+            opened, unprojected = _capability_recovery_plan(ctx)
+            for name in opened + [n for n in unprojected if n not in opened]:
+                try:
+                    result = _opf_journal.recover_transaction(cap, "record", name)
+                except (_journal.JournalError, OSError, ValueError) as exc:
+                    raise RecordError("the record journal transaction {} cannot be reconciled ({}); "
+                                      "fail-closed".format(name, exc))
+                if result == "rolled-forward":
+                    reconciled.append("{} rolled FORWARD (its publication is present in the working tree, "
+                                      "uncommitted; its render and final doctor never ran)".format(name))
+                elif result == "rolled-back":
+                    reconciled.append("{} rolled BACK to its prestate".format(name))
+                elif result == "terminal":
+                    reconciled.append("{} was already terminal; its terminal projection is published and "
+                                      "the publication outcome is unchanged".format(name))
+                else:
+                    raise RecordError("the record journal transaction {} did not reconcile to a terminal "
+                                      "state ({}); fail-closed".format(name, result))
+        except RecordError as exc:
+            detail = _held_refusal(exc, cap, reconciled)
+            if detail is None:
+                raise
+            raise RecordError(detail)
+        outcomes = ([_reclaimed_outcome(cap, opened or unprojected)] if cap.recovered else []) + reconciled
     finally:
         try:
             _opf_oplock.release_operation(cap)
         except _opf_oplock.OpLockError as exc:
             print("opf record: additionally, releasing the operation capability failed ({}); the failure "
                   "above still governs.".format(exc), file=sys.stderr)
-    return outcomes or None
+    return (bool(reconciled), outcomes) if outcomes else None
 
 
 def _sha256(data):

@@ -533,7 +533,14 @@ _CONTROL_DIR_MODE = 0o755
 
 
 class OpLockError(Exception):
-    """A fail-closed locking error."""
+    """A fail-closed locking error.
+
+    PR D fix 6: an OpLockError raised out of acquire_operation's protected body also reports what
+    that acquisition had REMOVED before it failed, so a caller never words a refusal as having
+    written nothing when it had: `recovered` (the stale records unlinked, in delete order),
+    `recovered_operation` (the confirmed-dead holder's recorded operation, once the liveness gate
+    has passed) and `staging_removed` (the staging leftovers unlinked). An OpLockError raised before
+    that body carries none of them; no removal step runs before it."""
 
 
 class _UnlinkNotDurable(OpLockError):
@@ -849,13 +856,14 @@ class OpCapability:
                  "_anchor_ident", "_ctl_ident", "_machine_ident", "_active_ident", "_lease_ident",
                  "_active_bytes", "_lease_bytes",
                  "_acquirer_pid", "_acquirer_pid_start", "_released", "_claim", "_claimant",
-                 "init_root", "init_token", "recovered")
+                 "init_root", "init_token", "recovered", "recovered_operation", "staging_removed")
 
     def __init__(self, op_id, holder, operation, store_root, machine_rel,
                  ctl_fd, machine_fd, anchor_fd, active_fd, lease_fd,
                  anchor_ident, ctl_ident, machine_ident, active_ident, lease_ident,
                  active_bytes, lease_bytes, acquirer_pid, acquirer_pid_start,
-                 init_root=None, init_token=None, recovered=()):
+                 init_root=None, init_token=None, recovered=(), recovered_operation=None,
+                 staging_removed=()):
         self.op_id = op_id
         self.holder = holder
         self.operation = operation
@@ -889,6 +897,11 @@ class OpCapability:
         # ("lease", then "active record"): set only by a recover=True acquisition whose liveness gate
         # confirmed the recorded holder dead, and empty on every other capability.
         self.recovered = recovered
+        # PR D fix 6: the `operation` the confirmed-dead holder's active record names (None unless
+        # this acquisition recovered a record), and the staging leftovers it removed under the held
+        # flock before stale classification, so a caller can say exactly what was cleared.
+        self.recovered_operation = recovered_operation
+        self.staging_removed = staging_removed
 
 
 # --- small fail-closed primitives ---------------------------------------------------------------
@@ -1658,7 +1671,7 @@ def _classify_stale(dir_fd, name, label):
     return True
 
 
-def _remove_staging_garbage(dir_fd, name, label):
+def _remove_staging_garbage(dir_fd, name, label, removed=None):
     """D1: remove the staging leftovers a process killed mid-publication left for the control record
     `name` beneath dir_fd. Called ONLY under the held anchor flock, before stale classification, so
     no cooperating publisher can be mid-publication: a leftover never became a record, is never a
@@ -1667,7 +1680,8 @@ def _remove_staging_garbage(dir_fd, name, label):
     single link, so the recovery gate then reads it like any other stale record. The directory is
     listed through a FRESH descriptor (never a rewind of a retained one); only a plain regular file
     whose name matches the staging pattern EXACTLY is removed, and a staging name bound to anything
-    else refuses (manual intervention). Returns the number of leftovers removed."""
+    else refuses (manual intervention). Returns the number of leftovers removed; each removed
+    leftover is also appended to `removed` (a list) when given, so a later refusal can name it."""
     with _FdOwner() as owner:
         try:
             list_fd = owner.adopt(os.open(".", _DIR_OPEN_FLAGS, dir_fd=dir_fd))
@@ -1675,7 +1689,7 @@ def _remove_staging_garbage(dir_fd, name, label):
         except OSError as exc:
             raise OpLockError("cannot list the {} directory for staging leftovers ({})".format(
                 label, exc))
-    removed = 0
+    count = 0
     for entry in entries:
         if not _is_staging_name(entry, name):
             continue
@@ -1691,14 +1705,16 @@ def _remove_staging_garbage(dir_fd, name, label):
             continue
         except OSError as exc:
             raise OpLockError("cannot remove {} staging leftover {} ({})".format(label, entry, exc))
-        removed += 1
-    if removed:
+        count += 1
+        if removed is not None:
+            removed.append("{} staging leftover {}".format(label, entry))
+    if count:
         try:
             os.fsync(dir_fd)
         except OSError as exc:
             raise OpLockError("cannot fsync the {} directory after removing staging leftovers "
                               "({})".format(label, exc))
-    return removed
+    return count
 
 
 def _validate_recovery_active(doc):
@@ -1913,7 +1929,7 @@ def _require_holder_confirmed_dead(ctl_fd, machine_fd, stale_active, stale_lease
     return active_ident, active_bytes, lease_ident, lease_bytes
 
 
-def _recover_stale(dir_fd, name, ident, expected_bytes, label):
+def _recover_stale(dir_fd, name, ident, expected_bytes, label, removed=None):
     """Identity- and byte-verified unlink of an OBSERVED stale control record, under the held anchor
     flock and only on the explicit recover=True path AFTER the liveness gate confirmed the holder
     dead. `ident` and `expected_bytes` are the (st_dev, st_ino) identity and exact bytes the
@@ -1923,7 +1939,8 @@ def _recover_stale(dir_fd, name, ident, expected_bytes, label):
     or byte check and is refused and PRESERVED rather than deleted into a two-holder state (DEF-1).
     The opened object (not just the name) must be a plain singly-linked regular file; the name must
     still bind that same inode at the final pre-unlink re-check; anything else refuses and
-    preserves."""
+    preserves. Once the unlink returns, `label` is appended to `removed` (a list) when given, BEFORE
+    the directory fsync, so a removal whose fsync then fails is still reported as performed."""
     with _FdOwner() as owner:
         try:
             fd = owner.adopt(os.open(name, _FILE_READ_FLAGS, dir_fd=dir_fd))
@@ -1941,6 +1958,8 @@ def _recover_stale(dir_fd, name, ident, expected_bytes, label):
         os.unlink(name, dir_fd=dir_fd)
     except OSError as exc:
         raise OpLockError("cannot unlink stale {} ({})".format(label, exc))
+    if removed is not None:
+        removed.append(label)
     try:
         os.fsync(dir_fd)
     except OSError as exc:
@@ -2384,6 +2403,21 @@ def _verified_unlink_verify(fd, ident, expected_bytes, label):
 # --- acquire / release ------------------------------------------------------------------------------
 
 
+def _recorded_operation(active_bytes):
+    """The `operation` of the active record the recovery liveness gate read and validated (its
+    exact bytes: a UTF-8 TOML table whose operation is a non-empty string), for the report of what
+    a recovery cleared."""
+    return tomllib.loads(active_bytes.decode("utf-8"))["operation"]
+
+
+def _tag_removals(exc, recovered, recovered_operation, staging_removed):
+    """PR D fix 6: record on an acquisition's OpLockError what it had removed before failing."""
+    exc.recovered = tuple(recovered)
+    exc.recovered_operation = recovered_operation
+    exc.staging_removed = tuple(staging_removed)
+    return exc
+
+
 def acquire_operation(store_root, operation, holder=None, recover=False):
     """Acquire the shared operation lock for the RESOLVED machine store at `store_root`.
 
@@ -2402,8 +2436,10 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
     store that still exists (a sibling git worktree's; D4), and deletes the lease before the active
     record, so an interrupted recovery leaves only a lone active record that a later recovery can
     clear. Returns an OpCapability whose `recovered` names the stale records this acquisition
-    cleared, in delete order (empty when it cleared none); raises OpLockError fail-closed on
-    everything else. An
+    cleared, in delete order (empty when it cleared none), `recovered_operation` the operation their
+    confirmed-dead holder recorded, and `staging_removed` the staging leftovers it removed; raises
+    OpLockError fail-closed on everything else, carrying the same three reports of what it had
+    removed before it failed (PR D fix 6). An
     interruption (a BaseException that is not an Exception) propagates as itself after the unwind.
     Everything after the argument validation runs with the Python-handled signals deferred (fix
     round 5): a signal arriving meanwhile is delivered only once the acquisition has either failed
@@ -2721,6 +2757,11 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
     ctl_fd = machine_fd = None
     cap = None
     recovered = ()
+    # PR D fix 6: what this acquisition removes, recorded as each removal happens, so a failure
+    # after a removal reports it (on the raised OpLockError) instead of reading as nothing removed.
+    recovered_operation = None
+    removed_stale = []
+    staging_removed = []
     try:
         # Fix round 4: no nested try statement follows the first adoption in this body. A try
         # statement's own line lies outside every enclosing exception range, so an interruption
@@ -2765,9 +2806,10 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
         # unlink is back to a single link when the recovery gate reads it. Fix round 9: only in
         # the acquiring process (a forked continuation is refused here, having removed nothing).
         _gated_step(acquirer_pid, "remove the active record's staging leftovers",
-                    _remove_staging_garbage, ctl_fd, ACTIVE_NAME, "active record")
+                    _remove_staging_garbage, ctl_fd, ACTIVE_NAME, "active record", staging_removed)
         _gated_step(acquirer_pid, "remove the lease's staging leftovers",
-                    _remove_staging_garbage, machine_fd, _opf_check.LEASE_NAME, "lease")
+                    _remove_staging_garbage, machine_fd, _opf_check.LEASE_NAME, "lease",
+                    staging_removed)
 
         # Stale-state classification under the held flock: a record under a FREE anchor is a
         # crash artefact; only explicit recovery clears it, and only for a CONFIRMED-DEAD holder.
@@ -2792,6 +2834,7 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
             rec_active_ident, rec_active_bytes, rec_lease_ident, rec_lease_bytes = \
                 _require_holder_confirmed_dead(ctl_fd, machine_fd, stale_active, stale_lease,
                                                machine_st, machine_path)
+            recovered_operation = _recorded_operation(rec_active_bytes)
             # Delete order: the verified LEASE first (its unlink is fsynced on the machine-store
             # directory inside _recover_stale), and ONLY THEN the active record. A crash or a failed
             # delete between the two leaves a LONE ACTIVE RECORD, which still carries the owner
@@ -2800,12 +2843,13 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
             # could ever confirm dead. Fix round 9: each delete runs only in the acquiring process.
             if stale_lease:
                 _gated_step(acquirer_pid, "remove the stale lease", _recover_stale, machine_fd,
-                            _opf_check.LEASE_NAME, rec_lease_ident, rec_lease_bytes, "lease")
+                            _opf_check.LEASE_NAME, rec_lease_ident, rec_lease_bytes, "lease",
+                            removed_stale)
             if stale_active:
                 _gated_step(acquirer_pid, "remove the stale active record", _recover_stale, ctl_fd,
-                            ACTIVE_NAME, rec_active_ident, rec_active_bytes, "active record")
-            recovered = tuple(label for label, stale in (("lease", stale_lease),
-                                                         ("active record", stale_active)) if stale)
+                            ACTIVE_NAME, rec_active_ident, rec_active_bytes, "active record",
+                            removed_stale)
+            recovered = tuple(removed_stale)
 
         op_id = str(uuid.uuid4())
         _validate_field("op_id", op_id)
@@ -2859,10 +2903,13 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
             machine_ident=(machine_st.st_dev, machine_st.st_ino),
             active_ident=active_ident, lease_ident=lease_ident,
             active_bytes=active_payload, lease_bytes=lease_payload,
-            acquirer_pid=acquirer_pid, acquirer_pid_start=acquirer_start, recovered=recovered)
+            acquirer_pid=acquirer_pid, acquirer_pid_start=acquirer_start, recovered=recovered,
+            recovered_operation=recovered_operation, staging_removed=tuple(staging_removed))
         owner.transfer_all()               # the capability now owns every retained descriptor
         return cap
     except BaseException as exc:
+        if isinstance(exc, OpLockError):
+            _tag_removals(exc, removed_stale, recovered_operation, staging_removed)
         # A capability already built and handed every descriptor (transfer_all is one assignment,
         # so the owner is then empty) but interrupted before it was returned is unwound like any
         # other failure: its descriptors come back to the owner in one step, closed below after the
@@ -2990,8 +3037,9 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
                                "({}){}".format(exc, detail))
             raise interrupt
         if unwind and isinstance(exc, Exception):
-            raise OpLockError("{}; additionally the unwind failed: {}".format(
-                exc, "; ".join(unwind))) from exc
+            raise _tag_removals(OpLockError("{}; additionally the unwind failed: {}".format(
+                exc, "; ".join(unwind))), removed_stale, recovered_operation,
+                staging_removed) from exc
         if unwind:
             exc.add_note("opf-oplock: additionally the unwind failed: {}".format("; ".join(unwind)))
         raise
@@ -4370,6 +4418,69 @@ def _t_r3_dead_recover_proceeds(d, env):
     cap = acquire_operation(root, "op", recover=True)   # nothing stale: recover=True clears nothing
     release_operation(cap)
     assert cap.recovered == (), "a recover=True acquisition that cleared nothing reports nothing"
+
+
+def _t_x6_removal_reports(d, env):
+    """T-x6 (PR D fix 6): an acquisition reports exactly what it removed, on its capability and on
+    the OpLockError of a failure after a removal: the staging leftovers (staging_removed), the
+    stale records in delete order (recovered) and their confirmed-dead holder's recorded operation
+    (recovered_operation). A publication failing after the recovery deletes carries all three, so
+    a caller never words that refusal as having removed nothing; an ordinary acquisition, and a
+    contended one that fails before any removal, report nothing removed."""
+    root = _st_git_store(d, "repo", env)
+    cap = acquire_operation(root, "op")
+    release_operation(cap)
+    assert (cap.recovered, getattr(cap, "recovered_operation", 0),
+            getattr(cap, "staging_removed", None)) == ((), None, ()), \
+        "an ordinary acquisition reports nothing removed"
+    machine = os.path.dirname(_st_lease_path(root))
+    active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
+    node = os.uname().nodename
+    dead_pid, dead_start = _st_reaped_child()
+    holder = _st_write_active_owned(root, dead_pid, dead_start, node, op_id="x6-op-id")
+    _st_write_lease_owned(root, holder=holder)
+    staging = _staging_name(_opf_check.LEASE_NAME)
+    with open(os.path.join(machine, staging), "wb") as fh:
+        fh.write(b"torn")
+    mod = sys.modules[__name__]
+    saved = mod._create_control_file
+
+    def _boom(*a, **k):
+        raise OpLockError("synthetic publication failure after the recovery deletes")
+
+    mod._create_control_file = _boom
+    failed = None
+    try:
+        acquire_operation(root, "op", recover=True)
+    except OpLockError as exc:
+        failed = exc
+    finally:
+        mod._create_control_file = saved
+    assert failed is not None, "the synthetic publication failure must refuse"
+    assert getattr(failed, "recovered", None) == ("lease", "active record"), \
+        "the failure reports the stale records it removed"
+    assert failed.recovered_operation == "recovered-op", failed.recovered_operation
+    assert failed.staging_removed == ("lease staging leftover " + staging,), failed.staging_removed
+    assert not os.path.exists(_st_lease_path(root)) and not os.path.exists(active), \
+        "the confirmed-dead records were removed before the failure"
+    assert not os.path.exists(os.path.join(machine, staging)), "the staging leftover was removed"
+    _st_write_active_owned(root, dead_pid, dead_start, node, op_id="x6-op-id-2")
+    cap = acquire_operation(root, "op", recover=True)
+    release_operation(cap)
+    assert (cap.recovered, cap.recovered_operation, cap.staging_removed) == (
+        ("active record",), "recovered-op", ()), (cap.recovered, cap.recovered_operation)
+    live = acquire_operation(root, "op")
+    contended = None
+    try:
+        acquire_operation(root, "op2", recover=True)
+    except OpLockError as exc:
+        contended = exc
+    finally:
+        release_operation(live)
+    assert contended is not None, "a held anchor refuses the second acquisition"
+    assert (getattr(contended, "recovered", None), getattr(contended, "recovered_operation", 0),
+            getattr(contended, "staging_removed", None)) == ((), None, ()), \
+        "a contended acquisition reports nothing removed"
 
 
 def _t_r3_crosshost_refuses(d, env):
@@ -9223,7 +9334,9 @@ def self_test_isolated():
     """Regression roster (plan section (e)): the resolving-roster check T-named,
     the PR2 T-c/T-crit/T-med/T-low roster PLUS the PR2
     round-3 recovery-liveness witnesses (T-r3-live-recover-refuses, T-r3-dead-recover-proceeds,
-    T-r3-crosshost-refuses), the LOW-4 coverage tests (T-c2-dirperms, T-c3-companion, T-h4-quote,
+    T-r3-crosshost-refuses), the PR D fix-6 removal-report witness (T-x6: an acquisition reports
+    what it removed, on its capability and on a failure after a removal), the LOW-4 coverage tests
+    (T-c2-dirperms, T-c3-companion, T-h4-quote,
     T-c6-diffinode), the LOW-1 torn-write witness (T-low1-torn), and the recovery-hardening
     witnesses T-d1 to T-d5 (DEF-1 to DEF-5), and the round-2 witnesses T-r2-1 to T-r2-5 (recovery
     delete order, cross-worktree pairing, store-root close, interrupted write, walk hand-off), and
@@ -9299,6 +9412,8 @@ def self_test_isolated():
         ("T-r3-live recover REFUSES a live holder (never a second holder)",
          _t_r3_live_recover_refuses),
         ("T-r3-dead recover PROCEEDS on a confirmed-dead holder", _t_r3_dead_recover_proceeds),
+        ("T-x6 an acquisition reports what it removed, on success and on a failure after it",
+         _t_x6_removal_reports),
         ("T-r3-crosshost recover REFUSES a foreign-host holder", _t_r3_crosshost_refuses),
         ("T-c6/T-c7/T-med6 verified release preserves mismatches, legs collected",
          _t_c6_c7_med6_verified_release),
