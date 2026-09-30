@@ -2750,12 +2750,20 @@ def flip_t45():
 # Fix 7: what each residual list, acquire_operation's docstring and the refusal helper state, exactly (the
 # reviewed head claimed a dead run's leftover is always reclaimed and reconciled, that "Only" two cases
 # leave work for a later trigger, that a multiply-linked staging leftover is refused, that every
-# acquisition error carries the reports, and that only a pre-body error lacks one).
+# acquisition error carries the reports, and that only a pre-body error lacks one). Fix 8: the closed
+# "in each of these cases" list is replaced by the rule the code enforces, the cases kept as examples
+# marked NOT exhaustive, a live run's own failed publication among them.
 FIX7_BOTH = ("left is handled by this run only as far as each step succeeds: its lease and active record "
              "are reclaimed when the recovery acquisition succeeds, and its record-journal work (an open "
              "transaction, or a terminal one missing its projection) is reconciled when the held plan and "
              "each reconciliation succeed",
-             "Records or journal work are left for a later run's trigger in each of these cases",
+             "The rule the code enforces: any run that fails or dies before its publication and release "
+             "complete leaves its records and journal work for the next run's trigger, which reconciles "
+             "under the held capability",
+             "Cases that leave such work include (examples, NOT exhaustive)",
+             "and a live run's own publication that fails before it completes, which leaves an open "
+             "transaction, or a terminal one missing its projection, for that trigger even when the "
+             "run's own release succeeds",
              "or fails, after its deletes included, which leaves every pending transaction and any record it "
              "did not remove",
              "which leaves every pending transaction while the records the acquisition removed stay removed",
@@ -2777,7 +2785,8 @@ FIX7_REMOVALS = ("An error that carries NO report",
                  "cannot say what was removed, so the sentence says that is not known instead")
 FIX7_RETIRED = ("is reclaimed and reconciled by this run", "Only a run that takes the capability",
                 "a record or its staging leftover that is not a plain singly-linked regular file",
-                "carrying the same three reports", "carries no report; no removal runs there")
+                "carrying the same three reports", "carries no report; no removal runs there",
+                "left for a later run's trigger in each of these cases")
 
 
 def fix7_texts():
@@ -2789,8 +2798,10 @@ def fix7_texts():
 
 
 def t46_disclosures_exact(fx):
-    """Each residual list names every case that leaves records or journal work for a later trigger (no
-    "Only"), a refusal's own-name removals and its unknown case, and staging-leftover cleanup as it is (a
+    """Each residual list states the rule deciding what is left for a later trigger, with its cases
+    kept as examples marked NOT exhaustive (fix 8: no closed "in each of these cases" list; a live
+    run's own failed publication among the examples), a refusal's own-name removals and its unknown
+    case, and staging-leftover cleanup as it is (a
     multiply-linked staging name IS removed); acquire_operation's docstring names exactly which errors
     carry the removal reports (its validation raises do not); the refusal helper says an unreported error
     is unknown. Two of those statements are exercised: a validation raise carries no report, and a
@@ -2840,6 +2851,135 @@ def flip_t46():
             texts.append(text)
         return tuple(texts)
     return patch.object(sys.modules[__name__], "fix7_texts", stripped)
+
+
+# --- T47-T49: the PR D fix-8 vectors --------------------------------------------------------------------
+
+# Fix 8: each outcome and refusal message states only what the code checked (the reviewed head certified
+# any COMPLETE publication as present in the working tree, read "every terminal one carrying its
+# projection" without _projection_missing's grammar exclusion, called a preparation that had already
+# created the journal directories "nothing written", and introduced the record guard with a home-absent
+# sentence its own capability recovery contradicts).
+T47_GRAMMAR = ("every terminal one in the homes record grammar carrying its projection; a name outside "
+               "that grammar has no projection path and is not checked")
+T47_JOURNAL = ("A COMPLETE transaction's publication was applied when it committed; its operands' "
+               "current bytes are not re-checked by this recovery (unexplained operands are checked "
+               "only for OPEN transactions)")
+T47_RETIRED = ("Any publication a COMPLETE transaction made is present in the working tree",
+               "every terminal one carrying its projection)")
+
+
+def t47_reclaimed_outcome_scoped(fx):
+    """The no-pending reclaimed outcome describes journal state only: its terminal-projection reading
+    names the grammar exclusion (_projection_missing checks a projection only for a homes-grammar
+    name), and its COMPLETE sentence speaks for the journal's commit, never for the operands' current
+    bytes, keeping the run-opf-doctor advice. The reviewed head certified working-tree poststate it
+    had not read."""
+    env = fx.env
+    base = fx.case("t47-homes2-base")
+    with imp._self_test_homes2_active(base):
+        root = fx.case("t47-homes2-complete", base)
+        proc = child(env, root, CREATE, flip=HOMES2_CHILD_FLIP + DIE_AT_RENDER)
+        assert proc.returncode == 137, ("T47 the child is killed at the render", proc.returncode,
+                                        proc.stderr[-800:])
+        result = record_cli(env, root, CREATE)
+        refused(result, "were reclaimed before this operation")
+        assert T47_GRAMMAR in result[2], ("T47 the grammar exclusion is named", result[2][-1200:])
+        assert T47_JOURNAL in result[2], ("T47 the outcome speaks for the journal, not current bytes",
+                                          result[2][-1200:])
+        assert "run opf doctor before relying on it" in result[2], \
+            ("T47 the doctor advice is kept", result[2][-800:])
+        for retired in T47_RETIRED:
+            assert retired not in result[2], ("T47 the overstated wording is gone", retired)
+
+
+def _flip_reclaimed(new, old):
+    """Read _reclaimed_outcome's line with a fix-8 sentence reverted to the reviewed head's wording."""
+    fixed = record._reclaimed_outcome
+
+    def reverted(cap, pending):
+        return fixed(cap, pending).replace(new, old)
+    return patch.object(record, "_reclaimed_outcome", reverted)
+
+
+def flip_t47_grammar():
+    return _flip_reclaimed(T47_GRAMMAR, "every terminal one carrying its projection")
+
+
+def flip_t47_poststate():
+    return _flip_reclaimed(T47_JOURNAL,
+                           "Any publication a COMPLETE transaction made is present in the working tree")
+
+
+T48_QUALIFIED = ("preparation may already have created its directories, and no operand, journal entry "
+                 "or lock was written (fail-closed)")
+
+
+def t48_prepare_names_created(fx):
+    """The homes-1 journal-prepare refusal names what preparation may have done: ensure_journal_dirs
+    runs before open_journal_root_fd, so a failure there can follow the journal directories' creation,
+    and the refusal says so instead of the reviewed head's unqualified "nothing written". The operands
+    are untouched."""
+    env = fx.env
+    root = fx.case("t48-homes1-prepare")
+    pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+    journal_dir = Path(root) / record.JOURNAL_REL
+    assert not journal_dir.exists(), "T48 no journal directory before the run"
+
+    def failing_open(root_fd, journal_rel):
+        raise journal.JournalError("synthetic journal open failure")
+    with patch.object(record._journal, "open_journal_root_fd", failing_open):
+        result = record_cli(env, root, CREATE)
+    refused(result, "cannot prepare the record journal " + record.JOURNAL_REL)
+    refused(result, T48_QUALIFIED)
+    assert "; nothing written (fail-closed)" not in result[2], \
+        ("T48 the unqualified wording is gone", result[2][-800:])
+    assert journal_dir.is_dir(), "T48 preparation created the journal directories before the refusal"
+    assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, "T48 the operands are untouched"
+
+
+def flip_t48():
+    """Refuse with the reviewed head's unqualified nothing-written wording."""
+    fixed = record.RecordError
+
+    class Unqualified(fixed):
+        def __init__(self, *args):
+            super().__init__(*(a.replace(T48_QUALIFIED, "nothing written (fail-closed)")
+                               if isinstance(a, str) else a for a in args))
+    return patch.object(record, "RecordError", Unqualified)
+
+
+# Fix 8: the record guard's introduction no longer claims an absent home means nothing written.
+FIX8_GUARD = ("no record-journal work to do, and no journal write made, when the home is absent (no "
+              "mkdir), or when every transaction is terminal AND carries its terminal projection; even "
+              "with no journal work pending, capability recovery may still remove a confirmed-dead "
+              "holder's lease and active record (_capability_leftover_present, below)",)
+FIX8_RETIRED = ("nothing to do, and nothing written, when the home is absent",)
+
+
+def t49_home_absent_recovery_disclosed(fx):
+    """The record guard's introduction no longer says an absent journal home means nothing to do and
+    nothing written: even with no journal work pending, capability recovery may still remove a
+    confirmed-dead holder's lease and active record (T31's no-journal case exercises that reclaim)."""
+    _module, guard = residual_texts()
+    for pin in FIX8_GUARD:
+        assert pin in guard, ("T49 the record guard states", pin)
+    for retired in FIX8_RETIRED:
+        assert retired not in guard, ("T49 the overstated wording is gone", retired)
+
+
+def flip_t49():
+    """Read the texts with the fix-8 introduction removed."""
+    original = residual_texts
+
+    def stripped():
+        texts = []
+        for text in original():
+            for pin in FIX8_GUARD:
+                text = text.replace(pin, "")
+            texts.append(text)
+        return tuple(texts)
+    return patch.object(sys.modules[__name__], "residual_texts", stripped)
 
 
 # --- the runner ------------------------------------------------------------------------------------------------
@@ -2902,6 +3042,9 @@ TESTS = (
     ("T44-continuation-refusal-discloses", t44_continuation_refusal_discloses, flip_t44),
     ("T45-unreported-removals-unknown", t45_unreported_removals_unknown, flip_t45),
     ("T46-disclosures-exact", t46_disclosures_exact, flip_t46),
+    ("T47-reclaimed-outcome-scoped", t47_reclaimed_outcome_scoped, (flip_t47_grammar, flip_t47_poststate)),
+    ("T48-prepare-names-created", t48_prepare_names_created, flip_t48),
+    ("T49-home-absent-recovery-disclosed", t49_home_absent_recovery_disclosed, flip_t49),
 )
 
 

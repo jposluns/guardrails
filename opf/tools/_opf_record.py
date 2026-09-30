@@ -102,7 +102,9 @@ a run that took the capability after that read, and was dead by this run's recov
 left is handled by this run only as far as each step succeeds: its lease and active record are
 reclaimed when the recovery acquisition succeeds, and its record-journal work (an open transaction,
 or a terminal one missing its projection) is reconciled when the held plan and each reconciliation
-succeed. Records or journal work are left for a later run's trigger in each of these cases: a run
+succeed. The rule the code enforces: any run that fails or dies before its publication and release
+complete leaves its records and journal work for the next run's trigger, which reconciles under the
+held capability. Cases that leave such work include (examples, NOT exhaustive): a run
 that takes the capability and dies after a trigger read that found nothing (no recovery acquisition
 is then made), or after this run's recovery acquisition released; a trigger read that fails (the
 run refuses before any acquisition); a recovery acquisition that is refused (a live holder, never
@@ -113,8 +115,10 @@ kept as found; a journal home that is not a directory; or a journal or projectio
 inspected or read), which leaves every pending transaction while the records the acquisition
 removed stay removed; a transaction that cannot be reconciled, which leaves it and each one planned
 after it; a failed release of the recovery capability, which leaves whichever of this run's own
-records it did not remove; and the journal work of an operation other than record (an 'ingest'
-holder's), which this verb never examines. A leftover the capability's own recovery gate refuses
+records it did not remove; the journal work of an operation other than record (an 'ingest'
+holder's), which this verb never examines; and a live run's own publication that fails before it
+completes, which leaves an open transaction, or a terminal one missing its projection, for that
+trigger even when the run's own release succeeds. A leftover the capability's own recovery gate refuses
 refuses record runs with no record operand, journal or projection written, the refusal naming
 whatever the acquisition removed before it refused (a staging leftover, a confirmed-dead holder's
 record deleted before a later step failed, or a name the acquisition had itself created: a
@@ -1506,8 +1510,10 @@ def _refuse_legacy_journal(ctx):
 
 def _reconcile_capability_journal(ctx):
     """Reconcile an interrupted homes-2 record publication in the typed journal home, then refuse this
-    run, mirroring the homes-1 rules: nothing to do, and nothing written, when the home is absent (no
-    mkdir), or when every transaction is terminal AND carries its terminal projection. A terminal
+    run, mirroring the homes-1 rules: no record-journal work to do, and no journal write made, when
+    the home is absent (no mkdir), or when every transaction is terminal AND carries its terminal
+    projection; even with no journal work pending, capability recovery may still remove a
+    confirmed-dead holder's lease and active record (_capability_leftover_present, below). A terminal
     transaction WITHOUT its projection -- the state a crash between the durable COMPLETE (or the
     terminal rollback frame) and the projection write leaves, together with the dead holder's lease --
     is recovered too, so the projection is published and the confirmed-dead leftovers are cleared
@@ -1538,7 +1544,9 @@ def _reconcile_capability_journal(ctx):
     this run only as far as each step succeeds: its lease and active record are reclaimed when the
     recovery acquisition succeeds, and its record-journal work (an open transaction, or a terminal
     one missing its projection) is reconciled when the held plan and each reconciliation succeed.
-    Records or journal work are left for a later run's trigger in each of these cases: a run that
+    The rule the code enforces: any run that fails or dies before its publication and release
+    complete leaves its records and journal work for the next run's trigger, which reconciles under
+    the held capability. Cases that leave such work include (examples, NOT exhaustive): a run that
     takes the capability and dies after trigger reads that found nothing (no recovery acquisition
     is then made), or after this run's recovery acquisition released; a trigger read that fails
     (this run refuses before any acquisition); a recovery acquisition that is refused (a live
@@ -1549,8 +1557,11 @@ def _reconcile_capability_journal(ctx):
     projection that cannot be inspected or read), which leaves every pending transaction while the
     records the acquisition removed stay removed; a transaction that cannot be reconciled, which
     leaves it and each one planned after it; a failed release of the recovery capability, which
-    leaves whichever of this run's own records it did not remove; and the journal work of an
-    operation other than record (an 'ingest' holder's), which this verb never examines. A leftover
+    leaves whichever of this run's own records it did not remove; the journal work of an
+    operation other than record (an 'ingest' holder's), which this verb never examines; and a live
+    run's own publication that fails before it completes, which leaves an open transaction, or a
+    terminal one missing its projection, for that trigger even when the run's own release
+    succeeds. A leftover
     the substrate's recovery gate refuses refuses this run with no record operand, journal or
     projection written, the refusal naming whatever the acquisition removed before it refused (a
     staging leftover, a confirmed-dead holder's record deleted before a later step failed, or a name
@@ -1802,7 +1813,8 @@ def _reclaimed_outcome(cap, pending):
                 else repr(operation)))
     if not pending:
         line += (" with no record journal work pending (read under the held capability: no "
-                 "transaction open, every terminal one carrying its projection)")
+                 "transaction open, every terminal one in the homes record grammar carrying its "
+                 "projection; a name outside that grammar has no projection path and is not checked)")
     if cap.staging_removed:
         line += "; the acquisition also removed {}".format("; ".join(cap.staging_removed))
     if operation is not None and operation != VERB:
@@ -1810,9 +1822,11 @@ def _reclaimed_outcome(cap, pending):
                  "operation is not examined here".format(operation))
     if pending:
         return line
-    return line + (". Any publication a COMPLETE transaction made is present in the working tree; "
-                   "whether its render and final doctor ran is not recorded by the journal, so run opf "
-                   "doctor before relying on it")
+    return line + (". A COMPLETE transaction's publication was applied when it committed; its "
+                   "operands' current bytes are not re-checked by this recovery (unexplained "
+                   "operands are checked only for OPEN transactions), and whether its render and "
+                   "final doctor ran is not recorded by the journal, so run opf doctor before "
+                   "relying on it")
 
 
 def _recover_capability_journal(ctx, opened, unprojected):
@@ -1919,8 +1933,9 @@ def _publish(ctx, plan, subcommand, cap=None):
         _journal.ensure_journal_dirs(root_fd, JOURNAL_REL)
         jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
     except (_journal.JournalError, OSError) as exc:
-        raise RecordError("cannot prepare the record journal {} ({}); nothing written (fail-closed)".format(
-            JOURNAL_REL, exc))
+        raise RecordError("cannot prepare the record journal {} ({}); preparation may already have "
+                          "created its directories, and no operand, journal entry or lock was "
+                          "written (fail-closed)".format(JOURNAL_REL, exc))
     held = retain = False
     # The token binds this run's journal lock to the one transaction it opens (_leftover_lock_outcome).
     token = os.urandom(16).hex()
