@@ -1165,6 +1165,39 @@ def _run_cli(argv):
     return rc, buf.getvalue()
 
 
+def _close_vectors(base):
+    """#378: _remove_contained's parent close, the representative _close_fd_yielding site. A close that
+    fails while an exception unwinds lets that exception through as the same object; one that fails on the
+    normal path raises; neither leaves a descriptor open (_journal._st_close_check runs them and the flips)."""
+    (base / "d").mkdir(parents=True)
+    ns = vars(_journal)
+    sent = _journal._StSentinel("in flight at _remove_contained")
+
+    def remove(raise_sent):
+        def call(fault):
+            (base / "d" / "f").write_bytes(b"x")
+            real_parent, real_unlink = ns["_open_parent"], os.unlink
+
+            def parent_spy(root_fd, relpath):
+                pfd, name = real_parent(root_fd, relpath)
+                return fault.arm(pfd), name
+
+            def unlink_spy(*args, **kwargs):
+                if raise_sent:
+                    raise sent
+                return real_unlink(*args, **kwargs)
+            ns["_open_parent"], os.unlink = parent_spy, unlink_spy
+            try:
+                _remove_contained(base, "d/f")
+            finally:
+                ns["_open_parent"], os.unlink = real_parent, real_unlink
+        return call
+
+    return (("pin site _remove_contained: finally while an exception unwinds", True, "AL", remove(True),
+             lambda e: e is sent),
+            ("pin site _remove_contained: normal path", False, "BL", remove(False), None))
+
+
 def self_test():
     """Adversarial synthetic-tree flow invariants (B10 root-cause fix: the r1 suite was too shallow and hid
     B1-B9). Each scenario asserts the FAIL/refuse path first, so the guard is proven to bite, then the clean
@@ -1705,6 +1738,11 @@ def self_test():
                             {".aiqt/evil": b"x\n"}, rel1, [])
         rc, out = _run_cli(["pin", "--root", str(t31), "--staged", str(s31)])
         check("T31: do_pin REFUSES an op targeting .aiqt/ exit 2", rc == 2 and ".aiqt" in out)
+
+        # #378: the representative _close_fd_yielding site, each vector green and red under its flip.
+        close_failures, close_runs = _journal._st_close_check(vars(_journal), _close_vectors(tmp / "close"))
+        failures.extend(close_failures)
+        checked += close_runs
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

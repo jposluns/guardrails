@@ -1064,6 +1064,46 @@ def check(case_id, condition):
         raise OracleFailure(case_id)
 
 
+def _close_vectors(base):
+    """#378: the vectors for this tool's _close_fd_yielding copy and its site, working_blob's directory
+    close. A close that fails while an exception unwinds lets that exception through as the same object;
+    one that fails on the normal path raises; neither leaves a descriptor open. Returns (failures, runs)."""
+    import _close_selftest
+    base.mkdir()
+    (base / "blob").write_bytes(b"blob")
+    ns = globals()
+    sent = _close_selftest._StSentinel("in flight at working_blob")
+
+    def blob(raise_sent):
+        def call(fault):
+            real_fdopen, real_require = os.fdopen, ns["require"]
+            start = _close_selftest._st_fd_table()
+
+            def fdopen_spy(fd, *args, **kwargs):
+                # working_blob holds exactly two new descriptors here: the file and its directory
+                directory = set(_close_selftest._st_fd_table()) - set(start) - {fd}
+                require(len(directory) == 1, "close vector: cannot identify working_blob's directory")
+                fault.arm(directory.pop())
+                return real_fdopen(fd, *args, **kwargs)
+
+            def require_spy(condition, message):
+                if raise_sent and message.endswith("working input is not a regular file"):
+                    raise sent
+                real_require(condition, message)
+            os.fdopen, ns["require"] = fdopen_spy, require_spy
+            try:
+                working_blob(str(base), "blob")
+            finally:
+                os.fdopen, ns["require"] = real_fdopen, real_require
+        return call
+
+    vectors = (("check_release_cut site working_blob: finally while an exception unwinds", True, "AL",
+                blob(True), lambda e: e is sent),
+               ("check_release_cut site working_blob: normal path", False, "BL", blob(False), None)
+               ) + _close_selftest._st_helper_vectors(ns)
+    return _close_selftest._st_close_check(ns, vectors)
+
+
 def self_test(red_on_revert):
     """Isolate fixture git calls, including in-process production helpers."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1133,6 +1173,11 @@ def _self_test_isolated(red_on_revert):
                       any("injected unreadable working file" in row["detail"]
                           for row in report["snapshots"]))
             print("PASS " + case_id)
+        close_failures, close_runs = _close_vectors(parent / "close")
+        for failure in close_failures:
+            print("FAIL " + failure, file=sys.stderr)
+        check("close-vectors", not close_failures)
+        print("PASS close-vectors runs=" + str(close_runs))
         if red_on_revert:
             source = script.read_text(encoding="utf-8")
             marker = "# SELF-TEST:" + " mutation targets are restricted to the production prefix above."

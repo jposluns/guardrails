@@ -229,6 +229,33 @@ def run(root):
     return worst
 
 
+def _close_vectors(base):
+    """#378: the vectors for this tool's _close_fd_yielding copy and its one site, _read_regular_page. That
+    site closes only on an exception path (os.fdopen takes the descriptor otherwise), so its vector is a
+    masking one; the normal-path vectors call the helper directly. Returns (failures, runs)."""
+    import _close_selftest
+    page = base / "page.html"
+    page.write_text("<nav></nav>", encoding="utf-8")
+    ns = globals()
+    sent = _close_selftest._StSentinel("in flight at _read_regular_page")
+
+    def read_page(fault):
+        real = os.fdopen
+
+        def spy(fd, *args, **kwargs):
+            fault.arm(fd)
+            raise sent
+        os.fdopen = spy
+        try:
+            _read_regular_page(page)
+        finally:
+            os.fdopen = real
+
+    vectors = (("check_footer site _read_regular_page: finally while an exception unwinds", True, "AL",
+                read_page, lambda e: e is sent),) + _close_selftest._st_helper_vectors(ns)
+    return _close_selftest._st_close_check(ns, vectors)
+
+
 def _self_test():
     import tempfile
     nav = '<nav><a href="/disclosure">Disclosure</a></nav>'
@@ -332,12 +359,16 @@ def _self_test():
         (root4 / "opf" / "site" / "stale.html").write_text(nav, encoding="utf-8")
         if quiet_run(root4) != 1:
             failures.append("an opf/site page missing the ./disclosure nav link was not reported (expected 1)")
+    with tempfile.TemporaryDirectory() as d5:
+        close_failures, close_runs = _close_vectors(Path(d5))
+    failures.extend(close_failures)
     if failures:
         print("FAIL: check_footer self-test")
         for f in failures:
             print("  " + f)
         return 1
-    print("PASS: check_footer self-test ({} check_pages cases + run() exit-code legs)".format(len(cases)))
+    print("PASS: check_footer self-test ({} check_pages cases + run() exit-code legs + {} #378 close-vector "
+          "runs)".format(len(cases), close_runs))
     return 0
 
 

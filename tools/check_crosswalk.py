@@ -806,6 +806,36 @@ def _clean_crosswalk(fold=False, split=False):
     return "\n".join(rows) + "\n", p1, p2, sha1, sha2
 
 
+def _close_vectors(base):
+    """#378: _read_archive_payload's payload close, the representative _close_fd_yielding site. A close that
+    fails while an exception unwinds lets that exception through as the same object; one that fails on the
+    normal path raises; neither leaves a descriptor open (_journal._st_close_check runs them and the flips)."""
+    (base / ARCHIVE_REL / "entry").mkdir(parents=True)
+    (base / ARCHIVE_REL / "entry" / "payload").write_bytes(b"payload")
+    ns = globals()
+    sent = _journal._StSentinel("in flight at _read_archive_payload")
+
+    def read_payload(raise_sent):
+        def call(fault):
+            real = ns["_read_all_fd"]
+
+            def spy(fd):
+                fault.arm(fd)
+                if raise_sent:
+                    raise sent
+                return real(fd)
+            ns["_read_all_fd"] = spy
+            try:
+                _read_archive_payload(base, "entry")
+            finally:
+                ns["_read_all_fd"] = real
+        return call
+
+    return (("check_crosswalk site _read_archive_payload: finally while an exception unwinds", True, "AL",
+             read_payload(True), lambda e: e is sent),
+            ("check_crosswalk site _read_archive_payload: normal path", False, "BL", read_payload(False), None))
+
+
 def self_test():
     import io
     import shutil
@@ -1373,6 +1403,11 @@ def self_test():
         except GateError:
             pass
         n += 1
+
+        # #378: the representative _close_fd_yielding site, each vector green and red under its flip.
+        close_failures, close_runs = _journal._st_close_check(vars(_journal), _close_vectors(tmp / "close"))
+        failures.extend(close_failures)
+        n += close_runs
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

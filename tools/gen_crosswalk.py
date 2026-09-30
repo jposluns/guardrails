@@ -599,6 +599,42 @@ def main():
 #   (D10-C) the ADOPTER CLI (main() with --successor-inventory) emits ranked candidate mapping rows against
 #       the supplied successor inventory (rather than the pre-fix empty successor set that produced none).
 
+def _close_vectors(base):
+    """#378: the vectors for this tool's _close_fd_yielding copy and its representative site,
+    _read_payload_fd. A close that fails while an exception unwinds lets that exception through as the same
+    object; one that fails on the normal path raises; neither leaves a descriptor open. Returns (failures,
+    runs)."""
+    import _close_selftest
+    base.mkdir()
+    (base / "payload").write_bytes(b"payload")
+    ns = globals()
+    sent = _close_selftest._StSentinel("in flight at _read_payload_fd")
+
+    def read_payload(raise_sent):
+        def call(fault):
+            real = ns["_read_fd_all"]
+
+            def spy(fd):
+                fault.arm(fd)
+                if raise_sent:
+                    raise sent
+                return real(fd)
+            ns["_read_fd_all"] = spy
+            entry_fd = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                _read_payload_fd(entry_fd)
+            finally:
+                ns["_read_fd_all"] = real
+                os.close(entry_fd)
+        return call
+
+    vectors = (("gen_crosswalk site _read_payload_fd: finally while an exception unwinds", True, "AL",
+                read_payload(True), lambda e: e is sent),
+               ("gen_crosswalk site _read_payload_fd: normal path", False, "BL", read_payload(False), None)
+               ) + _close_selftest._st_helper_vectors(ns)
+    return _close_selftest._st_close_check(ns, vectors)
+
+
 def self_test():
     import io
     import shutil
@@ -618,6 +654,7 @@ def self_test():
         print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
         return 2
     failures = []
+    close_runs = 0
     try:
         # (a) REPO mode generate + drift-clean + determinism.
         good = tmp / "good"
@@ -899,6 +936,11 @@ def self_test():
         if "[[mapping]]" not in c_text or 'successor-clause-id = "succ.alpha"' not in c_text:
             failures.append("D10-C: the adopter CLI must emit ranked candidate mapping rows against the "
                             "supplied successor inventory (main() previously passed an empty successor set)")
+
+        # #378: this tool's _close_fd_yielding copy and its representative site, each green and red under
+        # its flip.
+        close_failures, close_runs = _close_vectors(tmp / "close")
+        failures.extend(close_failures)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -916,7 +958,8 @@ def self_test():
           "identical one is idempotent, and computes the unmatched list. Section 8.6-conformant: a pointer "
           "lives only in adopter migration state, never in the archived source, and the Expected-successor:/"
           "Coverage: pointer lines are stripped from the ranking input, so changing only a predecessor's "
-          "pointer content does not change which successor a candidate row names.")
+          "pointer content does not change which successor a candidate row names. The {} #378 close-vector "
+          "runs pass, each flip leg red by its own assertion.".format(close_runs))
     return 0
 
 

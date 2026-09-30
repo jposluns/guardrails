@@ -4226,6 +4226,7 @@ def _self_tests():
     ("opf-adopt-apply", _opf_adopt_apply.self_test),
     ("opf-fuzz", _opf_fuzz.self_test),
     ("opf-check", _opf_check.self_test),
+    ("opf-journal", _opf_store._journal.self_test),   # #378: the _close_fd_yielding vectors
     ("opf-watchdog-hostile-ambient", _watchdog_hostile_ambient_self_test),
     ("opf-watchdog-wrapper-deadline", _watchdog_wrapper_caller_deadline_self_test),
     ("opf-watchdog-shared-restore", _watchdog_shared_restore_self_test),

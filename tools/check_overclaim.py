@@ -2576,15 +2576,84 @@ def _self_test():
     failures.extend(_page_bound_source_self_test())
     failures.extend(_asset_closure_self_test())
     failures.extend(_block_boundary_negation_self_test())
+    close_failures, close_runs = _close_vector_self_test()
+    failures.extend(close_failures)
 
     if failures:
         print("FAIL: check_overclaim self-test")
         for f in failures:
             print("  " + f)
         return 1
-    print("PASS: check_overclaim self-test ({} positive, {} negative, plus scoping and collector cases)"
-          .format(len(POSITIVE), len(NEGATIVE)))
+    print("PASS: check_overclaim self-test ({} positive, {} negative, plus scoping and collector cases, plus "
+          "{} #378 close-vector runs)".format(len(POSITIVE), len(NEGATIVE), close_runs))
     return 0
+
+
+def _close_vector_self_test():
+    """#378: the vectors for this tool's _close_fd_yielding copy and two representative sites, the finally
+    in _read_regular_bounded and the fstat-failure except handler in _open_regular_nofollow. A close that
+    fails while an exception unwinds lets that exception through (the handler's own _FailClosed at the
+    except site); one that fails on the normal path raises; neither leaves a descriptor open. Returns
+    (failures, runs)."""
+    import errno
+    import shutil
+    import tempfile
+    import _close_selftest
+    base = tempfile.mkdtemp(prefix="aiqt-overclaim-close-")
+    try:
+        target = os.path.join(base, "register.json")
+        with open(target, "wb") as fh:
+            fh.write(b"{}")
+        ns = globals()
+        sent = _close_selftest._StSentinel("in flight at _read_regular_bounded")
+
+        def read_bounded(raise_sent):
+            def call(fault):
+                real_open, real_read = ns["_open_regular_nofollow"], os.read
+
+                def open_spy(path, label):
+                    fd, st = real_open(path, label)
+                    return fault.arm(fd), st
+
+                def read_spy(fd, n):
+                    if raise_sent:
+                        raise sent
+                    return real_read(fd, n)
+                ns["_open_regular_nofollow"], os.read = open_spy, read_spy
+                try:
+                    _read_regular_bounded(target, "register.json", 1024)
+                finally:
+                    ns["_open_regular_nofollow"], os.read = real_open, real_read
+            return call
+
+        def fstat_fails(fault):
+            real = os.fstat
+            state = {"failed": False}
+
+            def spy(fd, *args, **kwargs):
+                if state["failed"]:
+                    return real(fd, *args, **kwargs)
+                state["failed"] = True
+                fault.arm(fd)
+                raise OSError(errno.EACCES, "self-test injected fstat failure")
+            os.fstat = spy
+            try:
+                _open_regular_nofollow(target, "register.json")
+            finally:
+                os.fstat = real
+
+        def handler_error(e):
+            return type(e) is _FailClosed and "could not be fstat'd" in str(e)
+
+        vectors = (("check_overclaim site _read_regular_bounded: finally while an exception unwinds", True,
+                    "AL", read_bounded(True), lambda e: e is sent),
+                   ("check_overclaim site _read_regular_bounded: normal path", False, "BL", read_bounded(False),
+                    None),
+                   ("check_overclaim site _open_regular_nofollow: except handler raising its own _FailClosed",
+                    True, "AL", fstat_fails, handler_error)) + _close_selftest._st_helper_vectors(ns)
+        return _close_selftest._st_close_check(ns, vectors)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def _block_boundary_negation_self_test():

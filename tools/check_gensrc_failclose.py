@@ -1246,6 +1246,42 @@ def _build_repo(base, gens):
     return base
 
 
+def _close_vectors(base):
+    """#378: the vectors for this tool's _close_fd_yielding copy and its representative site,
+    _read_bytes_safe. A close that fails while an exception unwinds lets that exception through as the same
+    object; one that fails on the normal path raises; neither leaves a descriptor open. Returns (failures,
+    runs)."""
+    import _close_selftest
+    base.mkdir()
+    target = base / "target"
+    target.write_bytes(b"payload")
+    sandbox_real = os.path.realpath(str(base))
+    ns = globals()
+    sent = _close_selftest._StSentinel("in flight at _read_bytes_safe")
+
+    def read_bytes(raise_sent):
+        def call(fault):
+            real = os.read
+
+            def spy(fd, n):
+                fault.arm(fd)
+                if raise_sent:
+                    raise sent
+                return real(fd, n)
+            os.read = spy
+            try:
+                _read_bytes_safe(str(target), sandbox_real, "close vector")
+            finally:
+                os.read = real
+        return call
+
+    vectors = (("check_gensrc_failclose site _read_bytes_safe: finally while an exception unwinds", True, "AL",
+                read_bytes(True), lambda e: e is sent),
+               ("check_gensrc_failclose site _read_bytes_safe: normal path", False, "BL", read_bytes(False),
+                None)) + _close_selftest._st_helper_vectors(ns)
+    return _close_selftest._st_close_check(ns, vectors)
+
+
 def self_test_main():
     from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
     scrub_git_environment()
@@ -1272,6 +1308,7 @@ def _self_test_main_isolated():
     saved_now = _now
     saved_mkdtemp = _mkdtemp
     cleanup_error = None
+    close_runs = 0
     try:
         # (a) A conformant repo (content-guarding file + tree generators) passes.
         good = _build_repo(tmp / "good", {"goodfile": _GOODFILE, "goodtree": _GOODTREE})
@@ -1533,6 +1570,11 @@ def _self_test_main_isolated():
                 if flag not in cvals:
                     failures.append("F-367 no-maintenance flags: template `git {}` call is missing -c {} "
                                     "(git() must splice _TEMPLATE_GIT_NO_MAINTENANCE)".format(sub, flag))
+
+        # #378: this tool's _close_fd_yielding copy and its representative site, each green and red under
+        # its flip.
+        close_failures, close_runs = _close_vectors(tmp / "close")
+        failures.extend(close_failures)
     finally:
         _run_check = saved_run_check
         _now = saved_now
@@ -1570,7 +1612,8 @@ def _self_test_main_isolated():
           "failure and a tracked-set mismatch each fail closed (exit 2) with no git add -A fallback; and "
           "every template git command carries the F-367 no-maintenance flags (gc.auto=0, gc.autoDetach="
           "false, maintenance.auto=false) so no detached auto-gc / auto-maintenance can race the per-call "
-          "copytree of the template")
+          "copytree of the template; and the {} #378 close-vector runs pass, each flip leg red by its own "
+          "assertion".format(close_runs))
     return 0
 
 

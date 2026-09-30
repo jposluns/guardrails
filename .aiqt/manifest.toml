@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "966db1449bfe9d60474ecf7482efb6a367980fbc29a0eec40900852025945691"
+tree-sha256 = "07a0fc160de61a7f48663ee03a4ee3c309bb1a34de74f63899fb97c72bfdbb13"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2231,8 +2231,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 41195
-sha256 = "ff482f94382bd00ea09ede13804335917cba2540bf1e38d1c9318cf6e3ff63db"
+bytes = 41232
+sha256 = "81348c7cdd7499fbbb17cc57aec843aa3a75656cad0e946d83189ac3b5abb862"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2551,8 +2551,8 @@ sha256 = "6594419bc15c14e7e4844e2a34bc5ef24618b7fccf79e9a0787f4e88d0f976ab"
 
 [[sources]]
 path = "opf/tools/_journal.py"
-bytes = 138066
-sha256 = "d323859d6a4ede4046e81d0d0c336fb4b0e1cce8356c4bd3700683dab2062644"
+bytes = 148355
+sha256 = "9a33f8720ba258e0ce680637e3b277fe64925ffed3b7f9abd88a9dce8321ea7c"
 
 [[sources]]
 path = "opf/tools/_opf_absorb.py"
@@ -2926,8 +2926,8 @@ sha256 = "22d329559594488e6b9fc93b11caf3efcd78b9828db39cc30b51e4298e0c6d38"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 285675
-sha256 = "3c7af8cb29a23c04f9de240b732855af1375918a9a3f737daf878929aa283b58"
+bytes = 285768
+sha256 = "d2f21204c71a6522fe7b9b74300d0d8e406ed4359318d8b9f98af54731809687"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
@@ -3130,6 +3130,11 @@ bytes = 4433
 sha256 = "60d56244cf05535c7c4a5cd04750f8f9f1815cf0d6708474de5c6f8e7e43b79a"
 
 [[sources]]
+path = "tools/_close_selftest.py"
+bytes = 7496
+sha256 = "9ca2390b1448f790451fa80c90c856bd2837bec445ed699c1c393ebc8d6cd83c"
+
+[[sources]]
 path = "tools/_gen_common.py"
 bytes = 5582
 sha256 = "4ad097991ec17d0ffae9c1c19421db06670d867dcaa06baa893019aa000c1ed1"
@@ -3206,8 +3211,8 @@ sha256 = "e6c66303c6770d8afeacc0f807a3bd807e841344b43a17cfd72d37432d151db1"
 
 [[sources]]
 path = "tools/check_crosswalk.py"
-bytes = 85044
-sha256 = "51c141bcd0b2591c4d44f15bc764c060f9bd0930544d25fd0fbf52fc751bf4e2"
+bytes = 86605
+sha256 = "921a6ff14f2c34714a324514bf270a0e51c67d6466c9dfd48a1c329db9d0c7a3"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
@@ -3216,13 +3221,13 @@ sha256 = "327816f450f48bf7f28b1e949f36a3fa2ecf8605e15746da22192a3f8802a91b"
 
 [[sources]]
 path = "tools/check_footer.py"
-bytes = 19167
-sha256 = "d60507a499be4ac54282c6b1b9dbd42404d49a4ce16620b82363cf2df617f931"
+bytes = 20416
+sha256 = "c15afd24ee8d70e5cbe962b975953cdebfc74bbdb6cb35d564fa7026e8bf02e0"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
-bytes = 89754
-sha256 = "351380eb43da81e9817cf503a408fa6c84544a23fed336842ae5f6332b3dc82c"
+bytes = 91546
+sha256 = "ae72cf8d382e067e1c5600acdc4f3616a90a7c4691dd539cb3959975e73c3179"
 
 [[sources]]
 path = "tools/check_git_option_table.py"
@@ -3296,8 +3301,8 @@ sha256 = "57bf632282cca35042d7b62a2d4d580b70a8db58b0f01a25245f3f40400723b2"
 
 [[sources]]
 path = "tools/check_overclaim.py"
-bytes = 272263
-sha256 = "0824dae9a249175e470d413f0f96f3dc794c86682861ba82ed6090bff1867001"
+bytes = 275294
+sha256 = "7773e7ae74e491b2b736fab864f22486267e942c0c50e7284c3b06e8a3ef7c9f"
 
 [[sources]]
 path = "tools/check_portability.py"
@@ -3331,8 +3336,8 @@ sha256 = "5893faf4680c720f09083ecb4aedfdf68e8e54c5bc35a1fed33dd918ddcd64e5"
 
 [[sources]]
 path = "tools/check_release_cut.py"
-bytes = 62779
-sha256 = "1a3c139a15527a0dbaf297dda8e5473c208d9a22014c9c9370b95e9f90d00c24"
+bytes = 65000
+sha256 = "c4e46e2ea93e9b05b17f3e4d8f4d6ca8a632d0e66f5427fcfd2bacbc6e046d93"
 
 [[sources]]
 path = "tools/check_release_delta.py"
@@ -3401,8 +3406,8 @@ sha256 = "9205a2311e4bc71d7fca81e8721b80fbf53b1b1146129fc37901b2fc16d77aef"
 
 [[sources]]
 path = "tools/doctor.py"
-bytes = 27562
-sha256 = "b4d178d2716ab086798f5b6667a8cd475a6ea59c2151520d2ff12dbef35592a3"
+bytes = 29159
+sha256 = "d7bfab717e3936c2de57d873e371372a7c71e4e6a39bf319e95d82d407b1d7b8"
 
 [[sources]]
 path = "tools/gen_adapters.py"
@@ -3426,8 +3431,8 @@ sha256 = "ec42c7dc27f24a7d5fe278645df0adbb74268c76e020e5b8a835ad36be57672d"
 
 [[sources]]
 path = "tools/gen_crosswalk.py"
-bytes = 52297
-sha256 = "7cc3cc509fda30ead004fecb6776c137000208391902c71c06eb493aba1f1b7c"
+bytes = 54110
+sha256 = "5ce0b5fb052d6d4a6c87925c58ff88c7c0a141216dfacd340bdec2d05426d76b"
 
 [[sources]]
 path = "tools/gen_cursor.py"
@@ -3536,8 +3541,8 @@ sha256 = "138df9180843eccc8dd09812fe17c45c82514936f2002a968d930ae2bc6eb9fc"
 
 [[sources]]
 path = "tools/migrate.py"
-bytes = 130841
-sha256 = "9af3afe4ef55baff806483fb5410a1937b756c35d7ee09f3c0cf7dbbf8eb7509"
+bytes = 132574
+sha256 = "783b944d72dcfffe8f88b5c75a2b7ae2195d2b23d99227537f34ce5eaa6eab03"
 
 [[sources]]
 path = "tools/opf_render.py"
@@ -3561,8 +3566,8 @@ sha256 = "562e84da57aeb23909a7e7a05d79b3fead0f30c03f8a274ca12ac5a993cf517f"
 
 [[sources]]
 path = "tools/pin.py"
-bytes = 97582
-sha256 = "f6af14475e03036c844fa717c85f608e86ba43417e9b532ccf8171d54264809f"
+bytes = 99300
+sha256 = "afe2d811cf3fb0a904f7c83f1377178634c1a24a2b78b2b6e14e2bc1650ff615"
 
 [[sources]]
 path = "tools/run_all_checks.sh"

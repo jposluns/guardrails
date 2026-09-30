@@ -736,6 +736,41 @@ def _all_terminal(root):
     return not (journal_root / "lock").exists()
 
 
+def _close_vectors(base):
+    """#378: do_status's root close, the representative _close_fd_yielding site. A close that fails while
+    an exception unwinds lets that exception through as the same object; one that fails on the normal path
+    raises; neither leaves a descriptor open (_journal._st_close_check runs them and the flips)."""
+    import io
+    from contextlib import redirect_stdout
+    base.mkdir()
+    ns = globals()
+    sent = _journal._StSentinel("in flight at do_status")
+
+    def status(raise_sent):
+        def call(fault):
+            real_open, real_classify = ns["_open_root_or_none"], ns["_classify_journal"]
+
+            def open_spy(root):
+                fd, err = real_open(root)
+                return fault.arm(fd), err
+
+            def classify_spy(root_fd):
+                if raise_sent:
+                    raise sent
+                return real_classify(root_fd)
+            ns["_open_root_or_none"], ns["_classify_journal"] = open_spy, classify_spy
+            try:
+                with redirect_stdout(io.StringIO()):
+                    do_status(base)
+            finally:
+                ns["_open_root_or_none"], ns["_classify_journal"] = real_open, real_classify
+        return call
+
+    return (("migrate site do_status: finally while an exception unwinds", True, "AL", status(True),
+             lambda e: e is sent),
+            ("migrate site do_status: normal path", False, "BL", status(False), None))
+
+
 def self_test():
     import io
     import shutil
@@ -2229,6 +2264,11 @@ def self_test():
             except _journal.JournalError:
                 pass
             checked += 1
+
+        # #378: the representative _close_fd_yielding site, each vector green and red under its flip.
+        close_failures, close_runs = _journal._st_close_check(vars(_journal), _close_vectors(tmp / "close"))
+        failures.extend(close_failures)
+        checked += close_runs
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

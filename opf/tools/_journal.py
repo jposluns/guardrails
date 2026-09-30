@@ -2098,3 +2098,277 @@ def build_inverse_ops(intent_ops):
         else:
             raise JournalError("cannot invert unknown op kind {!r}".format(kind))
     return inverse
+
+
+# --- self-test: the #378 close vectors -------------------------------------------------------------------
+# `_journal.py --self-test` runs these, and opf.py registers self_test so `opf.py --self-test` runs them in
+# CI. The four tools that import _journal (check_crosswalk, doctor, migrate, pin) drive their own
+# representative site through the same harness; the five tools with a local helper copy use
+# tools/_close_selftest.py, a copy of it kept in step.
+
+class _StSentinel(Exception):
+    """The in-flight exception a masking vector raises: not an OSError, so no site's `except OSError`
+    converts it, and it must reach the caller as the same object."""
+
+
+class _StCloseFault:
+    """While active, the FIRST close of an ARMED descriptor raises EIO WITHOUT releasing it, so the
+    helper's confirm-then-release path has to run; every other close is the real one. `fired` records, per
+    injected failure, the descriptor's fstat at the fault (None if it was already closed): a vector whose
+    fault never fired, or fired on a closed descriptor, proves nothing and is red (NOFIRE)."""
+
+    def __init__(self):
+        import errno
+        self.armed = set()
+        self.fired = []
+        self.err = OSError(errno.EIO, "self-test injected close failure")
+        self._close = os.close
+
+    def arm(self, fd):
+        self.armed.add(fd)
+        return fd
+
+    def _fake_close(self, fd):
+        if fd not in self.armed:
+            return self._close(fd)
+        self.armed.discard(fd)
+        try:
+            self.fired.append(os.fstat(fd))
+        except OSError:
+            self.fired.append(None)
+        raise self.err
+
+    def __enter__(self):
+        os.close = self._fake_close
+        return self
+
+    def __exit__(self, *exc_info):
+        os.close = self._close
+        return False
+
+
+def _st_fd_table():
+    """The open descriptors below 1024 and the file each names, so a leak is found even when its number
+    is reused by a different file."""
+    table = {}
+    for fd in range(1024):
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            continue
+        table[fd] = (st.st_dev, st.st_ino)
+    return table
+
+
+def _st_close_run(call, masking, expect):
+    """Run one vector: call(fault) drives the site with the fault active. Returns its problems, each
+    "TAG: detail": NOFIRE (the fault did not fire on an open descriptor), LEAK (a descriptor the call
+    opened is still open), MASKED (the injected close error replaced the in-flight exception), SILENT (a
+    normal-path failing close did not raise), WRONG (any other outcome). Empty means green."""
+    before = _st_fd_table()
+    fault = _StCloseFault()
+    raised = None
+    try:
+        with fault:
+            call(fault)
+    except Exception as exc:  # noqa: BLE001  every outcome is classified below
+        raised = exc
+    after = _st_fd_table()
+    problems = []
+    if len(fault.fired) != 1 or fault.fired[0] is None:
+        problems.append("NOFIRE: injected close failures {}".format(fault.fired))
+    leaked = sorted(fd for fd, ident in after.items() if before.get(fd) != ident)
+    for fd in leaked:
+        try:
+            os.close(fd)                                  # the harness's own cleanup of a flipped run
+        except OSError:
+            pass
+    if leaked:
+        problems.append("LEAK: descriptor(s) {} survived the failing close".format(leaked))
+    if masking:
+        if raised is fault.err:
+            problems.append("MASKED: the injected close error replaced the in-flight exception")
+        elif raised is None or not expect(raised):
+            problems.append("WRONG: expected the in-flight exception, got {!r}".format(raised))
+    elif raised is None:
+        problems.append("SILENT: the failing normal-path close did not raise")
+    elif raised is not fault.err:
+        problems.append("WRONG: expected the injected close error, got {!r}".format(raised))
+    return problems
+
+
+def _st_close_check(ns, vectors):
+    """Run each vector green, then under each flip it names, requiring the flip turn it red by its own
+    assertion alone. `ns` is the namespace whose `_close_fd_yielding` the sites resolve at call time. A
+    vector is (label, masking, flips, call, expect). The flips: A, _close_fd_yielding replaced by
+    _close_fd_propagating, so every site is back to propagating (red: MASKED); B, the helper always quiet
+    (red: SILENT); C, the caller-frame check removed (red: SILENT); L, the helper dropping the release
+    after a failed close (red: LEAK), the companion that proves the no-descriptor-survives assertion can
+    fail. Returns (failures, runs)."""
+    prop = ns["_close_fd_propagating"]
+
+    def quiet(fd):
+        try:
+            prop(fd)
+        except OSError:
+            pass
+
+    def frameless(fd):
+        if sys.exc_info()[2] is None:
+            prop(fd)
+            return
+        try:
+            prop(fd)
+        except OSError:
+            pass
+
+    def leaky(fd):
+        tb = sys.exc_info()[2]
+        in_flight = tb is not None and tb.tb_frame is sys._getframe(1)
+        try:
+            os.close(fd)
+        except OSError:
+            if not in_flight:
+                raise
+
+    flips = {"A": (prop, "MASKED"), "B": (quiet, "SILENT"), "C": (frameless, "SILENT"), "L": (leaky, "LEAK")}
+    real = ns["_close_fd_yielding"]
+    failures, runs = [], 0
+    for label, masking, want, call, expect in vectors:
+        runs += 1
+        got = _st_close_run(call, masking, expect)
+        if got:
+            failures.append("{}: {}".format(label, "; ".join(got)))
+        for flip in want:
+            fn, tag = flips[flip]
+            ns["_close_fd_yielding"] = fn
+            try:
+                red = _st_close_run(call, masking, expect)
+            finally:
+                ns["_close_fd_yielding"] = real
+            runs += 1
+            if [p.split(":")[0] for p in red] != [tag]:
+                failures.append("{} under flip {}: expected red by {} alone, got {}".format(
+                    label, flip, tag, red or "green"))
+    return failures, runs
+
+
+def _st_helper_vectors(ns):
+    """The helper's own vectors, calling `_close_fd_yielding` through `ns` so a flip applies."""
+    def devnull(fault):
+        return fault.arm(os.open(os.devnull, os.O_RDONLY))
+
+    sent = _StSentinel("in flight")
+
+    def mask_finally(fault):
+        fd = devnull(fault)
+        try:
+            raise sent
+        finally:
+            ns["_close_fd_yielding"](fd)
+
+    def mask_except(fault):
+        fd = devnull(fault)
+        try:
+            raise sent
+        except _StSentinel:
+            ns["_close_fd_yielding"](fd)
+            raise
+
+    def normal(fault):
+        ns["_close_fd_yielding"](devnull(fault))
+
+    def inner(fd):
+        ns["_close_fd_yielding"](fd)
+
+    def caller_except(fault):
+        try:
+            raise _StSentinel("handled by the caller")
+        except _StSentinel:
+            inner(devnull(fault))                         # reached normally from the caller's except block
+
+    return (("helper: finally while an exception unwinds", True, "AL", mask_finally, lambda e: e is sent),
+            ("helper: except handler re-raising", True, "AL", mask_except, lambda e: e is sent),
+            ("helper: normal path", False, "BL", normal, None),
+            ("helper: normal path under a caller's except", False, "BCL", caller_except, None))
+
+
+def _st_site_vectors(base):
+    """One representative finally site (_read_at) and one except-handler site (_read_contained)."""
+    ns = globals()
+    with open(os.path.join(base, "f"), "wb") as fh:
+        fh.write(b"payload")
+    sent = _StSentinel("in flight at _read_at")
+
+    def read_at(raise_sent):
+        def call(fault):
+            real = ns["_read_fd"]
+
+            def spy(fd, cap=None):
+                fault.arm(fd)
+                if raise_sent:
+                    raise sent
+                return real(fd, cap=cap)
+            ns["_read_fd"] = spy
+            dfd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                _read_at(dfd, "f", "f")
+            finally:
+                ns["_read_fd"] = real
+                os.close(dfd)
+        return call
+
+    def read_contained_missing(fault):
+        real = ns["_open_parent"]
+
+        def spy(root_fd, relpath):
+            pfd, name = real(root_fd, relpath)
+            return fault.arm(pfd), name
+        ns["_open_parent"] = spy
+        dfd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            _read_contained(dfd, "missing")
+        finally:
+            ns["_open_parent"] = real
+            os.close(dfd)
+
+    def handler_error(e):
+        return (type(e) is JournalError and str(e).startswith("cannot read contained file")
+                and isinstance(e.__context__, FileNotFoundError))
+
+    return (("site _read_at: finally while an exception unwinds", True, "AL", read_at(True),
+             lambda e: e is sent),
+            ("site _read_at: normal path", False, "BL", read_at(False), None),
+            ("site _read_contained: except handler raising its own JournalError", True, "AL",
+             read_contained_missing, handler_error))
+
+
+def self_test():
+    """The #378 close vectors for _close_fd_yielding and two representative _journal sites, each green
+    and each red under its flip. Returns 0 clean, 1 a failure, 2 cannot-evaluate."""
+    import shutil
+    import tempfile
+    try:
+        base = tempfile.mkdtemp(prefix="aiqt-journal-selftest-")
+    except OSError as exc:
+        print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
+        return 2
+    try:
+        vectors = _st_helper_vectors(globals()) + _st_site_vectors(base)
+        failures, runs = _st_close_check(globals(), vectors)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    if failures:
+        print("JOURNAL SELF-TEST: FAIL ({} of {} close-vector runs failed)".format(len(failures), runs))
+        for f in failures:
+            print("  FAILED: {}".format(f))
+        return 1
+    print("JOURNAL SELF-TEST: PASS ({} close vectors, {} runs including each flip leg red)".format(
+        len(vectors), runs))
+    return 0
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
+    sys.exit("usage: _journal.py --self-test")
