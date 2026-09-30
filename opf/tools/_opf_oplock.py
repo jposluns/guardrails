@@ -3974,7 +3974,10 @@ def _st_git_env(home):
 
 
 def _st_git(args, cwd, env):
-    proc = subprocess.run(["git"] + args, cwd=cwd, env=env, stdout=subprocess.PIPE,
+    # F-367: no DETACHED auto-gc/auto-maintenance may outlive a fixture commit and churn .git
+    # while a later read or the teardown rmtree traverses it.
+    proc = subprocess.run(["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"] + args,
+                          cwd=cwd, env=env, stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, timeout=60)
     if proc.returncode != 0:
         raise AssertionError("fixture git {} failed: {}".format(

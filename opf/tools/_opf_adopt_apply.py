@@ -2307,6 +2307,11 @@ def _self_test_checks():
 
                 escaped_interrupt = []
                 prior_trace = sys.gettrace()
+                # The REAL SIGINT below must surface as a KeyboardInterrupt regardless of
+                # the inherited disposition (a harness may launch this process with SIGINT
+                # ignored, and Python then installs no default_int_handler): pin the default
+                # handler for exactly this window and restore the inherited one after.
+                prior_handler = signal.signal(signal.SIGINT, signal.default_int_handler)
                 try:
                     with mock.patch.object(os, "chmod", flagging_chmod):
                         sys.settrace(sigint_tracer)
@@ -2316,6 +2321,7 @@ def _self_test_checks():
                             escaped_interrupt.append(True)
                 finally:
                     sys.settrace(prior_trace)
+                    signal.signal(signal.SIGINT, prior_handler)
                 check("grant-interrupt-after-grant-chmod-reverts-the-grant",
                       escaped_interrupt == [True] and sigint_fired == [True]
                       and mode_of(live) == 0o400)
