@@ -2086,7 +2086,7 @@ def _t_ordinary_retired(base, check):
     """Spec 14.1 (round-2 MAJOR): the public apply_ingest is retired and refuses FIRST, with the retirement
     pointer, before any store resolution, operation-capability or journal-writer-lock acquisition, read or
     write, even inside an engine block, over a reviewed, accepted run on a legacy-layout store (promotable
-    only under homes-2 activation, which this vector does not enter) and over a root that resolves no
+    only under homes-2 activation, which the refusal calls do not run under) and over a root that resolves no
     store, with promoted False, outcome "aborted", and the store tree byte-unchanged. Either mutation of
     the refusal fails the suite: restoring the retained engine in place of it turns retired-refused,
     retired-unresolved-refused and retired-resolves-and-locks-nothing red; literally deleting its return
