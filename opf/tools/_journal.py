@@ -463,10 +463,21 @@ def open_journal_root_from_path(root, journal_rel):
     down to the journal root contained, returning a jr fd the caller closes. FileNotFoundError when the
     root or a journal-rel component is absent."""
     root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    jr_fd = None
     try:
-        return _open_dir_contained(root_fd, journal_rel)
+        jr_fd = _open_dir_contained(root_fd, journal_rel)
     finally:
-        os.close(root_fd)
+        # ROUND-6 defect sibling (_opf_store._open_working_dir_fd): the new jr fd is HELD in a local
+        # across the root close, so a root close that reports an error cannot abandon the return and
+        # leak the just-opened journal-root fd. It is released quietly (on Linux a raising close still
+        # gave up the number) and the close error keeps propagating fail-closed.
+        try:
+            os.close(root_fd)
+        except OSError:
+            if jr_fd is not None:
+                _close_fd_quietly(jr_fd)
+            raise
+    return jr_fd
 
 
 def _open_txn_beneath(jr_fd, txn_dir):

@@ -737,9 +737,10 @@ def _open_working_dir_fd(store_root_fd, working_rel):
         return None
     except (OSError, _journal.JournalError) as exc:
         raise StoreError("cannot open the store tree parent of {} ({})".format(working_rel, exc))
+    wfd = None
     try:
         try:
-            return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
+            wfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
         except FileNotFoundError:
             return None
         except NotADirectoryError as exc:
@@ -748,7 +749,17 @@ def _open_working_dir_fd(store_root_fd, working_rel):
             # O_NOFOLLOW refuses a symlinked .working with ELOOP: refused, not followed, fail-closed.
             raise StoreError("cannot open {} no-follow ({})".format(working_rel, exc))
     finally:
-        os.close(pfd)
+        # ROUND-6 defect: the new descriptor is HELD in a local across the parent close, so a parent
+        # close that reports an error cannot abandon the return and leak the just-opened `working_rel`
+        # fd (one per discovery/resolution/investigation call). It is released quietly (on Linux a
+        # raising close still gave up the number) and the close error keeps propagating fail-closed.
+        try:
+            os.close(pfd)
+        except OSError:
+            if wfd is not None:
+                _journal._close_fd_quietly(wfd)
+            raise
+    return wfd
 
 
 def _list_real_subdirs(wfd, working_rel):
@@ -2740,6 +2751,112 @@ def self_test():
             except OSError:
                 pass
         os.close(_r5_root)
+
+        # ROUND-6 defect (K9a fix 6): _open_working_dir_fd returned the freshly-opened `.working`
+        # descriptor from inside a try whose finally closes the parent, so a parent close that reports
+        # an error (the number still released, as on Linux) abandoned the return and leaked the child:
+        # one descriptor per discovery/resolution/planner-investigation call. Inject the failure at the
+        # REAL parent close; the error still propagates fail-closed, and the child descriptor --
+        # recorded at its open -- is proven closed afterwards.
+        _r6 = build_store(manifest=manifest_text())
+        _r6_root = os.open(str(_r6), os.O_RDONLY | os.O_DIRECTORY)
+        _r6_seen = {}
+        _r6_real_open_parent = _journal._open_parent
+        _r6_real_open = os.open
+        _r6_real_close = os.close
+
+        def _r6_open_parent(root_fd, relpath):
+            pfd, name = _r6_real_open_parent(root_fd, relpath)
+            _r6_seen["pfd"] = pfd
+            return pfd, name
+
+        def _r6_open(*args, **kwargs):
+            fd = _r6_real_open(*args, **kwargs)
+            if kwargs.get("dir_fd") is not None and kwargs.get("dir_fd") == _r6_seen.get("pfd"):
+                _r6_seen["wfd"] = fd          # the child opened beneath the recorded parent
+            return fd
+
+        def _r6_close(fd):
+            _r6_real_close(fd)
+            if fd == _r6_seen.get("pfd") and "fired" not in _r6_seen:
+                _r6_seen["fired"] = True
+                raise OSError(5, "injected close failure")
+
+        _journal._open_parent = _r6_open_parent
+        os.open = _r6_open
+        os.close = _r6_close
+        try:
+            try:
+                _open_working_dir_fd(_r6_root, WORKING_DIRNAME)
+                _r6_out = "returned"
+            except OSError:
+                _r6_out = "raised"
+        finally:
+            os.close = _r6_real_close
+            os.open = _r6_real_open
+            _journal._open_parent = _r6_real_open_parent
+        check("r6-working-parent-close-injection-fired",
+              _r6_seen.get("fired") is True and "wfd" in _r6_seen)
+        check("r6-working-parent-close-error-propagates", _r6_out == "raised")
+        _r6_leaked = True
+        try:
+            os.fstat(_r6_seen.get("wfd", -1))
+        except OSError:
+            _r6_leaked = False
+        check("r6-working-fd-closed-after-parent-close-error", not _r6_leaked)
+        if _r6_leaked:                    # a pre-fix run leaks it; close so the failing suite stays clean
+            try:
+                os.close(_r6_seen["wfd"])
+            except OSError:
+                pass
+        os.close(_r6_root)
+
+        # ROUND-6 sibling: open_journal_root_from_path returned the freshly-opened journal-root
+        # descriptor from inside a try whose finally closes the operator-root fd, the same
+        # abandoned-return shape. Inject the failure at the REAL root close; the error still propagates
+        # fail-closed and the jr descriptor -- recorded at its open -- is proven closed afterwards.
+        _r6j = base / "r6-journal-close-leak"
+        (_r6j / "j" / "r").mkdir(parents=True)
+        _r6j_seen = {}
+        _r6j_real_odc = _journal._open_dir_contained
+
+        def _r6j_odc(root_fd, relpath):
+            _r6j_seen["root_fd"] = root_fd
+            fd = _r6j_real_odc(root_fd, relpath)
+            _r6j_seen["jr"] = fd
+            return fd
+
+        def _r6j_close(fd):
+            _r6_real_close(fd)
+            if fd == _r6j_seen.get("root_fd") and "fired" not in _r6j_seen:
+                _r6j_seen["fired"] = True
+                raise OSError(5, "injected close failure")
+
+        _journal._open_dir_contained = _r6j_odc
+        os.close = _r6j_close
+        try:
+            try:
+                _journal.open_journal_root_from_path(_r6j, "j/r")
+                _r6j_out = "returned"
+            except OSError:
+                _r6j_out = "raised"
+        finally:
+            os.close = _r6_real_close
+            _journal._open_dir_contained = _r6j_real_odc
+        check("r6-journal-root-close-injection-fired",
+              _r6j_seen.get("fired") is True and "jr" in _r6j_seen)
+        check("r6-journal-root-close-error-propagates", _r6j_out == "raised")
+        _r6j_leaked = True
+        try:
+            os.fstat(_r6j_seen.get("jr", -1))
+        except OSError:
+            _r6j_leaked = False
+        check("r6-journal-fd-closed-after-root-close-error", not _r6j_leaked)
+        if _r6j_leaked:                   # a pre-fix run leaks it; close so the failing suite stays clean
+            try:
+                os.close(_r6j_seen["jr"])
+            except OSError:
+                pass
 
         # ROUND-5 defect 1: the descriptor-bound resolver matches resolve_store over a held root. The
         # default store resolves with the manifest's EXACT bytes (read through the .working listing
