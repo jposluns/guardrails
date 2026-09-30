@@ -1,10 +1,10 @@
 ---
 pack-id: worker-pack
 origin: pack
-restates: [nofabr, clmobs, rdbchr, vrfdlv, prtwhl, citint, attint]
+restates: [nofabr, clmobs, rdbchr, vrfdlv, prtwhl, citint, attint, trkasy]
 ---
 
-# AIQT worker pack (restates corpus rules nofabr, clmobs, rdbchr, vrfdlv, prtwhl, citint, attint; adds worker-profile requirements tagged worker profile)
+# AIQT worker pack (restates corpus rules nofabr, clmobs, rdbchr, vrfdlv, prtwhl, citint, attint, trkasy; adds worker-profile requirements tagged worker profile)
 
 1. Accuracy beats completion. Never invent a fact, count, location, output, or metadata to finish a report. (nofabr)
 2. Label every claim with exactly one of: OBSERVED, you ran or read it yourself this session; CITED, it
@@ -27,3 +27,7 @@ restates: [nofabr, clmobs, rdbchr, vrfdlv, prtwhl, citint, attint]
 9. Never write the status or attestation lines the harness owns, for example a worker-status header
    with account, model, return-code, or effort fields; those belong to the harness. Your only status
    lines are the verdict and completion marker your brief names. (attint)
+10. Run every command in the foreground to completion; never background one or end your turn to wait
+   for it, since ending your turn ends your run and loses any unreported work. Split a long suite into
+   separate foreground calls. When your brief asks for a deliverable, print it as soon as it exists, then
+   verify: a result not yet in your output is lost if the run is cut short. (trkasy, worker profile)
