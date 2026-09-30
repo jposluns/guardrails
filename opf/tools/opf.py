@@ -7379,9 +7379,13 @@ def _watchdog_completion_case(mode):
         # and the fix 30 entry vectors (a special attribute, an
         # unlisted and a stale driver overwrite, an unmangled
         # private name) with the QA51 private-name mutation, driven
-        # by its mangled derived state; and the fix 31 vectors (a
-        # driver clearing its state, planted drifts of the two bound
-        # copies).
+        # by its mangled derived state; the fix 31 vectors (a driver
+        # clearing its state, planted drifts of the two bound
+        # copies); and the fix 32 vectors (a driver entering once
+        # with the deviation, then through a cached member, on the
+        # real member and on the QA38 mutant; a driver suspending
+        # the observation; no free tool id; each state copy; a lost
+        # indentation and a marker's trailing whitespace).
         # -- leg 19 bound (two identical copies, fix 30) --
         # derived_overrides IS the authoritative grammar. Every case
         # runs under every fixture state derived_overrides returns
@@ -7391,8 +7395,13 @@ def _watchdog_completion_case(mode):
         # of the member's class; a site whose key is not an m:
         # method key derives none -- with every pending-cancellation
         # type; each driver gets its own copy of the state. Under a
-        # deviation the member must be entered, and at each entry
-        # the fixture's attribute under the deviation's key, read
+        # deviation the member must be entered, and at each entry --
+        # each start of the member's own code object while its
+        # driver runs, however the member is reached, observed on a
+        # free sys.monitoring tool id released on exit; a run whose
+        # observation cannot be held, or is not intact after its
+        # driver returns, fails -- the entry frame's self is the
+        # fixture, whose attribute under the deviation's key, read
         # once, must hold its value (type-aware) and the key must be
         # a name the member's compiled code, nested code included,
         # loads as an attribute; a deviation its driver deliberately
@@ -7405,11 +7414,15 @@ def _watchdog_completion_case(mode):
         # pending point fires must still raise that cancellation
         # outward, keeping the fault in its chain if the fault
         # fired. NO guarantee for multi-attribute combinations, for
-        # any spelling outside the grammar, or for conditions
-        # carried through locals or other data flow, such as a load
-        # of the name from an object other than the fixture, or a
-        # member read after entry that yields a value other than
-        # the entry read's.
+        # any spelling outside the grammar, for conditions carried
+        # through locals or other data flow, such as a load of the
+        # name from an object other than the fixture, or a member
+        # read after entry that yields a value other than the entry
+        # read's, or for an entry the interpreter does not report
+        # to that tool id: one made inside a trace, profile or
+        # monitoring callback, one made while a driver suspends the
+        # observation and restores it, or one of a copy of the
+        # member's code object.
         # -- end of leg 19 bound --
         lifecycle_sites = set()
         for member_key in scope:
@@ -7462,8 +7475,13 @@ def _watchdog_completion_case(mode):
             # of the member's class; a site whose key is not an m:
             # method key derives none -- with every pending-cancellation
             # type; each driver gets its own copy of the state. Under a
-            # deviation the member must be entered, and at each entry
-            # the fixture's attribute under the deviation's key, read
+            # deviation the member must be entered, and at each entry --
+            # each start of the member's own code object while its
+            # driver runs, however the member is reached, observed on a
+            # free sys.monitoring tool id released on exit; a run whose
+            # observation cannot be held, or is not intact after its
+            # driver returns, fails -- the entry frame's self is the
+            # fixture, whose attribute under the deviation's key, read
             # once, must hold its value (type-aware) and the key must be
             # a name the member's compiled code, nested code included,
             # loads as an attribute; a deviation its driver deliberately
@@ -7476,11 +7494,15 @@ def _watchdog_completion_case(mode):
             # pending point fires must still raise that cancellation
             # outward, keeping the fault in its chain if the fault
             # fired. NO guarantee for multi-attribute combinations, for
-            # any spelling outside the grammar, or for conditions
-            # carried through locals or other data flow, such as a load
-            # of the name from an object other than the fixture, or a
-            # member read after entry that yields a value other than
-            # the entry read's.
+            # any spelling outside the grammar, for conditions carried
+            # through locals or other data flow, such as a load of the
+            # name from an object other than the fixture, or a member
+            # read after entry that yields a value other than the entry
+            # read's, or for an entry the interpreter does not report
+            # to that tool id: one made inside a trace, profile or
+            # monitoring callback, one made while a driver suspends the
+            # observation and restores it, or one of a copy of the
+            # member's code object.
             # -- end of leg 19 bound --
             if not member_key.startswith("m:"):
                 return [{}]
@@ -8108,6 +8130,17 @@ def _watchdog_completion_case(mode):
             "a listed driver overwrite no longer replaces a value the "
             "member reads at entry (fix 30)")
         import dis
+        unobserved_entries = (
+            "the member's entries were not all observed: no free "
+            "sys.monitoring tool id, or the observation was not intact "
+            "when the driver returned (fix 32)")
+        monitoring = sys.monitoring
+        entry_event = monitoring.events.PY_START
+        entry_tool_name = "opf leg 19 entry check"
+        # the two tool ids CPython assigns no role first, then the rest;
+        # an id already in use -- a caller's debugger, coverage,
+        # profiler or optimizer included -- is never taken
+        entry_tool_ids = (3, 4, 0, 1, 2, 5)
 
         def entry_checked_case(label, driver, cancellation, fault,
                                state, overwrites):
@@ -8120,7 +8153,15 @@ def _watchdog_completion_case(mode):
             # (read once per entry: which object a load reads, and
             # what a later read yields, lie outside it). fix 31 (QA52
             # codex BLOCKER): the check keeps its own immutable copy of
-            # the state; behavioural_case gives the driver a separate copy
+            # the state; behavioural_case gives the driver a separate copy.
+            # fix 32 (QA53 codex/claude BLOCKER): an entry is each
+            # PY_START of the member's own code object while the driver
+            # runs, observed on a free sys.monitoring tool id, and the
+            # fixture is the entry frame's own self -- the pre-fix
+            # wrapper patched on the class saw only the calls made
+            # through it, so a driver entering once with the deviation
+            # and then through a member cached before the patch went
+            # unchecked
             state = types.MappingProxyType(dict(state))
             if not state:
                 behavioural_case(label, driver, cancellation, fault,
@@ -8132,7 +8173,8 @@ def _watchdog_completion_case(mode):
             owner_name, member_name = label[0][2:].rsplit(".", 1)
             owner = getattr(emit, owner_name)
             member = vars(owner)[member_name]
-            loads, codes = set(), [member.__code__]
+            member_code = member.__code__
+            loads, codes = set(), [member_code]
             while codes:
                 code = codes.pop()
                 codes.extend(const for const in code.co_consts
@@ -8145,19 +8187,53 @@ def _watchdog_completion_case(mode):
             absent = object()
             entries = []
 
-            def entered(self, *args, **kwargs):
+            def entered(started, offset):
+                # called in the entry frame: sys._getframe(1) is the
+                # member's own frame, its arguments already bound
+                frame = sys._getframe(1)
+                fixture = absent
+                if frame.f_code is started:
+                    fixture = frame.f_locals.get("self", absent)
                 entries.append(dict(
-                    (attr, getattr(self, attr, absent))
+                    (attr, getattr(fixture, attr, absent))
                     for attr in state))
-                return member(self, *args, **kwargs)
 
-            outcome = None
-            with patch.object(owner, member_name, entered):
+            tool = None
+            for candidate in entry_tool_ids:
+                try:
+                    monitoring.use_tool_id(candidate, entry_tool_name)
+                except ValueError:
+                    continue
+                tool = candidate
+                break
+            if tool is None:
+                raise AssertionError(unobserved_entries, label,
+                                     "no free tool id")
+            outcome, intact = None, False
+            try:
+                monitoring.register_callback(tool, entry_event, entered)
+                monitoring.set_local_events(tool, member_code,
+                                            entry_event)
                 try:
                     behavioural_case(label, driver, cancellation,
                                      fault, state)
                 except AssertionError as exc:
                     outcome = exc
+                intact = (monitoring.get_tool(tool) == entry_tool_name
+                          and monitoring.get_local_events(
+                              tool, member_code) == entry_event)
+            finally:
+                # release exactly the id this case took; an id a driver
+                # freed, and someone else then took, is left alone
+                if monitoring.get_tool(tool) == entry_tool_name:
+                    monitoring.set_local_events(tool, member_code, 0)
+                    released = monitoring.register_callback(
+                        tool, entry_event, None)
+                    monitoring.free_tool_id(tool)
+                    intact = intact and released is entered
+            if not intact:
+                raise AssertionError(unobserved_entries, label,
+                                     sorted(state))
             for attr in sorted(state):
                 value = state[attr]
                 read = attr in loads and bool(entries)
@@ -8270,9 +8346,10 @@ def _watchdog_completion_case(mode):
                 body=[mutant_member], type_ignores=[])),
              "<fix 17 QA38 pinned mutant>", "exec"),
              mutant_namespace)
+        qa38_mutant = mutant_namespace["_finish_close"]  # fix 32 reuses it
         try:
             with patch.object(emit._FixtureProcess, "_finish_close",
-                              mutant_namespace["_finish_close"]):
+                              qa38_mutant):
                 behavioural_case(
                     ("m:_FixtureProcess._finish_close",
                      "held descriptor and report close", 0),
@@ -8642,11 +8719,20 @@ def _watchdog_completion_case(mode):
         # behaviourally; the unmangled key -- the state the pre-fix
         # derivation returned, which passed the mutant -- must go red
         # at entry.
-        # fix 31 (QA52): a driver that clears its state and drives a
-        # member cached before the wrapper is patched must go red at
-        # entry (codex BLOCKER); the special attribute is planted on
-        # the QA51 mutant, which also loads self.__class__, so only
-        # the value check can catch it (claude MINOR).
+        # fix 31 (QA52): a driver that clears its state and then drives
+        # a member cached before the case must go red at entry (codex
+        # BLOCKER; fix 32 observes that cached entry, so the driver now
+        # enters it under the cleared state); the special attribute is
+        # planted on the QA51 mutant, which also loads self.__class__,
+        # so only the value check can catch it (claude MINOR). fix 32
+        # (QA53 codex/claude BLOCKER): a driver entering once through
+        # the class attribute with the deviation, then through a member
+        # cached before the case under another value, must go red at
+        # entry, on the real member and on the QA38 mutant; so must a
+        # driver suspending the observation, and a case finding no
+        # free tool id; a caller's tool id and a nested case stay
+        # undisturbed, every tool id is released exactly, and each
+        # state copy is pinned (claude MINOR 1).
         def entry_red(case_labels, overrides, overwrites, reason,
                       vector):
             try:
@@ -8656,7 +8742,8 @@ def _watchdog_completion_case(mode):
                              overwrites)
             except AssertionError as exc:
                 entry_reasons = ((ineffective_deviation,),
-                                 (stale_overwrite,))
+                                 (stale_overwrite,),
+                                 (unobserved_entries,))
                 if reason is None:
                     assert exc.args[:1] not in entry_reasons, (
                         "the planted fix 30 vector went red at entry, "
@@ -8688,10 +8775,10 @@ def _watchdog_completion_case(mode):
                       _go=types.SimpleNamespace(set=lambda: None))])]),
                   frozenset([(abandon_case, "_go")]), stale_overwrite,
                   "stale-overwrite")
+        tool_table = [monitoring.get_tool(tool) for tool in entry_tool_ids]
         cached_finish = vars(emit._FixtureProcess)["_finish_close"]
 
         def clearing_driver(cancellation, fault, state):
-            planted = dict(state)
             state.clear()
 
             def fake_close(fd):
@@ -8699,7 +8786,7 @@ def _watchdog_completion_case(mode):
                     raise fault
 
             with patch.object(os, "close", fake_close):
-                cached_finish(finish_fake(cancellation, planted,
+                cached_finish(finish_fake(cancellation, state,
                                           pidfd=987006))
 
         with patch.dict(behavioural_drivers,
@@ -8708,6 +8795,141 @@ def _watchdog_completion_case(mode):
                       dict([(held_case[0], [dict(armed=True)])]),
                       behavioural_overwrites, ineffective_deviation,
                       "state-clearing driver")
+        received = []
+
+        def receiving_driver(cancellation, fault, state):
+            received.append(state)
+            finish_handles_driver(cancellation, fault, state)
+
+        with patch.dict(behavioural_drivers,
+                        dict([(held_case, receiving_driver)])):
+            drive_matrix([held_case],
+                         dict([(held_case[0], [dict(armed=True)])]),
+                         lambda: [RuntimeError("injected cleanup fault")])
+        assert received and all(type(got) is dict for got in received), (
+            "a driver no longer gets its own copy of the state (fix 32, "
+            "QA53 claude MINOR 1)", [type(got) for got in received])
+        given = dict(armed=True)
+
+        def given_clearing_driver(cancellation, fault, state):
+            given.clear()
+            finish_handles_driver(cancellation, fault, given)
+
+        try:
+            entry_checked_case(held_case, given_clearing_driver,
+                               TimeoutError("pending cancellation"),
+                               RuntimeError("injected cleanup fault"),
+                               given, behavioural_overwrites)
+        except AssertionError as exc:
+            assert exc.args[:1] == (ineffective_deviation,), exc.args
+        else:
+            raise AssertionError(
+                "the entry check no longer keeps its own copy of the "
+                "state (fix 32, QA53 claude MINOR 1)")
+
+        def wrapped_then_cached(cached):
+            def driver(cancellation, fault, state):
+                # the first entry, through the class attribute where
+                # the pre-fix wrapper sat, holds the deviation and
+                # fires nothing; the cached entry drives the case
+                emit._FixtureProcess._finish_close(
+                    finish_fake(None, state))
+                state["armed"] = False
+
+                def fake_close(fd):
+                    if fd == 987006:
+                        raise fault
+
+                with patch.object(os, "close", fake_close):
+                    cached(finish_fake(cancellation, state,
+                                       pidfd=987006))
+
+            return driver
+
+        for cached, vector in ((cached_finish, "wrapped-then-cached"),
+                               (qa38_mutant,
+                                "wrapped-then-cached QA38 mutant")):
+            with patch.object(emit._FixtureProcess, "_finish_close",
+                              cached), (
+                    patch.dict(behavioural_drivers, dict(
+                        [(held_case, wrapped_then_cached(cached))]))):
+                entry_red([held_case],
+                          dict([(held_case[0], [dict(armed=True)])]),
+                          behavioural_overwrites, ineffective_deviation,
+                          vector)
+
+        def suspending_driver(cancellation, fault, state):
+            for tool in entry_tool_ids:
+                if monitoring.get_tool(tool) == entry_tool_name:
+                    monitoring.set_local_events(
+                        tool, cached_finish.__code__, 0)
+            clearing_driver(cancellation, fault, state)
+
+        with patch.dict(behavioural_drivers,
+                        dict([(held_case, suspending_driver)])):
+            entry_red([held_case],
+                      dict([(held_case[0], [dict(armed=True)])]),
+                      behavioural_overwrites, unobserved_entries,
+                      "observation-suspending driver")
+        occupied = []
+        try:
+            for tool in entry_tool_ids:
+                if monitoring.get_tool(tool) is None:
+                    monitoring.use_tool_id(tool, "fix 32 occupant")
+                    occupied.append(tool)
+            entry_red([held_case],
+                      dict([(held_case[0], [dict(armed=True)])]),
+                      behavioural_overwrites, unobserved_entries,
+                      "no free tool id")
+        finally:
+            for tool in occupied:
+                monitoring.free_tool_id(tool)
+        caller_tool = next(tool for tool in entry_tool_ids
+                           if monitoring.get_tool(tool) is None)
+        caller_entries = []
+
+        def caller_callback(started, offset):
+            caller_entries.append(started)
+
+        def nesting_driver(cancellation, fault, state):
+            entry_checked_case(held_case, finish_handles_driver,
+                               type(cancellation)("nested cancellation"),
+                               RuntimeError("nested cleanup fault"),
+                               state, behavioural_overwrites)
+            finish_handles_driver(cancellation, fault, state)
+
+        monitoring.use_tool_id(caller_tool, "fix 32 caller")
+        try:
+            monitoring.register_callback(caller_tool, entry_event,
+                                         caller_callback)
+            monitoring.set_local_events(caller_tool,
+                                        cached_finish.__code__,
+                                        entry_event)
+            with patch.dict(behavioural_drivers,
+                            dict([(held_case, nesting_driver)])):
+                drive_matrix([held_case],
+                             dict([(held_case[0], [dict(armed=True)])]),
+                             lambda: [RuntimeError(
+                                 "injected cleanup fault")])
+            caller_intact = (
+                monitoring.get_tool(caller_tool) == "fix 32 caller"
+                and monitoring.get_local_events(
+                    caller_tool, cached_finish.__code__) == entry_event)
+        finally:
+            monitoring.set_local_events(caller_tool,
+                                        cached_finish.__code__, 0)
+            caller_released = monitoring.register_callback(
+                caller_tool, entry_event, None)
+            monitoring.free_tool_id(caller_tool)
+        assert (caller_intact and caller_released is caller_callback
+                and len(caller_entries)
+                == 2 * len(pending_cancellations)), (
+            "the entry check disturbed a caller's sys.monitoring tool id "
+            "or a nested case (fix 32)", caller_tool, len(caller_entries))
+        assert [monitoring.get_tool(tool)
+                for tool in entry_tool_ids] == tool_table, (
+            "the entry check did not release its tool ids exactly "
+            "(fix 32)", tool_table)
         mutant_member = copy.deepcopy(
             scope["m:_FixtureProcess._finish_close"])
         capture_assigns = [
@@ -8782,7 +9004,10 @@ def _watchdog_completion_case(mode):
         # identical, so neither can drift from the other. fix 31
         # (QA52): the file must hold exactly two terminated blocks,
         # every block line carrying its start marker's indentation
-        # and the rest byte-identical; planted drifts are pinned red
+        # and the rest byte-identical; planted drifts are pinned red.
+        # fix 32 (QA53 claude MINOR 2): each drift must be caught for
+        # its own reason, a lost indentation and a marker line's
+        # trailing whitespace included
         bound_marks = (("# -- leg 19 bound (two identical copies, "
                         "fix 30) --").encode(),
                        ("# -- end of leg 19 "
@@ -8809,17 +9034,27 @@ def _watchdog_completion_case(mode):
         own_text = Path(__file__).read_bytes()
         assert bound_copy_fault(own_text) is None, (
             bound_copy_fault(own_text), "(fix 30/31)")
-        cut = own_text.index(b"\n", own_text.index(bound_marks[0])
-                             + len(bound_marks[0]) + 1)
-        for vector, data in (
+        mark_end = own_text.index(bound_marks[0]) + len(bound_marks[0])
+        cut = own_text.index(b"\n", mark_end + 1)
+        blocks_fault = "not exactly two terminated leg 19 bound blocks"
+        for vector, data, reason in (
                 ("trailing whitespace",
-                 own_text[:cut] + b" " + own_text[cut:]),
-                ("unterminated third marker", own_text + bound_marks[0]),
+                 own_text[:cut] + b" " + own_text[cut:],
+                 "the two copies of the leg 19 bound differ"),
+                ("unterminated third marker", own_text + bound_marks[0],
+                 blocks_fault),
                 ("third terminated block",
-                 own_text + b"\n".join(bound_marks))):
-            assert bound_copy_fault(data) is not None, (
+                 own_text + b"\n".join(bound_marks), blocks_fault),
+                ("lost indentation",
+                 own_text[:mark_end + 1] + b"X" + own_text[mark_end + 2:],
+                 "a leg 19 bound line lost its indentation"),
+                ("marker trailing whitespace",
+                 own_text[:mark_end] + b" " + own_text[mark_end:],
+                 blocks_fault)):
+            assert bound_copy_fault(data) == reason, (
                 "the planted leg 19 bound drift was NOT caught by the "
-                "copy self-check (fix 31)", vector)
+                "copy self-check for its own reason (fix 31/32)", vector,
+                bound_copy_fault(data))
     elif mode == "receipt-high-fd":
         import fcntl
         import resource
