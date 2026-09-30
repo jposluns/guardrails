@@ -181,16 +181,7 @@ def _read(fd, name, before, budget):
             raise PlanError("file name changed during read: {!r}".format(name))
         return b"".join(chunks)
     finally:
-        os.close(child)
-
-
-def _read_rel(root_fd, path, budget):
-    parent, name = store._journal._open_parent(root_fd, path)
-    try:
-        before = os.stat(name, dir_fd=parent, follow_symlinks=False)
-        return _read(parent, name, before, budget)
-    finally:
-        os.close(parent)
+        store._journal._close_fd_propagating(child)
 
 
 def _roots(sources):
@@ -222,7 +213,12 @@ def _inventory(root, sources, targets):
                 raise PlanError("companion/remote store requires separately scoped investigation")
             if target is not None:
                 traces.append(pointer)
-        resolution = store.resolve_store(root)
+        # Descriptor-bound resolution (round-5 defect 1): resolve through the SAME held root
+        # descriptor every inventory read uses -- pointer reads through root_fd, discovery holding the
+        # .working listing descriptor and reading each listed manifest beneath it -- never a path
+        # re-resolution, so a root or .working swapped after the open above is never read. Discovery
+        # returns the resolved manifest's exact bytes, so it is never re-opened by path below.
+        resolution, manifest_raw = store.resolve_store_fd(root_fd, root)
         excluded = []
         if resolution.status == store.CANNOT_EVALUATE:
             # Prove that this is foreign content with NO candidate store manifest
@@ -247,12 +243,20 @@ def _inventory(root, sources, targets):
                                 if store._journal._lstat_at(child, store.MANIFEST_NAME) is not None:
                                     raise PlanError("unresolved store manifest requires repair")
                             finally:
-                                os.close(child)
+                                store._journal._close_fd_propagating(child)
             finally:
-                os.close(wfd)
+                store._journal._close_fd_propagating(wfd)
         if resolution.status == store.RESOLVED:
             manifest_path = resolution.machine_rel + "/" + store.MANIFEST_NAME
-            raw = _read_rel(root_fd, manifest_path, budget)
+            # The exact bytes discovery already read through the .working listing descriptor,
+            # brought under the planner's own byte bounds; a fresh by-path read here could read a
+            # tree swapped in after the listing (round-5 defect 1).
+            raw = manifest_raw
+            if len(raw) > MAX_FILE_BYTES:
+                raise PlanError("file exceeds byte bound: {!r}".format(manifest_path))
+            budget[0] += len(raw)
+            if budget[0] > MAX_TOTAL_BYTES:
+                raise PlanError("inventory exceeds byte bounds")
             manifest = tomllib.loads(raw.decode("utf-8"))
             checked = store.validate_manifest(manifest)
             if checked.status != store.VALID:
@@ -331,7 +335,7 @@ def _inventory(root, sources, targets):
                     if _stamp(os.stat(name, dir_fd=parent, follow_symlinks=False)) != _stamp(before):
                         raise PlanError("directory name changed during enumeration")
                 finally:
-                    os.close(child)
+                    store._journal._close_fd_propagating(child)
             elif stat.S_ISREG(before.st_mode):
                 # A malformed/ambiguous store must not be scanned as ordinary foreign
                 # content: a manifest may contain unmanaged exclusions we cannot trust.
@@ -358,7 +362,7 @@ def _inventory(root, sources, targets):
             try:
                 visit(parent, name, path, 0)
             finally:
-                os.close(parent)
+                store._journal._close_fd_propagating(parent)
         for path in sources:
             if entries.get(path, {}).get("kind") in (None, "absent", "excluded"):
                 raise PlanError("declared source is unavailable: {!r}".format(path))
@@ -392,7 +396,7 @@ def _inventory(root, sources, targets):
             if _stamp(os.fstat(check_fd)) != _stamp(root_stat):
                 raise PlanError("product root changed during investigation")
         finally:
-            os.close(check_fd)
+            store._journal._close_fd_propagating(check_fd)
         # The homes generation, the resolved store's declared view targets and its parsed manifest are
         # returned beside the observation, never inside it; all come from the same manifest read that
         # fixed the exclusions, whose digest the observation records.
@@ -436,7 +440,7 @@ def _inventory(root, sources, targets):
             "coverage_residuals": list(RESIDUALS),
         }, homes, view_targets, manifest
     finally:
-        os.close(root_fd)
+        store._journal._close_fd_propagating(root_fd)
 
 
 def _deliverable_destinations(manifest):
@@ -1653,6 +1657,61 @@ def self_test():
             machine.mkdir(parents=True)
             (machine / "manifest.toml").write_bytes(b"not toml")
             self.assertEqual(investigate(self.root, sources=[]).status, store.CANNOT_EVALUATE)
+
+        def test_working_swap_after_listing_never_read(self):
+            # Round-5 defect 1 (the rounds-2-4 invariant): every name discovery reads from the
+            # .working listing must be read through the descriptor that produced the listing. Swap
+            # .working for a replacement tree the instant the discovery listing returns: the
+            # replacement's manifest must NEVER be read on any path (resolution or the planner's own
+            # manifest use), and the investigation still refuses at the product-root re-check rather
+            # than proceeding over the swap.
+            import _opf_init
+            machine = self.root / ".working/toml"
+            machine.mkdir(parents=True)
+            (machine / "manifest.toml").write_text(_opf_init.build_manifest(), encoding="utf-8")
+            original_ino = (machine / "manifest.toml").stat().st_ino
+            replacement = self.root / ".working-replacement"
+            (replacement / "toml").mkdir(parents=True)
+            (replacement / "toml/manifest.toml").write_text(_opf_init.build_manifest(),
+                                                            encoding="utf-8")
+            replacement_ino = (replacement / "toml/manifest.toml").stat().st_ino
+            self.assertNotEqual(original_ino, replacement_ino)
+            state = {"fired": False}
+            real_listdir = os.listdir
+            real_read = os.read
+            read_inos = set()
+
+            def swap_listdir(target="."):
+                names = real_listdir(target)
+                if isinstance(target, int) and not state["fired"] and sorted(names) == ["toml"]:
+                    # The .working listing during store resolution: swap the whole tree NOW, after
+                    # the listing returned but before any listed manifest is read.
+                    os.rename(self.root / ".working", self.root / ".working-swapped-out")
+                    os.rename(self.root / ".working-replacement", self.root / ".working")
+                    state["fired"] = True
+                return names
+
+            def spy_read(fd, size):
+                try:
+                    read_inos.add(os.fstat(fd).st_ino)
+                except OSError:
+                    pass
+                return real_read(fd, size)
+
+            with mock.patch.object(os, "listdir", swap_listdir), \
+                    mock.patch.object(os, "read", spy_read):
+                result = investigate(self.root, sources=self.sources, targets=self.all_targets())
+            self.assertTrue(state["fired"], "the .working swap injection did not fire")
+            self.assertEqual(os.lstat(self.root / ".working/toml/manifest.toml").st_ino,
+                             replacement_ino)   # the swap really landed at the pathname
+            self.assertIn(original_ino, read_inos,
+                          "the listed store's manifest was not read at all")
+            self.assertNotIn(replacement_ino, read_inos,
+                             "the swapped-in replacement manifest was read")
+            # The honest outcome over a root mutated mid-investigation stays fail-closed.
+            self.assertEqual(result.status, store.CANNOT_EVALUATE)
+            self.assertTrue(any("product root changed" in f for f in result.findings),
+                            result.findings)
 
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(PlanningTests)
     expected = suite.countTestCases()

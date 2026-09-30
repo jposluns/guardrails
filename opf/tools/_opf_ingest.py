@@ -7,8 +7,9 @@ yet manage and emits a digest-stamped DISPOSITION WORKSHEET, read-only. It WIRES
 (inert, like `--scan`). Named `_opf_ingest` (not `_opf_migrate`) so it does not collide with `opf migrate`,
 which stays store RELOCATION (OQ-1 ruled 2026-09-17). The importer layer, plan composition, review /
 acceptance, apply promotion, and the `opf adopt` verb wiring are LATER slices (MIG-PR2..PR6) and are NOT
-added here; `opf adopt` continues to hit the fail-closed `KNOWN_VERBS` dispatch, pinned by the module
-self-test's dispatch-deferral vector (consciously flipped at MIG-PR6).
+added here. The `opf adopt` verb wiring has since landed (OPF-ADOPT K9a wires the read-only plan and
+status subcommands), so the module self-test's dispatch vector now pins the verb WIRED (consciously
+flipped from the original dispatch-deferral pin), while `detect` stays unwired.
 
 Ratified design constraints applied (PD-OPF-MIGRATE-DESIGN OQ-2..7, ratified 2026-09-19):
   - OQ-2: the worksheet row shape is ACCEPTANCE-READY for the SHARED `opf.import.acceptance/v1` format that
@@ -1305,7 +1306,19 @@ def sort_candidate_rows(candidates, migrate_rows):
 
 # --- the disposition PLANNER (MIG-PR3): compose a triaged worksheet + options into a staged inert plan ---
 
-def plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonce):
+def plan_ingest(product_root, worksheet, options, include=None, **_kwargs):
+    """The retired root-ingest `--plan` form: refuses on every store before any read, parse, detection or
+    write (spec 14.1)."""
+    return _opf_import.PlanResult(CANNOT_EVALUATE, [_opf_import.ORDINARY_IMPORT_RETIRED])
+
+
+# The retired public name and its real refusal, bound at import; _opf_import._self_test_engine rebinds it
+# to the retained engine for the self-tests, as it does the import modes.
+_RETIRED_MODES = ("plan_ingest",)
+_REFUSALS = {name: globals()[name] for name in _RETIRED_MODES}
+
+
+def _plan_ingest(product_root, worksheet, options, include=None, *, now, run_nonce):
     """Compose a triaged disposition WORKSHEET + its --ingest-options into a STAGED, INERT plan under
     `.working/imports/<run-id>/` via _opf_import.plan_import. NEVER manufactures acceptance.json; every
     ingest source stays unmapped/legacy_fragment; apply/promotion is refused (ingest-actions.toml, the
@@ -1825,6 +1838,53 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 check("missing-binding-" + disposition,
                       plan(root, ws, empty, files).verdict == CANNOT_EVALUATE)
 
+    def retired():
+        # Spec 14.1: plan_ingest is retired and refuses FIRST, with the retirement pointer, before any
+        # detection, triage gate, binding, read or write, even inside an engine block. The inputs are a
+        # fully triaged keep plan, the codex round-1 reproduction (a.txt holding "source\n", one
+        # `unresolved` row, empty options: formerly verdict 1 "complete triage before --plan"), through
+        # the library and through the CLI, and a NOT-ADOPTED root. Either mutation of plan_ingest's refusal
+        # fails the suite: restoring the retained engine in place of it turns each disposition's -refused,
+        # -not-adopted-refused and -cli-refused rows red; literally deleting its return makes plan_ingest
+        # return None, so refused() raises AttributeError and the vector crashes, which each runner reports
+        # as a non-passing result.
+        import tempfile
+        from unittest.mock import patch
+
+        def listing(root):
+            return dict((str(p), p.read_bytes() if p.is_file() else None) for p in root.rglob("*"))
+
+        def refused(result):
+            return (result.verdict == CANNOT_EVALUATE and result.run_id is None
+                    and result.findings == [_opf_import.ORDINARY_IMPORT_RETIRED])
+
+        bare = Path(tempfile.mkdtemp(prefix="opf-ingest-retired-")).resolve()
+        try:
+            for disposition in ("keep", "unresolved"):
+                with fixture(dict([("a.txt", "source\n")])) as (root, _machine):
+                    files = ["a.txt"]
+                    ws = triage(root, files, disposition)
+                    wp, op = root / "worksheet.toml", root / "options.toml"
+                    wp.write_bytes(_worksheet_bytes(ws))
+                    op.write_bytes(_worksheet_bytes(empty))
+                    before = listing(root)
+                    with _opf_import._self_test_engine(engine=False), \
+                            patch.object(sys.modules[__name__], "detect", wraps=detect) as detected:
+                        result = plan(root, ws, empty, files)
+                        unadopted = plan(bare, ws, empty, files)
+                    check(disposition + "-refused", refused(result) and not detected.called)
+                    check(disposition + "-not-adopted-refused", refused(unadopted))
+                    proc = subprocess.run(
+                        [sys.executable, "-I", "-B", str(Path(__file__).with_name("opf.py")),
+                         "import", "--root", str(root), "--plan", "--dispositions", str(wp),
+                         "--ingest-options", str(op), "--include", files[0]],
+                        capture_output=True, check=False)
+                    check(disposition + "-cli-refused", proc.returncode == 2
+                          and _opf_import.ORDINARY_IMPORT_RETIRED.encode("utf-8") in proc.stderr)
+                    check(disposition + "-nothing-staged", listing(root) == before)
+        finally:
+            shutil.rmtree(bare)
+
     def keep():
         # round-3 F2: a keep's exemption is judged by its COVERAGE, not its emitted string. Each round
         # trip registers the EMITTED unmanaged_path in the store manifest (exactly what PR-C will apply)
@@ -2011,7 +2071,9 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
             ws = triage(root, files, "move")
             ws = stamp([dict(r, note="dest_path=saved/a.md") for r in ws["row"]])
             check("nonempty-note", plan(root, ws, options(ws), files).verdict == CANNOT_EVALUATE)
-        # Positive control prevents an unrelated CLI/flag failure from passing the malformed leg.
+        # Positive control prevents an unrelated CLI/flag failure from passing the malformed leg: the
+        # well-formed CLI plan reaches the retired plan_ingest refusal (spec 14.1), and so does the
+        # malformed one, whose options file the CLI no longer reads before refusing (round-1 MINOR-2).
         for malformed in (False, True):
             with fixture() as (root, _machine):
                 files = ["legacy/a.md"]
@@ -2024,8 +2086,8 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                      "import", "--root", str(root), "--plan", "--dispositions", str(wp),
                      "--ingest-options", str(op), "--include", files[0]],
                     capture_output=True, check=False)
-                check("cli-malformed" if malformed else "cli-valid",
-                      proc.returncode == (2 if malformed else 0))
+                check("cli-malformed" if malformed else "cli-refused", proc.returncode == 2
+                      and _opf_import.ORDINARY_IMPORT_RETIRED.encode("utf-8") in proc.stderr)
 
     def reconcile():
         for case, verdict in (("digest-drift", CANNOT_EVALUATE), ("omission", FINDING),
@@ -3684,7 +3746,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
          ("relocated-store-scope-bytes", relocated_store_scope),
          ("reconcile-stage-window", reconcile_stage_window),
          ("partial-ingest-stage-nonpromotable", partial_ingest_stage),
-         ("ingest-review-bundle", review_bundle)]
+         ("ingest-review-bundle", review_bundle), ("ingest-plan-retired", retired)]
         if gate else
         [("plan-ingest-keep-exemption", keep), ("plan-ingest-migrate-provenance", migrate),
          ("plan-ingest-move-archive-default", archive),
@@ -3697,7 +3759,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
          ("plan-ingest-relocated-store-scope", relocated_store_scope),
          ("plan-ingest-reconcile-stage-window", reconcile_stage_window),
          ("plan-ingest-partial-stage-nonpromotable", partial_ingest_stage),
-         ("plan-ingest-review-bundle", review_bundle)])
+         ("plan-ingest-review-bundle", review_bundle), ("plan-ingest-retired", retired)])
     outer_check = check
     for label, test in registry:
         check = lambda suffix, cond, label=label: outer_check(label + "/" + suffix, cond)
@@ -3710,7 +3772,7 @@ def self_test():
     from unittest.mock import patch
     with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
         with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
-                        GIT_CONFIG_NOSYSTEM="1"):
+                        GIT_CONFIG_NOSYSTEM="1"), _opf_import._self_test_engine():
             return self_test_isolated()
 
 
@@ -4445,11 +4507,27 @@ def self_test_isolated():
 
         _self_test_planner(check, build_store, build_relocated, snapshot, symlink_supported)
 
-        # 13. dispatch-deferral: `opf adopt` is NOT wired; the fail-closed KNOWN_VERBS dispatch stands
-        #     (consciously flipped at MIG-PR6, which wires the verb).
+        # 13. dispatch-wiring (consciously FLIPPED from the original dispatch-deferral pin at OPF-ADOPT
+        #     K9a, which wires the verb read-only): `opf adopt` is a KNOWN_VERBS member whose dispatch
+        #     REACHES _cmd_adopt (plan/status land; the mutating subcommands still refuse fail-closed,
+        #     pinned by the opf-cli self-test leg), while `detect` stays UNWIRED (its fail-closed dispatch
+        #     stands). Routing is proved, not vocabulary: main() is driven with _cmd_adopt swapped for a
+        #     recorder, so removing the adopt dispatch branch (which falls through to the fail-closed
+        #     KNOWN_VERBS stub) fails this check even with KNOWN_VERBS unchanged.
+        import contextlib
+        import io
         import opf as _opf_cli
-        check("dispatch-deferral-adopt-unwired",
-              "adopt" not in _opf_cli.KNOWN_VERBS and "detect" not in _opf_cli.KNOWN_VERBS)
+        routed = []
+        real_cmd_adopt = _opf_cli._cmd_adopt
+        _opf_cli._cmd_adopt = lambda rest: routed.append(list(rest)) or _opf_cli.EXIT_OK
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                routed_rc = _opf_cli.main(["adopt", "status", "--root", str(base)])
+        finally:
+            _opf_cli._cmd_adopt = real_cmd_adopt
+        check("dispatch-wired-adopt-read-only",
+              "adopt" in _opf_cli.KNOWN_VERBS and "detect" not in _opf_cli.KNOWN_VERBS
+              and routed == [["status", "--root", str(base)]] and routed_rc == _opf_cli.EXIT_OK)
     except OSError as exc:
         print("OPF-INGEST SELF-TEST ERROR: harness error: {}".format(exc), file=sys.stderr)
         shutil.rmtree(str(base), ignore_errors=True)
@@ -4493,7 +4571,7 @@ def self_test_isolated():
           "(ENOSYS) skips a symlink vector while an EACCES propagates rather than masquerading as a silent "
           "skip (F9.2), the worksheet validates and catches vocab/digest/keyset/schema-type "
           "mutations, a source_path the contained reader rejects, and a non-string top-level key, and "
-          "`opf adopt` stays unwired.")
+          "the `opf adopt` verb is wired (OPF-ADOPT K9a) while `detect` stays unwired.")
     return 0
 
 
