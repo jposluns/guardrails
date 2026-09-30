@@ -606,45 +606,6 @@ validate integration before activation.
 """
 
 [[gate]]
-id = "opf-homes-migrate"
-script = "opf/tools/check_opf_homes_migrate.py"
-rules = []
-platform = "ci"
-default = "block"
-class = "c"
-residue = """
-It runs the OPF read-only homes-migration planning gate (opf/tools/check_opf_homes_migrate.py,
-OPF-LAYOUT-HOMES L3b PR1) via its --self-test [--red-on-revert]: there is no live-adopter leg (this
-repository is not an OPFiles adopter), so the whole assurance rides the self-test. The suite drives
-opf upgrade --homes-plan over synthetic stores through both the in-process dispatcher and the
-isolated executable (python3 -I -B opf/tools/opf.py), building fixture bytes independently of the new
-planner from fixed payloads and the legacy record serializers. It asserts the happy path (exact plan
-roster, per-source digests, destinations, and A13 binding) with a fixed clock (deterministic
-generated_at), that the tree and every armed mutation and schema-upgrade seam are untouched
-(_upgrade_run, _opf_write_guard.acquire_lease, _upgrade_replace, and the journal apply/run_transaction/recover
-entries each raise if entered), and the enumerated fail-closed refusals each exit 2 leaving the store
-byte-identical: a symlinked or wrong-type staged member, an unknown staged member, an acceptance
-merge-digest conflict, an unprovable (wrong-type) import-ops member, an oversized member over the
-product-read cap, and an unlistable home fails closed even under --root; a resolved non-co-located
-store refuses, a non-adopter root reports NOT APPLICABLE at 0, an already-homes-2 store plans nothing,
-archive bytes with no completed-import execution proof stay left-in-place, argument parsing refuses
-its invalid vectors, dispatch is byte-for-byte compatible with the original upgrade parser, other
-read-only verbs (doctor, render --check) do not enter the planner, and the evidence-fixture cases
-each refuse. A fixture with both durable archive bindings corrupted and no staged run asserts
-acceptance.json is the exact first refusal across fresh isolated and explicitly seeded processes.
-Under --red-on-revert each evidence rule, the archive binding sort, and the plan builder are reverted
-in turn and required to be caught by their own discriminator. It arguably serves the change-carries-a-check and
-check-fails-closed-on-unreadable disciplines, but the linkage to a single corpus rule is not
-undeniable, so none is claimed here. Class c: coverage is representative, so it asserts these
-scenarios with exact verdicts over synthetic mocked-observation fixtures, not the planner's whole
-input space; it does not certify filesystem races, crash recovery, power-loss durability, or live
-adopter state; ownership means consistency with OPF's records, not cryptographic authentication, so a
-forged internally-consistent journal is out of scope; the plan is not execution authority (apply,
-recover, and L4 activation are deferred slices); and any harness failure fails closed to 2 rather
-than a clean skip.
-"""
-
-[[gate]]
 id = "opf-init-contract-check"
 script = "opf/tools/check_opf_init_contract.py"
 rules = []
