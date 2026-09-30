@@ -389,8 +389,8 @@ def preview_homes_gitignore_rewrite(existing):
     file without markers is the append case plan_homes_gitignore handles, and duplicated,
     unbalanced or reversed markers leave no single region to replace, so no preview exists and
     the drift refusal stands. Nothing is applied here: the caller shows this preview for review
-    and passes it back as plan_homes_gitignore(existing, approved_rewrite=...) only on explicit
-    approval, never silently."""
+    and passes it back, with the reviewed bytes, as plan_homes_gitignore(existing,
+    approved_rewrite=..., reviewed_existing=...) only on explicit approval, never silently."""
     if not isinstance(existing, bytes):
         raise ValueError("homes-gitignore rewrite preview needs the current file bytes")
     text = existing.decode("utf-8", "surrogateescape")
@@ -409,7 +409,7 @@ def preview_homes_gitignore_rewrite(existing):
     return result.encode("utf-8", "surrogateescape")
 
 
-def plan_homes_gitignore(existing, approved_rewrite=None):
+def plan_homes_gitignore(existing, approved_rewrite=None, reviewed_existing=None):
     """Pure .working/.gitignore reconciliation planner: no git, no filesystem, no write.
     `existing` is the current file's bytes, or None when the file is absent. Returns the full
     new file bytes to install, or None when the file already carries the exact managed block
@@ -421,8 +421,12 @@ def plan_homes_gitignore(existing, approved_rewrite=None):
     refusal homes-gitignore-block-drift and is never repaired in place next to adopter text.
     The one sanctioned repair is the reviewed-rewrite path: pass the bytes
     preview_homes_gitignore_rewrite returned, after explicit review and approval, as
-    `approved_rewrite`; the planner returns exactly those bytes, and only while they still
-    byte-match a fresh preview, so a file changed since review refuses (fail-closed).
+    `approved_rewrite`, with the exact file bytes that preview was computed from as
+    `reviewed_existing`; the planner returns exactly those bytes, and only while `existing` still
+    byte-matches `reviewed_existing` and a fresh preview still byte-matches the approval, so a file
+    changed since review refuses (fail-closed). The prestate binding is what refuses an edit INSIDE
+    the drifted block: the replacement discards the whole marker region, so such an edit yields the
+    same preview and only the reviewed bytes can tell it apart.
     Installation is not performed here: _opf_write_guard.inspect_homes_gitignore must gate the
     write on effective ignore rules and the index first, and the index is never mutated."""
     if approved_rewrite is not None and not isinstance(approved_rewrite, bytes):
@@ -444,18 +448,19 @@ def plan_homes_gitignore(existing, approved_rewrite=None):
         return result
     if approved_rewrite is not None:
         preview = preview_homes_gitignore_rewrite(existing)
-        if approved_rewrite != preview:
+        if reviewed_existing != existing or approved_rewrite != preview:
             raise ValueError(
-                "homes-gitignore-block-drift: the approved rewrite does not byte-match the "
-                "current preview (the file changed since review, or the approval is stale); "
-                "re-preview, re-review and re-approve (fail-closed)")
+                "homes-gitignore-block-drift: the current file does not byte-match the reviewed "
+                "bytes, or the approved rewrite does not byte-match the current preview (the file "
+                "changed since review, or the approval is stale); re-preview, re-review and "
+                "re-approve (fail-closed)")
         return preview
     raise ValueError(
         "homes-gitignore-block-drift: .working/.gitignore carries a marker line without the "
         "exact managed block (a hand-edited, duplicated, unbalanced, reversed or CRLF block). "
         "It is never rewritten silently next to adopter text: review the exact replacement "
-        "(preview_homes_gitignore_rewrite) and pass it back as approved_rewrite on explicit "
-        "approval, or reconcile the file by hand")
+        "(preview_homes_gitignore_rewrite) and pass it back as approved_rewrite, with the "
+        "reviewed bytes as reviewed_existing, on explicit approval, or reconcile the file by hand")
 
 
 def snapshot_caller_alarm():

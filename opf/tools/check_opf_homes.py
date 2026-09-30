@@ -2280,13 +2280,23 @@ def _gitignore_reconciliation_self_test(check):
     check("gi-rewrite-preview", lambda: store.preview_homes_gitignore_rewrite(drifted) ==
           b"# adopter\n" + block + b"/local/\n")
     check("gi-rewrite-approved", lambda: store.plan_homes_gitignore(
-        drifted, approved_rewrite=store.preview_homes_gitignore_rewrite(drifted)) ==
-        b"# adopter\n" + block + b"/local/\n")
+        drifted, approved_rewrite=store.preview_homes_gitignore_rewrite(drifted),
+        reviewed_existing=drifted) == b"# adopter\n" + block + b"/local/\n")
     check("gi-rewrite-never-silent",
           lambda: drift_refuses(lambda: store.plan_homes_gitignore(drifted)))
     check("gi-rewrite-stale", lambda: drift_refuses(lambda: store.plan_homes_gitignore(
         b"# changed\n" + blk.replace("/journals/", "/other/").encode("utf-8"),
-        approved_rewrite=store.preview_homes_gitignore_rewrite(drifted))))
+        approved_rewrite=store.preview_homes_gitignore_rewrite(drifted), reviewed_existing=drifted)))
+    # The approval binds to the reviewed prestate: an edit INSIDE the drifted block after review
+    # yields the same preview, so only the reviewed bytes refuse it; an approval without them refuses.
+    inblock = drifted.replace(b"/journals/\n", b"/journals/\n!/journals/unreviewed\n")
+    check("gi-rewrite-inblock-edit", lambda: store.preview_homes_gitignore_rewrite(inblock) ==
+          store.preview_homes_gitignore_rewrite(drifted) and drift_refuses(
+              lambda: store.plan_homes_gitignore(
+                  inblock, approved_rewrite=store.preview_homes_gitignore_rewrite(drifted),
+                  reviewed_existing=drifted)))
+    check("gi-rewrite-unbound", lambda: value_refuses(lambda: store.plan_homes_gitignore(
+        drifted, approved_rewrite=store.preview_homes_gitignore_rewrite(drifted))))
     check("gi-rewrite-ambiguous", lambda: value_refuses(
         lambda: store.preview_homes_gitignore_rewrite((blk + blk).encode("utf-8"))))
     check("gi-rewrite-exact-noop", lambda: value_refuses(
@@ -2477,6 +2487,89 @@ def _gitignore_reconciliation_self_test(check):
             check("gi-verify-ineffective", lambda: any(
                 h.startswith("homes-gitignore-ineffective") and "journals" in h
                 for h in guard.verify_homes_gitignore_effective(rootv, "init")))
+
+            # The durable probe answers for NEW evidence: tracked evidence already under imported/
+            # (the steady state after the first import) cannot mask an ignoring rule...
+            repod, rootd = tracked_fixture("durable-tracked", ".working/imported/ev")
+            (rootd / ".gitignore").write_text("/.working/imported/\n", encoding="utf-8")
+            (rootd / ".working" / ".gitignore").write_bytes(block)
+            check("gi-durable-tracked", lambda: any(
+                h.startswith("durable-evidence-ignored") and "imported" in h
+                for h in guard.inspect_homes_gitignore(rootd, "init")[1]))
+            # ...and an index entry at the probe child itself, which would mask it, is cannot-evaluate.
+            repom, rootm = tracked_fixture("probe-masked",
+                                           ".working/imported/" + guard._HOMES_PROBE_CHILD)
+            (rootm / ".gitignore").write_text("/.working/imported/\n", encoding="utf-8")
+            check("gi-probe-masked", lambda: guard_refuses(
+                lambda: guard.inspect_homes_gitignore(rootm, "init"), "would mask"))
+
+            # A regular file AT a control home is not matched by the block's directory-only rules:
+            # held by the inspector and the post-write re-check alike.
+            repot, roott = fixture("home-file")
+            (roott / ".working" / ".gitignore").write_bytes(block)
+            (roott / ".working" / "staging").write_text("x\n", encoding="utf-8")
+            check("gi-home-file", lambda: all(any(
+                h.startswith("homes-gitignore-ineffective") and "staging" in h for h in holds)
+                for holds in (guard.inspect_homes_gitignore(roott, "init")[1],
+                              guard.verify_homes_gitignore_effective(roott, "init"))))
+
+            # An ignored control file is never committed, so the block would not travel: held.
+            repoi, rooti = fixture("control-ignored")
+            (rooti / ".gitignore").write_text("/.working/.gitignore\n", encoding="utf-8")
+            (rooti / ".working" / ".gitignore").write_bytes(block)
+            check("gi-control-ignored", lambda: any(
+                h.startswith("homes-gitignore-ignored")
+                for h in guard.inspect_homes_gitignore(rooti, "init")[1]))
+
+            # The post-write re-check applies the inspector's unreadable-input refusal.
+            repou, rootu = fixture("verify-unreadable")
+            (rootu / ".gitignore").write_text("/.working/staging/\n/.working/journals/\n",
+                                              encoding="utf-8")
+            os.symlink("elsewhere", rootu / ".working" / ".gitignore")
+            check("gi-verify-unreadable", lambda: guard_refuses(
+                lambda: guard.verify_homes_gitignore_effective(rootu, "init"),
+                "homes-gitignore-unreadable"))
+
+            # A symlinked .working/ is the named unreadable refusal, never a raw JournalError.
+            repow, rootw = fixture("working-symlink")
+            (rootw / ".working").rmdir()
+            (rootw / "real").mkdir()
+            os.symlink("real", rootw / ".working")
+            check("gi-working-symlink", lambda: guard_refuses(
+                lambda: guard.inspect_homes_gitignore(rootw, "init"), "homes-gitignore-unreadable"))
+
+            # The shared indexed-ignore availability probe runs through the verb allowlist too, in
+            # the inspector and the post-write re-check alike: narrowing the allowlist refuses its
+            # config call (no other homes probe runs config).
+            with patch.object(guard, "_HOMES_INSPECT_VERBS",
+                              guard._HOMES_INSPECT_VERBS - frozenset(("config",))):
+                check("gi-verb-allowlist-shared", lambda: all(guard_refuses(
+                    lambda f=f: f(root_c, "init"), "'config'") for f in (
+                        guard.inspect_homes_gitignore, guard.verify_homes_gitignore_effective)))
+
+            # A control-path listing git answers with stderr (a sparse index expanding, for example)
+            # refuses with git's own words, not a bare rc.
+            def noisy_run(g, r, args, **kw):
+                if "ls-files" in args:
+                    return observe._GitOutcome(True, 0, b"", "hint: synthetic ls-files stderr\n")
+                return real_run(g, r, args, **kw)
+
+            with patch.object(observe, "_run_git", noisy_run):
+                check("gi-index-stderr", lambda: guard_refuses(
+                    lambda: guard.inspect_homes_gitignore(root_c, "init"), "synthetic ls-files stderr"))
+
+            # The inspector forwards the reviewed prestate: the approval applies on the reviewed
+            # bytes and holds on any other bytes, even ones with the same preview.
+            repor, rootr = fixture("rewrite-bound")
+            drift_r = b"# adopter\n" + blk.replace("/staging/\n", "/staging/\n/extra/\n").encode("utf-8")
+            other_r = drift_r.replace(b"/extra/", b"/other/")
+            (rootr / ".working" / ".gitignore").write_bytes(drift_r)
+            preview_r = store.preview_homes_gitignore_rewrite(drift_r)
+            check("gi-rewrite-inspect-bound", lambda: guard.inspect_homes_gitignore(
+                rootr, "init", approved_rewrite=preview_r, reviewed_existing=drift_r) == (preview_r, [])
+                and any(h.startswith("homes-gitignore-block-drift")
+                        for h in guard.inspect_homes_gitignore(
+                            rootr, "init", approved_rewrite=preview_r, reviewed_existing=other_r)[1]))
 
         # I11: a global core.excludesFile that ignores imported/ is durable-evidence-ignored under
         # the adopter's REAL configuration (config discovery), read through a second isolated HOME.

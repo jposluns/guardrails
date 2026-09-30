@@ -350,6 +350,12 @@ _HOMES_IGNORED_RELS = (_opf_store.STAGING_REL, _opf_store.JOURNALS_REL)    # the
 # mtime, which GIT_OPTIONAL_LOCKS does not suppress; the index content is never mutated, and the
 # tracked-control-path advice below only NAMES the untracking, it never performs it.
 _HOMES_INSPECT_VERBS = frozenset(("rev-parse", "ls-files", "check-ignore", "config", "cat-file"))
+# The untracked child every home effectiveness probe asks about. check-ignore answers "not ignored"
+# for any path whose pathspec matches an index entry, so probing a home itself reads the tracked
+# content already there (durable evidence after the first import, the steady state) as not ignored.
+# A child answers for NEW content, and git classifies every home above it as a directory whatever its
+# current type, even while absent. An index entry at a durable probe child is itself refused.
+_HOMES_PROBE_CHILD = ".opf-ignore-probe"
 
 
 def _ignore_file_candidates(prefix, paths):
@@ -427,8 +433,9 @@ def _homes_repo_prefix(store_root, git, verb):
 def _homes_read_gitignore(store_root, verb):
     """The current .working/.gitignore bytes, or None when the file (or .working/ itself) is absent.
     A contained no-follow read bound to the store root, require_single_link, under the product read
-    ceiling: a symlink, a non-regular file, a second hard link, an oversize file, or any read error is
-    the named cannot-evaluate refusal homes-gitignore-unreadable, never a guess at the bytes."""
+    ceiling: a symlink, a non-regular file, a second hard link, an oversize file, a symlinked or
+    non-directory .working/, or any read error is the named cannot-evaluate refusal
+    homes-gitignore-unreadable, never a guess at the bytes."""
     journal = _opf_store._journal
     root = Path(os.path.abspath(str(store_root)))
     try:
@@ -440,9 +447,9 @@ def _homes_read_gitignore(store_root, verb):
     try:
         try:
             pfd, name = journal._open_parent(root_fd, _HOMES_GITIGNORE_REL)
-        except (FileNotFoundError, NotADirectoryError):
+        except FileNotFoundError:
             return None            # no .working/ directory yet: the control file is absent
-        except OSError as exc:
+        except (OSError, journal.JournalError) as exc:    # a symlinked or non-directory .working/
             raise WriteGuardError("homes-gitignore-unreadable: cannot reach {} ({}); cannot-evaluate "
                                   "(fail-closed)".format(_HOMES_GITIGNORE_REL, exc))
         try:
@@ -477,7 +484,8 @@ def _homes_index_holds(git, repo, prefix, verb):
                                   verb, out.err.strip()))
     if out.rc != 0 or out.err:
         raise WriteGuardError("git could not list the store control paths for the {} gitignore "
-                              "inspection (rc {}); cannot-evaluate (fail-closed)".format(verb, out.rc))
+                              "inspection (rc {}): {}; cannot-evaluate (fail-closed)".format(
+                                  verb, out.rc, out.err.strip()))
     if out.out and not out.out.endswith(b"\x00"):
         raise WriteGuardError("git returned a malformed index listing for the {} gitignore "
                               "inspection; cannot-evaluate (fail-closed)".format(verb))
@@ -521,9 +529,10 @@ def _homes_rel_ignored(git, repo, prefix, rel, verb):
     """Whether the adopter's EFFECTIVE ignore rules, the real configuration their own `git add` reads
     (global and system core.excludesFile included), ignore `rel` beneath the store: one rc-classified
     check-ignore per path over the config-discovery boundary, the opf.py _init_unignored pattern. The
-    literal "./" prefix keeps a leading colon in an adopter store prefix a path, never pathspec magic,
-    and a trailing slash makes a directory-only pattern match even while the directory is still
-    absent (confirmed against git 2.53.0). rc 0 is ignored, rc 1 is not ignored, anything else is
+    literal "./" prefix keeps a leading colon in an adopter store prefix a path, never pathspec magic.
+    A home is probed through its _HOMES_PROBE_CHILD, so a directory-only pattern on the home matches
+    whether the home is absent or present, whatever its type, and tracked content there cannot mask
+    the answer (confirmed against git 2.53.0). rc 0 is ignored, rc 1 is not ignored, anything else is
     cannot-evaluate."""
     result = _homes_run_git_discovery(git, repo, ["check-ignore", "--", "./" + prefix + rel])
     if not result.completed:
@@ -538,24 +547,68 @@ def _homes_rel_ignored(git, repo, prefix, rel, verb):
                           "cannot-evaluate (fail-closed)".format(verb, result.rc, result.err.strip()))
 
 
+def _homes_unignored_content(git, repo, prefix, verb):
+    """Existing untracked content under the staging and journals homes that the adopter's effective
+    ignore rules leave unignored (ls-files --others --exclude-standard over the config-discovery
+    boundary): a regular file or symlink AT a home, which the block's directory-only rules never
+    match, or content a rule re-includes. A probe of a hypothetical child cannot see either."""
+    out = _homes_run_git_discovery(git, repo, ["--literal-pathspecs", "ls-files", "--others",
+                                               "--exclude-standard", "-z", "--"]
+                                   + [prefix + rel for rel in _HOMES_IGNORED_RELS])
+    if not out.completed or out.rc != 0 or out.err:
+        raise WriteGuardError("cannot list unignored content under the store control paths for the "
+                              "{} gitignore inspection (rc {}): {}; cannot-evaluate "
+                              "(fail-closed)".format(verb, out.rc, out.err.strip()))
+    if out.out and not out.out.endswith(b"\x00"):
+        raise WriteGuardError("git returned a malformed untracked listing for the {} gitignore "
+                              "inspection; cannot-evaluate (fail-closed)".format(verb))
+    return [os.fsdecode(entry) for entry in out.out.split(b"\x00")[:-1] if entry]
+
+
 def _homes_effective_holds(git, repo, prefix, block_present, verb):
     """The effective-ignore findings: a durable evidence home the adopter's real rules ignore
-    (spec 4.2: durable imported/ and archive/ evidence MUST stay tracked), and, only when the managed
-    block is already present, an ignored home the block should cover but the effective rules do not
-    (an adopter negation after the block, for example)."""
+    (spec 4.2: durable imported/ and archive/ evidence MUST stay tracked), an ignored
+    .working/.gitignore (spec 4.2: the block travels with the store, and an ignored control file is
+    never committed), and, only when the managed block is already present, an ignored home the block
+    should cover but the effective rules do not (an adopter negation after the block, for example)
+    or existing unignored content at it (a regular file or symlink at the home). Homes are probed
+    through _HOMES_PROBE_CHILD, so each answer is for new content, regardless of tracked entries
+    and of the home's current type."""
+    durable = [prefix + rel + "/" + _HOMES_PROBE_CHILD for rel in _HOMES_DURABLE_RELS]
+    masked = _homes_run_git(git, repo, ["--literal-pathspecs", "ls-files", "--cached", "-z", "--"]
+                            + durable)
+    if not masked.completed or masked.rc != 0 or masked.err:
+        raise WriteGuardError("cannot list the ignore probe paths for the {} gitignore inspection "
+                              "(rc {}): {}; cannot-evaluate (fail-closed)".format(
+                                  verb, masked.rc, masked.err.strip()))
+    if masked.out:
+        raise WriteGuardError("an index entry at the ignore probe path {!r} would mask the effective "
+                              "ignore answer for the {} gitignore inspection; cannot-evaluate "
+                              "(fail-closed)".format(os.fsdecode(masked.out.split(b"\x00")[0]), verb))
     holds = []
     for rel in _HOMES_DURABLE_RELS:
-        if _homes_rel_ignored(git, repo, prefix, rel + "/", verb):
+        if _homes_rel_ignored(git, repo, prefix, rel + "/" + _HOMES_PROBE_CHILD, verb):
             holds.append("durable-evidence-ignored: the effective ignore rules ignore {}{}/, but "
                          "durable imported/ and archive/ evidence MUST stay tracked (spec 4.2); fix "
                          "the adopter ignore rule, then retry opf {}".format(prefix, rel, verb))
+    if _homes_rel_ignored(git, repo, prefix, _HOMES_GITIGNORE_REL, verb):
+        holds.append("homes-gitignore-ignored: the effective ignore rules ignore {}{}, so the managed "
+                     "block would never be committed and would not travel with the store (spec 4.2); "
+                     "fix the adopter ignore rule, then retry opf {}".format(
+                         prefix, _HOMES_GITIGNORE_REL, verb))
     if block_present:
+        unignored = _homes_unignored_content(git, repo, prefix, verb)
         for rel in _HOMES_IGNORED_RELS:
-            if not _homes_rel_ignored(git, repo, prefix, rel + "/", verb):
+            home = prefix + rel
+            present = [p for p in unignored if p == home or p.startswith(home + "/")]
+            if present or not _homes_rel_ignored(git, repo, prefix, rel + "/" + _HOMES_PROBE_CHILD,
+                                                 verb):
                 holds.append("homes-gitignore-ineffective: the managed block is present but the "
-                             "effective ignore rules do not ignore {}{}/ (an adopter negation or a "
-                             "higher-precedence rule overrides it); reconcile the adopter rules, "
-                             "then retry opf {}".format(prefix, rel, verb))
+                             "effective ignore rules do not ignore {}{}/ (an adopter negation, a "
+                             "higher-precedence rule, or a non-directory entry at that path "
+                             "overrides it){}; reconcile the adopter rules, then retry opf {}".format(
+                                 prefix, rel, "".join("; unignored {!r}".format(p) for p in present),
+                                 verb))
     return holds
 
 
@@ -563,10 +616,14 @@ def _homes_indexed_ignore_guard(git, repo, rel_prefix, verb):
     """Fail closed when an indexed .gitignore blob governing the probed control paths is unavailable
     in a partial clone: the probe above read it as no-rule, but the adopter's own `git add` would
     fetch it, so the effective answer cannot be trusted (the same cannot-evaluate opf.py's init
-    preflight applies, through the same _opf_observe.indexed_ignore_availability)."""
-    candidates = _ignore_file_candidates(rel_prefix, list(_HOMES_DURABLE_RELS + _HOMES_IGNORED_RELS))
+    preflight applies, through the same _opf_observe.indexed_ignore_availability, here run through
+    the verb allowlist). The candidates govern every probed path: each home's probe child and the
+    control file itself."""
+    probed = [rel + "/" + _HOMES_PROBE_CHILD for rel in _HOMES_DURABLE_RELS + _HOMES_IGNORED_RELS]
+    candidates = _ignore_file_candidates(rel_prefix, probed + [_HOMES_GITIGNORE_REL])
     try:
-        unavailable = _opf_observe.indexed_ignore_availability(git, repo, candidates)
+        unavailable = _opf_observe.indexed_ignore_availability(git, repo, candidates,
+                                                               run=_homes_run_git_discovery)
     except RuntimeError as exc:
         raise WriteGuardError("cannot evaluate indexed ignore availability for the {} gitignore "
                               "inspection ({}); cannot-evaluate (fail-closed)".format(verb, exc))
@@ -578,7 +635,7 @@ def _homes_indexed_ignore_guard(git, repo, rel_prefix, verb):
                                   ", ".join(sorted(unavailable)), verb))
 
 
-def inspect_homes_gitignore(store_root, verb, approved_rewrite=None):
+def inspect_homes_gitignore(store_root, verb, approved_rewrite=None, reviewed_existing=None):
     """The read-only homes-2 .working/.gitignore reconciliation inspection (spec 4.2). UNWIRED in
     this release: no production verb calls it; the homes migration (H1) and homes-2 init (J) consume
     it, write the returned bytes through their journal (prestate and poststate digests, so a change
@@ -589,19 +646,21 @@ def inspect_homes_gitignore(store_root, verb, approved_rewrite=None):
     computed (None for no change), and `holds` is the list of named refusals that HOLD installation:
     tracked-control-path (a cached index entry under staging/ or journals/, held for the adopter's
     explicit reviewed untracking, never an index mutation here), durable-evidence-ignored,
-    homes-gitignore-ineffective, and homes-gitignore-block-drift. The caller may write only when
-    holds is empty. Raises WriteGuardError on every cannot-evaluate state: git missing from PATH,
-    no repository or a bare one, an unreadable .working/.gitignore (homes-gitignore-unreadable), a
-    flagged index entry for that file, a probe that cannot run, or an unavailable indexed ignore
-    blob in a partial clone.
+    homes-gitignore-ignored, homes-gitignore-ineffective, and homes-gitignore-block-drift. The
+    caller may write only when holds is empty. Raises WriteGuardError on every cannot-evaluate
+    state: git missing from PATH, no repository or a bare one, an unreadable .working/.gitignore
+    (homes-gitignore-unreadable), a flagged index entry for that file, a probe that cannot run, or
+    an unavailable indexed ignore blob in a partial clone.
 
     The index is never mutated: only rev-parse, ls-files, check-ignore, config and cat-file run
-    (structurally allowlisted in _homes_run_git), never status, add, rm, update-index or reset, and
-    both git environments set GIT_OPTIONAL_LOCKS=0; the one disclosed metadata residual is the
-    split-index shared-index mtime refresh a read can cause. `approved_rewrite` is the
-    reviewed-rewrite approval forwarded to plan_homes_gitignore: the exact previewed replacement
-    bytes, applied only on that explicit approval and only while they still byte-match a fresh
-    preview, never silently."""
+    (structurally allowlisted: every call, the shared indexed_ignore_availability's included, runs
+    through _homes_run_git or _homes_run_git_discovery), never status, add, rm, update-index or
+    reset, and both git environments set GIT_OPTIONAL_LOCKS=0; the one disclosed metadata residual
+    is the split-index shared-index mtime refresh a read can cause. `approved_rewrite` and
+    `reviewed_existing` are the reviewed-rewrite approval forwarded to plan_homes_gitignore: the
+    exact previewed replacement bytes and the exact file bytes they were previewed from, applied
+    only on that explicit approval and only while the current file still byte-matches the reviewed
+    bytes, never silently."""
     git = _opf_observe._git_path()
     if git is None:
         raise WriteGuardError("git is missing from PATH, so the {} gitignore inspection cannot read "
@@ -616,7 +675,8 @@ def inspect_homes_gitignore(store_root, verb, approved_rewrite=None):
     holds += _homes_effective_holds(git, repo, prefix, block_present, verb)
     _homes_indexed_ignore_guard(git, repo, rel_prefix, verb)
     try:
-        planned = _opf_store.plan_homes_gitignore(existing, approved_rewrite=approved_rewrite)
+        planned = _opf_store.plan_homes_gitignore(existing, approved_rewrite=approved_rewrite,
+                                                  reviewed_existing=reviewed_existing)
     except ValueError as exc:
         holds.append(str(exc))
         planned = None
@@ -625,20 +685,23 @@ def inspect_homes_gitignore(store_root, verb, approved_rewrite=None):
 
 def verify_homes_gitignore_effective(store_root, verb):
     """The post-write effectiveness re-check for the callers that install the managed block (H1 and
-    J, after their journaled write): re-runs the read-only tracked-control-path index probe, the
-    .working/.gitignore index-flag check, and the staging/journals effectiveness probe, and returns
-    the list of named findings (empty when the installed block is effective and no control path is
-    tracked). Raises WriteGuardError on the same cannot-evaluate states as inspect_homes_gitignore.
-    Read-only; the index is never mutated."""
+    J, after their journaled write): re-runs the inspector's contained read of .working/.gitignore
+    (homes-gitignore-unreadable), the read-only tracked-control-path index probe, the
+    .working/.gitignore index-flag check, the effectiveness probes, and the partial-clone
+    indexed-ignore guard, and returns the list of named findings (empty when the installed block is
+    effective and no control path is tracked). Raises WriteGuardError on the same cannot-evaluate
+    states as inspect_homes_gitignore. Read-only; the index is never mutated."""
     git = _opf_observe._git_path()
     if git is None:
         raise WriteGuardError("git is missing from PATH, so the {} gitignore verification cannot "
                               "read effective ignore rules or the index; cannot-evaluate "
                               "(fail-closed)".format(verb))
-    repo, _rel_prefix, prefix = _homes_repo_prefix(store_root, git, verb)
+    repo, rel_prefix, prefix = _homes_repo_prefix(store_root, git, verb)
+    _homes_read_gitignore(store_root, verb)    # the inspector's unreadable-input refusals
     holds = _homes_index_holds(git, repo, prefix, verb)
     _homes_gitignore_flags(git, repo, prefix, verb)
     holds += _homes_effective_holds(git, repo, prefix, True, verb)
+    _homes_indexed_ignore_guard(git, repo, rel_prefix, verb)
     return holds
 
 
