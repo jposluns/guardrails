@@ -13,7 +13,6 @@ intake failure also stops traversal before archive reads. Independently invoked
 archive intake retains its fixed legacy shape and has no manifest contract.
 """
 import contextlib
-import datetime
 import os
 import stat
 from pathlib import Path
@@ -188,10 +187,6 @@ def _manifest_readers(fx, supported_profiles=None):
         "loader": lambda: _error(lambda: wl.load_worklog(fx.res)),
         "views": lambda: _error(lambda: _opf_views.plan_views(fx.fd, M)),
         "plan_views": lambda: _error(lambda: _opf_views.plan_views(fx.fd, M)),
-        "import": lambda: (_opf_import.stage_import(
-            fx.root, [], {"fragments": {}},
-            now=datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc),
-            run_nonce="worklog-boundary").findings or [None])[0],
         "changelog": lambda: (_opf_changelog.evaluate(fx.root).findings or [None])[0],
         "absorb": lambda: (_opf_absorb.evaluate(fx.root).findings or [None])[0],
         "doctor": lambda: _doctor_entry(fx, supported_profiles),
@@ -209,16 +204,15 @@ def _manifest_read_regressions(check):
 
     # Literal diagnostics from 32fcfbc2dba710eab3d03e53ad77fa754461fe50:
     # _opf_store.py:550-563; _opf_changelog.py:469-478 (also absorb);
-    # _opf_views.py:157-195,1582-1583; _opf_import.py:486-497,933-934;
-    # _opf_check.py:469-477,2436-2437. These are manifest diagnostics:
-    # the baseline worklog-only helpers did not themselves read the manifest.
+    # _opf_views.py:157-195,1582-1583; _opf_check.py:469-477,2436-2437.
+    # These are manifest diagnostics: the baseline worklog-only helpers did
+    # not themselves read the manifest.
     expected = {
         "loader": "cannot read m/manifest.toml (fixture unreadable)",
         "changelog": "cannot read m/manifest.toml (fixture unreadable)",
         "absorb": "cannot read m/manifest.toml (fixture unreadable)",
         "views": "cannot read m/manifest.toml (fixture unreadable)",
         "plan_views": "cannot read m/manifest.toml (fixture unreadable)",
-        "import": "cannot read m/manifest.toml (fixture unreadable)",
         "doctor": ["cannot read m/manifest.toml: cannot read m/manifest.toml (fixture unreadable)"],
     }
     for caller, baseline in expected.items():
@@ -259,10 +253,10 @@ def _manifest_read_regressions(check):
 
 
 def _manifest_diagnostics(data, validation):
-    """32fcfbc manifest translations, including U7's earlier layout gate.
+    """32fcfbc manifest translations.
 
     _opf_views.plan_views; _opf_changelog._load_inputs (also absorb);
-    _opf_import._require_inline_layout/stage_import;
+    _opf_import._worklog_ids (helper column only);
     _opf_check._validate_opened_store. Loader uses U1's findings.
     """
     message = "; ".join(validation.findings)
@@ -278,13 +272,6 @@ def _manifest_diagnostics(data, validation):
                    + ["manifest: " + finding for finding in validation.findings]),
         "import": "store manifest is not VALID ({}: {})".format(validation.status, message),
     }
-    base = data.get("opf") if isinstance(data, dict) else None
-    layout = base.get("layout") if isinstance(base, dict) else None
-    if isinstance(data, dict) and layout != "inline":
-        expected["import"] = (
-            "m/manifest.toml: storage layout {!r} is unsupported; U7's inline active-store readers stage only "
-            "an `inline`-layout store (spec 9), so a non-inline layout is fail-closed (never a "
-            "partial inline read that would miss per-record ids or admit a phantom target)".format(layout))
     expected["absorb"] = expected["changelog"]
     expected["plan_views"] = expected["views"]
     return expected
@@ -295,8 +282,8 @@ def _manifest_intake_regressions(check):
 
     Oracle: 32fcfbc2dba710eab3d03e53ad77fa754461fe50, _opf_store.py
     _read_toml_contained/load_manifest/validate_manifest; _opf_views.py
-    _read_raw_and_parsed/plan_views; _opf_import.py _require_inline_layout;
-    _opf_changelog.py _load_inputs; _opf_check.py _validate_opened_store.
+    _read_raw_and_parsed/plan_views; _opf_changelog.py _load_inputs;
+    _opf_check.py _validate_opened_store.
     The old worklog-only helpers did not read a manifest: loader uses the
     store manifest oracle. Non-table parser results are defensive seam tests.
     Views had no single-link or 1-MiB store cap: those cases deliberately keep
@@ -385,16 +372,14 @@ def _manifest_intake_regressions(check):
         cases.append(("generated-" + name, "validation", (data, control), "; ".join(validation.findings)))
 
     for mode, phase, value, message in cases:
-        expected = dict.fromkeys(("loader", "views", "import", "changelog", "absorb"), message)
+        expected = dict.fromkeys(("loader", "views", "changelog", "absorb"), message)
         expected["doctor"] = ["cannot read {}: {}".format(p, message)]
         if mode == "absent":
             expected.update(
                 loader=p + " vanished after discovery",
                 views=p + " vanished after discovery",
-                import_=p + ": the store manifest is absent; the storage layout cannot be determined (spec 9)",
                 changelog="manifest.toml is absent from the resolved store (a required input; fail-closed, spec 9)",
                 doctor=[p + " is absent (the store manifest is required; spec 4.5)"])
-            expected["import"] = expected.pop("import_")
             expected["absorb"] = expected["changelog"]
         elif phase == "validation" or mode in (
                 "top-level-type", "opf-absent", "opf-not-table", "opf-empty",
@@ -403,6 +388,7 @@ def _manifest_intake_regressions(check):
                     value[0] if phase == "validation" else value)
             control = value[1] if phase == "validation" else None
             expected = _manifest_diagnostics(data, _opf_store.validate_manifest(data, control))
+            del expected["import"]  # Retired public staging (C2); F5 keeps the helper column.
         elif message == exotic:
             expected["views"] = (p + " is present but is not a regular file "
                                  "(a FIFO, device, socket, or directory; fail-closed, never opened)")
@@ -581,7 +567,6 @@ def _entry_point_census(check):
     # archive loader: it has no manifest contract and retains F1 archive cases.
     check("F2f-public-entry-census", boundaries == {
         "_opf_absorb.evaluate", "_opf_changelog.evaluate", "_opf_check.validate_store",
-        "_opf_import.stage_import", "_opf_import.apply_import", "_opf_ingest_apply.apply_ingest",
         "_opf_views.plan_views", "_opf_worklog.load_worklog", "_opf_worklog.load_worklog_at",
         "_opf_worklog.load_archive_worklog_at"})
 
@@ -594,23 +579,15 @@ def _entry_point_regressions(check):
     These are deterministic intake failures, not concurrent filesystem race tests.
     """
     import _opf_emit
-    import _opf_ingest_apply
     from _opf_manifest_regressions import manifest_cases
 
     p = M + "/manifest.toml"
-    now = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
-    run_id = "imp-20260101T000000Z-0000000000000000"
     for name, data, validation, control in manifest_cases(check):
         with _Fixture() as fx:
             readers = _manifest_readers(fx, control)
-            # Apply has its own public preflight before it can acquire a lease.
             readers.update({key: (lambda run=run: run()[1])
                             for key, run in _outer_readers(fx).items()})
             readers.update(
-                import_apply_preflight=lambda: (_opf_import.apply_import(
-                    fx.root, run_id, now=now).findings or [None])[0],
-                ingest_apply_preflight=lambda: (_opf_ingest_apply.apply_ingest(
-                    fx.root, run_id, now=now).findings or [None])[0],
                 loader_at=lambda: _error(lambda: wl.load_worklog_at(fx.fd, M)),
                 doctor_public=lambda: _doctor_public(fx, control))
             if control is not None:
@@ -787,19 +764,13 @@ def _outer_readers(fx):
             rc = _opf_views.render([mode, "--root", str(fx.root)])
         return rc, output.getvalue()
 
-    def plan():
-        result = _opf_import.plan_import(
-            fx.root, [], now=datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc),
-            run_nonce="worklog-boundary")
-        return result.verdict, "\n".join(result.findings)
-
     return {"render_check": lambda: render("--check"),
-            "render_write": lambda: render("--write"), "plan_import": plan}
+            "render_write": lambda: render("--write")}
 
 
 def _outer_entry_regressions(check):
     """Outer public wrappers have distinct initial intake and later loader paths."""
-    for caller in ("render_check", "render_write", "plan_import"):
+    for caller in ("render_check", "render_write"):
         for mode in ("reachable", "invalid", "generation", "parse", "unreadable"):
             with _Fixture() as fx:
                 _manifest_readers(fx)
@@ -859,101 +830,6 @@ def _late_fault_text(mode):
             "generation": "[opf].worklog = 2 is not supported",
             "parse": "cannot parse m/manifest.toml",
             "unreadable": "fixture late intake denied"}[mode]
-
-
-@contextlib.contextmanager
-def _apply_ready(fx, caller, run_id):
-    """Intake-only fixtures, not staged-run, lock, or publication verification.
-
-    Supply reviewed-run/lock preconditions; keep public apply control flow,
-    manifest validation, counter validation, ID collectors and worklog intake real.
-    The active-read witness refuses before allocation or publication.
-    """
-    import check_opf_import
-    import _opf_emit
-    import _opf_ingest_apply as ingest
-    import _opf_journal
-    import _opf_oplock
-    with contextlib.ExitStack() as stack:
-        def mock(obj, name, **kwargs):
-            return stack.enter_context(patch.object(obj, name, **kwargs))
-
-        if caller == "apply_import":
-            run_rel = _opf_import.IMPORTS_REL + "/" + run_id
-            fx.files[run_rel + "/candidate/counters.toml"] = fx.files[M + "/counters.toml"]
-            mock(_journal, "ensure_journal_dirs", return_value=None)
-            mock(_journal, "open_journal_root_fd", side_effect=lambda *_: os.dup(fx.fd))
-            mock(_opf_import, "_claim_apply_lock", return_value="claimed")
-            mock(_opf_import, "_recover_open_txns", return_value=None)
-            mock(_journal, "release_lock", return_value=None)
-            mock(_opf_import, "_load_staged_run_for_review", return_value=("plan", "inventory", {}, {}, []))
-            mock(check_opf_import, "check_staged_run", return_value={"fixture-reviewed": (True, "")})
-            mock(_opf_import, "_read_json_acceptance", return_value=dict(
-                run_id=run_id, plan_digest="plan", inventory_digest="inventory", decisions=[]))
-            mock(_opf_import, "_validate_acceptance", return_value=[])
-            mock(_opf_import, "_staged_candidate_types", return_value=[])
-            mock(_opf_import, "_minted_by_namespace", return_value={})
-            # Defensive fence if a future edit bypasses the active-read refusal.
-            mock(_opf_import, "_build_promotion_machine_files",
-                 side_effect=AssertionError("unexpected publication preparation"))
-            yield _opf_import.apply_import
-        else:
-            # This API is intentionally dormant in shipped homes 1. Activate only
-            # this synthetic fixture, as the ingest apply self-tests do.
-            mock(_opf_store, "SUPPORTED_HOMES", new=2)
-            fx.manifest["opf"]["spec_version"] = _opf_store.HOMES2_SPEC_VERSION
-            fx.manifest["opf"]["homes"] = 2
-            fx.files[M + "/manifest.toml"] = _opf_emit.emit_checked(fx.manifest).encode()
-            mock(_opf_oplock, "acquire_operation", return_value=object())
-            mock(_opf_oplock, "release_operation", return_value=None)
-            mock(_opf_journal, "acquire_writer_lock", return_value=None)
-            mock(_opf_journal, "release_writer_lock", return_value=None)
-            mock(_opf_journal, "attempt_states", return_value={})
-            mock(ingest, "_locate_run", return_value="fixture-run")
-            mock(ingest, "_validated_snapshot", return_value=({}, {}))
-            mock(ingest, "_require_acceptance", return_value=b"fixture")
-            mock(ingest, "_execution_plan", return_value=SimpleNamespace())
-            mock(ingest, "_live_sources", return_value={})
-            yield ingest.apply_ingest
-
-
-def _apply_intake_regressions(check):
-    run_id = "imp-20260101T000000Z-0000000000000000"
-    now = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
-    for caller in ("apply_import", "apply_ingest"):
-        for mode in ("reachable", "invalid", "generation", "parse", "unreadable"):
-            with _Fixture() as fx:
-                _manifest_readers(fx)
-                real_load = wl.load_worklog_at
-                armed, reads = False, []
-
-                def intake(*args, **kwargs):
-                    nonlocal armed
-                    armed = True
-                    _install_late_fault(fx, mode)
-                    return real_load(*args, **kwargs)
-
-                def read(fd, rel, **kwargs):
-                    path = fx.path(fd, rel)
-                    if armed:
-                        reads.append(path)
-                    if path == LEGACY:
-                        raise PermissionError("fixture active-read witness")
-                    return fx.read(fd, rel, **kwargs)
-
-                with _apply_ready(fx, caller, run_id) as apply, \
-                        patch.object(wl, "load_worklog_at", side_effect=intake) as entered, \
-                        patch.object(_journal, "_read_contained", side_effect=read):
-                    result = apply(fx.root, run_id, now=now)
-                label = "F2h-{}-{}".format(caller, mode)
-                check(label + "-reached-loader", entered.call_count == 1)
-                check(label + "-refused", result.verdict == _opf_import.CANNOT_EVALUATE
-                      and result.promoted is False
-                      and any(_late_fault_text(mode) in m for m in result.findings))
-                if mode == "reachable":
-                    check(label + "-active-witness", LEGACY in reads)
-                else:
-                    check(label + "-manifest-only", reads == [M + "/manifest.toml"])
 
 
 def _upgrade_preflight_regressions(check, fence):
@@ -1208,7 +1084,6 @@ def self_test():
     _entry_point_regressions(check)
     _doctor_snapshot_regressions(check)
     _outer_entry_regressions(check)
-    _apply_intake_regressions(check)
 
     archive_parse = ("cannot parse m/archive/2026/worklog.toml "
                      "(Expected '=' after a key in a key/value pair (at line 1, column 5))")

@@ -15,7 +15,7 @@ import _opf_init
 import _opf_store
 
 
-MANIFEST_CALLERS = ("loader", "views", "plan_views", "import",
+MANIFEST_CALLERS = ("loader", "views", "plan_views",
                     "changelog", "absorb", "doctor")
 
 
