@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T61)
+  check_opf_record.py --self-test                    the fixture suite (T1-T63)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -236,6 +236,12 @@ Each case runs on its own copy of that template; the root is removed in a finall
   T61 a journal lock acquisition failing after its O_EXCL create refuses saying the created lock may
       be left in place for the next run's reconciliation, never through the cli's cannot-evaluate
       backstop with no mention of it (flip: the refusal without the disclosure)
+  T62 a success-report emission that fails after the single-writer claim's release succeeded is not
+      reported as a lease-release failure: the refusal says the release succeeded and only the
+      report's output failed, the transaction stays COMPLETE and the lease absent, and the next run
+      records normally (flip: the fix-10 head's one except spanning the release and the emission)
+  T63 T29's temporary global config is removed even when its write fails after creating the file,
+      the write running inside the cleanup region (flip: the fix-10 head's write before it)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -1963,6 +1969,28 @@ def stripped_launch_env(env):
     return dict((k, v) for k, v in env.vars.items() if not k.startswith("GIT_"))
 
 
+def t29_write_launch_config(gitconfig, trace):
+    """The one-launch trace2 global config T29 writes into the scrubbed HOME. A module seam: T63
+    injects a write that fails after creating the file."""
+    gitconfig.write_text("[trace2]\n\tenvVars = GIT_CONFIG_NOSYSTEM,GIT_CONFIG_SYSTEM\n"
+                         "\teventTarget = {}\n".format(trace), encoding="utf-8")
+
+
+@contextlib.contextmanager
+def t29_launch_config(gitconfig, trace):
+    """T29's temporary global config, created INSIDE the cleanup region (PR D fix 11): its removal is
+    attempted on every exit of this context, a write that failed after creating the file included
+    (the fix-10 head wrote it before its try/finally, so a failed write left it in the scrubbed HOME
+    for every later fixture git launch). A write that failed before creating the file leaves nothing
+    to remove; a removal failure raises."""
+    try:
+        t29_write_launch_config(gitconfig, trace)
+        yield
+    finally:
+        if gitconfig.exists():
+            gitconfig.unlink()
+
+
 def t29_git_lifecycle(fx):
     """A git launch that strips every GIT_* variable, as the operation capability's rev-parse does, still
     runs with the system-config pins (GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_SYSTEM the null device): the gate
@@ -1978,13 +2006,9 @@ def t29_git_lifecycle(fx):
     trace = Path(root) / "t29-trace2-events.jsonl"
     gitconfig = Path(env.vars["HOME"]) / ".gitconfig"
     assert not gitconfig.exists(), "T29 the scrubbed HOME carries no global git config"
-    gitconfig.write_text("[trace2]\n\tenvVars = GIT_CONFIG_NOSYSTEM,GIT_CONFIG_SYSTEM\n"
-                         "\teventTarget = {}\n".format(trace), encoding="utf-8")
-    try:
+    with t29_launch_config(gitconfig, trace):
         proc = subprocess.run(["git", "-C", str(root), *GIT_NO_MAINTENANCE, "rev-parse", "--git-dir"],
                               capture_output=True, text=True, timeout=120, env=stripped_launch_env(env))
-    finally:
-        gitconfig.unlink()
     assert proc.returncode == 0, ("T29 the stripped launch runs", proc.returncode, proc.stderr[-800:])
     seen = dict()
     for line in trace.read_text(encoding="utf-8").splitlines():
@@ -3713,6 +3737,95 @@ def flip_t61():
     return patch.object(record, "RecordError", Undisclosed)
 
 
+# --- T62, T63: the PR D fix-11 vectors ------------------------------------------------------------------
+
+# Fix 11: a failure is attributed to the step that raised it. The fix-10 head's one except spanned
+# _conclude's claim release AND the success emission, so an output failure after a successful release
+# printed the lease-release-failure text; and T29 wrote its temporary global config before its
+# try/finally, so a write that failed after creating the file left it in the scrubbed HOME.
+T62_RELEASE_FAILED = "but the lease release failed"
+T62_EMIT_FAILED = ("and the lease release succeeded, but emitting the success report failed; the report "
+                   "may be partial or absent, so nothing is offered as recorded here")
+
+
+def t62_output_failure_not_release(fx):
+    """A success-report emission that fails AFTER the single-writer claim's release succeeded is not
+    reported as a lease-release failure (the fix-10 head's one except spanned the release and the
+    emission): the run exits 2 saying the release succeeded and only the report's output failed, the
+    transaction is COMPLETE, the lease is in fact absent, and the next run records normally."""
+    env = fx.env
+    root = fx.case("t62-emit-fails-after-release")
+    pre = read(root, BI_INDEX)
+
+    def failing_emit(report):
+        raise BrokenPipeError(32, "synthetic output failure after the lease release")
+    with patch.object(record, "_emit_success", failing_emit):
+        result = record_cli(env, root, CREATE)
+    refused(result, T62_EMIT_FAILED)
+    err = result[2]
+    assert T62_RELEASE_FAILED not in err, ("T62 the release is not blamed", err[-1200:])
+    assert "synthetic output failure after the lease release" in err, ("T62 the output failure is "
+                                                                       "surfaced", err[-800:])
+    assert not (Path(root) / LEASE).exists(), "T62 the lease is in fact released"
+    assert list(journal_states(root).values()) == ["complete"], "T62 the transaction is COMPLETE"
+    assert read(root, BI_INDEX) != pre, "T62 the publication rewrote the index"
+    fx.commit_all(root, "the T62 change, recorded but unreported")
+    recorded(record_cli(env, root, CREATE))
+
+
+def flip_t62():
+    """One except spanning the release and the emission (the fix-10 head): an output failure after a
+    successful release prints the lease-release-failure text."""
+    def head_conclude(ctx, lease, report):
+        try:
+            record._release_guard(ctx, lease)
+            record._emit_success(report)
+        except BaseException:
+            print(record._release_failure_text(report), file=sys.stderr)
+            raise
+    return patch.object(record, "_conclude", head_conclude)
+
+
+T63_TORN = "synthetic no-space failure after the config file's create"
+
+
+def t63_t29_cleanup_covers_the_write(fx):
+    """T29's temporary global config is removed even when its write fails AFTER creating the file: the
+    write runs inside the cleanup region (t29_launch_config, PR D fix 11). The fix-10 head wrote it
+    before the try/finally, so a torn write left the config in the scrubbed HOME for every later
+    fixture git launch. The torn write's own error still surfaces."""
+    gitconfig = Path(fx.env.vars["HOME"]) / ".gitconfig"
+
+    def torn_write(path, trace):
+        path.write_text("[trace2]\n", encoding="utf-8")
+        raise OSError(28, T63_TORN)
+    failed = None
+    try:
+        with patch.object(sys.modules[__name__], "t29_write_launch_config", torn_write):
+            try:
+                t29_git_lifecycle(fx)
+            except OSError as exc:
+                failed = exc
+        assert failed is not None and T63_TORN in str(failed), ("T63 the torn write surfaces", failed)
+        assert not gitconfig.exists(), "T63 the torn config is removed by T29's own cleanup"
+    finally:
+        if gitconfig.exists():
+            gitconfig.unlink()
+
+
+def flip_t63():
+    """Create the config before the cleanup region (the fix-10 head's ordering), so a write that fails
+    after creating the file leaves it."""
+    @contextlib.contextmanager
+    def head_ordering(gitconfig, trace):
+        t29_write_launch_config(gitconfig, trace)
+        try:
+            yield
+        finally:
+            gitconfig.unlink()
+    return patch.object(sys.modules[__name__], "t29_launch_config", head_ordering)
+
+
 # --- the runner ------------------------------------------------------------------------------------------------
 
 TESTS = (
@@ -3789,6 +3902,8 @@ TESTS = (
     ("T59-recovery-lease-failure-scoped", t59_recovery_lease_failure_scoped, flip_t59),
     ("T60-release-failure-scoped", t60_release_failure_scoped, flip_t60),
     ("T61-lock-create-failure-disclosed", t61_lock_create_failure_disclosed, flip_t61),
+    ("T62-output-failure-not-release", t62_output_failure_not_release, flip_t62),
+    ("T63-t29-cleanup-covers-the-write", t63_t29_cleanup_covers_the_write, flip_t63),
 )
 
 

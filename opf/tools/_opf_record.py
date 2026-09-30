@@ -37,7 +37,7 @@ Every subcommand runs ONE shared operation sequence (_run_operation), the `opf u
 record authoring (spec 9.2 is the precedent; spec 8.8 is normative):
   1. resolve the store; reconcile any interrupted `opf record` journal FIRST. Recovery writes the store,
      so it runs only under the single-writer lease (a held lease refuses before any recovery write and is
-     never seized) and only when every operand still holds a state the journal explains (an intervening
+     never seized) and only when every open transaction's operand still holds a state the journal explains (an intervening
      edit is surfaced and refused, never overwritten); a reconciled interruption refuses this run, exit 2,
      so the operator inspects it before anything new is written;
   2. read the manifest; a `create --type` that is not an enabled baseline type, or a `transition` id
@@ -1380,7 +1380,9 @@ def _with_recovery_lease(ctx, pending, recover):
     """Run `recover` holding the single-writer lease, claimed exactly as publication claims it. A present
     lease (a live peer's, or the interrupted run's own leftover) refuses before any recovery write and is
     never seized: releasing a leftover lease stays the operator's explicit reconciliation step. The lease
-    is released on every exit; a release failure after a refusal is surfaced and never displaces it."""
+    release is attempted on every exit; a release failure after a refusal is surfaced, saying the lease
+    may be left, and never displaces the refusal, and one after a clean recovery is the run's own
+    failure."""
     try:
         lease = _opf_write_guard.acquire_lease(ctx.root_fd, ctx.machine_rel, VERB)
     except _opf_write_guard.WriteGuardError as exc:
@@ -1460,9 +1462,11 @@ def _reconcile_journal(ctx):
     and no transaction is open. Otherwise recovery is a STORE WRITE, so it runs only under the
     rules publication runs under: a journal lock held by a possibly-live owner is never seized; the
     single-writer lease is claimed exactly as publication claims it, so a present lease refuses before any
-    recovery write (_with_recovery_lease); and every operand must hold a state its transaction explains
-    (_unexplained_operands), so an intervening edit is surfaced and refused. The store then ends exactly
-    at the prestate or exactly at the poststate, the lease is released, and the run refuses (exit 2)
+    recovery write (_with_recovery_lease); and every OPEN transaction's operands must hold a state that
+    transaction explains (_unexplained_operands), so an intervening edit is surfaced and refused. Each
+    open transaction then ends exactly at its prestate or exactly at its poststate (a terminal
+    transaction's operands are not re-checked: a COMPLETE one's publication was applied when it
+    committed), the lease release is attempted with a failure surfaced, and the run refuses (exit 2)
     naming each outcome: the operator inspects the result before re-running. On a homes-2 store the
     record journal lives in the typed capability home instead: a legacy .aiqt/record/journal found
     there is REFUSED read-only, never recovered in place (the homes migration transports it, spec 4.2),
@@ -1953,12 +1957,14 @@ def _publish(ctx, plan, subcommand, cap=None):
     instead (_publish_homes2); the homes-1 path below is unchanged. Each
     op is a `write` whose poststate is the planned bytes and whose `source-poststate` pins the exact bytes
     and mode the plan was made from: capture refuses (nothing opened) if the file changed since it was
-    read, and apply re-verifies the captured preimage on the opened fd. Crash anywhere leaves the store
-    exactly the prestate or exactly the poststate once recovered (_reconcile_journal on the next run).
+    read, and apply re-verifies the captured preimage on the opened fd. Crash anywhere leaves an OPEN
+    transaction recoverable to exactly its prestate or exactly its poststate (_reconcile_journal on the
+    next run; one already COMPLETE was applied when it committed, its current bytes not re-checked there).
     The INTENT header also carries every operand's planned bytes, so a later recovery can tell a write the
     crash tore (a byte prefix of them) from an intervening edit (_unexplained_operands); a publication
     whose INTENT would pass the journal-read cap is refused by the engine before it opens. Raises
-    RecordError; the journal lock is released on every exit except a failure that may have left the
+    RecordError; the journal lock's release is attempted on every exit (a failed release is surfaced
+    saying the lock may be left, T55) except a failure that may have left the
     transaction open, which keeps it for the next run's reconciliation, and a lock acquisition failing
     after its O_EXCL create, whose refusal says the created lock may be left in place (PR D fix 10)."""
     if ctx.journal_rel != JOURNAL_REL:
@@ -2240,25 +2246,51 @@ def _emit_success(report):
                                                                  shlex.quote(p)))
 
 
-def _release_failure_text(report):
-    """What a failed lease release after the final gate reports: the final gate's recorded outcome, VALID or
-    free of findings carrying only the accepted pending cannot-evaluate of this change, never a VALID the
-    gate did not return."""
+def _gate_outcome_text(report):
+    """The final gate's recorded outcome: VALID, or free of findings carrying only the accepted pending
+    cannot-evaluate of this change, never a VALID the gate did not return."""
     pending = report.get("doctor_pending") or []
-    reached = "doctor-VALID" if not pending else (
+    return "doctor-VALID" if not pending else (
         "a doctor result free of findings, carrying only the accepted pending cannot-evaluate of {} until it is "
         "committed ({} line(s); opf doctor reports CANNOT-EVALUATE until then)".format(report.get("change"),
                                                                                     len(pending)))
+
+
+def _release_failure_text(report):
+    """What a failed lease release after the final gate reports: the final gate's recorded outcome
+    (_gate_outcome_text), and that the release failed."""
     return ("opf record: the store reached {}, but the lease release failed; nothing is offered as recorded. "
             "Confirm no opf run is live (spec 5.7) and reconcile the lease before any further action.".format(
-                reached))
+                _gate_outcome_text(report)))
+
+
+def _emit_failure_text(report):
+    """What a success-report emission that fails AFTER the release succeeded reports (PR D fix 11): the
+    release is not blamed; the publication was applied when its transaction committed, and only this
+    report's output failed, so it may be partial or absent."""
+    return ("opf record: the store reached {}, and the lease release succeeded, but emitting the success "
+            "report failed; the report may be partial or absent, so nothing is offered as recorded here. "
+            "The publication was applied when its transaction committed; inspect the store paths "
+            "(git status) and run opf doctor before relying on it (this verb never runs git add or "
+            "commit).".format(_gate_outcome_text(report)))
 
 
 def _conclude(ctx, lease, report):
     """R5: release the single-writer claim FIRST, then emit the success report, so success is never
-    reported over a still-held or failed-to-release lease."""
-    _release_guard(ctx, lease)
-    _emit_success(report)
+    reported over a still-held or failed-to-release lease. A failure is attributed to the step that
+    raised it (PR D fix 11): the release-failure text is printed only when the release itself failed;
+    an emission failure after a successful release says the release succeeded and only the report's
+    output failed. Either failure is re-raised and governs the exit."""
+    try:
+        _release_guard(ctx, lease)
+    except BaseException:
+        print(_release_failure_text(report), file=sys.stderr)
+        raise
+    try:
+        _emit_success(report)
+    except BaseException:
+        print(_emit_failure_text(report), file=sys.stderr)
+        raise
 
 
 # --- the shared operation sequence --------------------------------------------------------------------
@@ -2369,11 +2401,7 @@ def _run_operation(req):
                 # only homes-1 change); only the homes-2 report names its typed journal home.
                 report["journal_rel"] = ctx.journal_rel
             released = True
-            try:
-                _conclude(ctx, lease, report)
-            except BaseException:
-                print(_release_failure_text(report), file=sys.stderr)
-                raise
+            _conclude(ctx, lease, report)
         finally:
             if not released:
                 pending = sys.exc_info()[1]

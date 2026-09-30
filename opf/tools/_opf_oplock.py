@@ -4490,7 +4490,7 @@ def _t_r3_dead_recover_proceeds(d, env):
     assert cap.recovered == ("lease", "active record"), cap.recovered
     cap = acquire_operation(root, "op", recover=True)   # nothing stale: recover=True clears nothing
     release_operation(cap)
-    assert cap.recovered == (), "a recover=True acquisition that cleared nothing reports nothing"
+    assert cap.recovered == (), "a recover=True acquisition that cleared nothing reports nothing recovered"
 
 
 def _t_x6_removal_reports(d, env):
@@ -4499,13 +4499,16 @@ def _t_x6_removal_reports(d, env):
     stale records in delete order (recovered) and their confirmed-dead holder's recorded operation
     (recovered_operation). A publication failing after the recovery deletes carries all three, so
     a caller never words that refusal as having removed nothing; an ordinary acquisition, and a
-    contended one that fails before any removal, report nothing removed."""
+    contended one that fails before any removal, report no stale-record, recorded-operation or
+    staging-leftover removal (PR D fix 11: created_removed still names an ordinary acquisition's
+    retirement of its own two publication staging names, T-x7, and is empty on the contended
+    refusal, which fails before any publication)."""
     root = _st_git_store(d, "repo", env)
     cap = acquire_operation(root, "op")
     release_operation(cap)
     assert (cap.recovered, getattr(cap, "recovered_operation", 0),
             getattr(cap, "staging_removed", None)) == ((), None, ()), \
-        "an ordinary acquisition reports nothing removed"
+        "an ordinary acquisition reports no stale-record, recorded-operation or staging-leftover removal"
     machine = os.path.dirname(_st_lease_path(root))
     active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
     node = os.uname().nodename
@@ -4552,8 +4555,9 @@ def _t_x6_removal_reports(d, env):
         release_operation(live)
     assert contended is not None, "a held anchor refuses the second acquisition"
     assert (getattr(contended, "recovered", None), getattr(contended, "recovered_operation", 0),
-            getattr(contended, "staging_removed", None)) == ((), None, ()), \
-        "a contended acquisition reports nothing removed"
+            getattr(contended, "staging_removed", None),
+            getattr(contended, "created_removed", None)) == ((), None, (), ()), \
+        "a contended acquisition reports no removal at all"
 
 
 def _t_x7_every_unlink_reported(d, env):
