@@ -2301,6 +2301,13 @@ def _gitignore_reconciliation_self_test(check):
         lambda: store.preview_homes_gitignore_rewrite((blk + blk).encode("utf-8"))))
     check("gi-rewrite-exact-noop", lambda: value_refuses(
         lambda: store.preview_homes_gitignore_rewrite(block)))
+    # A supplied approval binds to its reviewed prestate before ANY branch: a file now absent,
+    # marker-free or already exact is not the reviewed one, so the stale approval refuses rather than
+    # being dropped for a create, append or no-op plan.
+    for label, current in (("absent", None), ("markerless", b"# concurrent\n"), ("exact", block)):
+        check("gi-rewrite-stale-" + label, lambda c=current: drift_refuses(
+            lambda: store.plan_homes_gitignore(c, approved_rewrite=store.preview_homes_gitignore_rewrite(
+                drifted), reviewed_existing=drifted)))
 
     # An absent git is a named cannot-evaluate FAIL at the inspector...
     with patch.object(observe, "_git_path", lambda: None):
@@ -2383,7 +2390,7 @@ def _gitignore_reconciliation_self_test(check):
 
             with patch.object(observe, "_run_git", spy_run), \
                  patch.object(observe, "_run_git_config_discovery", spy_disc):
-                planned_c, holds_c = guard.inspect_homes_gitignore(root_c, "init")
+                planned_c, holds_c = guard.inspect_homes_gitignore(root_c, "init")[:2]
             check("gi-clean", lambda: planned_c == block and holds_c == [])
             allowed = {"rev-parse", "ls-files", "check-ignore", "config", "cat-file"}
             check("gi-verb-allowlist", lambda: bool(seen) and all(
@@ -2453,7 +2460,7 @@ def _gitignore_reconciliation_self_test(check):
             # homes-gitignore-ineffective (per-path effectiveness, not a whole-probe rc).
             repo12, root12 = fixture("ineffective")
             (root12 / ".working" / ".gitignore").write_bytes(block + b"!/staging/\n")
-            planned12, holds12 = guard.inspect_homes_gitignore(root12, "init")
+            planned12, holds12 = guard.inspect_homes_gitignore(root12, "init")[:2]
             check("gi-ineffective", lambda: planned12 is None and any(
                 h.startswith("homes-gitignore-ineffective") and "staging" in h for h in holds12))
 
@@ -2566,10 +2573,109 @@ def _gitignore_reconciliation_self_test(check):
             (rootr / ".working" / ".gitignore").write_bytes(drift_r)
             preview_r = store.preview_homes_gitignore_rewrite(drift_r)
             check("gi-rewrite-inspect-bound", lambda: guard.inspect_homes_gitignore(
-                rootr, "init", approved_rewrite=preview_r, reviewed_existing=drift_r) == (preview_r, [])
+                rootr, "init", approved_rewrite=preview_r, reviewed_existing=drift_r)
+                == (preview_r, [], drift_r)
                 and any(h.startswith("homes-gitignore-block-drift")
                         for h in guard.inspect_homes_gitignore(
                             rootr, "init", approved_rewrite=preview_r, reviewed_existing=other_r)[1]))
+            # ...and a stale approval holds when the file has since lost its markers, never an append.
+            (rootr / ".working" / ".gitignore").write_bytes(b"# concurrent replacement\n")
+            planned_s, holds_s = guard.inspect_homes_gitignore(
+                rootr, "init", approved_rewrite=preview_r, reviewed_existing=drift_r)[:2]
+            check("gi-rewrite-inspect-stale", lambda: planned_s is None and any(
+                h.startswith("homes-gitignore-block-drift") for h in holds_s))
+
+            # The inspection returns the exact bytes it planned from, so the caller's journal can bind
+            # its prestate to them: a file with and without a final newline plan the same bytes.
+            repoe, roote = fixture("prestate")
+            (roote / ".working" / ".gitignore").write_bytes(b"/local/")
+            check("gi-prestate", lambda: guard.inspect_homes_gitignore(roote, "init") == (
+                b"/local/\n" + block, [], b"/local/"))
+
+            # The allowlist reads the verb after the argument-less global flags only: a leading option
+            # that takes an argument cannot pass its argument off as the verb, and config passes only in
+            # a read form; each refuses before launch.
+            launched = []
+            with patch.object(observe, "_run_git",
+                              lambda *a, **k: launched.append(a) or observe._GitOutcome(True, 0, b"", "")):
+                check("gi-verb-option-arg", lambda: all(guard_refuses(
+                    lambda a=a: guard._homes_run_git(git, root_c, a), "non-allowlisted") for a in (
+                        ["-C", "ls-files", "update-index", "--refresh"], ["-c", "x=y", "ls-files"],
+                        ["config", "core.bare", "true"])) and not launched)
+
+            # An ignore source git cannot read (a symlinked nested .gitignore, which git refuses to
+            # follow whatever the uid) is only a warning, with check-ignore rc 1, the not-ignored
+            # answer: any diagnostic is cannot-evaluate in the inspector and the re-check alike...
+            repos, roots = fixture("source-diagnostic")
+            (roots / ".working" / ".gitignore").write_bytes(block)
+            (roots / ".working" / "imported").mkdir()
+            (roots / "rules").write_text("*\n", encoding="utf-8")
+            os.symlink(os.path.join("..", "..", "rules"), roots / ".working" / "imported" / ".gitignore")
+            check("gi-ignore-source-diagnostic", lambda: all(guard_refuses(
+                lambda f=f: f(roots, "init"), "unable to access") for f in (
+                    guard.inspect_homes_gitignore, guard.verify_homes_gitignore_effective)))
+
+            # ...including a diagnostic on the shared partial-clone probe's config reads.
+            def noisy_disc(g, r, args, **kw):
+                out = real_disc(g, r, args, **kw)
+                if "config" in args:
+                    return observe._GitOutcome(out.completed, out.rc, out.out, "warning: synthetic config\n")
+                return out
+
+            with patch.object(observe, "_run_git_config_discovery", noisy_disc):
+                check("gi-discovery-stderr", lambda: guard_refuses(
+                    lambda: guard.inspect_homes_gitignore(root_c, "init"), "synthetic config"))
+
+            # A partial re-include beneath a home: /<home>/* ignores the probe child, not the home, so
+            # a re-included subdirectory's future content would be unignored. git's own rule report
+            # shows the governing rule is not a home-level exclusion: cannot-evaluate. The same
+            # home-level rule repeated after the block still covers the home.
+            for rel in ("staging", "journals"):
+                repop, rootp = fixture("partial-" + rel)
+                (rootp / ".working" / ".gitignore").write_bytes(
+                    block + "!/{0}/\n/{0}/*\n!/{0}/import/\n".format(rel).encode("utf-8"))
+                (rootp / ".working" / rel / "import").mkdir(parents=True)
+                check("gi-partial-reinclude-" + rel, lambda r=rootp: all(guard_refuses(
+                    lambda f=f: f(r, "init"), "re-include") for f in (
+                        guard.inspect_homes_gitignore, guard.verify_homes_gitignore_effective)))
+            repoq, rootq = fixture("home-rule-repeated")
+            (rootq / ".working" / ".gitignore").write_bytes(block + b"/staging/\n")
+            check("gi-home-rule-repeated",
+                  lambda: guard.inspect_homes_gitignore(rootq, "init")[:2] == (None, []))
+
+            # A glob character in the store prefix: check-ignore matches its probe paths against the
+            # index as glob pathspecs, so a tracked sibling the glob matches would mask the durable and
+            # control-file answers; the glob-mode listing refuses it. The tracked control file itself
+            # is its own (tracked) answer and passes.
+            for label, rel, rule in (("durable", ".working/imported/" + guard._HOMES_PROBE_CHILD,
+                                      "imported/\n"), ("control", ".working/.gitignore", ".gitignore\n")):
+                repog, rootg = fixture("glob-" + label, subdir="s[t]")
+                (rootg / ".working" / ".gitignore").write_bytes(block)
+                sibling = repog / "st" / Path(rel)
+                sibling.parent.mkdir(parents=True)
+                sibling.write_text("x\n", encoding="utf-8")
+                run_git(repog, "--literal-pathspecs", "add", "--", sibling.relative_to(repog).as_posix())
+                run_git(repog, "commit", "-qm", "seed")
+                (repog / ".git" / "info").mkdir(exist_ok=True)
+                (repog / ".git" / "info" / "exclude").write_text(rule, encoding="utf-8")
+                check("gi-glob-prefix-masked-" + label, lambda r=rootg: guard_refuses(
+                    lambda: guard.inspect_homes_gitignore(r, "init"), "would mask"))
+            repok, rootk = tracked_fixture("control-tracked", ".working/.gitignore")
+            (rootk / ".working" / ".gitignore").write_bytes(block)
+            check("gi-control-tracked",
+                  lambda: guard.inspect_homes_gitignore(rootk, "init")[:2] == (None, []))
+
+            # The post-write re-check confirms the block itself: root rules that happen to cover the
+            # homes do not stand in for an absent, adopter-only or drifted .working/.gitignore.
+            for label, content in (("absent", None), ("adopter", b"/local/\n"), ("drifted", drift_r)):
+                repob, rootb = fixture("verify-missing-" + label)
+                (rootb / ".gitignore").write_text("/.working/staging/\n/.working/journals/\n",
+                                                  encoding="utf-8")
+                if content is not None:
+                    (rootb / ".working" / ".gitignore").write_bytes(content)
+                check("gi-verify-block-missing-" + label, lambda r=rootb: any(
+                    h.startswith("homes-gitignore-block-missing")
+                    for h in guard.verify_homes_gitignore_effective(r, "init")))
 
         # I11: a global core.excludesFile that ignores imported/ is durable-evidence-ignored under
         # the adopter's REAL configuration (config discovery), read through a second isolated HOME.

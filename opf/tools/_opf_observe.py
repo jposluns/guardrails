@@ -435,17 +435,18 @@ def _config_discovery_env():
     return env
 
 
-def _run_git_config_discovery(git, store_root, args, timeout=_GIT_TIMEOUT_S):
+def _run_git_config_discovery(git, store_root, args, timeout=_GIT_TIMEOUT_S, input_bytes=None):
     """Like _run_git, but under the config-discovery environment (OPF-D2B), and with core.fsmonitor forced
     off by a command-scope `-c` so an adopter fsmonitor config cannot launch a monitor process during the
     read-only probe (a command-line `-c` overrides file and runtime config for fsmonitor; trace2 is instead
     forced off through the environment in _config_discovery_env, since its early config read ignores `-c`).
     The probe also passes --no-pager, so a pager configured for check-ignore cannot launch a process (defence
-    in depth: the captured, non-TTY stdout already suppresses the pager).
+    in depth: the captured, non-TTY stdout already suppresses the pager). Optional input_bytes is sent on
+    stdin; callers supply bytes, never shell text.
     Returns a _GitOutcome shaped exactly as _run_git's."""
     cmd = [git, "--no-pager", "--no-replace-objects", "-c", "core.fsmonitor=false", "-C", str(store_root)] + list(args)
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        proc = subprocess.run(cmd, input=input_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               env=_config_discovery_env(), timeout=timeout)
     except subprocess.TimeoutExpired:
         return _GitOutcome(False, None, b"", "git timed out after {}s".format(timeout))

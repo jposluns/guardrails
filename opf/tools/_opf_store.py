@@ -426,11 +426,26 @@ def plan_homes_gitignore(existing, approved_rewrite=None, reviewed_existing=None
     byte-matches `reviewed_existing` and a fresh preview still byte-matches the approval, so a file
     changed since review refuses (fail-closed). The prestate binding is what refuses an edit INSIDE
     the drifted block: the replacement discards the whole marker region, so such an edit yields the
-    same preview and only the reviewed bytes can tell it apart.
+    same preview and only the reviewed bytes can tell it apart. A supplied approval is checked
+    BEFORE the create, no-op and append branches: a file now absent, marker-free or already exact is
+    not the reviewed file, so the stale approval refuses rather than being dropped for another plan.
     Installation is not performed here: _opf_write_guard.inspect_homes_gitignore must gate the
     write on effective ignore rules and the index first, and the index is never mutated."""
     if approved_rewrite is not None and not isinstance(approved_rewrite, bytes):
         raise ValueError("homes-gitignore approved rewrite must be the previewed bytes")
+    if approved_rewrite is not None:
+        try:
+            bound = (isinstance(existing, bytes) and reviewed_existing == existing
+                     and approved_rewrite == preview_homes_gitignore_rewrite(existing))
+        except ValueError:
+            bound = False    # no preview exists for the current bytes: not the reviewed drifted file
+        if not bound:
+            raise ValueError(
+                "homes-gitignore-block-drift: the current file does not byte-match the reviewed "
+                "bytes, or the approved rewrite does not byte-match the current preview (the file "
+                "changed since review, or the approval is stale); re-preview, re-review and "
+                "re-approve (fail-closed)")
+        return approved_rewrite
     block = render_homes_gitignore().encode("utf-8")
     if existing is None:
         return block
@@ -446,15 +461,6 @@ def plan_homes_gitignore(existing, approved_rewrite=None, reviewed_existing=None
                 and homes_gitignore_matches(result.decode("utf-8", "surrogateescape"))):
             raise ValueError("homes-gitignore append postcondition failed; refusing to plan")
         return result
-    if approved_rewrite is not None:
-        preview = preview_homes_gitignore_rewrite(existing)
-        if reviewed_existing != existing or approved_rewrite != preview:
-            raise ValueError(
-                "homes-gitignore-block-drift: the current file does not byte-match the reviewed "
-                "bytes, or the approved rewrite does not byte-match the current preview (the file "
-                "changed since review, or the approval is stale); re-preview, re-review and "
-                "re-approve (fail-closed)")
-        return preview
     raise ValueError(
         "homes-gitignore-block-drift: .working/.gitignore carries a marker line without the "
         "exact managed block (a hand-edited, duplicated, unbalanced, reversed or CRLF block). "
