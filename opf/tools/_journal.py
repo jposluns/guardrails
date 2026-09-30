@@ -769,7 +769,9 @@ def read_lock_owner(journal_root):
     JSON MUST be an object, so owner_confirmed_dead / _owner_is_current can call .get without a non-dict
     (a bare list/int/string) reaching them as an uncaught AttributeError. The lock is opened beneath the
     journal-dir handle with O_NOFOLLOW and confirmed a regular file on the opened fd (mirror B1), so a
-    symlinked or non-regular `lock` fails closed rather than redirecting the read off-tree."""
+    symlinked or non-regular `lock` fails closed rather than redirecting the read off-tree. The journal dir
+    itself is opened here by PATH; a caller already holding a contained journal-root descriptor reads
+    through read_lock_owner_at instead, so the journal path is never re-resolved after that open."""
     journal_root = Path(journal_root)
     try:
         jr_fd = os.open(str(journal_root), os.O_RDONLY | os.O_DIRECTORY)
@@ -778,39 +780,48 @@ def read_lock_owner(journal_root):
     except OSError as exc:
         raise JournalError("cannot open journal root ({})".format(exc))
     try:
-        try:
-            # O_NONBLOCK so a FIFO lock (a hostile pre-planted tree) is refused at the fstat gate below
-            # instead of blocking the open forever; a no-op for the regular file this expects.
-            lfd = os.open("lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=jr_fd)
-        except FileNotFoundError:
-            return None
-        except OSError as exc:                            # ELOOP on a symlinked lock, or any read error: fail closed
-            raise JournalError("cannot read journal lock ({})".format(exc))
-        try:
-            _st = os.fstat(lfd)
-            if not stat.S_ISREG(_st.st_mode):
-                raise JournalError("journal lock is not a regular file (fail-closed)")
-            # O_NOFOLLOW refuses a SYMLINK but a HARDLINK is a regular file that passes S_ISREG, so a `lock`
-            # hardlinked to an out-of-tree victim would be READ through the victim's inode. A lock acquire_lock
-            # created is singly-linked (O_CREAT|O_EXCL, exactly one name); a link count above 1 means a second
-            # name references this inode (a planted hardlink), so refuse it fail-closed, class-consistent with
-            # the other journal opens' st_nlink==1 identity guards (frames.log reopen/append/read/truncate,
-            # the product-file prestate checks, and the lock.break arbitration inode). Round-12 F4: this closes
-            # read_lock_owner, the last unguarded acceptor of a hardlinked inode in the journal.
-            if _st.st_nlink != 1:
-                raise JournalError("journal lock has {} hard links; refusing to read (a hardlink to an "
-                                   "out-of-tree victim, never our singly-linked lock)".format(_st.st_nlink))
-            # MINOR-1: the same journal-read cap bounds the lock (a small owner record); an oversize plant
-            # is refused fail-closed rather than slurped (SECA resource-bounds; pre-open-size fast-reject
-            # plus the capped read's incremental post-read re-check).
-            if _st.st_size > _MAX_JOURNAL_READ_BYTES:
-                raise JournalError("journal lock is {} bytes, over the {}-byte journal-read cap "
-                                   "(fail-closed)".format(_st.st_size, _MAX_JOURNAL_READ_BYTES))
-            raw = _read_fd(lfd, cap=_MAX_JOURNAL_READ_BYTES)
-        finally:
-            os.close(lfd)
+        return read_lock_owner_at(jr_fd)
     finally:
         os.close(jr_fd)
+
+
+def read_lock_owner_at(jr_fd):
+    """read_lock_owner bound to an already-open journal-root descriptor (jr_fd, the caller's, never closed
+    here): `lock` is opened beneath jr_fd, never by re-resolving a journal PATH, so a journal path swapped
+    for a symlink after the caller's contained open can neither hide the held lock nor substitute an
+    out-of-tree one. Same contract as read_lock_owner: None when no lock file is present, JournalError on
+    an unreadable, non-regular, multiply-linked, oversize or malformed lock."""
+    try:
+        # O_NONBLOCK so a FIFO lock (a hostile pre-planted tree) is refused at the fstat gate below
+        # instead of blocking the open forever; a no-op for the regular file this expects.
+        lfd = os.open("lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=jr_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:                                # ELOOP on a symlinked lock, or any read error: fail closed
+        raise JournalError("cannot read journal lock ({})".format(exc))
+    try:
+        _st = os.fstat(lfd)
+        if not stat.S_ISREG(_st.st_mode):
+            raise JournalError("journal lock is not a regular file (fail-closed)")
+        # O_NOFOLLOW refuses a SYMLINK but a HARDLINK is a regular file that passes S_ISREG, so a `lock`
+        # hardlinked to an out-of-tree victim would be READ through the victim's inode. A lock acquire_lock
+        # created is singly-linked (O_CREAT|O_EXCL, exactly one name); a link count above 1 means a second
+        # name references this inode (a planted hardlink), so refuse it fail-closed, class-consistent with
+        # the other journal opens' st_nlink==1 identity guards (frames.log reopen/append/read/truncate,
+        # the product-file prestate checks, and the lock.break arbitration inode). Round-12 F4: this closes
+        # read_lock_owner, the last unguarded acceptor of a hardlinked inode in the journal.
+        if _st.st_nlink != 1:
+            raise JournalError("journal lock has {} hard links; refusing to read (a hardlink to an "
+                               "out-of-tree victim, never our singly-linked lock)".format(_st.st_nlink))
+        # MINOR-1: the same journal-read cap bounds the lock (a small owner record); an oversize plant
+        # is refused fail-closed rather than slurped (SECA resource-bounds; pre-open-size fast-reject
+        # plus the capped read's incremental post-read re-check).
+        if _st.st_size > _MAX_JOURNAL_READ_BYTES:
+            raise JournalError("journal lock is {} bytes, over the {}-byte journal-read cap "
+                               "(fail-closed)".format(_st.st_size, _MAX_JOURNAL_READ_BYTES))
+        raw = _read_fd(lfd, cap=_MAX_JOURNAL_READ_BYTES)
+    finally:
+        os.close(lfd)
     try:
         owner = json.loads(raw)
     except ValueError as exc:
@@ -924,12 +935,14 @@ def release_lock(journal_root):
     _fsync_path_dir(journal_root)
 
 
-def _journal_txn_dirs(jr_fd, journal_root):
+def _journal_txn_dirs(jr_fd, journal_root, strict=False):
     """The transaction subdirectories of a journal root, sorted (the reconcile order). Skips the lock and
     arbitration files and any stray non-directory entry. A symlinked entry is REFUSED (JournalError), not
     followed or silently skipped, class-consistent with doctor.assert_open_journal and migrate._txn_dirs so
     a symlinked/dangling txn entry cannot slip through the stale-lock reconcile as 'all terminal'
-    (SECI-symlink-resolution; F-R17-C1 sibling).
+    (SECI-symlink-resolution; F-R17-C1 sibling). strict=True (a read-only state report) also REFUSES any
+    wrong-type entry instead of skipping it: only a directory, or a REGULAR `lock` / `lock.break` (the
+    only non-directory names this engine creates in a journal root), is accepted.
 
     F-R18-JTOCTOU: enumerate and classify FD-RELATIVE to the TRUSTED, already-open journal-root descriptor
     (os.scandir(jr_fd), os.lstat(name, dir_fd=jr_fd)), never by re-resolving the journal PATH. A path-based
@@ -955,8 +968,17 @@ def _journal_txn_dirs(jr_fd, journal_root):
         if stat.S_ISLNK(est.st_mode):
             raise JournalError("a symlinked journal entry {!r} is refused, not followed "
                                "(fail-closed)".format(name))
+        if strict and name in ("lock", "lock.break"):
+            if not stat.S_ISREG(est.st_mode):
+                raise JournalError("journal entry {!r} is not a regular file (a wrong-type entry is "
+                                   "refused, never skipped; fail-closed)".format(name))
+            continue
         if stat.S_ISDIR(est.st_mode):
             out.append(Path(journal_root) / name)
+        elif strict:
+            raise JournalError("journal entry {!r} is neither a transaction directory nor a regular lock "
+                               "or arbitration file (a wrong-type entry is refused, never skipped; "
+                               "fail-closed)".format(name))
     return out
 
 

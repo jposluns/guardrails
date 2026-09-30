@@ -603,8 +603,11 @@ def journal_state(root_fd, journal_root):
     the recorded lock owner (None when no lock is held) and the sorted names of the transactions
     `_journal.classify_state` reads as open (INTENT without a terminal frame). A nothing-opened,
     complete, or rolled-back transaction is clean. An absent journal root is (None, []); a symlinked,
-    dangling, non-directory, unreadable, or corrupt journal, or a symlinked entry in it, raises
-    AdoptApplyError (fail-closed, never followed and never read as absent). Nothing is written here."""
+    dangling, non-directory, unreadable, or corrupt journal, or a symlinked or wrong-type entry in it (any
+    entry but a transaction directory or a regular `lock` / `lock.break`), raises AdoptApplyError
+    (fail-closed, never followed, skipped or read as absent). The lock and every entry are read through
+    the ONE contained journal-root descriptor, never by re-resolving `journal_root` (which only names the
+    returned entries). Nothing is written here."""
     try:
         st = _journal._lstat_contained(root_fd, JOURNAL_REL)
     except (_journal.JournalError, OSError) as exc:
@@ -621,8 +624,8 @@ def journal_state(root_fd, journal_root):
                               "fail-closed".format(JOURNAL_REL, exc))
     try:
         try:
-            owner = _journal.read_lock_owner(journal_root)
-            txns = _journal._journal_txn_dirs(jr_fd, journal_root)
+            owner = _journal.read_lock_owner_at(jr_fd)
+            txns = _journal._journal_txn_dirs(jr_fd, journal_root, strict=True)
             opened = sorted(t.name for t in txns if _journal.classify_state(jr_fd, t) == "open")
         except (_journal.JournalError, OSError) as exc:
             raise AdoptApplyError("the adoption journal {} cannot be read ({}); "
