@@ -26,10 +26,12 @@ it (spec 14.1, Fable-synthesized plan):
     the staging run dir is deleted as the terminal journaled step). Fail-closed throughout. `check_opf_import.py`
     is the accompanying gate over a staged run, the scan layer, and the per-run transaction record.
 
-RETIRED (spec 14.1): adoption is the only intake, so the five public entry points above now refuse before
-any write with ORDINARY_IMPORT_RETIRED on every store. Their engines are retained, unreachable from the CLI,
-as `_scan_import`, `_plan_import`, `_review_import`, `_review_import_interactive` and `_apply_import` until
-the import engine is removed; only the self-tests reach them, through `_self_test_engine`.
+RETIRED (spec 14.1): adoption is the only intake, so the five public entry points above, the `stage_import`
+primitive beneath them, and `_opf_ingest.plan_ingest` now refuse before any read or write with
+ORDINARY_IMPORT_RETIRED on every store. Their engines are retained, unreachable from the CLI, as
+`_scan_import`, `_plan_import`, `_review_import`, `_review_import_interactive`, `_apply_import`,
+`_stage_import` and `_opf_ingest._plan_ingest` until the import engine is removed; only the self-tests
+reach them, through `_self_test_engine`.
 
 Offline, stdlib only, fail-closed. This module takes an operator-enumerated set of legacy SOURCE files
 and an untrusted MAPPING PLAN, validates both, mints record ids from the store's counters, and STAGES a
@@ -1087,7 +1089,13 @@ def _tile_spans(rows, source_len, where):
 
 # --- the staging step --------------------------------------------------------------------------------
 
-def stage_import(product_root, import_set, plan, *, now, run_nonce):
+def stage_import(product_root, import_set, plan, **_kwargs):
+    """The retired staging primitive beneath `--plan`: refuses on every store before any read or write
+    (spec 14.1)."""
+    return StageResult(CANNOT_EVALUATE, [ORDINARY_IMPORT_RETIRED])
+
+
+def _stage_import(product_root, import_set, plan, *, now, run_nonce):
     """Validate an enumerated import set against an untrusted mapping plan and, on a full pass, stage the
     byte-canonical candidate under `.working/imports/<run-id>/` (store scope; spec 14.1). Writes only the
     `.working/imports/` staging root (created if absent) and the new run directory beneath it; the active
@@ -2656,7 +2664,7 @@ def _plan_import(product_root, import_set, *, proposals=None, importer_proposals
         # mechanically mapped). Handed to the settled staging classifier, which mints a legacy_fragment
         # quarantine record per fragment and stages the byte-canonical candidate run dir.
         plan = _baseline_plan(scan.sources)
-        result = stage_import(product_root, import_set, plan, now=now, run_nonce=run_nonce)
+        result = _stage_import(product_root, import_set, plan, now=now, run_nonce=run_nonce)
         if result.verdict != CLEAN:
             return PlanResult(result.verdict, result.findings, run_id=result.run_id,
                               run_rel=result.run_rel, migration_incomplete=result.migration_incomplete)
@@ -6426,31 +6434,39 @@ def _self_test_ingest_capture_homes2(root, run, now, check, stamp):
           and acc_path.read_bytes() == b"null\n")
 
 
-_RETIRED_MODES = ("scan_import", "plan_import", "review_import", "review_import_interactive", "apply_import")
+_RETIRED_MODES = ("scan_import", "plan_import", "review_import", "review_import_interactive", "apply_import",
+                  "stage_import")
 _REFUSALS = {name: globals()[name] for name in _RETIRED_MODES}   # the real refusals, bound at import
 
 
 def _self_test_engine(engine=True):
-    """SELF-TEST ONLY: for one `with` block, bind the five retired public names to their retained engines
-    (or, with engine=False, back to the real refusals, so a refusal vector nested in an engine block still
-    faces them), in this module and in the importable `_opf_import` (distinct objects when this file runs
-    as __main__). The engine vectors, here and in the sibling gates, predate the retirement and still
-    exercise the engine through those names; production never enters this."""
+    """SELF-TEST ONLY: for one `with` block, bind the retired public names to their retained engines (or,
+    with engine=False, back to the real refusals, so a refusal vector nested in an engine block still faces
+    them): this module's six in this module and in the importable `_opf_import` (distinct objects when this
+    file runs as __main__), and `_opf_ingest.plan_ingest` in the importable `_opf_ingest` and in __main__
+    when that is the same file. The engine vectors, here and in the sibling gates, predate the retirement
+    and still exercise the engine through those names; production never enters this."""
     import contextlib
     import importlib
     from unittest.mock import patch
+    ingest = importlib.import_module("_opf_ingest")
+    main = sys.modules.get("__main__")
+    mods = [sys.modules[__name__], importlib.import_module("_opf_import"), ingest]
+    if os.path.realpath(getattr(main, "__file__", None) or "") == os.path.realpath(ingest.__file__):
+        mods.append(main)
     stack = contextlib.ExitStack()
-    for mod in {id(m): m for m in (sys.modules[__name__], importlib.import_module("_opf_import"))}.values():
-        for name in _RETIRED_MODES:
+    for mod in {id(m): m for m in mods}.values():
+        for name in mod._RETIRED_MODES:
             stack.enter_context(patch.object(mod, name, getattr(mod, "_" + name) if engine
                                              else mod._REFUSALS[name]))
     return stack
 
 
 def _self_test_ordinary_refused():
-    """Every retired public mode refuses on every store before any write (spec 14.1): over an unresolved
-    root, and over a store holding a run the engine staged and accepted, each returns CANNOT-EVALUATE with
-    ORDINARY_IMPORT_RETIRED and leaves every path and byte unchanged. Returns 0 pass, 1 fail."""
+    """Every retired public mode, and the stage_import primitive beneath them, refuses on every store before
+    any write (spec 14.1): over an unresolved root, and over a store holding a run the engine staged and
+    accepted, each returns CANNOT-EVALUATE with ORDINARY_IMPORT_RETIRED and leaves every path and byte
+    unchanged. Returns 0 pass, 1 fail."""
     import io
     import shutil
     import tempfile
@@ -6486,6 +6502,7 @@ def _self_test_ordinary_refused():
         stdin, stdout = TTY("accept\n\n" * 4), io.StringIO()
         return (("scan", scan_import(root, ["a.txt"])),
                 ("plan", plan_import(root, ["a.txt"], now=now, run_nonce="refused")),
+                ("stage", stage_import(root, ["a.txt"], whole, now=now, run_nonce="refused")),
                 ("review", review_import(root, rid, actor="tester", decisions=decisions, now=now)),
                 ("interactive", review_import_interactive(root, rid, actor="tester", now=now,
                                                           in_stream=stdin, out_stream=stdout)),
@@ -6506,6 +6523,17 @@ def _self_test_ordinary_refused():
                                                encoding="utf-8")
         (base / "store" / "a.txt").write_text("legacy source body\n", encoding="utf-8")
         root = base / "store"
+        whole = dict(fragments=dict([("a.txt", [dict(span=[0, len(b"legacy source body\n")],
+                                                    state="unmapped", origin="baseline")])]))
+        # The library staging intake (codex round 1 staged a run through it) over a copy of the FRESH
+        # store, where its engine stages this whole-file baseline plan: deleting the refusal stages a run
+        # there.
+        shutil.copytree(root, base / "fresh")
+        before = tree(base)
+        with _self_test_engine(engine=False):
+            fresh = stage_import(base / "fresh", ["a.txt"], whole, now=now, run_nonce="refused")
+        check("fresh-stage-refused", refused(fresh))
+        check("fresh-stage-nothing-written", tree(base) == before)
         # Positive control: the retained engine still stages and accepts a run, so the refusals below
         # face a promotion-ready run, not an empty store.
         staged = _plan_import(root, ["a.txt"], now=now, run_nonce="engine")

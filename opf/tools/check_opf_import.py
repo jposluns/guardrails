@@ -176,8 +176,8 @@ internally consistent history; and a reservation is not graded (it proves neithe
 failure). Transported legacy history refuses with the named transported-legacy-evidence finding until
 migration apply ships its receipt contract.
 
-This repository is not an OPFiles adopter (it has no store to import into), so even though the `opf
-import` verb is now wired (OPF-IMPORT-VERB, opf.py `_cmd_import`) there is no staged import run to check
+This repository is not an OPFiles adopter (it has no store to import into), and the ordinary `opf import`
+modes are retired (spec 14.1; opf.py `_cmd_import` refuses them), so there is no staged import run to check
 live: the live leg prints NOT APPLICABLE and exits 0, spec-honest like the doctor/drift legs in
 run_all_checks.sh; the assurance rides the --self-test leg over synthetic staged runs. Offline, stdlib
 only, fail-closed, launched isolated
@@ -6100,7 +6100,7 @@ def main(argv=None):
         if args:
             print("check_opf_import: unexpected argument(s): {}".format(" ".join(args)), file=sys.stderr)
             return EXIT_ERROR
-        # Live leg: the `opf import` verb is now wired (opf.py `_cmd_import`), but this repo is not an
+        # Live leg: the ordinary `opf import` modes are retired (spec 14.1), and this repo is not an
         # OPFiles adopter and has no staged import run to check live. NOT APPLICABLE, exit 0 (the
         # doctor/drift non-adopter posture); the assurance rides the --self-test leg over synthetic runs.
         print("check_opf_import: NOT APPLICABLE (this repository is not an OPFiles adopter, so there is "
