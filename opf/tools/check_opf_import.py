@@ -6275,7 +6275,7 @@ def _self_test_isolated():
                 # copy of this module's source is executed with os.O_PATH absent (compiled in
                 # memory: no bytecode cache, never registered in sys.modules, sys.path restored), and
                 # its _ALIAS_ID_FLAGS must equal its own _ALIAS_ID_FALLBACK_FLAGS. Killed mutation:
-                # `getattr(os, "O_PATH", os.O_RDONLY)` drops the fallback's O_NONBLOCK and reds
+                # a getattr default of plain O_RDONLY drops the fallback's O_NONBLOCK and reds
                 # here; a bare `os.O_PATH` raises at load and reds too.
                 _fresh_flags, _fresh_fallback = None, object()
                 try:
