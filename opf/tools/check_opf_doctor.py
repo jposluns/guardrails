@@ -331,7 +331,10 @@ def _self_test_isolated():
         # a bounded timeout so a hung fixture call fails SAFE to a harness error (exit 2), never hangs.
         cmd = [git, "--no-replace-objects", "-C", str(cwd),
                "-c", "user.email=opf@example.invalid", "-c", "user.name=OPF Self Test",
-               "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"] + list(args)
+               "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main",
+               # F-367: no DETACHED auto-gc/auto-maintenance may outlive a fixture commit and
+               # churn .git while a later read or the teardown rmtree traverses it.
+               "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"] + list(args)
         try:
             proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                   env=_git_env(home), timeout=_GIT_TIMEOUT_S)
@@ -453,7 +456,12 @@ def _self_test_isolated():
 
         def _git_probe(*args):
             try:
-                proc = subprocess.run([git, "--no-replace-objects", "-C", str(root)] + list(args),
+                # F-367: the same pins as _git above, in option position, so even these
+                # read-only probes can never spawn a detached auto-gc/auto-maintenance
+                # child that outlives the digest and churns .git.
+                proc = subprocess.run([git, "--no-replace-objects", "-C", str(root),
+                                       "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
+                                       "-c", "maintenance.auto=false"] + list(args),
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                       env=_git_env(home), timeout=_GIT_TIMEOUT_S)
             except (OSError, subprocess.TimeoutExpired) as exc:

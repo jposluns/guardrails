@@ -116,7 +116,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
-from _git_fixture_env import git_fixture_env, scrub_git_environment  # noqa: E402
+from _git_fixture_env import _MAINTENANCE_PIN_VARS, git_fixture_env, scrub_git_environment  # noqa: E402
 import gen_secret_patterns  # noqa: E402  (same tools dir, for the drift-gate F-129 self-test)
 
 sys.path.insert(0, str(repo_root() / ".aiqt" / "core" / "hooks" / "scripts"))
@@ -364,10 +364,16 @@ def _main_isolated():
     # below is judged ONLY against the GIT_* vars it explicitly sets. Production still reads the real
     # os.environ; this scrub is a test-harness isolation, not a change to the control.
     # The synthetic handler environment must not include harness config pins: the
-    # production guard correctly treats those as repository-view overrides. Fixture
-    # git subprocesses receive git_fixture_env() explicitly, including all three pins.
-    # The entry's PATH lifecycle reasserts system pins after handler-internal scrubs.
-    for key in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM"):
+    # production guard correctly treats those as repository-view overrides. That covers BOTH the
+    # config-file pins AND the F-367 maintenance pins the entry scrub just installed
+    # (GIT_CONFIG_COUNT / GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n): every one is a non-cosmetic
+    # GIT_* environment-config variable, so leaving any of them in the suite process flips every
+    # in-process handler case to the artbr1 ambient-view-override denial. Fixture git
+    # subprocesses receive git_fixture_env() explicitly, including all three pins, and the
+    # entry's PATH lifecycle wrapper reasserts the pins argv-side for every `git` resolved
+    # through PATH, so popping the process-wide copies does not unpin any fixture launch.
+    for key in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+                "GIT_CONFIG_NOSYSTEM") + _MAINTENANCE_PIN_VARS:
         os.environ.pop(key, None)
     # F-106 regression guard: run the whole self-test with NO ambient git identity, so the EN-6 recovery
     # snapshot's `git commit-tree` must supply its OWN fixed identity to succeed. The recovery layer scrubs
