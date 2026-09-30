@@ -3933,6 +3933,8 @@ def _self_test_isolated():
     import shutil
     import signal
     import tempfile
+    import time
+    import types
 
     import _opf_import as imp
     import _opf_emit
@@ -6268,6 +6270,27 @@ def _self_test_isolated():
             if _saved_o_path is not None:
                 del os.O_PATH
             try:
+                # --- PR C fix 5 (O_PATH wiring): the vectors below patch _ALIAS_ID_FLAGS onto the
+                # fallback, so they never exercise the module's own top-level guard. Here a FRESH
+                # copy of this module's source is executed with os.O_PATH absent (compiled in
+                # memory: no bytecode cache, never registered in sys.modules, sys.path restored), and
+                # its _ALIAS_ID_FLAGS must equal its own _ALIAS_ID_FALLBACK_FLAGS. Killed mutation:
+                # `getattr(os, "O_PATH", os.O_RDONLY)` drops the fallback's O_NONBLOCK and reds
+                # here; a bare `os.O_PATH` raises at load and reds too.
+                _fresh_flags, _fresh_fallback = None, object()
+                try:
+                    _fresh = types.ModuleType("_check_opf_import_no_opath_copy")
+                    _fresh.__file__ = gate_module.__file__
+                    with open(gate_module.__file__, "rb") as _fresh_fh:
+                        _fresh_code = compile(_fresh_fh.read(), gate_module.__file__, "exec")
+                    with unittest.mock.patch.object(sys, "path", list(sys.path)):
+                        exec(_fresh_code, _fresh.__dict__)
+                    _fresh_flags = getattr(_fresh, "_ALIAS_ID_FLAGS", None)
+                    _fresh_fallback = getattr(_fresh, "_ALIAS_ID_FALLBACK_FLAGS", _fresh_fallback)
+                except Exception:  # noqa: BLE001 - an unguarded os.O_PATH raises at load: a red
+                    pass
+                expect("homes2-no-opath-alias-flags-wired-to-fallback",
+                       _fresh_flags == _fresh_fallback)
                 with unittest.mock.patch.object(gate_module, "_ALIAS_ID_FLAGS",
                                                 _alias_fallback, create=True):
                     th_no_opath_alias = check_staged_run(th_typed, homes=2)
@@ -6287,16 +6310,52 @@ def _self_test_isolated():
                     def _alias_alarm(signum, frame):
                         raise _AliasOpenBlocked()
 
-                    _saved_alarm = signal.signal(signal.SIGALRM, _alias_alarm)
-                    signal.setitimer(signal.ITIMER_REAL, 30.0, 5.0)
+                    # PR C fix 5: the watchdog borrows SIGALRM through the project's SHARED
+                    # elapsed-aware helpers, exactly as the other opf watchdogs do: snapshot the
+                    # caller's disposition, mask, and ITIMER_REAL + pending state first
+                    # (_opf_store.snapshot_caller_alarm), discard an inherited pending SIGALRM under
+                    # SIG_IGN, unblock and arm INSIDE the try, and restore through
+                    # _opf_store.restore_caller_alarm, so a caller timer is neither cancelled nor
+                    # extended and a pending caller alarm is re-posted, never destroyed. A long
+                    # caller deadline (ignored, never fires) is armed across the watchdog and must
+                    # come back inside the elapsed-aware floor. Killed mutation: the pre-fix
+                    # hand-rolled restore (timer zeroed) leaves ITIMER_REAL disarmed, reads 0.0,
+                    # and reds.
+                    _deadline_prev = signal.getsignal(signal.SIGALRM)
+                    _deadline_snap = _opf_store.snapshot_caller_alarm()
+                    _deadline_armed, _deadline_after, _deadline_elapsed = 3600.0, 0.0, 0.0
                     try:
-                        th_fifo = check_staged_run(th_typed, homes=2)
-                        th_fifo_blocked = False
-                    except _AliasOpenBlocked:
-                        th_fifo, th_fifo_blocked = {}, True
+                        signal.signal(signal.SIGALRM, signal.SIG_IGN)
+                        _deadline_t0 = time.monotonic()
+                        signal.setitimer(signal.ITIMER_REAL, _deadline_armed, 0.0)
+                        _prev_alarm = signal.getsignal(signal.SIGALRM)
+                        _have_mask = hasattr(signal, "pthread_sigmask")
+                        _prev_mask = (signal.pthread_sigmask(signal.SIG_BLOCK, []) if _have_mask
+                                      else None)
+                        _alarm_snap = _opf_store.snapshot_caller_alarm()
+                        try:
+                            signal.signal(signal.SIGALRM, signal.SIG_IGN)
+                            signal.signal(signal.SIGALRM, _alias_alarm)
+                            if _have_mask:
+                                signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
+                            signal.setitimer(signal.ITIMER_REAL, 30.0, 5.0)
+                            try:
+                                th_fifo = check_staged_run(th_typed, homes=2)
+                                th_fifo_blocked = False
+                            except _AliasOpenBlocked:
+                                th_fifo, th_fifo_blocked = {}, True
+                        finally:
+                            signal.setitimer(signal.ITIMER_REAL, 0.0, 0.0)
+                            signal.signal(signal.SIGALRM, _prev_alarm)
+                            if _have_mask:
+                                signal.pthread_sigmask(signal.SIG_SETMASK, _prev_mask)
+                            _opf_store.restore_caller_alarm(*_alarm_snap)
+                        _deadline_after, _ = signal.getitimer(signal.ITIMER_REAL)
+                        _deadline_elapsed = time.monotonic() - _deadline_t0
                     finally:
                         signal.setitimer(signal.ITIMER_REAL, 0.0, 0.0)
-                        signal.signal(signal.SIGALRM, _saved_alarm)
+                        signal.signal(signal.SIGALRM, _deadline_prev)
+                        _opf_store.restore_caller_alarm(*_deadline_snap)
                     os.unlink(str(th_legacy))
             finally:
                 if _saved_o_path is not None:
@@ -6311,6 +6370,8 @@ def _self_test_isolated():
                    == set(th_ambiguous_ids)
                    and all("2 staging locations" in th_fifo[cid][1]
                            for cid in th_ambiguous_ids))
+            expect("homes2-no-opath-fifo-watchdog-keeps-caller-deadline",
+                   _deadline_armed - _deadline_elapsed - 1e-3 <= _deadline_after <= _deadline_armed)
 
         expect("module-self-test", imp.self_test() == 0)
     except OSError as exc:
