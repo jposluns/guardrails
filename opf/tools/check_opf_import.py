@@ -176,8 +176,8 @@ internally consistent history; and a reservation is not graded (it proves neithe
 failure). Transported legacy history refuses with the named transported-legacy-evidence finding until
 migration apply ships its receipt contract.
 
-This repository is not an OPFiles adopter (it has no store to import into), so even though the `opf
-import` verb is now wired (OPF-IMPORT-VERB, opf.py `_cmd_import`) there is no staged import run to check
+This repository is not an OPFiles adopter (it has no store to import into), and the ordinary `opf import`
+modes are retired (spec 14.1; opf.py `_cmd_import` refuses them), so there is no staged import run to check
 live: the live leg prints NOT APPLICABLE and exits 0, spec-honest like the doctor/drift legs in
 run_all_checks.sh; the assurance rides the --self-test leg over synthetic staged runs. Offline, stdlib
 only, fail-closed, launched isolated
@@ -3849,9 +3849,10 @@ def _self_test():
     """Keep caller HOME/XDG out of fixture reads, including in-process production helpers."""
     import tempfile
     from unittest.mock import patch
+    import _opf_import
     with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
         with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
-                        GIT_CONFIG_NOSYSTEM="1"):
+                        GIT_CONFIG_NOSYSTEM="1"), _opf_import._self_test_engine():
             return _self_test_isolated()
 
 
@@ -4019,9 +4020,12 @@ def _self_test_isolated():
                 entry["sha256"] = new_sha
         (run_dir / "report.toml").write_text(_opf_emit.emit(report), encoding="utf-8")
 
-    # Round-6 (test hermeticity): the genuine Group C controls drive a real in-process apply_import, so an
+    # Round-6 (test hermeticity): the in-process genuine Group C controls drive the retained apply engine
+    # (imp.apply_import, which _self_test binds to _apply_import through _opf_import._self_test_engine), so an
     # INHERITED journal crash-injection variable would kill this process mid-run; neutralize it for the whole
-    # self-test and restore it in the finally (mirrors the module suite's R4-C2).
+    # self-test and restore it in the finally (mirrors the module suite's R4-C2). The interrupted-promotion
+    # control runs imp._apply_import in a child process instead, with that variable removed from the child's
+    # environment until the child arms its own.
     import _journal as _journal_env
     _saved_kill_env = os.environ.pop(_journal_env.KILL_ENV, None)
     try:
@@ -4315,8 +4319,12 @@ def _self_test_isolated():
                and "not a regular file" in tc[1])
 
         # Round-6 (GENUINE controls): every Group C state the gate accepts, and the interrupted state it must
-        # refuse, built by the REAL producer: plan_import -> review_import -> apply_import over a doctor-
-        # composable store (the module suite's build_apply_store shape), never a hand-written record/journal.
+        # refuse, built by the REAL producer over a doctor-composable store (the module suite's build_apply_store
+        # shape), never a hand-written record/journal. Each starts from an in-process plan_import -> review_import
+        # (genuine_reviewed; _self_test binds both names to their retained engines). The complete state is then
+        # applied in-process by apply_import, bound the same way to _apply_import; the interrupted state is left
+        # by imp._apply_import killed in a child process, whose fresh import carries no such binding (below); and
+        # the rolled-back state is that interrupted state after the in-process recover (imp._claim_apply_lock).
         # The genuine apply deletes the staging run dir as its terminal journaled op, so the gate (addressed by
         # a run dir) can see a genuine complete record only beside a RESTORED pre-apply copy of that run dir;
         # every Group C artefact (record, journal, archive) is the producer's own.
@@ -4465,9 +4473,10 @@ def _self_test_isolated():
             expect("pr4b-r7-disc-genuine-intent-" + vname,
                    _ts[0] is True and tc[0] is False and "transaction record" in tc[1])
 
-        # A GENUINE interrupted promotion: a real apply_import killed (the journal's own crash-injection point)
-        # right after it CREATED this run's transaction record and before the terminal run-dir deletion, so the
-        # producer's complete record, archive, lock, and open INTENT journal all exist beside the live run dir.
+        # A GENUINE interrupted promotion: the retained apply engine (imp._apply_import, in a child process)
+        # killed at the journal's own crash-injection point right after it CREATED this run's transaction
+        # record and before the terminal run-dir deletion, so the producer's complete record, archive, lock,
+        # and open INTENT journal all exist beside the live run dir.
         # The gate must refuse it (not terminal COMPLETE); after a genuine recover (rolled back) the run is
         # un-applied again and both Group C checks PASS (the genuine rolled-back control).
         c_root, c_run, _c_keep = genuine_reviewed()
@@ -4485,8 +4494,8 @@ def _self_test_isolated():
             "    os.environ[_journal.KILL_ENV] = 'after-apply-{}'.format(index)",
             "    return ops, content",
             "imp._build_publication_ops = arm",
-            "result = imp.apply_import(Path(sys.argv[2]), sys.argv[3],",
-            "                          now=datetime.datetime.fromisoformat(sys.argv[5]))",
+            "result = imp._apply_import(Path(sys.argv[2]), sys.argv[3],",
+            "                           now=datetime.datetime.fromisoformat(sys.argv[5]))",
             "raise SystemExit(result.verdict)",
         ])
         c_env = {k: v for k, v in os.environ.items() if k != _journal.KILL_ENV}
@@ -6099,7 +6108,7 @@ def main(argv=None):
         if args:
             print("check_opf_import: unexpected argument(s): {}".format(" ".join(args)), file=sys.stderr)
             return EXIT_ERROR
-        # Live leg: the `opf import` verb is now wired (opf.py `_cmd_import`), but this repo is not an
+        # Live leg: the ordinary `opf import` modes are retired (spec 14.1), and this repo is not an
         # OPFiles adopter and has no staged import run to check live. NOT APPLICABLE, exit 0 (the
         # doctor/drift non-adopter posture); the assurance rides the --self-test leg over synthetic runs.
         print("check_opf_import: NOT APPLICABLE (this repository is not an OPFiles adopter, so there is "
