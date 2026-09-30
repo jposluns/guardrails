@@ -95,11 +95,18 @@ a hand edit or hand merge that leaves canonical bytes passes it and spec 5.7's i
 a separate requirement; recovery proves each operand's state under the lease, but the journal engine's
 restore then rewrites without re-checking, so an edit landing in that window, or one that leaves an exact
 byte prefix of the journaled preimage or planned bytes (read as a torn write), is not detected. On a
-homes-2 store the recovery trigger reads the operation capability's lease and active record UNHELD, so
-a holder that dies after that read leaves its records for the next run, and a leftover the
-capability's own recovery gate refuses (a lone owner-less lease, a cross-host or not-confirmed-dead
-holder, an active record paired with a sibling worktree's still-present machine store) refuses every
-record run until it is cleared by hand. A
+homes-2 store the recovery trigger reads the operation capability's lease and active record UNHELD;
+the journal home, the plan and what recovery actually cleared are re-derived under the held
+capability, so a holder that releases after that read leaves no outcome and the run continues, but a
+run that acquires the capability after that read and dies leaves its records and any journal work for
+the next run. A leftover the capability's own recovery gate refuses refuses record runs, nothing
+written: an active record paired with a sibling worktree's still-present machine store until a record
+run in the checkout owning that store reclaims it (its holder confirmed dead there); a holder read as
+possibly live until it exits and a later run confirms it dead; and every other refused leftover (a lone
+owner-less lease, a cross-host holder or one with no usable nodename, a malformed owner identity, a
+record or its staging leftover that is not a regular file, a record failing the gate's schema or
+lease-pairing validation, the earlier schema-1 active record included, or one whose recorded machine
+store cannot be confirmed present or absent) until it is cleared by hand. A
 transition changes `status` and `updated_at` only, plus `proposed_from` (written when it lands a
 `/proposed` status, removed when it leaves one) and a pending_decision's resolution bundle (written by
 `open -> decided`, removed by the rejection of `decided/proposed`), so a target state that requires
@@ -1491,12 +1498,24 @@ def _reconcile_capability_journal(ctx):
     lease first) -- triggers the same recovery acquisition (_capability_leftover_present), so a
     CONFIRMED-DEAD holder's records are cleared instead of refusing every later acquisition, while a
     live holder refuses it and is never seized. The reads below only decide whether recovery is
-    needed at all; they are never acted on. RESIDUAL: those trigger reads are unheld, so a holder
-    that dies after them leaves its records for the next run's trigger (this run's own acquisition
-    refuses them as stale); a leftover the substrate's recovery gate refuses (a lone owner-less
-    lease, a cross-host or not-confirmed-dead holder, an active record paired with a sibling
-    worktree's machine store that still exists) refuses this run and needs manual intervention; and
-    the homes-1 path (retired) keeps its own lease rules unchanged."""
+    needed at all; they are never acted on. RESIDUAL: those trigger reads are unheld. What recovery
+    acts on and reports is re-derived under the held capability -- the journal home REOPENED, the
+    plan re-read, and what the acquisition actually cleared taken from the capability itself
+    (OpCapability.recovered) -- so an outcome names only what this run's held acquisition cleared and
+    its held plan found: a holder that released in that window, with no journal work pending, yields
+    no outcome and this run continues, and a journal directory replaced in that window is planned
+    from its current binding. A run that acquires the capability after those reads and dies leaves
+    its records and any journal work for the next run's trigger (this run neither reclaims nor
+    reconciles them). A leftover the substrate's recovery gate refuses refuses this run with nothing
+    written, and keeps refusing record runs until: for an active record paired with a sibling
+    worktree's still-present machine store, a record run in the checkout owning that store reclaims
+    it (its holder confirmed dead there); for a holder read as possibly live, the holder exits and a
+    later run confirms it dead; every other refused leftover (a lone owner-less lease, a cross-host
+    holder or one with no usable nodename, a malformed owner identity, a record or its staging
+    leftover that is not a regular file, a record failing the gate's schema or lease-pairing
+    validation, the earlier schema-1 active record included, or one whose recorded machine store
+    cannot be confirmed present or absent) needs manual intervention. The homes-1 path (retired)
+    keeps its own lease rules unchanged."""
     root_fd = ctx.root_fd
     rel = ctx.journal_rel
     leftover = _capability_leftover_present(ctx)
@@ -1504,11 +1523,8 @@ def _reconcile_capability_journal(ctx):
         st = _journal._lstat_contained(root_fd, rel)
     except (_journal.JournalError, OSError) as exc:
         raise RecordError("cannot inspect the record journal {} ({}); fail-closed".format(rel, exc))
-    if st is None:
-        if not leftover:
-            return
-        outcomes = _recover_capability_journal(ctx, None, [], [])
-    else:
+    opened, unprojected = [], []
+    if st is not None:
         if not stat.S_ISDIR(st.st_mode):
             raise RecordError("the record journal {} is not a directory; fail-closed".format(rel))
         try:
@@ -1525,11 +1541,11 @@ def _reconcile_capability_journal(ctx):
             opened = sorted(n for n, s in states.items() if s == "open")
             unprojected = sorted(n for n, s in states.items()
                                  if s in ("complete", "rolled-back") and _projection_missing(ctx, n))
-            if not opened and not unprojected and not leftover:
-                return
-            outcomes = _recover_capability_journal(ctx, jr_fd, opened, unprojected)
         finally:
             _journal._close_fd_quietly(jr_fd)
+    if not opened and not unprojected and not leftover:
+        return
+    outcomes = _recover_capability_journal(ctx, opened, unprojected)
     if outcomes is None:
         return
     raise RecordError("an interrupted opf record run was reconciled before this operation: {}. Nothing was "
@@ -1599,36 +1615,40 @@ def _projection_missing(ctx, name):
                           "fail-closed".format(rel, exc))
 
 
-def _capability_recovery_plan(ctx, jr_fd):
-    """(opened, unprojected): what the typed record journal needs reconciled, from a FRESH read -- the
-    open transactions, and the terminal ones missing their terminal projection -- with the clean-state
-    rule over the open ones checked on the SAME observation: every open transaction's operands must
-    hold a state its journal explains (_unexplained_operands over the staged header, D-a4), else the
-    plan refuses naming each path, so an intervening edit is surfaced and refused, never overwritten.
+def _capability_recovery_plan(ctx):
+    """(opened, unprojected): what the typed record journal needs reconciled, from a FRESH read --
+    the journal home is ALWAYS re-inspected and REOPENED here, never read through a descriptor or an
+    absence the unheld trigger read left, so a home created, or replaced by another directory, since
+    that read (a peer run that opened a transaction and was killed) is planned from its current
+    binding and reconciled by this run, and the outcome never reports nothing pending over open work.
     Read-only. Meaningful only under the held operation capability: publication runs under the same
-    capability, so a plan derived under it cannot miss a peer's completed publication. No journal
-    root at the trigger read (jr_fd None: the home was absent when a capability leftover triggered
-    recovery) is re-inspected HERE, under the capability, never taken from that unheld absence: a
-    journal a peer run left meanwhile (its home created, a transaction opened, the run killed) is
-    planned and reconciled by this run, so the outcome never reports nothing pending over open work."""
+    capability, so a plan derived under it cannot miss a peer's completed publication."""
     rel = ctx.journal_rel
-    if jr_fd is None:
-        try:
-            st = _journal._lstat_contained(ctx.root_fd, rel)
-        except (_journal.JournalError, OSError) as exc:
-            raise RecordError("cannot inspect the record journal {} ({}); fail-closed".format(rel, exc))
-        if st is None:
-            return [], []
-        if not stat.S_ISDIR(st.st_mode):
-            raise RecordError("the record journal {} is not a directory; fail-closed".format(rel))
-        try:
-            fresh_fd = _journal.open_journal_root_fd(ctx.root_fd, rel)
-        except (_journal.JournalError, OSError) as exc:
-            raise RecordError("cannot open the record journal {} ({}); fail-closed".format(rel, exc))
-        try:
-            return _capability_recovery_plan(ctx, fresh_fd)
-        finally:
-            _journal._close_fd_quietly(fresh_fd)
+    try:
+        st = _journal._lstat_contained(ctx.root_fd, rel)
+    except (_journal.JournalError, OSError) as exc:
+        raise RecordError("cannot inspect the record journal {} ({}); fail-closed".format(rel, exc))
+    if st is None:
+        return [], []
+    if not stat.S_ISDIR(st.st_mode):
+        raise RecordError("the record journal {} is not a directory; fail-closed".format(rel))
+    try:
+        jr_fd = _journal.open_journal_root_fd(ctx.root_fd, rel)
+    except (_journal.JournalError, OSError) as exc:
+        raise RecordError("cannot open the record journal {} ({}); fail-closed".format(rel, exc))
+    try:
+        return _capability_journal_plan(ctx, jr_fd)
+    finally:
+        _journal._close_fd_quietly(jr_fd)
+
+
+def _capability_journal_plan(ctx, jr_fd):
+    """(opened, unprojected) read through the open journal root jr_fd: the open transactions, and the
+    terminal ones missing their terminal projection, with the clean-state rule over the open ones
+    checked on the SAME observation: every open transaction's operands must hold a state its journal
+    explains (_unexplained_operands over the staged header, D-a4), else the plan refuses naming each
+    path, so an intervening edit is surfaced and refused, never overwritten. Read-only."""
+    rel = ctx.journal_rel
     try:
         txns = _journal._journal_txn_dirs(jr_fd, _journal_root(ctx))
         states = {t.name: _journal.classify_state(jr_fd, t) for t in txns}
@@ -1650,33 +1670,37 @@ def _capability_recovery_plan(ctx, jr_fd):
     return opened, unprojected
 
 
-# The outcome line when a capability leftover alone triggered homes-2 recovery.
-_LEFTOVER_CAPABILITY_OUTCOME = (
-    "an operation capability lease or active record was present with no record journal work pending "
-    "(re-read under the held capability: no transaction open, every terminal one carrying its "
-    "projection); recovery took the operation capability, which clears a holder's lease and active "
-    "record only once that holder is confirmed dead, and released it. Any publication a COMPLETE "
-    "transaction made is present in the working tree; whether its render and final doctor ran is not "
-    "recorded by the journal, so run opf doctor before relying on it")
+def _reclaimed_outcome(recovered, pending):
+    """The outcome line for the capability records this run's recovery acquisition cleared, taken
+    from the held capability (OpCapability.recovered), never from the unheld trigger read. With no
+    journal work pending under the held capability it carries the operator's inspection advice."""
+    line = ("recovery cleared the operation capability's {}, left by a holder its recovery gate "
+            "confirmed dead, under the held capability".format(" and ".join(recovered)))
+    if pending:
+        return line
+    return line + (" with no record journal work pending (read under the held capability: no "
+                   "transaction open, every terminal one carrying its projection). Any publication a "
+                   "COMPLETE transaction made is present in the working tree; whether its render and "
+                   "final doctor ran is not recorded by the journal, so run opf doctor before relying "
+                   "on it")
 
 
-def _recover_capability_journal(ctx, jr_fd, opened, unprojected):
+def _recover_capability_journal(ctx, opened, unprojected):
     """Recovery proper for the typed home: the operation capability is acquired FIRST (acquire refuses
     a live holder; recover=True clears only a CONFIRMED-DEAD holder's leftover lease and active
     record, the same possibly-live-never-seized standard the homes-1 stale journal lock is held to),
-    and the recovery plan is then re-derived UNDER the held capability (_capability_recovery_plan), so
-    a peer publication that completed between the trigger read and this acquisition is seen and kept,
-    never rolled back as if it were the interruption's own write. `opened` and `unprojected` are the
-    unheld trigger read, used ONLY to describe the pending work in the acquisition refusal. Returns
-    the outcome lines, or None when (re-read under the capability) nothing needed recovery. Each
-    transaction is recovered through the capability-bound API, which re-validates identity and the
-    record header before any truncate or write, and publishes the terminal projection an interrupted
-    run left missing; an already-terminal transaction reconciles to exactly that projection repair.
-    Empty `opened` and `unprojected` mean a capability leftover alone triggered recovery: the
-    acquisition is then the reconciliation, and its outcome line is returned when the plan under the
-    capability is empty too; work that plan finds (a journal the trigger read saw absent included) is
-    reconciled and reported instead."""
-    leftover_only = not opened and not unprojected
+    and the recovery plan is then re-derived UNDER the held capability (_capability_recovery_plan, which
+    reopens the journal home), so a peer publication that completed between the trigger read and this
+    acquisition is seen and kept, never rolled back as if it were the interruption's own write.
+    `opened` and `unprojected` are the unheld trigger read, used ONLY to describe the pending work in
+    the acquisition refusal. The outcome is worded from the held observation alone: the records the
+    acquisition itself reports clearing (OpCapability.recovered) and the transactions the held plan
+    reconciles. Returns those outcome lines, or None when the acquisition cleared nothing and the plan
+    under the capability found nothing (a holder that released after the trigger read, say), so the
+    run continues. Each transaction is recovered through the capability-bound API, which re-validates
+    identity and the record header before any truncate or write, and publishes the terminal projection
+    an interrupted run left missing; an already-terminal transaction reconciles to exactly that
+    projection repair."""
     if opened:
         need = "an interrupted opf record publication needs reconciliation (open transaction(s) {})".format(
             ", ".join(opened))
@@ -1684,19 +1708,18 @@ def _recover_capability_journal(ctx, jr_fd, opened, unprojected):
         need = ("an interrupted opf record publication needs reconciliation (terminal transaction(s) {} "
                 "missing the terminal projection)".format(", ".join(unprojected)))
     else:
-        need = ("an operation capability lease or active record is present with no record journal work "
-                "pending (a live run's, never seized, or an interrupted run's leftover, cleared only once "
-                "its holder is confirmed dead)")
+        need = ("an operation capability lease or active record was present at the trigger read with no "
+                "record journal work pending (a live run's, never seized, or an interrupted run's leftover, "
+                "cleared only once its holder is confirmed dead)")
     try:
         cap = _opf_oplock.acquire_operation(str(ctx.res.store_root), VERB, recover=True)
     except _opf_oplock.OpLockError as exc:
         raise RecordError("{}, and reconciliation writes the store, so it runs only under the operation "
                           "capability: {} Nothing was written (fail-closed)".format(need, exc))
     try:
-        opened, unprojected = _capability_recovery_plan(ctx, jr_fd)
-        if not opened and not unprojected:
-            return [_LEFTOVER_CAPABILITY_OUTCOME] if leftover_only else None
-        outcomes = []
+        recovered = cap.recovered
+        opened, unprojected = _capability_recovery_plan(ctx)
+        outcomes = [_reclaimed_outcome(recovered, opened or unprojected)] if recovered else []
         for name in opened + [n for n in unprojected if n not in opened]:
             try:
                 result = _opf_journal.recover_transaction(cap, "record", name)
@@ -1720,7 +1743,7 @@ def _recover_capability_journal(ctx, jr_fd, opened, unprojected):
         except _opf_oplock.OpLockError as exc:
             print("opf record: additionally, releasing the operation capability failed ({}); the failure "
                   "above still governs.".format(exc), file=sys.stderr)
-    return outcomes
+    return outcomes or None
 
 
 def _sha256(data):

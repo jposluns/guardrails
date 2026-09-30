@@ -849,13 +849,13 @@ class OpCapability:
                  "_anchor_ident", "_ctl_ident", "_machine_ident", "_active_ident", "_lease_ident",
                  "_active_bytes", "_lease_bytes",
                  "_acquirer_pid", "_acquirer_pid_start", "_released", "_claim", "_claimant",
-                 "init_root", "init_token")
+                 "init_root", "init_token", "recovered")
 
     def __init__(self, op_id, holder, operation, store_root, machine_rel,
                  ctl_fd, machine_fd, anchor_fd, active_fd, lease_fd,
                  anchor_ident, ctl_ident, machine_ident, active_ident, lease_ident,
                  active_bytes, lease_bytes, acquirer_pid, acquirer_pid_start,
-                 init_root=None, init_token=None):
+                 init_root=None, init_token=None, recovered=()):
         self.op_id = op_id
         self.holder = holder
         self.operation = operation
@@ -885,6 +885,10 @@ class OpCapability:
         # under that holder. None on every capability acquire_operation returns.
         self.init_root = init_root
         self.init_token = init_token
+        # The stale records THIS acquisition cleared under its held anchor flock, in delete order
+        # ("lease", then "active record"): set only by a recover=True acquisition whose liveness gate
+        # confirmed the recorded holder dead, and empty on every other capability.
+        self.recovered = recovered
 
 
 # --- small fail-closed primitives ---------------------------------------------------------------
@@ -2397,7 +2401,9 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
     a two-holder state. Recovery also refuses an active record paired with a different machine
     store that still exists (a sibling git worktree's; D4), and deletes the lease before the active
     record, so an interrupted recovery leaves only a lone active record that a later recovery can
-    clear. Returns an OpCapability; raises OpLockError fail-closed on everything else. An
+    clear. Returns an OpCapability whose `recovered` names the stale records this acquisition
+    cleared, in delete order (empty when it cleared none); raises OpLockError fail-closed on
+    everything else. An
     interruption (a BaseException that is not an Exception) propagates as itself after the unwind.
     Everything after the argument validation runs with the Python-handled signals deferred (fix
     round 5): a signal arriving meanwhile is delivered only once the acquisition has either failed
@@ -2714,6 +2720,7 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
     active_payload = lease_payload = None
     ctl_fd = machine_fd = None
     cap = None
+    recovered = ()
     try:
         # Fix round 4: no nested try statement follows the first adoption in this body. A try
         # statement's own line lies outside every enclosing exception range, so an interruption
@@ -2797,6 +2804,8 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
             if stale_active:
                 _gated_step(acquirer_pid, "remove the stale active record", _recover_stale, ctl_fd,
                             ACTIVE_NAME, rec_active_ident, rec_active_bytes, "active record")
+            recovered = tuple(label for label, stale in (("lease", stale_lease),
+                                                         ("active record", stale_active)) if stale)
 
         op_id = str(uuid.uuid4())
         _validate_field("op_id", op_id)
@@ -2850,7 +2859,7 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
             machine_ident=(machine_st.st_dev, machine_st.st_ino),
             active_ident=active_ident, lease_ident=lease_ident,
             active_bytes=active_payload, lease_bytes=lease_payload,
-            acquirer_pid=acquirer_pid, acquirer_pid_start=acquirer_start)
+            acquirer_pid=acquirer_pid, acquirer_pid_start=acquirer_start, recovered=recovered)
         owner.transfer_all()               # the capability now owns every retained descriptor
         return cap
     except BaseException as exc:
@@ -4345,6 +4354,7 @@ def _t_r3_dead_recover_proceeds(d, env):
     root = _st_git_store(d, "repo", env)
     cap = acquire_operation(root, "op")
     release_operation(cap)
+    assert cap.recovered == (), "an ordinary acquisition reports nothing recovered"
     dead_pid, dead_start = _st_reaped_child()
     node = os.uname().nodename
     holder = _st_write_active_owned(root, dead_pid, dead_start, node, op_id="dead-op-id")
@@ -4356,6 +4366,10 @@ def _t_r3_dead_recover_proceeds(d, env):
     release_operation(cap)
     assert not os.path.exists(active), "a confirmed-dead active record is cleared"
     assert not os.path.exists(lease), "the paired lease is cleared with it"
+    assert cap.recovered == ("lease", "active record"), cap.recovered
+    cap = acquire_operation(root, "op", recover=True)   # nothing stale: recover=True clears nothing
+    release_operation(cap)
+    assert cap.recovered == (), "a recover=True acquisition that cleared nothing reports nothing"
 
 
 def _t_r3_crosshost_refuses(d, env):
@@ -5462,6 +5476,7 @@ def _t_r2_1_crash_between_recovery_deletes(d, env):
     cap = acquire_operation(root, "op", recover=True)   # the lone active record is recoverable
     release_operation(cap)
     assert not os.path.exists(active) and not os.path.exists(lease)
+    assert cap.recovered == ("active record",), cap.recovered
 
 
 def _t_r2_2_cross_worktree_recovery(d, env):
