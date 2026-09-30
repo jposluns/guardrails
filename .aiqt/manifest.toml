@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "c4514f23d9b0f0d7a1558736504dec91fff2062bf293ed33c3625ffbc64dac08"
+tree-sha256 = "84849a80a7fbc23faaaba1c064a6061ad0adc080c684d53ab9cf81902f7a48bf"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3591,8 +3591,8 @@ sha256 = "13c527d0d7999c696bf34fcf649c804e8856f11c6880c3cfde3bdee630d582fe"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 264784
-sha256 = "305f1a1c2f975f929ea64c201acf35c4bab44bca540a77b97be947084f02a912"
+bytes = 264432
+sha256 = "00991ff8cd355a0f959a3d85f53d85b7e31f49905040a9d1093a8130a147bdfb"
 
 [[sources]]
 path = "tools/selftest_opf_render.py"
