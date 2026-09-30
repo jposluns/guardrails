@@ -7387,7 +7387,12 @@ def _watchdog_completion_case(mode):
         # indentation and a marker's trailing whitespace); and the
         # fix 33 vectors (an entry callback made to raise by its
         # fixture, a caller's preregistered previous callback, a
-        # freed-then-retaken shared-name id).
+        # freed-then-retaken shared-name id); and the fix 34
+        # vectors (a flag-only callback failure and the flag
+        # store's bytecode, every event's preregistered
+        # callback restored around a case, a failing
+        # registration and a failing save, the bound's
+        # live-case uniqueness wording).
         # -- leg 19 bound (two identical copies, fix 30) --
         # derived_overrides IS the authoritative grammar. Every case
         # runs under every fixture state derived_overrides returns
@@ -7401,43 +7406,50 @@ def _watchdog_completion_case(mode):
         # each start of the member's own code object while its
         # driver runs, however the member is reached, observed on a
         # free sys.monitoring tool id taken under a name unique to
-        # the case; once its driver has returned, an id still
-        # carrying that name has its events cleared and is freed,
-        # and the caller's previous PY_START callback, returned
-        # when the check registered its own, is re-registered on
-        # it; an id freed and retaken under another name is left
-        # alone; a run whose observation cannot be held or is not
-        # intact after its driver returns, or whose entry callback
-        # itself raised, fails -- the entry frame's self is the
-        # fixture, whose attribute under the deviation's key, read
-        # once, must hold its value (type-aware) and the key must be
-        # a name the member's compiled code, nested code included,
-        # loads as an attribute; a deviation its driver deliberately
-        # replaces is listed in behavioural_overwrites and must
-        # instead be loaded with no entry holding its value, and any
-        # other deviation failing the check fails the suite. Only
-        # the default state must fire both the pending point and the
-        # injected fault. Under a deviation, a run whose pending
-        # point does not fire is checked at entry only; one whose
-        # pending point fires must still raise that cancellation
-        # outward, keeping the fault in its chain if the fault
-        # fired. NO guarantee for multi-attribute combinations, for
-        # any spelling outside the grammar, for conditions carried
-        # through locals or other data flow, such as a load of the
-        # name from an object other than the fixture, or a member
-        # read after entry that yields a value other than the entry
-        # read's, or for an entry the interpreter does not report
-        # to that tool id as a PY_START of the member's own code
-        # object: one made inside a trace, profile or monitoring
-        # callback, one made while a driver suspends the
-        # observation and restores it, one of a copy of the
-        # member's code object, one made in another process, a
+        # the case among live cases (a completed case's name may
+        # recur); every event's callback on that id is saved before
+        # the case takes it; once its driver has returned, an id
+        # still carrying that name has its events cleared and is
+        # freed, and every saved callback is re-registered on it,
+        # exactly; setup that fails re-registers only the callbacks
+        # it had saved and never frees an id it did not take; an id
+        # freed and retaken under another name is left alone; a run
+        # whose observation cannot be held or is not intact after
+        # its driver returns, or with an exception raised inside its
+        # entry callback, fails -- the callback stores a preallocated
+        # failure flag first, without allocating, and the flag alone
+        # fails the run, though under an interpreter allocation
+        # failure inside the callback anything beyond that flag, the
+        # recorded detail included, may be lost -- the entry frame's
+        # self is the fixture, whose attribute under the deviation's
+        # key, read once, must hold its value (type-aware) and the
+        # key must be a name the member's compiled code, nested code
+        # included, loads as an attribute; a deviation its driver
+        # deliberately replaces is listed in behavioural_overwrites
+        # and must instead be loaded with no entry holding its
+        # value, and any other deviation failing the check fails the
+        # suite. Only the default state must fire both the pending
+        # point and the injected fault. Under a deviation, a run
+        # whose pending point does not fire is checked at entry
+        # only; one whose pending point fires must still raise that
+        # cancellation outward, keeping the fault in its chain if
+        # the fault fired. NO guarantee for multi-attribute
+        # combinations, for any spelling outside the grammar, for
+        # conditions carried through locals or other data flow, such
+        # as a load of the name from an object other than the
+        # fixture, or a member read after entry that yields a value
+        # other than the entry read's, or for an entry the
+        # interpreter does not report to that tool id as a PY_START
+        # of the member's own code object: one made inside a trace,
+        # profile or monitoring callback, one made while a driver
+        # suspends the observation and restores it, one of a copy of
+        # the member's code object, one made in another process, a
         # forked child included, whose interpreter reports it only
         # to that process's own copy of the observation, or a
         # generator or coroutine resumption, which the interpreter
-        # reports as PY_RESUME, not PY_START -- only the first
-        # entry of a generator or coroutine is a start this check
-        # observes.
+        # reports as PY_RESUME or, resumed by throw, PY_THROW (not a
+        # local event), never PY_START -- only the first entry of a
+        # generator or coroutine is a start this check observes.
         # -- end of leg 19 bound --
         lifecycle_sites = set()
         for member_key in scope:
@@ -7494,43 +7506,50 @@ def _watchdog_completion_case(mode):
             # each start of the member's own code object while its
             # driver runs, however the member is reached, observed on a
             # free sys.monitoring tool id taken under a name unique to
-            # the case; once its driver has returned, an id still
-            # carrying that name has its events cleared and is freed,
-            # and the caller's previous PY_START callback, returned
-            # when the check registered its own, is re-registered on
-            # it; an id freed and retaken under another name is left
-            # alone; a run whose observation cannot be held or is not
-            # intact after its driver returns, or whose entry callback
-            # itself raised, fails -- the entry frame's self is the
-            # fixture, whose attribute under the deviation's key, read
-            # once, must hold its value (type-aware) and the key must be
-            # a name the member's compiled code, nested code included,
-            # loads as an attribute; a deviation its driver deliberately
-            # replaces is listed in behavioural_overwrites and must
-            # instead be loaded with no entry holding its value, and any
-            # other deviation failing the check fails the suite. Only
-            # the default state must fire both the pending point and the
-            # injected fault. Under a deviation, a run whose pending
-            # point does not fire is checked at entry only; one whose
-            # pending point fires must still raise that cancellation
-            # outward, keeping the fault in its chain if the fault
-            # fired. NO guarantee for multi-attribute combinations, for
-            # any spelling outside the grammar, for conditions carried
-            # through locals or other data flow, such as a load of the
-            # name from an object other than the fixture, or a member
-            # read after entry that yields a value other than the entry
-            # read's, or for an entry the interpreter does not report
-            # to that tool id as a PY_START of the member's own code
-            # object: one made inside a trace, profile or monitoring
-            # callback, one made while a driver suspends the
-            # observation and restores it, one of a copy of the
-            # member's code object, one made in another process, a
+            # the case among live cases (a completed case's name may
+            # recur); every event's callback on that id is saved before
+            # the case takes it; once its driver has returned, an id
+            # still carrying that name has its events cleared and is
+            # freed, and every saved callback is re-registered on it,
+            # exactly; setup that fails re-registers only the callbacks
+            # it had saved and never frees an id it did not take; an id
+            # freed and retaken under another name is left alone; a run
+            # whose observation cannot be held or is not intact after
+            # its driver returns, or with an exception raised inside its
+            # entry callback, fails -- the callback stores a preallocated
+            # failure flag first, without allocating, and the flag alone
+            # fails the run, though under an interpreter allocation
+            # failure inside the callback anything beyond that flag, the
+            # recorded detail included, may be lost -- the entry frame's
+            # self is the fixture, whose attribute under the deviation's
+            # key, read once, must hold its value (type-aware) and the
+            # key must be a name the member's compiled code, nested code
+            # included, loads as an attribute; a deviation its driver
+            # deliberately replaces is listed in behavioural_overwrites
+            # and must instead be loaded with no entry holding its
+            # value, and any other deviation failing the check fails the
+            # suite. Only the default state must fire both the pending
+            # point and the injected fault. Under a deviation, a run
+            # whose pending point does not fire is checked at entry
+            # only; one whose pending point fires must still raise that
+            # cancellation outward, keeping the fault in its chain if
+            # the fault fired. NO guarantee for multi-attribute
+            # combinations, for any spelling outside the grammar, for
+            # conditions carried through locals or other data flow, such
+            # as a load of the name from an object other than the
+            # fixture, or a member read after entry that yields a value
+            # other than the entry read's, or for an entry the
+            # interpreter does not report to that tool id as a PY_START
+            # of the member's own code object: one made inside a trace,
+            # profile or monitoring callback, one made while a driver
+            # suspends the observation and restores it, one of a copy of
+            # the member's code object, one made in another process, a
             # forked child included, whose interpreter reports it only
             # to that process's own copy of the observation, or a
             # generator or coroutine resumption, which the interpreter
-            # reports as PY_RESUME, not PY_START -- only the first
-            # entry of a generator or coroutine is a start this check
-            # observes.
+            # reports as PY_RESUME or, resumed by throw, PY_THROW (not a
+            # local event), never PY_START -- only the first entry of a
+            # generator or coroutine is a start this check observes.
             # -- end of leg 19 bound --
             if not member_key.startswith("m:"):
                 return [{}]
@@ -8162,7 +8181,7 @@ def _watchdog_completion_case(mode):
             "the member's entries were not all observed: no free "
             "sys.monitoring tool id, the observation was not intact "
             "when the driver returned, or the entry callback itself "
-            "failed (fix 32/33)")
+            "failed (fix 32/33/34)")
         monitoring = sys.monitoring
         entry_event = monitoring.events.PY_START
         entry_tool_name = "opf leg 19 entry check"
@@ -8170,6 +8189,16 @@ def _watchdog_completion_case(mode):
         # an id already in use -- a caller's debugger, coverage,
         # profiler or optimizer included -- is never taken
         entry_tool_ids = (3, 4, 0, 1, 2, 5)
+        # fix 34 (QA55 codex MAJOR): every single-bit event a
+        # callback can be registered for, saved and restored
+        # around a case; NO_EVENTS carries none, and the
+        # deprecated BRANCH alias writes through to BRANCH_LEFT
+        # and BRANCH_RIGHT, so saving it too would corrupt their
+        # restoration
+        callback_events = tuple(sorted(
+            value for name, value in vars(monitoring.events).items()
+            if name != "BRANCH" and isinstance(value, int)
+            and value > 0 and not value & (value - 1)))
 
         def entry_checked_case(label, driver, cancellation, fault,
                                state, overwrites):
@@ -8216,10 +8245,19 @@ def _watchdog_completion_case(mode):
             absent = object()
             entries = []
             observation_failures = []
+            # fix 34 (QA55 codex BLOCKER): the callback's failure
+            # flag -- a one-slot list preallocated here, written
+            # by an item store of a singleton, which allocates
+            # nothing
+            observation_incomplete = [None]
             # fix 33 (QA54 codex MAJOR, claude MINOR 2): the case
-            # OWNS its id under a name unique to this case, so a
-            # freed-then-retaken id -- the shared prefix included --
-            # or a nested case's id is never mistaken for its own
+            # OWNS its id under a name unique to this case for as
+            # long as the case is live -- entries lives until the
+            # case completes, so no two live cases share
+            # id(entries); a completed case's name may recur
+            # (fix 34, QA55 codex MINOR) -- so a freed-then-
+            # retaken id -- the shared prefix included -- or a
+            # nested case's id is never mistaken for its own
             case_tool_name = "%s %d" % (entry_tool_name, id(entries))
 
             def entered(started, offset):
@@ -8238,23 +8276,55 @@ def _watchdog_completion_case(mode):
                         (attr, getattr(fixture, attr, absent))
                         for attr in state))
                 except BaseException as exc:
+                    # fix 34 (QA55 codex BLOCKER): the flag
+                    # FIRST, by a store that allocates nothing,
+                    # so a failure recording the detail below
+                    # cannot lose the record
+                    observation_incomplete[0] = True
                     observation_failures.append(exc)
 
-            tool = None
+            tool, saved_callbacks = None, []
             for candidate in entry_tool_ids:
-                try:
-                    monitoring.use_tool_id(candidate, case_tool_name)
-                except ValueError:
+                if monitoring.get_tool(candidate) is not None:
                     continue
-                tool = candidate
-                break
+                saved, taken = [], False
+                try:
+                    # fix 34 (QA55 codex MAJOR): EVERY event's
+                    # callback on the id -- registration needs no
+                    # claimed id -- is saved before the case
+                    # takes it, to be restored exactly on
+                    # release; free_tool_id clears them all
+                    for event in callback_events:
+                        saved.append((event,
+                                      monitoring.register_callback(
+                                          candidate, event, None)))
+                    try:
+                        monitoring.use_tool_id(candidate,
+                                               case_tool_name)
+                        taken = True
+                    except ValueError:
+                        pass
+                finally:
+                    if not taken:
+                        # fix 34 (QA55 codex MAJOR): setup that
+                        # fails puts back only the callbacks it
+                        # saved and never frees an id it did not
+                        # take
+                        for event, callback in saved:
+                            if callback is not None:
+                                monitoring.register_callback(
+                                    candidate, event, callback)
+                if taken:
+                    tool, saved_callbacks = candidate, saved
+                    break
             if tool is None:
                 raise AssertionError(unobserved_entries, label,
                                      "no free tool id")
-            outcome, intact, previous = None, False, None
+            outcome, intact, registered = None, False, False
             try:
-                previous = monitoring.register_callback(
-                    tool, entry_event, entered)
+                monitoring.register_callback(tool, entry_event,
+                                             entered)
+                registered = True
                 monitoring.set_local_events(tool, member_code,
                                             entry_event)
                 try:
@@ -8271,19 +8341,26 @@ def _watchdog_completion_case(mode):
                 # the shared name included -- is left alone (fix 33)
                 if monitoring.get_tool(tool) == case_tool_name:
                     monitoring.set_local_events(tool, member_code, 0)
-                    released = monitoring.register_callback(
-                        tool, entry_event, None)
+                    released = (monitoring.register_callback(
+                        tool, entry_event, None) if registered
+                        else None)
                     monitoring.free_tool_id(tool)
-                    # fix 33 (QA54 codex MAJOR): free_tool_id clears
-                    # the id's callbacks, so the caller's previous
-                    # PY_START callback -- registration needs no
-                    # claimed id -- is put back afterwards, restoring
-                    # the id exactly as this case found it
-                    if previous is not None:
-                        monitoring.register_callback(
-                            tool, entry_event, previous)
+                    # fix 33/34 (QA54/QA55 codex MAJOR):
+                    # free_tool_id clears the id's callbacks, so
+                    # every callback saved before the case took
+                    # the id is put back afterwards, restoring
+                    # the id exactly as this case found it; a
+                    # registration that failed is not treated as
+                    # a release
+                    for event, callback in saved_callbacks:
+                        if callback is not None:
+                            monitoring.register_callback(
+                                tool, event, callback)
                     intact = intact and released is entered
-            if observation_failures:
+            # fix 34 (QA55 codex BLOCKER): the flag, checked
+            # before any other outcome; the detailed record may
+            # be absent if recording it failed
+            if observation_incomplete[0] is not None:
                 raise AssertionError(unobserved_entries, label,
                                      "the entry callback failed",
                                      observation_failures)
@@ -9086,6 +9163,207 @@ def _watchdog_completion_case(mode):
             for tool in retaken:
                 if monitoring.get_tool(tool) == entry_tool_name:
                     monitoring.free_tool_id(tool)
+        # fix 34 (QA55 codex BLOCKER): the callback stores its
+        # preallocated failure flag FIRST, by a store that
+        # allocates nothing, and the check fails the run on the
+        # flag before any other outcome -- so an allocation
+        # failure while recording the failure detail cannot lose
+        # the record. Pinned two ways: the flag alone, with no
+        # detail recorded and no entry made, must fail the run as
+        # unobserved (a check done after the state checks would
+        # report an ineffective deviation instead), and the
+        # handler's bytecode from its entry to the flag store must
+        # stay inside a fixed non-allocating repertoire, with the
+        # detail record only after the store.
+        captured_callbacks = []
+
+        def flag_setting_driver(cancellation, fault, state):
+            for tool in entry_tool_ids:
+                name = monitoring.get_tool(tool)
+                if (name is not None
+                        and name.startswith(entry_tool_name)):
+                    callback = monitoring.register_callback(
+                        tool, entry_event, None)
+                    monitoring.register_callback(tool, entry_event,
+                                                 callback)
+                    code = callback.__code__
+                    assert ("observation_incomplete"
+                            in code.co_freevars), (
+                        "the entry callback no longer holds the "
+                        "preallocated failure flag (fix 34, QA55)",
+                        code.co_freevars)
+                    flag = callback.__closure__[
+                        code.co_freevars.index(
+                            "observation_incomplete")].cell_contents
+                    flag[0] = True
+                    captured_callbacks.append(callback)
+            assert captured_callbacks, (
+                "the flag vector found no live entry-check tool "
+                "id (fix 34, QA55)")
+
+        with patch.dict(behavioural_drivers,
+                        dict([(held_case, flag_setting_driver)])):
+            entry_red([held_case],
+                      dict([(held_case[0], [dict(armed=True)])]),
+                      behavioural_overwrites, unobserved_entries,
+                      "flag-only callback failure")
+        flag_instructions = list(dis.get_instructions(
+            captured_callbacks[-1].__code__))
+        handler_at = next(
+            at for at, instruction in enumerate(flag_instructions)
+            if instruction.opname == "PUSH_EXC_INFO")
+        flag_at = next(
+            at for at, instruction in enumerate(flag_instructions)
+            if instruction.argval == "observation_incomplete")
+        detail_at = next(
+            at for at, instruction in enumerate(flag_instructions)
+            if instruction.argval == "observation_failures")
+        store_at = next(
+            at for at in range(flag_at, len(flag_instructions))
+            if flag_instructions[at].opname == "STORE_SUBSCR")
+        assert handler_at < flag_at and store_at < detail_at, (
+            "the failure flag is not stored first in the entry "
+            "callback's handler (fix 34, QA55)",
+            handler_at, flag_at, store_at, detail_at)
+        allocation_free = frozenset((
+            "PUSH_EXC_INFO", "CHECK_EXC_MATCH", "POP_JUMP_IF_FALSE",
+            "NOT_TAKEN", "STORE_FAST", "LOAD_FAST",
+            "LOAD_FAST_BORROW", "LOAD_DEREF", "LOAD_CONST",
+            "LOAD_SMALL_INT", "LOAD_GLOBAL", "STORE_SUBSCR", "COPY",
+            "SWAP", "NOP"))
+        handler_ops = [instruction.opname for instruction
+                       in flag_instructions[handler_at:store_at + 1]]
+        assert set(handler_ops) <= allocation_free, (
+            "an operation before the failure flag store may "
+            "allocate (fix 34, QA55)",
+            sorted(set(handler_ops) - allocation_free))
+        # fix 34 (QA55 codex MAJOR): a callback a caller
+        # registered on the id for ANY event -- not only PY_START
+        # -- must be back, exactly, once the case has released the
+        # id; pre-fix free_tool_id wiped every other event's
+        # callback
+        def preregistered_for(event):
+            def callback(*args):
+                pass
+            callback.fix34_event = event
+            return callback
+
+        every_tool = next(tool for tool in entry_tool_ids
+                          if monitoring.get_tool(tool) is None)
+        preregistered_all = [(event, preregistered_for(event))
+                             for event in callback_events]
+        for event, callback in preregistered_all:
+            monitoring.register_callback(every_tool, event,
+                                         callback)
+        try:
+            drive_matrix([held_case],
+                         dict([(held_case[0], [dict(armed=True)])]),
+                         lambda: [RuntimeError(
+                             "injected cleanup fault")])
+        finally:
+            restored_all = [
+                (event, monitoring.register_callback(
+                    every_tool, event, None))
+                for event, callback in preregistered_all]
+        assert restored_all == preregistered_all, (
+            "a caller's previous callback for an event other than "
+            "PY_START was not restored exactly when the case "
+            "released its tool id (fix 34, QA55)", every_tool,
+            [event for (event, callback), (_, restored)
+             in zip(preregistered_all, restored_all)
+             if restored is not callback])
+        # fix 34 (QA55 codex MAJOR): setup that raises restores
+        # exactly what the case had replaced and never frees an id
+        # it did not take. A registration failure after the id was
+        # taken frees the id and puts every saved callback back; a
+        # save failure before the id was taken puts back only the
+        # callbacks already saved and leaves the id untaken.
+        setup_tool = next(tool for tool in entry_tool_ids
+                          if monitoring.get_tool(tool) is None)
+
+        def setup_prior(started, offset):
+            pass
+
+        real_register = monitoring.register_callback
+
+        def entered_rejecting(tool, event, func):
+            if getattr(func, "__name__", None) == "entered":
+                raise RuntimeError(
+                    "injected registration failure (fix 34)")
+            return real_register(tool, event, func)
+
+        monitoring.register_callback(setup_tool, entry_event,
+                                     setup_prior)
+        try:
+            with patch.object(monitoring, "register_callback",
+                              entered_rejecting):
+                try:
+                    drive_matrix(
+                        [held_case],
+                        dict([(held_case[0], [dict(armed=True)])]),
+                        lambda: [RuntimeError(
+                            "injected cleanup fault")])
+                except RuntimeError as exc:
+                    assert ("injected registration failure"
+                            in str(exc)), exc
+                else:
+                    raise AssertionError(
+                        "the injected registration failure did "
+                        "not propagate (fix 34, QA55)")
+        finally:
+            setup_restored = monitoring.register_callback(
+                setup_tool, entry_event, None)
+        assert (setup_restored is setup_prior
+                and monitoring.get_tool(setup_tool) is None), (
+            "a failing registration destroyed the caller's "
+            "previous PY_START callback, or left the id claimed "
+            "(fix 34, QA55)", setup_tool, setup_restored,
+            monitoring.get_tool(setup_tool))
+        raise_event = monitoring.events.RAISE
+        assert (any(event < raise_event for event in callback_events)
+                and any(event > raise_event
+                        for event in callback_events)), callback_events
+
+        def save_rejecting(tool, event, func):
+            if func is None and event == raise_event:
+                raise RuntimeError("injected save failure (fix 34)")
+            return real_register(tool, event, func)
+
+        save_prior = [(event, preregistered_for(event))
+                      for event in callback_events]
+        for event, callback in save_prior:
+            monitoring.register_callback(setup_tool, event,
+                                         callback)
+        try:
+            with patch.object(monitoring, "register_callback",
+                              save_rejecting):
+                try:
+                    drive_matrix(
+                        [held_case],
+                        dict([(held_case[0], [dict(armed=True)])]),
+                        lambda: [RuntimeError(
+                            "injected cleanup fault")])
+                except RuntimeError as exc:
+                    assert "injected save failure" in str(exc), exc
+                else:
+                    raise AssertionError(
+                        "the injected save failure did not "
+                        "propagate (fix 34, QA55)")
+            assert monitoring.get_tool(setup_tool) is None, (
+                "a failing save claimed or freed an id the case "
+                "never took (fix 34, QA55)", setup_tool,
+                monitoring.get_tool(setup_tool))
+        finally:
+            save_after = [
+                (event, monitoring.register_callback(
+                    setup_tool, event, None))
+                for event, callback in save_prior]
+        assert save_after == save_prior, (
+            "a failing save did not put back exactly the "
+            "callbacks it had removed (fix 34, QA55)", setup_tool,
+            [event for (event, callback), (_, after)
+             in zip(save_prior, save_after)
+             if after is not callback])
         mutant_member = copy.deepcopy(
             scope["m:_FixtureProcess._finish_close"])
         capture_assigns = [
@@ -9190,6 +9468,13 @@ def _watchdog_completion_case(mode):
         own_text = Path(__file__).read_bytes()
         assert bound_copy_fault(own_text) is None, (
             bound_copy_fault(own_text), "(fix 30/31)")
+        # fix 34 (QA55 codex MINOR): both copies qualify the case
+        # name's uniqueness to live cases
+        live_needle = b"among live " + b"cases"
+        assert own_text.count(live_needle) == 2, (
+            "the leg 19 bound no longer qualifies the case name's "
+            "uniqueness to live cases in both copies "
+            "(fix 34, QA55)", own_text.count(live_needle))
         mark_end = own_text.index(bound_marks[0]) + len(bound_marks[0])
         cut = own_text.index(b"\n", mark_end + 1)
         blocks_fault = "not exactly two terminated leg 19 bound blocks"
