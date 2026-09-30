@@ -2940,9 +2940,9 @@ def _cli_self_test():
                 expect(["upgrade", "--root", not_adopted], EXIT_OK)
                 expect(["upgrade", "--root", broken], EXIT_MALFORMED)
                 # the upgrade parser accepts only one non-empty --root: the retired --homes-plan, a missing
-                # or empty --root, a repeated --root and an unknown option each exit 2, and afterwards no
-                # file or directory under the fixture root has been created or removed (names only, compared
-                # once after the loop; the current directory an argument-less run would use is not checked)
+                # or empty --root, a repeated --root and an unknown option each exit 2, and the directory and
+                # file names under the fixture root after the loop match those before it (names only, compared
+                # once; the current directory an argument-less run would use is not checked)
                 tree_before = sorted((d, sorted(dn), sorted(fn)) for d, dn, fn in os.walk(base))
                 for bad in (["--homes-plan"], ["--root"], ["--root", ""],
                             ["--root", not_adopted, "--root", not_adopted], ["--unknown"]):
