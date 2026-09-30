@@ -7379,28 +7379,37 @@ def _watchdog_completion_case(mode):
         # and the fix 30 entry vectors (a special attribute, an
         # unlisted and a stale driver overwrite, an unmangled
         # private name) with the QA51 private-name mutation, driven
-        # by its mangled derived state.
+        # by its mangled derived state; and the fix 31 vectors (a
+        # driver clearing its state, planted drifts of the two bound
+        # copies).
         # -- leg 19 bound (two identical copies, fix 30) --
-        # derived_overrides IS the authoritative grammar; no comment
-        # restates it. Every case runs under every fixture state
-        # derived_overrides returns for its member -- the default
-        # state plus single-attribute deviations derived from the
-        # member's own committed AST, a private name keyed as the
-        # compiler mangles it in a method of the member's class; a
-        # site whose key is not an m: method key derives none --
-        # with every pending-cancellation type. At member entry a
-        # deviation's key must be an attribute name the member's
-        # compiled code loads, and the fixture must yield the
-        # deviation's value under it; a deviation its driver
-        # deliberately replaces is listed in behavioural_overwrites
-        # (so it is not driven), and each listed entry is checked
-        # to still be replaced; any other deviation that is not the
-        # value read at entry fails the suite. Only the default
-        # state must fire both the pending point and the injected
-        # fault; a deviation that routes around either leaves that
-        # run vacuous. NO guarantee for multi-attribute
-        # combinations, for conditions carried through locals or
-        # other data flow, or for any spelling outside the grammar.
+        # derived_overrides IS the authoritative grammar. Every case
+        # runs under every fixture state derived_overrides returns
+        # for its member -- the default state plus single-attribute
+        # deviations derived from the member's own committed AST, a
+        # private name keyed as the compiler mangles it in a method
+        # of the member's class; a site whose key is not an m:
+        # method key derives none -- with every pending-cancellation
+        # type; each driver gets its own copy of the state. Under a
+        # deviation the member must be entered, and at each entry
+        # the fixture's attribute under the deviation's key, read
+        # once, must hold its value (type-aware) and the key must be
+        # a name the member's compiled code, nested code included,
+        # loads as an attribute; a deviation its driver deliberately
+        # replaces is listed in behavioural_overwrites and must
+        # instead be loaded with no entry holding its value, and any
+        # other deviation failing the check fails the suite. Only
+        # the default state must fire both the pending point and the
+        # injected fault. Under a deviation, a run whose pending
+        # point does not fire is checked at entry only; one whose
+        # pending point fires must still raise that cancellation
+        # outward, keeping the fault in its chain if the fault
+        # fired. NO guarantee for multi-attribute combinations, for
+        # any spelling outside the grammar, or for conditions
+        # carried through locals or other data flow, such as a load
+        # of the name from an object other than the fixture, or a
+        # member read after entry that yields a value other than
+        # the entry read's.
         # -- end of leg 19 bound --
         lifecycle_sites = set()
         for member_key in scope:
@@ -7445,26 +7454,33 @@ def _watchdog_completion_case(mode):
             # the matrix itself always derives from the member's own
             # committed AST.
             # -- leg 19 bound (two identical copies, fix 30) --
-            # derived_overrides IS the authoritative grammar; no comment
-            # restates it. Every case runs under every fixture state
-            # derived_overrides returns for its member -- the default
-            # state plus single-attribute deviations derived from the
-            # member's own committed AST, a private name keyed as the
-            # compiler mangles it in a method of the member's class; a
-            # site whose key is not an m: method key derives none --
-            # with every pending-cancellation type. At member entry a
-            # deviation's key must be an attribute name the member's
-            # compiled code loads, and the fixture must yield the
-            # deviation's value under it; a deviation its driver
-            # deliberately replaces is listed in behavioural_overwrites
-            # (so it is not driven), and each listed entry is checked
-            # to still be replaced; any other deviation that is not the
-            # value read at entry fails the suite. Only the default
-            # state must fire both the pending point and the injected
-            # fault; a deviation that routes around either leaves that
-            # run vacuous. NO guarantee for multi-attribute
-            # combinations, for conditions carried through locals or
-            # other data flow, or for any spelling outside the grammar.
+            # derived_overrides IS the authoritative grammar. Every case
+            # runs under every fixture state derived_overrides returns
+            # for its member -- the default state plus single-attribute
+            # deviations derived from the member's own committed AST, a
+            # private name keyed as the compiler mangles it in a method
+            # of the member's class; a site whose key is not an m:
+            # method key derives none -- with every pending-cancellation
+            # type; each driver gets its own copy of the state. Under a
+            # deviation the member must be entered, and at each entry
+            # the fixture's attribute under the deviation's key, read
+            # once, must hold its value (type-aware) and the key must be
+            # a name the member's compiled code, nested code included,
+            # loads as an attribute; a deviation its driver deliberately
+            # replaces is listed in behavioural_overwrites and must
+            # instead be loaded with no entry holding its value, and any
+            # other deviation failing the check fails the suite. Only
+            # the default state must fire both the pending point and the
+            # injected fault. Under a deviation, a run whose pending
+            # point does not fire is checked at entry only; one whose
+            # pending point fires must still raise that cancellation
+            # outward, keeping the fault in its chain if the fault
+            # fired. NO guarantee for multi-attribute combinations, for
+            # any spelling outside the grammar, or for conditions
+            # carried through locals or other data flow, such as a load
+            # of the name from an object other than the fixture, or a
+            # member read after entry that yields a value other than
+            # the entry read's.
             # -- end of leg 19 bound --
             if not member_key.startswith("m:"):
                 return [{}]
@@ -7602,7 +7618,8 @@ def _watchdog_completion_case(mode):
             # fire, which keeps the pre-fix-17 strictness.
             outward = None
             try:
-                driver(cancellation, fault, state)
+                # the driver gets its own copy of the state (fix 31)
+                driver(cancellation, fault, dict(state))
             except BaseException as exc:
                 outward = exc
             if cancellation.__traceback__ is not None:
@@ -8063,7 +8080,7 @@ def _watchdog_completion_case(mode):
             sorted(lifecycle_sites
                    ^ set(behavioural_drivers)))
         # fix 30 (QA51 claude/codex MAJOR; orchestrator premise review
-        # 2026-09-30): the matrix ENFORCES the effective state instead
+        # 2026-09-30): the matrix CHECKS each deviation at entry instead
         # of disclosing where a deviation is lost. The deliberate
         # driver overwrites, keyed (case, attribute): each driver
         # replaces its attribute after the state is installed, so a
@@ -8083,7 +8100,8 @@ def _watchdog_completion_case(mode):
               "owner collection finish", 0), "_finish_close"),
         ])
         ineffective_deviation = (
-            "a generated deviation is not the value the member reads "
+            "a generated deviation fails the entry check -- its name "
+            "is not loaded, or the fixture does not hold its value "
             "at entry: derive the name its compiled code loads, or "
             "list a deliberate driver overwrite (fix 30)")
         stale_overwrite = (
@@ -8093,12 +8111,17 @@ def _watchdog_completion_case(mode):
 
         def entry_checked_case(label, driver, cancellation, fault,
                                state, overwrites):
-            # the value the member reads is resolved through its OWN
+            # the entry check, resolved through the member's OWN
             # compiled code: a deviation's key must be an attribute
             # name that code (nested code objects included) loads --
             # so a private name counts only as the compiler mangled
             # it -- and the fixture must yield the deviation's value
             # under that name each time the member is entered
+            # (read once per entry: which object a load reads, and
+            # what a later read yields, lie outside it). fix 31 (QA52
+            # codex BLOCKER): the check keeps its own immutable copy of
+            # the state; behavioural_case gives the driver a separate copy
+            state = types.MappingProxyType(dict(state))
             if not state:
                 behavioural_case(label, driver, cancellation, fault,
                                  state)
@@ -8619,6 +8642,11 @@ def _watchdog_completion_case(mode):
         # behaviourally; the unmangled key -- the state the pre-fix
         # derivation returned, which passed the mutant -- must go red
         # at entry.
+        # fix 31 (QA52): a driver that clears its state and drives a
+        # member cached before the wrapper is patched must go red at
+        # entry (codex BLOCKER); the special attribute is planted on
+        # the QA51 mutant, which also loads self.__class__, so only
+        # the value check can catch it (claude MINOR).
         def entry_red(case_labels, overrides, overwrites, reason,
                       vector):
             try:
@@ -8648,10 +8676,6 @@ def _watchdog_completion_case(mode):
                         "parked launcher release", 0)
         abandon_case = ("m:_FixtureProcess._close_masked",
                         "unfinished-launch abandonment", 0)
-        entry_red([held_case],
-                  dict([(held_case[0], [dict([("__class__", True)])])]),
-                  behavioural_overwrites, ineffective_deviation,
-                  "special-attribute")
         drive_matrix([release_case],
                      dict([(release_case[0], [dict(_go=True)])]),
                      lambda: [RuntimeError("injected cleanup fault")])
@@ -8664,6 +8688,26 @@ def _watchdog_completion_case(mode):
                       _go=types.SimpleNamespace(set=lambda: None))])]),
                   frozenset([(abandon_case, "_go")]), stale_overwrite,
                   "stale-overwrite")
+        cached_finish = vars(emit._FixtureProcess)["_finish_close"]
+
+        def clearing_driver(cancellation, fault, state):
+            planted = dict(state)
+            state.clear()
+
+            def fake_close(fd):
+                if fd == 987006:
+                    raise fault
+
+            with patch.object(os, "close", fake_close):
+                cached_finish(finish_fake(cancellation, planted,
+                                          pidfd=987006))
+
+        with patch.dict(behavioural_drivers,
+                        dict([(held_case, clearing_driver)])):
+            entry_red([held_case],
+                      dict([(held_case[0], [dict(armed=True)])]),
+                      behavioural_overwrites, ineffective_deviation,
+                      "state-clearing driver")
         mutant_member = copy.deepcopy(
             scope["m:_FixtureProcess._finish_close"])
         capture_assigns = [
@@ -8691,7 +8735,9 @@ def _watchdog_completion_case(mode):
             "    if self.__qa51 == 7:\n"
             "        pending = None\n"
             "except AttributeError:\n"
-            "    pass").body
+            "    pass\n"
+            "if self.__class__ is True:\n"
+            "    pending = None").body
         mangled_state = dict(_FixtureProcess__qa51=7)
         mutant_overrides = derived_overrides(
             "m:_FixtureProcess._finish_close", mutant_member)
@@ -8700,6 +8746,8 @@ def _watchdog_completion_case(mode):
                             for override in mutant_overrides)), (
             "the derivation no longer keys a private name as the "
             "compiler mangles it (fix 30, QA51)", mutant_overrides)
+        assert driven_state(dict([("__class__", True)]),
+                            mutant_overrides), mutant_overrides
         mutant_class = ast.parse(
             "class _FixtureProcess:\n    pass").body[0]
         mutant_class.body = [mutant_member]
@@ -8724,26 +8772,54 @@ def _watchdog_completion_case(mode):
                       dict([(held_case[0], [dict([("__qa51", 7)])])]),
                       behavioural_overwrites, ineffective_deviation,
                       "unmangled private-name")
+            entry_red([held_case],
+                      dict([(held_case[0], [dict([("__class__", True)])])]),
+                      behavioural_overwrites, ineffective_deviation,
+                      "special-attribute")
 
         # fix 30: the leg 19 bound is stated twice, at the leg 19 head
         # and at derived_overrides, and the two copies must stay
-        # identical, so neither can drift from the other
-        bound_copies, bound_lines = [], None
-        for line in Path(__file__).read_text(
-                encoding="utf-8").splitlines():
-            text = line.strip()
-            if text == ("# -- leg 19 bound (two identical copies, "
-                        "fix 30) --"):
-                bound_lines = []
-            elif text == "# -- end of leg 19 bound --":
-                bound_copies.append(bound_lines)
-                bound_lines = None
-            elif bound_lines is not None:
-                bound_lines.append(text)
-        assert (len(bound_copies) == 2 and None not in bound_copies
-                and bound_copies[0] == bound_copies[1]), (
-            "the two copies of the leg 19 bound differ (fix 30)",
-            len(bound_copies))
+        # identical, so neither can drift from the other. fix 31
+        # (QA52): the file must hold exactly two terminated blocks,
+        # every block line carrying its start marker's indentation
+        # and the rest byte-identical; planted drifts are pinned red
+        bound_marks = (("# -- leg 19 bound (two identical copies, "
+                        "fix 30) --").encode(),
+                       ("# -- end of leg 19 "
+                        "bound --").encode())
+
+        def bound_copy_fault(data):
+            lines = data.split(b"\n")
+            marks = [(at, line.lstrip(b" "))
+                     for at, line in enumerate(lines)
+                     if any(mark in line for mark in bound_marks)]
+            if [body for at, body in marks] != list(bound_marks) * 2:
+                return "not exactly two terminated leg 19 bound blocks"
+            copies = []
+            for (start, body), (end, _) in zip(marks[::2], marks[1::2]):
+                indent = lines[start][:-len(body)]
+                block = lines[start:end + 1]
+                if not all(line.startswith(indent) for line in block):
+                    return "a leg 19 bound line lost its indentation"
+                copies.append([line[len(indent):] for line in block])
+            if copies[0] != copies[1]:
+                return "the two copies of the leg 19 bound differ"
+            return None
+
+        own_text = Path(__file__).read_bytes()
+        assert bound_copy_fault(own_text) is None, (
+            bound_copy_fault(own_text), "(fix 30/31)")
+        cut = own_text.index(b"\n", own_text.index(bound_marks[0])
+                             + len(bound_marks[0]) + 1)
+        for vector, data in (
+                ("trailing whitespace",
+                 own_text[:cut] + b" " + own_text[cut:]),
+                ("unterminated third marker", own_text + bound_marks[0]),
+                ("third terminated block",
+                 own_text + b"\n".join(bound_marks))):
+            assert bound_copy_fault(data) is not None, (
+                "the planted leg 19 bound drift was NOT caught by the "
+                "copy self-check (fix 31)", vector)
     elif mode == "receipt-high-fd":
         import fcntl
         import resource
