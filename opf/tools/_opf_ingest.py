@@ -4447,12 +4447,26 @@ def self_test_isolated():
         _self_test_planner(check, build_store, build_relocated, snapshot, symlink_supported)
 
         # 13. dispatch-wiring (consciously FLIPPED from the original dispatch-deferral pin at OPF-ADOPT
-        #     K9a, which wires the verb read-only): `opf adopt` is now a KNOWN_VERBS member with a wired
-        #     dispatch (plan/status land; the mutating subcommands still refuse fail-closed, pinned by the
-        #     opf-cli self-test leg), while `detect` stays UNWIRED (its fail-closed dispatch stands).
+        #     K9a, which wires the verb read-only): `opf adopt` is a KNOWN_VERBS member whose dispatch
+        #     REACHES _cmd_adopt (plan/status land; the mutating subcommands still refuse fail-closed,
+        #     pinned by the opf-cli self-test leg), while `detect` stays UNWIRED (its fail-closed dispatch
+        #     stands). Routing is proved, not vocabulary: main() is driven with _cmd_adopt swapped for a
+        #     recorder, so removing the adopt dispatch branch (which falls through to the fail-closed
+        #     KNOWN_VERBS stub) fails this check even with KNOWN_VERBS unchanged.
+        import contextlib
+        import io
         import opf as _opf_cli
+        routed = []
+        real_cmd_adopt = _opf_cli._cmd_adopt
+        _opf_cli._cmd_adopt = lambda rest: routed.append(list(rest)) or _opf_cli.EXIT_OK
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                routed_rc = _opf_cli.main(["adopt", "status", "--root", str(base)])
+        finally:
+            _opf_cli._cmd_adopt = real_cmd_adopt
         check("dispatch-wired-adopt-read-only",
-              "adopt" in _opf_cli.KNOWN_VERBS and "detect" not in _opf_cli.KNOWN_VERBS)
+              "adopt" in _opf_cli.KNOWN_VERBS and "detect" not in _opf_cli.KNOWN_VERBS
+              and routed == [["status", "--root", str(base)]] and routed_rc == _opf_cli.EXIT_OK)
     except OSError as exc:
         print("OPF-INGEST SELF-TEST ERROR: harness error: {}".format(exc), file=sys.stderr)
         shutil.rmtree(str(base), ignore_errors=True)

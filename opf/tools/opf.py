@@ -2806,14 +2806,35 @@ def _adopt_read_inputs(path):
     of tables). This reader validates STRUCTURE only, as a closed keyset; the planner and the schema
     layer own the SEMANTICS (_opf_adopt_plan.plan: the digest grammar and inventory binding, the exact
     _opf_adopt.PLAN_BINDING_INPUTS bindings keyset, per-row decision and op validation, the frozen-plan
-    validation), never duplicated here. Returns the parsed table with the optional keys defaulted."""
+    validation), never duplicated here. The read is BOUNDED, the planner's own read discipline: a
+    no-follow, nonblocking open (a symlinked final component refuses, and a FIFO returns at once rather
+    than blocking), a regular file only, and the planner's per-file byte bound
+    (_opf_adopt_plan.MAX_FILE_BYTES) checked on the opened fd and again by the journal's capped reader, so
+    a FIFO, device, directory, symlink or oversized worksheet refuses. Returns the parsed table with the
+    optional keys defaulted."""
     import tomllib
+    cap = _opf_adopt_plan.MAX_FILE_BYTES
     try:
-        with open(path, "rb") as fh:
-            doc = tomllib.load(fh)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
         raise ValueError("--inputs worksheet not found: {}".format(path))
-    except (OSError, ValueError, RecursionError) as exc:
+    except (OSError, ValueError) as exc:   # ELOOP: a symlinked worksheet is refused, never followed
+        raise ValueError("--inputs worksheet unreadable ({}): {}".format(path, exc))
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError("--inputs worksheet is not a regular file (a FIFO, device or directory is "
+                             "refused): {}".format(path))
+        if st.st_size > cap:
+            raise ValueError("--inputs worksheet exceeds the {}-byte bound: {}".format(cap, path))
+        raw = _opf_adopt_apply._journal._read_fd(fd, cap=cap)
+    except (OSError, _opf_adopt_apply._journal.JournalError) as exc:
+        raise ValueError("--inputs worksheet unreadable ({}): {}".format(path, exc))
+    finally:
+        os.close(fd)
+    try:
+        doc = tomllib.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError) as exc:   # UnicodeDecodeError and TOMLDecodeError are ValueErrors
         raise ValueError("--inputs worksheet unreadable or malformed ({}): {}".format(path, exc))
     if not (isinstance(doc, dict) and type(doc.get("schema")) is int and doc.get("schema") == 1):
         raise ValueError("--inputs worksheet must be a TOML table carrying `schema = 1` (an integer 1, "
@@ -2861,10 +2882,13 @@ def _cmd_adopt(rest):
           Exit 1: INVALID (a schema-violating decision, op or plan). Exit 2: cannot-evaluate (an
           unreadable worksheet, a changed inventory, an unresolvable root, an unresolved disposition).
       status [--root DIR] : report the adoption state READ-ONLY, writing nothing: the adoption evidence
-          bundles (the _opf_store adoption evidence home) and the adoption journal
-          (_opf_adopt_apply.JOURNAL_REL). Exit 0: clean (each run listed, or "no adoption run exists" --
-          this build cannot have applied one). Exit 1: a finding (journal debris from an interrupted
-          transaction, or foreign entries at a reserved adoption home). Exit 2: cannot-evaluate. Like
+          bundles (the _opf_store adoption evidence home, each graded by the engine's own bundle
+          validator) and the adoption journal (_opf_adopt_apply.JOURNAL_REL, classified by the engine's
+          journal_state), both read contained and no-follow. Exit 0: clean (each verified run listed, or
+          "no adoption run exists"). Exit 1: a finding (an open transaction or a held lock in the
+          journal, a bundle the validator grades INVALID, or a directory at the evidence home that is not
+          a run id). Exit 2: cannot-evaluate (a symlinked, dangling or wrong-type root, home or entry, or
+          an unreadable journal or bundle). Like
           `plan`, a NOT-ADOPTED root is fine: adoption is the verb that PRECEDES a store, so neither
           subcommand requires store resolution (unlike import D7).
 
@@ -2929,7 +2953,12 @@ def _cmd_adopt(rest):
     if sub == "plan" and inputs_file is None:
         print("opf adopt plan: --inputs FILE is required (the planning worksheet)", file=sys.stderr)
         return EXIT_MALFORMED
-    root_abs = os.path.abspath(root if root is not None else ".")
+    try:
+        root_abs = os.path.abspath(root if root is not None else ".")
+    except (OSError, ValueError) as exc:   # e.g. a deleted current directory: cannot-evaluate, never exit 1
+        print("opf adopt {}: cannot evaluate: cannot resolve the product root ({})".format(sub, exc),
+              file=sys.stderr)
+        return EXIT_MALFORMED
 
     if sub == "plan":
         import datetime
@@ -2958,42 +2987,59 @@ def _cmd_adopt(rest):
                   "2".format(exc), file=sys.stderr)
             return EXIT_MALFORMED
 
-    # sub == "status": the read-only state report over the two adoption homes; ZERO writes.
+    # sub == "status": the read-only state report over the two adoption homes; ZERO writes. Both homes
+    # are read ONLY through the engine's contained, no-follow primitives bound to ONE product-root fd (a
+    # symlinked root or ancestor refuses), the same ones verify_bundle and journal_clean_or_refuse use:
+    # a symlinked, dangling or wrong-type home or entry is cannot-evaluate, never followed and never read
+    # as absent. A bundle is reported only when the engine's own bundle validator grades it VALID, and
+    # the journal is read only through the engine's own classification (journal_state).
+    adopt, journal = _opf_adopt_apply, _opf_adopt_apply._journal
     try:
-        if not os.path.isdir(root_abs):
-            print("opf adopt status: cannot evaluate: --root {!r} is not a directory".format(root_abs),
-                  file=sys.stderr)
-            return EXIT_MALFORMED
-        findings = []
-        evidence_rel = _opf_store.IMPORTED_REL + "/" + _opf_adopt_apply.KIND
+        journal.require_containment()
+        root_fd = adopt._open_product_root(root_abs)
         try:
-            entries = sorted(os.listdir(os.path.join(root_abs, evidence_rel)))
-        except FileNotFoundError:
+            findings = []
+            runs = []
+            evidence_rel = _opf_store.IMPORTED_REL + "/" + adopt.KIND
+            home = journal._lstat_contained(root_fd, evidence_rel)
             entries = []                     # no evidence home: no run was ever applied
-        except NotADirectoryError:
-            entries = []
-            findings.append("{} exists but is not a directory (foreign content at the reserved adoption "
-                            "evidence home)".format(evidence_rel))
-        runs = []
-        for name in entries:
-            if _opf_adopt_apply.is_run_id(name):
-                runs.append(name)
-            else:
-                findings.append("{}/{} does not match the adoption run-id grammar (foreign content at "
-                                "the reserved adoption evidence home)".format(evidence_rel, name))
-        journal_rel = _opf_adopt_apply.JOURNAL_REL
-        try:
-            journal = sorted(os.listdir(os.path.join(root_abs, journal_rel)))
-        except FileNotFoundError:
-            journal = []                     # no journal: no adoption transaction ever started
-        except NotADirectoryError:
-            journal = []
-            findings.append("{} exists but is not a directory (foreign content at the adoption journal "
-                            "home)".format(journal_rel))
-        if journal:
-            findings.append("the adoption journal at {} holds {} entr{} -- an adoption transaction did "
-                            "not complete".format(journal_rel, len(journal),
-                                                  "y" if len(journal) == 1 else "ies"))
+            if home is not None:
+                if not stat.S_ISDIR(home.st_mode):
+                    raise adopt.AdoptApplyError("{} is not a directory (a symlinked, dangling or foreign "
+                                                "entry at the reserved adoption evidence home)".format(
+                                                    evidence_rel))
+                dfd = journal._open_dir_contained(root_fd, evidence_rel)
+                try:
+                    entries = [(name, journal._lstat_at(dfd, name)) for name in sorted(os.listdir(dfd))]
+                finally:
+                    os.close(dfd)
+            for name, est in entries:
+                if est is None or not stat.S_ISDIR(est.st_mode):
+                    raise adopt.AdoptApplyError("{}/{} is not a directory (a symlinked, dangling or "
+                                                "foreign entry at the reserved adoption evidence "
+                                                "home)".format(evidence_rel, name))
+                if not adopt.is_run_id(name):
+                    findings.append("{}/{} does not match the adoption run-id grammar (foreign content at "
+                                    "the reserved adoption evidence home)".format(evidence_rel, name))
+                    continue
+                checked = adopt._verify_bundle_at(root_fd, name, adopt.evidence_home_rel(name))
+                if checked.status == _opf_store.VALID:
+                    runs.append(name)
+                elif checked.status == _opf_store.INVALID:
+                    findings.extend("adoption run {}: {}".format(name, f) for f in checked.findings)
+                else:
+                    raise adopt.AdoptApplyError("adoption run {}: {}".format(
+                        name, "; ".join(checked.findings)))
+            owner, opened = adopt.journal_state(root_fd, adopt._journal_root(root_abs))
+        finally:
+            os.close(root_fd)
+        journal_rel = adopt.JOURNAL_REL
+        if owner is not None:
+            findings.append("the adoption journal lock at {} is held (pid {}); status never seizes it "
+                            "(reconcile once no adoption run is live)".format(journal_rel, owner.get("pid")))
+        if opened:
+            findings.append("the adoption journal at {} holds interrupted transaction(s) {} -- an "
+                            "adoption transaction did not complete".format(journal_rel, ", ".join(opened)))
         for run_id in runs:
             print("opf adopt status: adoption run {}: evidence bundle at {}/{}".format(
                 run_id, evidence_rel, run_id))
@@ -3004,6 +3050,9 @@ def _cmd_adopt(rest):
         if not runs:
             print("opf adopt status: no adoption run exists")
         return EXIT_OK
+    except (_opf_adopt_apply.AdoptApplyError, _opf_adopt_apply._journal.JournalError, OSError) as exc:
+        print("opf adopt status: cannot evaluate: {}".format(exc), file=sys.stderr)
+        return EXIT_MALFORMED
     except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false verdict or uncaught exit-1
         print("opf adopt status: cannot evaluate: unexpected error ({!r}); failing closed to exit "
               "2".format(exc), file=sys.stderr)
@@ -3524,15 +3573,31 @@ def _cli_self_test():
             flip: reverting the adopt dispatch routes it to the fail-closed KNOWN_VERBS branch (returning
             2 where 0/1 is expected -- the wiring discriminator), and a subcommand that writes flips the
             byte-identical snapshot red. Vectors: `status` over a clean root -> 0 + the no-adoption-run
-            message, byte-identical; `status` over a root with adoption-journal debris -> 1 (finding),
-            byte-identical (status reports, never reconciles); `plan` with a missing worksheet -> 2 (the
-            fail-closed read boundary); `plan` with a STALE (well-formed, non-matching) observation
+            message, byte-identical; `status` over a root with an OPEN adoption-journal transaction -> 1
+            (finding), byte-identical (status reports, never reconciles); `status` over a completed engine
+            transaction or a nothing-opened entry -> 0, over a run-id directory the bundle validator grades
+            INVALID -> 1, and over a symlinked, dangling or wrong-type root, home or entry -> 2; an
+            unresolvable cwd -> 2; `plan` with a missing, FIFO, oversized or symlinked worksheet -> 2 (the
+            bounded, fail-closed read boundary); `plan` with a STALE (well-formed, non-matching) observation
             digest -> 2 (the inventory binding refuses BEFORE any op validation), byte-identical; `plan`
             with the FRESH digest and one SCHEMA-VIOLATING op row (a known op missing its required
             inputs) -> 1 (INVALID rides _opf_adopt.validate_op through the wired planner, the 0/1
             discriminator past the digest binding), byte-identical. The VALID freeze discrimination rides
             _opf_adopt_plan.self_test end to end (it builds its own decision-complete fixtures)."""
+            import subprocess
             import tomllib
+            journal = _opf_adopt_apply._journal
+            adopt_j_rel = _opf_adopt_apply.JOURNAL_REL
+            adopt_rid = "adopt-20260101T000000Z-0123456789abcdef"
+            evidence_rel = _opf_store.IMPORTED_REL + "/" + _opf_adopt_apply.KIND
+
+            def run_adopt(argv):
+                buf = io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                        return main(list(argv)), buf.getvalue()
+                except BaseException as exc:            # a dispatcher crash is itself a failure
+                    return "raised {!r}".format(exc), buf.getvalue()
 
             def tree_snapshot(rootdir):
                 snap = dict()
@@ -3555,9 +3620,29 @@ def _cli_self_test():
                     os.mkdir(clean)
                     with open(os.path.join(clean, "note.txt"), "w", encoding="utf-8") as fh:
                         fh.write("adopter content\n")
+                    # debris: an OPEN transaction (INTENT without a terminal frame), published through the
+                    # journal's own writer, so the engine's classification reads it as interrupted.
                     debris = os.path.join(abase, "debris")
-                    os.makedirs(os.path.join(debris, ".aiqt", "adopt", "journal", "txn"))
-                except OSError as exc:
+                    os.makedirs(os.path.join(debris, adopt_j_rel))
+                    debris_fd = os.open(debris, os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        jr_fd = journal.open_journal_root_fd(debris_fd, adopt_j_rel)
+                        try:
+                            os.mkdir("txn", dir_fd=jr_fd)
+                            journal.publish(jr_fd, Path(debris, adopt_j_rel, "txn"), journal.F_INTENT,
+                                            {"txn": "txn", "ops": []})
+                        finally:
+                            os.close(jr_fd)
+                    finally:
+                        os.close(debris_fd)
+                    # done: a COMPLETED engine transaction (its journal entry stays, and its bundle is VALID).
+                    done = os.path.join(abase, "done")
+                    os.mkdir(done)
+                    _opf_adopt_apply.run_adopt_transaction(done, adopt_rid, lambda ops: None)
+                    # an empty (nothing-opened) journal entry, which the engine classifies as clean.
+                    unopened = os.path.join(abase, "unopened")
+                    os.makedirs(os.path.join(unopened, adopt_j_rel, "txn"))
+                except (OSError, journal.JournalError, _opf_adopt_apply.AdoptApplyError) as exc:
                     print("opf cli self-test: harness error: could not build the adopt fixtures "
                           "({})".format(exc), file=sys.stderr)
                     return EXIT_MALFORMED
@@ -3579,11 +3664,92 @@ def _cli_self_test():
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
                     rc = main(["adopt", "status", "--root", debris])
-                if rc != EXIT_FINDING or "adoption journal" not in buf.getvalue():
+                if rc != EXIT_FINDING or "interrupted transaction(s) txn" not in buf.getvalue():
                     failures.append("adopt status over journal debris: rc={!r} (expected 1 + the journal "
                                     "finding)".format(rc))
                 if tree_snapshot(debris) != before:
                     failures.append("adopt status (journal debris) mutated the product root")
+
+                # status reads both homes through the ENGINE (K9a fix 1), each vector red on the K9a head:
+                # a COMPLETED engine transaction is clean and its bundle verifies (was 1, "any journal
+                # entry is interrupted"); a nothing-opened entry is clean (was 1); a run-id directory the
+                # bundle validator grades INVALID is a finding (was 0, "evidence bundle"); and a symlinked,
+                # dangling or wrong-type root, home or entry is cannot-evaluate, never followed (was 0/1
+                # over the followed or absent target) and never read as absent (was 0).
+                def fresh_root(name):
+                    path = os.path.join(abase, name)
+                    os.mkdir(path)
+                    with open(os.path.join(path, "note.txt"), "w", encoding="utf-8") as fh:
+                        fh.write("adopter content\n")
+                    return path
+
+                try:
+                    outside = os.path.join(abase, "outside")
+                    os.makedirs(os.path.join(outside, "imported", _opf_adopt_apply.KIND, adopt_rid))
+                    stray = os.path.join(outside, "stray")
+                    os.mkdir(stray)
+                    # a foreign tree whose only entries are NOT run ids: an enumeration that followed the
+                    # link would report them as findings (exit 1) rather than refuse (exit 2).
+                    foreign = os.path.join(abase, "foreign")
+                    os.makedirs(os.path.join(foreign, "imported", _opf_adopt_apply.KIND, "stray"))
+                    status_vectors = [("completed engine transaction", done, EXIT_OK,
+                                       "adoption run {}: evidence bundle at".format(adopt_rid)),
+                                      ("nothing-opened journal entry", unopened, EXIT_OK,
+                                       "no adoption run exists")]
+                    root = fresh_root("nobundle")
+                    os.makedirs(os.path.join(root, evidence_rel, adopt_rid))
+                    status_vectors.append(("run-id directory with no inventory", root, EXIT_FINDING,
+                                           "has no inventory"))
+                    root = fresh_root("filebundle")
+                    os.makedirs(os.path.join(root, evidence_rel))
+                    with open(os.path.join(root, evidence_rel, adopt_rid), "w", encoding="utf-8") as fh:
+                        fh.write("not a bundle\n")
+                    status_vectors.append(("regular file with a run-id name", root, EXIT_MALFORMED,
+                                           "cannot evaluate"))
+                    for label, rel, target in (
+                            ("symlinked evidence home", evidence_rel, outside),
+                            ("symlinked .working ancestor, run-id bundle outside", ".working", outside),
+                            ("symlinked .working ancestor, foreign dir outside", ".working", foreign),
+                            ("dangling evidence home", evidence_rel, os.path.join(abase, "nowhere")),
+                            ("symlinked evidence entry", evidence_rel + "/stray", stray),
+                            ("symlinked journal home", adopt_j_rel, outside),
+                            ("dangling journal home", adopt_j_rel, os.path.join(abase, "nowhere")),
+                            ("symlinked journal entry", adopt_j_rel + "/txn", stray)):
+                        root = fresh_root("link-{}".format(len(status_vectors)))
+                        os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+                        os.symlink(target, os.path.join(root, rel))
+                        status_vectors.append((label, root, EXIT_MALFORMED, "cannot evaluate"))
+                    os.symlink(clean, os.path.join(abase, "rootlink"))
+                    status_vectors.append(("symlinked --root", os.path.join(abase, "rootlink"),
+                                           EXIT_MALFORMED, "cannot evaluate"))
+                except OSError as exc:
+                    print("opf cli self-test: harness error: could not build the adopt status fixtures "
+                          "({})".format(exc), file=sys.stderr)
+                    return EXIT_MALFORMED
+                for label, root, want, needle in status_vectors:
+                    rc, out = run_adopt(["adopt", "status", "--root", root])
+                    if rc != want or needle not in out:
+                        failures.append("adopt status over a {}: rc={!r} (expected {} + {!r})".format(
+                            label, rc, want, needle))
+
+                # root normalization sits INSIDE the fail-closed handling: an unresolvable current
+                # directory (os.getcwd raising, as it does once the cwd is deleted) is exit 2, never an
+                # uncaught FileNotFoundError (red on the K9a head, where abspath ran outside every handler).
+                real_getcwd = os.getcwd
+
+                def _no_cwd():
+                    raise FileNotFoundError(2, "simulated deleted current directory")
+
+                os.getcwd = _no_cwd
+                try:
+                    cwd_results = [run_adopt(argv) for argv in (
+                        ["adopt", "status"], ["adopt", "plan", "--inputs", "w.toml"])]
+                finally:
+                    os.getcwd = real_getcwd
+                for rc, out in cwd_results:
+                    if rc != EXIT_MALFORMED or "cannot resolve the product root" not in out:
+                        failures.append("adopt with an unresolvable cwd: rc={!r} (expected 2 + the "
+                                        "cannot-resolve message)".format(rc))
 
                 # plan with a MISSING worksheet -> 2 (fail-closed read boundary, the --set class).
                 expect(["adopt", "plan", "--inputs", os.path.join(abase, "absent.toml"),
@@ -3623,6 +3789,41 @@ def _cli_self_test():
                                     "the inventory-binding message)".format(rc))
                 if tree_snapshot(clean) != before:
                     failures.append("adopt plan (stale digest) mutated the product root")
+
+                # the --inputs read is BOUNDED (K9a fix 1), each vector red on the K9a head: a FIFO refuses
+                # at once (the head blocked in open(), so it runs in an isolated child under a timeout and a
+                # regression fails rather than hangs), an oversized worksheet refuses at the planner's byte
+                # bound (the head read it whole), and a symlinked worksheet is refused, never followed (the
+                # head followed it to the stale worksheet and reported that worksheet's digest mismatch).
+                try:
+                    fifo = os.path.join(abase, "worksheet.fifo")
+                    os.mkfifo(fifo)
+                    big = os.path.join(abase, "big.toml")
+                    with open(big, "w", encoding="utf-8") as fh:
+                        fh.write("schema = 1\n#" + "x" * _opf_adopt_plan.MAX_FILE_BYTES + "\n")
+                    linked = os.path.join(abase, "linked.toml")
+                    os.symlink(stale, linked)
+                except OSError as exc:
+                    print("opf cli self-test: harness error: could not build the adopt --inputs fixtures "
+                          "({})".format(exc), file=sys.stderr)
+                    return EXIT_MALFORMED
+                try:
+                    child = subprocess.run(
+                        [sys.executable, "-I", "-B", os.path.abspath(__file__), "adopt", "plan", "--inputs",
+                         fifo, "--root", clean],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+                    fifo_result = (child.returncode, child.stdout + child.stderr)
+                except subprocess.TimeoutExpired:
+                    fifo_result = ("timed out (blocked on the FIFO)", "")
+                for label, (rc, out), needle in (
+                        ("a FIFO", fifo_result, "not a regular file"),
+                        ("an oversized", run_adopt(["adopt", "plan", "--inputs", big, "--root", clean]),
+                         "-byte bound"),
+                        ("a symlinked", run_adopt(["adopt", "plan", "--inputs", linked, "--root", clean]),
+                         "worksheet unreadable")):
+                    if rc != EXIT_MALFORMED or needle not in out:
+                        failures.append("adopt plan with {} worksheet: rc={!r} (expected 2 + {!r})".format(
+                            label, rc, needle))
 
                 # plan with the FRESH digest and one SCHEMA-VIOLATING op row (a known op missing its
                 # required inputs) -> 1: INVALID rides _opf_adopt.validate_op through the wired planner
@@ -3708,8 +3909,10 @@ def _cli_self_test():
               "composable fixture -> 1 (composition abort) and over an unknown run -> 2 not-promotion-ready, "
               "each mutating nothing; adopt (K9a) wires the read-only plan/status subcommands onto the "
               "adoption planner -- bare/malformed usage and the deferred approve/apply/complete/reconcile "
-              "fail closed to exit 2, status -> 0 no-run / 1 journal-debris finding, plan -> 2 missing "
-              "worksheet or stale digest / 1 schema-violating op, each mutating nothing; fixture-setup "
+              "fail closed to exit 2, status -> 0 no-run or verified run / 1 open-transaction or invalid-"
+              "bundle finding / 2 symlinked, dangling or wrong-type home, plan -> 2 missing, FIFO, oversized "
+              "or symlinked worksheet or stale digest / 1 schema-violating op, each mutating nothing; an "
+              "unresolvable cwd -> 2; fixture-setup "
               "and fixture-I/O OSError fail closed to exit 2)")
         return EXIT_OK
     except Exception as exc:  # noqa: BLE001  final fail-closed backstop, never an uncaught exit-1 escape

@@ -598,18 +598,20 @@ def _journal_root(product_root):
     return Path(product_root) / JOURNAL_REL
 
 
-def journal_clean_or_refuse(root_fd, journal_root):
-    """The reconcile-first discipline (`opf record` step 1): inspect the adoption journal READ-ONLY and
-    REFUSE on a held lock (a possibly-live owner is never seized) or any open transaction, directing the
-    operator to the explicit reconcile() entry. An absent journal root is clean; an unreadable or corrupt
-    journal refuses. Nothing is written here, recovery included."""
+def journal_state(root_fd, journal_root):
+    """The adoption journal's state READ-ONLY, through the engine's own classification: (owner, opened),
+    the recorded lock owner (None when no lock is held) and the sorted names of the transactions
+    `_journal.classify_state` reads as open (INTENT without a terminal frame). A nothing-opened,
+    complete, or rolled-back transaction is clean. An absent journal root is (None, []); a symlinked,
+    dangling, non-directory, unreadable, or corrupt journal, or a symlinked entry in it, raises
+    AdoptApplyError (fail-closed, never followed and never read as absent). Nothing is written here."""
     try:
         st = _journal._lstat_contained(root_fd, JOURNAL_REL)
     except (_journal.JournalError, OSError) as exc:
         raise AdoptApplyError("cannot inspect the adoption journal {} ({}); "
                               "fail-closed".format(JOURNAL_REL, exc))
     if st is None:
-        return
+        return None, []
     if not stat.S_ISDIR(st.st_mode):
         raise AdoptApplyError("the adoption journal {} is not a directory; fail-closed".format(JOURNAL_REL))
     try:
@@ -627,6 +629,15 @@ def journal_clean_or_refuse(root_fd, journal_root):
                                   "fail-closed".format(JOURNAL_REL, exc))
     finally:
         _journal._close_fd_quietly(jr_fd)
+    return owner, opened
+
+
+def journal_clean_or_refuse(root_fd, journal_root):
+    """The reconcile-first discipline (`opf record` step 1): inspect the adoption journal READ-ONLY
+    (journal_state) and REFUSE on a held lock (a possibly-live owner is never seized) or any open
+    transaction, directing the operator to the explicit reconcile() entry. An absent journal root is
+    clean; an unreadable or corrupt journal refuses. Nothing is written here, recovery included."""
+    owner, opened = journal_state(root_fd, journal_root)
     if owner is not None:
         raise AdoptApplyError("the adoption journal lock is held (pid {}); it is never seized. "
                               "Reconcile once no adoption run is live (fail-closed)".format(owner.get("pid")))
@@ -2400,8 +2411,8 @@ def main():
     args = sys.argv[1:]
     if "--self-test" in args or "--selftest" in args:
         return self_test()
-    print("usage: _opf_adopt_apply.py --self-test (a library module; the adoption verb is a later "
-          "slice)", file=sys.stderr)
+    print("usage: _opf_adopt_apply.py --self-test (a library module; the adoption verb is `opf adopt`)",
+          file=sys.stderr)
     return 2
 
 
