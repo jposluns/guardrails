@@ -563,14 +563,33 @@ class ManifestValidation:
 # --- contained reads (the pin.py idiom, mapped to StoreError) -----------------------------------------
 
 def _close_fd_exc_safe(fd):
-    """Close a descriptor in a `finally` or an unwinding callback without letting a failing close REPLACE
-    the exception already in flight (#377 fix 1): while one is being handled or unwound (sys.exc_info()),
-    the close is quiet so that exception propagates unchanged; with none in flight the close error still
-    propagates fail-closed. Either way _journal's confirm-then-release guards never retain the fd."""
-    if sys.exc_info()[1] is not None:
-        _journal._close_fd_quietly(fd)
-    else:
+    """Close a descriptor in a `finally` or an `except` handler without letting a failing close REPLACE
+    the exception already in flight there (#377; the semantics of #378's _journal._close_fd_yielding).
+    An exception is in flight only when it is unwinding through, or being handled in, the CALLING frame
+    (its traceback head is that frame): then the close is quiet and that exception propagates unchanged.
+    Otherwise the close error propagates fail-closed, including in code reached normally from inside a
+    CALLER's `except` block, whose exception is not in flight here. Either way _journal's
+    confirm-then-release guards never retain the fd. An ExitStack callback runs in contextlib's frame, where
+    this test cannot see the exception the stack is unwinding: register such a close with _close_fd_on_exit.
+    Residual (disclosed, as in #378): a `finally` reached NORMALLY while lexically inside an `except`
+    handler of the SAME function would read that handled exception as in flight; no call site is nested
+    that way."""
+    tb = sys.exc_info()[2]
+    if tb is None or tb.tb_frame is not sys._getframe(1):
         _journal._close_fd_propagating(fd)
+    else:
+        _journal._close_fd_quietly(fd)
+
+
+def _close_fd_on_exit(fd, exc_type, exc, tb):
+    """The ExitStack form of _close_fd_exc_safe (#377 fix 2), registered on the acquisition statement as
+    `stack.push(functools.partial(_close_fd_on_exit, fd := ...))`. ExitStack hands an exit callback the
+    exception it is unwinding (the body's, or an earlier callback's close error), so the close is quiet
+    while one is and propagates fail-closed when none is. Returns None, so it never suppresses."""
+    if exc is None:
+        _journal._close_fd_propagating(fd)
+    else:
+        _journal._close_fd_quietly(fd)
 
 
 def _open_root_fd(root):

@@ -82,11 +82,13 @@ def compute_digest(version, members):
 
 def _close_fd_exc_safe(fd):
     """_opf_store._close_fd_exc_safe without the store import: a failing close never replaces an
-    exception in flight, and still propagates fail-closed when none is."""
-    if sys.exc_info()[1] is not None:
-        _journal._close_fd_quietly(fd)
-    else:
+    exception in flight in the CALLING frame, and still propagates fail-closed when none is, including
+    under an exception a caller is merely handling."""
+    tb = sys.exc_info()[2]
+    if tb is None or tb.tb_frame is not sys._getframe(1):
         _journal._close_fd_propagating(fd)
+    else:
+        _journal._close_fd_quietly(fd)
 
 
 def _read_regular(path, limit, what):

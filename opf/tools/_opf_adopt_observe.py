@@ -698,7 +698,7 @@ def _with_descriptors(operation):
     """
     @functools.wraps(operation)
     def guarded(*args, **kwargs):
-        stack = contextlib.ExitStack()
+        stack = _UnwindingStack()
         try:
             try:
                 return operation(*args, **kwargs, _descriptors=stack)
@@ -709,6 +709,26 @@ def _with_descriptors(operation):
             stack.close()
             raise
     return guarded
+
+
+class _UnwindingStack(contextlib.ExitStack):
+    """close() from a `finally` or an `except` handler unwinds like a `with` exit.
+
+    ExitStack.close() passes no exception to its exit callbacks, and a
+    callback runs in contextlib's frame, so neither can see the exception the
+    operation raised. Here the exception in flight in the frame that calls
+    close() (#378's calling-frame test) is handed to every exit callback, so a
+    _close_fd_on_exit close stays quiet and that exception keeps propagating.
+    On the normal path, or under an exception a caller is merely handling, none
+    is passed and a close error still fails closed (#377 fix 2).
+    """
+
+    def close(self):
+        tb = sys.exc_info()[2]
+        if tb is None or tb.tb_frame is not sys._getframe(1):
+            self.__exit__(None, None, None)
+        else:
+            self.__exit__(*sys.exc_info())
 
 
 class _QuarantineOwner:
@@ -743,7 +763,7 @@ class _QuarantineOwner:
     def remove(self, *, _descriptors):
         if self.identity is not None and self.state in ("PENDING", "OWNED"):
             parent = None
-            _descriptors.callback(store._close_fd_exc_safe, parent := store._open_dir_nofollow(self.parent_path))
+            _descriptors.push(functools.partial(store._close_fd_on_exit, parent := store._open_dir_nofollow(self.parent_path)))
             opened = os.fstat(parent)
             _require((opened.st_dev, opened.st_ino) == self.parent_identity,
                      CANNOT_EVALUATE, "cleanup", "cleanup parent changed")
@@ -776,15 +796,17 @@ def _quarantine(root, owners):
     with stack:
         # Register on the acquisition statement; a Python hold(fd) helper
         # would add an interruptible statement before callback ownership.
-        stack.callback(store._close_fd_exc_safe, root_fd := store._open_dir_nofollow(root))
-        stack.callback(store._close_fd_exc_safe, working := _open_directory(root_fd, ".working"))
-        stack.callback(store._close_fd_exc_safe, adopt := _open_directory(working, "adopt"))
+        # An exit callback (not stack.callback) receives the exception the
+        # stack is unwinding, so a failing close never replaces it.
+        stack.push(functools.partial(store._close_fd_on_exit, root_fd := store._open_dir_nofollow(root)))
+        stack.push(functools.partial(store._close_fd_on_exit, working := _open_directory(root_fd, ".working")))
+        stack.push(functools.partial(store._close_fd_on_exit, adopt := _open_directory(working, "adopt")))
         # Independent of the public request ID: never infer a capability from it.
         run_name = "observe-" + secrets.token_hex(16)
         owner = _QuarantineOwner(adopt, run_name, root + "/.working/adopt")
         owners.append(owner)
-        stack.callback(store._close_fd_exc_safe, run := _open_directory(adopt, run_name, fresh=True, owner=owner))
-        stack.callback(store._close_fd_exc_safe, quarantine := _open_directory(run, "quarantine", fresh=True))
+        stack.push(functools.partial(store._close_fd_on_exit, run := _open_directory(adopt, run_name, fresh=True, owner=owner)))
+        stack.push(functools.partial(store._close_fd_on_exit, quarantine := _open_directory(run, "quarantine", fresh=True)))
         path = root + "/.working/adopt/" + run_name + "/quarantine"
         for entry in list(sys.path) + os.environ.get("PATH", "").split(os.pathsep):
             if not isinstance(entry, str):
@@ -802,7 +824,7 @@ def _quarantine(root, owners):
 def _put(parent, name, payload, deadline, *, _descriptors):
     fd = None
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK
-    _descriptors.callback(store._close_fd_exc_safe, fd := os.open(name, flags, 0o600, dir_fd=parent))
+    _descriptors.push(functools.partial(store._close_fd_on_exit, fd := os.open(name, flags, 0o600, dir_fd=parent)))
     opened = os.fstat(fd)
     _require(stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1,
              CANNOT_EVALUATE, "quarantine", "output is not an exclusive regular file")
@@ -821,7 +843,7 @@ def _read_archive(parent, deadline, *, _descriptors):
     before = os.stat("archive.tar.gz", dir_fd=parent, follow_symlinks=False)
     fd = None
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-    _descriptors.callback(store._close_fd_exc_safe, fd := os.open("archive.tar.gz", flags, dir_fd=parent))
+    _descriptors.push(functools.partial(store._close_fd_on_exit, fd := os.open("archive.tar.gz", flags, dir_fd=parent)))
     opened = os.fstat(fd)
     _require(
         stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1
@@ -1047,24 +1069,24 @@ def _unpack(parent, archive, deadline, commit=None, *, _descriptors):
     _require(terminated and wrapper is not None,
              INVALID, "archive", "archive has no supported wrapped member stream")
     members_fd = None
-    _descriptors.callback(store._close_fd_exc_safe, members_fd := _open_directory(parent, "members", fresh=True))
+    _descriptors.push(functools.partial(store._close_fd_on_exit, members_fd := _open_directory(parent, "members", fresh=True)))
     for path, kind in sorted(nodes.items(), key=lambda item: (item[0].count("/"), item[0])):
         if kind != "directory":
             continue
         entry = contextlib.ExitStack()
-        _descriptors.callback(entry.close)
+        _descriptors.push(entry)    # its __exit__ also receives the exception unwinding _descriptors
         with entry:
-            entry.callback(store._close_fd_exc_safe, (opened := store._journal._open_parent(members_fd, path))[0])
+            entry.push(functools.partial(store._close_fd_on_exit, (opened := store._journal._open_parent(members_fd, path))[0]))
             pfd, name = opened
-            entry.callback(store._close_fd_exc_safe, _open_directory(pfd, name, fresh=True))
+            entry.push(functools.partial(store._close_fd_on_exit, _open_directory(pfd, name, fresh=True)))
     result = []
     budget = [0]
     for path, mode, payload in files:
         deadline.left()
         entry = contextlib.ExitStack()
-        _descriptors.callback(entry.close)
+        _descriptors.push(entry)
         with entry:
-            entry.callback(store._close_fd_exc_safe, (opened := store._journal._open_parent(members_fd, path))[0])
+            entry.push(functools.partial(store._close_fd_on_exit, (opened := store._journal._open_parent(members_fd, path))[0]))
             pfd, name = opened
             _put(pfd, name, payload, deadline)
             before = os.stat(name, dir_fd=pfd, follow_symlinks=False)

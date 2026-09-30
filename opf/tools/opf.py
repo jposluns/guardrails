@@ -4218,12 +4218,17 @@ def _retained_close_offpath_self_test():
     and release it. Returns 0 clean, 1 on a failing check, 2 on a harness error."""
     import contextlib
     import errno
+    import gzip
     import io
     import shutil
+    import tarfile
     import tempfile
     import types
+    from unittest import mock
     import check_opf_prompt_pack
+    import check_opf_upgrade
     import _opf_adopt_observe
+    this = sys.modules[__name__]
     tools = os.path.dirname(os.path.abspath(__file__))
     real_open, real_dup, real_pipe, real_close = os.open, os.dup, os.pipe, os.close
     failures = []
@@ -4427,6 +4432,41 @@ def _retained_close_offpath_self_test():
             _opf_adopt_observe._read_archive(observe_fd, deadline)
 
         expect("offpath-adopt-observe-descriptor-stack", put_and_read)
+        # #377 fix 2 (claude QA r1 coverage gaps): the quarantine stack's five exit-callback closes and the
+        # rollback owner's parent reopen, then the unpacker's members descriptor and per-entry stacks.
+        quarantine = base / "quarantine"
+        quarantine.mkdir()
+
+        def quarantine_cycle():
+            owners = []
+            try:
+                with _opf_adopt_observe._quarantine(str(quarantine), owners):
+                    pass
+            finally:
+                for owner in owners:
+                    with contextlib.suppress(Exception):
+                        owner.finish(False)
+
+        def tar_member(name, kind, payload=b""):
+            info = tarfile.TarInfo(name)
+            info.type, info.mode, info.size = kind, 0o644, len(payload)
+            return info.tobuf(format=tarfile.USTAR_FORMAT) + payload + b"\0" * ((-len(payload)) % 512)
+
+        archive = gzip.compress(b"".join((
+            tar_member("wrap/", tarfile.DIRTYPE), tar_member("wrap/d/", tarfile.DIRTYPE),
+            tar_member("wrap/d/f", tarfile.REGTYPE, b"data"), b"\0" * 1024)), mtime=0)
+        unpack_parent = base / "unpack"
+        unpack_parent.mkdir(mode=0o700)
+        unpack_fd = os.open(str(unpack_parent), os.O_RDONLY | os.O_DIRECTORY)
+        held.append(unpack_fd)
+
+        def unpack():
+            shutil.rmtree(str(unpack_parent / "members"), ignore_errors=True)
+            _opf_adopt_observe._unpack(unpack_fd, archive, deadline)
+
+        for label, call in (("quarantine", quarantine_cycle), ("unpack", unpack)):
+            call()                            # the fixture reaches every registration before it is swept
+            expect("offpath-adopt-observe-" + label, call)
         # _opf_adopt_apply: the product-root closes of verify_bundle, reconcile, the default-store probe
         # and a transaction refused at the store posture (nothing written).
         run_id = "adopt-20260101T000000Z-0123456789abcdef"
@@ -4461,6 +4501,76 @@ def _retained_close_offpath_self_test():
             _upgrade_create_index(init_fd, "new.index.toml", b"schema = 1\n")
 
         expect("offpath-opf-upgrade-helpers", upgrade_helpers)
+        # #377 fix 2 (claude QA r1 coverage gaps): _render_resolved_store's product-root open-failure branch,
+        # _init_repo's repository-root probe (a real git worktree), _cmd_init's directory publication (its
+        # git boundary stubbed), and _upgrade_run's destination loop and root close over the frozen 1.0.0
+        # store (the cleanliness gate stubbed, stopped at the ignore probe before any write).
+        missing = base / "no-such-product-root"
+        with contextlib.redirect_stderr(io.StringIO()):
+            if _opf_views._render_resolved_store(missing, res, True) != _opf_views.EXIT_CANNOT_EVALUATE:
+                raise RuntimeError("the unopenable product root did not refuse")
+        expect("offpath-views-product-root-unopenable",
+               lambda: _opf_views._render_resolved_store(missing, res, True))
+        repo = base / "repo"
+        repo.mkdir()
+        git = _opf_observe._git_path()
+        made = None if git is None else _opf_observe._run_git(
+            git, repo, ["-c", "init.templateDir=", "-c", "init.defaultBranch=main", "init", "-q"])
+        if made is None or not made.completed or made.rc != 0:
+            raise RuntimeError("the fixture worktree could not be initialized ({})".format(
+                "git not found" if made is None else made.err))
+        _init_repo(repo)
+        expect("offpath-opf-init-repo", lambda: _init_repo(repo))
+        fresh = base / "init-cmd"
+        fresh.mkdir()
+
+        def cmd_init():
+            shutil.rmtree(str(fresh / _opf_store.WORKING_DIRNAME), ignore_errors=True)
+            for name in (_opf_store.POINTER_REL, "CHANGELOG.md"):
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(str(fresh / name))
+            with mock.patch.object(this, "_init_repo", lambda root: ("git", root)), \
+                    mock.patch.object(this, "_init_untracked", lambda *args: None), \
+                    mock.patch.object(this, "_init_unignored", lambda *args: None):
+                return _cmd_init(["--root", str(fresh)])
+
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            if cmd_init() != EXIT_OK:
+                raise RuntimeError("the stubbed init fixture did not publish")
+        expect("offpath-opf-cmd-init", cmd_init)
+        legacy = base / "upgrade"
+        legacy_machine = legacy / _opf_store.WORKING_DIRNAME / _opf_store.DEFAULT_MACHINE_SUBDIR
+        legacy_machine.mkdir(parents=True)
+        for name, text in ((_opf_store.MANIFEST_NAME, check_opf_upgrade._FIX_MANIFEST),
+                           (_opf_check.COUNTERS_NAME, check_opf_upgrade._FIX_COUNTERS),
+                           (_opf_check.VERSION_NAME, check_opf_upgrade._FIX_VERSION),
+                           (_opf_check.WORKLOG_NAME, check_opf_upgrade._FIX_WORKLOG)):
+            (legacy_machine / name).write_text(text, encoding="utf-8")
+        for name in check_opf_upgrade._FIX_INDEX_TYPES:
+            (legacy_machine / (name + _opf_check.INDEX_SUFFIX)).write_text(
+                check_opf_upgrade._FIX_INDEX, encoding="utf-8")
+        (legacy / _opf_store.POINTER_REL).write_text('[store]\ntarget = "dir:."\n', encoding="utf-8")
+        (legacy / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
+
+        class _StopBeforeWrite(Exception):
+            pass
+
+        def stop(*args):
+            raise _StopBeforeWrite()
+
+        def upgrade_run():
+            with mock.patch.object(_opf_write_guard, "check_clean", lambda *args: None), \
+                    mock.patch.object(_opf_write_guard, "check_ignored", stop):
+                _upgrade_run(str(legacy))
+
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                upgrade_run()
+        except _StopBeforeWrite:
+            pass
+        else:
+            raise RuntimeError("the frozen 1.0.0 upgrade fixture did not reach the ignore probe")
+        expect("offpath-opf-upgrade-run", upgrade_run)
     except Exception as exc:  # noqa: BLE001  a fixture that cannot be built is a harness error, never a pass
         print("opf retained-close offpath self-test: harness error ({!r})".format(exc), file=sys.stderr)
         return EXIT_MALFORMED
@@ -4473,6 +4583,441 @@ def _retained_close_offpath_self_test():
             ", ".join(failures), len(failures), len(ran)), file=sys.stderr)
         return EXIT_FINDING
     print("opf retained-close offpath self-test: PASS ({} checks)".format(len(ran)))
+    return EXIT_OK
+
+
+def _close_exc_safe_vectors_self_test():
+    """#377 fix 2: the in-flight-exception close vectors. Each vector drives one call site with the close
+    it names raising EIO WITHOUT releasing the descriptor, and grades one property on its own assertion:
+      body    the body's exception is in flight at the close: that SAME exception object must propagate;
+      normal  nothing is in flight: the injected close error must propagate (fail-closed);
+      caller  the normal vector run from inside a CALLER's `except` block: the close error must still
+              propagate, since the caller's handled exception is not in flight at the close.
+    Every vector also requires that no descriptor it opened survives. Three flips then re-run every vector
+    and must turn exactly their own vectors red, each by that vector's own assertion: MASK (every close
+    helper always propagating) the body vectors; SWALLOW (always quiet) the normal and caller vectors; and
+    CALLER-FRAME (#377 fix 1's any-exception test in place of the calling-frame test, in both helpers,
+    the ExitStack callback and the descriptor stack's close) the caller vectors. Returns 0 clean, 1 on a
+    failing check, 2 on a harness error."""
+    import contextlib
+    import errno
+    import io
+    import shutil
+    import tempfile
+    import types
+    from unittest import mock
+    import check_opf_prompt_pack
+    import _opf_adopt_observe
+    journal = _opf_store._journal
+    real_open, real_dup, real_close, real_fstat, real_read = os.open, os.dup, os.close, os.fstat, os.read
+    propagating, quietly = journal._close_fd_propagating, journal._close_fd_quietly
+    ANY = object()
+    state = types.SimpleNamespace(opened=[], target=None, injected=None)
+
+    class _Body(BaseException):
+        """The body's in-flight exception; a BaseException, so no site handler maps it."""
+
+    class _CallerHandled(Exception):
+        """The exception a CALLER is handling while it calls the site normally."""
+
+    def arm(fd=ANY):
+        """Make the next close (of `fd`, when given) raise without releasing the descriptor."""
+        state.target = fd
+
+    def _open(*args, **kwargs):
+        fd = real_open(*args, **kwargs)
+        state.opened.append(fd)
+        return fd
+
+    def _dup(fd):
+        new = real_dup(fd)
+        state.opened.append(new)
+        return new
+
+    def _close(fd):
+        if state.target is ANY or (state.target is not None and state.target == fd):
+            state.target = None
+            state.injected = OSError(errno.EIO, "injected retained-close failure")   # NOT released
+            raise state.injected
+        real_close(fd)
+
+    def run(call):
+        """(the exception `call` raised, or None; the descriptors it opened that are still open)."""
+        state.opened, state.target, state.injected = [], None, None
+        got = None
+        os.open, os.dup, os.close = _open, _dup, _close
+        os.supports_dir_fd.add(_open)         # _containment.probe keys off os.open's dir_fd support
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                call()
+        except BaseException as exc:  # noqa: BLE001  graded by the vector
+            got = exc
+        finally:
+            os.supports_dir_fd.discard(_open)
+            os.open, os.dup, os.close = real_open, real_dup, real_close
+            state.target = None
+        left = []
+        for fd in sorted(set(state.opened)):
+            try:
+                real_fstat(fd)
+            except OSError:
+                continue
+            left.append(fd)
+        for fd in left:                       # a failing vector leaks; release so the suite stays clean
+            with contextlib.suppress(OSError):
+                real_close(fd)
+        return got, left
+
+    def raiser(body, result=None):
+        """A stand-in that arms the next close, then raises the body exception or returns `result`."""
+        def hook(*args, **kwargs):
+            arm()
+            if body is not None:
+                raise body
+            return result
+        return hook
+
+    def first_call(obj, name, body, real):
+        """Patch obj.name so its first call arms the next close and raises `body` (or delegates)."""
+        calls = []
+
+        def hook(*args, **kwargs):
+            calls.append(None)
+            if len(calls) == 1:
+                arm()
+                if body is not None:
+                    raise body
+            return real(*args, **kwargs)
+        return mock.patch.object(obj, name, hook)
+
+    def then_arm(obj, name, body):
+        """Patch obj.name so it runs, THEN arms the next close and raises `body` (or returns its result)."""
+        real = getattr(obj, name)
+
+        def hook(*args, **kwargs):
+            result = real(*args, **kwargs)
+            arm()
+            if body is not None:
+                raise body
+            return result
+        return mock.patch.object(obj, name, hook)
+
+    def dirfd(path):
+        return real_open(str(path), os.O_RDONLY | os.O_DIRECTORY)
+
+    tmp = Path(tempfile.mkdtemp(prefix="opf-close-exc-safe-")).resolve()
+    res = types.SimpleNamespace(status=_opf_store.RESOLVED, store_root=tmp, machine_rel="m",
+                                pointer_source="default")
+
+    # Each case maps a body exception (None: the normal path) to the call a vector runs.
+    def c_store_subdirs(body):
+        def call():
+            root = dirfd(tmp)
+            try:
+                with mock.patch.object(_opf_store, "_list_real_subdirs", raiser(body, [])):
+                    _opf_store._immediate_subdirs(root, ".working")
+            finally:
+                real_close(root)
+        return call
+
+    def c_store_load_manifest(body):
+        def call():
+            with mock.patch.object(_opf_store, "_read_toml_contained", raiser(body, {})):
+                _opf_store.load_manifest(res)
+        return call
+
+    def c_views_render(body):
+        def call():
+            with mock.patch.object(_opf_views, "_render_resolved", raiser(body, 0)):
+                _opf_views._render_resolved_store(tmp, res, True)
+        return call
+
+    def c_views_write_temp(body):
+        def call():
+            root = dirfd(tmp)
+            try:
+                with mock.patch.object(_opf_views, "_WRITE_GATE_COMPOSED", True), \
+                        then_arm(journal, "_write_all", body):
+                    _opf_views._write_contained(root, "m/VIEW.md", "view\n", False)
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(str(tmp / "m" / "VIEW.md"))
+                real_close(root)
+        return call
+
+    def c_adopt_apply_probe(body):
+        def call():
+            with mock.patch.object(_opf_store, "discover_machine_store", raiser(body, ("present", None, None))):
+                _opf_adopt_apply._default_store_present_without_manifest(tmp)
+        return call
+
+    def c_adopt_apply_transaction(body):
+        def call():
+            product = Path(tempfile.mkdtemp(dir=str(tmp))).resolve()
+            (product / "legacy").mkdir()
+            (product / "legacy" / "RULES.md").write_bytes(b"old rules\n")
+            digest = "sha256:" + _opf_adopt_apply._sha256(b"old rules\n")
+            real_root = _opf_adopt_apply._open_product_root
+
+            def open_root(product_root):
+                fd = real_root(product_root)
+                arm(fd)                       # only the product-root descriptor's close is injected
+                return fd
+
+            def compose(ops):
+                ops.preserve("legacy/RULES.md", digest)
+                if body is not None:
+                    raise body
+            try:
+                with mock.patch.object(_opf_adopt_apply, "_open_product_root", open_root):
+                    _opf_adopt_apply.run_adopt_transaction(
+                        str(product), "adopt-20260101T000000Z-0123456789abcdef", compose)
+            finally:
+                shutil.rmtree(str(product), ignore_errors=True)
+        return call
+
+    def c_adopt_observe_open_directory(body):
+        def call():
+            parent = dirfd(tmp)
+            try:
+                with mock.patch.object(_opf_adopt_observe.planning, "_stamp", raiser(body)):
+                    _opf_adopt_observe._open_directory(parent, "other")
+            finally:
+                real_close(parent)
+        return call
+
+    def c_adopt_observe_put(body):
+        def call():
+            parent = dirfd(tmp)
+            name = "put-" + os.urandom(6).hex()
+            try:
+                _opf_adopt_observe._put(parent, name, b"data", types.SimpleNamespace(left=raiser(body)))
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(name, dir_fd=parent)
+                real_close(parent)
+        return call
+
+    def c_adopt_observe_quarantine(body):
+        def call():
+            owners = []
+            try:
+                with _opf_adopt_observe._quarantine(str(tmp / "q"), owners):
+                    arm()                     # the stack's first exit callback closes the quarantine fd
+                    if body is not None:
+                        raise body
+            finally:
+                for owner in owners:
+                    with contextlib.suppress(Exception):
+                        owner.finish(False)
+        return call
+
+    def c_changelog(body):
+        def call():
+            with mock.patch.object(_opf_store, "_read_toml_contained", raiser(body, None)):
+                _opf_changelog._load_inputs(res, tmp)
+        return call
+
+    def c_absorb(body):
+        def call():
+            with mock.patch.object(_opf_store, "_read_toml_contained", raiser(body, {})):
+                _opf_absorb._load_done(res, frozenset())
+        return call
+
+    def c_observe(body):
+        def call():
+            with first_call(os, "fstat", body, real_fstat):
+                _opf_observe._worktree_open_succeeds(tmp / "lease")
+        return call
+
+    def c_write_guard_read(body):
+        def call():
+            parent = dirfd(tmp)
+            try:
+                with first_call(os, "read", body, real_read):
+                    _opf_write_guard.read_lease_payload(parent, "lease")
+            finally:
+                real_close(parent)
+        return call
+
+    def c_write_guard_acquire(body):
+        def call():
+            root = dirfd(tmp)
+            try:
+                with then_arm(journal, "_write_all", body):
+                    _opf_write_guard.acquire_lease(root, "m", "render")
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(str(tmp / "m" / _opf_check.LEASE_NAME))
+                real_close(root)
+        return call
+
+    def c_prompt_pack(body):
+        if body is None:
+            # The site's normal path hands the fd to fdopen, so its normal vector drives the helper itself.
+            def call():
+                fd = os.open(str(tmp / "lease"), os.O_RDONLY)
+                arm()
+                check_opf_prompt_pack._close_fd_exc_safe(fd)
+            return call
+        real_require = check_opf_prompt_pack._require
+
+        def require(condition, *args, **kwargs):
+            if not condition:
+                arm()
+                try:
+                    real_require(condition, *args, **kwargs)
+                except check_opf_prompt_pack._Refusal as exc:
+                    body.want = exc           # the site's own refusal is the exception in flight
+                    raise
+
+        def call():
+            with mock.patch.object(check_opf_prompt_pack, "_require", require):
+                check_opf_prompt_pack._read_regular(str(tmp / "big"), 8, "vector")
+        return call
+
+    def c_opf_same_root(body):
+        def call():
+            root = dirfd(tmp)
+            calls = []
+
+            def fstat(fd, *args, **kwargs):
+                calls.append(None)
+                if len(calls) == 1:
+                    arm()
+                elif len(calls) == 2 and body is not None:
+                    raise body
+                return real_fstat(fd, *args, **kwargs)
+            try:
+                with mock.patch.object(os, "fstat", fstat):
+                    _init_same_root(tmp, root)
+            finally:
+                real_close(root)
+        return call
+
+    def c_opf_init_create(body):
+        def call():
+            root = dirfd(tmp)
+            try:
+                with then_arm(journal, "_recreate_file", body):
+                    _init_create(root, "created.txt", b"x\n")
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(str(tmp / "created.txt"))
+                real_close(root)
+        return call
+
+    cases = (
+        ("_opf_store._immediate_subdirs finally", c_store_subdirs, True),
+        ("_opf_store.load_manifest finally", c_store_load_manifest, True),
+        ("_opf_views._render_resolved_store two-close finally", c_views_render, True),
+        ("_opf_views._write_contained temp-file finally", c_views_write_temp, True),
+        ("_opf_adopt_apply._default_store_present_without_manifest finally", c_adopt_apply_probe, True),
+        ("_opf_adopt_apply.run_adopt_transaction product-root finally", c_adopt_apply_transaction, True),
+        # Its normal path returns the fd unclosed, so it has a body vector only.
+        ("_opf_adopt_observe._open_directory except", c_adopt_observe_open_directory, False),
+        ("_opf_adopt_observe._put descriptor-stack exit callback", c_adopt_observe_put, True),
+        ("_opf_adopt_observe._quarantine with-stack exit callback", c_adopt_observe_quarantine, True),
+        ("_opf_changelog._load_inputs finally", c_changelog, True),
+        ("_opf_absorb._load_done finally", c_absorb, True),
+        ("_opf_observe._worktree_open_succeeds finally", c_observe, True),
+        ("_opf_write_guard.read_lease_payload finally", c_write_guard_read, True),
+        ("_opf_write_guard.acquire_lease payload-fd finally", c_write_guard_acquire, True),
+        ("check_opf_prompt_pack._read_regular finally", c_prompt_pack, True),
+        ("opf._init_same_root finally", c_opf_same_root, True),
+        ("opf._init_create finally", c_opf_init_create, True),
+    )
+
+    def chain(exc):
+        seen = []
+        while exc is not None and all(exc is not e for e in seen):
+            seen.append(exc)
+            exc = exc.__cause__ if exc.__cause__ is not None else exc.__context__
+        return seen
+
+    def vector(kind, case):
+        """The failure messages of one vector run (empty: green), each prefixed by the assertion it broke."""
+        body = _Body("vector-original") if kind == "body" else None
+        call = case(body)
+        if kind == "caller":
+            inner = call
+
+            def call():
+                try:
+                    raise _CallerHandled("an exception the caller is handling")
+                except _CallerHandled:
+                    inner()
+        got, left = run(call)
+        fails = []
+        if state.injected is None:
+            fails.append("injection: the close injection never fired")
+        elif kind == "body":
+            if got is not getattr(body, "want", body):
+                fails.append("body: the in-flight exception was replaced (got {!r})".format(got))
+        elif all(e is not state.injected for e in chain(got)):
+            fails.append("{}: the close error was not raised (got {!r})".format(kind, got))
+        if left:
+            fails.append("descriptors: {} survived".format(left))
+        return fails
+
+    def fix1_close(fd):
+        """#377 fix 1's test: ANY exception in sys.exc_info() counts as in flight."""
+        if sys.exc_info()[1] is not None:
+            quietly(fd)
+        else:
+            propagating(fd)
+
+    flips = (
+        (None, ()),
+        ("MASK", ((_opf_store, "_close_fd_exc_safe", propagating),
+                  (check_opf_prompt_pack, "_close_fd_exc_safe", propagating),
+                  (_opf_store, "_close_fd_on_exit", lambda fd, *exc: propagating(fd)),
+                  (journal, "_close_fd_quietly", propagating))),
+        ("SWALLOW", ((_opf_store, "_close_fd_exc_safe", quietly),
+                     (check_opf_prompt_pack, "_close_fd_exc_safe", quietly),
+                     (_opf_store, "_close_fd_on_exit", lambda fd, *exc: quietly(fd)))),
+        ("CALLER-FRAME", ((_opf_store, "_close_fd_exc_safe", fix1_close),
+                          (check_opf_prompt_pack, "_close_fd_exc_safe", fix1_close),
+                          (_opf_store, "_close_fd_on_exit", lambda fd, *exc: fix1_close(fd)),
+                          (_opf_adopt_observe._UnwindingStack, "close",
+                           lambda stack: stack.__exit__(*sys.exc_info())))),
+    )
+    # The one assertion each flip must break, per vector kind; every other vector must stay green.
+    reds = {None: {}, "MASK": {"body": "body"}, "SWALLOW": {"normal": "normal", "caller": "caller"},
+            "CALLER-FRAME": {"caller": "caller"}}
+    failures = []
+    checks = 0
+    try:
+        for sub in (".working", "other", "m", "q"):
+            (tmp / sub).mkdir()
+        (tmp / "lease").write_bytes(b"payload")
+        (tmp / "big").write_bytes(b"x" * 64)
+        for flip, patches in flips:
+            with contextlib.ExitStack() as patched:
+                for obj, name, value in patches:
+                    patched.enter_context(mock.patch.object(obj, name, value))
+                for site, case, has_normal in cases:
+                    for kind in ("body", "normal", "caller") if has_normal else ("body",):
+                        fails = vector(kind, case)
+                        wanted = reds[flip].get(kind)
+                        ok = (not fails if wanted is None
+                              else bool(fails) and all(f.startswith(wanted + ":") for f in fails))
+                        checks += 1
+                        if not ok:
+                            failures.append((flip or "unflipped", kind, site, fails))
+                        print("  {} {} {} [{}]: {}".format(
+                            "PASS" if ok else "FAIL", flip or "unflipped", kind, site,
+                            "; ".join(fails) if fails else "green"))
+    except Exception as exc:  # noqa: BLE001  a fixture that cannot be built is a harness error, never a pass
+        print("opf close exc-safe vectors self-test: harness error ({!r})".format(exc), file=sys.stderr)
+        return EXIT_MALFORMED
+    finally:
+        shutil.rmtree(str(tmp), ignore_errors=True)
+    if failures:
+        print("opf close exc-safe vectors self-test: FAIL (failing {} of {} checks): {!r}".format(
+            len(failures), checks, failures[:4]), file=sys.stderr)
+        return EXIT_FINDING
+    print("opf close exc-safe vectors self-test: PASS ({} checks)".format(checks))
     return EXIT_OK
 
 
@@ -4504,6 +5049,7 @@ def _self_tests():
     ("opf-watchdog-shared-restore-deadline", _watchdog_shared_restore_deadline_self_test),
     ("opf-aggregator", _aggregator_self_test),
     ("opf-retained-close-offpath", _retained_close_offpath_self_test),
+    ("opf-close-exc-safe-vectors", _close_exc_safe_vectors_self_test),
     ("opf-cli", _cli_self_test),
 )
 
