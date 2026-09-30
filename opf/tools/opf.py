@@ -2944,11 +2944,15 @@ def _cmd_adopt(rest):
         print("opf adopt plan: --inputs FILE is required (the planning worksheet)", file=sys.stderr)
         return EXIT_MALFORMED
     try:
-        root_abs = os.path.abspath(root if root is not None else ".")
-        # abspath collapses `..` LEXICALLY, but the kernel resolves `DIR/link/..` to link's target's
-        # parent: where the physical resolution differs from the lexical one's, a `..` crossed a
-        # symlink, so refuse rather than evaluate a directory the operator did not name.
-        physical = os.path.realpath(root if root is not None else ".")
+        # The EFFECTIVE root is what the operator's traversal names: the --root value, or the current
+        # directory when --root is omitted. Every refusal below names it (never the absent --root value).
+        effective = root if root is not None else os.getcwd()
+        root_abs = os.path.abspath(effective)
+        # Two guard layers, both cannot-evaluate (exit 2). Layer 1: abspath collapses `..` LEXICALLY,
+        # but the kernel resolves `DIR/link/..` to link's target's parent: where the physical resolution
+        # differs from the lexical one's, a `..` crossed a symlink, so refuse rather than evaluate a
+        # directory the operator did not name.
+        physical = os.path.realpath(effective)
         lexical = os.path.realpath(root_abs)
     except (OSError, ValueError) as exc:   # e.g. a deleted current directory: cannot-evaluate, never exit 1
         print("opf adopt {}: cannot evaluate: cannot resolve the product root ({})".format(sub, exc),
@@ -2957,7 +2961,38 @@ def _cmd_adopt(rest):
     if physical != lexical:
         print("opf adopt {}: cannot evaluate: the product root {!r} resolves physically to {!r}, not "
               "{!r} (a `..` after a symlink); a symlinked root or ancestor refuses".format(
-                  sub, root, physical, root_abs), file=sys.stderr)
+                  sub, effective, physical, root_abs), file=sys.stderr)
+        return EXIT_MALFORMED
+    # Layer 2 (K9a round 3): the realpath comparison alone still ADMITS a `..` whose crossing lands back
+    # on the collapsed path (R/link/.. with the link resolving inside R) and a `..` after a component
+    # that does not exist (R/missing/..), so VALIDATE the ORIGINAL traversal too: every `..` must cross
+    # a REAL directory -- present, and neither a symlink nor a non-directory -- or the root refuses.
+    # A `..` through a real directory still works.
+    at = os.sep
+    try:
+        walked = effective if os.path.isabs(effective) else os.path.join(os.getcwd(), effective)
+        for comp in walked.split(os.sep):
+            if comp in ("", "."):
+                continue
+            if comp != "..":
+                at = os.path.join(at, comp)
+                continue
+            try:
+                crossed = os.lstat(at)
+            except (OSError, ValueError) as exc:
+                print("opf adopt {}: cannot evaluate: the product root {!r} crosses `..` out of {!r}, "
+                      "which cannot be read as a real directory ({}); a `..` may cross only a real "
+                      "directory".format(sub, effective, at, exc), file=sys.stderr)
+                return EXIT_MALFORMED
+            if not stat.S_ISDIR(crossed.st_mode):
+                print("opf adopt {}: cannot evaluate: the product root {!r} crosses `..` out of {!r}, "
+                      "which is a symlink or not a directory; a `..` may cross only a real "
+                      "directory".format(sub, effective, at), file=sys.stderr)
+                return EXIT_MALFORMED
+            at = os.path.dirname(at.rstrip(os.sep)) or os.sep
+    except (OSError, ValueError) as exc:   # e.g. a deleted current directory while joining a relative root
+        print("opf adopt {}: cannot evaluate: cannot resolve the product root ({})".format(sub, exc),
+              file=sys.stderr)
         return EXIT_MALFORMED
 
     if sub == "plan":
@@ -3765,6 +3800,21 @@ def _cli_self_test():
                     status_vectors.append(("--root with a .. through a real directory",
                                            os.path.join(clean, "..", "clean"), EXIT_OK,
                                            "no adoption run exists"))
+                    # K9a fix 3, each red on the fix-2 head, whose guard compared collapsed REALPATHS
+                    # only (physical == lexical admitted both): a `..` whose preceding component is a
+                    # symlink is refused even when the link resolves INSIDE the root (the kernel still
+                    # crossed a directory the operator never named), and a `..` after a component that
+                    # does not exist is refused rather than collapsed away.
+                    root = fresh_root("insidelink")
+                    os.mkdir(os.path.join(root, "childdir"))
+                    os.symlink(os.path.join(root, "childdir"), os.path.join(root, "inlink"))
+                    status_vectors.append(("--root DIR/link/.. with the link resolving inside DIR",
+                                           os.path.join(root, "inlink", ".."), EXIT_MALFORMED,
+                                           "crosses `..` out of"))
+                    root = fresh_root("missingdotdot")
+                    status_vectors.append(("--root DIR/missing/..",
+                                           os.path.join(root, "missing", ".."), EXIT_MALFORMED,
+                                           "crosses `..` out of"))
                 except OSError as exc:
                     print("opf cli self-test: harness error: could not build the adopt status fixtures "
                           "({})".format(exc), file=sys.stderr)
@@ -3839,6 +3889,22 @@ def _cli_self_test():
                     if rc != EXIT_MALFORMED or "cannot resolve the product root" not in out:
                         failures.append("adopt with an unresolvable cwd: rc={!r} (expected 2 + the "
                                         "cannot-resolve message)".format(rc))
+
+                # the physical-vs-lexical refusal NAMES the effective root (K9a fix 3): with --root
+                # omitted the effective root is the current directory, so the refusal must name that
+                # directory, never format the absent --root value (the fix-2 head printed 'the product
+                # root None'). The cwd is simulated as a `..`-after-symlink path, the deterministic
+                # stand-in for a cwd concurrently swapped for a symlink.
+                fake_cwd = os.path.join(abase, "dotdot", "link", "..")
+                os.getcwd = lambda: fake_cwd
+                try:
+                    fake_rc, fake_out = run_adopt(["adopt", "status"])
+                finally:
+                    os.getcwd = real_getcwd
+                if fake_rc != EXIT_MALFORMED or fake_cwd not in fake_out or "None" in fake_out:
+                    failures.append("adopt status refusal with --root omitted: rc={!r} (expected 2 "
+                                    "+ a message naming the effective root {!r} and never None; got "
+                                    "{!r})".format(fake_rc, fake_cwd, fake_out.strip()))
 
                 # plan with a MISSING worksheet -> 2 (fail-closed read boundary, the --set class).
                 expect(["adopt", "plan", "--inputs", os.path.join(abase, "absent.toml"),

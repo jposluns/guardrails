@@ -13,7 +13,10 @@ transaction per (run, phase), reconcile-first; and a dispatch table keyed by the
 ADOPT_OPS vocabulary in which EVERY op returns a refusing not-yet-executable verdict. No operation
 executes: the file ops, init-store composition, trust verification, approval capture, hook activation,
 rendering, receipt writing, the completion checks, retirement, and the CLI verb remain later slices.
-Outside its own self-test fixtures this module is dead code until those slices land.
+Live outside the self-test fixtures today: `opf adopt status` reads BOTH adoption homes through this
+module's read-only reporters (_open_product_root, verify_bundle/_verify_bundle_at and journal_state);
+every mutating entry -- the transaction shell, reconcile() and the dispatch table -- stays reachable
+only from the self-test until those slices land.
 
 Preserve-first (spec 14.2), enforced over the composed op list BEFORE any transaction opens: a live file
 is removed, OR OVERWRITTEN BY A `write` (which destroys the live bytes exactly as a removal does), ONLY
@@ -300,7 +303,10 @@ def verify_bundle(product_root, run_id):
     (disclosed): every inventory and payload read is bounded by the journal's contained-read cap
     (_journal._MAX_PRODUCT_READ_BYTES, 16 MiB), so a listed file over the cap is CANNOT-EVALUATE naming
     the cap, never truncated or slurped unbounded; the same ceiling bounds compose (_read_live), preimage
-    capture and poststate verification, so no bundle this shell writes can carry an over-cap payload."""
+    capture and poststate verification, so no bundle this shell writes can carry an over-cap payload.
+    Directory identities are RETAINED from the bundle listing through every inventory and payload read
+    (_verify_bundle_at), so a directory concurrently swapped onto a listed pathname is never re-resolved
+    mid-verification (round 3)."""
     if not is_run_id(run_id):
         return schema._cannot("bundle run id {!r} does not match the adoption grammar".format(run_id))
     root_fd = _open_product_root(product_root)
@@ -311,63 +317,122 @@ def verify_bundle(product_root, run_id):
 
 
 def _verify_bundle_at(root_fd, run_id, bundle):
-    try:
-        st = _journal._lstat_contained(root_fd, bundle)
-        if st is None:
-            return schema._invalid(["evidence bundle {!r} is missing".format(bundle)])
-        if not stat.S_ISDIR(st.st_mode):
-            return schema._cannot("evidence bundle {!r} is not a directory".format(bundle))
-        dfd = _journal._open_dir_contained(root_fd, bundle)
+    # Round-3 identity retention (the read_lock_owner_at posture applied to the bundle): ONE descriptor
+    # per directory, opened contained/no-follow beneath its retained parent and HELD from the bundle
+    # listing through every inventory and payload read, so no read re-resolves a pathname from root_fd
+    # after the listing. The bundle descriptor the listing used is the SAME descriptor every
+    # bundle-relative read goes through, and a listed payload outside the bundle walks its own chain the
+    # same way, sharing every already-opened ancestor, so all reads of one verification bind to one
+    # directory identity per path: a directory swapped onto a pathname between the listing and a read is
+    # never followed, and two directories neither of which verifies alone can never combine into one
+    # false success. A component that cannot be opened contained (symlinked, wrong-type, unreadable) is
+    # CANNOT-EVALUATE, never approximated.
+    dir_fds = dict()
+
+    def dir_at(parts):
+        """The RETAINED dir fd for the relative directory `parts` (a tuple of components; () is the
+        product root itself): each component is opened O_DIRECTORY|O_NOFOLLOW beneath its retained
+        parent exactly once and reused for every later read of this verification."""
+        if not parts:
+            return root_fd
+        fd = dir_fds.get(parts)
+        if fd is None:
+            pfd = dir_at(parts[:-1])
+            try:
+                fd = os.open(parts[-1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
+            except FileNotFoundError:
+                raise
+            except OSError as exc:
+                raise _journal.JournalError("cannot open contained directory component {!r} of "
+                                            "{!r} ({})".format(parts[-1], "/".join(parts), exc))
+            dir_fds[parts] = fd
+        return fd
+
+    def read_retained(relpath):
+        """_read_contained's sibling over the RETAINED parent chain (contained, no-follow, single-link,
+        capped at _journal._MAX_PRODUCT_READ_BYTES), never a fresh path walk from root_fd."""
+        parts = _journal._check_rel(relpath)
+        # O_NONBLOCK so a non-regular final component (e.g. a FIFO swapped in for the regular file)
+        # returns at once instead of blocking forever; the fstat below then refuses it.
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                     dir_fd=dir_at(tuple(parts[:-1])))
         try:
-            names = sorted(os.listdir(dfd))
+            fst = os.fstat(fd)
+            if not stat.S_ISREG(fst.st_mode):
+                raise _journal.JournalError("contained path {!r} is not a regular file".format(relpath))
+            if fst.st_nlink != 1:
+                raise _journal.JournalError("contained control file {!r} has {} hard links; "
+                                            "refusing to read a multiply-linked control file (a hardlink "
+                                            "to an out-of-tree victim, never our singly-linked control "
+                                            "file)".format(relpath, fst.st_nlink))
+            return _journal._read_fd(fd, cap=_journal._MAX_PRODUCT_READ_BYTES), fst
         finally:
-            os.close(dfd)
-    except (_journal.JournalError, OSError) as exc:
-        return schema._cannot("cannot list evidence bundle {!r} ({})".format(bundle, exc))
-    inventories = [name for name in names if store.is_evidence_inventory_name(name)]
-    if not inventories:
-        return schema._invalid(["evidence bundle {!r} has no inventory".format(bundle)])
-    if "inventory.toml" not in inventories:
-        return schema._cannot("evidence bundle {!r} has a phase inventory but no inventory.toml; a "
-                              "phase inventory never stands in for it (spec 4.2)".format(bundle))
-    expected = {}
-    for name in inventories:
-        rel = bundle + "/" + name
+            os.close(fd)
+
+    try:
         try:
-            raw, _fst = _journal._read_contained(root_fd, rel, require_single_link=True)
-            doc = tomllib.loads(raw.decode("utf-8"))
-        except (_journal.JournalError, OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-            return schema._cannot("inventory {!r} is unreadable or unparseable ({})".format(rel, exc))
-        checked = validate_inventory(doc, run_id)
-        if checked.status != store.VALID:
-            return schema.AdoptValidation(checked.status, [
-                "inventory {!r}: {}".format(rel, f) for f in checked.findings])
-        for row in doc["file"]:
-            if row["path"] in expected:
-                return schema._cannot("{!r} is claimed by more than one inventory of bundle "
-                                      "{!r}".format(row["path"], bundle))
-            expected[row["path"]] = row
-    findings = []
-    for path in sorted(expected):
-        row = expected[path]
-        try:
-            pst = _journal._lstat_contained(root_fd, path)
-            if pst is None:
-                findings.append("listed file {!r} is missing".format(path))
-                continue
-            if not stat.S_ISREG(pst.st_mode):
-                findings.append("listed entry {!r} is not a regular file".format(path))
-                continue
-            # bounded by _MAX_PRODUCT_READ_BYTES (16 MiB): an over-cap listed payload cannot be hashed
-            # here and is CANNOT-EVALUATE below, naming the cap (a disclosed capacity limit; the same
-            # ceiling bounds compose/capture/poststate, so the shell never writes such a bundle).
-            data, _fst = _journal._read_contained(root_fd, path, require_single_link=True)
+            st = _journal._lstat_contained(root_fd, bundle)
+            if st is None:
+                return schema._invalid(["evidence bundle {!r} is missing".format(bundle)])
+            if not stat.S_ISDIR(st.st_mode):
+                return schema._cannot("evidence bundle {!r} is not a directory".format(bundle))
+            dfd = dir_at(tuple(_journal._check_rel(bundle)))
+            names = sorted(os.listdir(dfd))
         except (_journal.JournalError, OSError) as exc:
-            return schema._cannot("cannot read listed file {!r} ({})".format(path, exc))
-        if len(data) != row["size"] or _sha256(data) != row["sha256"]:
-            findings.append("listed file {!r} does not match its recorded size and sha256 (payload "
-                            "drift)".format(path))
-    return schema._ok() if not findings else schema._invalid(findings)
+            return schema._cannot("cannot list evidence bundle {!r} ({})".format(bundle, exc))
+        inventories = [name for name in names if store.is_evidence_inventory_name(name)]
+        if not inventories:
+            return schema._invalid(["evidence bundle {!r} has no inventory".format(bundle)])
+        if "inventory.toml" not in inventories:
+            return schema._cannot("evidence bundle {!r} has a phase inventory but no inventory.toml; a "
+                                  "phase inventory never stands in for it (spec 4.2)".format(bundle))
+        expected = dict()
+        for name in inventories:
+            rel = bundle + "/" + name
+            try:
+                raw, _fst = read_retained(rel)
+                doc = tomllib.loads(raw.decode("utf-8"))
+            except (_journal.JournalError, OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+                return schema._cannot("inventory {!r} is unreadable or unparseable ({})".format(rel, exc))
+            checked = validate_inventory(doc, run_id)
+            if checked.status != store.VALID:
+                return schema.AdoptValidation(checked.status, [
+                    "inventory {!r}: {}".format(rel, f) for f in checked.findings])
+            for row in doc["file"]:
+                if row["path"] in expected:
+                    return schema._cannot("{!r} is claimed by more than one inventory of bundle "
+                                          "{!r}".format(row["path"], bundle))
+                expected[row["path"]] = row
+        findings = []
+        for path in sorted(expected):
+            row = expected[path]
+            try:
+                parts = _journal._check_rel(path)
+                try:
+                    pfd = dir_at(tuple(parts[:-1]))
+                except FileNotFoundError:
+                    findings.append("listed file {!r} is missing".format(path))
+                    continue
+                pst = _journal._lstat_at(pfd, parts[-1])
+                if pst is None:
+                    findings.append("listed file {!r} is missing".format(path))
+                    continue
+                if not stat.S_ISREG(pst.st_mode):
+                    findings.append("listed entry {!r} is not a regular file".format(path))
+                    continue
+                # bounded by _MAX_PRODUCT_READ_BYTES (16 MiB): an over-cap listed payload cannot be hashed
+                # here and is CANNOT-EVALUATE below, naming the cap (a disclosed capacity limit; the same
+                # ceiling bounds compose/capture/poststate, so the shell never writes such a bundle).
+                data, _fst = read_retained(path)
+            except (_journal.JournalError, OSError) as exc:
+                return schema._cannot("cannot read listed file {!r} ({})".format(path, exc))
+            if len(data) != row["size"] or _sha256(data) != row["sha256"]:
+                findings.append("listed file {!r} does not match its recorded size and sha256 (payload "
+                                "drift)".format(path))
+        return schema._ok() if not findings else schema._invalid(findings)
+    finally:
+        for fd in dir_fds.values():
+            _journal._close_fd_quietly(fd)
 
 
 # --- composition: preserve-first, derived inventories, immutable homes (spec 4.2, 14.2) ---------------
@@ -673,7 +738,10 @@ def reconcile(product_root):
                                       "fail-closed".format(JOURNAL_REL))
             jr_fd = _journal.open_journal_root_fd(root_fd, JOURNAL_REL)
             try:
-                owner = _journal.read_lock_owner(journal_root)
+                # beneath the HELD jr_fd (round 3, the journal_state posture): the journal path is
+                # never re-resolved after the contained open, so a concurrently swapped journal
+                # cannot hide the held lock or substitute a decoy's.
+                owner = _journal.read_lock_owner_at(jr_fd)
                 txns = _journal._journal_txn_dirs(jr_fd, journal_root)
                 opened = sorted(t.name for t in txns if _journal.classify_state(jr_fd, t) == "open")
                 if owner is None and not opened:
@@ -1034,6 +1102,11 @@ def _self_test_checks():
     check("dispatch-out-of-vocab-cannot-eval", dispatch(dict(op="delete-everything")).status == CANNOT)
     check("dispatch-malformed-row-invalid", dispatch(dict(op="create-file", path="a/b")).status == INVALID)
 
+    # round 3: the module introduction must name the LIVE status surface (`opf adopt status` reads both
+    # adoption homes through this module) instead of calling the module dead code.
+    check("module-intro-names-the-live-status-surface",
+          "dead code" not in (__doc__ or "") and "opf adopt status" in (__doc__ or ""))
+
     # 1: run identity. The homes grammar and the schema's shipped grammar agree on every vector; the mint
     # validates its own output; the import family and traversal spellings are refused.
     rid = mint_run_id(now, "0123456789abcdef")
@@ -1129,6 +1202,72 @@ def _self_test_checks():
         crossed = verify_bundle(_root3, rid)
         check("verify-cross-inventory-duplicate-cannot-eval",
               crossed.status == CANNOT and any("more than one inventory" in f for f in crossed.findings))
+
+    # 3c (round 3): bundle verification RETAINS its directory identities from the listing through every
+    # inventory and payload read, so a directory swapped onto the bundle pathname mid-verification is
+    # never re-resolved and two directories neither of which verifies alone can never combine into one
+    # false success. Vector A injects the swap immediately before the payload read (the round-3 QA
+    # reproduction: reading the original's inventory, then the replacement's payload bytes, reported
+    # VALID); vector B injects it immediately after the listing (the original's listing combined with
+    # the replacement's inventory and payload). Both must instead report the ORIGINAL bundle's payload
+    # drift, read through the retained descriptors.
+    _swap_payload_rel = home + "/payload.txt"
+
+    def _swap_fixture(base, tag, replacement_files):
+        broot = base / tag
+        (broot / _swap_payload_rel).parent.mkdir(parents=True)
+        (broot / _swap_payload_rel).write_bytes(b"BAD!!")
+        (broot / inventory_rel(rid)).write_bytes(
+            emit_inventory(rid, [inventory_row(_swap_payload_rel, b"GOOD!")]))
+        repl = broot / "replacement"
+        repl.mkdir()
+        for name, payload in replacement_files:
+            (repl / name).write_bytes(payload)
+
+        def swap():
+            os.rename(broot / home, str(broot / home) + ".aside")
+            os.rename(repl, broot / home)
+        return broot, swap
+
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        _swap_base = Path(temp).resolve()
+        # vector A: the replacement alone is CANNOT-EVALUATE (malformed inventory), the original alone
+        # is INVALID (payload drift); the swap fires immediately before the payload read.
+        broot_a, swap_a = _swap_fixture(_swap_base, "read", (
+            ("inventory.toml", b"invalid"), ("payload.txt", b"GOOD!")))
+        check("verify-swap-fixture-original-invalid", verify_bundle(broot_a, rid).status == INVALID)
+        _read_fired = []
+        _real_read_contained = _journal._read_contained
+
+        def _reading_swap(root_fd, relpath, require_single_link=False):
+            if relpath == _swap_payload_rel and not _read_fired:
+                _read_fired.append(relpath)
+                swap_a()
+            return _real_read_contained(root_fd, relpath, require_single_link=require_single_link)
+
+        with mock.patch.object(_journal, "_read_contained", _reading_swap):
+            swapped = verify_bundle(broot_a, rid)
+        check("verify-swap-before-payload-read-still-original-drift",
+              swapped.status == INVALID and any("payload drift" in f for f in swapped.findings))
+        # vector B: the replacement alone is CANNOT-EVALUATE (a malformed phase inventory its own
+        # listing would surface); the swap fires immediately after the bundle listing.
+        broot_b, swap_b = _swap_fixture(_swap_base, "list", (
+            ("inventory.toml", emit_inventory(rid, [inventory_row(_swap_payload_rel, b"GOOD!")])),
+            ("payload.txt", b"GOOD!"), ("inventory-completion.toml", b"invalid")))
+        _list_fired = []
+        _real_listdir = os.listdir
+
+        def _listing_swap(target):
+            names = _real_listdir(target)
+            if isinstance(target, int) and not _list_fired:
+                _list_fired.append(target)
+                swap_b()
+            return names
+
+        with mock.patch.object(os, "listdir", _listing_swap):
+            swapped = verify_bundle(broot_b, rid)
+        check("verify-swap-after-listing-still-original-drift",
+              swapped.status == INVALID and any("payload drift" in f for f in swapped.findings))
 
     # 4: the op-list invariants, over hand-built lists (check_apply_ops is pure).
     src, body = ".working/TODO.md", b"todo\n"
@@ -2365,6 +2504,36 @@ def _self_test_checks():
         check("held-lock-refuses-reconcile",
               "possibly-live owner" in (refusal(reconcile, root) or ""))
         _journal.release_lock(journal_root)
+
+    # 8b (round 3): reconcile reads the journal lock beneath the HELD contained journal-root fd (the
+    # round-2 journal_state posture), never by re-resolving the journal PATH: the journal path is
+    # swapped for a symlink to an empty decoy right after the contained open (the deterministic
+    # stand-in for a concurrent writer), and the product's own held lock must STILL refuse -- a
+    # path-based owner read saw the decoy's absent lock and reconciled straight through to a clean
+    # empty outcome list here.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root, files = fixture(temp)
+        journal_root = _journal_root(root)
+        root_fd = store._open_dir_nofollow(root)
+        try:
+            _journal.ensure_journal_dirs(root_fd, JOURNAL_REL)
+        finally:
+            os.close(root_fd)
+        _journal.acquire_lock(journal_root, "opf-adopt-selftest-live-peer")
+        decoy = Path(temp).resolve() / "decoy"
+        decoy.mkdir()
+        _real_open_jr = _journal.open_journal_root_fd
+
+        def _racing_open_jr(rfd, rel):
+            fd = _real_open_jr(rfd, rel)
+            os.rename(journal_root, str(journal_root) + ".moved")
+            os.symlink(decoy, journal_root)
+            return fd
+
+        with mock.patch.object(_journal, "open_journal_root_fd", _racing_open_jr):
+            _res, why = attempt(reconcile, root)
+        check("reconcile-lock-read-beneath-held-jr-fd",
+              why is not None and "possibly-live owner" in why)
 
     # 9: live re-observation over a throwaway fixture.
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
