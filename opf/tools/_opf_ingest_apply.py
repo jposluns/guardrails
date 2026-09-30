@@ -1,6 +1,13 @@
 """Ingest promotion coordinator (MIG-PR5 slice 1): promote a reviewed, ACCEPTED staged ingest run.
 
-`apply_ingest` owns the ingest state machine; it shares acceptance validation, the frozen review snapshot,
+RETIRED (spec 14.1): adoption is the only intake, so the public `apply_ingest` entry refuses on every
+store before any read, store resolution, operation or journal lock, or write, with
+`_opf_import.ORDINARY_IMPORT_RETIRED`, exactly as the import modes and `_opf_ingest.plan_ingest` do. The
+engine is retained, unreachable from the CLI, as `_apply_ingest` until the import engine is removed; only
+the self-tests reach it, through `_opf_import._self_test_engine` (and the red-on-revert candidates, through
+`_load_revert_candidate`).
+
+`_apply_ingest` owns the ingest state machine; it shares acceptance validation, the frozen review snapshot,
 and index helpers with `_opf_import`, and never calls `apply_import`. Sequence:
 
   1. read-only admission: UTC clock, run-id grammar, a co-located product/store root, activated homes 2;
@@ -92,7 +99,7 @@ class _RetainLock(Exception):
 
 
 class _Launch:
-    """The launch boundary's evidence, held by apply_ingest OUTSIDE every fallible post-launch step: whether
+    """The launch boundary's evidence, held by _apply_ingest OUTSIDE every fallible post-launch step: whether
     the publication attempt was launched, the indeterminate result built BEFORE the launch (so reporting a
     nested post-launch failure formats and constructs nothing), and the attempt's own result once formed.
     Only a formed result is an established outcome; a launched attempt without one retains the lock."""
@@ -698,7 +705,7 @@ def _post_launch_result(cap, run_id, attempt, ref, exc, returned):
     formatting step raises. Residual (the shared journal contract): the journal's raise does not say WHICH
     fsync failed, so a COMPLETE whose log fsync succeeded but whose closing directory fsync failed, durable
     in fact, is reported indeterminate too. A BaseException outside Exception (an interrupt or exit) is not
-    caught here; it propagates, and apply_ingest's launch boundary keeps the journal lock held for it."""
+    caught here; it propagates, and _apply_ingest's launch boundary keeps the journal lock held for it."""
     detail = _safe_text(exc)
     if returned:
         return _committed_result(ref, "live verification could not complete (" + detail + ")")
@@ -719,8 +726,8 @@ def _post_launch_result(cap, run_id, attempt, ref, exc, returned):
 def _launched_attempt(cap, root_fd, run_id, attempt, ref, ops, plan, live, run_rel):
     """The launched publication attempt owns its outcome end to end, TOTAL over Exception: from the launch
     on, no exception, from the transaction, verification, the outcome helper itself, or any diagnostic, can
-    reach the generic abort handler in apply_ingest. It returns a formed result or raises _RetainLock; a
-    failure raising even that (constructing _RetainLock itself) is caught by apply_ingest's launch
+    reach the generic abort handler in _apply_ingest. It returns a formed result or raises _RetainLock; a
+    failure raising even that (constructing _RetainLock itself) is caught by _apply_ingest's launch
     boundary, which reports the prebuilt indeterminate result and never aborted."""
     try:
         # ONE guard: no exception, from the transaction, verification, or any later step, can report a
@@ -800,7 +807,21 @@ def _apply_locked(cap, resolution, run_id, homes, now, launch):
                 pass
 
 
-def apply_ingest(product_root, run_id, *, now=None):
+def apply_ingest(product_root, run_id, **_kwargs):
+    """The retired ingest-apply promotion entry: refuses on every store before any read, store resolution,
+    operation or journal lock, or write (spec 14.1)."""
+    return ApplyResult(CANNOT_EVALUATE, [_opf_import.ORDINARY_IMPORT_RETIRED], promoted=False,
+                       outcome="aborted")
+
+
+# The retired public name and its real refusal, bound at import; _opf_import._self_test_engine rebinds it
+# to the retained engine for the self-tests (and _load_revert_candidate for the red-on-revert candidates),
+# as it does the import modes and _opf_ingest.plan_ingest.
+_RETIRED_MODES = ("apply_ingest",)
+_REFUSALS = {name: globals()[name] for name in _RETIRED_MODES}
+
+
+def _apply_ingest(product_root, run_id, *, now=None):
     """Promote the reviewed, accepted staged ingest run `run_id`. Returns an ApplyResult; `promoted` and
     `outcome` are read from the result, never inferred from the verdict. An attempt whose commit can be
     neither confirmed nor ruled out (including a readable COMPLETE whose durability is unconfirmed) reports
@@ -2061,6 +2082,38 @@ def _t_evidence_move(base, check):
                       for msg in rep.findings))
 
 
+def _t_ordinary_retired(base, check):
+    """Spec 14.1 (round-2 MAJOR): the public apply_ingest is retired and refuses FIRST, with the retirement
+    pointer, before any store resolution, operation-capability or journal-writer-lock acquisition, read or
+    write, even inside an engine block, over a promotion-ready reviewed run and over a root that resolves
+    no store, with promoted False, outcome "aborted", and the store tree byte-unchanged. Deleting the
+    refusal resolves the store, takes both locks, and promotes the accepted run."""
+    from unittest.mock import patch
+
+    root, rid, _run = _st_build(base, "ordinary-retired")
+    before = _st_tree(root)
+
+    def refused(result):
+        return (result.verdict == CANNOT_EVALUATE
+                and result.findings == [_opf_import.ORDINARY_IMPORT_RETIRED]
+                and result.promoted is False and result.outcome == "aborted")
+
+    with _opf_import._self_test_engine(engine=False), \
+            patch.object(_opf_import, "_resolve_store_for_review",
+                         wraps=_opf_import._resolve_store_for_review) as resolved, \
+            patch.object(_opf_oplock, "acquire_operation",
+                         wraps=_opf_oplock.acquire_operation) as operation, \
+            patch.object(_opf_journal, "acquire_writer_lock",
+                         wraps=_opf_journal.acquire_writer_lock) as writer:
+        result = apply_ingest(root, rid, now=_NOW)
+        unresolved = apply_ingest(str(base / "ordinary-retired-no-store"), rid, now=_NOW)
+    check("retired-refused", refused(result))
+    check("retired-unresolved-refused", refused(unresolved))
+    check("retired-resolves-and-locks-nothing",
+          not resolved.called and not operation.called and not writer.called)
+    check("retired-nothing-written", _st_tree(root) == before)
+
+
 TESTS = (("evidence-composition", _t_evidence_composition), ("evidence-move", _t_evidence_move),
          ("evidence-entries", _t_evidence_entries),
          ("happy-path", _t_happy_path), ("retry-monotonic", _t_retry_monotonic),
@@ -2069,7 +2122,8 @@ TESTS = (("evidence-composition", _t_evidence_composition), ("evidence-move", _t
          ("postverify-committed", _t_postverify_committed),
          ("postcommit-journal-fault", _t_postcommit_journal_fault),
          ("postlaunch-indeterminate", _t_postlaunch_indeterminate), ("postlaunch-total", _t_postlaunch_total),
-         ("postlaunch-retain", _t_postlaunch_retain)) + tuple(
+         ("postlaunch-retain", _t_postlaunch_retain),
+         ("ordinary-retired", _t_ordinary_retired)) + tuple(
              ("staged-{}-{}".format(kind, case), _t_staged_apply(kind, case))
              for kind in ("import", "ingest") for case in ("clean", "corrupt", "withheld"))
 
@@ -2154,7 +2208,10 @@ _REVERT_MARKER = "# --- in-tree red-on-revert discrimination (mirrors"
 
 def _load_revert_candidate(source, name, file_path):
     """Compile `source` into a fresh module registered under `name`, injecting __file__ so the module's
-    own sys.path bootstrap runs. The caller pops it from sys.modules when the phase is done."""
+    own sys.path bootstrap runs, and bind each retired public name (`_RETIRED_MODES`) to its retained
+    engine, exactly as _opf_import._self_test_engine binds the module under test (the refusals have their
+    own vectors and are never what a discriminator mutates). The caller pops it from sys.modules when the
+    phase is done."""
     import types
     module = types.ModuleType(name)
     module.__dict__["__file__"] = file_path
@@ -2164,6 +2221,8 @@ def _load_revert_candidate(source, name, file_path):
     except BaseException:
         sys.modules.pop(name, None)
         raise
+    for retired in getattr(module, "_RETIRED_MODES", ()):
+        setattr(module, retired, getattr(module, "_" + retired))
     return module
 
 

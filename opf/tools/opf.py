@@ -2458,13 +2458,15 @@ def _cmd_import(rest):
     Wires the reserved import grammar onto the U7 operation layer (_opf_import scan/plan/review/apply); it
     adds NO operation-layer behaviour. EXACTLY ONE mode is required: a bare `opf import` or two modes is a
     usage error (exit 2). The parser is the house fail-closed idiom (unknown token, an empty or
-    option-looking or duplicate value -> exit 2), matching _cmd_render's --root loop; each run-id operand is
-    validated against the U7 run-id grammar as an identifier BEFORE any path use.
+    option-looking or duplicate value -> exit 2), matching _cmd_render's --root loop.
 
     RETIRED (spec 14.1): each mode below now reaches the operation layer's refusal, exit 2, before the
-    clock, any input file or any write; only the argv usage checks (the parser, the mode-combination rules
-    and the run-id grammar) precede it. The per-mode contract that follows describes the retained engine
-    behind it.
+    clock, any input file or any write, and BEFORE any mode-specific argv validation (round-2 MINOR): the
+    former mode-combination rules and the CLI run-id grammar check are retired with the modes, so a missing
+    or extra companion flag or a run-id outside the grammar meets the retirement pointer, never a usage
+    error for a mode this build refuses. Only the token parser (an unknown flag, a duplicate, an empty or
+    missing value) and the exactly-one-mode rule precede it. The per-mode contract that follows describes
+    the retained engine behind it.
 
     Modes and the 0/1/2 exit contract (0 clean, 1 finding, 2 cannot-evaluate), read straight from the
     operation-layer verdict via _import_exit:
@@ -2606,70 +2608,17 @@ def _cmd_import(rest):
             print("opf import: unrecognized argument {!r}".format(tok), file=sys.stderr)
             return EXIT_MALFORMED
 
-    # Mode-combination validation (fail-closed: an unsupported flag for the chosen mode is a usage error).
     ingest_form = dispositions_file is not None or ingest_options_file is not None
     if mode is None:
         print("opf import: give exactly one mode (--scan / --plan / --review / --apply)", file=sys.stderr)
         return EXIT_MALFORMED
-    if mode == "scan":
-        if set_file is None:
-            print("opf import: --scan requires --set FILE", file=sys.stderr)
-            return EXIT_MALFORMED
-        if ingest_form or include:
-            print("opf import: --dispositions / --ingest-options / --include are valid only with the "
-                  "root-ingest --plan form", file=sys.stderr)
-            return EXIT_MALFORMED
-        if actor is not None or decisions_file is not None or interactive:
-            print("opf import: --actor / --decisions / --interactive are valid only with --review",
-                  file=sys.stderr)
-            return EXIT_MALFORMED
-    elif mode == "plan":
-        # --plan accepts EXACTLY ONE of two sub-forms: the declared-set import (--set FILE) XOR the
-        # root-ingest disposition planner (--dispositions FILE --ingest-options FILE [--include ...]).
-        if bool(set_file) == bool(ingest_form):
-            print("opf import: --plan requires exactly one of --set FILE (declared-set import) or "
-                  "--dispositions FILE --ingest-options FILE (root-ingest planner)", file=sys.stderr)
-            return EXIT_MALFORMED
-        if ingest_form and (dispositions_file is None or ingest_options_file is None):
-            print("opf import: the root-ingest --plan form requires BOTH --dispositions FILE and "
-                  "--ingest-options FILE", file=sys.stderr)
-            return EXIT_MALFORMED
-        if include and not ingest_form:
-            print("opf import: --include is valid only with the root-ingest --plan form", file=sys.stderr)
-            return EXIT_MALFORMED
-        if actor is not None or decisions_file is not None or interactive:
-            print("opf import: --actor / --decisions / --interactive are valid only with --review",
-                  file=sys.stderr)
-            return EXIT_MALFORMED
-    elif mode == "review":
-        if set_file is not None or ingest_form or include:
-            print("opf import: --set / --dispositions / --ingest-options / --include are not valid with "
-                  "--review", file=sys.stderr)
-            return EXIT_MALFORMED
-        if actor is None:
-            print("opf import: --review requires --actor NAME", file=sys.stderr)
-            return EXIT_MALFORMED
-        if bool(decisions_file) == bool(interactive):
-            print("opf import: --review requires exactly one of --decisions FILE / --interactive",
-                  file=sys.stderr)
-            return EXIT_MALFORMED
-    else:   # apply
-        if (set_file is not None or actor is not None or decisions_file is not None or interactive
-                or ingest_form or include):
-            print("opf import: --apply takes only a <run-id>", file=sys.stderr)
-            return EXIT_MALFORMED
-
-    # A run-id operand is an identifier: validate it against the U7 run-id grammar BEFORE any path use
-    # (guard-input-soundness), so a value outside the grammar is a located cannot-evaluate, never a path.
-    if run_id is not None and not _opf_import._RUN_ID_RE.match(run_id):
-        print("opf import: run-id {!r} does not match the run-id grammar imp-<UTCSTAMP>Z-<hash16> "
-              "(fail-closed)".format(run_id), file=sys.stderr)
-        return EXIT_MALFORMED
-
     # Spec 14.1: every mode is retired, and its operation-layer refusal reads no operand, so the verb
-    # forwards to it before the clock or any --set / --dispositions / --ingest-options / --decisions file is
-    # read: a malformed input file meets the retirement pointer, not a reader error (round-1 MINOR-2). The
-    # readers stay, unused on this path, until the import engine is removed.
+    # forwards to it BEFORE any mode-specific argv validation and before the clock or any --set /
+    # --dispositions / --ingest-options / --decisions file is read (round-1 MINOR-2; round-2 MINOR): a
+    # missing or extra companion flag, a run-id outside the grammar, and a malformed input file each meet
+    # the retirement pointer, never a mode-specific usage error or a reader error for a mode this build
+    # refuses. The former mode-combination rules and the CLI run-id grammar check are retired with the
+    # modes; the readers stay, unused on this path, until the import engine is removed.
     root_abs = os.path.abspath(root if root is not None else ".")
     try:
         if mode == "scan":
@@ -2783,29 +2732,30 @@ def _cli_self_test():
         expect(["absorb", "--covers", ""], EXIT_MALFORMED)       # empty covers refused
         expect(["absorb", "--bogus"], EXIT_MALFORMED)            # unknown arg
 
-        # import verb ROUTING (OPF-IMPORT-VERB), judged on exit code only. These grammar cases fail closed in
-        # the parser BEFORE any store resolution, so they need no store on disk. A bare `import` and every
-        # malformed combination is a usage error (exit 2); the CLEAN 0 / FINDING 1 discrimination over a real
-        # store rides _import_leg below (and reverting the import dispatch routes these to the fail-closed
+        # import verb ROUTING (OPF-IMPORT-VERB), judged on exit code only. These cases fail closed BEFORE
+        # any store resolution, so they need no store on disk. A bare `import`, a token-parser error and a
+        # duplicate mode are usage errors (exit 2); a well-parsed retired mode, whatever its companion
+        # flags, meets the operation layer's retirement refusal (also exit 2; the refusal/usage split is
+        # asserted in _import_leg below, and reverting the import dispatch routes these to the fail-closed
         # KNOWN_VERBS branch, returning 2 where 0/1 is expected -- the wiring discriminator).
         _VALID_RID = "imp-20260101T000000Z-0123456789abcdef"   # syntactically valid; names no staged run
         expect(["import"], EXIT_MALFORMED)                       # bare: exactly one mode required
         expect(["import", "--root", "."], EXIT_MALFORMED)        # --root but no mode
         expect(["import", "--set", "s.toml"], EXIT_MALFORMED)    # --set but no mode
         expect(["import", "--scan", "--plan", "--set", "s.toml"], EXIT_MALFORMED)  # two modes
-        expect(["import", "--scan"], EXIT_MALFORMED)             # --scan requires --set
-        expect(["import", "--plan"], EXIT_MALFORMED)             # --plan requires --set
+        expect(["import", "--scan"], EXIT_MALFORMED)             # retired --scan: the refusal
+        expect(["import", "--plan"], EXIT_MALFORMED)             # retired --plan: the refusal
         expect(["import", "--scan", "--set"], EXIT_MALFORMED)    # --set needs a value
-        expect(["import", "--scan", "--set", "s.toml", "--actor", "x"], EXIT_MALFORMED)  # actor only on review
+        expect(["import", "--scan", "--set", "s.toml", "--actor", "x"], EXIT_MALFORMED)  # retired --scan: the refusal
         expect(["import", "--review"], EXIT_MALFORMED)           # --review needs a <run-id>
-        expect(["import", "--review", _VALID_RID], EXIT_MALFORMED)   # missing --actor
-        expect(["import", "--review", _VALID_RID, "--actor", "x"], EXIT_MALFORMED)  # neither decisions/interactive
+        expect(["import", "--review", _VALID_RID], EXIT_MALFORMED)   # retired --review: the refusal
+        expect(["import", "--review", _VALID_RID, "--actor", "x"], EXIT_MALFORMED)  # retired --review: the refusal
         expect(["import", "--review", _VALID_RID, "--actor", "x", "--decisions", "d.json",
-                "--interactive"], EXIT_MALFORMED)                # both decisions and interactive
+                "--interactive"], EXIT_MALFORMED)                # retired --review: the refusal
         expect(["import", "--review", _VALID_RID, "--actor", "", "--interactive"], EXIT_MALFORMED)  # empty actor
-        expect(["import", "--review", "not-a-run-id", "--actor", "x", "--interactive"], EXIT_MALFORMED)  # bad rid
-        expect(["import", "--apply", _VALID_RID, "--actor", "x"], EXIT_MALFORMED)   # --apply takes only a run-id
-        expect(["import", "--apply", "not-a-run-id"], EXIT_MALFORMED)   # bad run-id grammar
+        expect(["import", "--review", "not-a-run-id", "--actor", "x", "--interactive"], EXIT_MALFORMED)  # the refusal
+        expect(["import", "--apply", _VALID_RID, "--actor", "x"], EXIT_MALFORMED)   # retired --apply: the refusal
+        expect(["import", "--apply", "not-a-run-id"], EXIT_MALFORMED)   # retired --apply: the refusal
         expect(["import", "--bogus", "--scan", "--set", "s.toml"], EXIT_MALFORMED)  # unknown arg
         expect(["import", "--root"], EXIT_MALFORMED)             # --root needs a value
 
@@ -2922,7 +2872,10 @@ def _cli_self_test():
             NOT-ADOPTED root and over an adopted store holding a run the retained engine staged and
             accepted; deleting one operation-layer refusal turns its row red. A malformed --set /
             --decisions / --dispositions / --ingest-options file meets the same refusal, its reader never
-            run, while an argv usage error still exits 2 before it (without the refusal text)."""
+            run, and so does a mode-specific argv violation (a missing or extra companion flag, a run-id
+            outside the grammar): the refusal precedes the retired mode-combination validation (round-2
+            MINOR). Only a token-parser usage error (a flag missing its value) still exits 2 before it,
+            without the refusal text."""
             import datetime
             import tomllib
 
@@ -3145,11 +3098,38 @@ def _cli_self_test():
                 malformed(["import", "--plan", "--dispositions", not_toml, "--ingest-options", not_toml,
                            "--root", store])
 
-                # An argv usage error is decided before the refusal and stays exit 2 without its text.
-                rc, out = run_cli(["import", "--scan", "--root", store])
-                if rc != EXIT_MALFORMED or refusal in out or "--scan requires --set FILE" not in out:
-                    failures.append("import --scan without --set: rc={!r} (expected the argv usage error at "
-                                    "exit 2, before the refusal)".format(rc))
+                # Round-2 MINOR: a retired mode flag meets the refusal BEFORE the retired mode-specific
+                # argv validation, so a missing or extra companion flag or a run-id outside the grammar
+                # reaches the retirement pointer, never a usage error for a retired mode. Flip: restoring
+                # the mode-combination validation (or the CLI run-id grammar check) ahead of the dispatch
+                # turns its rows red.
+                usage_texts = ("requires --set FILE", "are valid only with", "requires exactly one of",
+                               "requires BOTH", "are not valid with", "requires --actor NAME",
+                               "takes only a <run-id>", "does not match the run-id grammar")
+                for argv, what in (
+                        (["import", "--scan", "--root", store], "--scan without --set"),
+                        (["import", "--plan", "--root", store], "--plan without --set/--dispositions"),
+                        (["import", "--scan", "--set", set_file, "--actor", "x", "--root", store],
+                         "--scan with --actor"),
+                        (["import", "--review", rid, "--root", store], "--review without --actor"),
+                        (["import", "--review", rid, "--actor", "tester", "--decisions", complete,
+                          "--interactive", "--root", store],
+                         "--review with both --decisions/--interactive"),
+                        (["import", "--apply", rid, "--set", set_file, "--root", store],
+                         "--apply with --set"),
+                        (["import", "--apply", "not-a-run-id", "--root", store],
+                         "--apply outside the run-id grammar"),
+                ):
+                    rc, out = run_cli(argv)
+                    if rc != EXIT_MALFORMED or refusal not in out or any(t in out for t in usage_texts):
+                        failures.append("import {}: rc={!r} (expected the retirement refusal before the "
+                                        "retired mode-specific argv validation)".format(what, rc))
+                # A token-parser usage error (a flag missing its value) is still decided before the refusal
+                # and stays exit 2 without its text.
+                rc, out = run_cli(["import", "--scan", "--set", "--root", store])
+                if rc != EXIT_MALFORMED or refusal in out or "requires a non-empty argument" not in out:
+                    failures.append("import --scan with a valueless --set: rc={!r} (expected the token-"
+                                    "parser usage error at exit 2, before the refusal)".format(rc))
             finally:
                 shutil.rmtree(ibase, ignore_errors=True)
             return None
@@ -3201,9 +3181,10 @@ def _cli_self_test():
               "store, NOT-ADOPTED -> 0 (2 with --require-store) and a garbage store -> 2; "
               "import surfaces the retired --scan / --plan / --review / --apply refusal (spec 14.1) at exit 2 "
               "over a NOT-ADOPTED root and over an accepted staged run, each mutating nothing, before any "
-              "input reader (a malformed --set / --decisions / --dispositions / --ingest-options meets the "
-              "refusal; an argv usage error precedes it); fixture-setup and fixture-I/O OSError fail closed "
-              "to exit 2)")
+              "input reader AND before any mode-specific argv validation (a malformed --set / --decisions / "
+              "--dispositions / --ingest-options, a missing or extra companion flag, and a run-id outside "
+              "the grammar each meet the refusal; only a token-parser usage error precedes it); "
+              "fixture-setup and fixture-I/O OSError fail closed to exit 2)")
         return EXIT_OK
     except Exception as exc:  # noqa: BLE001  final fail-closed backstop, never an uncaught exit-1 escape
         print("opf cli self-test: harness error: unexpected error ({!r}); failing closed to exit 2".format(

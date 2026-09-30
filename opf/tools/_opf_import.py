@@ -27,11 +27,11 @@ it (spec 14.1, Fable-synthesized plan):
     is the accompanying gate over a staged run, the scan layer, and the per-run transaction record.
 
 RETIRED (spec 14.1): adoption is the only intake, so the five public entry points above, the `stage_import`
-primitive beneath them, and `_opf_ingest.plan_ingest` now refuse before any read or write with
-ORDINARY_IMPORT_RETIRED on every store. Their engines are retained, unreachable from the CLI, as
-`_scan_import`, `_plan_import`, `_review_import`, `_review_import_interactive`, `_apply_import`,
-`_stage_import` and `_opf_ingest._plan_ingest` until the import engine is removed; only the self-tests
-reach them, through `_self_test_engine`.
+primitive beneath them, `_opf_ingest.plan_ingest`, and the `_opf_ingest_apply.apply_ingest` promotion entry
+now refuse before any read or write with ORDINARY_IMPORT_RETIRED on every store. Their engines are retained,
+unreachable from the CLI, as `_scan_import`, `_plan_import`, `_review_import`, `_review_import_interactive`,
+`_apply_import`, `_stage_import`, `_opf_ingest._plan_ingest` and `_opf_ingest_apply._apply_ingest` until the
+import engine is removed; only the self-tests reach them, through `_self_test_engine`.
 
 Offline, stdlib only, fail-closed. This module takes an operator-enumerated set of legacy SOURCE files
 and an untrusted MAPPING PLAN, validates both, mints record ids from the store's counters, and STAGES a
@@ -6443,16 +6443,19 @@ def _self_test_engine(engine=True):
     """SELF-TEST ONLY: for one `with` block, bind the retired public names to their retained engines (or,
     with engine=False, back to the real refusals, so a refusal vector nested in an engine block still faces
     them): this module's six in this module and in the importable `_opf_import` (distinct objects when this
-    file runs as __main__), and `_opf_ingest.plan_ingest` in the importable `_opf_ingest` and in __main__
-    when that is the same file. The engine vectors, here and in the sibling gates, predate the retirement
-    and still exercise the engine through those names; production never enters this."""
+    file runs as __main__), and `_opf_ingest.plan_ingest` and `_opf_ingest_apply.apply_ingest` in their
+    importable modules and in __main__ when that is one of those files. The engine vectors, here and in the
+    sibling gates, predate the retirement and still exercise the engine through those names; production
+    never enters this."""
     import contextlib
     import importlib
     from unittest.mock import patch
     ingest = importlib.import_module("_opf_ingest")
+    ingest_apply = importlib.import_module("_opf_ingest_apply")
     main = sys.modules.get("__main__")
-    mods = [sys.modules[__name__], importlib.import_module("_opf_import"), ingest]
-    if os.path.realpath(getattr(main, "__file__", None) or "") == os.path.realpath(ingest.__file__):
+    mods = [sys.modules[__name__], importlib.import_module("_opf_import"), ingest, ingest_apply]
+    if os.path.realpath(getattr(main, "__file__", None) or "") in (
+            os.path.realpath(ingest.__file__), os.path.realpath(ingest_apply.__file__)):
         mods.append(main)
     stack = contextlib.ExitStack()
     for mod in {id(m): m for m in mods}.values():
@@ -6463,13 +6466,16 @@ def _self_test_engine(engine=True):
 
 
 def _self_test_ordinary_refused():
-    """Every retired public mode, and the stage_import primitive beneath them, refuses on every store before
-    any write (spec 14.1): over an unresolved root, and over a store holding a run the engine staged and
-    accepted, each returns CANNOT-EVALUATE with ORDINARY_IMPORT_RETIRED and leaves every path and byte
-    unchanged. Returns 0 pass, 1 fail."""
+    """Every retired public mode, the stage_import primitive beneath them, and the ingest-apply promotion
+    entry (_opf_ingest_apply.apply_ingest) refuse on every store before any write (spec 14.1): over an
+    unresolved root, and over a store holding a run the engine staged and accepted, each returns
+    CANNOT-EVALUATE with ORDINARY_IMPORT_RETIRED (the ingest-apply entry with promoted False, outcome
+    "aborted") and leaves every path and byte unchanged. Returns 0 pass, 1 fail."""
     import io
     import shutil
     import tempfile
+
+    import _opf_ingest_apply
     failures, count = [], [0]
 
     def check(name, cond):
@@ -6500,6 +6506,7 @@ def _self_test_ordinary_refused():
 
     def modes(root, rid):
         stdin, stdout = TTY("accept\n\n" * 4), io.StringIO()
+        ingest_apply = _opf_ingest_apply.apply_ingest(root, rid, now=now)
         return (("scan", scan_import(root, ["a.txt"])),
                 ("plan", plan_import(root, ["a.txt"], now=now, run_nonce="refused")),
                 ("stage", stage_import(root, ["a.txt"], whole, now=now, run_nonce="refused")),
@@ -6507,7 +6514,10 @@ def _self_test_ordinary_refused():
                 ("interactive", review_import_interactive(root, rid, actor="tester", now=now,
                                                           in_stream=stdin, out_stream=stdout)),
                 ("interactive-no-io", stdin.reads == 0 and stdout.getvalue() == ""),
-                ("apply", apply_import(root, rid, now=now)))
+                ("apply", apply_import(root, rid, now=now)),
+                ("ingest-apply", ingest_apply),
+                ("ingest-apply-aborted", ingest_apply.promoted is False
+                 and ingest_apply.outcome == "aborted"))
 
     now = datetime.datetime(2026, 9, 9, 12, 0, 0, tzinfo=datetime.timezone.utc)
     base = Path(tempfile.mkdtemp(prefix="opf-import-refused-")).resolve()
