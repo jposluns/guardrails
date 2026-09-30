@@ -7360,8 +7360,8 @@ def _watchdog_completion_case(mode):
         # there is this leg's OWN coverage assert, not leg 11's
         # tripwire (fix 13, QA34 claude MINOR: leg 11 covers the two
         # exceptional-path calls only, and dropping a normal-path
-        # site shifts its label's source-order ordinals, stranding
-        # that ordinal's case as stale). Reproduced for the
+        # site removes or shifts its label's source-order ordinals,
+        # stranding a case as stale). Reproduced for the
         # unfinished-launch abandonment site during fix 11 and for
         # both owned-handle cleanup sites during fix 12. fix 17
         # (QA38 codex BLOCKER, reproduced by the orchestrator): the
@@ -7370,9 +7370,10 @@ def _watchdog_completion_case(mode):
         # -- `pending = exc if not self.armed else None` at
         # _finish_close's capture, with the finish fixture pinned
         # armed=False -- passed every case. Each case therefore now
-        # runs once per fixture state its member's own code branches
-        # on, DERIVED per site from the member AST (derived_overrides
-        # below), and that exact QA38 mutation is pinned red after
+        # runs once per fixture state DERIVED per site from its
+        # member's own branch tests by the bounded grammar below
+        # (derived_overrides; single-attribute deviations only),
+        # and that exact QA38 mutation is pinned red after
         # the matrix. fix 18 (QA39 claude BLOCKER / gemini BLOCKER,
         # maintainer decision 2026-09-29): the derivation is a
         # BOUNDED, DISCLOSED guarantee, not widened past its
@@ -7493,8 +7494,9 @@ def _watchdog_completion_case(mode):
             # are DERIVED from the site's own code, never hand-listed.
             # Every syntactic self.<attr> (assignment targets
             # included) inside an If/While/IfExp test of the member
-            # (nested defs included) names an attribute the
-            # site branches on. fix 19 (QA40 claude/codex/gemini
+            # (nested defs included) is treated as an attribute the
+            # site branches on (an assignment target may not be one;
+            # that only adds states). fix 19 (QA40 claude/codex/gemini
             # BLOCKER) and fix 20 (QA41 codex BLOCKER / claude
             # MAJOR), maintainer decisions 2026-09-29: the
             # recognized grammar, stated in exact AST terms:
