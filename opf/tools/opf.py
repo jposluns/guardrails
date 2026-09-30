@@ -40,9 +40,10 @@ the U7 operation layer (_opf_import scan/plan/review/apply). Exactly one mode is
 the canonical inventory to stdout writing nothing, `--plan` stages a candidate run, `--review` captures an
 attributed acceptance.json (no live-store write), and `--apply` wires onto the PR-C apply-promotion
 (the journaled, verified-restore cutover that promotes an accepted run). Each mode maps the operation layer's
-0/1/2 verdict to the CLI exit contract. Unlike the applicability-probe siblings, import is a REQUESTED
-operation: an unresolved / NOT-ADOPTED root fails cannot-evaluate (exit 2) with a "run `opf init` first"
-message rather than reporting NOT APPLICABLE (divergence D7).
+0/1/2 verdict to the CLI exit contract. Those four modes are now RETIRED (spec 14.1): the operation layer
+refuses each on every root, a NOT-ADOPTED one included, before any write, and the verb surfaces that
+refusal at exit 2 before reading any input file (only its argv usage checks precede it); `--show-review`
+and `--diff-review` remain.
 
 `init` HAS landed: `opf init [--root DIR]` creates validated store sources, a pointer, and a starter
 `CHANGELOG.md` when none exists, without git writes or rendering.
@@ -2441,8 +2442,15 @@ def _cmd_import(rest):
     Wires the reserved import grammar onto the U7 operation layer (_opf_import scan/plan/review/apply); it
     adds NO operation-layer behaviour. EXACTLY ONE mode is required: a bare `opf import` or two modes is a
     usage error (exit 2). The parser is the house fail-closed idiom (unknown token, an empty or
-    option-looking or duplicate value -> exit 2), matching _cmd_render's --root loop; each run-id operand is
-    validated against the U7 run-id grammar as an identifier BEFORE any path use.
+    option-looking or duplicate value -> exit 2), matching _cmd_render's --root loop.
+
+    RETIRED (spec 14.1): each mode below now reaches the operation layer's refusal, exit 2, before the
+    clock, any input file or any write, and BEFORE any mode-specific argv validation (round-2 MINOR): the
+    former mode-combination rules and the CLI run-id grammar check are retired with the modes, so a missing
+    or extra companion flag or a run-id outside the grammar meets the retirement pointer, never a usage
+    error for a mode this build refuses. Only the token parser (an unknown flag, a duplicate, an empty or
+    missing value) and the exactly-one-mode rule precede it. The per-mode contract that follows describes
+    the retained engine behind it.
 
     Modes and the 0/1/2 exit contract (0 clean, 1 finding, 2 cannot-evaluate), read straight from the
     operation-layer verdict via _import_exit:
@@ -2462,19 +2470,14 @@ def _cmd_import(rest):
                            finding; 2 not-promotion-ready / unverifiable / indeterminate). Mutates the store
                            only through the journaled, verified-restore cutover.
 
-    D7 (verb-family precedent, deliberate divergence from the sibling verbs): every import mode requires a
-    RESOLVED, initialized store; an unresolved / NOT-ADOPTED root is exit 2 with the operation layer's "run
-    `opf init` first" message, NOT the NOT-APPLICABLE exit 0 that doctor/render/upgrade report on a
-    non-adopter root. Those siblings are applicability probes; import is a REQUESTED operation whose
-    precondition (an adopted store) failed, so it fails cannot-evaluate rather than reporting not-applicable.
+    D7 (verb-family precedent, deliberate divergence from the sibling verbs): an unresolved / NOT-ADOPTED
+    root is exit 2, NOT the NOT-APPLICABLE exit 0 that doctor/render/upgrade report on a non-adopter root;
+    import is a REQUESTED operation, so its refusal is a cannot-evaluate rather than not-applicable.
 
-    `now` is read from the clock (timestamp-from-clock) and `run_nonce` from os.urandom, both injected into
-    the operation layer (the deterministic run id composes them). Every residual escape (a resolver/gather/
-    operation escape, an unreadable --set/--decisions file) fails closed to exit 2 (never a false 0 or an
-    uncaught exit-1), the same class-width backstop render/doctor carry."""
+    Every residual escape from the operation layer fails closed to exit 2 (never a false 0 or an uncaught
+    exit-1), the same class-width backstop render/doctor carry."""
     if "--show-review" in rest or "--diff-review" in rest:
         return _cmd_import_review_aid(rest)
-    import datetime
 
     root = None
     mode = None
@@ -2589,138 +2592,38 @@ def _cmd_import(rest):
             print("opf import: unrecognized argument {!r}".format(tok), file=sys.stderr)
             return EXIT_MALFORMED
 
-    # Mode-combination validation (fail-closed: an unsupported flag for the chosen mode is a usage error).
     ingest_form = dispositions_file is not None or ingest_options_file is not None
     if mode is None:
         print("opf import: give exactly one mode (--scan / --plan / --review / --apply)", file=sys.stderr)
         return EXIT_MALFORMED
-    if mode == "scan":
-        if set_file is None:
-            print("opf import: --scan requires --set FILE", file=sys.stderr)
-            return EXIT_MALFORMED
-        if ingest_form or include:
-            print("opf import: --dispositions / --ingest-options / --include are valid only with the "
-                  "root-ingest --plan form", file=sys.stderr)
-            return EXIT_MALFORMED
-        if actor is not None or decisions_file is not None or interactive:
-            print("opf import: --actor / --decisions / --interactive are valid only with --review",
-                  file=sys.stderr)
-            return EXIT_MALFORMED
-    elif mode == "plan":
-        # --plan accepts EXACTLY ONE of two sub-forms: the declared-set import (--set FILE) XOR the
-        # root-ingest disposition planner (--dispositions FILE --ingest-options FILE [--include ...]).
-        if bool(set_file) == bool(ingest_form):
-            print("opf import: --plan requires exactly one of --set FILE (declared-set import) or "
-                  "--dispositions FILE --ingest-options FILE (root-ingest planner)", file=sys.stderr)
-            return EXIT_MALFORMED
-        if ingest_form and (dispositions_file is None or ingest_options_file is None):
-            print("opf import: the root-ingest --plan form requires BOTH --dispositions FILE and "
-                  "--ingest-options FILE", file=sys.stderr)
-            return EXIT_MALFORMED
-        if include and not ingest_form:
-            print("opf import: --include is valid only with the root-ingest --plan form", file=sys.stderr)
-            return EXIT_MALFORMED
-        if actor is not None or decisions_file is not None or interactive:
-            print("opf import: --actor / --decisions / --interactive are valid only with --review",
-                  file=sys.stderr)
-            return EXIT_MALFORMED
-    elif mode == "review":
-        if set_file is not None or ingest_form or include:
-            print("opf import: --set / --dispositions / --ingest-options / --include are not valid with "
-                  "--review", file=sys.stderr)
-            return EXIT_MALFORMED
-        if actor is None:
-            print("opf import: --review requires --actor NAME", file=sys.stderr)
-            return EXIT_MALFORMED
-        if bool(decisions_file) == bool(interactive):
-            print("opf import: --review requires exactly one of --decisions FILE / --interactive",
-                  file=sys.stderr)
-            return EXIT_MALFORMED
-    else:   # apply
-        if (set_file is not None or actor is not None or decisions_file is not None or interactive
-                or ingest_form or include):
-            print("opf import: --apply takes only a <run-id>", file=sys.stderr)
-            return EXIT_MALFORMED
-
-    # A run-id operand is an identifier: validate it against the U7 run-id grammar BEFORE any path use
-    # (guard-input-soundness), so a value outside the grammar is a located cannot-evaluate, never a path.
-    if run_id is not None and not _opf_import._RUN_ID_RE.match(run_id):
-        print("opf import: run-id {!r} does not match the run-id grammar imp-<UTCSTAMP>Z-<hash16> "
-              "(fail-closed)".format(run_id), file=sys.stderr)
-        return EXIT_MALFORMED
-
+    # Spec 14.1: every mode is retired, and its operation-layer refusal reads no operand, so the verb
+    # forwards to it BEFORE any mode-specific argv validation and before the clock or any --set /
+    # --dispositions / --ingest-options / --decisions file is read (round-1 MINOR-2; round-2 MINOR): a
+    # missing or extra companion flag, a run-id outside the grammar, and a malformed input file each meet
+    # the retirement pointer, never a mode-specific usage error or a reader error for a mode this build
+    # refuses. The former mode-combination rules and the CLI run-id grammar check are retired with the
+    # modes; the readers stay, unused on this path, until the import engine is removed.
     root_abs = os.path.abspath(root if root is not None else ".")
-    now = datetime.datetime.now(datetime.timezone.utc)
     try:
         if mode == "scan":
-            sources, _proposals = _import_read_set(set_file)
-            res = _opf_import.scan_import(root_abs, sources)
-            if res.verdict == _opf_import.CLEAN:
-                sys.stdout.write(_opf_emit.emit_checked(res.inventory))
-                return EXIT_OK
-            for f in res.findings:
-                print("opf import: {}".format(f), file=sys.stderr)
-            return _import_exit(res.verdict)
-        if mode == "plan":
-            if dispositions_file is not None:            # root-ingest disposition planner (MIG-PR3)
-                worksheet = _import_read_worksheet(dispositions_file)
-                options = _import_read_options(ingest_options_file)
-                res = _opf_ingest.plan_ingest(root_abs, worksheet, options, include=include or None,
-                                              now=now, run_nonce=os.urandom(16).hex())
-            else:                                        # existing declared-set importer
-                sources, proposals = _import_read_set(set_file)
-                res = _opf_import.plan_import(root_abs, sources, proposals=proposals, now=now,
-                                              run_nonce=os.urandom(16).hex())
-            if res.verdict == _opf_import.CLEAN:
-                print("opf import: plan staged: run {}; report {}; migration_incomplete={}".format(
-                    res.run_id, res.report_rel, res.migration_incomplete))
-                return EXIT_OK
-            for f in res.findings:
-                print("opf import: {}".format(f), file=sys.stderr)
-            return _import_exit(res.verdict)
-        if mode == "review":
-            if interactive:
-                res = _opf_import.review_import_interactive(root_abs, run_id, actor=actor, now=now)
-            else:
-                decisions = _import_read_decisions(decisions_file, run_id)
-                if isinstance(decisions, dict):
-                    res = _opf_import.review_import(root_abs, run_id, actor=actor, now=now,
-                                                    decisions=decisions["decisions"], ingest=decisions["ingest"])
-                else:
-                    res = _opf_import.review_import(root_abs, run_id, actor=actor, decisions=decisions, now=now)
-            if res.verdict == _opf_import.CLEAN:
-                print("opf import: acceptance captured: run {}; acceptance {}; {} decision(s)".format(
-                    res.run_id, res.acceptance_rel, res.decisions_count))
-                return EXIT_OK
-            for f in res.findings:
-                print("opf import: {}".format(f), file=sys.stderr)
-            return _import_exit(res.verdict)
-        # mode == "apply": every import mode requires a RESOLVED, initialized store (D7). Resolve first via
-        # the operation layer's shared init-first precondition (single-sourced; the message is NOT
-        # re-authored here) so a NOT-ADOPTED root reports "run `opf init` first" at exit 2, consistent with
-        # scan / plan / review, rather than a promotion-specific message. An adopted store forwards to the
-        # now-real apply_import (PR-C): a run with no acceptance is not promotion-ready -> exit 2 mutating
-        # nothing, and a reviewed run promotes.
-        try:
-            _opf_import._resolve_store_for_review(root_abs)
-        except _opf_import._StageError as exc:
-            print("opf import: {}".format(exc.message), file=sys.stderr)
-            return _import_exit(exc.verdict)
-        res = _opf_import.apply_import(root_abs, run_id, now=now)
-        if res.verdict == _opf_import.CLEAN:
-            print("opf import: promotion {}: run {}".format(res.outcome, run_id))
-            return EXIT_OK
-        for f in res.findings:
-            print("opf import: {}".format(f), file=sys.stderr)
-        return _import_exit(res.verdict)
-    except ValueError as exc:
-        # A fail-closed --set / --decisions read error: cannot-evaluate (exit 2), never a silent skip.
-        print("opf import: cannot evaluate: {}".format(exc), file=sys.stderr)
-        return EXIT_MALFORMED
+            res = _opf_import.scan_import(root_abs, [])
+        elif mode == "plan" and ingest_form:             # root-ingest disposition planner (MIG-PR3)
+            res = _opf_ingest.plan_ingest(root_abs, None, None)
+        elif mode == "plan":                             # declared-set importer
+            res = _opf_import.plan_import(root_abs, [])
+        elif mode == "review" and interactive:
+            res = _opf_import.review_import_interactive(root_abs, run_id)
+        elif mode == "review":
+            res = _opf_import.review_import(root_abs, run_id)
+        else:
+            res = _opf_import.apply_import(root_abs, run_id)
     except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false verdict or uncaught exit-1
         print("opf import: cannot evaluate: unexpected error ({!r}); failing closed to exit 2".format(exc),
               file=sys.stderr)
         return EXIT_MALFORMED
+    for f in res.findings:
+        print("opf import: {}".format(f), file=sys.stderr)
+    return _import_exit(res.verdict)
 
 
 def _cmd_record(rest):
@@ -2813,29 +2716,31 @@ def _cli_self_test():
         expect(["absorb", "--covers", ""], EXIT_MALFORMED)       # empty covers refused
         expect(["absorb", "--bogus"], EXIT_MALFORMED)            # unknown arg
 
-        # import verb ROUTING (OPF-IMPORT-VERB), judged on exit code only. These grammar cases fail closed in
-        # the parser BEFORE any store resolution, so they need no store on disk. A bare `import` and every
-        # malformed combination is a usage error (exit 2); the CLEAN 0 / FINDING 1 discrimination over a real
-        # store rides _import_leg below (and reverting the import dispatch routes these to the fail-closed
-        # KNOWN_VERBS branch, returning 2 where 0/1 is expected -- the wiring discriminator).
+        # import verb ROUTING (OPF-IMPORT-VERB), judged on exit code only. These cases fail closed BEFORE
+        # any store resolution, so they need no store on disk. A bare `import`, a token-parser error and a
+        # duplicate mode are usage errors (exit 2); a well-parsed retired mode, whatever its companion
+        # flags, meets the operation layer's retirement refusal (also exit 2). Every row here expects 2, so
+        # these rows can tell neither the refusal from a usage error nor a reverted import dispatch (the
+        # fail-closed KNOWN_VERBS branch also returns 2) from the wired verb; _import_leg below makes both
+        # splits on the refusal text (present for a retired mode, absent for a token-parser usage error).
         _VALID_RID = "imp-20260101T000000Z-0123456789abcdef"   # syntactically valid; names no staged run
         expect(["import"], EXIT_MALFORMED)                       # bare: exactly one mode required
         expect(["import", "--root", "."], EXIT_MALFORMED)        # --root but no mode
         expect(["import", "--set", "s.toml"], EXIT_MALFORMED)    # --set but no mode
         expect(["import", "--scan", "--plan", "--set", "s.toml"], EXIT_MALFORMED)  # two modes
-        expect(["import", "--scan"], EXIT_MALFORMED)             # --scan requires --set
-        expect(["import", "--plan"], EXIT_MALFORMED)             # --plan requires --set
+        expect(["import", "--scan"], EXIT_MALFORMED)             # retired --scan: the refusal
+        expect(["import", "--plan"], EXIT_MALFORMED)             # retired --plan: the refusal
         expect(["import", "--scan", "--set"], EXIT_MALFORMED)    # --set needs a value
-        expect(["import", "--scan", "--set", "s.toml", "--actor", "x"], EXIT_MALFORMED)  # actor only on review
+        expect(["import", "--scan", "--set", "s.toml", "--actor", "x"], EXIT_MALFORMED)  # retired --scan: the refusal
         expect(["import", "--review"], EXIT_MALFORMED)           # --review needs a <run-id>
-        expect(["import", "--review", _VALID_RID], EXIT_MALFORMED)   # missing --actor
-        expect(["import", "--review", _VALID_RID, "--actor", "x"], EXIT_MALFORMED)  # neither decisions/interactive
+        expect(["import", "--review", _VALID_RID], EXIT_MALFORMED)   # retired --review: the refusal
+        expect(["import", "--review", _VALID_RID, "--actor", "x"], EXIT_MALFORMED)  # retired --review: the refusal
         expect(["import", "--review", _VALID_RID, "--actor", "x", "--decisions", "d.json",
-                "--interactive"], EXIT_MALFORMED)                # both decisions and interactive
+                "--interactive"], EXIT_MALFORMED)                # retired --review: the refusal
         expect(["import", "--review", _VALID_RID, "--actor", "", "--interactive"], EXIT_MALFORMED)  # empty actor
-        expect(["import", "--review", "not-a-run-id", "--actor", "x", "--interactive"], EXIT_MALFORMED)  # bad rid
-        expect(["import", "--apply", _VALID_RID, "--actor", "x"], EXIT_MALFORMED)   # --apply takes only a run-id
-        expect(["import", "--apply", "not-a-run-id"], EXIT_MALFORMED)   # bad run-id grammar
+        expect(["import", "--review", "not-a-run-id", "--actor", "x", "--interactive"], EXIT_MALFORMED)  # the refusal
+        expect(["import", "--apply", _VALID_RID, "--actor", "x"], EXIT_MALFORMED)   # retired --apply: the refusal
+        expect(["import", "--apply", "not-a-run-id"], EXIT_MALFORMED)   # retired --apply: the refusal
         expect(["import", "--bogus", "--scan", "--set", "s.toml"], EXIT_MALFORMED)  # unknown arg
         expect(["import", "--root"], EXIT_MALFORMED)             # --root needs a value
 
@@ -2945,17 +2850,44 @@ def _cli_self_test():
             return None
 
         def _import_leg():
-            """Build a VALID synthetic store and drive the import round-trip end to end, judged on exit
-            codes AND observable side effects. Returns None on success or EXIT_MALFORMED on a harness
-            (fixture I/O) error. Each 0/1 vector is a deliberate flip: reverting the import dispatch routes
-            it to the fail-closed KNOWN_VERBS branch (returning 2 where 0/1 is expected). Vectors: an
-            unresolved store -> 2 with the init-first message (D7); --scan over a valid store -> 0 AND the
-            store tree byte-unchanged (pure read); --plan -> 0 staging one run; --review with an INCOMPLETE
-            decisions file -> 1 and NO acceptance.json; --review with a COMPLETE decisions file -> 0 and a
-            schema-valid acceptance.json; --review --interactive over a non-TTY stdin -> 2 (interactive
-            front-end refusal); --apply over an UNREVIEWED staged run -> 2 (now-real apply_import finds no
-            acceptance.json) AND the store byte-unchanged (nothing promoted; a reviewed run promotes)."""
+            """Build a VALID synthetic store and drive the retired import modes (spec 14.1), judged on exit
+            codes, the refusal text AND observable side effects. Returns None on success or EXIT_MALFORMED
+            on a harness (fixture I/O) error. Vectors, each checked for exit 2 with the operation layer's
+            retirement refusal text, in three fixture phases: before any run is staged, --scan and --plan
+            over a NOT-ADOPTED root and over the adopted store, with the store tree byte-unchanged; after
+            the retained engine stages a run and before it is accepted, --review (batch and --interactive)
+            over that run, checked only for writing no acceptance.json; after the retained engine accepts
+            the run, --apply over it, over an unknown run and over the NOT-ADOPTED root, with the store tree
+            byte-unchanged. The NOT-ADOPTED root is never driven with --review, and its own tree is not
+            snapshotted. Either mutation of one public refusal fails the suite: restoring the retained
+            engine in place of it turns that refusal's rows red; literally deleting its return makes the
+            entry return None, which crashes the self-test (this vector, where the import dispatcher's
+            res.findings read raises AttributeError, or earlier the opf-import refusal suite where it
+            drives the same refusal), which each runner reports as a non-passing result. A malformed --set /
+            --decisions / --dispositions / --ingest-options file meets the same refusal, its reader never
+            run, and so does a mode-specific argv violation (a missing or extra companion flag, a run-id
+            outside the grammar): the refusal precedes the retired mode-combination validation (round-2
+            MINOR). Only a token-parser usage error (a flag missing its value) still exits 2 before it,
+            without the refusal text."""
+            import datetime
             import tomllib
+
+            refusal = _opf_import.ORDINARY_IMPORT_RETIRED
+            engine_now = datetime.datetime(2026, 9, 9, 12, 0, 0, tzinfo=datetime.timezone.utc)
+
+            def run_cli(argv):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                    rc = main(argv)
+                return rc, buf.getvalue()
+
+            def refused(argv, what):
+                rc, out = run_cli(argv)
+                if rc != EXIT_MALFORMED or refusal not in out:
+                    failures.append("import {}: rc={!r} (expected 2 + the retirement refusal)".format(what, rc))
+
+            def malformed(argv):
+                refused(argv, "{} (a malformed input file, never read)".format(" ".join(argv[1:4])))
 
             def tree_snapshot(rootdir):
                 snap = {}
@@ -3005,26 +2937,26 @@ def _cli_self_test():
                           "({})".format(exc), file=sys.stderr)
                     return EXIT_MALFORMED
 
-                # 1: unresolved store -> exit 2 AND the init-first message (D7): assert code AND message.
-                buf = io.StringIO()
-                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                    rc = main(["import", "--scan", "--set", set_file, "--root", not_adopted])
-                if rc != EXIT_MALFORMED or "opf init" not in buf.getvalue():
-                    failures.append("import --scan over a NOT-ADOPTED root: rc={!r} (expected 2 + an "
-                                    "init-first message)".format(rc))
-
-                # 2: --scan over a valid store -> 0 AND the store tree byte-unchanged (scan writes nothing).
+                # 1-2: --scan and --plan refuse over a NOT-ADOPTED root and over the adopted store, and the
+                # store tree stays byte-unchanged (no run is staged).
                 before = tree_snapshot(store)
-                expect(["import", "--scan", "--set", set_file, "--root", store], EXIT_OK)
+                refused(["import", "--scan", "--set", set_file, "--root", not_adopted], "--scan (not adopted)")
+                refused(["import", "--plan", "--set", set_file, "--root", not_adopted], "--plan (not adopted)")
+                refused(["import", "--scan", "--set", set_file, "--root", store], "--scan")
+                refused(["import", "--plan", "--set", set_file, "--root", store], "--plan")
                 if tree_snapshot(store) != before:
-                    failures.append("import --scan mutated the store tree (scan must be a pure read)")
+                    failures.append("a refused import --scan / --plan mutated the store tree")
 
-                # 3: --plan over a valid store -> 0, staging exactly one run dir under .working/imports/.
-                expect(["import", "--plan", "--set", set_file, "--root", store], EXIT_OK)
+                # 3: the retained engine (never the CLI) stages exactly one run for the vectors below.
+                staged = _opf_import._plan_import(store, ["a.txt", "b.txt"], now=engine_now, run_nonce="cli")
+                if staged.verdict != _opf_import.CLEAN:
+                    failures.append("the retained engine did not stage the fixture run: {}".format(
+                        staged.findings))
+                    return None
                 imports_dir = os.path.join(working, "imports")
                 run_ids = sorted(os.listdir(imports_dir)) if os.path.isdir(imports_dir) else []
                 if len(run_ids) != 1:
-                    failures.append("import --plan staged {} run(s), expected exactly 1".format(
+                    failures.append("the engine staged {} run(s), expected exactly 1".format(
                         len(run_ids)))
                     return None
                 rid = run_ids[0]
@@ -3052,138 +2984,80 @@ def _cli_self_test():
                 complete = os.path.join(ibase, "complete.json")
                 with open(complete, "w", encoding="utf-8") as fh:
                     json.dump({"schema": 1, "run_id": rid, "decisions": all_decisions}, fh)
-                incomplete = os.path.join(ibase, "incomplete.json")
-                with open(incomplete, "w", encoding="utf-8") as fh:
-                    json.dump({"schema": 1, "run_id": rid, "decisions": all_decisions[:1]}, fh)
                 acceptance = os.path.join(run_dir, "acceptance.json")
 
-                # 4: --review with an INCOMPLETE decisions file -> 1 (finding), NO acceptance.json written.
-                expect(["import", "--review", rid, "--actor", "tester", "--decisions", incomplete,
-                        "--root", store], EXIT_FINDING)
-                if os.path.exists(acceptance):
-                    failures.append("import --review with an incomplete decisions file wrote "
-                                    "acceptance.json (a finding must write nothing)")
+                # 4-5: --review with a COMPLETE decisions file, and --review --interactive, refuse and write
+                # no acceptance.json. The interactive refusal precedes the TTY check (stdin is a StringIO,
+                # hermetic regardless of the test process's real stdin).
+                refused(["import", "--review", rid, "--actor", "tester", "--decisions", complete,
+                         "--root", store], "--review")
 
-                # 5: --review with a COMPLETE decisions file -> 0 and a schema-valid acceptance.json present.
-                expect(["import", "--review", rid, "--actor", "tester", "--decisions", complete,
-                        "--root", store], EXIT_OK)
-                if not os.path.isfile(acceptance):
-                    failures.append("import --review (complete) did not write acceptance.json")
-                else:
-                    with open(acceptance, "rb") as fh:
-                        acc = json.load(fh)
-                    if acc.get("format") != "opf.import.acceptance/v1" or acc.get("run_id") != rid:
-                        failures.append("acceptance.json is not a valid opf.import.acceptance/v1 bound to "
-                                        "the run")
-
-                # 6: --review --interactive over a NON-TTY stdin -> 2 (routes to the interactive front-end,
-                # which refuses a non-TTY). Swap stdin to a StringIO so the vector is hermetic regardless of
-                # the test process's real stdin (test-hermeticity).
                 real_stdin = sys.stdin
                 sys.stdin = io.StringIO("")
                 try:
-                    buf = io.StringIO()
-                    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                        rc = main(["import", "--review", rid, "--actor", "tester", "--interactive",
-                                   "--root", store])
+                    refused(["import", "--review", rid, "--actor", "tester", "--interactive", "--root", store],
+                            "--review --interactive")
                 finally:
                     sys.stdin = real_stdin
-                if rc != EXIT_MALFORMED:
-                    failures.append("import --review --interactive over a non-TTY: rc={!r} (expected "
-                                    "2)".format(rc))
+                if os.path.exists(acceptance):
+                    failures.append("a refused import --review wrote acceptance.json")
 
-                # 7: --apply over the REVIEWED staged run (PR-C, apply is now REAL). This minimal fixture
-                # store declares only [types.backlog_item], so the assembled candidate is NOT doctor-
-                # composable and apply's D4 composition gate aborts fail-closed -> EXIT_FINDING (1), nothing
-                # promoted, and the store tree is byte-unchanged (the abort precedes any publication write).
-                # This CONSCIOUSLY replaces the former deferred-stub exit-2 pin (change-carries-check): the
-                # deferred stub returned 2 for every run, so a real exit-1 composition abort flips it red.
+                # 6-7: the retained engine accepts the run; --apply over that accepted run (one the retained
+                # apply engine rejects: this minimal store is not doctor-composable), over an unknown run, and
+                # over a NOT-ADOPTED root refuses, and the store tree is byte-unchanged.
+                accepted = _opf_import._review_import(store, rid, actor="tester", decisions=all_decisions,
+                                                      now=engine_now)
+                if accepted.verdict != _opf_import.CLEAN:
+                    failures.append("the retained engine did not accept the fixture run: {}".format(
+                        accepted.findings))
                 store_before = tree_snapshot(store)
-                expect(["import", "--apply", rid, "--root", store], EXIT_FINDING)
+                refused(["import", "--apply", rid, "--root", store], "--apply (accepted run)")
+                refused(["import", "--apply", _VALID_RID, "--root", store], "--apply (unknown run)")
+                refused(["import", "--apply", _VALID_RID, "--root", not_adopted], "--apply (not adopted)")
                 if tree_snapshot(store) != store_before:
-                    failures.append("import --apply (composition abort) mutated the store (must mutate nothing)")
+                    failures.append("a refused import --apply mutated the store")
 
-                # 8 (F1 schema bool/float-slip, R5-F2 class at the new CLI readers): a --set whose schema is
-                # a bool (True == 1) or a float (1.0 == 1) is a MALFORMED file -> exit 2, never accepted.
-                # Flip: dropping the `type(...) is int` guard accepts both and --scan returns 0.
+                # 8-13 (round-1 MINOR-2): each mode refuses BEFORE its input reader, so a MALFORMED --set (a
+                # bool or float schema, scalar or incomplete proposal rows, a bad span), --decisions (a bool
+                # schema, a parse that would raise RecursionError, an extra envelope key), --dispositions or
+                # --ingest-options file meets the retirement refusal, never a reader error. Flip: restoring a
+                # reader ahead of the refusal turns its rows red.
                 set_true = os.path.join(ibase, "set-schema-true.toml")
                 with open(set_true, "w", encoding="utf-8") as fh:
                     fh.write('schema = true\nsource = ["a.txt"]\n')
-                expect(["import", "--scan", "--set", set_true, "--root", store], EXIT_MALFORMED)
+                malformed(["import", "--scan", "--set", set_true, "--root", store])
                 set_float = os.path.join(ibase, "set-schema-float.toml")
                 with open(set_float, "w", encoding="utf-8") as fh:
                     fh.write('schema = 1.0\nsource = ["a.txt"]\n')
-                expect(["import", "--scan", "--set", set_float, "--root", store], EXIT_MALFORMED)
-                # The --decisions reader carries the same class: a bool schema is malformed -> exit 2.
+                malformed(["import", "--scan", "--set", set_float, "--root", store])
                 dec_true = os.path.join(ibase, "dec-schema-true.json")
                 with open(dec_true, "w", encoding="utf-8") as fh:
                     json.dump({"schema": True, "run_id": rid, "decisions": []}, fh)
-                expect(["import", "--review", rid, "--actor", "tester", "--decisions", dec_true,
-                        "--root", store], EXIT_MALFORMED)
+                malformed(["import", "--review", rid, "--actor", "tester", "--decisions", dec_true,
+                           "--root", store])
 
-                # 9 (F2 --set proposal-row STRUCTURE, fail-closed consistently for scan AND plan): a
-                # structurally-malformed --set is exit 2 for BOTH modes. Flip: without the row-structure
-                # validation, --scan silently ignores the proposal (0) while --plan forwards it to
-                # _validate_proposals as a finding (1) -- the exit-code inconsistency this closes.
+                # Structurally malformed --set proposal rows, for --scan AND --plan.
                 set_badprop = os.path.join(ibase, "set-badprop.toml")   # scalars where tables are required
                 with open(set_badprop, "w", encoding="utf-8") as fh:
                     fh.write('schema = 1\nsource = ["a.txt"]\nproposal = [5, 7]\n')
-                expect(["import", "--scan", "--set", set_badprop, "--root", store], EXIT_MALFORMED)
-                expect(["import", "--plan", "--set", set_badprop, "--root", store], EXIT_MALFORMED)
+                malformed(["import", "--scan", "--set", set_badprop, "--root", store])
+                malformed(["import", "--plan", "--set", set_badprop, "--root", store])
                 set_misskey = os.path.join(ibase, "set-misskey.toml")   # a row missing source_path
                 with open(set_misskey, "w", encoding="utf-8") as fh:
                     fh.write('schema = 1\nsource = ["a.txt"]\n\n[[proposal]]\n'
                              'span = [0, 1]\nsuggested_state = "mapped"\n')
-                expect(["import", "--scan", "--set", set_misskey, "--root", store], EXIT_MALFORMED)
-                expect(["import", "--plan", "--set", set_misskey, "--root", store], EXIT_MALFORMED)
+                malformed(["import", "--scan", "--set", set_misskey, "--root", store])
+                malformed(["import", "--plan", "--set", set_misskey, "--root", store])
                 set_badspan = os.path.join(ibase, "set-badspan.toml")   # span not a two-int list
                 with open(set_badspan, "w", encoding="utf-8") as fh:
                     fh.write('schema = 1\nsource = ["a.txt"]\n\n[[proposal]]\n'
                              'source_path = "a.txt"\nspan = [0, 1, 2]\nsuggested_state = "mapped"\n')
-                expect(["import", "--plan", "--set", set_badspan, "--root", store], EXIT_MALFORMED)
+                malformed(["import", "--plan", "--set", set_badspan, "--root", store])
 
-                # 10 (F2 reader/op-layer SPLIT proof): a STRUCTURALLY-valid proposal that is SEMANTICALLY
-                # invalid (span beyond the source size) passes the reader and is a _validate_proposals
-                # FINDING -> exit 1 via --plan, NEVER a reader exit 2. This proves the reader owns STRUCTURE
-                # while the operation layer still owns SEMANTICS (span bounds, state vocab, confinement).
-                set_oob = os.path.join(ibase, "set-oob-span.toml")
-                with open(set_oob, "w", encoding="utf-8") as fh:
-                    fh.write('schema = 1\nsource = ["a.txt"]\n\n[[proposal]]\n'
-                             'source_path = "a.txt"\nspan = [0, 100000]\nsuggested_state = "mapped"\n')
-                expect(["import", "--plan", "--set", set_oob, "--root", store], EXIT_FINDING)
-
-                # 11 (F3 --apply init-first parity, D7): --apply <valid-rid> on a NOT-ADOPTED root reports the
-                # init-first message at exit 2, not the deferred-promotion stub message. Flip: without the
-                # CLI-side store resolution, --apply calls the stub unconditionally and a NOT-ADOPTED root
-                # gets the deferred message with no "opf init".
-                buf = io.StringIO()
-                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                    rc = main(["import", "--apply", _VALID_RID, "--root", not_adopted])
-                if rc != EXIT_MALFORMED or "opf init" not in buf.getvalue():
-                    failures.append("import --apply over a NOT-ADOPTED root: rc={!r} (expected 2 + an "
-                                    "init-first message)".format(rc))
-                # On an ADOPTED store naming NO staged run, --apply (PR-C, real) loads the run fail-closed,
-                # finds no such promotion-ready run, and reports "not promotion-ready" at exit 2, mutating
-                # nothing (the store tree is byte-unchanged; the journal/lock infrastructure under .aiqt/ adds
-                # no files once the lock is released). This replaces the former deferred-stub message pin.
-                store_before_apply = tree_snapshot(store)
-                buf = io.StringIO()
-                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                    rc = main(["import", "--apply", _VALID_RID, "--root", store])
-                if rc != EXIT_MALFORMED or "not promotion-ready" not in buf.getvalue():
-                    failures.append("import --apply over an ADOPTED store (unknown run): rc={!r} (expected "
-                                    "2 + a not-promotion-ready message)".format(rc))
-                if tree_snapshot(store) != store_before_apply:
-                    failures.append("import --apply (adopted, unknown run) mutated the store")
-
-                # 12 (F4 read-boundary RecursionError parity, R8-F1 class): a deeply-nested --decisions JSON
-                # raises RecursionError from json.loads (not fh.read). The reader catches it and fails closed
-                # AT THE reader with a LOCATED message -> exit 2, never escaping only to _cmd_import's outer
-                # backstop. The C json scanner's nesting depth is a platform constant, so the property is
-                # driven HERMETICALLY by patching json.loads to raise RecursionError for one call (restored in
-                # a finally; the same stdlib-injection idiom as _expect_harness below). Flip: dropping
-                # RecursionError from the parse except lets it escape and the located "--decisions file"
-                # reader message is absent from the output.
+                # A --decisions file whose parse would raise RecursionError, driven HERMETICALLY by patching
+                # json.loads for the call (restored in a finally; the same stdlib-injection idiom as
+                # _expect_harness below): the refusal precedes the reader, so the retirement pointer is
+                # present and the reader's located "--decisions file" message absent.
                 real_loads = json.loads
 
                 def _boom_loads(*_a, **_k):
@@ -3197,25 +3071,59 @@ def _cli_self_test():
                                    "--root", store])
                 finally:
                     json.loads = real_loads
-                if rc != EXIT_MALFORMED or "--decisions file" not in buf.getvalue():
+                out = buf.getvalue()
+                if rc != EXIT_MALFORMED or refusal not in out or "--decisions file" in out:
                     failures.append("import --review with a RecursionError-raising decisions JSON: rc={!r} "
-                                    "(expected 2 + a located reader message)".format(rc))
+                                    "(expected 2 + the retirement refusal, the reader never run)".format(rc))
 
-                # 13 (R2-F5 --decisions envelope CLOSED-KEYSET, class-width parity with the --set envelope
-                # + proposal rows): an otherwise-VALID --decisions file (schema 1, matching run_id, list
-                # decisions) carrying an EXTRA top-level key -- even one nested deeply -- is a MALFORMED
-                # envelope -> exit 2, never silently accepted. Flip: without the closed-keyset check the
-                # extra-key file exits 0 (the exact round-2 bug). The SAME content WITHOUT the extra key
-                # still reviews at exit 0 (vector 5 above proved `complete` -> 0), so this isolates the
-                # extra key alone as the discriminator.
+                # An otherwise-valid --decisions file carrying an extra (deeply nested) envelope key.
                 dec_extra = os.path.join(ibase, "dec-extra-key.json")
                 junk = "x"
                 for _ in range(40):
                     junk = {"n": junk}
                 with open(dec_extra, "w", encoding="utf-8") as fh:
                     json.dump({"schema": 1, "run_id": rid, "decisions": all_decisions, "extra": junk}, fh)
-                expect(["import", "--review", rid, "--actor", "tester", "--decisions", dec_extra,
-                        "--root", store], EXIT_MALFORMED)
+                malformed(["import", "--review", rid, "--actor", "tester", "--decisions", dec_extra,
+                           "--root", store])
+                # The root-ingest --plan form: a --dispositions / --ingest-options file that is not TOML.
+                not_toml = os.path.join(ibase, "not-toml.toml")
+                with open(not_toml, "w", encoding="utf-8") as fh:
+                    fh.write("option = [\n")
+                malformed(["import", "--plan", "--dispositions", not_toml, "--ingest-options", not_toml,
+                           "--root", store])
+
+                # Round-2 MINOR: a retired mode flag meets the refusal BEFORE the retired mode-specific
+                # argv validation, so a missing or extra companion flag or a run-id outside the grammar
+                # reaches the retirement pointer, never a usage error for a retired mode. Flip: restoring
+                # the mode-combination validation (or the CLI run-id grammar check) ahead of the dispatch
+                # turns its rows red.
+                usage_texts = ("requires --set FILE", "are valid only with", "requires exactly one of",
+                               "requires BOTH", "are not valid with", "requires --actor NAME",
+                               "takes only a <run-id>", "does not match the run-id grammar")
+                for argv, what in (
+                        (["import", "--scan", "--root", store], "--scan without --set"),
+                        (["import", "--plan", "--root", store], "--plan without --set/--dispositions"),
+                        (["import", "--scan", "--set", set_file, "--actor", "x", "--root", store],
+                         "--scan with --actor"),
+                        (["import", "--review", rid, "--root", store], "--review without --actor"),
+                        (["import", "--review", rid, "--actor", "tester", "--decisions", complete,
+                          "--interactive", "--root", store],
+                         "--review with both --decisions/--interactive"),
+                        (["import", "--apply", rid, "--set", set_file, "--root", store],
+                         "--apply with --set"),
+                        (["import", "--apply", "not-a-run-id", "--root", store],
+                         "--apply outside the run-id grammar"),
+                ):
+                    rc, out = run_cli(argv)
+                    if rc != EXIT_MALFORMED or refusal not in out or any(t in out for t in usage_texts):
+                        failures.append("import {}: rc={!r} (expected the retirement refusal before the "
+                                        "retired mode-specific argv validation)".format(what, rc))
+                # A token-parser usage error (a flag missing its value) is still decided before the refusal
+                # and stays exit 2 without its text.
+                rc, out = run_cli(["import", "--scan", "--set", "--root", store])
+                if rc != EXIT_MALFORMED or refusal in out or "requires a non-empty argument" not in out:
+                    failures.append("import --scan with a valueless --set: rc={!r} (expected the token-"
+                                    "parser usage error at exit 2, before the refusal)".format(rc))
             finally:
                 shutil.rmtree(ibase, ignore_errors=True)
             return None
@@ -3265,12 +3173,15 @@ def _cli_self_test():
         print("opf cli self-test: PASS (verb routing: unknown/unwired verbs and render/doctor/import usage "
               "errors fail closed; render --check forwards to the U4 engine; doctor resolves + validates a "
               "store, NOT-ADOPTED -> 0 (2 with --require-store) and a garbage store -> 2; "
-              "import wires scan/plan/review/apply onto "
-              "the U7 operation layer -- an unresolved store -> 2 init-first, --scan -> 0 writing nothing, "
-              "--plan -> 0 staging a run, --review incomplete -> 1 and complete -> 0 with a valid "
-              "acceptance.json, non-TTY --interactive -> 2, and --apply over a reviewed run on a non-doctor-"
-              "composable fixture -> 1 (composition abort) and over an unknown run -> 2 not-promotion-ready, "
-              "each mutating nothing; fixture-setup and fixture-I/O OSError fail closed to exit 2)")
+              "import surfaces the retired --scan / --plan / --review / --apply refusal (spec 14.1) at exit 2: "
+              "--scan and --plan over a NOT-ADOPTED root and over the adopted store before any run is staged, "
+              "the store tree byte-unchanged; --review (batch and --interactive) over a staged run before its "
+              "acceptance, writing no acceptance.json; --apply over the accepted run, an unknown run and a "
+              "NOT-ADOPTED root, the store tree byte-unchanged; each refusal comes before any "
+              "input reader AND before any mode-specific argv validation (a malformed --set / --decisions / "
+              "--dispositions / --ingest-options, a missing or extra companion flag, and a run-id outside "
+              "the grammar each meet the refusal; only a token-parser usage error precedes it); "
+              "fixture-setup and fixture-I/O OSError fail closed to exit 2)")
         return EXIT_OK
     except Exception as exc:  # noqa: BLE001  final fail-closed backstop, never an uncaught exit-1 escape
         print("opf cli self-test: harness error: unexpected error ({!r}); failing closed to exit 2".format(

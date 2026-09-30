@@ -1946,8 +1946,8 @@ def boundary_self_test():
                 patch.object(store, "_open_root_fd", return_value=-1), patch.object(ingest.os, "close"), \
                 patch.object(ingest, "_digest_of", side_effect=_Reached):
             try:
-                result = ingest.plan_ingest("/store", dict(row=[journal_row]), dict(option=[]), now=utc,
-                                            run_nonce="0123456789abcdef")
+                result = ingest._plan_ingest("/store", dict(row=[journal_row]), dict(option=[]), now=utc,
+                                             run_nonce="0123456789abcdef")   # the retained engine
             except _Reached:
                 return "admitted"
         return result.verdict, " ".join(result.findings)
