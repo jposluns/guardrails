@@ -29,6 +29,14 @@ ROOT = Path(__file__).resolve().parents[1]
 SYSTEM_PATH = "/usr/bin:/bin"
 GIT = "/usr/bin/git"
 JQ = "/usr/bin/jq"
+# The F-367 argv pins, mirroring _git_fixture_env._NO_AUTO_MAINTENANCE: an unpinned fixture
+# commit spawns the DETACHED `git maintenance run --auto` child, which once its task
+# thresholds are met can repack or prune this fixture's .git/objects after the commit
+# returned, racing the TemporaryDirectory teardown (and any later read). Spliced into the
+# fixture git argv, NOT into base_env, so the environment ci-status.sh receives through
+# invoke() stays exactly as before.
+NO_AUTO_MAINTENANCE = ["-c", "gc.auto=0", "-c", "gc.autoDetach=false",
+                       "-c", "maintenance.auto=false"]
 SCRIPT = ROOT / "tools" / "ci-status.sh"
 CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
 SUITE_ID = "ci-status-behaviour-selftest"
@@ -155,18 +163,19 @@ class Fixture:
             "TZ": "UTC",
             "GIT_CONFIG_NOSYSTEM": "1",
         }
-        subprocess.run([GIT, "init", "-q", "-b", "main", str(self.repo)],
+        subprocess.run([GIT] + NO_AUTO_MAINTENANCE + ["init", "-q", "-b", "main", str(self.repo)],
                        check=True, capture_output=True, timeout=30, env=self.base_env)
         (self.repo / "seed.txt").write_text("seed\n", encoding="utf-8")
-        subprocess.run([GIT, "-C", str(self.repo), "add", "seed.txt"],
+        subprocess.run([GIT, "-C", str(self.repo)] + NO_AUTO_MAINTENANCE + ["add", "seed.txt"],
                        check=True, capture_output=True, timeout=30, env=self.base_env)
         subprocess.run(
-            [GIT, "-C", str(self.repo), "-c", "user.name=Selftest",
-             "-c", "user.email=selftest@example.invalid", "-c", "commit.gpgsign=false",
-             "commit", "-q", "-m", "seed"],
+            [GIT, "-C", str(self.repo)] + NO_AUTO_MAINTENANCE
+            + ["-c", "user.name=Selftest",
+               "-c", "user.email=selftest@example.invalid", "-c", "commit.gpgsign=false",
+               "commit", "-q", "-m", "seed"],
             check=True, capture_output=True, timeout=30, env=self.base_env)
         result = subprocess.run(
-            [GIT, "-C", str(self.repo), "rev-parse", "HEAD"],
+            [GIT, "-C", str(self.repo)] + NO_AUTO_MAINTENANCE + ["rev-parse", "HEAD"],
             check=True, capture_output=True, text=True, timeout=30, env=self.base_env,
         )
         self.head_sha = result.stdout.strip()

@@ -4354,8 +4354,10 @@ def self_test():
     # written through those APIs turns this vector red and forces review
     # against the reader. Every pinned site reads no runner or workflow
     # text under the parity guarantee: the sites parse Python sources for
-    # ast, read harness and stub call logs, write the selftest report, or
-    # split text the reader or a screen has already validated. A read
+    # ast (the F-367 maintenance-pin scan included), read harness, stub
+    # call and Trace2 event logs (the F-367 maintenance probe), write the
+    # selftest report, or split text the reader or a screen has already
+    # validated. A read
     # spelled another way (getattr, an alias) is outside this tripwire, as
     # the module docstring discloses. This vector fails without the
     # change: the former Path.read_text() calls on the runners and the
@@ -4413,9 +4415,12 @@ def self_test():
         },
         "tools/selftest_git_fixture_env.py": {
             ("_archive_reads_use_caller_env", "read_text"): 1,
+            ("_auto_maintenance_children", "read_text"): 1,
+            ("_auto_maintenance_children", "splitlines"): 1,
             ("_binding_calls", "read_text"): 1,
             ("_caller_env_archive_only", "read_text"): 1,
             ("_calls_any", "read_text"): 1,
+            ("_maintenance_pin_scan", "read_text"): 1,
             ("_manifest_extra_setup_failures", "read_text"): 1,
             ("_opf_home_lifecycles", "read_text"): 1,
             ("_opf_lifecycle_graph_checks", "read_text"): 1,
