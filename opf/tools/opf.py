@@ -19,8 +19,7 @@ over them, returning that engine's 0/1/2 contract (a NOT-ADOPTED root reports NO
 with `--require-store`, the enforcement-pack CI floor, it is a cannot-evaluate and exits 2 instead, so a
 repository whose store was removed cannot pass CI vacuously). Doctor is read-only; its
 observation gather is the caller-side git seam validate_store itself never touches. `upgrade` HAS landed
-(spec 9.2): `opf upgrade [--root DIR] [--homes-plan]`. With `--homes-plan`, it prints the homes-generation
-migration plan read-only and exits without upgrading. Otherwise it is the in-place, additive, idempotent
+(spec 9.2): `opf upgrade [--root DIR]` is the in-place, additive, idempotent
 upgrade from 1.0.0 or 1.1.0 to 1.2.0. The 1.1.0 schema delta changes only spec_version; declared views
 are then regenerated, so a stale committed view can change. The 1.0.0 path also applies the earlier
 schema delta
@@ -1880,7 +1879,6 @@ def _cmd_upgrade(rest):
     pre-existing untracked or ignored content in that scope refuses before mutation.""".format(
         to=_UPGRADE_TO)
     root = None
-    homes_plan = False
     i = 0
     while i < len(rest):
         tok = rest[i]
@@ -1898,28 +1896,11 @@ def _cmd_upgrade(rest):
                 return EXIT_MALFORMED
             root = val
             i += 2
-        elif tok == "--homes-plan":
-            if homes_plan:
-                print("opf upgrade: --homes-plan given more than once", file=sys.stderr)
-                return EXIT_MALFORMED
-            homes_plan = True
-            i += 1
         else:
             print("opf upgrade: unrecognized argument {!r}".format(tok), file=sys.stderr)
             return EXIT_MALFORMED
     root = root if root is not None else "."
     try:
-        if homes_plan:
-            # Deliberately lazy: existing schema upgrades and other verbs do not
-            # load the new planner. The complete text is formed before printing.
-            import _opf_homes_migrate
-            try:
-                text = _opf_homes_migrate.plan_homes_migration(root)
-            except _opf_homes_migrate.MigrationPlanError as exc:
-                raise _UpgradeError(
-                    "homes-plan cannot evaluate: {}".format(exc)) from exc
-            print(text, end="")
-            return EXIT_OK
         return _upgrade_run(root)
     except (_UpgradeError, _opf_write_guard.WriteGuardError) as exc:
         print("opf upgrade: refused: {}; exit 2".format(exc), file=sys.stderr)
