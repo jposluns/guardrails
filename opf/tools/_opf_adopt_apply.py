@@ -12,9 +12,12 @@ the preserve-first composition of spec 14.2; live re-observation of every operan
 transaction per (run, phase), reconcile-first; and a dispatch table keyed by the closed twelve-op
 ADOPT_OPS vocabulary in which EVERY op returns a refusing not-yet-executable verdict. No operation
 executes: the file ops, init-store composition, trust verification, approval capture, hook activation,
-rendering, receipt writing, the completion checks, retirement, and the CLI verb remain later slices.
-Live outside the self-test fixtures today: `opf adopt status` reads BOTH adoption homes through this
-module's read-only reporters (_open_product_root, verify_bundle/_verify_bundle_at and journal_state);
+rendering, receipt writing, the completion checks, retirement, and the MUTATING CLI subcommands (approve,
+apply, complete, reconcile) remain later slices; the read-only `opf adopt` subcommands plan and status
+shipped with K9a. Live outside the self-test fixtures today: `opf adopt status` opens and lists the
+evidence home in opf.py through the _journal containment primitives, then grades each listed bundle
+through this module's _verify_bundle_at (beneath the HELD home descriptor it is passed) and the journal
+through journal_state, with _open_product_root anchoring both reads to one product-root descriptor;
 every mutating entry -- the transaction shell, reconcile() and the dispatch table -- stays reachable
 only from the self-test until those slices land.
 
@@ -316,7 +319,7 @@ def verify_bundle(product_root, run_id):
         os.close(root_fd)
 
 
-def _verify_bundle_at(root_fd, run_id, bundle):
+def _verify_bundle_at(root_fd, run_id, bundle, home_fd=None):
     # Round-3 identity retention (the read_lock_owner_at posture applied to the bundle): ONE descriptor
     # per directory, opened contained/no-follow beneath its retained parent and HELD from the bundle
     # listing through every inventory and payload read, so no read re-resolves a pathname from root_fd
@@ -326,8 +329,14 @@ def _verify_bundle_at(root_fd, run_id, bundle):
     # directory identity per path: a directory swapped onto a pathname between the listing and a read is
     # never followed, and two directories neither of which verifies alone can never combine into one
     # false success. A component that cannot be opened contained (symlinked, wrong-type, unreadable) is
-    # CANNOT-EVALUATE, never approximated.
+    # CANNOT-EVALUATE, never approximated. home_fd (round 4): the evidence-home descriptor a caller that
+    # LISTED the home still holds; when given, it SEEDS the retained chain (a dup, so the caller's
+    # descriptor stays open and the cleanup below owns only the dup) and the bundle is stat'ed and opened
+    # beneath THAT held identity, never re-walked from root_fd, so an evidence home swapped onto its
+    # pathname between the caller's listing and this verification can never contribute a bundle.
     dir_fds = dict()
+    if home_fd is not None:
+        dir_fds[tuple(_journal._check_rel(bundle))[:-1]] = os.dup(home_fd)
 
     def dir_at(parts):
         """The RETAINED dir fd for the relative directory `parts` (a tuple of components; () is the
@@ -371,7 +380,12 @@ def _verify_bundle_at(root_fd, run_id, bundle):
 
     try:
         try:
-            st = _journal._lstat_contained(root_fd, bundle)
+            if home_fd is not None:
+                # presence and type read through the HELD home descriptor the caller's listing used,
+                # never by re-walking `bundle` from root_fd (round 4).
+                st = _journal._lstat_at(home_fd, _journal._check_rel(bundle)[-1])
+            else:
+                st = _journal._lstat_contained(root_fd, bundle)
             if st is None:
                 return schema._invalid(["evidence bundle {!r} is missing".format(bundle)])
             if not stat.S_ISDIR(st.st_mode):
@@ -669,10 +683,12 @@ def journal_state(root_fd, journal_root):
     `_journal.classify_state` reads as open (INTENT without a terminal frame). A nothing-opened,
     complete, or rolled-back transaction is clean. An absent journal root is (None, []); a symlinked,
     dangling, non-directory, unreadable, or corrupt journal, or a symlinked or wrong-type entry in it (any
-    entry but a transaction directory or a regular `lock` / `lock.break`), raises AdoptApplyError
-    (fail-closed, never followed, skipped or read as absent). The lock and every entry are read through
-    the ONE contained journal-root descriptor, never by re-resolving `journal_root` (which only names the
-    returned entries). Nothing is written here."""
+    entry but a transaction directory or a regular, singly-linked `lock` / `lock.break`), raises
+    AdoptApplyError (fail-closed, never followed, skipped or read as absent). The lock and every entry are
+    read through the ONE contained journal-root descriptor, never by re-resolving `journal_root` (which
+    only names the returned entries), and each transaction is classified through its own directory
+    descriptor HELD from the enumeration itself (round 4), so a transaction directory swapped onto its
+    name after the enumeration can never read as clean. Nothing is written here."""
     try:
         st = _journal._lstat_contained(root_fd, JOURNAL_REL)
     except (_journal.JournalError, OSError) as exc:
@@ -690,8 +706,18 @@ def journal_state(root_fd, journal_root):
     try:
         try:
             owner = _journal.read_lock_owner_at(jr_fd)
-            txns = _journal._journal_txn_dirs(jr_fd, journal_root, strict=True)
-            opened = sorted(t.name for t in txns if _journal.classify_state(jr_fd, t) == "open")
+            # hold=True (round 4): every transaction directory descriptor is opened AT enumeration and
+            # HELD through classification, and classify_state reads the frames through that same held
+            # identity, so a transaction directory swapped onto its name after the enumeration (an
+            # interrupted transaction renamed aside and replaced by an empty decoy) is still classified
+            # from the enumerated directory's own frames, never reopened by name and read as clean.
+            txns = _journal._journal_txn_dirs(jr_fd, journal_root, strict=True, hold=True)
+            try:
+                opened = sorted(t.name for t, tfd in txns
+                                if _journal.classify_state(jr_fd, t, txn_fd=tfd) == "open")
+            finally:
+                for _t, tfd in txns:
+                    _journal._close_fd_quietly(tfd)
         except (_journal.JournalError, OSError) as exc:
             raise AdoptApplyError("the adoption journal {} cannot be read ({}); "
                                   "fail-closed".format(JOURNAL_REL, exc))
@@ -1105,7 +1131,8 @@ def _self_test_checks():
     # round 3: the module introduction must name the LIVE status surface (`opf adopt status` reads both
     # adoption homes through this module) instead of calling the module dead code.
     check("module-intro-names-the-live-status-surface",
-          "dead code" not in (__doc__ or "") and "opf adopt status" in (__doc__ or ""))
+          "dead code" not in (__doc__ or "") and "opf adopt status" in (__doc__ or "")
+          and "the CLI verb remain" not in (__doc__ or ""))
 
     # 1: run identity. The homes grammar and the schema's shipped grammar agree on every vector; the mint
     # validates its own output; the import family and traversal spellings are refused.
@@ -1237,16 +1264,23 @@ def _self_test_checks():
             ("inventory.toml", b"invalid"), ("payload.txt", b"GOOD!")))
         check("verify-swap-fixture-original-invalid", verify_bundle(broot_a, rid).status == INVALID)
         _read_fired = []
-        _real_read_contained = _journal._read_contained
+        _real_lstat_at = _journal._lstat_at
 
-        def _reading_swap(root_fd, relpath, require_single_link=False):
-            if relpath == _swap_payload_rel and not _read_fired:
-                _read_fired.append(relpath)
+        def _reading_swap(pfd, name):
+            # the LIVE read path (round 4): _verify_bundle_at stats each listed payload through
+            # _journal._lstat_at on its RETAINED parent immediately before read_retained reads it, so
+            # hooking here injects the swap between the listing and the payload read. The round-3 hook
+            # patched _journal._read_contained, which the retained-descriptor rewrite no longer calls for
+            # bundle reads, so its swap never fired and the vector passed vacuously; the fired check below
+            # keeps this vector honest.
+            if name == "payload.txt" and not _read_fired:
+                _read_fired.append(name)
                 swap_a()
-            return _real_read_contained(root_fd, relpath, require_single_link=require_single_link)
+            return _real_lstat_at(pfd, name)
 
-        with mock.patch.object(_journal, "_read_contained", _reading_swap):
+        with mock.patch.object(_journal, "_lstat_at", _reading_swap):
             swapped = verify_bundle(broot_a, rid)
+        check("verify-swap-before-payload-read-injection-fired", _read_fired == ["payload.txt"])
         check("verify-swap-before-payload-read-still-original-drift",
               swapped.status == INVALID and any("payload drift" in f for f in swapped.findings))
         # vector B: the replacement alone is CANNOT-EVALUATE (a malformed phase inventory its own
@@ -1266,6 +1300,7 @@ def _self_test_checks():
 
         with mock.patch.object(os, "listdir", _listing_swap):
             swapped = verify_bundle(broot_b, rid)
+        check("verify-swap-after-listing-injection-fired", _list_fired != [])
         check("verify-swap-after-listing-still-original-drift",
               swapped.status == INVALID and any("payload drift" in f for f in swapped.findings))
 
@@ -2523,9 +2558,11 @@ def _self_test_checks():
         decoy = Path(temp).resolve() / "decoy"
         decoy.mkdir()
         _real_open_jr = _journal.open_journal_root_fd
+        _jr_swap_fired = []
 
         def _racing_open_jr(rfd, rel):
             fd = _real_open_jr(rfd, rel)
+            _jr_swap_fired.append(rel)   # the injection provably ran (round 4)
             os.rename(journal_root, str(journal_root) + ".moved")
             os.symlink(decoy, journal_root)
             return fd
@@ -2533,7 +2570,7 @@ def _self_test_checks():
         with mock.patch.object(_journal, "open_journal_root_fd", _racing_open_jr):
             _res, why = attempt(reconcile, root)
         check("reconcile-lock-read-beneath-held-jr-fd",
-              why is not None and "possibly-live owner" in why)
+              _jr_swap_fired != [] and why is not None and "possibly-live owner" in why)
 
     # 9: live re-observation over a throwaway fixture.
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
