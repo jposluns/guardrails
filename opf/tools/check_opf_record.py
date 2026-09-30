@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T29)
+  check_opf_record.py --self-test                    the fixture suite (T1-T31)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -131,6 +131,15 @@ Each case runs on its own copy of that template; the root is removed in a finall
       the operation capability's rev-parse does, still runs with the system-config pins, and every
       fixture git call carries the three no-maintenance pins (flip: launch git past the lifecycle's
       wrapper, keeping only the GIT_CONFIG_NOSYSTEM pin so the flip itself reads no system config)
+  T30 a readable manifest declaring homes 2 that this tooling does not activate (no activation
+      patches) refuses BEFORE any reconciliation: the legacy leftover lock, the .aiqt subtree and
+      every other byte unchanged (flip: probe the generation alone, under which the legacy journal
+      is reconciled in place)
+  T31 a homes-2 run killed while holding the capability with no journal work left for recovery
+      (before the journal home existed, a nothing-opened transaction, or COMPLETE with its
+      projection) is reconciled by the next run: the confirmed-dead lease and active record are
+      cleared, that run refuses naming it, and ordinary acquisition succeeds again; a LIVE holder's
+      capability is refused and never seized (flip: a trigger that never sees the capability lease)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -1850,6 +1859,112 @@ def flip_t29():
     return patch.object(sys.modules[__name__], "stripped_launch_env", past_wrapper)
 
 
+# --- T30, T31: the PR D fix-3 vectors --------------------------------------------------------------------
+
+def t30_unactivated_homes2(fx):
+    """A readable manifest declaring homes 2 while this tooling does not activate it (no activation
+    patches: SUPPORTED_HOMES is 1, so homes_generation reads it as 1) is refused BEFORE any
+    reconciliation or write, with the homes-2 spec_version and without it. The reviewed head probed
+    it as generation 1 and reconciled the legacy journal in place, removing its leftover lock."""
+    env = fx.env
+    manifest_rel = MACH + "/" + record._opf_store.MANIFEST_NAME
+    for label, spec_version in (("pair", record._opf_store.HOMES2_SPEC_VERSION), ("current", None)):
+        root = fx.case("t30-unactivated-" + label)
+        proc = child(env, root, CREATE, flip=FAILING_LOCK_RELEASE)
+        assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (label, proc.returncode,
+                                                                        proc.stderr[-800:])
+        assert (Path(root) / record.JOURNAL_REL / "lock").exists(), ("T30 a reconcilable legacy leftover",
+                                                                    label)
+        manifest = model(root, manifest_rel)
+        manifest["opf"]["homes"] = 2
+        if spec_version is not None:
+            manifest["opf"]["spec_version"] = spec_version
+        (Path(root) / manifest_rel).write_text(emit.emit_checked(manifest), encoding="utf-8")
+        assert record._opf_store.homes_generation(manifest) == 1, ("T30 homes 2 is not activated", label)
+        before = snapshot(root)
+        result = record_cli(env, root, CREATE)
+        assert snapshot(root) == before, ("T30 nothing is reconciled or written", label)
+        refused(result, "which this tooling does not activate")
+
+
+def flip_t30():
+    """Probe the generation alone (the reviewed head's behaviour): the unactivated homes-2
+    declaration reads as generation 1 and the legacy journal is reconciled in place."""
+    def generation_only(ctx):
+        manifest = record._read_operand(ctx.root_fd, ctx.rel(record._opf_store.MANIFEST_NAME)).model
+        return record._opf_store.homes_generation(manifest)
+    return patch.object(record, "_probe_homes", generation_only)
+
+
+# Inside the killed child: the run holds the capability (it is past _acquire_guard) and dies before its
+# transaction begins, so on a store with no earlier homes-2 publication no journal home exists.
+DIE_BEFORE_PUBLISH = """
+import os
+record._publish = lambda *a, **k: os._exit(137)
+"""
+# Inside the killed child: the run dies at the render, after its COMPLETE transaction and projection.
+DIE_AT_RENDER = """
+import os
+record._render = lambda *a, **k: os._exit(137)
+"""
+
+
+def t31_dead_capability(fx):
+    """A homes-2 run killed while holding the operation capability, in each state that leaves
+    recovery no journal work (no journal home yet, a nothing-opened transaction, a COMPLETE one with
+    its projection), leaves the dead holder's lease and active record. The next run reclaims them
+    through the confirmed-dead gate and refuses naming it; the operands end at the prestate, or at
+    the poststate iff COMPLETE; .aiqt is never touched; and an ordinary acquisition succeeds again.
+    The reviewed head never reconciled these states, so every later acquisition refused on the stale
+    records. A LIVE holder's capability is refused, never seized, and it releases cleanly."""
+    env = fx.env
+    base = fx.case("t31-homes2-base")
+    with imp._self_test_homes2_active(base):
+        reference = fx.case("t31-homes2-reference", base)
+        proc = child(env, reference, CREATE, flip=HOMES2_CHILD_FLIP)
+        assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-1600:])
+        post = dict((rel, read(reference, rel)) for rel in RECORD_OPERANDS)
+        for label, kill, flip, want in (("no-journal", None, DIE_BEFORE_PUBLISH, []),
+                                        ("nothing-opened", "after-preimage-0", "", ["nothing-opened"]),
+                                        ("complete-projected", None, DIE_AT_RENDER, ["complete"])):
+            root = fx.case("t31-homes2-" + label, base)
+            pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+            proc = child(env, root, CREATE, kill=kill, flip=HOMES2_CHILD_FLIP + flip)
+            assert proc.returncode == 137, ("T31 the child is killed", label, proc.returncode,
+                                            proc.stderr[-800:])
+            assert (Path(root) / LEASE).exists(), ("T31 the dead holder's lease is left", label)
+            states = journal_states(root, TYPED_JOURNAL)
+            assert sorted(states.values()) == want, ("T31 no journal work for recovery", label, states)
+            assert all((Path(root) / record._opf_store.txn_record("record", name)).is_file()
+                       for name, s in states.items() if s == "complete"), ("T31 the projection", label)
+            result = record_cli(env, root, CREATE)
+            refused(result, "was reconciled")
+            assert "operation capability lease was present" in result[2], (label, result[2][-800:])
+            assert not (Path(root) / LEASE).exists(), ("T31 the confirmed-dead lease is cleared", label)
+            now = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+            assert now == (post if want == ["complete"] else pre), ("T31 prestate, or poststate iff "
+                                                                    "COMPLETE", label)
+            assert not (Path(root) / ".aiqt").exists(), ("T31 nothing under .aiqt", label)
+            cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
+            record._opf_oplock.release_operation(cap)
+        root = fx.case("t31-homes2-live", reference)
+        cap = record._opf_oplock.acquire_operation(str(root), record.VERB)
+        try:
+            before = snapshot(root)
+            result = record_cli(env, root, CREATE)
+            assert snapshot(root) == before, "T31 a live holder's capability is never seized"
+            refused(result, "never seized")
+        finally:
+            record._opf_oplock.release_operation(cap)
+        assert not (Path(root) / LEASE).exists(), "T31 the live holder releases cleanly"
+
+
+def flip_t31():
+    """A trigger that never sees the capability lease (the reviewed head's journal-only trigger):
+    the dead holder's leftovers are never reclaimed."""
+    return patch.object(record, "_capability_lease_present", lambda ctx: False)
+
+
 # --- the runner ------------------------------------------------------------------------------------------------
 
 TESTS = (
@@ -1893,6 +2008,8 @@ TESTS = (
     ("T27-homes1-report-shape", t27_homes1_report, flip_t27),
     ("T28-spec15-probe-sentence", t28_spec15_sentence, flip_t28),
     ("T29-git-lifecycle-pins", t29_git_lifecycle, flip_t29),
+    ("T30-unactivated-homes2-refused", t30_unactivated_homes2, flip_t30),
+    ("T31-dead-capability-reclaimed", t31_dead_capability, flip_t31),
 )
 
 
