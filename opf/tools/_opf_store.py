@@ -562,6 +562,17 @@ class ManifestValidation:
 
 # --- contained reads (the pin.py idiom, mapped to StoreError) -----------------------------------------
 
+def _close_fd_exc_safe(fd):
+    """Close a descriptor in a `finally` or an unwinding callback without letting a failing close REPLACE
+    the exception already in flight (#377 fix 1): while one is being handled or unwound (sys.exc_info()),
+    the close is quiet so that exception propagates unchanged; with none in flight the close error still
+    propagates fail-closed. Either way _journal's confirm-then-release guards never retain the fd."""
+    if sys.exc_info()[1] is not None:
+        _journal._close_fd_quietly(fd)
+    else:
+        _journal._close_fd_propagating(fd)
+
+
 def _open_root_fd(root):
     """Open a root directory fd with O_NOFOLLOW, so a symlinked final root component is refused rather
     than followed off-tree (the migrate.py/pin.py idiom). Raises OSError, mapped by the caller. Used for
@@ -723,7 +734,7 @@ def _immediate_subdirs(store_root_fd, working_rel):
     try:
         return _list_real_subdirs(wfd, working_rel)
     finally:
-        _journal._close_fd_propagating(wfd)
+        _close_fd_exc_safe(wfd)
 
 
 def _open_working_dir_fd(store_root_fd, working_rel):
@@ -757,7 +768,7 @@ def _open_working_dir_fd(store_root_fd, working_rel):
         # released its number, so the parent descriptor itself can never stay retained), and the close
         # error keeps propagating fail-closed.
         try:
-            _journal._close_fd_propagating(pfd)
+            _close_fd_exc_safe(pfd)
         except OSError:
             if wfd is not None:
                 _journal._close_fd_quietly(wfd)
@@ -848,7 +859,7 @@ def discover_machine_store_fd(store_root_fd, accept_tokens=None):
         status, machine_dir, detail = _discovery_result(matches, legacy)
         return status, machine_dir, detail, (raws.get(machine_dir) if status == "one" else None)
     finally:
-        _journal._close_fd_propagating(wfd)
+        _close_fd_exc_safe(wfd)
 
 
 def _classify_working_names(names, load, accept):
@@ -1032,7 +1043,7 @@ def resolve_store(product_root, accept_tokens=None):
         except StoreError as exc:
             return Resolution(CANNOT_EVALUATE, str(exc))
     finally:
-        _journal._close_fd_propagating(product_root_fd)
+        _close_fd_exc_safe(product_root_fd)
 
     if local is not None or committed is not None:
         # A pointer named the store: the override wins wholesale, else it completes with the committed
@@ -1090,7 +1101,7 @@ def _resolve_at(store_root, source, target, pointer, accept_tokens=None):
             return Resolution(CANNOT_EVALUATE, str(exc), store_root=store_root, target=target,
                               pointer_source=source)
     finally:
-        _journal._close_fd_propagating(store_root_fd)
+        _close_fd_exc_safe(store_root_fd)
 
     if status == "one":
         return Resolution(RESOLVED, detail, store_root=store_root, machine_dir=machine_dir,
@@ -1927,7 +1938,7 @@ def load_manifest(resolution, supported_profiles=None):
     except StoreError as exc:
         return ManifestValidation(CANNOT_EVALUATE, [str(exc)])
     finally:
-        _journal._close_fd_propagating(store_root_fd)
+        _close_fd_exc_safe(store_root_fd)
     if data is None:
         # Discovery already read this file, so its disappearance now is a race/fail-closed error.
         return ManifestValidation(CANNOT_EVALUATE, ["{} vanished after discovery".format(manifest_rel)])

@@ -682,7 +682,7 @@ def _open_directory(parent, name, fresh=False, owner=None):
         return fd
     except BaseException:
         if fd is not None:
-            store._journal._close_fd_propagating(fd)
+            store._journal._close_fd_quietly(fd)
         raise
 
 
@@ -743,7 +743,7 @@ class _QuarantineOwner:
     def remove(self, *, _descriptors):
         if self.identity is not None and self.state in ("PENDING", "OWNED"):
             parent = None
-            _descriptors.callback(store._journal._close_fd_propagating, parent := store._open_dir_nofollow(self.parent_path))
+            _descriptors.callback(store._close_fd_exc_safe, parent := store._open_dir_nofollow(self.parent_path))
             opened = os.fstat(parent)
             _require((opened.st_dev, opened.st_ino) == self.parent_identity,
                      CANNOT_EVALUATE, "cleanup", "cleanup parent changed")
@@ -776,15 +776,15 @@ def _quarantine(root, owners):
     with stack:
         # Register on the acquisition statement; a Python hold(fd) helper
         # would add an interruptible statement before callback ownership.
-        stack.callback(store._journal._close_fd_propagating, root_fd := store._open_dir_nofollow(root))
-        stack.callback(store._journal._close_fd_propagating, working := _open_directory(root_fd, ".working"))
-        stack.callback(store._journal._close_fd_propagating, adopt := _open_directory(working, "adopt"))
+        stack.callback(store._close_fd_exc_safe, root_fd := store._open_dir_nofollow(root))
+        stack.callback(store._close_fd_exc_safe, working := _open_directory(root_fd, ".working"))
+        stack.callback(store._close_fd_exc_safe, adopt := _open_directory(working, "adopt"))
         # Independent of the public request ID: never infer a capability from it.
         run_name = "observe-" + secrets.token_hex(16)
         owner = _QuarantineOwner(adopt, run_name, root + "/.working/adopt")
         owners.append(owner)
-        stack.callback(store._journal._close_fd_propagating, run := _open_directory(adopt, run_name, fresh=True, owner=owner))
-        stack.callback(store._journal._close_fd_propagating, quarantine := _open_directory(run, "quarantine", fresh=True))
+        stack.callback(store._close_fd_exc_safe, run := _open_directory(adopt, run_name, fresh=True, owner=owner))
+        stack.callback(store._close_fd_exc_safe, quarantine := _open_directory(run, "quarantine", fresh=True))
         path = root + "/.working/adopt/" + run_name + "/quarantine"
         for entry in list(sys.path) + os.environ.get("PATH", "").split(os.pathsep):
             if not isinstance(entry, str):
@@ -802,7 +802,7 @@ def _quarantine(root, owners):
 def _put(parent, name, payload, deadline, *, _descriptors):
     fd = None
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK
-    _descriptors.callback(store._journal._close_fd_propagating, fd := os.open(name, flags, 0o600, dir_fd=parent))
+    _descriptors.callback(store._close_fd_exc_safe, fd := os.open(name, flags, 0o600, dir_fd=parent))
     opened = os.fstat(fd)
     _require(stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1,
              CANNOT_EVALUATE, "quarantine", "output is not an exclusive regular file")
@@ -821,7 +821,7 @@ def _read_archive(parent, deadline, *, _descriptors):
     before = os.stat("archive.tar.gz", dir_fd=parent, follow_symlinks=False)
     fd = None
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-    _descriptors.callback(store._journal._close_fd_propagating, fd := os.open("archive.tar.gz", flags, dir_fd=parent))
+    _descriptors.callback(store._close_fd_exc_safe, fd := os.open("archive.tar.gz", flags, dir_fd=parent))
     opened = os.fstat(fd)
     _require(
         stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1
@@ -1047,16 +1047,16 @@ def _unpack(parent, archive, deadline, commit=None, *, _descriptors):
     _require(terminated and wrapper is not None,
              INVALID, "archive", "archive has no supported wrapped member stream")
     members_fd = None
-    _descriptors.callback(store._journal._close_fd_propagating, members_fd := _open_directory(parent, "members", fresh=True))
+    _descriptors.callback(store._close_fd_exc_safe, members_fd := _open_directory(parent, "members", fresh=True))
     for path, kind in sorted(nodes.items(), key=lambda item: (item[0].count("/"), item[0])):
         if kind != "directory":
             continue
         entry = contextlib.ExitStack()
         _descriptors.callback(entry.close)
         with entry:
-            entry.callback(store._journal._close_fd_propagating, (opened := store._journal._open_parent(members_fd, path))[0])
+            entry.callback(store._close_fd_exc_safe, (opened := store._journal._open_parent(members_fd, path))[0])
             pfd, name = opened
-            entry.callback(store._journal._close_fd_propagating, _open_directory(pfd, name, fresh=True))
+            entry.callback(store._close_fd_exc_safe, _open_directory(pfd, name, fresh=True))
     result = []
     budget = [0]
     for path, mode, payload in files:
@@ -1064,7 +1064,7 @@ def _unpack(parent, archive, deadline, commit=None, *, _descriptors):
         entry = contextlib.ExitStack()
         _descriptors.callback(entry.close)
         with entry:
-            entry.callback(store._journal._close_fd_propagating, (opened := store._journal._open_parent(members_fd, path))[0])
+            entry.callback(store._close_fd_exc_safe, (opened := store._journal._open_parent(members_fd, path))[0])
             pfd, name = opened
             _put(pfd, name, payload, deadline)
             before = os.stat(name, dir_fd=pfd, follow_symlinks=False)

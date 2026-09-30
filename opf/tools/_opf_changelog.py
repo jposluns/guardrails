@@ -477,7 +477,7 @@ def _load_inputs(resolution, product_root):
             # check-fails-closed-on-unreadable): an unreadable ledger must never escape as an uncaught error.
             return None, None, None, frozenset(), str(exc)
     finally:
-        _journal._close_fd_propagating(store_fd)
+        _opf_store._close_fd_exc_safe(store_fd)
     if version_data is None:
         return None, None, None, frozenset(), ("version.toml is absent from the resolved store (a required "
                                                 "input; fail-closed, spec 6.1)")
@@ -547,7 +547,7 @@ def _load_inputs(resolution, product_root):
         except (_journal.JournalError, OSError) as exc:
             return None, None, None, frozenset(), "cannot read {} ({})".format(CHANGELOG_REL, exc)
     finally:
-        _journal._close_fd_propagating(product_fd)
+        _opf_store._close_fd_exc_safe(product_fd)
     try:
         changelog_text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:

@@ -1033,7 +1033,7 @@ def _init_inventory(root_fd):
                     try:
                         walk(child_fd, relpath, depth + 1)
                     finally:
-                        journal._close_fd_propagating(child_fd)
+                        _opf_store._close_fd_exc_safe(child_fd)
 
     try:
         working = _opf_store.WORKING_DIRNAME
@@ -1047,7 +1047,7 @@ def _init_inventory(root_fd):
                 try:
                     walk(working_fd, working, 0)
                 finally:
-                    journal._close_fd_propagating(working_fd)
+                    _opf_store._close_fd_exc_safe(working_fd)
         report["complete"] = True
     except Exception as exc:  # noqa: BLE001  an incomplete inventory never licenses a write
         report["error"] = ascii(exc)
@@ -1174,7 +1174,7 @@ def _init_same_root(root, root_fd):
         if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
             raise RuntimeError("root changed since its contained directory was opened")
     finally:
-        _opf_store._journal._close_fd_propagating(check_fd)
+        _opf_store._close_fd_exc_safe(check_fd)
 
 
 def _init_create(root_fd, relpath, data):
@@ -1194,7 +1194,7 @@ def _init_create(root_fd, relpath, data):
             raise RuntimeError("create-only publication refused {!r}: {!r}".format(
                 relpath, exc)) from exc
     finally:
-        journal._close_fd_propagating(pfd)
+        _opf_store._close_fd_exc_safe(pfd)
 
 
 def _init_observed(root_fd, directories, payloads):
@@ -1220,7 +1220,7 @@ def _init_observed(root_fd, directories, payloads):
                     data, opened = journal._read_at(
                         pfd, name, relpath, cap=len(payloads[relpath]) + 1)
                 finally:
-                    journal._close_fd_propagating(pfd)
+                    _opf_store._close_fd_exc_safe(pfd)
                 row["state"] = (
                     "matches-payload" if opened.st_nlink == 1 and data == payloads[relpath]
                     else "different-content-or-link-count")
@@ -1347,7 +1347,7 @@ def _cmd_init(rest):
                 os.mkdir(name, 0o755, dir_fd=pfd)
                 os.fsync(pfd)
             finally:
-                journal._close_fd_propagating(pfd)
+                _opf_store._close_fd_exc_safe(pfd)
         for relpath, data in payloads.items():
             stage = "creating " + relpath
             _init_same_root(root, root_fd)
@@ -1491,7 +1491,7 @@ def _upgrade_replace(root_fd, relpath, data):
                 journal._write_all(fd, data)
                 os.fsync(fd)
             finally:
-                journal._close_fd_propagating(fd)
+                _opf_store._close_fd_exc_safe(fd)
             os.rename(tmpname, name, src_dir_fd=pfd, dst_dir_fd=pfd)
             renamed = True
             os.fsync(pfd)
@@ -1502,7 +1502,7 @@ def _upgrade_replace(root_fd, relpath, data):
                 except OSError:
                     pass
     finally:
-        journal._close_fd_propagating(pfd)
+        _opf_store._close_fd_exc_safe(pfd)
 
 
 def _upgrade_create_index(root_fd, relpath, data):
@@ -1518,7 +1518,7 @@ def _upgrade_create_index(root_fd, relpath, data):
         os.fsync(pfd)
         return True
     finally:
-        journal._close_fd_propagating(pfd)
+        _opf_store._close_fd_exc_safe(pfd)
 
 
 def _upgrade_plan(manifest_model, counters_model):
@@ -2104,7 +2104,7 @@ def _upgrade_run(root):
                     raise _UpgradeError("upgrade destination {!r} is not a regular file "
                                         "(fail-closed)".format(relpath))
             finally:
-                _opf_store._journal._close_fd_propagating(pfd)
+                _opf_store._close_fd_exc_safe(pfd)
         # DISTINCT roots for the recovery/staging advice (R1): `.working` lives under the STORE root, product-
         # scope targets under the PRODUCT root; the two differ for a RELOCATED store.
         recovery_store_root = res.store_root
@@ -2243,7 +2243,7 @@ def _upgrade_run(root):
             print(_upgrade_recovery_text(*recovery), file=sys.stderr)
         raise
     finally:
-        _opf_store._journal._close_fd_propagating(root_fd)
+        _opf_store._close_fd_exc_safe(root_fd)
 
 
 def _import_exit(verdict):
@@ -2694,7 +2694,7 @@ def _adopt_read_inputs(path):
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
         finally:
             try:
-                _opf_adopt_apply._journal._close_fd_propagating(pfd)
+                _opf_store._close_fd_exc_safe(pfd)
             except OSError:
                 # A failing parent close must not leak the just-opened worksheet fd (round-5 defect 2)
                 # or the parent fd itself (round 7: both closes run through the journal engine's
@@ -2724,7 +2724,7 @@ def _adopt_read_inputs(path):
     except (OSError, _opf_adopt_apply._journal.JournalError) as exc:
         raise ValueError("--inputs worksheet unreadable ({}): {}".format(path, exc))
     finally:
-        _opf_adopt_apply._journal._close_fd_propagating(fd)
+        _opf_store._close_fd_exc_safe(fd)
     try:
         doc = tomllib.loads(raw.decode("utf-8"))
     except (ValueError, RecursionError) as exc:   # UnicodeDecodeError and TOMLDecodeError are ValueErrors
@@ -2981,10 +2981,10 @@ def _cmd_adopt(rest):
                             name, "; ".join(checked.findings)))
             finally:
                 if dfd is not None:
-                    journal._close_fd_propagating(dfd)
+                    _opf_store._close_fd_exc_safe(dfd)
             owner, opened = adopt.journal_state(root_fd, adopt._journal_root(root_abs))
         finally:
-            journal._close_fd_propagating(root_fd)
+            _opf_store._close_fd_exc_safe(root_fd)
         journal_rel = adopt.JOURNAL_REL
         if owner is not None:
             findings.append("the adoption journal lock at {} is held (pid {}); status never seizes it "

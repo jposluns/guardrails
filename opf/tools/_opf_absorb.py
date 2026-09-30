@@ -618,7 +618,7 @@ def _load_done(resolution, registered_vendors):
             # fail-closed cannot-evaluate (check-fails-closed-on-unreadable), never a silent empty join.
             return None, None, str(exc)
     finally:
-        _journal._close_fd_propagating(store_fd)
+        _opf_store._close_fd_exc_safe(store_fd)
     if done_data is None:
         return None, None, ("done.index.toml is absent but [types.done] is declared (a declared type's index "
                             "must exist; fail-closed, check-fails-closed-on-unreadable)")

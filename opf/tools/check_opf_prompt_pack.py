@@ -80,6 +80,15 @@ def compute_digest(version, members):
     return "sha256:" + hashlib.sha256(("\n".join(lines) + "\n").encode("utf-8")).hexdigest()
 
 
+def _close_fd_exc_safe(fd):
+    """_opf_store._close_fd_exc_safe without the store import: a failing close never replaces an
+    exception in flight, and still propagates fail-closed when none is."""
+    if sys.exc_info()[1] is not None:
+        _journal._close_fd_quietly(fd)
+    else:
+        _journal._close_fd_propagating(fd)
+
+
 def _read_regular(path, limit, what):
     """Exact bytes of a regular file, never following a final symlink, bounded by limit."""
     try:
@@ -98,7 +107,7 @@ def _read_regular(path, limit, what):
             data = handle.read(limit + 1)
     finally:
         if fd is not None:
-            _journal._close_fd_propagating(fd)
+            _close_fd_exc_safe(fd)
     _require(len(data) <= limit, what + "-bound", what + " exceeds the size bound", CANNOT_EVALUATE)
     return data
 

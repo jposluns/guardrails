@@ -316,7 +316,7 @@ def verify_bundle(product_root, run_id):
     try:
         return _verify_bundle_at(root_fd, run_id, evidence_home_rel(run_id))
     finally:
-        _journal._close_fd_propagating(root_fd)
+        store._close_fd_exc_safe(root_fd)
 
 
 def _verify_bundle_at(root_fd, run_id, bundle, home_fd=None):
@@ -381,7 +381,7 @@ def _verify_bundle_at(root_fd, run_id, bundle, home_fd=None):
                                             "file)".format(relpath, fst.st_nlink))
             return _journal._read_fd(fd, cap=_journal._MAX_PRODUCT_READ_BYTES), fst
         finally:
-            _journal._close_fd_propagating(fd)
+            store._close_fd_exc_safe(fd)
 
     try:
         try:
@@ -808,7 +808,7 @@ def reconcile(product_root):
             raise AdoptApplyError("the adoption journal {} cannot be reconciled ({}); "
                                   "fail-closed".format(JOURNAL_REL, exc))
     finally:
-        _journal._close_fd_propagating(root_fd)
+        store._close_fd_exc_safe(root_fd)
     return outcomes
 
 
@@ -828,7 +828,7 @@ def _default_store_present_without_manifest(product_root):
         except (store.StoreError, OSError):
             return False
     finally:
-        _journal._close_fd_propagating(root_fd)
+        store._close_fd_exc_safe(root_fd)
     return status == "present"
 
 
@@ -992,7 +992,7 @@ def run_adopt_transaction(product_root, run_id, compose, phase=None):
     finally:
         if jr_fd is not None:
             _journal._close_fd_quietly(jr_fd)
-        _journal._close_fd_propagating(root_fd)
+        store._close_fd_exc_safe(root_fd)
 
 
 # --- the dispatch table: EVERY op refuses not-yet-executable in this slice -----------------------------
