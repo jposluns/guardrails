@@ -2145,6 +2145,17 @@ _SCAN_ALLOWED_UNPINNED = (
      "cannot-evaluate pass-through: the credential-red-check re-invokes the SAVED"
      " subprocess.Popen inside its patched side_effect after asserting the launch"
      " environment; the argv is the runner check's own bash runner-script launch, not git"),
+    ("opf/tools/_opf_emit.py", "_run_fixture_process.exec_subject", ("os",),
+     "cannot-evaluate os launch: the fork()ed subject leg of the shared fixture tree owner"
+     " rewires stdio onto the capture files and replaces the child image with os.execvpe"
+     " (the guardian pidfd/pdeathsig/setsid ownership scheme requires an exec-in-child"
+     " image replacement no subprocess list-argv launch can spell); every entry into it is"
+     " run_status_owned, whose own argv head is sys.executable running the _fixture_main"
+     " supervisor (the opf.py watchdog checks patch it only with wrappers that replay"
+     " sys.executable argvs through the saved launcher), and the raw in-child replay runs"
+     " the fixture argvs its callers spell: sys.executable CLI/crash subjects throughout,"
+     " plus the worklog upgrade fixture's git init/add/commit whose argv carries the three"
+     " F-367 pins as literal `-c` pairs in option position under a private HOME/XDG env"),
     # In-process exec loaders and mutant builders (the dynamic tripwire), each audited: each
     # exec compiles THIS repo's own tracked source, an AST/text mutant of it, or a red-leg
     # candidate body spelled as a string literal in the self-test itself, into a module
@@ -2178,6 +2189,29 @@ _SCAN_ALLOWED_UNPINNED = (
     ("opf/tools/_opf_adopt_observe.py", "self_test.source_mutant", ("dynamic",),
      "exec of this module's own function source with exactly one guard site replaced"
      " (red-leg mutant); the exec only defines the mutant function"),
+    ("opf/tools/_opf_emit.py", "_fixture_main", ("dynamic",),
+     "exec-based definition of one assertion fixture inside the isolated fixture CHILD:"
+     " the body arrives as the `-c` text of an explicit [sys.executable, -I, -B, -c, ...]"
+     " argv and is compiled into a single _opf_fixture function (the exec only defines"
+     " it; the call is the next statement); every body is a string spelled beside its"
+     " run_status_owned call in this repo's tools, and the audited bodies drive imported"
+     " repo modules and CLI cases in-process, spelling no process launch of their own"),
+    ("opf/tools/_opf_manifest_regressions.py", "_validator_namespace", ("dynamic",),
+     "exec-based builder of the manifest-validator namespace: the compiled AST is"
+     " inspect.getsource(_opf_store) (or a reviewed AST mutant of it) filtered to its"
+     " FunctionDef nodes only, so the exec only defines the validator functions over"
+     " dict(vars(_opf_store)); a launch the tracked source spells is scanned at its own"
+     " source location, and the census red-leg mutants alter finding emission only"),
+    ("opf/tools/opf.py", "_watchdog_completion_case", ("dynamic",),
+     "exec of _FixtureProcess._finish_close rebuilt from _opf_emit's own AST with exactly"
+     " one pinned QA38/QA39/QA40/QA41/QA51 mutation inserted (red-leg mutants); each exec"
+     " only defines the mutant member (for QA51, a one-member class) into dict(vars(emit))"
+     " for the behavioural matrix to drive in-process"),
+    ("opf/tools/opf.py", "_watchdog_completion_case.displaced_outward", ("dynamic",),
+     "exec of the two disclosed leg-11 QA37 vector sources (string literals in this"
+     " self-test); the exec only defines each vector's mutant function, whose body calls"
+     " the planted wait/abandon_unfinished stubs and _cleanup_boundary, never a process"
+     " launch"),
 )
 
 

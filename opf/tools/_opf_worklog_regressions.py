@@ -1013,11 +1013,16 @@ def _upgrade_preflight_regressions(check, fence):
                "LC_ALL": "C", "TZ": "UTC", "TMPDIR": str(base)}
 
         def git_call(root, *args):
+            # F-367: pin automatic maintenance off in option position, so no detached
+            # `git maintenance run --auto` / `git gc --auto` child can outlive the
+            # commit and race this fixture temporary directory cleanup.
             _opf_emit.run_status_owned(
                 [git, "-C", str(root), "-c", "init.templateDir=",
                  "-c", "init.defaultBranch=main", "-c", "core.hooksPath=" + str(home),
                  "-c", "commit.gpgSign=false", "-c", "user.name=OPF fixture",
-                 "-c", "user.email=fixture@example.invalid", *args],
+                 "-c", "user.email=fixture@example.invalid",
+                 "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
+                 "-c", "maintenance.auto=false", *args],
                 fixture_id="upgrade-git/" + root.name + "/" + args[0], process_fixture=True,
                 env=env, cwd=base, check=True, capture_output=True, timeout=150)
 
