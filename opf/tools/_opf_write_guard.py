@@ -354,8 +354,11 @@ _HOMES_INSPECT_VERBS = frozenset(("rev-parse", "ls-files", "check-ignore", "conf
 # option is refused: one that takes a separate argument (-C <path>, -c <name=value>) would make a
 # first-non-option parse read that argument as the verb and forward a different command to git.
 _HOMES_GLOBAL_FLAGS = frozenset(("--literal-pathspecs",))
-# config is allowlisted only with one of these read actions (git refuses to combine two actions).
+# config is allowlisted only with one of these read actions (git refuses to combine two actions), named
+# where git still parses it as an option (_homes_config_read), beside only _HOMES_CONFIG_FLAGS: argument-less
+# options, so no option can take the action token as its argument (`--file --get`).
 _HOMES_CONFIG_READS = frozenset(("--get", "--get-all", "--get-regexp"))
+_HOMES_CONFIG_FLAGS = frozenset(("-z", "--name-only", "--type=bool"))
 # The untracked child every home effectiveness probe asks about. check-ignore answers "not ignored"
 # for any path whose pathspec matches an index entry, so probing a home itself reads the tracked
 # content already there (durable evidence after the first import, the steady state) as not ignored.
@@ -381,17 +384,34 @@ def _ignore_file_candidates(prefix, paths):
     return sorted(candidates)
 
 
+def _homes_config_read(options):
+    """Whether the tokens after a homes `config` verb form a read. git parses config options only up to
+    `--` or the first positional (git 2.53.0: `config --file F -- k --get` and `config -z --file F k
+    --get-all` each write the action token as the value), so exactly one _HOMES_CONFIG_READS action
+    must come before that point, beside only _HOMES_CONFIG_FLAGS; every later token is then a key or
+    value pattern of that read, never an action or a value to write."""
+    reads = 0
+    for token in options:
+        if token == "--" or not token.startswith("-"):
+            break
+        if token in _HOMES_CONFIG_READS:
+            reads += 1
+        elif token not in _HOMES_CONFIG_FLAGS:
+            return False
+    return reads == 1
+
+
 def _homes_allowlisted_verb(args):
     """The verb of a homes git argv, refused BEFORE launch unless allowlisted. The verb is the token
     after the leading _HOMES_GLOBAL_FLAGS, so any other leading option is itself the refused verb and
-    an option argument can never be mistaken for it; config passes only with a _HOMES_CONFIG_READS
-    action."""
+    an option argument can never be mistaken for it; config passes only in a read form
+    (_homes_config_read)."""
     index = 0
     while index < len(args) and args[index] in _HOMES_GLOBAL_FLAGS:
         index += 1
     head = args[index] if index < len(args) else None
     if head not in _HOMES_INSPECT_VERBS or (
-            head == "config" and not _HOMES_CONFIG_READS.intersection(args[index + 1:])):
+            head == "config" and not _homes_config_read(args[index + 1:])):
         raise WriteGuardError("homes gitignore inspection attempted the non-allowlisted git verb "
                               "{!r} (argv {!r}); refusing (fail-closed)".format(head, list(args)))
     return head
@@ -418,9 +438,33 @@ def _homes_run_git(git, root, args, own_stderr=False):
     return _homes_checked(head, _opf_observe._run_git(git, root, args), own_stderr)
 
 
+def _homes_config_overrides():
+    """The sorted names of the ambient runtime git configuration overrides the config-discovery
+    environment drops (_opf_observe._config_discovery_env): GIT_CONFIG_GLOBAL, GIT_CONFIG_SYSTEM,
+    GIT_CONFIG_COUNT with its GIT_CONFIG_KEY_<n> / GIT_CONFIG_VALUE_<n> pairs, GIT_CONFIG_PARAMETERS (a
+    wrapper's `git -c`) and the legacy GIT_CONFIG: every GIT_CONFIG name but the carried
+    GIT_CONFIG_NOSYSTEM toggle."""
+    return sorted(name for name in os.environ if name != "GIT_CONFIG_NOSYSTEM"
+                  and (name == "GIT_CONFIG" or name.startswith("GIT_CONFIG_")))
+
+
 def _homes_run_git_discovery(git, root, args, input_bytes=None):
-    """_opf_observe._run_git_config_discovery behind the same verb allowlist and stderr refusal."""
+    """_opf_observe._run_git_config_discovery behind the same verb allowlist and stderr refusal, refused
+    before launch while the environment carries a runtime configuration override that runner drops
+    (_homes_config_overrides): the probe's answer could then differ from the adopter's own git there
+    (with core.ignoreCase=true supplied through GIT_CONFIG_COUNT, `!/STAGING/` re-includes the staging
+    home), so it is cannot-evaluate, never replayed. Disclosed residual (configuration divergence): the
+    probe reads the configuration git discovers at inspection time through HOME, XDG_CONFIG_HOME and the
+    system config, in the store's containing repository; a later configuration edit, a different HOME,
+    or a repository or index variable (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, dropped by the runner's
+    allowlist) at the adopter's own git call is not bound by this inspection."""
     head = _homes_allowlisted_verb(args)
+    dropped = _homes_config_overrides()
+    if dropped:
+        raise WriteGuardError("the environment carries the runtime git configuration override(s) {}, which "
+                              "the homes gitignore inspection's config-discovery probe drops, so its answer "
+                              "could differ from the adopter's own git; unset them and retry "
+                              "(cannot-evaluate, fail-closed)".format(", ".join(dropped)))
     return _homes_checked(head, _opf_observe._run_git_config_discovery(
         git, root, args, input_bytes=input_bytes), False)
 
@@ -698,13 +742,14 @@ def _homes_indexed_ignore_guard(git, repo, rel_prefix, verb):
     in a partial clone: the probe above read it as no-rule, but the adopter's own `git add` would
     fetch it, so the effective answer cannot be trusted (the same cannot-evaluate opf.py's init
     preflight applies, through the same _opf_observe.indexed_ignore_availability, here run through
-    the verb allowlist). The candidates govern every probed path: each home's probe child and the
-    control file itself."""
+    the verb allowlist and `strict`, so a failed partial-clone config probe is cannot-evaluate, never the
+    partial fallback that can still end clean). The candidates govern every probed path: each home's
+    probe child and the control file itself."""
     probed = [rel + "/" + _HOMES_PROBE_CHILD for rel in _HOMES_DURABLE_RELS + _HOMES_IGNORED_RELS]
     candidates = _ignore_file_candidates(rel_prefix, probed + [_HOMES_GITIGNORE_REL])
     try:
         unavailable = _opf_observe.indexed_ignore_availability(git, repo, candidates,
-                                                               run=_homes_run_git_discovery)
+                                                               run=_homes_run_git_discovery, strict=True)
     except RuntimeError as exc:
         raise WriteGuardError("cannot evaluate indexed ignore availability for the {} gitignore "
                               "inspection ({}); cannot-evaluate (fail-closed)".format(verb, exc))
@@ -734,10 +779,11 @@ def inspect_homes_gitignore(store_root, verb, approved_rewrite=None, reviewed_ex
     homes-gitignore-ignored, homes-gitignore-ineffective, and homes-gitignore-block-drift. The
     caller may write only when holds is empty. Raises WriteGuardError on every cannot-evaluate
     state: git missing from PATH, no repository or a bare one, an unreadable .working/.gitignore
-    (homes-gitignore-unreadable), a flagged index entry for that file, a probe that cannot run or
-    writes a diagnostic to stderr, an index entry that would mask a probe, an ignored home whose
-    governing rule does not exclude the home itself, or an unavailable indexed ignore blob in a
-    partial clone.
+    (homes-gitignore-unreadable), a flagged index entry for that file, a probe that cannot run, fails
+    or writes a diagnostic to stderr, an ambient runtime git configuration override the config-discovery
+    probe drops (named; the remaining configuration divergence is disclosed at _homes_run_git_discovery),
+    an index entry that would mask a probe, an ignored home whose governing rule does not exclude the
+    home itself, or an unavailable indexed ignore blob in a partial clone.
 
     The index is never mutated: only rev-parse, ls-files, check-ignore, config and cat-file run
     (structurally allowlisted: every call, the shared indexed_ignore_availability's included, runs

@@ -2374,6 +2374,8 @@ def _gitignore_reconciliation_self_test(check):
             return sorted(rows)
 
         with patch.dict(os.environ, env_iso):
+            for name in guard._homes_config_overrides():
+                del os.environ[name]   # an ambient override refuses every discovery probe (restored on exit)
             # A clean fixture plans the block with no holds, through ONLY the allowlisted read-only
             # verbs (I15): rev-parse, ls-files, check-ignore, config, cat-file; never status.
             repo_c, root_c = fixture("clean")
@@ -2603,6 +2605,29 @@ def _gitignore_reconciliation_self_test(check):
                         ["-C", "ls-files", "update-index", "--refresh"], ["-c", "x=y", "ls-files"],
                         ["config", "core.bare", "true"])) and not launched)
 
+            # A config read action counts only where git still parses it as an option, before `--` and
+            # the first positional, beside argument-less flags: Codex's `--file F -- k --get`, a
+            # positional first (`k --get-all`) and an option taking the action as its argument
+            # (`--file --get`) are writes to git 2.53.0, each refused before launch; the partial-clone
+            # probe's own reads still pass.
+            config_file = str(base / "guard-config")
+            config_launched = []
+            with patch.object(observe, "_run_git_config_discovery", lambda *a, **k: config_launched.append(a)
+                              or observe._GitOutcome(True, 0, b"", "")):
+                check("gi-config-guard-dashdash", lambda: all(guard_refuses(
+                    lambda a=a: guard._homes_run_git_discovery(git, root_c, a), "non-allowlisted") for a in (
+                        ["config", "--file", config_file, "--", "qa.worker", "--get"],
+                        ["config", "--", "qa.worker", "--get"],
+                        ["config", "qa.worker", "--get"],
+                        ["config", "-z", "--file", config_file, "qa.worker", "--get-all"],
+                        ["config", "-z", "qa.worker", "--get-all"],
+                        ["config", "--file", "--get", "--", "qa.worker", "v"])) and not config_launched)
+            check("gi-config-guard-reads", lambda: all(guard._homes_allowlisted_verb(a) == "config" for a in (
+                ["config", "--get-regexp", r"^remote\..*\.partialclonefilter$"],
+                ["config", "--get", "extensions.partialClone"],
+                ["config", "-z", "--name-only", "--get-regexp", r"^remote\..*\.promisor$"],
+                ["config", "--type=bool", "--get-all", "remote.origin.promisor"])))
+
             # An ignore source git cannot read (a symlinked nested .gitignore, which git refuses to
             # follow whatever the uid) is only a warning, with check-ignore rc 1, the not-ignored
             # answer: any diagnostic is cannot-evaluate in the inspector and the re-check alike...
@@ -2625,6 +2650,59 @@ def _gitignore_reconciliation_self_test(check):
             with patch.object(observe, "_run_git_config_discovery", noisy_disc):
                 check("gi-discovery-stderr", lambda: guard_refuses(
                     lambda: guard.inspect_homes_gitignore(root_c, "init"), "synthetic config"))
+
+            # ...and a partial-clone config probe that fails WITHOUT a diagnostic (rc 2 or 255, a
+            # timeout, or an enumerated promisor key whose re-query answers rc 1) is cannot-evaluate in
+            # the inspector and the re-check alike, never the partial fallback whose availability check
+            # can still end clean (Codex's reproductions over the installed block); the shared default
+            # keeps that fallback for opf.py's init preflight.
+            repoz, rootz = fixture("config-probe-failure")
+            (rootz / ".working" / ".gitignore").write_bytes(block)
+
+            def requery_fails(args):
+                if "--name-only" in args:
+                    return observe._GitOutcome(True, 0, b"remote.origin.promisor\x00", "")
+                return observe._GitOutcome(True, 1, b"", "")
+
+            for label, answer in (
+                    ("rc2", lambda a: observe._GitOutcome(True, 2, b"", "")),
+                    ("rc255", lambda a: observe._GitOutcome(True, 255, b"", "")),
+                    ("timeout", lambda a: observe._GitOutcome(False, None, b"", "synthetic timeout")),
+                    ("requery", requery_fails)):
+                def failing_disc(g, r, args, answer=answer, **kw):
+                    return answer(args) if "config" in args else real_disc(g, r, args, **kw)
+
+                with patch.object(observe, "_run_git_config_discovery", failing_disc):
+                    check("gi-config-probe-failure-" + label, lambda: all(guard_refuses(
+                        lambda f=f: f(rootz, "init"), "partial-clone config probe failed") for f in (
+                            guard.inspect_homes_gitignore, guard.verify_homes_gitignore_effective))
+                        and observe._is_partial_clone(git, rootz, run=failing_disc) is True)
+
+            # A runtime configuration override the config-discovery probe would drop is a named
+            # cannot-evaluate, never replayed: with core.ignoreCase=true supplied through
+            # GIT_CONFIG_COUNT (Codex's reproduction) or a wrapper's `git -c` (GIT_CONFIG_PARAMETERS),
+            # an uppercase negation re-includes the home for the adopter's git, while the probe, which
+            # drops the override, would read the block as effective (as it does, correctly, without
+            # one). Every dropped name is refused; the carried GIT_CONFIG_NOSYSTEM toggle is not.
+            ignore_case = (("GIT_CONFIG_COUNT", dict(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.ignoreCase",
+                                                     GIT_CONFIG_VALUE_0="true")),
+                           ("GIT_CONFIG_PARAMETERS", dict(GIT_CONFIG_PARAMETERS="'core.ignorecase'='true'")))
+            for rel in ("staging", "journals"):
+                repoo, rooto = fixture("override-" + rel)
+                (rooto / ".working" / ".gitignore").write_bytes(block + b"!/" + rel.upper().encode() + b"/\n")
+                (rooto / ".working" / rel).mkdir()
+                (rooto / ".working" / rel / "payload").write_text("x\n", encoding="utf-8")
+                check("gi-config-override-baseline-" + rel,
+                      lambda r=rooto: guard.inspect_homes_gitignore(r, "init")[:2] == (None, []))
+                for name, extra in ignore_case:
+                    with patch.dict(os.environ, extra):
+                        check("gi-config-override-" + rel + "-" + name, lambda r=rooto, n=name: all(
+                            guard_refuses(lambda f=f: f(r, "init"), n) for f in (
+                                guard.inspect_homes_gitignore, guard.verify_homes_gitignore_effective)))
+            with patch.dict(os.environ, dict(GIT_CONFIG="x", GIT_CONFIG_GLOBAL="x", GIT_CONFIG_SYSTEM="x",
+                                             GIT_CONFIG_KEY_3="x")):
+                check("gi-config-override-names", lambda: guard._homes_config_overrides() == [
+                    "GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_KEY_3", "GIT_CONFIG_SYSTEM"])
 
             # A partial re-include beneath a home: /<home>/* ignores the probe child, not the home, so
             # a re-included subdirectory's future content would be unignored. git's own rule report
@@ -2687,6 +2765,8 @@ def _gitignore_reconciliation_self_test(check):
         env_iso11 = dict(HOME=str(home11), XDG_CONFIG_HOME=str(home11 / "cfg"),
                          GIT_CONFIG_NOSYSTEM="1")
         with patch.dict(os.environ, env_iso11):
+            for name in guard._homes_config_overrides():
+                del os.environ[name]
             repo11, root11 = fixture("durable-ignored")
             check("gi-durable-ignored", lambda: any(
                 h.startswith("durable-evidence-ignored") and "imported" in h
