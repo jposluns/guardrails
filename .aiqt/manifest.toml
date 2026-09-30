@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "9436f1e961766656d41c70ac0ac5a5cabd1c7aa50acbc71905a427a6aae29d7a"
+tree-sha256 = "655709ddb1e3116d0f3c871dcd0db860e9b458431f8131dc4fdccedb167a3f9d"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2706,8 +2706,8 @@ sha256 = "d7f989594fa55308a5ddf8831fe4999f035d282cea073e7d3aa146dd3ba35e1a"
 
 [[sources]]
 path = "opf/tools/_opf_write_guard.py"
-bytes = 81222
-sha256 = "d3de9b2c986fc37a1b36970007f0cbf8e26301201d4c892e17f4d21cb444110b"
+bytes = 81562
+sha256 = "a75b7ff6c86fba059f31bb322b902429992c12e70e1254ddd0c891f27325e409"
 
 [[sources]]
 path = "opf/tools/_semver.py"
