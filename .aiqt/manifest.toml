@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "91bb5a2fcbbeb1e9ff95959b88b35715f2140db8538ef510522f8d5ba3b25a0a"
+tree-sha256 = "4279b81a54ba63cf80c1bd44aa854b55f5a0c7857c5253ad2ac02dfea0a5ab54"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -101,8 +101,8 @@ sha256 = "2ec7728abc86392c978ee5a5069ad1bd3cf52b55170367c3bbccd0316f5458d2"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
-bytes = 2931
-sha256 = "d8aa606781e1ddb2ef9d6e3f6b1590d42f96a036f0305342120ea5855c5abdeb"
+bytes = 3141
+sha256 = "0318662fd38c17c90193eab72f5172afb824b4035b1da1f39eec4f2448f5c197"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -1566,8 +1566,8 @@ sha256 = "27b27ca584b3f43f111051d861e316ae6f78a64373dcd2cb2197c6da241a7126"
 
 [[sources]]
 path = ".claude/worker-pack.md"
-bytes = 2813
-sha256 = "419b51d0d7726128272dcd708e18be33d17a7bf5c9f7c8fb1870c5b6b3405180"
+bytes = 3023
+sha256 = "d5fabd287a18c8d3be484590519812d978b5fc5ac2c74fa036a827eb06375b4c"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/00-project-integrity.mdc"
@@ -4411,7 +4411,7 @@ sha256 = "27b27ca584b3f43f111051d861e316ae6f78a64373dcd2cb2197c6da241a7126"
 artifact-id = "worker-pack:.claude/worker-pack.md"
 path = ".claude/worker-pack.md"
 kind = "file"
-sha256 = "419b51d0d7726128272dcd708e18be33d17a7bf5c9f7c8fb1870c5b6b3405180"
+sha256 = "d5fabd287a18c8d3be484590519812d978b5fc5ac2c74fa036a827eb06375b4c"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/00-project-integrity.mdc"
