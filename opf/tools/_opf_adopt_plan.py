@@ -181,7 +181,7 @@ def _read(fd, name, before, budget):
             raise PlanError("file name changed during read: {!r}".format(name))
         return b"".join(chunks)
     finally:
-        os.close(child)
+        store._journal._close_fd_propagating(child)
 
 
 def _roots(sources):
@@ -243,9 +243,9 @@ def _inventory(root, sources, targets):
                                 if store._journal._lstat_at(child, store.MANIFEST_NAME) is not None:
                                     raise PlanError("unresolved store manifest requires repair")
                             finally:
-                                os.close(child)
+                                store._journal._close_fd_propagating(child)
             finally:
-                os.close(wfd)
+                store._journal._close_fd_propagating(wfd)
         if resolution.status == store.RESOLVED:
             manifest_path = resolution.machine_rel + "/" + store.MANIFEST_NAME
             # The exact bytes discovery already read through the .working listing descriptor,
@@ -335,7 +335,7 @@ def _inventory(root, sources, targets):
                     if _stamp(os.stat(name, dir_fd=parent, follow_symlinks=False)) != _stamp(before):
                         raise PlanError("directory name changed during enumeration")
                 finally:
-                    os.close(child)
+                    store._journal._close_fd_propagating(child)
             elif stat.S_ISREG(before.st_mode):
                 # A malformed/ambiguous store must not be scanned as ordinary foreign
                 # content: a manifest may contain unmanaged exclusions we cannot trust.
@@ -362,7 +362,7 @@ def _inventory(root, sources, targets):
             try:
                 visit(parent, name, path, 0)
             finally:
-                os.close(parent)
+                store._journal._close_fd_propagating(parent)
         for path in sources:
             if entries.get(path, {}).get("kind") in (None, "absent", "excluded"):
                 raise PlanError("declared source is unavailable: {!r}".format(path))
@@ -396,7 +396,7 @@ def _inventory(root, sources, targets):
             if _stamp(os.fstat(check_fd)) != _stamp(root_stat):
                 raise PlanError("product root changed during investigation")
         finally:
-            os.close(check_fd)
+            store._journal._close_fd_propagating(check_fd)
         # The homes generation, the resolved store's declared view targets and its parsed manifest are
         # returned beside the observation, never inside it; all come from the same manifest read that
         # fixed the exclusions, whose digest the observation records.
@@ -440,7 +440,7 @@ def _inventory(root, sources, targets):
             "coverage_residuals": list(RESIDUALS),
         }, homes, view_targets, manifest
     finally:
-        os.close(root_fd)
+        store._journal._close_fd_propagating(root_fd)
 
 
 def _deliverable_destinations(manifest):

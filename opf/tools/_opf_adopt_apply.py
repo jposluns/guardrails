@@ -336,7 +336,12 @@ def _verify_bundle_at(root_fd, run_id, bundle, home_fd=None):
     # pathname between the caller's listing and this verification can never contribute a bundle.
     dir_fds = dict()
     if home_fd is not None:
-        dir_fds[tuple(_journal._check_rel(bundle))[:-1]] = os.dup(home_fd)
+        # Round 7 MINOR: the subscript KEY is computed BEFORE the dup (Python evaluates an
+        # assignment right-hand side first), so a _check_rel raise on a malformed bundle path can
+        # never strand the just-duplicated home descriptor outside dir_fds, where the cleanup
+        # below cannot close it.
+        home_key = tuple(_journal._check_rel(bundle))[:-1]
+        dir_fds[home_key] = os.dup(home_fd)
 
     def dir_at(parts):
         """The RETAINED dir fd for the relative directory `parts` (a tuple of components; () is the
@@ -376,7 +381,7 @@ def _verify_bundle_at(root_fd, run_id, bundle, home_fd=None):
                                             "file)".format(relpath, fst.st_nlink))
             return _journal._read_fd(fd, cap=_journal._MAX_PRODUCT_READ_BYTES), fst
         finally:
-            os.close(fd)
+            _journal._close_fd_propagating(fd)
 
     try:
         try:
@@ -2588,6 +2593,91 @@ def _self_test_checks():
                   "not a contained relative file path" in (refusal(observe_live, root_fd, "../escape") or ""))
         finally:
             os.close(root_fd)
+
+    # round 7 MINOR 1: _verify_bundle_at computes the retained-chain KEY before duplicating the held
+    # home descriptor, so a bundle path _check_rel refuses can never strand the dup outside dir_fds
+    # (where the verification cleanup cannot close it). The malformed-bundle raise still propagates
+    # and no duplicated descriptor survives it.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = Path(temp).resolve()
+        (root / "home").mkdir()
+        root_fd = store._open_dir_nofollow(root)
+        home_fd = os.open("home", os.O_RDONLY | os.O_DIRECTORY, dir_fd=root_fd)
+        _m1_seen = dict()
+        _m1_real_dup = os.dup
+
+        def _m1_dup(fd):
+            nfd = _m1_real_dup(fd)
+            _m1_seen["dup"] = nfd
+            return nfd
+
+        os.dup = _m1_dup
+        try:
+            try:
+                _verify_bundle_at(root_fd, "x", "a/../b", home_fd=home_fd)
+                _m1_out = "returned"
+            except _journal.JournalError:
+                _m1_out = "raised"
+        finally:
+            os.dup = _m1_real_dup
+        check("r7-verify-bundle-malformed-rel-raises", _m1_out == "raised")
+        _m1_leaked = False
+        if "dup" in _m1_seen:
+            try:
+                os.fstat(_m1_seen["dup"])
+                _m1_leaked = True
+            except OSError:
+                pass
+        check("r7-verify-bundle-home-dup-never-stranded", not _m1_leaked)
+        if _m1_leaked:                    # a pre-fix run leaks it; close so the failing suite stays clean
+            try:
+                os.close(_m1_seen["dup"])
+            except OSError:
+                pass
+        os.close(home_fd)
+        os.close(root_fd)
+
+    # round 7 MINOR 2: _journal_txn_dirs(hold=True) builds the returned entry path BEFORE opening the
+    # transaction descriptor, so a path construction that raises (a malformed journal_root) can never
+    # strand a just-opened txn descriptor outside `out`, where the except-cleanup cannot close it. The
+    # construction error still propagates and no held txn descriptor survives it.
+    with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
+        root = Path(temp).resolve()
+        (root / "txn-1").mkdir()
+        jr_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+        _m2_opened = []
+        _m2_real_open = os.open
+
+        def _m2_open(*args, **kwargs):
+            fd = _m2_real_open(*args, **kwargs)
+            if kwargs.get("dir_fd") == jr_fd:
+                _m2_opened.append(fd)
+            return fd
+
+        os.open = _m2_open
+        try:
+            try:
+                _journal._journal_txn_dirs(jr_fd, None, strict=True, hold=True)
+                _m2_out = "returned"
+            except TypeError:
+                _m2_out = "raised"
+        finally:
+            os.open = _m2_real_open
+        check("r7-txn-dirs-held-path-error-raises", _m2_out == "raised")
+        _m2_left = []
+        for _fd in _m2_opened:
+            try:
+                os.fstat(_fd)
+            except OSError:
+                continue
+            _m2_left.append(_fd)
+        check("r7-txn-dirs-no-held-descriptor-survives-path-error", not _m2_left)
+        for _fd in _m2_left:              # a pre-fix run leaks it; close so the failing suite stays clean
+            try:
+                os.close(_fd)
+            except OSError:
+                pass
+        os.close(jr_fd)
 
     # 10: apply takes only a plan/v2 (spec 14.1): a v1-marked plan is never apply input. The v1 schema no
     # longer ships (the plan-v2 schema replaced it, U8), and apply refuses on the format marker before it

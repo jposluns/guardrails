@@ -185,6 +185,39 @@ def _close_fd_quietly(fd):
             pass
 
 
+def _close_fd_propagating(fd):
+    """Close a descriptor on a FAIL-CLOSED path where the close error must PROPAGATE to the caller (unlike
+    _close_fd_quietly's teardown swallow), while never leaving the descriptor itself retained (codex round
+    7): a close that raises does not by itself prove the fd was released (on Linux close() releases the
+    number even on EINTR/EIO, but that release is not assumed), so a bare `os.close` on such a path could
+    leak the very descriptor it was releasing when the raising close RETAINED it. On a raise this runs the
+    same confirm-then-release recovery as _close_fd_quietly: CONFIRM with fstat that the descriptor is
+    actually gone (EBADF means it was already released); only when it is genuinely STILL open close it once
+    more (fstat has just proven the fd valid, so this is not a blind double-close) and, if even that cannot
+    release it, surface the leak to stderr. The ORIGINAL close error then re-raises either way, so every
+    existing fail-closed mapping of a raising close is preserved."""
+    try:
+        os.close(fd)
+        return
+    except OSError as exc:
+        first = exc
+    try:
+        os.fstat(fd)
+    except OSError:
+        raise first                                       # confirmed gone: still propagate the close error
+    try:
+        os.close(fd)                                      # genuinely still open (fstat proved it valid): release it
+    except OSError as exc2:
+        # As in _close_fd_quietly: the diagnostic itself must never replace the original error; a broken
+        # stderr is swallowed so the original close error below still propagates fail-closed.
+        try:
+            print("warning: fail-closed close of fd {} failed to release it ({} / {}); fail-surfaced"
+                  .format(fd, first, exc2), file=sys.stderr)
+        except OSError:
+            pass
+    raise first
+
+
 def _open_parent(root_fd, relpath):
     """Open the parent directory of relpath by walking each intermediate component beneath root_fd with
     O_DIRECTORY|O_NOFOLLOW (a symlinked component raises rather than redirects the walk). Returns
@@ -256,7 +289,7 @@ def _lstat_contained(root_fd, relpath):
     try:
         return _lstat_at(pfd, name)
     finally:
-        os.close(pfd)
+        _close_fd_propagating(pfd)
 
 
 def _lstat_at(pfd, name):
@@ -321,7 +354,7 @@ def _read_contained(root_fd, relpath, require_single_link=False):
         # regular file (SECA resource-bounds; the TOCTOU-hang backstop behind a check-then-open gate).
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
     except OSError as exc:
-        os.close(pfd)
+        _close_fd_propagating(pfd)
         raise JournalError("cannot read contained file {!r} ({})".format(relpath, exc))
     try:
         st = os.fstat(fd)
@@ -338,13 +371,13 @@ def _read_contained(root_fd, relpath, require_single_link=False):
         return _read_fd(fd, cap=_MAX_PRODUCT_READ_BYTES), st
     finally:
         # Each close in its own try/finally (round-5 defect 3): a FILE close that reports an error must
-        # not skip the parent close and leak pfd. On Linux a failing close still releases the number, so
-        # both descriptors are released either way, and the file-close error keeps propagating
-        # fail-closed to the caller.
+        # not skip the parent close and leak pfd. Each close runs through the confirm-then-release guard
+        # (round 7: a raising close is not assumed to have released its number), so both descriptors are
+        # released either way, and the file-close error keeps propagating fail-closed to the caller.
         try:
-            os.close(fd)
+            _close_fd_propagating(fd)
         finally:
-            os.close(pfd)
+            _close_fd_propagating(pfd)
 
 
 def _fsync_dir_fd(fd):
@@ -469,10 +502,12 @@ def open_journal_root_from_path(root, journal_rel):
     finally:
         # ROUND-6 defect sibling (_opf_store._open_working_dir_fd): the new jr fd is HELD in a local
         # across the root close, so a root close that reports an error cannot abandon the return and
-        # leak the just-opened journal-root fd. It is released quietly (on Linux a raising close still
-        # gave up the number) and the close error keeps propagating fail-closed.
+        # leak the just-opened journal-root fd. It is released quietly, the root close runs through the
+        # confirm-then-release guard (round 7: a raising close is not assumed to have released its
+        # number, so the root descriptor itself can never stay retained), and the close error keeps
+        # propagating fail-closed.
         try:
-            os.close(root_fd)
+            _close_fd_propagating(root_fd)
         except OSError:
             if jr_fd is not None:
                 _close_fd_quietly(jr_fd)
@@ -653,9 +688,9 @@ def read_frames(jr_fd, txn_dir, txn_fd=None):
                                    "(fail-closed)".format(_st.st_size, _MAX_JOURNAL_READ_BYTES))
             raw = _read_fd(ffd, cap=_MAX_JOURNAL_READ_BYTES)
         finally:
-            os.close(ffd)
+            _close_fd_propagating(ffd)
     finally:
-        os.close(txnfd)
+        _close_fd_propagating(txnfd)
     frames, off = [], 0
     while off < len(raw):
         nl = raw.find(b"\n", off)
@@ -849,7 +884,7 @@ def read_lock_owner_at(jr_fd):
                                "(fail-closed)".format(_st.st_size, _MAX_JOURNAL_READ_BYTES))
         raw = _read_fd(lfd, cap=_MAX_JOURNAL_READ_BYTES)
     finally:
-        os.close(lfd)
+        _close_fd_propagating(lfd)
     try:
         owner = json.loads(raw)
     except ValueError as exc:
@@ -1018,12 +1053,17 @@ def _journal_txn_dirs(jr_fd, journal_root, strict=False, hold=False):
                 continue
             if stat.S_ISDIR(est.st_mode):
                 if hold:
+                    # Round 7 MINOR: build the returned entry path BEFORE the open, so a path
+                    # construction that raises (a malformed journal_root) can never strand a
+                    # just-opened txn descriptor outside `out`, where the except-cleanup below
+                    # cannot close it.
+                    entry = Path(journal_root) / name
                     try:
                         tfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=jr_fd)
                     except OSError as exc:
                         raise JournalError("cannot open journal txn dir {!r} contained no-follow ({}); "
                                            "fail-closed".format(name, exc))
-                    out.append((Path(journal_root) / name, tfd))
+                    out.append((entry, tfd))
                 else:
                     out.append(Path(journal_root) / name)
             elif strict:

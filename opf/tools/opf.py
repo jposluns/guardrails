@@ -2791,17 +2791,15 @@ def _adopt_read_inputs(path):
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
         finally:
             try:
-                os.close(pfd)
+                _opf_adopt_apply._journal._close_fd_propagating(pfd)
             except OSError:
-                # A failing parent close must not leak the just-opened worksheet fd (round-5 defect 2):
-                # close it in its own guarded step before the parent's close error propagates (on Linux
-                # a failing close still releases the number, so this is a close of a live descriptor,
-                # never a double-close); the propagating error still fails the read closed below.
+                # A failing parent close must not leak the just-opened worksheet fd (round-5 defect 2)
+                # or the parent fd itself (round 7: both closes run through the journal engine's
+                # confirm-then-release guards, so a close that raises with its number retained still
+                # releases it, never via a blind double close); the propagating error still fails the
+                # read closed below.
                 if fd is not None:
-                    try:
-                        os.close(fd)
-                    except OSError:
-                        pass
+                    _opf_adopt_apply._journal._close_fd_quietly(fd)
                 raise
     except FileNotFoundError:
         raise ValueError("--inputs worksheet not found: {}".format(path))
@@ -2823,7 +2821,7 @@ def _adopt_read_inputs(path):
     except (OSError, _opf_adopt_apply._journal.JournalError) as exc:
         raise ValueError("--inputs worksheet unreadable ({}): {}".format(path, exc))
     finally:
-        os.close(fd)
+        _opf_adopt_apply._journal._close_fd_propagating(fd)
     try:
         doc = tomllib.loads(raw.decode("utf-8"))
     except (ValueError, RecursionError) as exc:   # UnicodeDecodeError and TOMLDecodeError are ValueErrors
@@ -3080,10 +3078,10 @@ def _cmd_adopt(rest):
                             name, "; ".join(checked.findings)))
             finally:
                 if dfd is not None:
-                    os.close(dfd)
+                    journal._close_fd_propagating(dfd)
             owner, opened = adopt.journal_state(root_fd, adopt._journal_root(root_abs))
         finally:
-            os.close(root_fd)
+            journal._close_fd_propagating(root_fd)
         journal_rel = adopt.JOURNAL_REL
         if owner is not None:
             findings.append("the adoption journal lock at {} is held (pid {}); status never seizes it "
