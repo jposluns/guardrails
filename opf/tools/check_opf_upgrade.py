@@ -637,7 +637,10 @@ def _suite_isolated():
         def git_call(store, args):
             proc = subprocess.run(
                 ["git", "-C", str(store), "-c", "init.templateDir=", "-c", "init.defaultBranch=main",
-                 "-c", "user.email=t@t", "-c", "user.name=t"] + list(args),
+                 "-c", "user.email=t@t", "-c", "user.name=t",
+                 # F-367: no DETACHED auto-gc/auto-maintenance may outlive a fixture commit and
+                 # churn .git while a later read or the teardown rmtree traverses it.
+                 "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"] + list(args),
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="backslashreplace", timeout=120, env=env_holder["env"])
             if proc.returncode != 0:
                 raise OSError("fixture git failed at {!r}: {}".format(str(store), proc.stderr))

@@ -178,7 +178,14 @@ def _suite_isolated(invoke):
             # blob through the promisor, is legitimate fixture behaviour. Production OBSERVATIONS keep
             # _run_git's default (lazy fetch suppressed), which the object-reading probes under test exercise
             # directly (e.g. _opf_observe._show_toml / _run_git below, without this flag).
-            result = _opf_observe._run_git(git, root, args, allow_lazy_fetch=True)
+            # F-367: config_overrides (git's environment-config mechanism, command-scope
+            # precedence) pins automatic maintenance OFF, so no DETACHED auto-gc can outlive a
+            # fixture commit and churn .git while a ground-truth copytree or a later read
+            # traverses it.
+            result = _opf_observe._run_git(
+                git, root, args, allow_lazy_fetch=True,
+                config_overrides=[("gc.auto", "0"), ("gc.autoDetach", "false"),
+                                  ("maintenance.auto", "false")])
             if not result.completed or result.rc != 0:
                 raise OSError("fixture git failed at {!r}: {}".format(str(root), result.err))
             return result.out

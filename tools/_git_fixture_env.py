@@ -53,6 +53,28 @@ import tempfile
 _SCRATCH_HOME = None
 _PRESCRUB_ENVIRON = None
 
+# The F-367 auto-maintenance pins, applied through git's documented environment-config mechanism
+# (GIT_CONFIG_COUNT / GIT_CONFIG_KEY_<n> / GIT_CONFIG_VALUE_<n>, command-scope precedence, so a
+# repository-local setting cannot re-enable it): a fixture `git commit` otherwise spawns
+# `git maintenance run --auto`, which DETACHES (gc.autoDetach, and --detach on current git) and
+# keeps repacking and pruning the fixture's .git/objects after the commit subprocess returned,
+# racing a later copytree/rmtree/read of that repository (loose objects and their fan-out
+# directories vanish mid-traversal, ENOENT). gc.auto=0 disables auto-gc, maintenance.auto=false
+# keeps commit from spawning the child at all, and gc.autoDetach=false is defence in depth: a
+# gc --auto that still runs stays foreground, inside the caller's wait.
+_NO_AUTO_MAINTENANCE = (("gc.auto", "0"), ("gc.autoDetach", "false"), ("maintenance.auto", "false"))
+_MAINTENANCE_PIN_VARS = ("GIT_CONFIG_COUNT",) + tuple(
+    "GIT_CONFIG_%s_%d" % (kind, index) for index in range(len(_NO_AUTO_MAINTENANCE))
+    for kind in ("KEY", "VALUE"))
+
+
+def _pin_no_auto_maintenance(env):
+    """Apply the _NO_AUTO_MAINTENANCE pins to env in place (see the constant's rationale)."""
+    env["GIT_CONFIG_COUNT"] = str(len(_NO_AUTO_MAINTENANCE))
+    for index, (key, value) in enumerate(_NO_AUTO_MAINTENANCE):
+        env["GIT_CONFIG_KEY_%d" % index] = key
+        env["GIT_CONFIG_VALUE_%d" % index] = value
+
 
 def _scratch_home():
     """A process-lifetime empty directory serving as HOME and XDG_CONFIG_HOME for fixture git calls,
@@ -104,6 +126,7 @@ def git_fixture_env(**overrides):
     env["GIT_CONFIG_NOSYSTEM"] = "1"
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_SYSTEM"] = os.devnull
+    _pin_no_auto_maintenance(env)
     env.update(overrides)
     return env
 
@@ -117,7 +140,7 @@ def scrub_git_environment():
     for key in [k for k in os.environ if k.startswith("GIT_")]:
         del os.environ[key]
     for key in ("HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_NOSYSTEM",
-                "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
+                "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM") + _MAINTENANCE_PIN_VARS:
         os.environ[key] = env[key]
     return env
 
@@ -140,11 +163,15 @@ def fixture_git_lifecycle():
     try:
         with tempfile.TemporaryDirectory(prefix="aiqt-fixture-git-bin-") as directory:
             wrapper = Path(directory) / "git"
+            # The -c pins mirror _NO_AUTO_MAINTENANCE argv-side: a descendant that scrubbed the
+            # GIT_* environment (dropping the GIT_CONFIG_COUNT pins) still cannot spawn a
+            # detached auto-gc/auto-maintenance run through this wrapper (F-367).
+            pins = " ".join("-c " + shlex.quote("%s=%s" % pair) for pair in _NO_AUTO_MAINTENANCE)
             wrapper.write_text(
                 "#!/bin/sh\n"
                 "export GIT_CONFIG_NOSYSTEM=1\n"
                 "export GIT_CONFIG_SYSTEM={}\n"
-                "exec {} \"$@\"\n".format(shlex.quote(os.devnull), shlex.quote(real_git)),
+                "exec {} {} \"$@\"\n".format(shlex.quote(os.devnull), shlex.quote(real_git), pins),
                 encoding="utf-8")
             wrapper.chmod(0o700)
             scrub_git_environment()
