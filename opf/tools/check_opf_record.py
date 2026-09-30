@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T66)
+  check_opf_record.py --self-test                    the fixture suite (T1-T68)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -254,6 +254,17 @@ Each case runs on its own copy of that template; the root is removed in a finall
       transaction reads rolled-back leaves the rolled-back refusal governing the exit, the release
       failure surfaced beside it (flip: the reviewed head's narrow release handler, which the
       interrupt passes through)
+  T67 the record CLI invoked inside an embedding caller's except block, with the journal-lock
+      release raising a non-ordinary error on the clean exit, fails as the run's own failure (exit
+      2, no success report), exactly as outside the handler: the cleanup reads the run's own
+      recorded failure, never sys.exc_info() (flip: the fix-13 head's cleanup, whose ambient
+      sys.exc_info() read takes the caller's handled exception for a refusal in flight and reports
+      success over the swallowed release failure)
+  T68 the single-writer release mark is copied before the lease acquisition, so an ordinary
+      allocation failure at that copy can never land between the acquisition and the protected
+      region: a trap that fails the copy only once the lease is held never fires and the run
+      records (flip: the fix-13 head's ordering, whose post-acquisition copy fails and strands the
+      just-acquired lease)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -4116,6 +4127,137 @@ def flip_t66():
     return patch.object(record, "_publish", head_publish)
 
 
+# --- T67, T68: the PR D fix-14 vectors ------------------------------------------------------------------
+
+def t67_ambient_exception_not_pending(fx):
+    """The record CLI invoked inside an embedding caller's except block, with the journal-lock
+    release raising a non-ordinary RuntimeError on the clean exit: the release failure is the run's
+    own failure (exit 2, no success report), exactly as it is outside the handler. On the fix-13
+    head the cleanup read sys.exc_info() in its finally, so the caller's handled ValueError read as
+    a refusal in flight and the run reported success exit 0 over the swallowed release failure (QA
+    round 13, F1)."""
+    env = fx.env
+    root = fx.case("t67-ambient-handler")
+
+    def raising_release(_journal_root):
+        raise RuntimeError("ambient release witness")
+    with patch.object(record._journal, "release_lock", raising_release):
+        try:
+            raise ValueError("the embedding caller's handled exception")
+        except ValueError:
+            result = record_cli(env, root, CREATE)
+    rc, out, err = result
+    assert rc == 2, ("T67 a non-ordinary clean-exit release failure is the run's own failure, an "
+                     "embedding caller's except block included", rc, out[-800:], err[-800:])
+    assert RECORDED_EVENT not in out, ("T67 no success report", out[-800:])
+    assert "ambient release witness" in err, ("T67 the release failure governs the exit", err[-800:])
+    assert (Path(root) / record.JOURNAL_REL / "lock").exists(), "T67 the unreleased lock is left"
+    outside = fx.case("t67-no-handler")
+    with patch.object(record._journal, "release_lock", raising_release):
+        result = record_cli(env, outside, CREATE)
+    assert result[0] == 2, ("T67 the same failure outside any handler", result[0], result[2][-800:])
+
+
+def flip_t67():
+    """The fix-13 head's _publish cleanup: `pending = sys.exc_info()[1]` read in the finally, under
+    which an embedding caller's handled exception reads as a refusal in flight, so a clean-exit
+    non-ordinary release failure is surfaced as a warning and the run still reports success."""
+    def head_publish(ctx, plan, subcommand, cap=None):
+        if ctx.journal_rel != record.JOURNAL_REL:
+            return record._publish_homes2(ctx, plan, subcommand, cap)
+        root_fd = ctx.root_fd
+        journal_root = record._journal_root(ctx)
+        journal.require_containment()
+        journal.ensure_journal_dirs(root_fd, record.JOURNAL_REL)
+        jr_fd = journal.open_journal_root_fd(root_fd, record.JOURNAL_REL)
+        held = retain = False
+        token = os.urandom(16).hex()
+        try:
+            if journal.read_lock_owner(journal_root) is not None:
+                raise record.RecordError("the record journal lock is held (fail-closed)")
+            journal.acquire_lock(journal_root, "{}.{}".format(record.SESSION_ID, token))
+            held = True
+            ops, content, staged = [], dict(), []
+            for operand in plan.operands:
+                post = dict((("kind", "file"), ("content-sha256", record._sha256(operand.new_raw))))
+                source = dict((("kind", "file"), ("mode", operand.mode),
+                               ("sha256", record._sha256(operand.raw))))
+                ops.append(dict((("op", "write"), ("path", operand.rel), ("poststate", post),
+                                 ("source-poststate", source))))
+                content.update(((operand.rel, operand.new_raw),))
+                staged.append(record.base64.b64encode(operand.new_raw).decode("ascii"))
+            txn_id = record._record_run_id(token)
+            header = dict((("unit", record.SESSION_ID), ("kind", "record-" + subcommand),
+                           ("staged", staged)))
+            try:
+                journal.run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops,
+                                        lambda op: content.get(op.get("path")), record.SESSION_ID)
+            except (journal.JournalError, OSError) as exc:
+                retain = True
+                raise record.RecordError("the publication FAILED ({})".format(exc))
+        finally:
+            if held and not retain:
+                pending = sys.exc_info()[1]   # the head's ambient read
+                try:
+                    journal.release_lock(journal_root)
+                except BaseException as exc:  # noqa: BLE001  the head's cleanup handler
+                    if pending is None and not isinstance(exc, (journal.JournalError, OSError)):
+                        raise
+                    try:
+                        print("opf record: the record journal lock under {} could not be released "
+                              "({}); it may be left in place.".format(record.JOURNAL_REL, exc),
+                              file=sys.stderr)
+                    except BaseException:
+                        pass
+            journal._close_fd_quietly(jr_fd)
+    return patch.object(record, "_publish", head_publish)
+
+
+def t68_release_mark_before_acquisition(fx):
+    """The release mark's copy precedes the lease acquisition, so an ordinary allocation failure at
+    `list(_RELEASE_PENDING)` can never land between _acquire_guard returning and the protected
+    region: the trap object fails the copy only once the lease has been acquired, so on the fixed
+    ordering it never fires and the run records with the lease released. On the fix-13 head the
+    copy ran after the real acquisition, so the trap fired there: exit 2 with zero release attempts
+    and the lease left in place (QA round 13, F2)."""
+    env = fx.env
+    root = fx.case("t68-release-mark")
+    acquired = []
+    real_acquire = guard.acquire_lease
+
+    def arming_acquire(root_fd, machine_rel, verb):
+        lease = real_acquire(root_fd, machine_rel, verb)
+        acquired.append(True)
+        return lease
+
+    class MarkCopyTrap:
+        """Iterable release mark whose copy fails once the lease is held."""
+
+        def __iter__(self):
+            if acquired:
+                raise MemoryError("synthetic allocation failure after the acquisition")
+            return iter((False,))
+    with patch.object(record, "_RELEASE_PENDING", MarkCopyTrap()), \
+            patch.object(guard, "acquire_lease", arming_acquire):
+        result = record_cli(env, root, CREATE)
+    assert acquired, "T68 the run acquired the lease for real"
+    recorded(result)
+    assert not (Path(root) / LEASE).exists(), "T68 the lease is released, never stranded"
+
+
+def flip_t68():
+    """The fix-13 head's ordering: the release mark's copy is taken only after _acquire_guard has
+    returned, so the allocation failure lands between the acquisition and the protected region and
+    the just-acquired lease is stranded."""
+    real = record._acquire_guard
+
+    def head_order(ctx):
+        lease = real(ctx)
+        list(record._RELEASE_PENDING)   # the head's post-acquisition copy of the release mark
+        return lease
+    return patch.object(record, "_acquire_guard", head_order)
+
+
 # --- the runner ------------------------------------------------------------------------------------------------
 
 TESTS = (
@@ -4198,6 +4340,8 @@ TESTS = (
      (flip_t64_conclude, flip_t64_recovery)),
     ("T65-interrupt-before-conclude", t65_interrupt_before_conclude, flip_t65),
     ("T66-release-interrupt-never-displaces", t66_release_interrupt_never_displaces, flip_t66),
+    ("T67-ambient-exception-not-pending", t67_ambient_exception_not_pending, flip_t67),
+    ("T68-release-mark-before-acquisition", t68_release_mark_before_acquisition, flip_t68),
 )
 
 

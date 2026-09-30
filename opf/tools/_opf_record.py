@@ -244,7 +244,8 @@ PENDING_DECISION = "pending_decision"
 # three keys on `decided`, none on `open` or `withdrawn`.
 DECISION_BUNDLE = ("decision", "decided_at", "decided_by")
 # The single-writer journal lock of one publication carries `opf-record.<token>` as its session, and the
-# transaction directory it opens ends `.<token>`: a leftover lock names its own transaction by that token.
+# transaction directory it opens ends `-<hash16>`, the token's first 16 hex digits (_record_run_id): a
+# leftover lock names its own transaction by that token (_txn_of_token).
 _TOKEN_RE = re.compile(r"^[0-9a-f]{32}\Z")
 
 
@@ -1912,12 +1913,15 @@ def _recover_capability_journal(ctx, opened, unprojected):
         need = ("an operation capability lease or active record was present at the trigger read with no "
                 "record journal work pending (a live run's, never seized, or an interrupted run's leftover, "
                 "cleared only once its holder is confirmed dead)")
+    # The outcome list is allocated BEFORE the acquisition (PR D fix 14): an allocation failure
+    # between acquire_operation returning and the protected region would strand the just-acquired
+    # capability.
+    reconciled = []
     try:
         cap = _opf_oplock.acquire_operation(str(ctx.res.store_root), VERB, recover=True)
     except _opf_oplock.OpLockError as exc:
         raise RecordError("{}, and reconciliation writes the store, so it runs only under the operation "
                           "capability: {} {} (fail-closed)".format(need, exc, _acquisition_removals(exc)))
-    reconciled = []
     try:
         try:
             opened, unprojected = _capability_recovery_plan(ctx)
@@ -1982,7 +1986,8 @@ def _publish(ctx, plan, subcommand, cap=None):
     RecordError; the journal lock's release is attempted on the clean exit and on an ordinary
     exception (a failed release is surfaced saying the lock may be left, T55, with a surfacing write
     that itself fails dropped, PR D fix 12; an ordinary release failure is never fatal here, and a
-    refusal in flight still governs, whatever the release raised, PR D fix 13) except a
+    refusal in flight still governs, whatever the release raised, PR D fix 13, a refusal in flight
+    being one this run itself raised, never an embedding caller's handled exception, PR D fix 14) except a
     run_transaction failure whose transaction reads as open, COMPLETE, or unreadable, which retains
     the lock for the next run's reconciliation, and a lock acquisition failing after its O_EXCL
     create, whose refusal says the created lock may be left in place (PR D fix 10)."""
@@ -1999,6 +2004,10 @@ def _publish(ctx, plan, subcommand, cap=None):
                           "created its directories, and no operand, journal entry or lock was "
                           "written (fail-closed)".format(JOURNAL_REL, exc))
     held = retain = False
+    # The run's own failure in flight, recorded by the except below (PR D fix 14): the cleanup reads
+    # this, never sys.exc_info(), which inside an embedding caller's except block reads the caller's
+    # handled exception as a refusal in flight (T67).
+    pending = None
     # The token binds this run's journal lock to the one transaction it opens (_leftover_lock_outcome).
     token = os.urandom(16).hex()
     try:
@@ -2054,9 +2063,11 @@ def _publish(ctx, plan, subcommand, cap=None):
                               "retained, leaving it for the next opf record run's reconciliation, which acts on "
                               "it only as far as each step succeeds (fail-closed)".format(
                                   txn_id, _FAILED_STATE.get(state, "in an unreadable state"), exc))
+    except BaseException as exc:  # noqa: BLE001  recorded for the cleanup, re-raised unchanged
+        pending = exc
+        raise
     finally:
         if held and not retain:
-            pending = sys.exc_info()[1]
             try:
                 _journal.release_lock(journal_root)
             except BaseException as exc:  # noqa: BLE001  surfaced, never displaces a refusal in flight
@@ -2066,7 +2077,11 @@ def _publish(ctx, plan, subcommand, cap=None):
                 # never only after a terminal transaction. An ordinary release failure is never fatal
                 # here (T55); a refusal in flight still governs, whatever the release raised (PR D fix
                 # 13); any other raising release on the clean exit is the run's own failure; and the
-                # surfacing write itself failing is dropped (PR D fix 12).
+                # surfacing write itself failing is dropped (PR D fix 12). The refusal in flight is
+                # read from this run's own record of it (pending), never from sys.exc_info(), which
+                # inside an embedding caller's except block reads the caller's handled exception as a
+                # refusal in flight, turning a clean-exit release failure into a warned success (PR D
+                # fix 14, T67).
                 if pending is None and not isinstance(exc, (_journal.JournalError, OSError)):
                     raise
                 try:
@@ -2310,7 +2325,9 @@ def _emit_failure_text(report):
 # the one release is never attempted twice, and a failure raised before _conclude begins still
 # reaches the caller's release (PR D fix 12; T65 discriminates against the fix-11 head, whose caller
 # marked the release done on its own line BEFORE calling _conclude, so a failure raised there
-# skipped the release entirely).
+# skipped the release entirely). The copy is allocated BEFORE the acquisition (PR D fix 14; T68
+# discriminates against the fix-13 head, which allocated it between _acquire_guard and the protected
+# region, so an allocation failure there stranded the just-acquired lease).
 _RELEASE_PENDING = (False,)
 
 
@@ -2427,8 +2444,12 @@ def _run_operation(req):
         _opf_write_guard.check_ignored(
             product_root, [p for p in scope["product"]
                            if not os.path.lexists(os.path.join(str(product_root), p))], VERB)
-        lease = _acquire_guard(ctx)
+        # The release mark and the failure record are allocated BEFORE the acquisition (PR D fix 14,
+        # T68): an allocation failure between _acquire_guard returning and the protected region would
+        # strand the just-acquired lease.
         released = list(_RELEASE_PENDING)
+        pending = None
+        lease = _acquire_guard(ctx)
         try:
             # Under the held lease, the operands must still hold the exact bytes planned from (the
             # journal's capture pin re-checks the same bytes under its own lock).
@@ -2454,9 +2475,13 @@ def _run_operation(req):
                 # only homes-1 change); only the homes-2 report names its typed journal home.
                 report["journal_rel"] = ctx.journal_rel
             _conclude(ctx, lease, report, released)
+        except BaseException as exc:  # noqa: BLE001  recorded for the cleanup, re-raised unchanged
+            # PR D fix 14 (T67): the cleanup reads this run's own failure, never sys.exc_info(),
+            # which inside an embedding caller's except block reads the caller's handled exception.
+            pending = exc
+            raise
         finally:
             if not released[0]:
-                pending = sys.exc_info()[1]
                 try:
                     _release_guard(ctx, lease)
                 except BaseException as rel_exc:  # noqa: BLE001  surfaced, never displaces the original failure
