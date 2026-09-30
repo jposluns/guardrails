@@ -31,9 +31,10 @@ longer match its plan digest is drifted and is never archived or removed. A non-
 only its retirement preimage at apply and stays frozen in place (its removal waits for the green
 completion check, a later slice). An `rmdir` may target ONLY a directory this same transaction created; a
 pre-existing live directory is never removed by this shell. No protected destination
-(`_opf_adopt.protected_destination`, the ONE predicate the planner shares: a `.git` or `.aiqt` component
-at any depth, the adoption journal's own tree included; the product-root pointers; the store control area;
-the store tree's `.gitignore`) is an apply operand of ANY kind, save the mkdirs leading to this run's own
+(`_opf_adopt.protected_destination`, the ONE predicate the planner shares, its names compared
+case-insensitively: a path that is not normalized and contained; a `.git` or `.aiqt` component at any
+depth, the adoption journal's own tree included; the product-root pointers; the store control area; the
+store tree's `.gitignore`) is an apply operand of ANY kind, save the mkdirs leading to this run's own
 homes. The adoption archive and every evidence bundle are immutable: an op may only create beneath this
 run's own archive, this run's own bundle, or the Move root, never write, remove, or rmdir anything under
 `.working/archive/` or `.working/imported/`, and never create in another run's home.
@@ -497,9 +498,10 @@ def check_apply_ops(run_id, phase, ops, staged):
     additionally needs staged bytes matching its own content digest, like a create. An rmdir may target
     only a directory an earlier mkdir in this same list creates (so, under one-op-per-path, no live
     directory is ever removed by this shell). A protected destination (_opf_adopt.protected_destination,
-    the predicate the planner applies to every move destination and archive copy: `.git` and `.aiqt` at any
-    depth, the adoption journal's own tree included, the product-root pointers, the store control area and
-    the store tree's `.gitignore`) is never an operand of any kind, save a mkdir of this run's own homes or
+    the predicate the planner applies to every move destination and archive copy, its names compared
+    case-insensitively: `.git` and `.aiqt` at any depth, the adoption journal's own tree included, the
+    product-root pointers, the store control area and the store tree's `.gitignore`) is never an operand of
+    any kind, save a mkdir of this run's own homes or
     their ancestors. Immutable homes: under `.working/archive/` and `.working/imported/` only a create
     beneath this run's own archive, own bundle, or the Move root (and the mkdirs leading there) is allowed,
     never a write, remove, or rmdir, and never another run's home (spec 14.2, 4.2). One op per path. The
@@ -1209,7 +1211,10 @@ def _self_test_checks():
     for label, path in (("nested-aiqt", "docs/.aiqt/x.md"), ("nested-git", "docs/.git/x"),
                         ("journals", ".working/journals/x"), ("staging", ".working/staging/x"),
                         ("imports", ".working/imports/x"), ("pointer", ".opf.toml"),
-                        ("local-pointer", ".opf.local.toml"), ("store-gitignore", ".working/.gitignore")):
+                        ("local-pointer", ".opf.local.toml"), ("store-gitignore", ".working/.gitignore"),
+                        ("casefold-git", ".GIT/x"), ("casefold-pointer", ".OPF.toml"),
+                        ("casefold-staging", ".Working/staging/x"), ("casefold-archive", ".WORKING/archive/x"),
+                        ("casefold-gitignore", ".working/.GITIGNORE")):
         refused = findings_of(*sealed([c(path, body)], dict([(path, body)])))
         check("compose-protected-{}-create-refused".format(label),
               any("protected destination" in f for f in refused))
@@ -1223,7 +1228,7 @@ def _self_test_checks():
                             ".working/archive/moved/legacy")] + [c(mv, body)], dict([(mv, body)]))) == [])
 
     # K1 parity: for each destination, a plan moving a source there validates exactly when apply admits the
-    # create of it, both through the one shared predicate.
+    # create of it, both through the one shared predicate (its protected names compared case-insensitively).
     def move_plan(destination):
         p = schema.canonical_plan()
         digest = "sha256:" + _sha256(body)
@@ -1241,7 +1246,9 @@ def _self_test_checks():
                            (".opf.local.toml", False), (".working/.gitignore", False),
                            (".working/journals/x", False), (".working/staging/x", False),
                            (".working/imports/x", False), (".working/imported/x", False),
-                           (archive_rel(other_run, "x.md"), False)):
+                           (archive_rel(other_run, "x.md"), False), (".GIT/x", False),
+                           ("docs/.Aiqt/x.md", False), (".OPF.toml", False), (".Opf.Local.toml", False),
+                           (".Working/staging/x", False), (".WORKING/.GITIGNORE", False)):
         planned = schema.validate_plan(move_plan(path)).status == VALID
         applied = findings_of(*sealed([c(path, body)], dict([(path, body)]))) == []
         check("parity-" + path, planned == applied == admitted)
