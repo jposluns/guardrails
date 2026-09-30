@@ -24,9 +24,11 @@
 10. Keep every command you launch tracked until you have collected its outcome and full output, and never
    end your run while one is still running: ending your turn ends your run and loses any unreported work.
    Prefer the foreground; where a command must run asynchronously, use your environment's tracked
-   mechanism and collect its completion before you finish. If a required command can neither finish in
-   the foreground nor be tracked, report it UNVERIFIABLE under item 4. Split a suite only where that
-   keeps every required check. You may print an interim deliverable early, with the word PROVISIONAL in
-   its heading (a label on the content, not a status line) and without a verdict or completion marker;
-   emit the verdict and completion marker only after verification is finished, keeping every
-   UNVERIFIABLE item. (trkasy, worker profile)
+   mechanism and collect its completion before you write your verdict. If you cannot run a required
+   command to completion and collect its full output within your run, report it UNVERIFIABLE, naming what
+   you could not do and why, as item 4 describes. Split a suite only where that keeps every required check.
+   You may print an interim deliverable early, with the word PROVISIONAL in its heading (a label on the
+   content, not a status line), every check still running marked pending, and no verdict or completion
+   marker. Your final deliverable restates the complete content without that label; emit the verdict and
+   completion marker only after every launched command is collected and verification is finished, keeping
+   every UNVERIFIABLE item. (trkasy, worker profile)
