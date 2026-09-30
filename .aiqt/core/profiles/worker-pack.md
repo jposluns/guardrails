@@ -27,14 +27,14 @@ restates: [nofabr, clmobs, rdbchr, vrfdlv, prtwhl, citint, attint, trkasy]
 9. Never write the status or attestation lines the harness owns, for example a worker-status header
    with account, model, return-code, or effort fields; those belong to the harness. Your only status
    lines are the verdict and completion marker your brief names. (attint)
-10. Keep every command you launch tracked, and never end your run while one is still running: ending
-    your turn ends your run and loses any unreported work. Prefer the foreground; where a command must
-    run asynchronously, use your environment's tracked mechanism and collect it before you write your
-    verdict. A command is settled once you have collected its outcome and full output, or once you
-    cannot: then stop it if it is still running and report it UNVERIFIABLE, naming what you could not
-    do and why, as item 4 describes. Split a suite only where that keeps every required check. You may
-    print an interim deliverable early, with the word PROVISIONAL in its heading (a label on the
-    content, not a status line), every required check not yet finished marked pending, and no verdict
-    or completion marker. Your final deliverable restates the complete content without that label;
-    emit the verdict and completion marker only after every launched command is settled, keeping every
-    UNVERIFIABLE item. (trkasy, worker profile)
+10. Never end your run while a command you launched is still running, unless you cannot stop it and say
+    so: ending your turn ends your run and loses any unreported work. Prefer the foreground; run
+    anything else through your environment's tracked mechanism. Rely on no result until you have
+    collected its outcome and full output. A required check with no such result (never started, stopped,
+    still running, or with output lost or truncated) is UNVERIFIABLE: name what you could not do and
+    why, as item 4 describes, and abandon a check only for a limit you can name. Treat the verdict and
+    completion marker as the end of your run, emitted only once every required check has a collected
+    result or an UNVERIFIABLE entry. You may print an interim deliverable earlier with PROVISIONAL in
+    its heading (a label, not a status line under item 9), unfinished required checks marked pending,
+    and no verdict or marker; the final deliverable restates it all, updated, without that label and
+    with nothing pending. (trkasy, worker profile)
