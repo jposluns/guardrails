@@ -77,9 +77,10 @@ def _self_test():
     """Keep caller HOME/XDG out of fixture reads, including in-process production helpers."""
     import tempfile
     from unittest.mock import patch
+    import _opf_import
     with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
         with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
-                        GIT_CONFIG_NOSYSTEM="1"):
+                        GIT_CONFIG_NOSYSTEM="1"), _opf_import._self_test_engine():
             return _self_test_isolated()
 
 

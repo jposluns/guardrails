@@ -3849,9 +3849,10 @@ def _self_test():
     """Keep caller HOME/XDG out of fixture reads, including in-process production helpers."""
     import tempfile
     from unittest.mock import patch
+    import _opf_import
     with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
         with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
-                        GIT_CONFIG_NOSYSTEM="1"):
+                        GIT_CONFIG_NOSYSTEM="1"), _opf_import._self_test_engine():
             return _self_test_isolated()
 
 
@@ -4485,8 +4486,8 @@ def _self_test_isolated():
             "    os.environ[_journal.KILL_ENV] = 'after-apply-{}'.format(index)",
             "    return ops, content",
             "imp._build_publication_ops = arm",
-            "result = imp.apply_import(Path(sys.argv[2]), sys.argv[3],",
-            "                          now=datetime.datetime.fromisoformat(sys.argv[5]))",
+            "result = imp._apply_import(Path(sys.argv[2]), sys.argv[3],",
+            "                           now=datetime.datetime.fromisoformat(sys.argv[5]))",
             "raise SystemExit(result.verdict)",
         ])
         c_env = {k: v for k, v in os.environ.items() if k != _journal.KILL_ENV}

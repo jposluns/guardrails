@@ -1825,6 +1825,23 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 check("missing-binding-" + disposition,
                       plan(root, ws, empty, files).verdict == CANNOT_EVALUATE)
 
+    def retired():
+        # Spec 14.1: plan_ingest composes the retired plan_import, so a fully triaged keep plan refuses
+        # with the retirement pointer and stages nothing, even inside an engine block. Deleting
+        # plan_import's refusal stages this run.
+        def listing(root):
+            return dict((str(p), p.read_bytes() if p.is_file() else None) for p in root.rglob("*"))
+
+        with fixture() as (root, _machine):
+            files = ["legacy/a.md"]
+            ws = triage(root, files, "keep")
+            before = listing(root)
+            with _opf_import._self_test_engine(engine=False):
+                result = plan(root, ws, empty, files)
+            check("refused", result.verdict == CANNOT_EVALUATE and result.run_id is None
+                  and result.findings == [_opf_import.ORDINARY_IMPORT_RETIRED])
+            check("nothing-staged", listing(root) == before)
+
     def keep():
         # round-3 F2: a keep's exemption is judged by its COVERAGE, not its emitted string. Each round
         # trip registers the EMITTED unmanaged_path in the store manifest (exactly what PR-C will apply)
@@ -2011,7 +2028,9 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
             ws = triage(root, files, "move")
             ws = stamp([dict(r, note="dest_path=saved/a.md") for r in ws["row"]])
             check("nonempty-note", plan(root, ws, options(ws), files).verdict == CANNOT_EVALUATE)
-        # Positive control prevents an unrelated CLI/flag failure from passing the malformed leg.
+        # Positive control prevents an unrelated CLI/flag failure from passing the malformed leg: the
+        # well-formed CLI plan reaches the retired plan_import refusal (spec 14.1); the malformed one stops
+        # at the options reader before it.
         for malformed in (False, True):
             with fixture() as (root, _machine):
                 files = ["legacy/a.md"]
@@ -2024,8 +2043,8 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                      "import", "--root", str(root), "--plan", "--dispositions", str(wp),
                      "--ingest-options", str(op), "--include", files[0]],
                     capture_output=True, check=False)
-                check("cli-malformed" if malformed else "cli-valid",
-                      proc.returncode == (2 if malformed else 0))
+                check("cli-malformed" if malformed else "cli-refused", proc.returncode == 2 and malformed
+                      != (_opf_import.ORDINARY_IMPORT_RETIRED.encode("utf-8") in proc.stderr))
 
     def reconcile():
         for case, verdict in (("digest-drift", CANNOT_EVALUATE), ("omission", FINDING),
@@ -3684,7 +3703,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
          ("relocated-store-scope-bytes", relocated_store_scope),
          ("reconcile-stage-window", reconcile_stage_window),
          ("partial-ingest-stage-nonpromotable", partial_ingest_stage),
-         ("ingest-review-bundle", review_bundle)]
+         ("ingest-review-bundle", review_bundle), ("ingest-plan-retired", retired)]
         if gate else
         [("plan-ingest-keep-exemption", keep), ("plan-ingest-migrate-provenance", migrate),
          ("plan-ingest-move-archive-default", archive),
@@ -3697,7 +3716,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
          ("plan-ingest-relocated-store-scope", relocated_store_scope),
          ("plan-ingest-reconcile-stage-window", reconcile_stage_window),
          ("plan-ingest-partial-stage-nonpromotable", partial_ingest_stage),
-         ("plan-ingest-review-bundle", review_bundle)])
+         ("plan-ingest-review-bundle", review_bundle), ("plan-ingest-retired", retired)])
     outer_check = check
     for label, test in registry:
         check = lambda suffix, cond, label=label: outer_check(label + "/" + suffix, cond)
@@ -3710,7 +3729,7 @@ def self_test():
     from unittest.mock import patch
     with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
         with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
-                        GIT_CONFIG_NOSYSTEM="1"):
+                        GIT_CONFIG_NOSYSTEM="1"), _opf_import._self_test_engine():
             return self_test_isolated()
 
 
