@@ -357,7 +357,8 @@ def render_homes_gitignore():
 def homes_gitignore_matches(text):
     """Exact managed-block drift check; adopter text outside the block is preserved.
     Only block bytes are checked, not effective git rules or index state. Activation must
-    inspect both before installation; a tracked control path requires reviewed untracking.
+    inspect both before installation (_opf_write_guard.inspect_homes_gitignore is that
+    read-only inspector); a tracked control path requires reviewed untracking.
     """
     if not isinstance(text, str):
         return False
@@ -367,6 +368,105 @@ def homes_gitignore_matches(text):
     if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
         return False
     return "".join(lines[starts[0]:ends[0] + 1]) == render_homes_gitignore()
+
+
+def _homes_gitignore_markers(text):
+    """The BEGIN/END marker-line indexes of `text` over splitlines(keepends=True), recognized
+    exactly as homes_gitignore_matches recognizes them (one source for the marker grammar)."""
+    lines = text.splitlines(keepends=True)
+    starts = [i for i, line in enumerate(lines) if line.rstrip("\r\n") == GITIGNORE_BEGIN]
+    ends = [i for i, line in enumerate(lines) if line.rstrip("\r\n") == GITIGNORE_END]
+    return lines, starts, ends
+
+
+def preview_homes_gitignore_rewrite(existing):
+    """The reviewed-rewrite preview for a drifted managed block: the exact replacement
+    .working/.gitignore bytes, with the single BEGIN..END marker region replaced by
+    render_homes_gitignore() and every adopter byte outside the markers preserved byte-exact
+    (a surrogateescape round trip, so non-UTF-8 adopter bytes survive). Defined ONLY for a
+    well-formed drifted block, exactly one BEGIN line before exactly one END line whose region
+    is not the exact block; anything else raises ValueError: an exact block needs no rewrite, a
+    file without markers is the append case plan_homes_gitignore handles, and duplicated,
+    unbalanced or reversed markers leave no single region to replace, so no preview exists and
+    the drift refusal stands. Nothing is applied here: the caller shows this preview for review
+    and passes it back, with the reviewed bytes, as plan_homes_gitignore(existing,
+    approved_rewrite=..., reviewed_existing=...) only on explicit approval, never silently."""
+    if not isinstance(existing, bytes):
+        raise ValueError("homes-gitignore rewrite preview needs the current file bytes")
+    text = existing.decode("utf-8", "surrogateescape")
+    if homes_gitignore_matches(text):
+        raise ValueError("homes-gitignore rewrite preview: the managed block is already exact; "
+                         "nothing to rewrite")
+    lines, starts, ends = _homes_gitignore_markers(text)
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        raise ValueError(
+            "homes-gitignore-block-drift: the marker structure is not a single BEGIN..END region "
+            "(duplicated, unbalanced or reversed markers), so no reviewed rewrite can be "
+            "previewed; reconcile .working/.gitignore by hand")
+    result = "".join(lines[:starts[0]]) + render_homes_gitignore() + "".join(lines[ends[0] + 1:])
+    if not homes_gitignore_matches(result):
+        raise ValueError("homes-gitignore rewrite preview failed its own drift check; refusing")
+    return result.encode("utf-8", "surrogateescape")
+
+
+def plan_homes_gitignore(existing, approved_rewrite=None, reviewed_existing=None):
+    """Pure .working/.gitignore reconciliation planner: no git, no filesystem, no write.
+    `existing` is the current file's bytes, or None when the file is absent. Returns the full
+    new file bytes to install, or None when the file already carries the exact managed block
+    (no change). Adopter text is preserved byte-exact: the result is `existing` plus the
+    appended block (with one separating newline when `existing` does not end in one), or the
+    file is left alone; the block is appended last, never inserted, and non-UTF-8 adopter
+    bytes survive a surrogateescape round trip. Any marker line without an exact block match
+    (a duplicated, unbalanced, reversed, drifted or CRLF block) raises the named ValueError
+    refusal homes-gitignore-block-drift and is never repaired in place next to adopter text.
+    The one sanctioned repair is the reviewed-rewrite path: pass the bytes
+    preview_homes_gitignore_rewrite returned, after explicit review and approval, as
+    `approved_rewrite`, with the exact file bytes that preview was computed from as
+    `reviewed_existing`; the planner returns exactly those bytes, and only while `existing` still
+    byte-matches `reviewed_existing` and a fresh preview still byte-matches the approval, so a file
+    changed since review refuses (fail-closed). The prestate binding is what refuses an edit INSIDE
+    the drifted block: the replacement discards the whole marker region, so such an edit yields the
+    same preview and only the reviewed bytes can tell it apart. A supplied approval is checked
+    BEFORE the create, no-op and append branches: a file now absent, marker-free or already exact is
+    not the reviewed file, so the stale approval refuses rather than being dropped for another plan.
+    Installation is not performed here: _opf_write_guard.inspect_homes_gitignore must gate the
+    write on effective ignore rules and the index first, and the index is never mutated."""
+    if approved_rewrite is not None and not isinstance(approved_rewrite, bytes):
+        raise ValueError("homes-gitignore approved rewrite must be the previewed bytes")
+    if approved_rewrite is not None:
+        try:
+            bound = (isinstance(existing, bytes) and reviewed_existing == existing
+                     and approved_rewrite == preview_homes_gitignore_rewrite(existing))
+        except ValueError:
+            bound = False    # no preview exists for the current bytes: not the reviewed drifted file
+        if not bound:
+            raise ValueError(
+                "homes-gitignore-block-drift: the current file does not byte-match the reviewed "
+                "bytes, or the approved rewrite does not byte-match the current preview (the file "
+                "changed since review, or the approval is stale); re-preview, re-review and "
+                "re-approve (fail-closed)")
+        return approved_rewrite
+    block = render_homes_gitignore().encode("utf-8")
+    if existing is None:
+        return block
+    if not isinstance(existing, bytes):
+        raise ValueError("homes-gitignore planning needs the current file bytes or None")
+    text = existing.decode("utf-8", "surrogateescape")
+    if homes_gitignore_matches(text):
+        return None
+    _lines, starts, ends = _homes_gitignore_markers(text)
+    if not starts and not ends:
+        result = existing + (b"\n" if existing and not existing.endswith(b"\n") else b"") + block
+        if not (result.startswith(existing)
+                and homes_gitignore_matches(result.decode("utf-8", "surrogateescape"))):
+            raise ValueError("homes-gitignore append postcondition failed; refusing to plan")
+        return result
+    raise ValueError(
+        "homes-gitignore-block-drift: .working/.gitignore carries a marker line without the "
+        "exact managed block (a hand-edited, duplicated, unbalanced, reversed or CRLF block). "
+        "It is never rewritten silently next to adopter text: review the exact replacement "
+        "(preview_homes_gitignore_rewrite) and pass it back as approved_rewrite, with the "
+        "reviewed bytes as reviewed_existing, on explicit approval, or reconcile the file by hand")
 
 
 def snapshot_caller_alarm():
