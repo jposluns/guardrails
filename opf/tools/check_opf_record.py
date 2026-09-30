@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T28)
+  check_opf_record.py --self-test                    the fixture suite (T1-T29)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -127,6 +127,10 @@ Each case runs on its own copy of that template; the root is removed in a finall
       journal home, byte-shape-identical to the pre-D build (flip: re-add the key)
   T28 spec 15 records that a no-follow existence probe of a former .aiqt/ location, used only to
       refuse, is not a read (flip: read the spec with the sentence removed)
+  T29 the gate runs inside the OPF git lifecycle: a git launch that strips every GIT_* variable, as
+      the operation capability's rev-parse does, still runs with the system-config pins, and every
+      fixture git call carries the three no-maintenance pins (flip: launch git past the lifecycle's
+      wrapper, keeping only the GIT_CONFIG_NOSYSTEM pin so the flip itself reads no system config)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -150,6 +154,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _journal as journal          # noqa: E402
 import _opf_check as opf_check      # noqa: E402
 import _opf_emit as emit            # noqa: E402
+import _opf_oplock                  # noqa: E402
 import _opf_record as record        # noqa: E402
 import _opf_schema as schema        # noqa: E402
 import _opf_write_guard as guard    # noqa: E402
@@ -167,6 +172,8 @@ LEASE = MACH + "/lease.toml"
 RECORDED_EVENT = '"event": "recorded"'
 CREATE = ["create", "--type", "backlog_item", "--title", "an item", "--actor", "assistant:gate"]
 APPEND = ["worklog-append", "--kind", "added", "--summary", "a fact", "--actor", "assistant:gate"]
+# No automatic gc or maintenance may detach from, or outlive, a fixture git launch.
+GIT_NO_MAINTENANCE = ("-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false")
 
 
 def kill_points(n):
@@ -194,8 +201,8 @@ class Env:
                      "GIT_COMMITTER_EMAIL": "gate@example.invalid"}
 
     def run_git(self, root, *args):
-        return subprocess.run(["git", "-C", str(root), "-c", "init.defaultBranch=main"] + list(args),
-                              capture_output=True, text=True, timeout=120, env=self.vars)
+        return subprocess.run(["git", "-C", str(root), "-c", "init.defaultBranch=main", *GIT_NO_MAINTENANCE]
+                              + list(args), capture_output=True, text=True, timeout=120, env=self.vars)
 
     def git(self, root, *args):
         proc = self.run_git(root, *args)
@@ -1802,6 +1809,47 @@ def flip_t28():
                         lambda: " ".join(original().split()).replace(SPEC15_SENTENCE, ""))
 
 
+# --- T29: the gate's git runs inside the OPF git lifecycle -----------------------------------------------
+
+def stripped_launch_env(env):
+    """The environment the operation capability's rev-parse (_opf_oplock._git_rev_parse_output) gives
+    git during an in-process run: the run's own environment with every GIT_* variable removed,
+    GIT_CONFIG_NOSYSTEM included."""
+    return dict((k, v) for k, v in env.vars.items() if not k.startswith("GIT_"))
+
+
+def t29_git_lifecycle(fx):
+    """A git launch that strips every GIT_* variable, as the operation capability's rev-parse does, still
+    runs with the system-config pins (GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_SYSTEM the null device): the gate
+    runs inside the OPF git lifecycle, whose PATH wrapper reasserts them, so no fixture or production git
+    call reads the host's system configuration. Every fixture git call carries the no-maintenance pins."""
+    env = fx.env
+    root = fx.case("t29-git-lifecycle")
+    proc = subprocess.run(["git", "-C", str(root), *GIT_NO_MAINTENANCE, "-c", "alias.pins=!env", "pins"],
+                          capture_output=True, text=True, timeout=120, env=stripped_launch_env(env))
+    assert proc.returncode == 0, ("T29 the stripped launch runs", proc.returncode, proc.stderr[-800:])
+    seen = dict(line.partition("=")[::2] for line in proc.stdout.splitlines())
+    pins = (seen.get("GIT_CONFIG_NOSYSTEM"), seen.get("GIT_CONFIG_SYSTEM"))
+    assert pins == ("1", os.devnull), ("T29 a GIT_*-stripped git launch keeps the system-config pins", pins)
+    maintenance = [env.git(root, "config", "--get", key).strip()
+                   for key in ("gc.auto", "gc.autoDetach", "maintenance.auto")]
+    assert maintenance == ["0", "false", "false"], ("T29 the no-maintenance pins", maintenance)
+
+
+def flip_t29():
+    """Launch git past the lifecycle's wrapper (the reviewed head ran outside the lifecycle), keeping
+    only the gate's own GIT_CONFIG_NOSYSTEM pin so the flip itself never reads system configuration."""
+    original = stripped_launch_env
+
+    def past_wrapper(env):
+        launch = original(env)
+        wrapper = os.path.dirname(shutil.which("git", path=launch["PATH"]))
+        launch["PATH"] = os.pathsep.join(p for p in launch["PATH"].split(os.pathsep) if p != wrapper)
+        launch["GIT_CONFIG_NOSYSTEM"] = "1"
+        return launch
+    return patch.object(sys.modules[__name__], "stripped_launch_env", past_wrapper)
+
+
 # --- the runner ------------------------------------------------------------------------------------------------
 
 TESTS = (
@@ -1844,22 +1892,33 @@ TESTS = (
     ("T26-complete-before-projection", t26_complete_before_projection, flip_t26),
     ("T27-homes1-report-shape", t27_homes1_report, flip_t27),
     ("T28-spec15-probe-sentence", t28_spec15_sentence, flip_t28),
+    ("T29-git-lifecycle-pins", t29_git_lifecycle, flip_t29),
 )
 
 
+# Whether the run in progress also drives each test's flip: set by self_test, read inside the lifecycle,
+# whose callback takes no arguments.
+_red_on_revert = [False]
+
+
 def self_test(red_on_revert=False):
-    """Keep caller HOME/XDG out of fixture reads, including in-process production helpers."""
-    with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
-        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
-                        GIT_CONFIG_NOSYSTEM="1"):
-            return _self_test_isolated(red_on_revert)
-
-
-def _self_test_isolated(red_on_revert=False):
+    """Run the whole gate inside the OPF git lifecycle (_opf_oplock._st_with_git_lifecycle): caller
+    HOME/XDG stay out of fixture reads, and its PATH git wrapper reasserts the system-config pins after a
+    production helper strips every GIT_* variable (the operation capability's rev-parse does), so no git
+    call, fixture or production, in-process or in a killed child, reads the host's system configuration."""
     if shutil.which("git") is None:
         print("OPF-RECORD SELF-TEST ERROR: git is not on PATH (the fixtures need real commits); exit 2",
               file=sys.stderr)
         return 2
+    _red_on_revert[0] = red_on_revert
+    try:
+        return _opf_oplock._st_with_git_lifecycle(_self_test_isolated)
+    finally:
+        _red_on_revert[0] = False
+
+
+def _self_test_isolated():
+    red_on_revert = _red_on_revert[0]
     ran, failures = [], []
 
     def check(name, test):
