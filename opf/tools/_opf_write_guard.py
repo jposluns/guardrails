@@ -459,7 +459,8 @@ def _homes_logical_path(physical):
     unnormalized, with the relative path from the cwd to `physical` (`<PWD>/..` from a subdirectory),
     a spelling git run from that cwd does not use (the over-refusal _homes_run_git_discovery
     discloses). None when PWD is unset, relative or another directory, when that spelling is exactly
-    the physical path, or when it does not reach the same directory."""
+    the physical path, or when it does not reach the same directory; the inspection never reaches
+    this helper with a present relative PWD, which _homes_run_git_discovery refuses first."""
     pwd = os.environ.get("PWD")
     if not pwd or not os.path.isabs(pwd):
         return None
@@ -481,7 +482,11 @@ def _homes_run_git_discovery(git, root, args, input_bytes=None):
     before launch while the environment carries a runtime configuration override that runner drops
     (_homes_config_overrides): the probe's answer could then differ from the adopter's own git there
     (with core.ignoreCase=true supplied through GIT_CONFIG_COUNT, `!/STAGING/` re-includes the staging
-    home), so it is cannot-evaluate, never replayed. When the absolute ambient PWD names the working
+    home), so it is cannot-evaluate, never replayed. A present but relative ambient PWD is refused the
+    same way before launch, naming it: git 2.53.0 can name its current directory by a relative PWD
+    verbatim (PWD `.` makes a `gitdir:[.]/` rule apply to the adopter's git at the worktree top), and
+    no probe here reproduces that spelling; an unset or empty PWD is not refused. When the absolute
+    ambient PWD names the working
     directory and spells a path to `root` other than the physical one (_homes_logical_path: through a
     symlink, or a spelling such as `R/.`, `R//` or `R/sub/..`), the probe runs ALSO from that path,
     with cwd and PWD there and PWD passed verbatim, never normalized. At the worktree top the path is
@@ -496,9 +501,8 @@ def _homes_run_git_discovery(git, root, args, input_bytes=None):
     (configuration divergence): the probe reads the configuration git discovers at inspection time through
     HOME, XDG_CONFIG_HOME and the system config, in the store's containing repository, from the physical
     path and the one path spelled from the absolute ambient PWD; a later configuration edit, a
-    different HOME, another spelling of the working directory (a different symlink, another shell's
-    PWD, or a relative PWD, which git 2.53.0 also adopts verbatim when it is the same directory as
-    the cwd), a replacement ref the adopter's git would follow (the probe passes
+    different HOME, another spelling of the working directory (a different symlink or another
+    shell's PWD), a replacement ref the adopter's git would follow (the probe passes
     --no-replace-objects, so it never reads replaced objects), or a
     repository or index variable (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, dropped by the runner's
     allowlist) at the adopter's own git call is not bound by this inspection. Disclosed residual
@@ -514,6 +518,14 @@ def _homes_run_git_discovery(git, root, args, input_bytes=None):
                               "the homes gitignore inspection's config-discovery probe drops, so its answer "
                               "could differ from the adopter's own git; unset them and retry "
                               "(cannot-evaluate, fail-closed)".format(", ".join(dropped)))
+    pwd = os.environ.get("PWD")
+    if pwd and not os.path.isabs(pwd):
+        raise WriteGuardError("the ambient PWD {!r} is relative: git can name the repository by that "
+                              "spelling (an includeIf \"gitdir:\" rule can then match it and not the "
+                              "physical path), and the homes gitignore inspection's probes do not "
+                              "reproduce a relative PWD, so the adopter's effective ignore rules cannot "
+                              "be determined; set PWD to the absolute working directory or unset it and "
+                              "retry (cannot-evaluate, fail-closed)".format(pwd))
     out = _opf_observe._run_git_config_discovery(git, root, args, input_bytes=input_bytes)
     logical = _homes_logical_path(root)
     if logical is not None and _opf_observe._run_git_config_discovery(
@@ -839,6 +851,8 @@ def inspect_homes_gitignore(store_root, verb, approved_rewrite=None, reviewed_ex
     (homes-gitignore-unreadable), a flagged index entry for that file, a probe that cannot run, fails
     or writes a diagnostic to stderr, an ambient runtime git configuration override the config-discovery
     probe drops (named; the remaining configuration divergence is disclosed at _homes_run_git_discovery),
+    a present but relative ambient PWD (named: git can name the repository by that spelling, which no
+    probe reproduces; an unset or empty PWD is not refused),
     a probe answer that differs between the physical store path and the path the ambient PWD spells
     to it (both named; the subdirectory over-refusal and the path namespace race are disclosed at
     _homes_run_git_discovery), an index entry that would mask a probe, an ignored home

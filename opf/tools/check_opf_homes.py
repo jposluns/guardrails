@@ -2868,6 +2868,31 @@ def _gitignore_reconciliation_self_test(check):
                     str(below) + "/.."))))
             include_if(None)
 
+            # A relative ambient PWD (Claude's fix-7 reproduction): git names the worktree top by it
+            # verbatim, so with PWD `.` there a `gitdir:[.]/` rule applies to the adopter's git, a
+            # spelling no probe reproduces; both entry points refuse it, naming it. An unset or empty
+            # PWD is not refused: that rule then does not apply to the adopter's git, and the
+            # inspection stays clean.
+            def clean_both():
+                try:
+                    return (guard.inspect_homes_gitignore(rootl, "init")[:2] == (None, [])
+                            and guard.verify_homes_gitignore_effective(rootl, "init") == [])
+                except guard.WriteGuardError:
+                    return False
+
+            def pwd_unset(thunk):
+                with patch.dict(os.environ):
+                    os.environ.pop("PWD", None)
+                    return thunk()
+
+            include_if("[.]")
+            check("gi-logical-path-relative-pwd", lambda: all(from_dir(rootl, lambda f=f: guard_refuses(
+                lambda: f(rootl, "init"), "the ambient PWD '.' is relative"), pwd=".") for f in (
+                    guard.inspect_homes_gitignore, guard.verify_homes_gitignore_effective)))
+            check("gi-logical-path-pwd-unset-clean", lambda: from_dir(rootl, lambda: pwd_unset(clean_both)))
+            check("gi-logical-path-pwd-empty-clean", lambda: from_dir(rootl, clean_both, pwd=""))
+            include_if(None)
+
 
 def self_test():
     import _opf_adopt as adopt
