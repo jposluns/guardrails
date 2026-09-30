@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T65)
+  check_opf_record.py --self-test                    the fixture suite (T1-T66)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -250,6 +250,10 @@ Each case runs on its own copy of that template; the root is removed in a finall
       single-writer claim exactly once, with the interrupt governing the exit: the release mark is
       set inside _conclude, never by the caller before the call (flip: a release mark that reads as
       already set, the fix-11 head's caller-side premature mark)
+  T66 a homes-1 journal-lock release that raises an interrupt while the publication failed and its
+      transaction reads rolled-back leaves the rolled-back refusal governing the exit, the release
+      failure surfaced beside it (flip: the reviewed head's narrow release handler, which the
+      interrupt passes through)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -3519,11 +3523,12 @@ def flip_t57():
 T58_BOTH = ("(a staging leftover that acquisition removed is then reported by a refusal that names it: "
             "this run refuses once and a re-run proceeds, PR D fix 10)")
 T58_FIX9 = "is then named by no outcome"
-T58_RECOVER = ("or None when the acquisition removed nothing, reclaimed no capability record and the plan "
-               "under the capability found nothing (a holder that released after the trigger read, say), so "
-               "the run continues; a staging leftover the acquisition removed while reclaiming no record is "
-               "named by its own outcome (_staging_removed_outcome, PR D fix 10), so no removal is left "
-               "unreported")
+T58_RECOVER = ("or None when the acquisition removed no pre-existing leftover (names it created and retired "
+               "itself in the same acquisition, created_removed, are its own bookkeeping, never leftovers), "
+               "reclaimed no capability record and the plan under the capability found nothing (a holder "
+               "that released after the trigger read, say), so the run continues; a staging leftover the "
+               "acquisition removed while reclaiming no record is named by its own outcome "
+               "(_staging_removed_outcome, PR D fix 10), so no removal is left unreported")
 T58_RETIRED = "or None when the acquisition cleared nothing"
 
 
@@ -4031,6 +4036,86 @@ def flip_t65():
     return patch.object(record, "_RELEASE_PENDING", (True,))
 
 
+# --- T66: the PR D fix-13 vector ------------------------------------------------------------------------
+
+def t66_release_interrupt_never_displaces(fx):
+    """A homes-1 journal-lock release that raises KeyboardInterrupt while the publication failed and
+    its transaction reads rolled-back: the rolled-back refusal still governs the exit, the release
+    failure surfaced beside it and the unreleased lock left for reconciliation (PR D fix 13). On the
+    reviewed head the release handler caught only (JournalError, OSError), so the interrupt displaced
+    the refusal, which survived only in __context__."""
+    env = fx.env
+    root = fx.case("t66-release-interrupt")
+
+    def failing_run(*_args, **_kwargs):
+        raise journal.JournalError("synthetic rolled-back publication failure")
+
+    def interrupted_release(_journal_root):
+        raise KeyboardInterrupt
+    caught = result = None
+    try:
+        with patch.object(journal, "run_transaction", failing_run), \
+                patch.object(journal, "classify_state", lambda *_a: "rolled-back"), \
+                patch.object(journal, "release_lock", interrupted_release):
+            result = record_cli(env, root, CREATE)
+    except KeyboardInterrupt as exc:
+        caught = exc
+    assert caught is None, "T66 the rolled-back refusal governs, never the release interrupt"
+    refused(result, "the publication was refused and rolled back to the prestate")
+    err = result[2]
+    assert "could not be released (" in err, ("T66 the failed release is surfaced", err[-800:])
+    assert (Path(root) / record.JOURNAL_REL / "lock").exists(), "T66 the unreleased lock is left"
+    assert not (Path(root) / LEASE).exists(), "T66 the single-writer claim is released"
+
+
+def flip_t66():
+    """The reviewed head's _publish release handler: (JournalError, OSError) only, so the release
+    interrupt passes through the finally and displaces the rolled-back refusal."""
+    def head_publish(ctx, plan, subcommand, cap=None):
+        if ctx.journal_rel != record.JOURNAL_REL:
+            return record._publish_homes2(ctx, plan, subcommand, cap)
+        root_fd = ctx.root_fd
+        journal_root = record._journal_root(ctx)
+        journal.require_containment()
+        journal.ensure_journal_dirs(root_fd, record.JOURNAL_REL)
+        jr_fd = journal.open_journal_root_fd(root_fd, record.JOURNAL_REL)
+        held = retain = False
+        token = os.urandom(16).hex()
+        try:
+            if journal.read_lock_owner(journal_root) is not None:
+                raise record.RecordError("the record journal lock is held (fail-closed)")
+            journal.acquire_lock(journal_root, "{}.{}".format(record.SESSION_ID, token))
+            held = True
+            ops, content = [], {}
+            for operand in plan.operands:
+                ops.append({"op": "write", "path": operand.rel,
+                            "poststate": {"kind": "file",
+                                          "content-sha256": record._sha256(operand.new_raw)},
+                            "source-poststate": {"kind": "file", "mode": operand.mode,
+                                                 "sha256": record._sha256(operand.raw)}})
+                content[operand.rel] = operand.new_raw
+            txn_id = record._record_run_id(token)
+            header = {"unit": record.SESSION_ID, "kind": "record-" + subcommand}
+            try:
+                journal.run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops,
+                                        lambda op: content[op["path"]], record.SESSION_ID)
+            except (journal.JournalError, OSError) as exc:
+                state = journal.classify_state(jr_fd, journal_root / txn_id)
+                if state == "rolled-back":
+                    raise record.RecordError("the publication was refused and rolled back to the "
+                                             "prestate ({}); nothing recorded (fail-closed)".format(exc))
+                retain = True
+                raise record.RecordError("the publication FAILED ({})".format(exc))
+        finally:
+            if held and not retain:
+                try:
+                    journal.release_lock(journal_root)
+                except (journal.JournalError, OSError):  # the head's width: an interrupt passes through
+                    pass
+            journal._close_fd_quietly(jr_fd)
+    return patch.object(record, "_publish", head_publish)
+
+
 # --- the runner ------------------------------------------------------------------------------------------------
 
 TESTS = (
@@ -4112,6 +4197,7 @@ TESTS = (
     ("T64-diagnostic-failure-never-governs", t64_diagnostic_failure_never_governs,
      (flip_t64_conclude, flip_t64_recovery)),
     ("T65-interrupt-before-conclude", t65_interrupt_before_conclude, flip_t65),
+    ("T66-release-interrupt-never-displaces", t66_release_interrupt_never_displaces, flip_t66),
 )
 
 

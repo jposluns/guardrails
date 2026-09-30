@@ -88,7 +88,11 @@ DISCLOSED RESIDUALS: there is no pre-doctor, so a store invalid in a way the pre
 fails only at the final doctor, after publication (the change is then left for review with scoped
 recovery text, as `opf upgrade` does); a completed transaction's journal directory is retained under
 the generation's record journal home as local recovery evidence; the lease is not made observable at a sync target (no
-sync runtime in this build, so the guarantee is single-host single-writer); two branches allocating from
+sync runtime in this build, so the guarantee is single-host single-writer); a signal
+delivered at any point may leave a lease, an operation capability record or a journal lock in place,
+which the next run's recovery handles (an asynchronous interrupt makes any narrower promise
+unkeepable, so release is described in this module for ordinary exceptions and clean exits only); two
+branches allocating from
 the same committed counters can both claim an id, which spec 5.7's store-path merge policy and doctor's
 C-ID-SPACE check (not this verb) catch; the byte-reproduction precondition proves serialization only, so
 a hand edit or hand merge that leaves canonical bytes passes it and spec 5.7's integration-base rule stays
@@ -1381,8 +1385,8 @@ def _with_recovery_lease(ctx, pending, recover):
     """Run `recover` holding the single-writer lease, claimed exactly as publication claims it. A present
     lease (a live peer's, or the interrupted run's own leftover) refuses before any recovery write and is
     never seized: releasing a leftover lease stays the operator's explicit reconciliation step. The lease
-    release is attempted on every exit of the recovery body (an interrupt landing between the acquisition
-    and that body can still leave the lease, like a kill); a release failure after a refusal is surfaced,
+    release is attempted when the recovery body returns and when it raises an ordinary exception (a
+    signal may leave the lease: the module residual list); a release failure after a refusal is surfaced,
     saying the lease may be left, and never displaces the refusal, whatever the release raised, with a
     surfacing print that itself fails dropped rather than let it displace the refusal (PR D fix 12), and
     a release failure after a clean recovery is the run's own failure."""
@@ -1885,9 +1889,10 @@ def _recover_capability_journal(ctx, opened, unprojected):
     acquisition itself reports clearing (OpCapability.recovered, with the operation its holder
     recorded) and the transactions the held plan reconciles. Returns (whether a record journal
     transaction was reconciled, whether a capability record was reclaimed, those outcome lines), or
-    None when the acquisition removed nothing, reclaimed no capability record and the plan under
-    the capability found nothing (a holder that released after the trigger read, say), so the run
-    continues; a staging leftover the acquisition removed while reclaiming no record is named by
+    None when the acquisition removed no pre-existing leftover (names it created and retired itself
+    in the same acquisition, created_removed, are its own bookkeeping, never leftovers), reclaimed
+    no capability record and the plan under the capability found nothing (a holder that released
+    after the trigger read, say), so the run continues; a staging leftover the acquisition removed while reclaiming no record is named by
     its own outcome (_staging_removed_outcome, PR D fix 10), so no removal is left unreported. A refusal
     states what was done before it: a failed acquisition names what it removed, or says that is not
     known when its error carries no report (_acquisition_removals), and a refusal under the held
@@ -1974,13 +1979,13 @@ def _publish(ctx, plan, subcommand, cap=None):
     The INTENT header also carries every operand's planned bytes, so a later recovery can tell a write the
     crash tore (a byte prefix of them) from an intervening edit (_unexplained_operands); a publication
     whose INTENT would pass the journal-read cap is refused by the engine before it opens. Raises
-    RecordError; the journal lock's release is attempted on every exit (a failed release is surfaced
-    saying the lock may be left, T55, with a surfacing write that itself fails dropped, never fatal, PR D
-    fix 12) except a run_transaction failure whose transaction reads as open, COMPLETE, or unreadable,
-    which retains the lock for the next run's reconciliation, a lock acquisition failing
-    after its O_EXCL create, whose refusal says the created lock may be left in place (PR D fix 10), and
-    an interrupt landing between the acquisition and its held marker, which leaves the lock like a
-    crash, for the same reconciliation."""
+    RecordError; the journal lock's release is attempted on the clean exit and on an ordinary
+    exception (a failed release is surfaced saying the lock may be left, T55, with a surfacing write
+    that itself fails dropped, PR D fix 12; an ordinary release failure is never fatal here, and a
+    refusal in flight still governs, whatever the release raised, PR D fix 13) except a
+    run_transaction failure whose transaction reads as open, COMPLETE, or unreadable, which retains
+    the lock for the next run's reconciliation, and a lock acquisition failing after its O_EXCL
+    create, whose refusal says the created lock may be left in place (PR D fix 10)."""
     if ctx.journal_rel != JOURNAL_REL:
         return _publish_homes2(ctx, plan, subcommand, cap)
     root_fd = ctx.root_fd
@@ -2051,12 +2056,19 @@ def _publish(ctx, plan, subcommand, cap=None):
                                   txn_id, _FAILED_STATE.get(state, "in an unreadable state"), exc))
     finally:
         if held and not retain:
+            pending = sys.exc_info()[1]
             try:
                 _journal.release_lock(journal_root)
-            except (_journal.JournalError, OSError) as exc:
-                # Surfaced, never fatal here: the transaction reached a terminal state, and a lock left in
-                # place is for the next run's reconciliation once this process has exited (_reconcile_journal).
-                # The surfacing write itself failing is dropped (PR D fix 12), keeping this non-fatal.
+            except BaseException as exc:  # noqa: BLE001  surfaced, never displaces a refusal in flight
+                # Surfaced: a lock left in place is for the next run's reconciliation once this process
+                # has exited (_reconcile_journal). This handler runs on the clean exit and under a
+                # refusal in flight, one raised before the transaction opened (nothing-opened) included,
+                # never only after a terminal transaction. An ordinary release failure is never fatal
+                # here (T55); a refusal in flight still governs, whatever the release raised (PR D fix
+                # 13); any other raising release on the clean exit is the run's own failure; and the
+                # surfacing write itself failing is dropped (PR D fix 12).
+                if pending is None and not isinstance(exc, (_journal.JournalError, OSError)):
+                    raise
                 try:
                     print("opf record: the record journal lock under {} could not be released ({}); it may be "
                           "left in place (a failure after its unlink leaves it removed, not durably), and a lock "
@@ -2295,11 +2307,10 @@ def _emit_failure_text(report):
 
 # The success path's release mark, copied per run (_run_operation): _conclude sets it as its first
 # statement, before its release attempt, and the caller's cleanup releases only while it is unset, so
-# the one release is never attempted twice, and an interrupt raised before _conclude begins still
+# the one release is never attempted twice, and a failure raised before _conclude begins still
 # reaches the caller's release (PR D fix 12; T65 discriminates against the fix-11 head, whose caller
-# marked the release done on its own line BEFORE calling _conclude, so that interrupt skipped the
-# release entirely). An interrupt landing between the mark and the attempt itself can still leave the
-# claim, like a kill: the mark and the attempt are separate statements.
+# marked the release done on its own line BEFORE calling _conclude, so a failure raised there
+# skipped the release entirely).
 _RELEASE_PENDING = (False,)
 
 
@@ -2308,9 +2319,8 @@ def _conclude(ctx, lease, report, released):
     reported over a still-held or failed-to-release lease. `released` is the caller's release mark
     (_RELEASE_PENDING): set as this function's first statement, before the release attempt, and read
     by the caller's cleanup, which releases only while it is unset, so the release is never attempted
-    twice, and an interrupt raised before this call still reaches the caller's release (one landing
-    between the mark and the attempt, both inside this function, can still leave the claim, like a
-    kill; PR D fix 12). A failure is attributed to the step that raised it (PR D fix 11): the
+    twice, and a failure raised before this call still reaches the caller's release (PR D fix 12). A
+    failure is attributed to the step that raised it (PR D fix 11): the
     release-failure text is printed only when the release itself failed; an emission failure after a
     successful release says the release succeeded and only the report's output failed. Either
     failure, an interrupt included, is re-raised and governs the exit: a diagnostic print that itself
