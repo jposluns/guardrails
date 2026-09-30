@@ -449,11 +449,17 @@ def _homes_config_overrides():
 
 
 def _homes_logical_path(physical):
-    """The logical path through which the ambient working directory reaches `physical`, or None when
-    there is none. git trusts PWD only when it names the process's current directory, so PWD must be
-    absolute and the same directory as the cwd; `physical` is then reached from PWD by the relative
-    path git's physical cwd has to it, resolved lexically (the shell's logical `cd`). None when PWD is
-    unusable, when that path is the physical one, or when it does not resolve to the same directory."""
+    """The path, spelled from the ambient PWD exactly as given, through which the working directory
+    reaches `physical`, or None when there is none. git 2.53.0 names its current directory by PWD
+    VERBATIM, never normalized, whenever PWD is the same directory as the cwd, so an includeIf
+    "gitdir:" rule can match the spelling `R/.`, `R//` or `R/sub/..` of a repository R and not `R`
+    itself. This helper takes PWD only when it is absolute and the same directory as the cwd. When
+    the cwd is `physical` (the worktree top), the path is PWD itself, byte for byte, so the probe
+    reproduces the adopter's own git invocation there; from any other cwd it is PWD joined,
+    unnormalized, with the relative path from the cwd to `physical` (`<PWD>/..` from a subdirectory),
+    a spelling git run from that cwd does not use (the over-refusal _homes_run_git_discovery
+    discloses). None when PWD is unset, relative or another directory, when that spelling is exactly
+    the physical path, or when it does not reach the same directory."""
     pwd = os.environ.get("PWD")
     if not pwd or not os.path.isabs(pwd):
         return None
@@ -461,8 +467,9 @@ def _homes_logical_path(physical):
         cwd = os.getcwd()
         if not os.path.samefile(pwd, cwd):
             return None
-        logical = os.path.normpath(os.path.join(pwd, os.path.relpath(str(physical), cwd)))
-        if logical == os.path.normpath(str(physical)) or not os.path.samefile(logical, str(physical)):
+        rel = os.path.relpath(str(physical), cwd)
+        logical = pwd if rel == os.curdir else os.path.join(pwd, rel)
+        if logical == str(physical) or not os.path.samefile(logical, str(physical)):
             return None
     except (OSError, ValueError):
         return None
@@ -474,18 +481,32 @@ def _homes_run_git_discovery(git, root, args, input_bytes=None):
     before launch while the environment carries a runtime configuration override that runner drops
     (_homes_config_overrides): the probe's answer could then differ from the adopter's own git there
     (with core.ignoreCase=true supplied through GIT_CONFIG_COUNT, `!/STAGING/` re-includes the staging
-    home), so it is cannot-evaluate, never replayed. When the ambient working directory reaches `root`
-    through a logical path (_homes_logical_path), the probe runs ALSO from that path, with cwd and PWD
-    there: git derives the repository path from PWD, so an includeIf "gitdir:" rule matching only the
-    logical path applies to the adopter's git in that shell but not to the physical probe, and any
-    disagreement between the two answers is cannot-evaluate, naming both paths. Disclosed residual
+    home), so it is cannot-evaluate, never replayed. When the absolute ambient PWD names the working
+    directory and spells a path to `root` other than the physical one (_homes_logical_path: through a
+    symlink, or a spelling such as `R/.`, `R//` or `R/sub/..`), the probe runs ALSO from that path,
+    with cwd and PWD there and PWD passed verbatim, never normalized. At the worktree top the path is
+    the ambient PWD itself, so the probe reproduces the adopter's own git there: git names the
+    repository by PWD's exact spelling, so an includeIf "gitdir:" rule matching only that spelling
+    applies to the adopter's git but not to the physical probe, and any disagreement between the two
+    answers is cannot-evaluate, naming both paths. Disclosed over-refusal (fail-closed): from a
+    working directory below the worktree top, git discovers the repository and names it by its
+    physical path, so no such rule applies to the adopter's git there, yet the probe runs from
+    `<PWD>/..` (and so on up) and refuses any rule matching that spelling but not the physical path
+    (`gitdir:<PWD>/../` or a directory rule `gitdir:<link>/` above it). Disclosed residual
     (configuration divergence): the probe reads the configuration git discovers at inspection time through
     HOME, XDG_CONFIG_HOME and the system config, in the store's containing repository, from the physical
-    path and the one logical path the ambient PWD names; a later configuration edit, a different HOME,
-    another logical path (a different symlink, another shell's PWD), a replacement ref the adopter's git
-    would follow (the probe passes --no-replace-objects, so it never reads replaced objects), or a
+    path and the one path spelled from the absolute ambient PWD; a later configuration edit, a
+    different HOME, another spelling of the working directory (a different symlink, another shell's
+    PWD, or a relative PWD, which git 2.53.0 also adopts verbatim when it is the same directory as
+    the cwd), a replacement ref the adopter's git would follow (the probe passes
+    --no-replace-objects, so it never reads replaced objects), or a
     repository or index variable (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, dropped by the runner's
-    allowlist) at the adopter's own git call is not bound by this inspection."""
+    allowlist) at the adopter's own git call is not bound by this inspection. Disclosed residual
+    (path namespace race): each probe resolves its pathname again when git launches, so a symlink or
+    directory on either path that a concurrent local actor swaps during the inspection (between
+    _homes_logical_path's check and a launch, or between probes) can direct a probe at another
+    repository whose answer is then read as this one's; such an actor is outside this unwired
+    helper's threat model, and the inspection does not bind the path namespace against it."""
     head = _homes_allowlisted_verb(args)
     dropped = _homes_config_overrides()
     if dropped:
@@ -818,8 +839,9 @@ def inspect_homes_gitignore(store_root, verb, approved_rewrite=None, reviewed_ex
     (homes-gitignore-unreadable), a flagged index entry for that file, a probe that cannot run, fails
     or writes a diagnostic to stderr, an ambient runtime git configuration override the config-discovery
     probe drops (named; the remaining configuration divergence is disclosed at _homes_run_git_discovery),
-    a probe answer that differs between the physical store path and the logical path the working
-    directory reaches it through (both named), an index entry that would mask a probe, an ignored home
+    a probe answer that differs between the physical store path and the path the ambient PWD spells
+    to it (both named; the subdirectory over-refusal and the path namespace race are disclosed at
+    _homes_run_git_discovery), an index entry that would mask a probe, an ignored home
     whose governing rule does not exclude the home itself, or an unavailable indexed ignore blob in a
     partial clone.
 

@@ -443,9 +443,11 @@ def _run_git_config_discovery(git, store_root, args, timeout=_GIT_TIMEOUT_S, inp
     The probe also passes --no-pager, so a pager configured for check-ignore cannot launch a process (defence
     in depth: the captured, non-TTY stdout already suppresses the pager). Optional input_bytes is sent on
     stdin; callers supply bytes, never shell text. `logical` runs the probe with its working directory and
-    PWD at store_root as given (a path through a symlink, unresolved), PWD being the one name added to that
-    environment: git then derives the repository path from PWD, as an adopter's shell there does, so an
-    includeIf "gitdir:" rule matching only that path applies (git 2.53.0).
+    PWD at store_root as given, verbatim (a path through a symlink, or a spelling such as `R/.` or `R//`,
+    never resolved or normalized; the caller passes a str, which pathlib would normalize), PWD being the
+    one name added to that environment: git then names the repository by PWD's exact spelling, as the
+    adopter's git at that directory does, so an includeIf "gitdir:" rule matching only that spelling
+    applies (git 2.53.0).
     Returns a _GitOutcome shaped exactly as _run_git's."""
     cmd = [git, "--no-pager", "--no-replace-objects", "-c", "core.fsmonitor=false", "-C", str(store_root)] + list(args)
     env = _config_discovery_env()

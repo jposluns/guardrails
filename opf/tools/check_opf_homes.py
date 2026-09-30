@@ -2800,13 +2800,14 @@ def _gitignore_reconciliation_self_test(check):
         os.symlink("lphys", base / "llink")
         env_isol = dict(HOME=str(homel), XDG_CONFIG_HOME=str(homel / "cfg"), GIT_CONFIG_NOSYSTEM="1")
 
-        def from_dir(path, thunk):
+        def from_dir(path, thunk, pwd=None):
             # Run `thunk` with the working directory and PWD at `path` as given (symlinks unresolved),
-            # as an adopter's shell there does; both are restored.
+            # as an adopter's shell there does, or with PWD the exact spelling `pwd` of that directory;
+            # both are restored.
             previous = os.getcwd()
             os.chdir(path)
             try:
-                with patch.dict(os.environ, PWD=str(path)):
+                with patch.dict(os.environ, PWD=str(path) if pwd is None else pwd):
                     return thunk()
             finally:
                 os.chdir(previous)
@@ -2836,6 +2837,36 @@ def _gitignore_reconciliation_self_test(check):
             check("gi-logical-path-agree-clean", lambda: from_dir(logical, lambda: guard._homes_logical_path(
                 rootl) == str(logical) and guard.inspect_homes_gitignore(rootl, "init")[:2] == (None, [])
                 and guard.verify_homes_gitignore_effective(rootl, "init") == []))
+
+            # git names the worktree top by PWD's exact spelling (Codex's and Claude's round-5
+            # reproductions): a rule written against `R/.`, `R//`, `R/.working/..` or `<link>/./repo`
+            # applies to the adopter's git there, so the probe passes that PWD verbatim, never
+            # normalized, and refuses the disagreement naming it; with no rule the spellings agree.
+            # Below the worktree top the adopter's git names the repository by its physical path, but
+            # the probe runs from `<PWD>/..`: a rule matching that spelling is the disclosed
+            # over-refusal.
+            spellings = (("dot", rootl, str(rootl) + "/.", str(rootl) + "/."),
+                         ("dslash", rootl, str(rootl) + "//", str(rootl) + "/"),
+                         ("dotdot", rootl, str(rootl) + "/.working/..", str(rootl) + "/.working/.."),
+                         ("link-dot", logical, str(base) + "/llink/./repo", str(base) + "/llink/./repo"))
+            for label, cwd, pwd, rule in spellings:
+                include_if(rule)
+                check("gi-logical-spelling-verbatim-" + label, lambda c=cwd, p=pwd: from_dir(
+                    c, lambda: guard._homes_logical_path(rootl) == p, pwd=p))
+                check("gi-logical-spelling-disagree-" + label, lambda c=cwd, p=pwd: all(from_dir(
+                    c, lambda f=f: guard_refuses(lambda: f(rootl, "init"), "answers differently from the "
+                                                 "physical path {!r} and from the logical path {!r}".format(
+                                                     str(rootl), p)), pwd=p) for f in (
+                        guard.inspect_homes_gitignore, guard.verify_homes_gitignore_effective)))
+            include_if(None)
+            check("gi-logical-spelling-agree-clean", lambda: all(from_dir(c, lambda: guard.inspect_homes_gitignore(
+                rootl, "init")[:2] == (None, []), pwd=p) for _, c, p, _ in spellings))
+            below = logical / ".working"
+            include_if(str(below) + "/..")
+            check("gi-logical-path-subdir-overrefusal", lambda: from_dir(below, lambda: guard_refuses(
+                lambda: guard.inspect_homes_gitignore(rootl, "init"), "and from the logical path {!r}".format(
+                    str(below) + "/.."))))
+            include_if(None)
 
 
 def self_test():
