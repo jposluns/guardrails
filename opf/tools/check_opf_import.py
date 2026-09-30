@@ -4020,10 +4020,12 @@ def _self_test_isolated():
                 entry["sha256"] = new_sha
         (run_dir / "report.toml").write_text(_opf_emit.emit(report), encoding="utf-8")
 
-    # Round-6 (test hermeticity): the genuine Group C controls drive the retained apply engine in-process
+    # Round-6 (test hermeticity): the in-process genuine Group C controls drive the retained apply engine
     # (imp.apply_import, which _self_test binds to _apply_import through _opf_import._self_test_engine), so an
     # INHERITED journal crash-injection variable would kill this process mid-run; neutralize it for the whole
-    # self-test and restore it in the finally (mirrors the module suite's R4-C2).
+    # self-test and restore it in the finally (mirrors the module suite's R4-C2). The interrupted-promotion
+    # control runs imp._apply_import in a child process instead, with that variable removed from the child's
+    # environment until the child arms its own.
     import _journal as _journal_env
     _saved_kill_env = os.environ.pop(_journal_env.KILL_ENV, None)
     try:
@@ -4317,8 +4319,12 @@ def _self_test_isolated():
                and "not a regular file" in tc[1])
 
         # Round-6 (GENUINE controls): every Group C state the gate accepts, and the interrupted state it must
-        # refuse, built by the REAL producer: plan_import -> review_import -> apply_import over a doctor-
-        # composable store (the module suite's build_apply_store shape), never a hand-written record/journal.
+        # refuse, built by the REAL producer over a doctor-composable store (the module suite's build_apply_store
+        # shape), never a hand-written record/journal. Each starts from an in-process plan_import -> review_import
+        # (genuine_reviewed; _self_test binds both names to their retained engines). The complete state is then
+        # applied in-process by apply_import, bound the same way to _apply_import; the interrupted state is left
+        # by imp._apply_import killed in a child process, whose fresh import carries no such binding (below); and
+        # the rolled-back state is that interrupted state after the in-process recover (imp._claim_apply_lock).
         # The genuine apply deletes the staging run dir as its terminal journaled op, so the gate (addressed by
         # a run dir) can see a genuine complete record only beside a RESTORED pre-apply copy of that run dir;
         # every Group C artefact (record, journal, archive) is the producer's own.

@@ -6536,8 +6536,9 @@ def _self_test_ordinary_refused():
         whole = dict(fragments=dict([("a.txt", [dict(span=[0, len(b"legacy source body\n")],
                                                     state="unmapped", origin="baseline")])]))
         # The library staging intake (codex round 1 staged a run through it) over a copy of the FRESH
-        # store, where its engine stages this whole-file baseline plan: deleting the refusal stages a run
-        # there.
+        # store, where its engine stages this whole-file baseline plan: restoring that engine in place of the
+        # refusal stages a run there and turns both rows red; literally deleting the refusal's return instead
+        # makes stage_import return None, and refused() raises AttributeError before any row is recorded.
         shutil.copytree(root, base / "fresh")
         before = tree(base)
         with _self_test_engine(engine=False):

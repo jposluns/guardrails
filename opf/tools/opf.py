@@ -2859,7 +2859,10 @@ def _cli_self_test():
             over that run, checked only for writing no acceptance.json; after the retained engine accepts
             the run, --apply over it, over an unknown run and over the NOT-ADOPTED root, with the store tree
             byte-unchanged. The NOT-ADOPTED root is never driven with --review, and its own tree is not
-            snapshotted. Deleting one operation-layer refusal turns its row red. A malformed --set /
+            snapshotted. Restoring the retained engine in place of one public refusal turns that refusal's
+            rows red (exit 1). Literally deleting the refusal's return does not: the entry then returns None,
+            the import dispatcher's res.findings read raises AttributeError, and the self-test's final
+            harness-error backstop exits 2 with no row recorded. A malformed --set /
             --decisions / --dispositions / --ingest-options file meets the same refusal, its reader never
             run, and so does a mode-specific argv violation (a missing or extra companion flag, a run-id
             outside the grammar): the refusal precedes the retired mode-combination validation (round-2

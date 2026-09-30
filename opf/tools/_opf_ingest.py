@@ -1842,8 +1842,10 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
         # detection, triage gate, binding, read or write, even inside an engine block. The inputs are a
         # fully triaged keep plan, the codex round-1 reproduction (a.txt holding "source\n", one
         # `unresolved` row, empty options: formerly verdict 1 "complete triage before --plan"), through
-        # the library and through the CLI, and a NOT-ADOPTED root. Deleting plan_ingest's refusal runs the
-        # detection again, returns the unresolved row's finding and the NOT-ADOPTED store message.
+        # the library and through the CLI, and a NOT-ADOPTED root. Restoring the retained engine in place of
+        # plan_ingest's refusal runs the detection again, returns the unresolved row's finding and the NOT-ADOPTED
+        # store message, so the library rows go red; literally deleting the refusal's return instead makes
+        # plan_ingest return None, and refused() raises AttributeError before any row is recorded.
         import tempfile
         from unittest.mock import patch
 
