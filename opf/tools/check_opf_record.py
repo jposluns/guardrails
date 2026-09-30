@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T59)
+  check_opf_record.py --self-test                    the fixture suite (T1-T61)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -223,12 +223,19 @@ Each case runs on its own copy of that template; the root is removed in a finall
       reconciles it; an intervening edit then refuses that reconciliation (flip: the reviewed head's
       promise)
   T58 a holder that releases between the trigger read and the recovery acquisition, with a staging
-      leftover that acquisition removes, lets the run continue with no outcome naming the removal, and
-      the residual lists and the recovery docstring disclose that (flip: read the texts with the
-      disclosure removed)
+      leftover that acquisition removes, refuses once naming the removal and reclaiming no record,
+      the re-run then proceeding, and the residual lists and the recovery docstring state that
+      reporting (flip: the silent continue of the fix-9 head)
   T59 a homes-1 recovery whose lease acquisition fails after creating the lease says only that no
       operand, journal entry or journal lock was written, beside the write guard's left-lease report,
       never "Nothing was written" (flip: the reviewed head's unscoped sentence)
+  T60 a failed lease or single-writer-claim release says the record may be left in place, scoped to
+      what the release verifiably did (an absent or replaced lease is refused as not this run's own,
+      and an unlinked record's directory fsync can fail after the unlink), never that it is LEFT in
+      place (flip: the left-in-place text)
+  T61 a journal lock acquisition failing after its O_EXCL create refuses saying the created lock may
+      be left in place for the next run's reconciliation, never through the cli's cannot-evaluate
+      backstop with no mention of it (flip: the refusal without the disclosure)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -1960,13 +1967,30 @@ def t29_git_lifecycle(fx):
     """A git launch that strips every GIT_* variable, as the operation capability's rev-parse does, still
     runs with the system-config pins (GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_SYSTEM the null device): the gate
     runs inside the OPF git lifecycle, whose PATH wrapper reasserts them, so no fixture or production git
-    call reads the host's system configuration. Every fixture git call carries the no-maintenance pins."""
+    call reads the host's system configuration. Observed through git's own trace2 (PR D fix 10): the
+    scrubbed HOME's global config, written for exactly this one launch, names the two pin variables in
+    trace2.envVars, and git logs each one's value from its OWN environment as a def_param event (an
+    unset variable yields no event), so the launch argv defines no alias, which the F-367
+    maintenance-pin scan refuses (an alias expansion is a command line that scan cannot read). Every
+    fixture git call carries the no-maintenance pins."""
     env = fx.env
     root = fx.case("t29-git-lifecycle")
-    proc = subprocess.run(["git", "-C", str(root), *GIT_NO_MAINTENANCE, "-c", "alias.pins=!env", "pins"],
-                          capture_output=True, text=True, timeout=120, env=stripped_launch_env(env))
+    trace = Path(root) / "t29-trace2-events.jsonl"
+    gitconfig = Path(env.vars["HOME"]) / ".gitconfig"
+    assert not gitconfig.exists(), "T29 the scrubbed HOME carries no global git config"
+    gitconfig.write_text("[trace2]\n\tenvVars = GIT_CONFIG_NOSYSTEM,GIT_CONFIG_SYSTEM\n"
+                         "\teventTarget = {}\n".format(trace), encoding="utf-8")
+    try:
+        proc = subprocess.run(["git", "-C", str(root), *GIT_NO_MAINTENANCE, "rev-parse", "--git-dir"],
+                              capture_output=True, text=True, timeout=120, env=stripped_launch_env(env))
+    finally:
+        gitconfig.unlink()
     assert proc.returncode == 0, ("T29 the stripped launch runs", proc.returncode, proc.stderr[-800:])
-    seen = dict(line.partition("=")[::2] for line in proc.stdout.splitlines())
+    seen = dict()
+    for line in trace.read_text(encoding="utf-8").splitlines():
+        event = json.loads(line)   # one trace2 event per line; unparseable output is a Harness fault
+        if event.get("event") == "def_param":
+            seen[event.get("param")] = event.get("value")
     pins = (seen.get("GIT_CONFIG_NOSYSTEM"), seen.get("GIT_CONFIG_SYSTEM"))
     assert pins == ("1", os.devnull), ("T29 a GIT_*-stripped git launch keeps the system-config pins", pins)
     maintenance = [env.git(root, "config", "--get", key).strip()
@@ -3459,10 +3483,14 @@ def flip_t57():
     return patch.object(record, "RecordError", Promising)
 
 
-T58_BOTH = "(a staging leftover that acquisition removed is then named by no outcome)"
-T58_RECOVER = ("or None when the acquisition reclaimed no capability record and the plan under the capability "
-               "found nothing (a holder that released after the trigger read, say), so the run continues; a "
-               "staging leftover that acquisition removed is then named by no outcome")
+T58_BOTH = ("(a staging leftover that acquisition removed is then reported by a refusal that names it: "
+            "this run refuses once and a re-run proceeds, PR D fix 10)")
+T58_FIX9 = "is then named by no outcome"
+T58_RECOVER = ("or None when the acquisition removed nothing, reclaimed no capability record and the plan "
+               "under the capability found nothing (a holder that released after the trigger read, say), so "
+               "the run continues; a staging leftover the acquisition removed while reclaiming no record is "
+               "named by its own outcome (_staging_removed_outcome, PR D fix 10), so no removal is left "
+               "unreported")
 T58_RETIRED = "or None when the acquisition cleared nothing"
 
 
@@ -3472,15 +3500,17 @@ def t58_texts():
     return module, guard, " ".join((record._recover_capability_journal.__doc__ or "").split())
 
 
-def t58_released_holder_staging_unreported(fx):
+def t58_released_holder_staging_reported(fx):
     """A live holder releases between the trigger read and the recovery acquisition (T35's setup) while
     an active-record staging leftover sits in the control directory: the acquisition removes it and
-    reclaims no record, so recovery returns no outcome and the run continues to the claim-seam refusal
-    with no line naming the removal. The residual lists and the recovery docstring disclose exactly
-    that; the reviewed head's docstring said that acquisition cleared nothing."""
+    reclaims no record, and the run now refuses ONCE, its outcome naming the removal and saying no
+    record was reclaimed, instead of continuing with no line naming it (the fix-9 head, PR D fix 10);
+    the re-run then proceeds to the claim-seam refusal with no removal left to name. The residual
+    lists and the recovery docstring state that reporting."""
     module, guard, recover = t58_texts()
-    assert T58_BOTH in module and T58_BOTH in guard, "T58 the residual lists disclose the unnamed removal"
-    assert T58_RECOVER in recover, "T58 the recovery docstring discloses the unnamed removal"
+    assert T58_BOTH in module and T58_BOTH in guard, "T58 the residual lists state the reporting"
+    assert T58_FIX9 not in module and T58_FIX9 not in guard, "T58 the named-by-no-outcome wording is gone"
+    assert T58_RECOVER in recover, "T58 the recovery docstring states the reporting"
     assert T58_RETIRED not in recover, "T58 the cleared-nothing wording is gone"
     env = fx.env
     base = fx.case("t58-homes2-base")
@@ -3501,24 +3531,31 @@ def t58_released_holder_staging_unreported(fx):
         finally:
             if held:
                 record._opf_oplock.release_operation(held.pop())
-        refused(result, "is not active in this build")
+        refused(result, "staging leftovers an interrupted publication left were removed before this "
+                        "operation: the recovery acquisition removed active record staging leftover ")
         err = result[2]
         assert not os.path.lexists(staging), "T58 the recovery acquisition removed the staging leftover"
-        assert staging.name not in err and "staging leftover" not in err, \
-            ("T58 no outcome names the removal", err[-800:])
+        assert staging.name in err, ("T58 the refusal names the removed leftover", err[-1200:])
+        assert "reclaiming no operation capability record" in err, ("T58 no reclaim is claimed", err[-1200:])
+        assert "nothing written" not in err, ("T58 no nothing-written wording beside the removal", err[-1200:])
         assert capability_records(root) == (False, False), "T58 the capability is released"
+        result = record_cli(env, root, CREATE)
+        refused(result, "is not active in this build")
+        assert "staging leftover" not in result[2], ("T58 the re-run proceeds with no removal to name",
+                                                     result[2][-800:])
 
 
 def flip_t58():
-    """Read the texts with the disclosure removed and the cleared-nothing wording restored."""
-    original = t58_texts
+    """The fix-9 head's behaviour: a staging-only removal yields no outcome and the run continues
+    unrefused, the removal named by no line."""
+    fixed = record._recover_capability_journal
 
-    def reverted():
-        module, guard, recover = original()
-        return (module.replace(T58_BOTH, ""), guard.replace(T58_BOTH, ""),
-                recover.replace(T58_RECOVER, T58_RETIRED + " and the plan under the capability found nothing "
-                                "(a holder that released after the trigger read, say), so the run continues"))
-    return patch.object(sys.modules[__name__], "t58_texts", reverted)
+    def reverted(ctx, opened, unprojected):
+        result = fixed(ctx, opened, unprojected)
+        if result is not None and not result[0] and not result[1]:
+            return None
+        return result
+    return patch.object(record, "_recover_capability_journal", reverted)
 
 
 T59_SCOPED = "No operand, journal entry or journal lock was written by this recovery (fail-closed)"
@@ -3561,6 +3598,119 @@ def flip_t59():
             super().__init__(*(a.replace(T59_SCOPED, "Nothing was written (fail-closed)")
                                if isinstance(a, str) else a for a in args))
     return patch.object(record, "RecordError", Unscoped)
+
+
+# --- T60, T61: the PR D fix-10 vectors ------------------------------------------------------------------
+
+# Fix 10: the release-failure messages state only what release_lease / release_operation verifiably
+# did (the fix-9 head certified "it is LEFT in place" over a release that refuses an absent or
+# replaced record as not this run's own, and over an unlink whose directory fsync failed after it),
+# and a journal lock acquisition failing after its O_EXCL create discloses the possibly-left lock
+# instead of reaching the cli's cannot-evaluate backstop, which said nothing about it.
+T60_LEASE_MAY = ("it may be left in place (the release refuses a lease that is absent or was replaced "
+                 "as not this run's own, and a failure after its unlink leaves it removed, not durably), "
+                 "it is never seized (spec 5.7), and the failure above still governs.")
+T60_CLAIM_MAY = ("whichever of its records the release did not remove may be left in place (never seized, "
+                 "spec 5.7; the release removes each record only as far as its verified steps succeed, "
+                 "and a removal's directory fsync can fail after the unlink), and the failure above "
+                 "still governs.")
+T60_FIX9 = "it is LEFT in place (never seized, spec 5.7) and the failure above still governs."
+
+
+def t60_release_failure_scoped(fx):
+    """A failed release beside a governing refusal says the record may be left in place, scoped to what
+    the release verifiably did, never the fix-9 head's it-is-LEFT-in-place certainty. Two legs: the
+    homes-1 recovery lease released after a recovery refusal (an intervening edit under a dead run's
+    open transaction), and the single-writer claim released after a failed publication. Each synthetic
+    release failure removes nothing, so the lease is in fact still present."""
+    env = fx.env
+
+    def failing_release(root_fd, machine_rel, expected_payload, verb):
+        raise guard.WriteGuardError("synthetic lease release failure")
+    root = fx.case("t60-recovery-release-fails")
+    proc = child(env, root, CREATE, flip=FAILING_APPLY)
+    assert proc.returncode == 2, ("T60 the child's publication fails after INTENT", proc.returncode,
+                                  proc.stderr[-800:])
+    assert list(journal_states(root).values()) == ["open"], "T60 the dead run's transaction is open"
+    edited = read(root, COUNTERS) + b"# an intervening edit\n"
+    (Path(root) / COUNTERS).write_bytes(edited)
+    with patch.object(record._opf_write_guard, "release_lease", failing_release):
+        result = record_cli(env, root, CREATE)
+    refused(result, "cannot be reconciled without overwriting a change made since it was interrupted")
+    err = result[2]
+    assert "additionally, releasing the lease failed (" in err, ("T60 the failure is surfaced", err[-1200:])
+    assert T60_LEASE_MAY in err, ("T60 the lease may be left", err[-1200:])
+    assert T60_FIX9 not in err, ("T60 no left-in-place certainty", err[-1200:])
+    assert (Path(root) / LEASE).exists(), "T60 the recovery lease is in fact left"
+    assert read(root, COUNTERS) == edited, "T60 the intervening edit is kept"
+    root = fx.case("t60-publication-release-fails")
+
+    def failing_apply(root_fd, ops, staged_reader):
+        raise OSError(5, "synthetic apply failure after INTENT")
+    with patch.object(record._journal, "apply_ops", failing_apply), \
+            patch.object(record._opf_write_guard, "release_lease", failing_release):
+        result = record_cli(env, root, CREATE)
+    refused(result, "the publication FAILED and its transaction ")
+    err = result[2]
+    assert "additionally, releasing the single-writer claim failed (" in err, \
+        ("T60 the claim-release failure is surfaced", err[-1200:])
+    assert T60_CLAIM_MAY in err, ("T60 the records may be left", err[-1200:])
+    assert T60_FIX9 not in err, ("T60 no left-in-place certainty", err[-1200:])
+    assert (Path(root) / LEASE).exists(), "T60 the single-writer lease is in fact left"
+
+
+def flip_t60():
+    """Print the fix-9 head's left-in-place release-failure text."""
+    import builtins
+
+    def reverted(*args, **kwargs):
+        def back(a):
+            a = a.replace("releasing the single-writer claim failed", "releasing the lease failed")
+            a = a.replace(T60_CLAIM_MAY, T60_FIX9)
+            return a.replace(T60_LEASE_MAY, T60_FIX9)
+        args = tuple(back(a) if isinstance(a, str) else a for a in args)
+        return builtins.print(*args, **kwargs)
+    return patch.object(record, "print", reverted, create=True)
+
+
+T61_LOCK_MAY = ("the lock itself may be left in place (a failure after its O_EXCL create leaves the "
+                "created lock, which is for the next opf record run's reconciliation), and no operand "
+                "or journal entry was written by this run (fail-closed)")
+
+
+def t61_lock_create_failure_disclosed(fx):
+    """A homes-1 journal lock acquisition that fails AFTER its O_EXCL create (here the journal-root
+    fsync) leaves the created lock; the run refuses saying the lock itself may be left in place, never
+    through the cli's cannot-evaluate backstop, which said nothing about it (the fix-9 head). The
+    created lock is in fact present and the operands are untouched."""
+    env = fx.env
+    root = fx.case("t61-lock-created-then-fails")
+    pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+    real = journal.acquire_lock
+
+    def created_then_failing(journal_root, session_id):
+        real(journal_root, session_id)
+        raise OSError(5, "synthetic journal-root fsync failure after the lock's create")
+    with patch.object(record._journal, "acquire_lock", created_then_failing):
+        result = record_cli(env, root, CREATE)
+    refused(result, "cannot take the record journal lock (")
+    err = result[2]
+    assert T61_LOCK_MAY in err, ("T61 the possibly-left lock is disclosed", err[-1200:])
+    assert "cannot evaluate: unexpected error" not in err, ("T61 never the backstop", err[-800:])
+    assert (Path(root) / record.JOURNAL_REL / "lock").exists(), "T61 the failed acquisition left the lock"
+    assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, "T61 the operands are untouched"
+
+
+def flip_t61():
+    """Refuse without the possibly-left-lock disclosure (the fix-9 head routed this failure to the cli
+    backstop, which said nothing about the lock)."""
+    fixed = record.RecordError
+
+    class Undisclosed(fixed):
+        def __init__(self, *args):
+            super().__init__(*(a.replace(T61_LOCK_MAY, "nothing written (fail-closed)")
+                               if isinstance(a, str) else a for a in args))
+    return patch.object(record, "RecordError", Undisclosed)
 
 
 # --- the runner ------------------------------------------------------------------------------------------------
@@ -3635,8 +3785,10 @@ TESTS = (
     ("T55-lock-release-after-unlink", t55_lock_release_after_unlink, flip_t55),
     ("T56-nothing-opened-not-terminal", t56_nothing_opened_not_terminal, flip_t56),
     ("T57-retained-not-promised", t57_retained_not_promised, flip_t57),
-    ("T58-released-holder-staging-unreported", t58_released_holder_staging_unreported, flip_t58),
+    ("T58-released-holder-staging-reported", t58_released_holder_staging_reported, flip_t58),
     ("T59-recovery-lease-failure-scoped", t59_recovery_lease_failure_scoped, flip_t59),
+    ("T60-release-failure-scoped", t60_release_failure_scoped, flip_t60),
+    ("T61-lock-create-failure-disclosed", t61_lock_create_failure_disclosed, flip_t61),
 )
 
 

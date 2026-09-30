@@ -98,7 +98,8 @@ byte prefix of the journaled preimage or planned bytes (read as a torn write), i
 homes-2 store the recovery trigger reads the operation capability's lease and active record UNHELD;
 the journal home, the plan and what recovery actually cleared are re-derived under the held
 capability, so a holder that releases after that read leaves no outcome and the run continues (a
-staging leftover that acquisition removed is then named by no outcome). What
+staging leftover that acquisition removed is then reported by a refusal that names it: this run
+refuses once and a re-run proceeds, PR D fix 10). What
 a run that took the capability after that read, and was dead by this run's recovery acquisition,
 left is handled by this run only as far as each step succeeds: its lease and active record are
 reclaimed when the recovery acquisition succeeds, and its record-journal work (an open transaction,
@@ -1393,8 +1394,10 @@ def _with_recovery_lease(ctx, pending, recover):
         try:
             _release(ctx, lease)
         except Exception as rel_exc:  # noqa: BLE001  surfaced, never displaces the original failure
-            print("opf record: additionally, releasing the lease failed ({}); it is LEFT in place (never "
-                  "seized, spec 5.7) and the failure above still governs.".format(rel_exc), file=sys.stderr)
+            print("opf record: additionally, releasing the lease failed ({}); it may be left in place "
+                  "(the release refuses a lease that is absent or was replaced as not this run's own, "
+                  "and a failure after its unlink leaves it removed, not durably), it is never seized "
+                  "(spec 5.7), and the failure above still governs.".format(rel_exc), file=sys.stderr)
         raise
     _release(ctx, lease)
     return result
@@ -1549,7 +1552,8 @@ def _reconcile_capability_journal(ctx):
     so an outcome names only what this run's held acquisition cleared and its held plan found, and
     attributes a reclaimed leftover to the operation its record names: a holder that released in
     that window, with no journal work pending, yields no outcome and this run continues (a staging
-    leftover that acquisition removed is then named by no outcome); a journal
+    leftover that acquisition removed is then reported by a refusal that names it: this run
+    refuses once and a re-run proceeds, PR D fix 10); a journal
     directory replaced in that window is planned from its current binding; and what a run that took
     the capability after those reads, and was dead by the recovery acquisition, left is handled by
     this run only as far as each step succeeds: its lease and active record are reclaimed when the
@@ -1633,9 +1637,10 @@ def _reconcile_capability_journal(ctx):
     # The lead names opf record only on record-journal evidence (a transaction this run reconciled);
     # a reclaimed capability leftover alone is attributed by its outcome line to the operation its
     # record names, which need not be record.
-    journal_reconciled, outcomes = result
+    journal_reconciled, reclaimed, outcomes = result
     lead = ("an interrupted opf record run was reconciled" if journal_reconciled else
-            "the operation capability records an interrupted run left were reclaimed")
+            "the operation capability records an interrupted run left were reclaimed" if reclaimed
+            else "staging leftovers an interrupted publication left were removed")
     raise RecordError("{} before this operation: {}. Nothing was recorded by this run. Inspect the store "
                       "paths (git status) and run opf doctor, then re-run".format(lead, "; ".join(outcomes)))
 
@@ -1846,6 +1851,15 @@ def _reclaimed_outcome(cap, pending):
                    "relying on it")
 
 
+def _staging_removed_outcome(cap):
+    """The outcome line for staging leftovers the recovery acquisition removed while reclaiming no
+    capability record (PR D fix 10): without it, an acquisition on the released-holder race path
+    removed the leftover and no line named the removal, and a later refusal's nothing-written
+    wording then read as a run that had removed nothing."""
+    return ("the recovery acquisition removed {}, reclaiming no operation capability record (the "
+            "holder released, or left only staging garbage)".format("; ".join(cap.staging_removed)))
+
+
 def _recover_capability_journal(ctx, opened, unprojected):
     """Recovery proper for the typed home: the operation capability is acquired FIRST (acquire refuses
     a live holder; recover=True clears only a CONFIRMED-DEAD holder's leftover lease and active
@@ -1858,10 +1872,11 @@ def _recover_capability_journal(ctx, opened, unprojected):
     the acquisition refusal. The outcome is worded from the held observation alone: the records the
     acquisition itself reports clearing (OpCapability.recovered, with the operation its holder
     recorded) and the transactions the held plan reconciles. Returns (whether a record journal
-    transaction was reconciled, those outcome lines), or None when the acquisition reclaimed no
-    capability record and the plan under the capability found nothing (a holder that released after
-    the trigger read, say), so the run continues; a staging leftover that acquisition removed is
-    then named by no outcome (it is reported only beside a reclaim, _reclaimed_outcome). A refusal
+    transaction was reconciled, whether a capability record was reclaimed, those outcome lines), or
+    None when the acquisition removed nothing, reclaimed no capability record and the plan under
+    the capability found nothing (a holder that released after the trigger read, say), so the run
+    continues; a staging leftover the acquisition removed while reclaiming no record is named by
+    its own outcome (_staging_removed_outcome, PR D fix 10), so no removal is left unreported. A refusal
     states what was done before it: a failed acquisition names what it removed, or says that is not
     known when its error carries no report (_acquisition_removals), and a refusal under the held
     capability names what the acquisition removed and each transaction already reconciled
@@ -1912,13 +1927,15 @@ def _recover_capability_journal(ctx, opened, unprojected):
                 raise
             raise RecordError(detail)
         outcomes = ([_reclaimed_outcome(cap, opened or unprojected)] if cap.recovered else []) + reconciled
+        if cap.staging_removed and not cap.recovered:
+            outcomes.insert(0, _staging_removed_outcome(cap))
     finally:
         try:
             _opf_oplock.release_operation(cap)
         except _opf_oplock.OpLockError as exc:
             print("opf record: additionally, releasing the operation capability failed ({}); the failure "
                   "above still governs.".format(exc), file=sys.stderr)
-    return (bool(reconciled), outcomes) if outcomes else None
+    return (bool(reconciled), bool(cap.recovered), outcomes) if outcomes else None
 
 
 def _sha256(data):
@@ -1942,7 +1959,8 @@ def _publish(ctx, plan, subcommand, cap=None):
     crash tore (a byte prefix of them) from an intervening edit (_unexplained_operands); a publication
     whose INTENT would pass the journal-read cap is refused by the engine before it opens. Raises
     RecordError; the journal lock is released on every exit except a failure that may have left the
-    transaction open, which keeps it for the next run's reconciliation."""
+    transaction open, which keeps it for the next run's reconciliation, and a lock acquisition failing
+    after its O_EXCL create, whose refusal says the created lock may be left in place (PR D fix 10)."""
     if ctx.journal_rel != JOURNAL_REL:
         return _publish_homes2(ctx, plan, subcommand, cap)
     root_fd = ctx.root_fd
@@ -1969,6 +1987,15 @@ def _publish(ctx, plan, subcommand, cap=None):
             raise RecordError("cannot take the record journal lock ({}); the journal preparation may already "
                               "have created its directories, and no operand, journal entry or lock was written "
                               "by this run (fail-closed)".format(exc))
+        except OSError as exc:
+            # PR D fix 10 (R3): acquire_lock can fail AFTER its O_EXCL create (the payload write, its
+            # fsync, or the journal directory's), leaving the created lock; without this branch the
+            # OSError reached the cli's cannot-evaluate backstop, which said nothing about the lock.
+            raise RecordError("cannot take the record journal lock ({}); the journal preparation may already "
+                              "have created its directories, the lock itself may be left in place (a failure "
+                              "after its O_EXCL create leaves the created lock, which is for the next opf "
+                              "record run's reconciliation), and no operand or journal entry was written by "
+                              "this run (fail-closed)".format(exc))
         held = True
         ops = []
         content = {}
@@ -2355,8 +2382,11 @@ def _run_operation(req):
                 except Exception as rel_exc:  # noqa: BLE001  surfaced, never displaces the original failure
                     if pending is None:
                         raise
-                    print("opf record: additionally, releasing the lease failed ({}); it is LEFT in place "
-                          "(never seized, spec 5.7) and the failure above still governs.".format(rel_exc),
+                    print("opf record: additionally, releasing the single-writer claim failed ({}); "
+                          "whichever of its records the release did not remove may be left in place "
+                          "(never seized, spec 5.7; the release removes each record only as far as its "
+                          "verified steps succeed, and a removal's directory fsync can fail after the "
+                          "unlink), and the failure above still governs.".format(rel_exc),
                           file=sys.stderr)
     except _opf_write_guard.WriteGuardError as exc:
         raise RecordError(str(exc))
