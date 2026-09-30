@@ -140,6 +140,24 @@ def _close_fd_propagating(fd):
     raise first
 
 
+def _close_fd_yielding(fd):
+    """Close a descriptor from an `except` handler or a `finally` block without letting a close error
+    REPLACE the exception already in flight there: when an exception is unwinding through, or being handled
+    in, the CALLING frame, the confirm-then-release close still runs (the descriptor is never retained) but
+    its close error is dropped so the ORIGINAL exception keeps propagating; on the normal path this is
+    exactly _close_fd_propagating, so a close error still fails closed. Inlined from
+    opf/tools/_journal._close_fd_yielding (the same body) so this tool keeps working without opf/tools
+    present."""
+    tb = sys.exc_info()[2]
+    if tb is None or tb.tb_frame is not sys._getframe(1):
+        _close_fd_propagating(fd)
+        return
+    try:
+        _close_fd_propagating(fd)
+    except OSError:
+        pass                                      # the in-flight exception wins; the fd was still released
+
+
 def _read_regular_page(path):
     """Read a page's text through a fail-closed, symlink-safe open. Opens O_NOFOLLOW (a symlink at the final
     component fails - never followed) + O_NONBLOCK (a FIFO open returns instead of blocking), fstats the
@@ -155,7 +173,7 @@ def _read_regular_page(path):
             return fh.read()
     finally:
         if fd >= 0:
-            _close_fd_propagating(fd)
+            _close_fd_yielding(fd)
 
 
 def _run_one(root, subdir, href, allowlist):

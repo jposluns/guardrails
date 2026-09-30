@@ -344,6 +344,24 @@ def _close_fd_propagating(fd):
     raise first
 
 
+def _close_fd_yielding(fd):
+    """Close a descriptor from an `except` handler or a `finally` block without letting a close error
+    REPLACE the exception already in flight there: when an exception is unwinding through, or being handled
+    in, the CALLING frame, the confirm-then-release close still runs (the descriptor is never retained) but
+    its close error is dropped so the ORIGINAL exception keeps propagating; on the normal path this is
+    exactly _close_fd_propagating, so a close error still fails closed. Inlined from
+    opf/tools/_journal._close_fd_yielding (the same body) so this tool keeps working without opf/tools
+    present."""
+    tb = sys.exc_info()[2]
+    if tb is None or tb.tb_frame is not sys._getframe(1):
+        _close_fd_propagating(fd)
+        return
+    try:
+        _close_fd_propagating(fd)
+    except OSError:
+        pass                                      # the in-flight exception wins; the fd was still released
+
+
 def working_blob(root, path):
     """POSIX no-follow, descriptor-relative traversal; unsupported platforms refuse."""
     require(hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
@@ -369,7 +387,7 @@ def working_blob(root, path):
                     path + ": working input is not a regular file")
             return stream.read()
     finally:
-        _close_fd_propagating(directory)
+        _close_fd_yielding(directory)
 
 
 def first_parent_range(root, head, before):

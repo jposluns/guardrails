@@ -218,6 +218,28 @@ def _close_fd_propagating(fd):
     raise first
 
 
+def _close_fd_yielding(fd):
+    """Close a descriptor from an `except` handler or a `finally` block without letting a close error
+    REPLACE the exception already in flight there (#378): the `raise first` of _close_fd_propagating would
+    otherwise mask the body's error whenever the body raised. When an exception is unwinding through, or
+    being handled in, the CALLING frame, the same confirm-then-release close still runs (the descriptor is
+    never retained) but its close error is dropped, so the ORIGINAL exception keeps propagating; when none
+    is (the normal path through a `finally`), this is exactly _close_fd_propagating and a close error still
+    fails closed. "In flight in the calling frame" means the current exception's traceback head is that
+    frame: an exception a CALLER is handling (this code reached normally from inside the caller's `except`
+    block) is not in flight here and never quiets the close. Residual (disclosed): a `finally` reached
+    NORMALLY while lexically inside an `except` handler of the SAME function would read that handled
+    exception as in flight; no call site is nested that way."""
+    tb = sys.exc_info()[2]
+    if tb is None or tb.tb_frame is not sys._getframe(1):
+        _close_fd_propagating(fd)
+        return
+    try:
+        _close_fd_propagating(fd)
+    except OSError:
+        pass                                      # the in-flight exception wins; the fd was still released
+
+
 def _open_parent(root_fd, relpath):
     """Open the parent directory of relpath by walking each intermediate component beneath root_fd with
     O_DIRECTORY|O_NOFOLLOW (a symlinked component raises rather than redirects the walk). Returns
@@ -289,7 +311,7 @@ def _lstat_contained(root_fd, relpath):
     try:
         return _lstat_at(pfd, name)
     finally:
-        _close_fd_propagating(pfd)
+        _close_fd_yielding(pfd)
 
 
 def _lstat_at(pfd, name):
@@ -331,7 +353,7 @@ def _read_at(pfd, name, relpath, cap=None):
             raise JournalError("contained path {!r} is not a regular file".format(relpath))
         return _read_fd(fd, cap=cap), st
     finally:
-        _close_fd_propagating(fd)
+        _close_fd_yielding(fd)
 
 
 def _read_contained(root_fd, relpath, require_single_link=False):
@@ -354,7 +376,7 @@ def _read_contained(root_fd, relpath, require_single_link=False):
         # regular file (SECA resource-bounds; the TOCTOU-hang backstop behind a check-then-open gate).
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
     except OSError as exc:
-        _close_fd_propagating(pfd)
+        _close_fd_yielding(pfd)
         raise JournalError("cannot read contained file {!r} ({})".format(relpath, exc))
     try:
         st = os.fstat(fd)
@@ -375,9 +397,9 @@ def _read_contained(root_fd, relpath, require_single_link=False):
         # (round 7: a raising close is not assumed to have released its number), so both descriptors are
         # released either way, and the file-close error keeps propagating fail-closed to the caller.
         try:
-            _close_fd_propagating(fd)
+            _close_fd_yielding(fd)
         finally:
-            _close_fd_propagating(pfd)
+            _close_fd_yielding(pfd)
 
 
 def _fsync_dir_fd(fd):
@@ -389,7 +411,7 @@ def _fsync_parent(root_fd, relpath):
     try:
         os.fsync(pfd)
     finally:
-        _close_fd_propagating(pfd)
+        _close_fd_yielding(pfd)
 
 
 def _fsync_path_dir(path):
@@ -406,7 +428,7 @@ def _fsync_path_dir(path):
     try:
         os.fsync(fd)
     finally:
-        _close_fd_propagating(fd)
+        _close_fd_yielding(fd)
 
 
 def _fsync_contained_dir(pfd, name):
@@ -418,7 +440,7 @@ def _fsync_contained_dir(pfd, name):
     try:
         os.fsync(dfd)
     finally:
-        _close_fd_propagating(dfd)
+        _close_fd_yielding(dfd)
 
 
 def ensure_journal_dirs(root_fd, journal_rel):
@@ -507,7 +529,7 @@ def open_journal_root_from_path(root, journal_rel):
         # number, so the root descriptor itself can never stay retained), and the close error keeps
         # propagating fail-closed.
         try:
-            _close_fd_propagating(root_fd)
+            _close_fd_yielding(root_fd)
         except OSError:
             if jr_fd is not None:
                 _close_fd_quietly(jr_fd)
@@ -558,10 +580,10 @@ def _create_frames_excl(jr_fd, txn_dir):
         try:
             os.fsync(fd)
         finally:
-            _close_fd_propagating(fd)
+            _close_fd_yielding(fd)
         os.fsync(txnfd)                                   # the new dir entry durable through the CONTAINED fd
     finally:
-        _close_fd_propagating(txnfd)
+        _close_fd_yielding(txnfd)
 
 
 def publish(jr_fd, txn_dir, ftype, obj):
@@ -626,10 +648,10 @@ def publish(jr_fd, txn_dir, ftype, obj):
             _write_all(fd, frame)
             os.fsync(fd)
         finally:
-            _close_fd_propagating(fd)
+            _close_fd_yielding(fd)
         os.fsync(txnfd)                                   # the txn dir durable through the CONTAINED fd
     finally:
-        _close_fd_propagating(txnfd)
+        _close_fd_yielding(txnfd)
     _kill_point("after-publish-" + ftype)
 
 
@@ -688,9 +710,9 @@ def read_frames(jr_fd, txn_dir, txn_fd=None):
                                    "(fail-closed)".format(_st.st_size, _MAX_JOURNAL_READ_BYTES))
             raw = _read_fd(ffd, cap=_MAX_JOURNAL_READ_BYTES)
         finally:
-            _close_fd_propagating(ffd)
+            _close_fd_yielding(ffd)
     finally:
-        _close_fd_propagating(txnfd)
+        _close_fd_yielding(txnfd)
     frames, off = [], 0
     while off < len(raw):
         nl = raw.find(b"\n", off)
@@ -756,10 +778,10 @@ def _truncate_log(jr_fd, txn_dir, good_len):
             os.ftruncate(fd, good_len)
             os.fsync(fd)
         finally:
-            _close_fd_propagating(fd)
+            _close_fd_yielding(fd)
         os.fsync(txnfd)                                   # the txn dir durable through the CONTAINED fd
     finally:
-        _close_fd_propagating(txnfd)
+        _close_fd_yielding(txnfd)
 
 
 def _first(frames, ftype):
@@ -820,7 +842,7 @@ def acquire_lock(journal_root, session_id):
         _write_all(fd, json.dumps(owner, sort_keys=True).encode())   # loop: a short write cannot leave a malformed lock
         os.fsync(fd)
     finally:
-        _close_fd_propagating(fd)
+        _close_fd_yielding(fd)
     _fsync_path_dir(journal_root)
     _kill_point("after-lock")
     return lock
@@ -845,7 +867,7 @@ def read_lock_owner(journal_root):
     try:
         return read_lock_owner_at(jr_fd)
     finally:
-        _close_fd_propagating(jr_fd)
+        _close_fd_yielding(jr_fd)
 
 
 def read_lock_owner_at(jr_fd):
@@ -884,7 +906,7 @@ def read_lock_owner_at(jr_fd):
                                "(fail-closed)".format(_st.st_size, _MAX_JOURNAL_READ_BYTES))
         raw = _read_fd(lfd, cap=_MAX_JOURNAL_READ_BYTES)
     finally:
-        _close_fd_propagating(lfd)
+        _close_fd_yielding(lfd)
     try:
         owner = json.loads(raw)
     except ValueError as exc:
@@ -1148,7 +1170,7 @@ def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id):
         finally:
             fcntl.flock(afd, fcntl.LOCK_UN)
     finally:
-        _close_fd_propagating(afd)
+        _close_fd_yielding(afd)
 
 
 # --- preimages (durably FIRST; the whole reversal is reconstructable from them alone) -----------------
@@ -1254,17 +1276,17 @@ def capture_preimages(parent_fd, txn_dir, root_fd, ops):
                         _write_all(pfd, data)
                         os.fsync(pfd)
                     finally:
-                        _close_fd_propagating(pfd)
+                        _close_fd_yielding(pfd)
                     op["prestate"] = {"kind": "file", "mode": stat.S_IMODE(st.st_mode),
                                       "size": len(data), "payload": ref,
                                       "sha256": hashlib.sha256(data).hexdigest()}
                 _kill_point("after-preimage-{}".format(seq))
             os.fsync(prefd)                               # the preimages dir durable, CONTAINED
         finally:
-            _close_fd_propagating(prefd)
+            _close_fd_yielding(prefd)
         os.fsync(txnfd)                                   # the txn dir durable, CONTAINED
     finally:
-        _close_fd_propagating(txnfd)
+        _close_fd_yielding(txnfd)
     _kill_point("after-preimages")
 
 
@@ -1446,7 +1468,7 @@ def apply_ops(root_fd, ops, staged_reader):
                     os.fsync(fd)
                     _read_back_verify(fd, op["poststate"]["content-sha256"], op["path"], "written")
                 finally:
-                    _close_fd_propagating(fd)
+                    _close_fd_yielding(fd)
             elif kind == "create":
                 # O_RDWR (not O_WRONLY): the spec 14.2 checkpoint re-reads the written bytes through this
                 # same descriptor; creation-time access is granted regardless of the created mode.
@@ -1461,7 +1483,7 @@ def apply_ops(root_fd, ops, staged_reader):
                     os.fsync(fd)
                     _read_back_verify(fd, op["poststate"]["content-sha256"], op["path"], "written")
                 finally:
-                    _close_fd_propagating(fd)
+                    _close_fd_yielding(fd)
             elif kind == "remove":
                 _verify_prestate_at(pfd, name, op["path"], op["prestate"])   # E1: check bound to the SAME pfd
                 os.unlink(name, dir_fd=pfd)
@@ -1478,7 +1500,7 @@ def apply_ops(root_fd, ops, staged_reader):
         except OSError as exc:
             raise JournalError("apply of {} {!r} failed ({})".format(op["op"], op["path"], exc))
         finally:
-            _close_fd_propagating(pfd)
+            _close_fd_yielding(pfd)
         _kill_point("after-apply-{}".format(i))
 
 
@@ -1583,7 +1605,7 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
             try:
                 data, _pst = _read_at(ppfd, pname, pre_rel, cap=prestate["size"])
             finally:
-                _close_fd_propagating(ppfd)
+                _close_fd_yielding(ppfd)
             if hashlib.sha256(data).hexdigest() != prestate["sha256"]:
                 raise JournalError("preimage for {!r} does not match recorded prestate digest".format(path))
             if st is None:
@@ -1821,14 +1843,14 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
                         raise
                 finally:
                     if fd is not None:
-                        _close_fd_propagating(fd)
+                        _close_fd_yielding(fd)
             else:                                     # a racing external writer left a non-regular file where a regular file is expected: fail closed
                 raise JournalError("cannot restore {!r}: unexpected non-regular file at restore time".format(path))
         os.fsync(pfd)
     except OSError as exc:
         raise JournalError("cannot restore {!r} ({})".format(path, exc))
     finally:
-        _close_fd_propagating(pfd)
+        _close_fd_yielding(pfd)
 
 
 def _recreate_file(pfd, name, data, mode):
@@ -1848,7 +1870,7 @@ def _recreate_file(pfd, name, data, mode):
         os.fchmod(fd, mode)                  # the exact prestate mode, only after the bytes verified
         os.fsync(fd)                         # the final mode durable alongside the verified bytes
     finally:
-        _close_fd_propagating(fd)
+        _close_fd_yielding(fd)
 
 
 # --- recovery (from the journal alone, both directions, idempotent) -----------------------------------

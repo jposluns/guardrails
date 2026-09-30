@@ -179,6 +179,24 @@ def _close_fd_propagating(fd):
     raise first
 
 
+def _close_fd_yielding(fd):
+    """Close a descriptor from an `except` handler or a `finally` block without letting a close error
+    REPLACE the exception already in flight there: when an exception is unwinding through, or being handled
+    in, the CALLING frame, the confirm-then-release close still runs (the descriptor is never retained) but
+    its close error is dropped so the ORIGINAL exception keeps propagating; on the normal path this is
+    exactly _close_fd_propagating, so a close error still fails closed. Inlined from
+    opf/tools/_journal._close_fd_yielding (the same body) so this tool keeps working without opf/tools
+    present."""
+    tb = sys.exc_info()[2]
+    if tb is None or tb.tb_frame is not sys._getframe(1):
+        _close_fd_propagating(fd)
+        return
+    try:
+        _close_fd_propagating(fd)
+    except OSError:
+        pass                                      # the in-flight exception wins; the fd was still released
+
+
 def _open_dir_at(dir_fd, name, create):
     """G8/G9: open directory `name` beneath dir_fd through an O_DIRECTORY|O_NOFOLLOW handle so a symlinked
     component can never redirect the archive out of the tree, creating it first when `create`. When a new
@@ -204,7 +222,7 @@ def _open_dir_at(dir_fd, name, create):
         try:
             os.fsync(dir_fd)                              # G9: persist the newly-created directory entry
         except OSError as exc:
-            _close_fd_propagating(fd)
+            _close_fd_yielding(fd)
             raise AdoptError("cannot fsync the parent after creating {!r} ({}); durability not confirmed, "
                              "fail-closed".format(name, exc))
     return fd
@@ -225,7 +243,7 @@ def _walk_components(base_fd, names, create):
                 _close_fd_propagating(prev)
     except BaseException:
         if close_prev:
-            _close_fd_propagating(fd)
+            _close_fd_yielding(fd)
         raise
     return fd
 
@@ -245,7 +263,7 @@ def _read_payload_fd(entry_fd):
             raise AdoptError("archived payload is not a regular file")
         return _read_fd_all(pfd)
     finally:
-        _close_fd_propagating(pfd)
+        _close_fd_yielding(pfd)
 
 
 _TMP_SEQ = itertools.count()
@@ -272,7 +290,7 @@ def _verify_published_payload(entry_fd, digest, tmp_stat):
         if hashlib.sha256(_read_fd_all(pfd)).hexdigest() != digest:
             raise AdoptError("published payload {}/payload does not hash to its digest".format(digest))
     finally:
-        _close_fd_propagating(pfd)
+        _close_fd_yielding(pfd)
 
 
 def _write_payload(entry_fd, digest, data):
@@ -339,7 +357,7 @@ def archive_file(archive_fd, data):
         _write_payload(entry_fd, digest, data)
         return digest
     finally:
-        _close_fd_propagating(entry_fd)
+        _close_fd_yielding(entry_fd)
 
 
 def _read_fd_all(fd):
@@ -397,7 +415,7 @@ def build_candidates(legacy_root, archive_fd, successor_texts):
             owner = os.fstat(fd).st_uid
             data = _read_fd_all(fd)                        # archive raw bytes FIRST (before any pointers)
         finally:
-            _close_fd_propagating(fd)
+            _close_fd_yielding(fd)
         digest = archive_file(archive_fd, data)
         rel = str(f.relative_to(legacy_root))
         try:
@@ -490,17 +508,17 @@ def run_adopter(legacy_root, out_dir, successor_texts):
         try:
             cand = build_candidates(legacy_root, archive_fd, successor_texts)
         finally:
-            _close_fd_propagating(archive_fd)
+            _close_fd_yielding(archive_fd)
         migration_fd = _walk_components(root_fd, (".aiqt", "migration"), create=True)
         try:
             _write_candidate(migration_fd, render_candidates(cand))
         finally:
-            _close_fd_propagating(migration_fd)
+            _close_fd_yielding(migration_fd)
     except AdoptError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return exc.exit_code
     finally:
-        _close_fd_propagating(root_fd)
+        _close_fd_yielding(root_fd)
     print("wrote candidate crosswalk and {} archive entries under {}".format(
         len(cand["archive"]), out_dir))
     return 0

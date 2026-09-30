@@ -250,6 +250,24 @@ def _close_fd_propagating(fd):
     raise first
 
 
+def _close_fd_yielding(fd):
+    """Close a descriptor from an `except` handler or a `finally` block without letting a close error
+    REPLACE the exception already in flight there: when an exception is unwinding through, or being handled
+    in, the CALLING frame, the confirm-then-release close still runs (the descriptor is never retained) but
+    its close error is dropped so the ORIGINAL exception keeps propagating; on the normal path this is
+    exactly _close_fd_propagating, so a close error still fails closed. Inlined from
+    opf/tools/_journal._close_fd_yielding (the same body) so this tool keeps working without opf/tools
+    present."""
+    tb = sys.exc_info()[2]
+    if tb is None or tb.tb_frame is not sys._getframe(1):
+        _close_fd_propagating(fd)
+        return
+    try:
+        _close_fd_propagating(fd)
+    except OSError:
+        pass                                      # the in-flight exception wins; the fd was still released
+
+
 def _read_bytes_safe(path, sandbox_real, where):
     """Read a target's bytes after re-validating it is a contained regular file, opening O_NOFOLLOW so a
     final-component symlink cannot be followed."""
@@ -264,7 +282,7 @@ def _read_bytes_safe(path, sandbox_real, where):
             chunks.append(block)
         return b"".join(chunks)
     finally:
-        _close_fd_propagating(fd)
+        _close_fd_yielding(fd)
 
 
 def _write_bytes_safe(path, data, sandbox_real, where):
@@ -275,7 +293,7 @@ def _write_bytes_safe(path, data, sandbox_real, where):
     try:
         os.write(fd, data)
     finally:
-        _close_fd_propagating(fd)
+        _close_fd_yielding(fd)
 
 
 def _sanitized_env(overrides=None):

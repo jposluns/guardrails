@@ -1917,6 +1917,24 @@ def _close_fd_propagating(fd):
     raise first
 
 
+def _close_fd_yielding(fd):
+    """Close a descriptor from an `except` handler or a `finally` block without letting a close error
+    REPLACE the exception already in flight there: when an exception is unwinding through, or being handled
+    in, the CALLING frame, the confirm-then-release close still runs (the descriptor is never retained) but
+    its close error is dropped so the ORIGINAL exception keeps propagating; on the normal path this is
+    exactly _close_fd_propagating, so a close error still fails closed. Inlined from
+    opf/tools/_journal._close_fd_yielding (the same body) so this tool keeps working without opf/tools
+    present."""
+    tb = sys.exc_info()[2]
+    if tb is None or tb.tb_frame is not sys._getframe(1):
+        _close_fd_propagating(fd)
+        return
+    try:
+        _close_fd_propagating(fd)
+    except OSError:
+        pass                                      # the in-flight exception wins; the fd was still released
+
+
 def _open_regular_nofollow(path, label):
     """Open `path` O_RDONLY with no-follow, NON-BLOCKING semantics and confirm the OPENED descriptor is a
     REGULAR file, returning (fd, st); the caller MUST close fd. O_NOFOLLOW rejects a symlink final component
@@ -1937,7 +1955,7 @@ def _open_regular_nofollow(path, label):
     try:
         st = os.fstat(fd)
     except OSError as exc:
-        _close_fd_propagating(fd)
+        _close_fd_yielding(fd)
         raise _FailClosed("register {} could not be fstat'd ({} errno={})".format(
             safe, type(exc).__name__, getattr(exc, "errno", None)))
     if not stat.S_ISREG(st.st_mode):
@@ -1973,7 +1991,7 @@ def _read_regular_bounded(path, label, limit):
             chunks.append(chunk)
             remaining -= len(chunk)
     finally:
-        _close_fd_propagating(fd)
+        _close_fd_yielding(fd)
     data = b"".join(chunks)
     if len(data) > limit:
         raise _FailClosed("register {} exceeds the {}-byte pre-read ceiling".format(safe, limit))

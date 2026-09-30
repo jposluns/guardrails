@@ -314,9 +314,9 @@ def do_cutover(root, staged, unit):
     finally:
         try:
             if jr_fd is not None:
-                _journal._close_fd_propagating(jr_fd)
+                _journal._close_fd_yielding(jr_fd)
         finally:
-            _journal._close_fd_propagating(root_fd)
+            _journal._close_fd_yielding(root_fd)
     print("cutover complete: unit {} txn {}".format(unit, txn_id))
     return 0
 
@@ -418,9 +418,9 @@ def do_recover(root):
     finally:
         try:
             if jr_fd is not None:
-                _journal._close_fd_propagating(jr_fd)
+                _journal._close_fd_yielding(jr_fd)
         finally:
-            _journal._close_fd_propagating(root_fd)
+            _journal._close_fd_yielding(root_fd)
 
 
 def do_status(root):
@@ -435,7 +435,7 @@ def do_status(root):
     try:
         journal_state = _classify_journal(root_fd)
     finally:
-        _journal._close_fd_propagating(root_fd)
+        _journal._close_fd_yielding(root_fd)
     if journal_state == "absent":
         print("status: not adopted (no journal)")
         return 0
@@ -467,7 +467,7 @@ def do_status(root):
             if not terminal:
                 open_txns.append(txn_dir.name)
     finally:
-        _journal._close_fd_propagating(jr_fd)
+        _journal._close_fd_yielding(jr_fd)
     lock = _journal.read_lock_owner(journal_root)
     if lock is not None:
         print("status: journal lock held by pid {}".format(lock.get("pid")))
