@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T41)
+  check_opf_record.py --self-test                    the fixture suite (T1-T59)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -57,7 +57,7 @@ Each case runs on its own copy of that template; the root is removed in a finall
   T14 create with an unknown or path-like --type refuses with the enabled-baseline-types message, not an
       operand read failure (flip: skip the --type check before the operand read)
   T15 a run whose journal lock release fails after COMPLETE still renders, runs doctor, and reports, and
-      says the lock was left; the next run reconciles the leftover lock and names the COMPLETE
+      says the lock may be left; the next run reconciles the leftover lock and names the COMPLETE
       transaction without claiming render and doctor never ran (flip: the old never-ran outcome text)
   T16 the proposing transition writes the pre-proposal state into the record's own proposed_from field;
       a maintainer rejection restores exactly that recorded state and removes the field; a forged
@@ -186,10 +186,49 @@ Each case runs on its own copy of that template; the root is removed in a finall
       acquisition removed before the fork (flip: the refusal carries no report)
   T45 an acquisition error carrying no removal report is worded as unknown, never as "removed nothing"
       (flip: a missing report reads as nothing removed)
-  T46 each residual list names every case that leaves work for a later trigger and describes
-      staging-leftover cleanup as it is; acquire_operation's docstring names which errors carry the
-      reports; a validation raise carries none, and a multiply-linked staging name is removed (flip:
-      read the texts with those statements removed)
+  T46 each residual list states the rule deciding what is left for a later trigger, with its cases
+      kept as examples marked NOT exhaustive, and describes staging-leftover cleanup as it is;
+      acquire_operation's docstring names which errors carry the reports; a validation raise carries
+      none, and a multiply-linked staging name is removed (flip: read the texts with those statements
+      removed)
+  T47 the no-pending reclaimed outcome names the grammar exclusion and speaks for the journal's commit,
+      never for the operands' current bytes (flips: either sentence reverted)
+  T48 the homes-1 journal-prepare refusal says preparation may have created the journal directories
+      (flip: the unqualified "nothing written")
+  T49 the record guard's introduction says capability recovery may remove a dead holder's records
+      even with no journal work pending (flip: read the text with that sentence removed)
+  T50 a homes-1 leftover journal lock over a COMPLETE transaction whose operand was restored to its
+      prestate keeps the restored bytes and speaks for the journal's commit, never certifying the
+      publication as present in the working tree (flip: the reviewed head's present-in-the-tree text)
+  T51 the homes-1 journal-lock refusals (a held lock, a failed lock acquisition) after journal
+      preparation created the directories say so, never "nothing written" (flip: the unqualified text)
+  T52 the governing rule and a direct homes-2 publication refused before its transaction opened
+      promise no reconciliation of work never left: the rule scopes the leftovers to what a run left,
+      the refusal says any journal work left is for the next trigger, none when it failed before its
+      transaction opened, and the next run reconciles nothing (flips: the reviewed head's refusal
+      text; the reviewed head's rule)
+  T53 a projection path holding an entry that is not the projection reads as existence only: the
+      reclaimed outcome and the guard introduction never say the terminal transaction carries its
+      projection (flips: the reviewed head's outcome; its introduction)
+  T54 this header describes every test in TESTS and never claims T46 names every case (flip: the
+      reviewed head's T46 line)
+  T55 a homes-1 journal lock release that unlinks the lock and then fails says the lock may be left,
+      never that it is left in place, and the next run reconciles nothing (flip: the reviewed head's
+      left-in-place text)
+  T56 a homes-1 run killed after its preimage capture, before INTENT, leaves its lock over a
+      nothing-opened transaction; the leftover-lock outcome says no transaction was open, never that
+      every transaction was already terminal (flip: the reviewed head's head clause)
+  T57 a homes-1 publication failing after INTENT retains its lock and says the transaction is left
+      for the next run's reconciliation as far as each step succeeds, never that the next run
+      reconciles it; an intervening edit then refuses that reconciliation (flip: the reviewed head's
+      promise)
+  T58 a holder that releases between the trigger read and the recovery acquisition, with a staging
+      leftover that acquisition removes, lets the run continue with no outcome naming the removal, and
+      the residual lists and the recovery docstring disclose that (flip: read the texts with the
+      disclosure removed)
+  T59 a homes-1 recovery whose lease acquisition fails after creating the lease says only that no
+      operand, journal entry or journal lock was written, beside the write guard's left-lease report,
+      never "Nothing was written" (flip: the reviewed head's unscoped sentence)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -1411,7 +1450,7 @@ def flip_t15():
 
     def claims_never_ran(owner, states):
         line = original(owner, states)
-        head, sep, _rest = line.partition("present in the working tree")
+        head, sep, _rest = line.partition("so its publication was applied when it committed")
         return head + sep + ", with its render and final doctor never run" if sep else line
     return patch.object(record, "_leftover_lock_outcome", claims_never_ran)
 
@@ -2752,18 +2791,26 @@ def flip_t45():
 # leave work for a later trigger, that a multiply-linked staging leftover is refused, that every
 # acquisition error carries the reports, and that only a pre-body error lacks one). Fix 8: the closed
 # "in each of these cases" list is replaced by the rule the code enforces, the cases kept as examples
-# marked NOT exhaustive, a live run's own failed publication among them.
+# marked NOT exhaustive, a live run's own failed publication among them. Fix 9: the rule scopes the
+# leftovers to what a run actually left (none from a publication refused before its transaction opened)
+# and says the next trigger reconciles them only as far as each step succeeds (T52).
+RULE_FIX8 = ("The rule the code enforces: any run that fails or dies before its publication and release "
+             "complete leaves its records and journal work for the next run's trigger, which reconciles "
+             "under the held capability")
+RULE_FIX9 = ("The rule the code enforces: whatever a run that fails or dies before its publication and "
+             "release complete leaves -- the capability records it did not remove, and any record-journal "
+             "work it left (an open transaction, or a terminal one missing its projection; a publication "
+             "refused before its transaction opened leaves none) -- is left for the next run's trigger, "
+             "which reconciles it under the held capability as far as each step succeeds")
 FIX7_BOTH = ("left is handled by this run only as far as each step succeeds: its lease and active record "
              "are reclaimed when the recovery acquisition succeeds, and its record-journal work (an open "
              "transaction, or a terminal one missing its projection) is reconciled when the held plan and "
              "each reconciliation succeed",
-             "The rule the code enforces: any run that fails or dies before its publication and release "
-             "complete leaves its records and journal work for the next run's trigger, which reconciles "
-             "under the held capability",
+             RULE_FIX9,
              "Cases that leave such work include (examples, NOT exhaustive)",
-             "and a live run's own publication that fails before it completes, which leaves an open "
-             "transaction, or a terminal one missing its projection, for that trigger even when the "
-             "run's own release succeeds",
+             "and a live run's own publication that fails after its transaction opened and before it "
+             "completes, which leaves an open transaction, or a terminal one missing its projection, for "
+             "that trigger even when the run's own release succeeds",
              "or fails, after its deletes included, which leaves every pending transaction and any record it "
              "did not remove",
              "which leaves every pending transaction while the records the acquisition removed stay removed",
@@ -2786,7 +2833,8 @@ FIX7_REMOVALS = ("An error that carries NO report",
 FIX7_RETIRED = ("is reclaimed and reconciled by this run", "Only a run that takes the capability",
                 "a record or its staging leftover that is not a plain singly-linked regular file",
                 "carrying the same three reports", "carries no report; no removal runs there",
-                "left for a later run's trigger in each of these cases")
+                "left for a later run's trigger in each of these cases", RULE_FIX8,
+                "own publication that fails before it completes, which leaves an open transaction")
 
 
 def fix7_texts():
@@ -2860,13 +2908,17 @@ def flip_t46():
 # projection" without _projection_missing's grammar exclusion, called a preparation that had already
 # created the journal directories "nothing written", and introduced the record guard with a home-absent
 # sentence its own capability recovery contradicts).
-T47_GRAMMAR = ("every terminal one in the homes record grammar carrying its projection; a name outside "
-               "that grammar has no projection path and is not checked")
+T47_GRAMMAR = ("every terminal one in the homes record grammar having an entry at its projection path, "
+               "which is not validated as its projection here; a name outside that grammar has no "
+               "projection path and is not checked")
+# The fix-8 wording T53 retires: a projection path's entry read as the projection itself.
+T47_GRAMMAR_FIX8 = ("every terminal one in the homes record grammar carrying its projection; a name outside "
+                    "that grammar has no projection path and is not checked")
 T47_JOURNAL = ("A COMPLETE transaction's publication was applied when it committed; its operands' "
                "current bytes are not re-checked by this recovery (unexplained operands are checked "
                "only for OPEN transactions)")
 T47_RETIRED = ("Any publication a COMPLETE transaction made is present in the working tree",
-               "every terminal one carrying its projection)")
+               "every terminal one carrying its projection)", "grammar carrying its projection")
 
 
 def t47_reclaimed_outcome_scoped(fx):
@@ -2951,10 +3003,12 @@ def flip_t48():
 
 # Fix 8: the record guard's introduction no longer claims an absent home means nothing written.
 FIX8_GUARD = ("no record-journal work to do, and no journal write made, when the home is absent (no "
-              "mkdir), or when every transaction is terminal AND carries its terminal projection; even "
-              "with no journal work pending, capability recovery may still remove a confirmed-dead "
-              "holder's lease and active record (_capability_leftover_present, below)",)
-FIX8_RETIRED = ("nothing to do, and nothing written, when the home is absent",)
+              "mkdir), or when no transaction is open AND every terminal one has an entry at its terminal "
+              "projection path (existence only: _projection_missing does not validate that entry as the "
+              "projection); even with no journal work pending, capability recovery may still remove a "
+              "confirmed-dead holder's lease and active record (_capability_leftover_present, below)",)
+FIX8_RETIRED = ("nothing to do, and nothing written, when the home is absent",
+                "every transaction is terminal AND carries its terminal projection")
 
 
 def t49_home_absent_recovery_disclosed(fx):
@@ -2980,6 +3034,493 @@ def flip_t49():
             texts.append(text)
         return tuple(texts)
     return patch.object(sys.modules[__name__], "residual_texts", stripped)
+
+
+# --- T50-T59: the PR D fix-9 vectors --------------------------------------------------------------------
+
+# Fix 9: each message, docstring and header sentence states only what the code checked on its path (the
+# reviewed head certified a leftover lock's COMPLETE publication as present in the working tree, called
+# the lock refusals after journal preparation "nothing written", promised reconciliation of work a run
+# never left, read a projection path's entry as the projection, claimed T46 named every case, said a lock
+# whose unlink had succeeded was left in place, said every transaction was terminal beside a
+# nothing-opened one, promised the next run reconciles a retained transaction, said a released holder's
+# acquisition cleared nothing after it removed a staging leftover, and said "Nothing was written" beside
+# a recovery lease the failed acquisition had created).
+T50_JOURNAL = ("so its publication was applied when it committed; its operands' current bytes are not "
+               "re-checked by this recovery (unexplained operands are checked only for OPEN transactions)")
+T50_FIX8 = "so its publication is present in the working tree"
+
+
+def t50_leftover_lock_complete_scoped(fx):
+    """A homes-1 run whose journal lock release fails after COMPLETE (T15's child) leaves its lock; the
+    operator then restores the index to its pre-publication bytes. Recovery checks operands only for
+    OPEN transactions, so it keeps the restored bytes, and its outcome speaks for the journal's commit
+    instead of certifying the publication as present in the working tree."""
+    env = fx.env
+    root = fx.case("t50-leftover-lock-restored")
+    pre = read(root, BI_INDEX)
+    proc = child(env, root, CREATE, flip=FAILING_LOCK_RELEASE)
+    assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-800:])
+    assert (Path(root) / record.JOURNAL_REL / "lock").exists(), "T50 the journal lock is left"
+    assert read(root, BI_INDEX) != pre, "T50 the publication rewrote the index"
+    (Path(root) / BI_INDEX).write_bytes(pre)
+    result = record_cli(env, root, CREATE)
+    refused(result, "was reconciled")
+    err = result[2]
+    assert read(root, BI_INDEX) == pre, "T50 recovery keeps the restored bytes (not re-checked)"
+    assert "is COMPLETE, " + T50_JOURNAL in err, ("T50 the outcome speaks for the journal", err[-1200:])
+    assert T50_FIX8 not in err, ("T50 no present-in-the-tree certification", err[-1200:])
+    assert "run opf doctor before relying on it" in err, ("T50 the doctor advice is kept", err[-800:])
+
+
+def flip_t50():
+    """The leftover-lock outcome keeps the reviewed head's present-in-the-tree certification."""
+    fixed = record._leftover_lock_outcome
+
+    def reverted(owner, states):
+        return fixed(owner, states).replace(
+            T50_JOURNAL + ", and whether", T50_FIX8 + "; whether")
+    return patch.object(record, "_leftover_lock_outcome", reverted)
+
+
+T51_QUALIFIED = ("the journal preparation may already have created its directories, and no operand, "
+                 "journal entry or lock was written by this run (fail-closed)")
+
+
+def t51_lock_refusals_name_created(fx):
+    """The homes-1 journal-lock refusals follow ensure_journal_dirs, so on a store with no journal home
+    they follow the directories' creation: a lock read as held (a peer that took it after this run's
+    preparation) and a failed lock acquisition each say preparation may have created the directories,
+    never the reviewed head's unqualified "nothing written". The operands are untouched."""
+    env = fx.env
+    owner = dict(pid=os.getpid(), uid=os.getuid(), session="opf-record.peer", utc="2026-09-30T00:00:00Z")
+    owner["pid-start"] = ""
+
+    def failing_acquire(journal_root, session_id):
+        raise journal.JournalError("synthetic journal lock failure")
+    for label, target, replacement, needle in (
+            ("held", "read_lock_owner", lambda journal_root: dict(owner), "the record journal lock is held; "),
+            ("acquire", "acquire_lock", failing_acquire,
+             "cannot take the record journal lock (synthetic journal lock failure); ")):
+        root = fx.case("t51-homes1-lock-" + label)
+        pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+        journal_dir = Path(root) / record.JOURNAL_REL
+        assert not journal_dir.exists(), ("T51 no journal directory before the run", label)
+        with patch.object(record._journal, target, replacement):
+            result = record_cli(env, root, CREATE)
+        refused(result, needle + T51_QUALIFIED)
+        assert "nothing written" not in result[2], ("T51 the unqualified wording is gone", label,
+                                                    result[2][-800:])
+        assert journal_dir.is_dir(), ("T51 preparation created the journal directories", label)
+        assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, ("T51 operands untouched", label)
+
+
+def flip_t51():
+    """Refuse with the reviewed head's unqualified nothing-written wording."""
+    fixed = record.RecordError
+
+    class Unqualified(fixed):
+        def __init__(self, *args):
+            super().__init__(*(a.replace(T51_QUALIFIED, "nothing written (fail-closed)")
+                               if isinstance(a, str) else a for a in args))
+    return patch.object(record, "RecordError", Unqualified)
+
+
+T52_TAIL = ("(an open transaction, or a terminal one missing its projection; none when it failed before its "
+            "transaction opened) is left for the next opf record run's recovery trigger (fail-closed)")
+T52_FIX8 = "and the next opf record run reconciles the typed journal"
+
+
+def t52_publication_refused_before_intent(fx):
+    """The governing rule scopes the leftovers to what a run actually left, and a direct homes-2
+    publication (T43's setup) refused by the engine's real pre-INTENT budget check (the journal-read cap
+    lowered to one byte) leaves no transaction and releases its own capability: its refusal says any
+    journal work left is for the next trigger, none when it failed before its transaction opened, and
+    the next run reconciles nothing. The reviewed head promised the next run reconciles the typed
+    journal."""
+    module, guard = residual_texts()
+    for text, where in ((module, "module"), (guard, "guard")):
+        assert RULE_FIX9 in text, ("T52 the rule scopes the leftovers", where)
+        assert RULE_FIX8 not in text, ("T52 the unscoped rule is gone", where)
+    env = fx.env
+    root = fx.case("t52-homes2-pre-intent")
+    with imp._self_test_homes2_active(root):
+        req = record.parse_request(CREATE + ["--root", str(root)])
+        res = record._opf_store.resolve_store(Path(os.path.abspath(str(root))))
+        assert res.status == record._opf_store.RESOLVED, res
+        root_fd = record._opf_store._open_dir_nofollow(res.store_root)
+        try:
+            ctx = record.Context(res, str(root), root_fd)
+            ctx.journal_rel = record._record_journal_rel(record._probe_homes(ctx))
+            assert ctx.journal_rel == TYPED_JOURNAL, ("T52 the probed journal home", ctx.journal_rel)
+            record._load_manifest(ctx)
+            ctx.counters = record._read_operand(root_fd, ctx.rel(opf_check.COUNTERS_NAME))
+            ctx.version = record._read_operand(root_fd, ctx.rel(opf_check.VERSION_NAME)).model
+            ctx.worklog = record._read_operand(root_fd, ctx.rel(opf_check.WORKLOG_NAME))
+            operand = record._read_operand(root_fd, record._operand_rel(req, ctx))
+            seam = record.claim_ids
+            with patch.object(record, "claim_ids", lambda homes, high, demand, known_complete:
+                              seam(1, high, demand, known_complete)):
+                plan = record._PLANNERS["create"](req, ctx, operand, record._clock_now())
+            for op in plan.operands:
+                op.new_raw = record._emit_bytes(op.new_model)
+            pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+            try:
+                with patch.object(journal, "_MAX_JOURNAL_READ_BYTES", 1):
+                    record._publish(ctx, plan, "create")
+            except record.RecordError as exc:
+                message = str(exc)
+            else:
+                raise AssertionError("T52 the over-budget publication must refuse")
+        finally:
+            os.close(root_fd)
+        assert "journal-read cap" in message, ("T52 the engine's pre-INTENT budget refusal", message)
+        assert T52_TAIL in message, ("T52 the refusal scopes what it left", message)
+        assert T52_FIX8 not in message, ("T52 no promise of reconciliation", message)
+        assert capability_records(root) == (False, False), "T52 the publication released its capability"
+        states = journal_states(root, TYPED_JOURNAL)
+        assert all(s == "nothing-opened" for s in states.values()), ("T52 no transaction opened", states)
+        assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, "T52 the operands are untouched"
+        result = record_cli(env, root, CREATE)
+        refused(result, "is not active in this build")
+        assert "was reconciled" not in result[2] and "were reclaimed" not in result[2], \
+            ("T52 the next run reconciles nothing", result[2][-800:])
+
+
+def flip_t52_message():
+    """The publication refusal keeps the reviewed head's promise of reconciliation."""
+    fixed = record.RecordError
+    pattern = re.compile(r"and any journal work it left in the typed journal (\S+) " + re.escape(T52_TAIL))
+
+    class Promising(fixed):
+        def __init__(self, *args):
+            super().__init__(*(pattern.sub(lambda m: T52_FIX8 + " " + m.group(1) + " (fail-closed)", a)
+                               if isinstance(a, str) else a for a in args))
+    return patch.object(record, "RecordError", Promising)
+
+
+def flip_t52_rule():
+    """Read the residual lists with the reviewed head's unscoped rule."""
+    original = residual_texts
+
+    def reverted():
+        return tuple(text.replace(RULE_FIX9, RULE_FIX8) for text in original())
+    return patch.object(sys.modules[__name__], "residual_texts", reverted)
+
+
+T53_GUARD = FIX8_GUARD[0]
+T53_GUARD_FIX8 = ("no record-journal work to do, and no journal write made, when the home is absent (no "
+                  "mkdir), or when every transaction is terminal AND carries its terminal projection; even "
+                  "with no journal work pending, capability recovery may still remove a confirmed-dead "
+                  "holder's lease and active record (_capability_leftover_present, below)")
+
+
+def t53_projection_existence_only(fx):
+    """A COMPLETE homes-2 transaction with a dead holder (T47's child, killed at the render) whose
+    projection file is replaced by an empty directory: _projection_missing checks existence only, so
+    recovery reclaims the capability records and leaves the directory, and neither the outcome nor the
+    guard introduction says the terminal transaction carries its projection."""
+    _module, guard = residual_texts()
+    assert T53_GUARD in guard, "T53 the guard introduction states existence only"
+    assert T53_GUARD_FIX8 not in guard, "T53 the carries-its-projection introduction is gone"
+    env = fx.env
+    base = fx.case("t53-homes2-base")
+    with imp._self_test_homes2_active(base):
+        root = fx.case("t53-homes2-not-a-projection", base)
+        proc = child(env, root, CREATE, flip=HOMES2_CHILD_FLIP + DIE_AT_RENDER)
+        assert proc.returncode == 137, ("T53 the child is killed at the render", proc.returncode,
+                                        proc.stderr[-800:])
+        states = journal_states(root, TYPED_JOURNAL)
+        assert list(states.values()) == ["complete"], ("T53 the COMPLETE transaction", states)
+        (name,) = states
+        projection = Path(root) / record._opf_store.txn_record("record", name)
+        assert projection.is_file(), "T53 the projection was published"
+        projection.unlink()
+        projection.mkdir()
+        result = record_cli(env, root, CREATE)
+        refused(result, "were reclaimed before this operation")
+        err = result[2]
+        assert T47_GRAMMAR in err, ("T53 the outcome states existence only", err[-1200:])
+        assert "grammar carrying its projection" not in err, ("T53 no carrying-its-projection claim",
+                                                              err[-1200:])
+        assert projection.is_dir(), "T53 the non-projection entry is kept as found"
+        assert capability_records(root) == (False, False), "T53 the dead holder's records are reclaimed"
+
+
+def flip_t53_outcome():
+    return _flip_reclaimed(T47_GRAMMAR, T47_GRAMMAR_FIX8)
+
+
+def flip_t53_guard():
+    """Read the guard introduction with the reviewed head's carries-its-projection wording."""
+    original = residual_texts
+
+    def reverted():
+        module, guard = original()
+        return module, guard.replace(T53_GUARD, T53_GUARD_FIX8)
+    return patch.object(sys.modules[__name__], "residual_texts", reverted)
+
+
+T54_T46 = ("T46 each residual list states the rule deciding what is left for a later trigger, with its "
+           "cases kept as examples marked NOT exhaustive")
+T54_FIX8 = "T46 each residual list names every case that leaves work for a later trigger"
+
+
+def header_text():
+    """This gate's header (the module docstring), whitespace-normalized."""
+    return " ".join((__doc__ or "").split())
+
+
+def t54_header_exact(fx):
+    """The header describes every test the runner registers, and its T46 line states what T46 pins (the
+    rule with its cases kept as NOT-exhaustive examples), never that each list names every case. The
+    reviewed head's header stopped at T46 and kept the exhaustive-list claim."""
+    text = header_text()
+    assert T54_T46 in text, "T54 the T46 line states the rule"
+    assert T54_FIX8 not in text, "T54 the every-case claim is gone"
+    numbers = sorted(set(int(re.match(r"T([0-9]+)", name).group(1)) for name, _t, _f in TESTS))
+    last = numbers[-1]
+    assert "the fixture suite (T1-T{})".format(last) in text, ("T54 the usage line names the suite", last)
+    for n in numbers:
+        assert re.search(r"(^|\s)T{}\s".format(n), text), ("T54 the header describes", n)
+
+
+def flip_t54():
+    """Read the header with the reviewed head's T46 line."""
+    original = header_text
+    return patch.object(sys.modules[__name__], "header_text",
+                        lambda: original().replace(T54_T46, T54_FIX8))
+
+
+T55_MAY_BE_LEFT = ("it may be left in place (a failure after its unlink leaves it removed, not durably), and "
+                   "a lock left there is for the next opf record run's reconciliation")
+T55_FIX8 = "it is left in place, and the next opf record run reconciles it"
+
+
+def t55_lock_release_after_unlink(fx):
+    """A homes-1 journal lock release that unlinks the lock and then fails (its directory fsync) still
+    records, and says the lock MAY be left, never that it is left in place: the lock is gone, and the
+    next run reconciles nothing. The reviewed head said the lock was left in place and would be
+    reconciled."""
+    env = fx.env
+    root = fx.case("t55-lock-unlinked")
+    lock = Path(root) / record.JOURNAL_REL / "lock"
+
+    def unlinked_then_failing(journal_root):
+        os.unlink(os.path.join(str(journal_root), "lock"))
+        raise OSError(5, "synthetic journal directory fsync failure after the unlink")
+    with patch.object(record._journal, "release_lock", unlinked_then_failing):
+        result = record_cli(env, root, CREATE)
+    recorded(result)
+    err = result[2]
+    assert "could not be released (" in err, ("T55 the failed release is surfaced", err[-800:])
+    assert T55_MAY_BE_LEFT in err, ("T55 the lock may be left", err[-800:])
+    assert T55_FIX8 not in err, ("T55 no left-in-place claim", err[-800:])
+    assert not lock.exists(), "T55 the lock was unlinked"
+    fx.commit_all(root, "t55 record")
+    result = record_cli(env, root, CREATE)
+    assert "was reconciled" not in result[2], ("T55 the next run reconciles nothing", result[2][-800:])
+    recorded(result)
+
+
+def flip_t55():
+    """Print the reviewed head's left-in-place text."""
+    import builtins
+
+    def reverted(*args, **kwargs):
+        args = tuple(a.replace(T55_MAY_BE_LEFT, T55_FIX8) if isinstance(a, str) else a for a in args)
+        return builtins.print(*args, **kwargs)
+    return patch.object(record, "print", reverted, create=True)
+
+
+T56_HEAD = "a leftover journal lock of a dead run was released; no transaction was open"
+T56_FIX8 = "every transaction was already terminal"
+
+
+def t56_nothing_opened_not_terminal(fx):
+    """A homes-1 run killed after its preimage capture and before INTENT leaves its journal lock over a
+    nothing-opened transaction (not terminal); once its lease is released the next run reconciles the
+    lock and says no transaction was open and the dead run's transaction never opened, never that every
+    transaction was already terminal. The operands keep the prestate."""
+    env = fx.env
+    root = fx.case("t56-nothing-opened")
+    pre = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+    proc = child(env, root, CREATE, kill="after-preimages")
+    assert proc.returncode == 137, ("T56 the child is killed before INTENT", proc.returncode, proc.stderr[-800:])
+    states = journal_states(root)
+    assert list(states.values()) == ["nothing-opened"], ("T56 a nothing-opened transaction", states)
+    (name,) = states
+    assert (Path(root) / record.JOURNAL_REL / "lock").exists(), "T56 the dead run's lock is left"
+    (Path(root) / LEASE).unlink()
+    result = record_cli(env, root, CREATE)
+    refused(result, "was reconciled")
+    err = result[2]
+    assert T56_HEAD + ": the dead run's transaction " + name + " never opened, so it published nothing" in err, \
+        ("T56 no transaction was open", err[-1200:])
+    assert T56_FIX8 not in err, ("T56 no every-terminal claim", err[-1200:])
+    assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == pre, "T56 the operands keep the prestate"
+
+
+def flip_t56():
+    """The leftover-lock outcome keeps the reviewed head's every-terminal clause."""
+    fixed = record._leftover_lock_outcome
+    return patch.object(record, "_leftover_lock_outcome", lambda owner, states: fixed(owner, states).replace(
+        "released; no transaction was open", "released; " + T56_FIX8))
+
+
+# Inside the child: the publication fails after INTENT (an apply OSError, which the engine does not roll
+# back), so the transaction stays open and the journal lock is retained; the child then exits normally.
+FAILING_APPLY = """
+import _journal
+def _failing_apply(root_fd, ops, staged_reader):
+    raise OSError(5, "synthetic apply failure after INTENT")
+_journal.apply_ops = _failing_apply
+"""
+T57_RETAINED = ("the journal lock is retained, leaving it for the next opf record run's reconciliation, which "
+                "acts on it only as far as each step succeeds (fail-closed)")
+T57_FIX8 = "the journal lock is retained so the next opf record run reconciles it (fail-closed)"
+
+
+def t57_retained_not_promised(fx):
+    """A homes-1 publication failing after INTENT keeps its transaction open and its journal lock, and
+    says the transaction is left for the next run's reconciliation as far as each step succeeds, never
+    that the next run reconciles it: once the failed run has exited, an intervening operand edit makes
+    that next run refuse instead, the transaction still open and the edit kept."""
+    env = fx.env
+    root = fx.case("t57-apply-fails-live")
+
+    def failing_apply(root_fd, ops, staged_reader):
+        raise OSError(5, "synthetic apply failure after INTENT")
+    with patch.object(record._journal, "apply_ops", failing_apply):
+        result = record_cli(env, root, CREATE)
+    refused(result, "the publication FAILED and its transaction ")
+    assert T57_RETAINED in result[2], ("T57 the transaction is left, not promised", result[2][-800:])
+    assert T57_FIX8 not in result[2], ("T57 no promise of reconciliation", result[2][-800:])
+    root = fx.case("t57-apply-fails-exited")
+    proc = child(env, root, CREATE, flip=FAILING_APPLY)
+    assert proc.returncode == 2 and T57_RETAINED in proc.stderr, ("T57 the child's refusal", proc.returncode,
+                                                                  proc.stderr[-800:])
+    assert list(journal_states(root).values()) == ["open"], "T57 the transaction is left open"
+    edited = read(root, COUNTERS) + b"# an intervening edit\n"
+    (Path(root) / COUNTERS).write_bytes(edited)
+    result = record_cli(env, root, CREATE)
+    refused(result, "cannot be reconciled without overwriting a change made since it was interrupted")
+    assert list(journal_states(root).values()) == ["open"], "T57 the next run did not reconcile it"
+    assert read(root, COUNTERS) == edited, "T57 the intervening edit is kept"
+
+
+def flip_t57():
+    """Refuse with the reviewed head's promise of reconciliation."""
+    fixed = record.RecordError
+
+    class Promising(fixed):
+        def __init__(self, *args):
+            super().__init__(*(a.replace(T57_RETAINED, T57_FIX8) if isinstance(a, str) else a for a in args))
+    return patch.object(record, "RecordError", Promising)
+
+
+T58_BOTH = "(a staging leftover that acquisition removed is then named by no outcome)"
+T58_RECOVER = ("or None when the acquisition reclaimed no capability record and the plan under the capability "
+               "found nothing (a holder that released after the trigger read, say), so the run continues; a "
+               "staging leftover that acquisition removed is then named by no outcome")
+T58_RETIRED = "or None when the acquisition cleared nothing"
+
+
+def t58_texts():
+    """(the module docstring, the record guard's, _recover_capability_journal's), whitespace-normalized."""
+    module, guard = residual_texts()
+    return module, guard, " ".join((record._recover_capability_journal.__doc__ or "").split())
+
+
+def t58_released_holder_staging_unreported(fx):
+    """A live holder releases between the trigger read and the recovery acquisition (T35's setup) while
+    an active-record staging leftover sits in the control directory: the acquisition removes it and
+    reclaims no record, so recovery returns no outcome and the run continues to the claim-seam refusal
+    with no line naming the removal. The residual lists and the recovery docstring disclose exactly
+    that; the reviewed head's docstring said that acquisition cleared nothing."""
+    module, guard, recover = t58_texts()
+    assert T58_BOTH in module and T58_BOTH in guard, "T58 the residual lists disclose the unnamed removal"
+    assert T58_RECOVER in recover, "T58 the recovery docstring discloses the unnamed removal"
+    assert T58_RETIRED not in recover, "T58 the cleared-nothing wording is gone"
+    env = fx.env
+    base = fx.case("t58-homes2-base")
+    with imp._self_test_homes2_active(base):
+        root = fx.case("t58-homes2-released-staging", base)
+        held = [record._opf_oplock.acquire_operation(str(root), record.VERB)]
+        staging = active_record(root).parent / _opf_oplock._staging_name(_opf_oplock.ACTIVE_NAME)
+        staging.write_bytes(b"a torn active record publication")
+        original_acquire = record._opf_oplock.acquire_operation
+
+        def acquire_after_release(store_root, operation, holder=None, recover=False):
+            if held:
+                record._opf_oplock.release_operation(held.pop())
+            return original_acquire(store_root, operation, holder=holder, recover=recover)
+        try:
+            with patch.object(record._opf_oplock, "acquire_operation", acquire_after_release):
+                result = record_cli(env, root, CREATE)
+        finally:
+            if held:
+                record._opf_oplock.release_operation(held.pop())
+        refused(result, "is not active in this build")
+        err = result[2]
+        assert not os.path.lexists(staging), "T58 the recovery acquisition removed the staging leftover"
+        assert staging.name not in err and "staging leftover" not in err, \
+            ("T58 no outcome names the removal", err[-800:])
+        assert capability_records(root) == (False, False), "T58 the capability is released"
+
+
+def flip_t58():
+    """Read the texts with the disclosure removed and the cleared-nothing wording restored."""
+    original = t58_texts
+
+    def reverted():
+        module, guard, recover = original()
+        return (module.replace(T58_BOTH, ""), guard.replace(T58_BOTH, ""),
+                recover.replace(T58_RECOVER, T58_RETIRED + " and the plan under the capability found nothing "
+                                "(a holder that released after the trigger read, say), so the run continues"))
+    return patch.object(sys.modules[__name__], "t58_texts", reverted)
+
+
+T59_SCOPED = "No operand, journal entry or journal lock was written by this recovery (fail-closed)"
+
+
+def t59_recovery_lease_failure_scoped(fx):
+    """A homes-1 recovery whose lease acquisition fails AFTER the lease file was created (its payload
+    write fails) refuses with the write guard's own report that the lease is left in place, and the
+    recovery's sentence speaks only for operands, journal entries and the journal lock, never the
+    reviewed head's "Nothing was written" beside a created lease. The dead run's lock and the operands
+    are kept."""
+    env = fx.env
+    root = fx.case("t59-recovery-lease-created")
+    proc = child(env, root, CREATE, flip=FAILING_LOCK_RELEASE)
+    assert proc.returncode == 0 and RECORDED_EVENT in proc.stdout, (proc.returncode, proc.stderr[-800:])
+    lock = Path(root) / record.JOURNAL_REL / "lock"
+    assert lock.exists() and not (Path(root) / LEASE).exists(), "T59 a leftover lock and no lease"
+    post = dict((rel, read(root, rel)) for rel in RECORD_OPERANDS)
+
+    def failing_write(fd, data):
+        raise OSError(5, "synthetic lease payload write failure")
+    with patch.object(journal, "_write_all", failing_write):
+        result = record_cli(env, root, CREATE)
+    refused(result, "needs reconciliation (a dead run's journal lock)")
+    err = result[2]
+    assert "lease is LEFT in place" in err, ("T59 the write guard reports the created lease", err[-800:])
+    assert T59_SCOPED in err, ("T59 the recovery's sentence is scoped", err[-800:])
+    assert "Nothing was written" not in err, ("T59 no nothing-written claim", err[-800:])
+    assert (Path(root) / LEASE).exists(), "T59 the failed acquisition created the lease"
+    assert lock.exists(), "T59 the leftover journal lock is kept"
+    assert dict((rel, read(root, rel)) for rel in RECORD_OPERANDS) == post, "T59 the operands are untouched"
+
+
+def flip_t59():
+    """Refuse with the reviewed head's unscoped sentence."""
+    fixed = record.RecordError
+
+    class Unscoped(fixed):
+        def __init__(self, *args):
+            super().__init__(*(a.replace(T59_SCOPED, "Nothing was written (fail-closed)")
+                               if isinstance(a, str) else a for a in args))
+    return patch.object(record, "RecordError", Unscoped)
 
 
 # --- the runner ------------------------------------------------------------------------------------------------
@@ -3045,6 +3586,17 @@ TESTS = (
     ("T47-reclaimed-outcome-scoped", t47_reclaimed_outcome_scoped, (flip_t47_grammar, flip_t47_poststate)),
     ("T48-prepare-names-created", t48_prepare_names_created, flip_t48),
     ("T49-home-absent-recovery-disclosed", t49_home_absent_recovery_disclosed, flip_t49),
+    ("T50-leftover-lock-complete-scoped", t50_leftover_lock_complete_scoped, flip_t50),
+    ("T51-lock-refusals-name-created", t51_lock_refusals_name_created, flip_t51),
+    ("T52-publication-refused-before-intent", t52_publication_refused_before_intent,
+     (flip_t52_message, flip_t52_rule)),
+    ("T53-projection-existence-only", t53_projection_existence_only, (flip_t53_outcome, flip_t53_guard)),
+    ("T54-header-exact", t54_header_exact, flip_t54),
+    ("T55-lock-release-after-unlink", t55_lock_release_after_unlink, flip_t55),
+    ("T56-nothing-opened-not-terminal", t56_nothing_opened_not_terminal, flip_t56),
+    ("T57-retained-not-promised", t57_retained_not_promised, flip_t57),
+    ("T58-released-holder-staging-unreported", t58_released_holder_staging_unreported, flip_t58),
+    ("T59-recovery-lease-failure-scoped", t59_recovery_lease_failure_scoped, flip_t59),
 )
 
 
