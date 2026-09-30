@@ -7432,13 +7432,18 @@ def _watchdog_completion_case(mode):
         # take, and releases an id it did take even when
         # interrupted after the claim; the save loop through
         # the claim and its publication, and the whole
-        # release, run with SIGINT and every signal the
+        # release, mask SIGINT and every signal the
         # process currently has a Python-level handler for
-        # blocked at the OS level, the prior mask restored
-        # after the section, so a pending signal is
-        # delivered only then (Python runs signal handlers
-        # on the main thread; where pthread_sigmask is
-        # unavailable the sections run unmasked); an id
+        # on the calling thread, a best-effort narrowing
+        # of the interruption window, never a guarantee:
+        # a real signal can still be delivered before the
+        # mask is in place, be delivered through another
+        # thread and run its handler inside the section,
+        # or interrupt the masking call itself and leave
+        # the caller's prior mask widened -- deliveries
+        # the exclusion below places outside this bound
+        # (where pthread_sigmask is unavailable the
+        # sections run unmasked); an id
         # freed and retaken under another name is left alone; a run
         # whose observation cannot be held or is not intact after
         # its driver returns, or with an exception raised inside its
@@ -7455,10 +7460,15 @@ def _watchdog_completion_case(mode):
         # and must instead be loaded with no entry holding its
         # value, and any other deviation failing the check fails the
         # suite. An interpreter allocation failure, an audit hook
-        # raising, or any other asynchronous exception (for
-        # example one injected into the thread) anywhere in the
-        # observation machinery -- setup, callback or release --
-        # is outside this bound. Only the
+        # raising, any other asynchronous exception (for
+        # example one injected into the thread), and
+        # asynchronous signal delivery -- a real signal
+        # arriving at any point in setup, the case or
+        # release, delivery through another thread
+        # included -- are outside this bound; the
+        # guarantee that does hold is no silent pass and
+        # no unobserved entry: the suite fails loudly
+        # rather than passing silently. Only the
         # default state must fire both the pending
         # point and the injected fault. Under a deviation, a run
         # whose pending point does not fire is checked at entry
@@ -7554,13 +7564,18 @@ def _watchdog_completion_case(mode):
             # take, and releases an id it did take even when
             # interrupted after the claim; the save loop through
             # the claim and its publication, and the whole
-            # release, run with SIGINT and every signal the
+            # release, mask SIGINT and every signal the
             # process currently has a Python-level handler for
-            # blocked at the OS level, the prior mask restored
-            # after the section, so a pending signal is
-            # delivered only then (Python runs signal handlers
-            # on the main thread; where pthread_sigmask is
-            # unavailable the sections run unmasked); an id
+            # on the calling thread, a best-effort narrowing
+            # of the interruption window, never a guarantee:
+            # a real signal can still be delivered before the
+            # mask is in place, be delivered through another
+            # thread and run its handler inside the section,
+            # or interrupt the masking call itself and leave
+            # the caller's prior mask widened -- deliveries
+            # the exclusion below places outside this bound
+            # (where pthread_sigmask is unavailable the
+            # sections run unmasked); an id
             # freed and retaken under another name is left alone; a run
             # whose observation cannot be held or is not intact after
             # its driver returns, or with an exception raised inside its
@@ -7577,10 +7592,15 @@ def _watchdog_completion_case(mode):
             # and must instead be loaded with no entry holding its
             # value, and any other deviation failing the check fails the
             # suite. An interpreter allocation failure, an audit hook
-            # raising, or any other asynchronous exception (for
-            # example one injected into the thread) anywhere in the
-            # observation machinery -- setup, callback or release --
-            # is outside this bound. Only the
+            # raising, any other asynchronous exception (for
+            # example one injected into the thread), and
+            # asynchronous signal delivery -- a real signal
+            # arriving at any point in setup, the case or
+            # release, delivery through another thread
+            # included -- are outside this bound; the
+            # guarantee that does hold is no silent pass and
+            # no unobserved entry: the suite fails loudly
+            # rather than passing silently. Only the
             # default state must fire both the pending
             # point and the injected fault. Under a deviation, a run
             # whose pending point does not fire is checked at entry
@@ -8255,18 +8275,24 @@ def _watchdog_completion_case(mode):
             and value > 0 and not value & (value - 1)))
 
         def mask_handled_signals():
-            # fix 36 (QA57 codex MAJOR x2): the save loop through
-            # the claim, and the whole release, run with SIGINT
-            # and every signal this process currently has a
-            # Python-level handler for blocked at the OS level,
-            # so a real signal cannot fire a handler inside the
-            # section -- Python runs signal handlers on the main
-            # thread, where the mask holds a delivery pending;
-            # the caller restores the returned prior mask in a
-            # finally, so a pending signal is delivered only
-            # after the section. Where pthread_sigmask is
-            # unavailable the section runs unmasked, as the
-            # bound discloses.
+            # fix 36 (QA57 codex MAJOR x2), rescoped by fix 37
+            # (QA58): the save loop through the claim, and the
+            # whole release, run with SIGINT and every signal
+            # this process currently has a Python-level
+            # handler for blocked on the calling thread. A
+            # best-effort narrowing of the interruption
+            # window, never a guarantee: a real signal can be
+            # delivered before this helper blocks anything, a
+            # delivery inside this helper can leave the
+            # caller's prior mask widened, and a thread with
+            # the signal unblocked can receive it while Python
+            # still runs the handler on the main thread,
+            # inside the section. The bound discloses every
+            # such delivery as outside it; the caller puts the
+            # returned prior mask back in a finally, best
+            # effort on the same terms. Where pthread_sigmask
+            # is unavailable the section runs unmasked, as the
+            # bound also discloses.
             if not hasattr(signal, "pthread_sigmask"):
                 return None
             handled = {signal.SIGINT}
@@ -8419,10 +8445,13 @@ def _watchdog_completion_case(mode):
                     # skips -- so the save loop, the
                     # publication, the claim and the
                     # failure-path restore all run with handled
-                    # signals blocked; the prior mask comes
-                    # back in the outermost finally, delivering
-                    # a pending signal only after the section,
-                    # when the release below is armed
+                    # signals blocked on this thread; best
+                    # effort only (fix 37, QA58): a delivery
+                    # before the mask is in place, inside the
+                    # masking call, or through another thread
+                    # still interrupts, as the bound discloses;
+                    # the prior mask goes back in the outermost
+                    # finally, when the release below is armed
                     unmasked = mask_handled_signals()
                     try:
                         try:
@@ -8490,9 +8519,12 @@ def _watchdog_completion_case(mode):
                 # SIGINT after the member's mask went back and
                 # before free_tool_id and restore_saved leaves
                 # the id claimed and no callback restored -- the
-                # prior mask restored in a finally, so a pending
-                # signal is delivered only once the release is
-                # complete
+                # prior mask put back in a finally; best effort
+                # only (fix 37, QA58): the masking call itself
+                # starts unmasked, and a delivery before it
+                # completes or through another thread still
+                # interrupts the release, as the bound
+                # discloses
                 unmasked = mask_handled_signals()
                 try:
                     # release exactly the id this case took; an id a
@@ -9753,7 +9785,10 @@ def _watchdog_completion_case(mode):
         # the member's mask went back and before free_tool_id and
         # restore_saved -- must leave every saved callback
         # restored and the id unclaimed, the pending SIGINT
-        # delivered only after the masked section. Each delivery
+        # delivered only after the masked section -- the
+        # single-threaded, inside-the-section timing where
+        # the best-effort mask does hold (fix 37, QA58: not
+        # a general promise). Each delivery
         # is then repeated with the mask removed --
         # signal.pthread_sigmask stubbed out, the reviewed-HEAD
         # behaviour -- and must go red through this vector's own
@@ -9991,15 +10026,21 @@ def _watchdog_completion_case(mode):
         # fix 36 (QA57 codex MINOR): the general exclusion is the
         # single disclosure -- its wording appears exactly once
         # per copy, and the removed narrower allocator-detail
-        # qualification stays gone
+        # qualification stays gone; fix 37 (QA58): the rescoped
+        # disclosure names the signal-delivery exclusion
+        # exactly once per copy too
         allocation_needle = b"interpreter " + b"allocation"
         async_needle = b"any other " + b"asynchronous exception"
+        signal_needle = b"asynchronous signal " + b"delivery"
         assert (own_text.count(allocation_needle) == 2
-                and own_text.count(async_needle) == 2), (
-            "the allocator/audit/async exclusion no longer "
-            "appears exactly once per bound copy (fix 36, "
-            "QA57)", own_text.count(allocation_needle),
-            own_text.count(async_needle))
+                and own_text.count(async_needle) == 2
+                and own_text.count(signal_needle) == 2), (
+            "the allocator/audit/async/signal-delivery exclusion "
+            "no longer appears exactly once per bound copy "
+            "(fix 36/37, QA57/QA58)",
+            own_text.count(allocation_needle),
+            own_text.count(async_needle),
+            own_text.count(signal_needle))
         mark_end = own_text.index(bound_marks[0]) + len(bound_marks[0])
         cut = own_text.index(b"\n", mark_end + 1)
         blocks_fault = "not exactly two terminated leg 19 bound blocks"
