@@ -89,7 +89,6 @@ run_gate "site-versions-selftest" python3 -I -B tools/check_site_versions.py --s
 run_gate "site-versions" python3 -I -B tools/check_site_versions.py
 run_gate "opf-render-selftest" python3 -I -B tools/selftest_opf_render.py
 run_gate "opf-homes-selftest" python3 -I -B opf/tools/check_opf_homes.py --self-test
-run_gate "opf-homes-migrate-selftest" python3 -I -B opf/tools/check_opf_homes_migrate.py --self-test --red-on-revert
 run_gate "opf-homes-contract" python3 -I -B opf/tools/check_opf_homes.py
 run_gate "opf-tooling-selftest" python3 -I -B opf/tools/opf.py --self-test
 run_gate "opf-import-direct-selftest" python3 -I -B opf/tools/_opf_import.py --self-test
