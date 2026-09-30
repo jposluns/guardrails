@@ -2859,10 +2859,11 @@ def _cli_self_test():
             over that run, checked only for writing no acceptance.json; after the retained engine accepts
             the run, --apply over it, over an unknown run and over the NOT-ADOPTED root, with the store tree
             byte-unchanged. The NOT-ADOPTED root is never driven with --review, and its own tree is not
-            snapshotted. Restoring the retained engine in place of one public refusal turns that refusal's
-            rows red (exit 1). Literally deleting the refusal's return does not: the entry then returns None,
-            the import dispatcher's res.findings read raises AttributeError, and the self-test's final
-            harness-error backstop exits 2 with no row recorded. A malformed --set /
+            snapshotted. Either mutation of one public refusal fails the suite: restoring the retained
+            engine in place of it turns that refusal's rows red; literally deleting its return makes the
+            entry return None, which crashes the self-test (this vector, where the import dispatcher's
+            res.findings read raises AttributeError, or earlier the opf-import refusal suite where it
+            drives the same refusal), which each runner reports as a non-passing result. A malformed --set /
             --decisions / --dispositions / --ingest-options file meets the same refusal, its reader never
             run, and so does a mode-specific argv violation (a missing or extra companion flag, a run-id
             outside the grammar): the refusal precedes the retired mode-combination validation (round-2
@@ -3001,8 +3002,9 @@ def _cli_self_test():
                 if os.path.exists(acceptance):
                     failures.append("a refused import --review wrote acceptance.json")
 
-                # 6-7: the retained engine accepts the run; --apply over that promotion-ready run, over an
-                # unknown run, and over a NOT-ADOPTED root refuses, and the store tree is byte-unchanged.
+                # 6-7: the retained engine accepts the run; --apply over that accepted run (one the retained
+                # apply engine rejects: this minimal store is not doctor-composable), over an unknown run, and
+                # over a NOT-ADOPTED root refuses, and the store tree is byte-unchanged.
                 accepted = _opf_import._review_import(store, rid, actor="tester", decisions=all_decisions,
                                                       now=engine_now)
                 if accepted.verdict != _opf_import.CLEAN:

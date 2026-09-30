@@ -6536,9 +6536,11 @@ def _self_test_ordinary_refused():
         whole = dict(fragments=dict([("a.txt", [dict(span=[0, len(b"legacy source body\n")],
                                                     state="unmapped", origin="baseline")])]))
         # The library staging intake (codex round 1 staged a run through it) over a copy of the FRESH
-        # store, where its engine stages this whole-file baseline plan: restoring that engine in place of the
-        # refusal stages a run there and turns both rows red; literally deleting the refusal's return instead
-        # makes stage_import return None, and refused() raises AttributeError before any row is recorded.
+        # store, where its engine stages this whole-file baseline plan. Either mutation of the refusal fails
+        # the suite: restoring that engine in place of it turns fresh-stage-refused and
+        # fresh-stage-nothing-written red; literally deleting its return makes stage_import return None, so
+        # refused() raises AttributeError and the vector crashes, which each runner reports as a
+        # non-passing result.
         shutil.copytree(root, base / "fresh")
         before = tree(base)
         with _self_test_engine(engine=False):
@@ -6546,7 +6548,8 @@ def _self_test_ordinary_refused():
         check("fresh-stage-refused", refused(fresh))
         check("fresh-stage-nothing-written", tree(base) == before)
         # Positive control: the retained engine still stages and accepts a run, so the refusals below
-        # face a promotion-ready run, not an empty store.
+        # face a staged, accepted run, not an empty store (one the retained apply engine rejects: this
+        # minimal store is not doctor-composable).
         staged = _plan_import(root, ["a.txt"], now=now, run_nonce="engine")
         check("engine-plan-control", staged.verdict == CLEAN)
         rid = staged.run_id
