@@ -435,18 +435,27 @@ def _config_discovery_env():
     return env
 
 
-def _run_git_config_discovery(git, store_root, args, timeout=_GIT_TIMEOUT_S):
+def _run_git_config_discovery(git, store_root, args, timeout=_GIT_TIMEOUT_S, input_bytes=None, logical=False):
     """Like _run_git, but under the config-discovery environment (OPF-D2B), and with core.fsmonitor forced
     off by a command-scope `-c` so an adopter fsmonitor config cannot launch a monitor process during the
     read-only probe (a command-line `-c` overrides file and runtime config for fsmonitor; trace2 is instead
     forced off through the environment in _config_discovery_env, since its early config read ignores `-c`).
     The probe also passes --no-pager, so a pager configured for check-ignore cannot launch a process (defence
-    in depth: the captured, non-TTY stdout already suppresses the pager).
+    in depth: the captured, non-TTY stdout already suppresses the pager). Optional input_bytes is sent on
+    stdin; callers supply bytes, never shell text. `logical` runs the probe with its working directory and
+    PWD at store_root as given, verbatim (a path through a symlink, or a spelling such as `R/.` or `R//`,
+    never resolved or normalized; the caller passes a str, which pathlib would normalize), PWD being the
+    one name added to that environment: git then names the repository by PWD's exact spelling, as the
+    adopter's git at that directory does, so an includeIf "gitdir:" rule matching only that spelling
+    applies (git 2.53.0).
     Returns a _GitOutcome shaped exactly as _run_git's."""
     cmd = [git, "--no-pager", "--no-replace-objects", "-c", "core.fsmonitor=false", "-C", str(store_root)] + list(args)
+    env = _config_discovery_env()
+    if logical:
+        env["PWD"] = str(store_root)
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              env=_config_discovery_env(), timeout=timeout)
+        proc = subprocess.run(cmd, input=input_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              env=env, cwd=str(store_root) if logical else None, timeout=timeout)
     except subprocess.TimeoutExpired:
         return _GitOutcome(False, None, b"", "git timed out after {}s".format(timeout))
     except OSError as exc:
@@ -481,7 +490,7 @@ def _worktree_open_succeeds(worktree_path):
     return True
 
 
-def _is_partial_clone(git, store_root):
+def _is_partial_clone(git, store_root, run=None, strict=False):
     """True when the repository at store_root is a PARTIAL clone -- one with a promisor remote git can
     lazy-fetch from -- OR when partial-clone-ness cannot be determined. Returns False ONLY when all three
     probes complete cleanly and find no promisor filter, no boolean-true promisor remote, and no
@@ -530,29 +539,44 @@ def _is_partial_clone(git, store_root):
     so reading this LOCAL repository's config is correct (a repo whose only promisor config lives in an
     alternate does not lazy-fetch). A probe that cannot RUN, or returns an rc other than 0 (found) or 1 (not
     found), is a cannot-determine that resolves to partial = keep checking -- the safe, fail-closed direction
-    (guard-input-soundness, check-fails-closed-on-unreadable)."""
+    (guard-input-soundness, check-fails-closed-on-unreadable). A `strict` caller gets a RuntimeError for
+    each such probe failure instead (the enumerated-key re-query below included, and an enumerated key
+    whose non-UTF-8 name cannot be re-queried at all): the homes gitignore
+    inspection sets it, since there a failed probe is cannot-evaluate, never a partial fallback whose
+    availability check can still end clean; the default keeps the fallback for opf.py's init preflight.
+    `run` is the git runner (default, resolved at call time: _run_git_config_discovery); the homes
+    gitignore inspection passes its allowlisted wrapper."""
+    run = run or _run_git_config_discovery
+
+    def undetermined(out):
+        # A probe that cannot run or answers outside its rc contract: partial, or raised when strict.
+        if strict:
+            raise RuntimeError("a partial-clone config probe failed (rc {}: {}); partial-clone-ness cannot "
+                               "be determined".format(out.rc, out.err.strip() or "no diagnostic"))
+        return True
+
     # (a) A partialclonefilter on ANY remote registers the promisor by presence (value-blind), overriding a
     # sibling promisor=false; --get-regexp rc 0 means at least one such key exists.
-    filt = _run_git_config_discovery(
+    filt = run(
         git, store_root, ["config", "--get-regexp", r"^remote\..*\.partialclonefilter$"])
     if not filt.completed or filt.rc not in (0, 1):
-        return True    # cannot determine -> partial (fail-closed)
+        return undetermined(filt)    # cannot determine -> partial (fail-closed)
     if filt.rc == 0:
         return True    # a partialclonefilter is present: a promisor is registered
     # (c) The partialClone extension registers the named default promisor remote by presence (no format gate,
     # per the empirical resolution above).
-    ext = _run_git_config_discovery(git, store_root, ["config", "--get", "extensions.partialClone"])
+    ext = run(git, store_root, ["config", "--get", "extensions.partialClone"])
     if not ext.completed or ext.rc not in (0, 1):
-        return True    # cannot determine -> partial (fail-closed)
+        return undetermined(ext)    # cannot determine -> partial (fail-closed)
     if ext.rc == 0:
         return True    # the partialClone extension is declared: a partial clone
     # (b) A promisor remote registers only when its value is boolean-TRUE. Enumerate the promisor keys, then
     # re-evaluate EACH with git's own bool parser (--type=bool), so promisor=false does not register and a
     # garbage bool (a git error) fails closed to partial.
-    prom = _run_git_config_discovery(
+    prom = run(
         git, store_root, ["config", "-z", "--name-only", "--get-regexp", r"^remote\..*\.promisor$"])
     if not prom.completed or prom.rc not in (0, 1):
-        return True    # cannot determine -> partial (fail-closed)
+        return undetermined(prom)    # cannot determine -> partial (fail-closed)
     if prom.rc == 1:
         return False   # no promisor filter, no extension, and no promisor key at all: a full clone
     for kb in prom.out.split(b"\0"):
@@ -562,23 +586,29 @@ def _is_partial_clone(git, store_root):
         # bytes (e.g. `[remote "up\xffstream"]`) enumerates fine as raw bytes, but a lossy decode would mangle
         # it, so the --type=bool re-query below would ask for a DIFFERENT (nonexistent) key and read rc 1
         # (not found) -- which must NOT be mistaken for boolean-false / full. The key demonstrably EXISTS (it
-        # was just enumerated), so a name that cannot be re-queried is a cannot-determine -> partial.
+        # was just enumerated), so a name that cannot be re-queried is a cannot-determine -> partial, or
+        # raised when strict (git itself may reject its value, as for any other failed re-query).
         try:
             key = kb.decode("utf-8")
         except UnicodeDecodeError:
+            if strict:
+                raise RuntimeError("a partial-clone config probe failed (the enumerated promisor key {!r} is "
+                                   "not UTF-8, so it cannot be re-queried); partial-clone-ness cannot be "
+                                   "determined".format(kb))
             return True    # a non-UTF-8 promisor key name cannot be cleanly re-queried: fail-closed to partial
-        val = _run_git_config_discovery(git, store_root, ["config", "--type=bool", "--get-all", key])
+        val = run(git, store_root, ["config", "--type=bool", "--get-all", key])
         if not val.completed or val.rc != 0:
-            return True    # an ENUMERATED key that does not cleanly re-query -- rc 1 (not found: the name did
-                           # not round-trip), a garbage/unparseable bool (rc 128), or a probe that cannot run
-                           # -- is a cannot-determine -> partial (fail-closed), NEVER read as boolean-false/full
+            # An ENUMERATED key that does not cleanly re-query -- rc 1 (not found: the name did not
+            # round-trip), a garbage/unparseable bool (rc 128), or a probe that cannot run -- is a
+            # cannot-determine -> partial (fail-closed), NEVER read as boolean-false/full.
+            return undetermined(val)
         if any(line.strip() == "true" for line in val.out.decode("utf-8", "replace").splitlines()):
             return True    # a boolean-true promisor remote: a partial clone
     return False   # every enumerated promisor key cleanly re-queried (rc 0) AND evaluated boolean-false, and
                    # no filter or extension: a full clone
 
 
-def indexed_ignore_availability(git, store_root, gitignore_relpaths):
+def indexed_ignore_availability(git, store_root, gitignore_relpaths, run=None, strict=False):
     """Repo-relative candidate .gitignore paths whose ignore rule the adopter's own `git add` would read
     from the INDEX but whose blob is NOT available locally without a promisor fetch. The config-discovery
     ignore probe forces GIT_NO_LAZY_FETCH, so it reads such a blob as no-rule (destination not-ignored),
@@ -639,17 +669,21 @@ def indexed_ignore_availability(git, store_root, gitignore_relpaths):
 
     Returns a sorted list of the unavailable repo-relative .gitignore paths; an empty list means every
     applicable ignore OID is answerable without a fetch. Raises RuntimeError only when git could not be RUN
-    to list the index or to probe an OID (the call did not complete), or when `ls-files` itself failed -- a
-    cannot-evaluate the caller fails closed on. A nonzero `cat-file -e` rc, whether the object is genuinely
+    to list the index or to probe an OID (the call did not complete), when `ls-files` itself failed, or when
+    a `strict` caller's partial-clone probe failed (_is_partial_clone) -- a cannot-evaluate the caller
+    fails closed on. A nonzero `cat-file -e` rc, whether the object is genuinely
     absent or its pack is unreadable, is not raised: it is treated as an unavailable OID and REFUSED
-    (appended to the returned list). Both paths are fail-closed."""
+    (appended to the returned list). Both paths are fail-closed. `run` is the git runner for every call
+    here and in _is_partial_clone (default, resolved at call time: _run_git_config_discovery); the homes
+    gitignore inspection passes its verb-allowlisted wrapper (whose refusal propagates unchanged) and `strict`."""
+    run = run or _run_git_config_discovery
     if not gitignore_relpaths:
         return []
-    if not _is_partial_clone(git, store_root):
+    if not _is_partial_clone(git, store_root, run=run, strict=strict):
         return []   # a full (non-promisor) clone: git cannot lazy-fetch, so an absent indexed OID can never
                     # cause a silent fetch-and-ignore -- `git add` either stages or fails loudly -- and a
                     # refusal here would be a pure over-refusal. The hazard exists only in a partial clone.
-    listing = _run_git_config_discovery(
+    listing = run(
         git, store_root,
         ["--literal-pathspecs", "ls-files", "-s", "-t", "-z", "--"] + list(gitignore_relpaths))
     if not listing.completed:
@@ -685,7 +719,7 @@ def indexed_ignore_availability(git, store_root, gitignore_relpaths):
         # git's open is unsuccessful (absent, symlink, unreadable regular file, or unreadable directory), so
         # git falls back to the index OID (mode-blind); an unavailable OID is a cannot-evaluate the caller
         # refuses. cat-file -e forces no lazy fetch via _run_git_config_discovery, so it never fetches here.
-        avail = _run_git_config_discovery(git, store_root, ["cat-file", "-e", oid])
+        avail = run(git, store_root, ["cat-file", "-e", oid])
         if not avail.completed:
             raise RuntimeError("could not probe ignore-OID availability ({})".format(avail.err))
         if avail.rc != 0:  # genuinely absent OR an unreadable pack: both refuse (not raise), fail-closed

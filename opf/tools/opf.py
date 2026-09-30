@@ -1092,22 +1092,6 @@ def _init_untracked(git, repo, root, paths):
             os.fsdecode(tracked)))
 
 
-def _ignore_file_candidates(prefix, paths):
-    """Repo-relative .gitignore paths git consults when deciding whether the planned destinations are
-    ignored: one per ancestor directory from the repository root down to each destination's own directory.
-    A .gitignore in directory D governs paths under D, so every ancestor directory of a planned path is a
-    candidate ignore source (git add reads them all)."""
-    dirs = set()
-    for path in paths:
-        for parent in (prefix / path).parents:
-            dirs.add(parent)
-    candidates = set()
-    for directory in dirs:
-        posix = directory.as_posix()
-        candidates.add(".gitignore" if posix == "." else posix + "/.gitignore")
-    return sorted(candidates)
-
-
 def _init_unignored(git, repo, root, paths):
     """Refuse a planned destination git would ignore: an ignored store cannot be staged or discovered.
 
@@ -1166,7 +1150,7 @@ def _init_unignored(git, repo, root, paths):
     # checked-out .gitignore is read from disk by both. So a missing indexed ignore blob is a cannot-evaluate
     # we refuse, not a clean pass (guard-input-soundness).
     unavailable = _opf_observe.indexed_ignore_availability(
-        git, repo, _ignore_file_candidates(root.relative_to(repo), paths))
+        git, repo, _opf_write_guard._ignore_file_candidates(root.relative_to(repo), paths))
     if unavailable:
         raise RuntimeError(
             "git preflight: an indexed .gitignore blob is unavailable in this partial clone, so ignore "
