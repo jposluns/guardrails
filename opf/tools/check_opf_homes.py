@@ -1815,9 +1815,9 @@ def boundary_self_test():
                 patch.object(planning.os, "fstat", return_value=SimpleNamespace(st_dev=1, st_ino=1)), \
                 patch.object(planning.os, "close"), \
                 patch.object(store, "_read_pointer_target", return_value=None), \
-                patch.object(store, "resolve_store", return_value=resolved), \
+                patch.object(store, "resolve_store_fd",
+                             return_value=(resolved, emit.emit_checked(model).encode())), \
                 patch.object(store, "validate_manifest", return_value=store.ManifestValidation(store.VALID)), \
-                patch.object(planning, "_read_rel", return_value=emit.emit_checked(model).encode()), \
                 patch.object(store._journal, "_open_parent", side_effect=_Enumerated), \
                 patch.object(planning.os, "stat", side_effect=_Enumerated):
             try:
@@ -1848,8 +1848,8 @@ def boundary_self_test():
                              return_value=contextlib.nullcontext([SimpleNamespace(name=name)])), \
                 patch.object(planning.os, "stat", return_value=directory), \
                 patch.object(store, "_read_pointer_target", return_value=None), \
-                patch.object(store, "resolve_store", return_value=SimpleNamespace(
-                    status=store.CANNOT_EVALUATE, detail="fixture")), \
+                patch.object(store, "resolve_store_fd", return_value=(SimpleNamespace(
+                    status=store.CANNOT_EVALUATE, detail="fixture"), None)), \
                 patch.object(store._journal, "_lstat_at", return_value=directory), \
                 patch.object(store._journal, "_open_parent", side_effect=_Enumerated):
             try:
@@ -1881,9 +1881,9 @@ def boundary_self_test():
                 patch.object(planning.os, "fstat", return_value=same), \
                 patch.object(planning.os, "close"), \
                 patch.object(store, "_read_pointer_target", return_value=None), \
-                patch.object(store, "resolve_store", return_value=resolved), \
+                patch.object(store, "resolve_store_fd",
+                             return_value=(resolved, emit.emit_checked(model).encode())), \
                 patch.object(store, "validate_manifest", return_value=store.ManifestValidation(store.VALID)), \
-                patch.object(planning, "_read_rel", return_value=emit.emit_checked(model).encode()), \
                 patch.object(store._journal, "_open_parent", side_effect=FileNotFoundError), \
                 patch.object(adopt, "validate_plan", wraps=adopt.validate_plan) as frozen:
             # Every planned creation needs observed absence, so the root-level ones are declared targets; the
@@ -1978,8 +1978,8 @@ def boundary_self_test():
                 patch.object(store, "_open_root_fd", return_value=-1), patch.object(ingest.os, "close"), \
                 patch.object(ingest, "_digest_of", side_effect=_Reached):
             try:
-                result = ingest.plan_ingest("/store", dict(row=[journal_row]), dict(option=[]), now=utc,
-                                            run_nonce="0123456789abcdef")
+                result = ingest._plan_ingest("/store", dict(row=[journal_row]), dict(option=[]), now=utc,
+                                             run_nonce="0123456789abcdef")   # the retained engine
             except _Reached:
                 return "admitted"
         return result.verdict, " ".join(result.findings)
