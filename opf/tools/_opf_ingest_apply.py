@@ -2086,8 +2086,12 @@ def _t_ordinary_retired(base, check):
     """Spec 14.1 (round-2 MAJOR): the public apply_ingest is retired and refuses FIRST, with the retirement
     pointer, before any store resolution, operation-capability or journal-writer-lock acquisition, read or
     write, even inside an engine block, over a promotion-ready reviewed run and over a root that resolves
-    no store, with promoted False, outcome "aborted", and the store tree byte-unchanged. Deleting the
-    refusal resolves the store, takes both locks, and promotes the accepted run."""
+    no store, with promoted False, outcome "aborted", and the store tree byte-unchanged. Restoring the
+    retained engine in place of the refusal resolves the store but takes neither lock and promotes nothing:
+    it refuses the run as read-only legacy layout and the other root as unresolved, so retired-refused,
+    retired-unresolved-refused and retired-resolves-and-locks-nothing go red (exit 1); literally deleting
+    the refusal's return instead makes apply_ingest return None, and refused() raises AttributeError,
+    which self_test_isolated reports as a harness error (exit 2)."""
     from unittest.mock import patch
 
     root, rid, _run = _st_build(base, "ordinary-retired")
