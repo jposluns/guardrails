@@ -31,6 +31,16 @@ disposition before init-store, but it is not classified as occupying. The store
 control area (.working/archive, imported, staging, journals and the imports tree)
 is never adopter content in any homes generation (spec 14.2): it is inventoried,
 never a candidate, and a decision naming it refuses.
+A move decision without a destination plans the spec 14.2 default,
+.working/archive/moved/<source-path>, from the source row's own path, never stripped;
+its store base must be observed (an excluded or unobserved nearest ancestor is
+cannot-evaluate) and an occupied default destination is a collision. Every move
+destination and archive preservation copy is checked against the one
+protected-destination predicate the apply shell shares (_opf_adopt.protected_destination).
+DISCLOSED-STRICTER (disclose-guard-residuals): spec 14.2 requires only the default Move
+to refuse a store resolved outside the product root; investigation refuses every plan,
+and so every Move, default or explicit, whose committed or local pointer names a store
+at another root, whether or not that store resolves.
 Every planned creation (move and preservation destinations, init-store,
 render-views and pack members, the receipt) needs observed absence unless an
 occupying source is archived from it first; a replacement needs matching
@@ -511,6 +521,27 @@ def _observed_absent(kinds, path):
         probe = probe.rsplit("/", 1)[0]
 
 
+def _default_move_destination(kinds, path):
+    """The spec 14.2 default Move destination of a source, `.working/archive/moved/<source-path>`,
+    from the row's own path with its substructure kept (store.moved_dest, never stripped). The planner
+    freezes store_root ".", so the store-relative constructor is also the product-relative path. Its
+    absence must be observed: an excluded or unobserved nearest ancestor (a homes-2 store excludes its
+    control area from investigation) leaves the store base unobservable, which is cannot-evaluate
+    naming the source, and an entry at the destination or a file ancestor is an occupied destination,
+    a collision never an overwrite."""
+    destination = store.moved_dest(path)
+    probe = destination
+    while probe not in kinds and "/" in probe:
+        probe = probe.rsplit("/", 1)[0]
+    if kinds.get(probe) in (None, "excluded"):
+        raise PlanError("default move destination {!r} of {!r}: the store base cannot be observed, "
+                        "so its absence is unproven (cannot-evaluate)".format(destination, path))
+    if not _observed_absent(kinds, destination):
+        raise PlanError("default move destination {!r} of {!r} is occupied: a collision, never an "
+                        "overwrite (spec 14.2)".format(destination, path))
+    return destination
+
+
 def _decisions(observation, decisions, run_id, managed):
     """Per-candidate dispositions -> (disposition ops, plan-v2 source rows, unresolved).
 
@@ -519,7 +550,8 @@ def _decisions(observation, decisions, run_id, managed):
     destination (spec 14.2): keep refuses, and any other disposition is preserved
     under the adoption archive, a move included. A move destination and every
     preservation destination alike need observed absence (an occupied destination
-    is a collision, never an overwrite). A keep's register-unmanaged row is minted
+    is a collision, never an overwrite). A move without a destination takes the spec
+    14.2 default (_default_move_destination). A keep's register-unmanaged row is minted
     here without its manifest digests, which _bind_registrations adds once the
     program is ordered."""
     if type(decisions) is not list:
@@ -566,13 +598,17 @@ def _decisions(observation, decisions, run_id, managed):
         elif disposition == "retire" and set(row) == required:
             ops.append({"op": "retire-file", "path": path, "preimage_digest": digest})
             source["preservation"] = store.retire_preimage(run_id, path)
-        elif disposition == "move" and set(row) == required | {"destination"}:
-            destination = _path(row["destination"])
-            # Only observed absence is accepted: the destination's own absent entry, or an
-            # absent or walked ancestor. Declare a destination outside the walked roots in
-            # targets when investigating, then pass the same targets to plan.
-            if not _observed_absent(kinds, destination):
-                raise PlanError("move destination has no observed absence")
+        elif disposition == "move":
+            # The keyset check above admits exactly required, or required plus a destination.
+            if "destination" not in row:
+                destination = _default_move_destination(kinds, path)
+            else:
+                destination = _path(row["destination"])
+                # Only observed absence is accepted: the destination's own absent entry, or an
+                # absent or walked ancestor. Declare a destination outside the walked roots in
+                # targets when investigating, then pass the same targets to plan.
+                if not _observed_absent(kinds, destination):
+                    raise PlanError("move destination has no observed absence")
             ops.append({"op": "move-file", "source": path,
                         "destination": destination, "source_digest": digest})
             source["preservation"] = store.retire_preimage(run_id, path) if occupying else destination
@@ -1077,6 +1113,120 @@ def self_test():
                 with self.subTest(destination=destination):
                     result = self.make_plan(decisions=[dict(decision, destination=destination)])
                     self.assertEqual(result.status, status, result.findings)
+
+        def test_default_move_destination(self):
+            # A move without a destination plans the spec 14.2 default from the row's own path,
+            # never stripped: legacy/OLD.md lands at .working/archive/moved/legacy/OLD.md, and a
+            # store-tree source keeps its .working/ prefix beneath the Move root. A non-occupying
+            # default Move is preserved at that destination; an occupying one is archived, and
+            # still moves to its default destination.
+            (self.root / "legacy").mkdir()
+            (self.root / "legacy/OLD.md").write_bytes(b"old\n")
+            (self.root / ".working").mkdir()
+            (self.root / ".working/TODO.md").write_bytes(b"todo\n")
+            self.sources = ["legacy", "legacy.md"]
+            decisions = [self.decision, dict(path="legacy/OLD.md", disposition="move", actor="fixture"),
+                         dict(path=".working/TODO.md", disposition="move", actor="fixture")]
+            result = self.make_plan(decisions=decisions)
+            self.assertEqual(result.status, store.VALID, result.findings)
+            p = tomllib.loads(result.plan.decode())
+            moves = dict((row["source"], row["destination"])
+                         for row in p["ops"] if row["op"] == "move-file")
+            self.assertEqual(moves, dict([
+                ("legacy/OLD.md", ".working/archive/moved/legacy/OLD.md"),
+                (".working/TODO.md", ".working/archive/moved/.working/TODO.md")]))
+            rows = dict((row["path"], row) for row in p["sources"])
+            old, todo = rows["legacy/OLD.md"], rows[".working/TODO.md"]
+            self.assertEqual((old["occupying"], old["preservation"]),
+                             (False, ".working/archive/moved/legacy/OLD.md"))
+            self.assertEqual((todo["occupying"], todo["preservation"]),
+                             (True, store.retire_preimage(p["run_id"], ".working/TODO.md")))
+            self.assertIn(dict(path=".working/archive/moved/legacy/OLD.md", digest=_digest(b"old\n")),
+                          p["effects"]["creations"])
+
+        def test_default_move_collision(self):
+            # An occupied default destination is a collision finding, never an overwrite (spec 14.2).
+            occupied = store.moved_dest("legacy.md")
+            (self.root / occupied).parent.mkdir(parents=True)
+            (self.root / occupied).write_bytes(b"planted\n")
+            result = self.make_plan(decisions=[dict(self.decision, disposition="move")])
+            self.assertEqual(result.status, store.CANNOT_EVALUATE)
+            self.assertIsNone(result.plan)
+            self.assertTrue(any("collision" in f and occupied in f for f in result.findings),
+                            result.findings)
+            self.assertEqual((self.root / occupied).read_bytes(), b"planted\n")
+
+        def test_default_move_store_base_unobservable(self):
+            # A homes-2 store excludes its control area from investigation, so the default
+            # destination's store base is excluded: its absence is unproven, which is
+            # cannot-evaluate naming the source.
+            import _opf_init
+            manifest = tomllib.loads(_opf_init.build_manifest())
+            manifest["opf"].update(homes=2, spec_version=store.HOMES2_SPEC_VERSION)
+            (self.root / ".working/toml").mkdir(parents=True)
+            (self.root / ".working/toml/manifest.toml").write_text(emit_checked(manifest),
+                                                                   encoding="utf-8")
+            (self.root / ".working/archive/moved").mkdir(parents=True)
+            self.with_init = False
+            with mock.patch.object(store, "SUPPORTED_HOMES", 2):
+                doc = tomllib.loads(self.observation().observation.decode())
+                result = self.make_plan(decisions=[dict(self.decision, disposition="move")])
+            self.assertIn(dict(path=".working/archive", reason="store-control"), doc["exclusions"])
+            self.assertEqual(result.status, store.CANNOT_EVALUATE)
+            self.assertIsNone(result.plan)
+            self.assertTrue(any("store base cannot be observed" in f and "'legacy.md'" in f
+                                for f in result.findings), result.findings)
+
+        def test_companion_store_refuses_moves(self):
+            # Stricter than spec 14.2, which scopes the refusal to the default Move: a pointer
+            # naming a store at another root refuses every plan, the default and an explicit Move
+            # alike.
+            import _opf_init
+            (self.root / "companion/.working/toml").mkdir(parents=True)
+            (self.root / "companion/.working/toml/manifest.toml").write_text(
+                _opf_init.build_manifest(), encoding="utf-8")
+            (self.root / ".opf.toml").write_text('[store]\ntarget = "dir:companion"\n',
+                                                 encoding="utf-8")
+            for decision in (dict(self.decision, disposition="move"),
+                             dict(self.decision, disposition="move", destination="archive/legacy.md")):
+                with self.subTest(destination=decision.get("destination")):
+                    result = plan(self.root, sources=self.sources, targets=self.all_targets(),
+                                  expected_observation_digest="sha256:" + "0" * 64, product="opf",
+                                  decisions=[decision], ops=self.base_ops(), now=self.now,
+                                  run_nonce="0123456789abcdef", bindings=self.bindings)
+                    self.assertEqual(result.status, store.CANNOT_EVALUATE)
+                    self.assertIsNone(result.plan)
+                    self.assertTrue(any("companion/remote store" in f for f in result.findings),
+                                    result.findings)
+
+        def test_protected_move_destinations(self):
+            # The planner refuses exactly the destinations apply refuses (the shared predicate
+            # _opf_adopt.protected_destination): .git and .aiqt at any depth, the product-root
+            # pointers and the store control area; an ordinary destination still plans.
+            run_id = "adopt-20260102T030405Z-0123456789abcdef"
+            protected = [".aiqt/x.md", "docs/.aiqt/x.md", ".opf.toml", ".opf.local.toml"]
+            self.targets = protected + ["moved.md"]
+            for destination in protected:
+                with self.subTest(destination=destination):
+                    result = self.make_plan(decisions=[dict(self.decision, disposition="move",
+                                                            destination=destination)])
+                    self.assertEqual(result.status, store.INVALID, result.findings)
+                    self.assertIsNone(result.plan)
+                    reason = schema.protected_destination(destination, run_id)
+                    self.assertIn("plan move-file destination is protected: " + reason, result.findings)
+            result = self.make_plan(decisions=[dict(self.decision, disposition="move",
+                                                    destination="moved.md")])
+            self.assertEqual(result.status, store.VALID, result.findings)
+            # An archive preservation copy is a destination too: a retire of a source with an
+            # .aiqt component refuses.
+            (self.root / "docs/.aiqt").mkdir(parents=True)
+            (self.root / "docs/.aiqt/notes.md").write_bytes(b"notes\n")
+            self.sources = ["docs", "legacy.md"]
+            retired = dict(path="docs/.aiqt/notes.md", disposition="retire", actor="fixture")
+            result = self.make_plan(decisions=[self.decision, retired])
+            self.assertEqual(result.status, store.INVALID, result.findings)
+            self.assertTrue(any("'docs/.aiqt/notes.md' preservation is protected" in f
+                                for f in result.findings), result.findings)
 
         def test_store_identity_and_generated_effects(self):
             # The init, render and receipt outputs are exact effects, each at the frozen store. Another
