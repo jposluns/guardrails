@@ -7392,7 +7392,12 @@ def _watchdog_completion_case(mode):
         # store's bytecode, every event's preregistered
         # callback restored around a case, a failing
         # registration and a failing save, the bound's
-        # live-case uniqueness wording).
+        # live-case uniqueness wording); and the fix 35 vectors
+        # (the entry callback's cell-free prelude, the save
+        # loop's non-allocating slot store, an injected restore
+        # failure abandoning later callbacks, a pre-existing
+        # local-event mask surviving a case, a planted
+        # interrupt right after the claim).
         # -- leg 19 bound (two identical copies, fix 30) --
         # derived_overrides IS the authoritative grammar. Every case
         # runs under every fixture state derived_overrides returns
@@ -7408,16 +7413,27 @@ def _watchdog_completion_case(mode):
         # free sys.monitoring tool id taken under a name unique to
         # the case among live cases (a completed case's name may
         # recur); every event's callback on that id is saved before
-        # the case takes it; once its driver has returned, an id
-        # still carrying that name has its events cleared and is
-        # freed, and every saved callback is re-registered on it,
-        # exactly; setup that fails re-registers only the callbacks
-        # it had saved and never frees an id it did not take; an id
+        # the case takes it, each held by a non-allocating store
+        # into a preallocated slot as its removal returns it, and
+        # the member's local-event mask on the id is saved before
+        # the case arms its entry event; once its driver has
+        # returned, an id still carrying that name has that mask
+        # restored exactly as saved and is freed -- freeing clears
+        # the id's callbacks and global events, not local events
+        # on other code objects -- and every saved callback is
+        # re-registered on it, exactly, every remaining slot even
+        # if one registration raises, the first such error
+        # re-raised; setup that fails re-registers only the
+        # callbacks it had saved, never frees an id it did not
+        # take, and releases an id it did take even when
+        # interrupted after the claim; an id
         # freed and retaken under another name is left alone; a run
         # whose observation cannot be held or is not intact after
         # its driver returns, or with an exception raised inside its
-        # entry callback, fails -- the callback stores a preallocated
-        # failure flag first, without allocating, and the flag alone
+        # entry callback, fails -- the callback captures no variable
+        # into a cell, allocates nothing before its protected region,
+        # and stores a preallocated failure flag first, without
+        # allocating, and the flag alone
         # fails the run, though under an interpreter allocation
         # failure inside the callback anything beyond that flag, the
         # recorded detail included, may be lost -- the entry frame's
@@ -7428,7 +7444,10 @@ def _watchdog_completion_case(mode):
         # deliberately replaces is listed in behavioural_overwrites
         # and must instead be loaded with no entry holding its
         # value, and any other deviation failing the check fails the
-        # suite. Only the default state must fire both the pending
+        # suite. An interpreter allocation failure or an audit hook
+        # raising anywhere in the observation machinery -- setup,
+        # callback or release -- is outside this bound. Only the
+        # default state must fire both the pending
         # point and the injected fault. Under a deviation, a run
         # whose pending point does not fire is checked at entry
         # only; one whose pending point fires must still raise that
@@ -7508,16 +7527,27 @@ def _watchdog_completion_case(mode):
             # free sys.monitoring tool id taken under a name unique to
             # the case among live cases (a completed case's name may
             # recur); every event's callback on that id is saved before
-            # the case takes it; once its driver has returned, an id
-            # still carrying that name has its events cleared and is
-            # freed, and every saved callback is re-registered on it,
-            # exactly; setup that fails re-registers only the callbacks
-            # it had saved and never frees an id it did not take; an id
+            # the case takes it, each held by a non-allocating store
+            # into a preallocated slot as its removal returns it, and
+            # the member's local-event mask on the id is saved before
+            # the case arms its entry event; once its driver has
+            # returned, an id still carrying that name has that mask
+            # restored exactly as saved and is freed -- freeing clears
+            # the id's callbacks and global events, not local events
+            # on other code objects -- and every saved callback is
+            # re-registered on it, exactly, every remaining slot even
+            # if one registration raises, the first such error
+            # re-raised; setup that fails re-registers only the
+            # callbacks it had saved, never frees an id it did not
+            # take, and releases an id it did take even when
+            # interrupted after the claim; an id
             # freed and retaken under another name is left alone; a run
             # whose observation cannot be held or is not intact after
             # its driver returns, or with an exception raised inside its
-            # entry callback, fails -- the callback stores a preallocated
-            # failure flag first, without allocating, and the flag alone
+            # entry callback, fails -- the callback captures no variable
+            # into a cell, allocates nothing before its protected region,
+            # and stores a preallocated failure flag first, without
+            # allocating, and the flag alone
             # fails the run, though under an interpreter allocation
             # failure inside the callback anything beyond that flag, the
             # recorded detail included, may be lost -- the entry frame's
@@ -7528,7 +7558,10 @@ def _watchdog_completion_case(mode):
             # deliberately replaces is listed in behavioural_overwrites
             # and must instead be loaded with no entry holding its
             # value, and any other deviation failing the check fails the
-            # suite. Only the default state must fire both the pending
+            # suite. An interpreter allocation failure or an audit hook
+            # raising anywhere in the observation machinery -- setup,
+            # callback or release -- is outside this bound. Only the
+            # default state must fire both the pending
             # point and the injected fault. Under a deviation, a run
             # whose pending point does not fire is checked at entry
             # only; one whose pending point fires must still raise that
@@ -8266,15 +8299,22 @@ def _watchdog_completion_case(mode):
                 # fix 33 (QA54 codex BLOCKER): a failure HERE -- an
                 # attribute read raising, anything at all -- must
                 # never pass silently; it is recorded, and the check
-                # below fails the run on the record
+                # below fails the run on the record. fix 35 (QA56
+                # codex BLOCKER): the callback captures NOTHING and
+                # allocates nothing before the try -- the pre-fix
+                # generator expression captured `fixture`, whose
+                # cell was allocated before the protected region,
+                # where an allocation failure skipped the flag --
+                # so each attribute is read inline
                 try:
                     frame = sys._getframe(1)
                     fixture = absent
                     if frame.f_code is started:
                         fixture = frame.f_locals.get("self", absent)
-                    entries.append(dict(
-                        (attr, getattr(fixture, attr, absent))
-                        for attr in state))
+                    entry = {}
+                    for attr in state:
+                        entry[attr] = getattr(fixture, attr, absent)
+                    entries.append(entry)
                 except BaseException as exc:
                     # fix 34 (QA55 codex BLOCKER): the flag
                     # FIRST, by a store that allocates nothing,
@@ -8283,48 +8323,90 @@ def _watchdog_completion_case(mode):
                     observation_incomplete[0] = True
                     observation_failures.append(exc)
 
-            tool, saved_callbacks = None, []
-            for candidate in entry_tool_ids:
-                if monitoring.get_tool(candidate) is not None:
-                    continue
-                saved, taken = [], False
-                try:
-                    # fix 34 (QA55 codex MAJOR): EVERY event's
-                    # callback on the id -- registration needs no
-                    # claimed id -- is saved before the case
-                    # takes it, to be restored exactly on
-                    # release; free_tool_id clears them all
-                    for event in callback_events:
-                        saved.append((event,
-                                      monitoring.register_callback(
-                                          candidate, event, None)))
+            def restore_saved(target, slots):
+                # fix 35 (QA56 codex MAJOR): every saved slot is
+                # put back even if one registration raises; the
+                # first error is re-raised once every slot has
+                # been tried, so a failing restore cannot
+                # abandon the callbacks saved after it
+                error = None
+                for at, event in enumerate(callback_events):
+                    callback = slots[at]
+                    if callback is absent:
+                        continue
                     try:
-                        monitoring.use_tool_id(candidate,
-                                               case_tool_name)
-                        taken = True
-                    except ValueError:
-                        pass
-                finally:
-                    if not taken:
-                        # fix 34 (QA55 codex MAJOR): setup that
-                        # fails puts back only the callbacks it
-                        # saved and never frees an id it did not
-                        # take
-                        for event, callback in saved:
-                            if callback is not None:
-                                monitoring.register_callback(
-                                    candidate, event, callback)
-                if taken:
-                    tool, saved_callbacks = candidate, saved
-                    break
-            if tool is None:
-                raise AssertionError(unobserved_entries, label,
-                                     "no free tool id")
+                        monitoring.register_callback(target, event,
+                                                     callback)
+                    except BaseException as exc:
+                        if error is None:
+                            error = exc
+                if error is not None:
+                    raise error
+
+            tool, saved_callbacks = None, ()
             outcome, intact, registered = None, False, False
+            saved_local_events = None
             try:
+                for candidate in entry_tool_ids:
+                    if monitoring.get_tool(candidate) is not None:
+                        continue
+                    # fix 35 (QA56 codex MAJOR): the save slots
+                    # are preallocated, and each event's previous
+                    # callback is held by an item store -- which
+                    # allocates nothing -- the instant its
+                    # removal returns it, so an allocation
+                    # failure cannot lose a removed callback;
+                    # `absent` marks a slot the save never
+                    # reached
+                    saved = [absent] * len(callback_events)
+                    taken = False
+                    try:
+                        # fix 34 (QA55 codex MAJOR): EVERY
+                        # event's callback on the id --
+                        # registration needs no claimed id -- is
+                        # saved before the case takes it, to be
+                        # restored exactly on release;
+                        # free_tool_id clears them all
+                        for at, event in enumerate(
+                                callback_events):
+                            saved[at] = monitoring.register_callback(
+                                candidate, event, None)
+                        try:
+                            # fix 35 (QA56 gemini): the id and
+                            # its saved callbacks are published
+                            # BEFORE the claim and the taken
+                            # flag, so an interrupt landing
+                            # after the claim finds the release
+                            # below armed and never leaves a
+                            # taken id unreleased
+                            tool, saved_callbacks = candidate, saved
+                            monitoring.use_tool_id(candidate,
+                                                   case_tool_name)
+                            taken = True
+                        except ValueError:
+                            tool, saved_callbacks = None, ()
+                    finally:
+                        if not taken:
+                            # fix 34 (QA55 codex MAJOR): setup
+                            # that fails puts back only the
+                            # callbacks it saved and never frees
+                            # an id it did not take
+                            restore_saved(candidate, saved)
+                    if taken:
+                        break
+                if tool is None:
+                    raise AssertionError(unobserved_entries, label,
+                                         "no free tool id")
                 monitoring.register_callback(tool, entry_event,
                                              entered)
                 registered = True
+                # fix 35 (QA56 codex MAJOR): the member's
+                # pre-existing local-event mask on this id -- an
+                # unclaimed id keeps its per-code masks -- is
+                # saved before setup overwrites it, to be
+                # restored exactly at release
+                saved_local_events = monitoring.get_local_events(
+                    tool, member_code)
                 monitoring.set_local_events(tool, member_code,
                                             entry_event)
                 try:
@@ -8339,8 +8421,18 @@ def _watchdog_completion_case(mode):
                 # release exactly the id this case took; an id a
                 # driver freed, and someone else then took -- under
                 # the shared name included -- is left alone (fix 33)
-                if monitoring.get_tool(tool) == case_tool_name:
-                    monitoring.set_local_events(tool, member_code, 0)
+                if (tool is not None
+                        and monitoring.get_tool(tool)
+                        == case_tool_name):
+                    # fix 35 (QA56 codex MAJOR, claude MINOR):
+                    # the member's local-event mask goes back
+                    # exactly as saved -- a mask never saved was
+                    # never overwritten -- and freeing clears no
+                    # local events on other code objects, so
+                    # none need saving
+                    if saved_local_events is not None:
+                        monitoring.set_local_events(
+                            tool, member_code, saved_local_events)
                     released = (monitoring.register_callback(
                         tool, entry_event, None) if registered
                         else None)
@@ -8352,10 +8444,7 @@ def _watchdog_completion_case(mode):
                     # the id exactly as this case found it; a
                     # registration that failed is not treated as
                     # a release
-                    for event, callback in saved_callbacks:
-                        if callback is not None:
-                            monitoring.register_callback(
-                                tool, event, callback)
+                    restore_saved(tool, saved_callbacks)
                     intact = intact and released is entered
             # fix 34 (QA55 codex BLOCKER): the flag, checked
             # before any other outcome; the detailed record may
@@ -9363,6 +9452,219 @@ def _watchdog_completion_case(mode):
             "callbacks it had removed (fix 34, QA55)", setup_tool,
             [event for (event, callback), (_, after)
              in zip(save_prior, save_after)
+             if after is not callback])
+        # fix 35 (QA56 codex BLOCKER): the entry callback
+        # captures NOTHING -- a captured variable's cell is
+        # allocated by MAKE_CELL before the try, where an
+        # allocation failure skips the flag -- and every
+        # instruction before the protected region's first
+        # LOAD_GLOBAL comes from a fixed non-allocating
+        # prelude
+        entered_code = captured_callbacks[-1].__code__
+        assert entered_code.co_cellvars == (), (
+            "the entry callback captures a variable into a "
+            "cell, allocated before its protected region "
+            "(fix 35, QA56)", entered_code.co_cellvars)
+        prelude_free = frozenset(("RESUME", "COPY_FREE_VARS",
+                                  "NOP", "NOT_TAKEN"))
+        prelude_ops = []
+        for instruction in dis.get_instructions(entered_code):
+            if instruction.opname == "LOAD_GLOBAL":
+                break
+            prelude_ops.append(instruction.opname)
+        assert set(prelude_ops) <= prelude_free, (
+            "an operation before the entry callback's protected "
+            "region may allocate (fix 35, QA56)",
+            sorted(set(prelude_ops) - prelude_free))
+        # fix 35 (QA56 codex MAJOR): the save loop holds each
+        # removed callback by an item store into its
+        # preallocated slot, with nothing between the removal
+        # returning and the store -- an allocating record
+        # there (the pre-fix append of a fresh tuple) can lose
+        # the callback the removal just returned
+        case_instructions = list(dis.get_instructions(
+            entry_checked_case.__code__))
+        held_ops = frozenset(("LOAD_FAST", "LOAD_FAST_BORROW",
+                              "LOAD_FAST_LOAD_FAST",
+                              "LOAD_FAST_BORROW_LOAD_FAST_BORROW",
+                              "COPY", "SWAP", "NOP", "NOT_TAKEN"))
+        held_saves = []
+        for at, instruction in enumerate(case_instructions):
+            if instruction.opname != "STORE_SUBSCR":
+                continue
+            back = at
+            while case_instructions[back - 1].opname in held_ops:
+                back -= 1
+            if (case_instructions[back - 1].opname == "CALL"
+                    and any(prior.argval == "register_callback"
+                            for prior in case_instructions[
+                                max(0, back - 9):back])):
+                held_saves.append(at)
+        assert held_saves, (
+            "the save loop no longer holds each removed "
+            "callback by a non-allocating item store into its "
+            "preallocated slot (fix 35, QA56)")
+        # fix 35 (QA56 codex MAJOR): a restoration failure at
+        # release must not abandon the saved callbacks after
+        # it -- every remaining slot is still put back and the
+        # first error propagates
+        restore_tool = next(tool for tool in entry_tool_ids
+                            if monitoring.get_tool(tool) is None)
+        restore_prior = [(event, preregistered_for(event))
+                         for event in callback_events]
+        for event, callback in restore_prior:
+            monitoring.register_callback(restore_tool, event,
+                                         callback)
+        restore_rejected = []
+
+        def restore_rejecting(tool, event, func):
+            if (event == raise_event and not restore_rejected
+                    and getattr(func, "fix34_event", None)
+                    == raise_event):
+                restore_rejected.append(func)
+                raise RuntimeError(
+                    "injected restore failure (fix 35)")
+            return real_register(tool, event, func)
+
+        try:
+            with patch.object(monitoring, "register_callback",
+                              restore_rejecting):
+                try:
+                    drive_matrix(
+                        [held_case],
+                        dict([(held_case[0], [dict(armed=True)])]),
+                        lambda: [RuntimeError(
+                            "injected cleanup fault")])
+                except RuntimeError as exc:
+                    assert ("injected restore failure"
+                            in str(exc)), exc
+                else:
+                    raise AssertionError(
+                        "the injected restore failure did not "
+                        "propagate (fix 35, QA56)")
+        finally:
+            restore_after = [
+                (event, monitoring.register_callback(
+                    restore_tool, event, None))
+                for event, callback in restore_prior]
+        assert (restore_rejected
+                and monitoring.get_tool(restore_tool) is None), (
+            "the injected restore failure never fired, or left "
+            "the id claimed (fix 35, QA56)",
+            monitoring.get_tool(restore_tool))
+        restore_abandoned = [
+            event for (event, callback), (_, after)
+            in zip(restore_prior, restore_after)
+            if after is not callback and event != raise_event]
+        assert not restore_abandoned, (
+            "a failing restore abandoned the saved callbacks "
+            "after it when the case released its tool id "
+            "(fix 35, QA56)", restore_abandoned)
+        # fix 35 (QA56 codex MAJOR, claude MINOR): a
+        # pre-existing local-event mask -- an unclaimed id
+        # keeps its per-code masks -- survives a case exactly:
+        # the member's mask is saved before setup arms the
+        # entry event and restored at release, and freeing
+        # clears no local events on other code objects
+        def mask_probe():
+            pass
+
+        return_event = monitoring.events.PY_RETURN
+        mask_tool = next(tool for tool in entry_tool_ids
+                         if monitoring.get_tool(tool) is None)
+        member_finish = vars(
+            emit._FixtureProcess)["_finish_close"].__code__
+        monitoring.use_tool_id(mask_tool, "opf fix 35 mask pin")
+        try:
+            monitoring.set_local_events(mask_tool, member_finish,
+                                        return_event)
+            monitoring.set_local_events(mask_tool,
+                                        mask_probe.__code__,
+                                        return_event)
+        finally:
+            monitoring.free_tool_id(mask_tool)
+        try:
+            drive_matrix([held_case],
+                         dict([(held_case[0], [dict(armed=True)])]),
+                         lambda: [RuntimeError(
+                             "injected cleanup fault")])
+        finally:
+            mask_after = (
+                monitoring.get_local_events(mask_tool,
+                                            member_finish),
+                monitoring.get_local_events(mask_tool,
+                                            mask_probe.__code__))
+            monitoring.use_tool_id(mask_tool, "opf fix 35 mask pin")
+            try:
+                monitoring.set_local_events(mask_tool,
+                                            member_finish, 0)
+                monitoring.set_local_events(mask_tool,
+                                            mask_probe.__code__, 0)
+            finally:
+                monitoring.free_tool_id(mask_tool)
+        assert mask_after == (return_event, return_event), (
+            "a pre-existing local-event mask did not survive "
+            "the case exactly (fix 35, QA56)", mask_after,
+            return_event)
+        # fix 35 (QA56 gemini): an interrupt landing right
+        # after the claim -- after use_tool_id returns, before
+        # setup finishes -- must not leave the id taken with
+        # its callbacks cleared: the id and its saved
+        # callbacks are published before the claim, so the
+        # release still runs
+        class PlantedInterrupt(BaseException):
+            pass
+
+        real_use = monitoring.use_tool_id
+        claim_interrupted = []
+
+        def interrupting_use(tool, name):
+            result = real_use(tool, name)
+            if (not claim_interrupted
+                    and name.startswith(entry_tool_name)):
+                claim_interrupted.append(tool)
+                raise PlantedInterrupt
+            return result
+
+        interrupt_tool = next(tool for tool in entry_tool_ids
+                              if monitoring.get_tool(tool) is None)
+        interrupt_prior = [(event, preregistered_for(event))
+                           for event in callback_events]
+        for event, callback in interrupt_prior:
+            monitoring.register_callback(interrupt_tool, event,
+                                         callback)
+        try:
+            with patch.object(monitoring, "use_tool_id",
+                              interrupting_use):
+                try:
+                    drive_matrix(
+                        [held_case],
+                        dict([(held_case[0], [dict(armed=True)])]),
+                        lambda: [RuntimeError(
+                            "injected cleanup fault")])
+                except PlantedInterrupt:
+                    pass
+                else:
+                    raise AssertionError(
+                        "the planted interrupt right after the "
+                        "claim did not propagate (fix 35, QA56)")
+        finally:
+            interrupt_after = [
+                (event, monitoring.register_callback(
+                    interrupt_tool, event, None))
+                for event, callback in interrupt_prior]
+        assert claim_interrupted == [interrupt_tool], (
+            "the planted interrupt fired on an unexpected id "
+            "(fix 35, QA56)", claim_interrupted, interrupt_tool)
+        assert monitoring.get_tool(interrupt_tool) is None, (
+            "an interrupt right after the claim left the id "
+            "taken and unreleased (fix 35, QA56)", interrupt_tool,
+            monitoring.get_tool(interrupt_tool))
+        assert interrupt_after == interrupt_prior, (
+            "an interrupt right after the claim lost a saved "
+            "callback (fix 35, QA56)",
+            [event for (event, callback), (_, after)
+             in zip(interrupt_prior, interrupt_after)
              if after is not callback])
         mutant_member = copy.deepcopy(
             scope["m:_FixtureProcess._finish_close"])
