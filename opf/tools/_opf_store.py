@@ -1377,8 +1377,7 @@ def _validate_base(base, findings):
             # validation: older tooling MUST refuse a 1.3.0 (or any above-supported) declaration rather
             # than certify it under legacy checks (spec 9.2). The one exception is the exact reserved
             # homes-2 declaration pair, spec_version 2.0.0 with homes = 2 (spec 4.2): homes_generation()
-            # gates its activation on SUPPORTED_HOMES, and the homes-migration planner must keep
-            # recognizing an already-migrated store idempotently.
+            # gates its activation on SUPPORTED_HOMES.
             findings.append("[opf].spec_version {} is above the {} this tooling implements; "
                             "upgrade the tooling before operating on this store "
                             "(spec 9.2; fail-closed)".format(_safe_display(sv), SUPPORTED_SPEC_VERSION))
