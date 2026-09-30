@@ -111,6 +111,35 @@ def check_pages(pages, allowlist, href=DISCLOSURE_HREF):
     return findings
 
 
+def _close_fd_propagating(fd):
+    """Close a descriptor on a FAIL-CLOSED path: the close error PROPAGATES, but a raising close never
+    leaves the descriptor itself retained. On a raise, fstat CONFIRMS the descriptor is gone (EBADF means it
+    was already released); only when it is genuinely STILL open is it closed once more (fstat has just proven
+    it valid, so this is not a blind double-close), and a failure of that close is surfaced to stderr. The
+    ORIGINAL close error re-raises either way. Inlined from opf/tools/_journal._close_fd_propagating (the
+    same body) so this tool keeps working without opf/tools present (copied, mutated, or shipped alone)."""
+    try:
+        os.close(fd)
+        return
+    except OSError as exc:
+        first = exc
+    try:
+        os.fstat(fd)
+    except OSError:
+        raise first                                       # confirmed gone: still propagate the close error
+    try:
+        os.close(fd)                                      # genuinely still open (fstat proved it valid): release it
+    except OSError as exc2:
+        # The diagnostic itself must never replace the original error; a broken
+        # stderr is swallowed so the original close error below still propagates fail-closed.
+        try:
+            print("warning: fail-closed close of fd {} failed to release it ({} / {}); fail-surfaced"
+                  .format(fd, first, exc2), file=sys.stderr)
+        except OSError:
+            pass
+    raise first
+
+
 def _read_regular_page(path):
     """Read a page's text through a fail-closed, symlink-safe open. Opens O_NOFOLLOW (a symlink at the final
     component fails - never followed) + O_NONBLOCK (a FIFO open returns instead of blocking), fstats the
@@ -126,7 +155,7 @@ def _read_regular_page(path):
             return fh.read()
     finally:
         if fd >= 0:
-            os.close(fd)
+            _close_fd_propagating(fd)
 
 
 def _run_one(root, subdir, href, allowlist):

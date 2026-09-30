@@ -1888,6 +1888,35 @@ def _decode_data_script(url):
     return _decode_data_url(url, _JS_DATA_MEDIA, "script")
 
 
+def _close_fd_propagating(fd):
+    """Close a descriptor on a FAIL-CLOSED path: the close error PROPAGATES, but a raising close never
+    leaves the descriptor itself retained. On a raise, fstat CONFIRMS the descriptor is gone (EBADF means it
+    was already released); only when it is genuinely STILL open is it closed once more (fstat has just proven
+    it valid, so this is not a blind double-close), and a failure of that close is surfaced to stderr. The
+    ORIGINAL close error re-raises either way. Inlined from opf/tools/_journal._close_fd_propagating (the
+    same body) so this tool keeps working without opf/tools present (copied, mutated, or shipped alone)."""
+    try:
+        os.close(fd)
+        return
+    except OSError as exc:
+        first = exc
+    try:
+        os.fstat(fd)
+    except OSError:
+        raise first                                       # confirmed gone: still propagate the close error
+    try:
+        os.close(fd)                                      # genuinely still open (fstat proved it valid): release it
+    except OSError as exc2:
+        # The diagnostic itself must never replace the original error; a broken
+        # stderr is swallowed so the original close error below still propagates fail-closed.
+        try:
+            print("warning: fail-closed close of fd {} failed to release it ({} / {}); fail-surfaced"
+                  .format(fd, first, exc2), file=sys.stderr)
+        except OSError:
+            pass
+    raise first
+
+
 def _open_regular_nofollow(path, label):
     """Open `path` O_RDONLY with no-follow, NON-BLOCKING semantics and confirm the OPENED descriptor is a
     REGULAR file, returning (fd, st); the caller MUST close fd. O_NOFOLLOW rejects a symlink final component
@@ -1908,11 +1937,11 @@ def _open_regular_nofollow(path, label):
     try:
         st = os.fstat(fd)
     except OSError as exc:
-        os.close(fd)
+        _close_fd_propagating(fd)
         raise _FailClosed("register {} could not be fstat'd ({} errno={})".format(
             safe, type(exc).__name__, getattr(exc, "errno", None)))
     if not stat.S_ISREG(st.st_mode):
-        os.close(fd)
+        _close_fd_propagating(fd)
         raise _FailClosed("register {} is not a regular file".format(safe))
     return fd, st
 
@@ -1944,7 +1973,7 @@ def _read_regular_bounded(path, label, limit):
             chunks.append(chunk)
             remaining -= len(chunk)
     finally:
-        os.close(fd)
+        _close_fd_propagating(fd)
     data = b"".join(chunks)
     if len(data) > limit:
         raise _FailClosed("register {} exceeds the {}-byte pre-read ceiling".format(safe, limit))

@@ -398,11 +398,19 @@ def _atomic_publish(root, relpath, text):
     never a torn one."""
     data = text.encode("utf-8")
     root_fd = _open_root_fd(root)
+    pfd = None
     try:
         _ensure_parent_dirs(root_fd, relpath)
         pfd, name = _journal._open_parent(root_fd, relpath)
     finally:
-        os.close(root_fd)
+        # pfd is HELD across the root close (the _journal.open_journal_root_from_path idiom): a raising
+        # root close releases pfd quietly and keeps propagating, so neither descriptor stays retained.
+        try:
+            _journal._close_fd_propagating(root_fd)
+        except OSError:
+            if pfd is not None:
+                _journal._close_fd_quietly(pfd)
+            raise
     tmpname = name + ".tmp.{}".format(os.getpid())
     try:
         fd = os.open(tmpname, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o644, dir_fd=pfd)
@@ -410,11 +418,11 @@ def _atomic_publish(root, relpath, text):
             _journal._write_all(fd, data)
             os.fsync(fd)
         finally:
-            os.close(fd)
+            _journal._close_fd_propagating(fd)
         os.replace(tmpname, name, src_dir_fd=pfd, dst_dir_fd=pfd)
         os.fsync(pfd)
     finally:
-        os.close(pfd)
+        _journal._close_fd_propagating(pfd)
 
 
 def _remove_contained(root, relpath):
@@ -424,9 +432,13 @@ def _remove_contained(root, relpath):
     try:
         pfd, name = _journal._open_parent(root_fd, relpath)
     except (OSError, _journal.JournalError):
-        os.close(root_fd)
+        _journal._close_fd_propagating(root_fd)
         return
-    os.close(root_fd)
+    try:
+        _journal._close_fd_propagating(root_fd)
+    except OSError:
+        _journal._close_fd_quietly(pfd)                  # pfd held across the root close: never stranded
+        raise
     try:
         try:
             os.unlink(name, dir_fd=pfd)
@@ -434,7 +446,7 @@ def _remove_contained(root, relpath):
             return
         os.fsync(pfd)
     finally:
-        os.close(pfd)
+        _journal._close_fd_propagating(pfd)
 
 
 # --- op construction and the staged reader ------------------------------------------------------------
@@ -501,7 +513,7 @@ def _capture_pin_preimages(root, root_fd, transition_id, ops):
         # a re-resolved absolute path an ancestor symlink could redirect off-tree.
         _journal.capture_preimages(pfd, root / PREIMAGES_REL / transition_id, root_fd, ops)
     finally:
-        os.close(pfd)
+        _journal._close_fd_propagating(pfd)
 
 
 def _contained_swap(root_fd, ops, staged_reader):
@@ -584,7 +596,7 @@ def _blocking_open_journal(root, root_fd):
     try:
         jfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
     except OSError:
-        os.close(pfd)
+        _journal._close_fd_propagating(pfd)
         return True
     try:
         for entry in os.listdir(jfd):
@@ -597,8 +609,10 @@ def _blocking_open_journal(root, root_fd):
     except (OSError, _journal.JournalError):
         return True                                       # fail closed on any read/parse error
     finally:
-        os.close(jfd)
-        os.close(pfd)
+        try:
+            _journal._close_fd_propagating(jfd)
+        finally:
+            _journal._close_fd_propagating(pfd)
 
 
 def do_pin(root, staged, transition_id=None):
@@ -665,7 +679,7 @@ def do_pin(root, staged, transition_id=None):
     except (PinError, _journal.JournalError, OSError, KeyError, ValueError) as exc:
         return _fail(exc)
     finally:
-        os.close(root_fd)
+        _journal._close_fd_propagating(root_fd)
     print("pin: onboarding pin at {} (transition {})".format(release["version"], transition_id))
     return EXIT_OK
 
@@ -754,9 +768,9 @@ def do_un_adopt(root, authorizer, reason):
         _atomic_publish(root, UNADOPT_REL, _render_unadopt(intent))
         _complete_un_adopt(root, root_fd, ops, intent)
     except (PinError, _journal.JournalError, OSError, KeyError, ValueError) as exc:
-        os.close(root_fd)
+        _journal._close_fd_propagating(root_fd)
         return _fail(exc)
-    os.close(root_fd)
+    _journal._close_fd_propagating(root_fd)
     print("un-adopt: reversed transition {} to pre-adoption and recorded the terminal history row"
           .format(txn_rec["transition-id"]))
     return EXIT_OK
@@ -790,7 +804,7 @@ def _rmtree_contained(pfd, name):
         for child in os.listdir(dfd):
             _rmtree_contained(dfd, child)
     finally:
-        os.close(dfd)
+        _journal._close_fd_propagating(dfd)
     os.rmdir(name, dir_fd=pfd)
 
 
@@ -811,7 +825,7 @@ def _sweep_orphan_preimages(root, root_fd):
         _rmtree_contained(pfd, name)
         os.fsync(pfd)
     finally:
-        os.close(pfd)
+        _journal._close_fd_propagating(pfd)
     return 1
 
 
@@ -853,7 +867,7 @@ def _reverse_swap(root, root_fd, ops):
                     pass
             os.fsync(pfd)
         finally:
-            os.close(pfd)
+            _journal._close_fd_propagating(pfd)
 
 
 def _trim_last_pin_row(root, root_fd, txn):
@@ -1027,9 +1041,9 @@ def do_recover(root):
         _remove_contained(root, TRANSITION_REL)
         _sweep_orphan_preimages(root, root_fd)
     except (PinError, _journal.JournalError, OSError, KeyError, ValueError) as exc:
-        os.close(root_fd)
+        _journal._close_fd_propagating(root_fd)
         return _fail(exc)
-    os.close(root_fd)
+    _journal._close_fd_propagating(root_fd)
     print("recover: transition {} reversed to the prior state; re-run `pin` to retry".format(transition_id))
     return EXIT_OK
 
@@ -1044,9 +1058,12 @@ def do_status(root):
         rows = read_history(root_fd)
         txn = read_transition(root_fd)
     except PinError as exc:
-        os.close(root_fd)
+        _journal._close_fd_propagating(root_fd)
         return _fail(exc)
-    os.close(root_fd)
+    except BaseException:
+        _journal._close_fd_quietly(root_fd)              # a raw error (e.g. a retained close below) never strands root_fd
+        raise
+    _journal._close_fd_propagating(root_fd)
     if pin is None and rows is None and txn is None:
         print("status: not adopted (no pin state)")
         return EXIT_OK

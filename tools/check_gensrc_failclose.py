@@ -221,6 +221,35 @@ def _validate_contained_regular(path, sandbox_real, where):
                                 .format(where, real, sandbox_real))
 
 
+def _close_fd_propagating(fd):
+    """Close a descriptor on a FAIL-CLOSED path: the close error PROPAGATES, but a raising close never
+    leaves the descriptor itself retained. On a raise, fstat CONFIRMS the descriptor is gone (EBADF means it
+    was already released); only when it is genuinely STILL open is it closed once more (fstat has just proven
+    it valid, so this is not a blind double-close), and a failure of that close is surfaced to stderr. The
+    ORIGINAL close error re-raises either way. Inlined from opf/tools/_journal._close_fd_propagating (the
+    same body) so this tool keeps working without opf/tools present (copied, mutated, or shipped alone)."""
+    try:
+        os.close(fd)
+        return
+    except OSError as exc:
+        first = exc
+    try:
+        os.fstat(fd)
+    except OSError:
+        raise first                                       # confirmed gone: still propagate the close error
+    try:
+        os.close(fd)                                      # genuinely still open (fstat proved it valid): release it
+    except OSError as exc2:
+        # The diagnostic itself must never replace the original error; a broken
+        # stderr is swallowed so the original close error below still propagates fail-closed.
+        try:
+            print("warning: fail-closed close of fd {} failed to release it ({} / {}); fail-surfaced"
+                  .format(fd, first, exc2), file=sys.stderr)
+        except OSError:
+            pass
+    raise first
+
+
 def _read_bytes_safe(path, sandbox_real, where):
     """Read a target's bytes after re-validating it is a contained regular file, opening O_NOFOLLOW so a
     final-component symlink cannot be followed."""
@@ -235,7 +264,7 @@ def _read_bytes_safe(path, sandbox_real, where):
             chunks.append(block)
         return b"".join(chunks)
     finally:
-        os.close(fd)
+        _close_fd_propagating(fd)
 
 
 def _write_bytes_safe(path, data, sandbox_real, where):
@@ -246,7 +275,7 @@ def _write_bytes_safe(path, data, sandbox_real, where):
     try:
         os.write(fd, data)
     finally:
-        os.close(fd)
+        _close_fd_propagating(fd)
 
 
 def _sanitized_env(overrides=None):

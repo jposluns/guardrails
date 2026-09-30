@@ -169,10 +169,10 @@ def _open_archive_dir(root):
     try:
         for comp in ARCHIVE_REL.split("/"):
             nxt = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            os.close(fd)
-            fd = nxt
+            prev, fd = fd, nxt                              # held first: a raising close cannot strand nxt
+            _journal._close_fd_propagating(prev)
     except OSError as exc:
-        os.close(fd)
+        _journal._close_fd_propagating(fd)
         raise GateError("cannot open archive path component under {} through a no-follow handle ({}); a "
                         "symlinked ancestor is refused (8.2)".format(root, exc))
     return fd
@@ -205,11 +205,11 @@ def _read_archive_payload(root, sha):
                     raise GateError("archived payload for {} is not a regular file (8.2)".format(sha))
                 return _read_all_fd(pfd)
             finally:
-                os.close(pfd)
+                _journal._close_fd_propagating(pfd)
         finally:
-            os.close(shafd)
+            _journal._close_fd_propagating(shafd)
     finally:
-        os.close(archfd)
+        _journal._close_fd_propagating(archfd)
 
 
 def _archived_text(root, sha):
@@ -609,7 +609,7 @@ def check_unit_coverage(root, cw):
                                 "successor set {} (9.1)".format(entry.name, unit, sorted(recorded_s),
                                                                 component_succs[unit]))
     finally:
-        os.close(jr_fd)
+        _journal._close_fd_propagating(jr_fd)
     if have_completed and not cw.get("mapping"):
         findings.append("a completed cutover exists but the crosswalk has no mapping rows (9.1)")
     return findings

@@ -150,6 +150,35 @@ def _toml_str(value):
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
 
 
+def _close_fd_propagating(fd):
+    """Close a descriptor on a FAIL-CLOSED path: the close error PROPAGATES, but a raising close never
+    leaves the descriptor itself retained. On a raise, fstat CONFIRMS the descriptor is gone (EBADF means it
+    was already released); only when it is genuinely STILL open is it closed once more (fstat has just proven
+    it valid, so this is not a blind double-close), and a failure of that close is surfaced to stderr. The
+    ORIGINAL close error re-raises either way. Inlined from opf/tools/_journal._close_fd_propagating (the
+    same body) so this tool keeps working without opf/tools present (copied, mutated, or shipped alone)."""
+    try:
+        os.close(fd)
+        return
+    except OSError as exc:
+        first = exc
+    try:
+        os.fstat(fd)
+    except OSError:
+        raise first                                       # confirmed gone: still propagate the close error
+    try:
+        os.close(fd)                                      # genuinely still open (fstat proved it valid): release it
+    except OSError as exc2:
+        # The diagnostic itself must never replace the original error; a broken
+        # stderr is swallowed so the original close error below still propagates fail-closed.
+        try:
+            print("warning: fail-closed close of fd {} failed to release it ({} / {}); fail-surfaced"
+                  .format(fd, first, exc2), file=sys.stderr)
+        except OSError:
+            pass
+    raise first
+
+
 def _open_dir_at(dir_fd, name, create):
     """G8/G9: open directory `name` beneath dir_fd through an O_DIRECTORY|O_NOFOLLOW handle so a symlinked
     component can never redirect the archive out of the tree, creating it first when `create`. When a new
@@ -175,7 +204,7 @@ def _open_dir_at(dir_fd, name, create):
         try:
             os.fsync(dir_fd)                              # G9: persist the newly-created directory entry
         except OSError as exc:
-            os.close(fd)
+            _close_fd_propagating(fd)
             raise AdoptError("cannot fsync the parent after creating {!r} ({}); durability not confirmed, "
                              "fail-closed".format(name, exc))
     return fd
@@ -190,12 +219,13 @@ def _walk_components(base_fd, names, create):
     try:
         for name in names:
             nxt = _open_dir_at(fd, name, create)
-            if close_prev:
-                os.close(fd)
+            prev, prev_owned = fd, close_prev             # held first: a raising close cannot strand nxt
             fd, close_prev = nxt, True
+            if prev_owned:
+                _close_fd_propagating(prev)
     except BaseException:
         if close_prev:
-            os.close(fd)
+            _close_fd_propagating(fd)
         raise
     return fd
 
@@ -215,7 +245,7 @@ def _read_payload_fd(entry_fd):
             raise AdoptError("archived payload is not a regular file")
         return _read_fd_all(pfd)
     finally:
-        os.close(pfd)
+        _close_fd_propagating(pfd)
 
 
 _TMP_SEQ = itertools.count()
@@ -242,7 +272,7 @@ def _verify_published_payload(entry_fd, digest, tmp_stat):
         if hashlib.sha256(_read_fd_all(pfd)).hexdigest() != digest:
             raise AdoptError("published payload {}/payload does not hash to its digest".format(digest))
     finally:
-        os.close(pfd)
+        _close_fd_propagating(pfd)
 
 
 def _write_payload(entry_fd, digest, data):
@@ -309,7 +339,7 @@ def archive_file(archive_fd, data):
         _write_payload(entry_fd, digest, data)
         return digest
     finally:
-        os.close(entry_fd)
+        _close_fd_propagating(entry_fd)
 
 
 def _read_fd_all(fd):
@@ -367,7 +397,7 @@ def build_candidates(legacy_root, archive_fd, successor_texts):
             owner = os.fstat(fd).st_uid
             data = _read_fd_all(fd)                        # archive raw bytes FIRST (before any pointers)
         finally:
-            os.close(fd)
+            _close_fd_propagating(fd)
         digest = archive_file(archive_fd, data)
         rel = str(f.relative_to(legacy_root))
         try:
@@ -460,17 +490,17 @@ def run_adopter(legacy_root, out_dir, successor_texts):
         try:
             cand = build_candidates(legacy_root, archive_fd, successor_texts)
         finally:
-            os.close(archive_fd)
+            _close_fd_propagating(archive_fd)
         migration_fd = _walk_components(root_fd, (".aiqt", "migration"), create=True)
         try:
             _write_candidate(migration_fd, render_candidates(cand))
         finally:
-            os.close(migration_fd)
+            _close_fd_propagating(migration_fd)
     except AdoptError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return exc.exit_code
     finally:
-        os.close(root_fd)
+        _close_fd_propagating(root_fd)
     print("wrote candidate crosswalk and {} archive entries under {}".format(
         len(cand["archive"]), out_dir))
     return 0

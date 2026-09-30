@@ -210,7 +210,7 @@ def assert_open_journal(root_fd, root):
     try:
         jfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
     except OSError as exc:
-        os.close(pfd)
+        _journal._close_fd_propagating(pfd)
         return Result("open-journal", MALFORMED, "cannot open the journal ({})".format(exc))
     try:
         for entry in sorted(os.listdir(jfd)):
@@ -227,8 +227,10 @@ def assert_open_journal(root_fd, root):
     except OSError as exc:
         return Result("open-journal", MALFORMED, "cannot read the journal ({})".format(exc))
     finally:
-        os.close(jfd)
-        os.close(pfd)
+        try:
+            _journal._close_fd_propagating(jfd)
+        finally:
+            _journal._close_fd_propagating(pfd)
     if open_txns:
         return Result("open-journal", FAIL,
                       "{} open transaction(s) block any new pin operation until recovered: {}"
@@ -422,7 +424,7 @@ def run(root):
                 results.append(Result(fn.__name__, MALFORMED,
                                       "contained-path error (a symlink or traversal was refused): {}".format(exc)))
     finally:
-        os.close(root_fd)
+        _journal._close_fd_propagating(root_fd)
     for r in results:
         line = "  {:<17} {}".format(r.aid, r.status)
         if r.detail:
