@@ -110,11 +110,17 @@ JOURNALS_REL = "{}/{}".format(WORKING_DIRNAME, JOURNALS_DIRNAME)
 STORE_TREE_CONTROL_DIRS = (IMPORTED_DIRNAME, ARCHIVE_DIRNAME_STORE, STAGING_DIRNAME, JOURNALS_DIRNAME)
 RESERVED_MACHINE_SUBDIRS = ("imports",) + STORE_TREE_CONTROL_DIRS
 STAGING_KINDS = ("import", "ingest", "adoption", "layout", "preview")
+# The journal-home vocabulary: every staging kind plus the journal-only `record` kind (spec 4.2).
+# Record names ONLY a journal home: journal_root, txn_record and allocation_record admit it, while
+# stage_run, evidence_run and evidence_inventory keep refusing it, so `record` never gains a
+# staging or imported home.
+JOURNAL_KINDS = STAGING_KINDS + ("record",)
 # Import and ingest share the import engine's grammar; adoption has its own existing grammar.
-# Layout and preview reserve new prefixes with the same timestamp/hash shape. This checks shape,
-# not calendar validity, ownership, existence, symlinks, or permission to mutate a constructed path.
+# Layout and preview reserve new prefixes with the same timestamp/hash shape; record reserves
+# record- with that shape too (journal home only). This checks shape, not calendar validity,
+# ownership, existence, symlinks, or permission to mutate a constructed path.
 _HOME_RUN_PREFIXES = {"import": "imp", "ingest": "imp", "adoption": "adopt",
-                      "layout": "layout", "preview": "preview"}
+                      "layout": "layout", "preview": "preview", "record": "record"}
 _HOME_RUN_SUFFIX = r"-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}"
 # Evidence-bundle inventories: inventory.toml, then one inventory-<phase>.toml per later phase.
 _EVIDENCE_INVENTORY_RE = re.compile(r"inventory(?:-[a-z][a-z0-9]{0,31})?\.toml")
@@ -224,14 +230,18 @@ _NAMESPACE_OK = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 _EXTENSION_VENDOR_OK = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-")   # ASCII x-<vendor> slug alphabet
 
 
-def _home_kind(kind):
-    if not isinstance(kind, str) or kind not in STAGING_KINDS:
+def _home_kind(kind, kinds=None):
+    # `kinds` is the admitting vocabulary: STAGING_KINDS by default, JOURNAL_KINDS for the journal
+    # constructors. Read from the module at call time, never bound at def time, so an edited
+    # vocabulary is honoured wherever it is read.
+    kinds = STAGING_KINDS if kinds is None else kinds
+    if not isinstance(kind, str) or kind not in kinds:
         raise ValueError("unknown homes kind: {!r}".format(kind))
     return kind
 
 
-def _home_run(kind, run_id):
-    kind = _home_kind(kind)
+def _home_run(kind, run_id, kinds=None):
+    kind = _home_kind(kind, kinds)
     pattern = _HOME_RUN_PREFIXES[kind] + _HOME_RUN_SUFFIX
     if not isinstance(run_id, str) or re.fullmatch(pattern, run_id) is None:
         raise ValueError("invalid {} run-id: {!r}".format(kind, run_id))
@@ -271,12 +281,12 @@ def retire_preimage(run_id, path):
 
 def journal_root(kind):
     """Store-root-relative journal frames, disjoint from run projections."""
-    return "{}/{}/journal".format(JOURNALS_REL, _home_kind(kind))
+    return "{}/{}/journal".format(JOURNALS_REL, _home_kind(kind, JOURNAL_KINDS))
 
 
 def txn_record(kind, run_id):
     """Store-root-relative transaction projection."""
-    run = _home_run(kind, run_id)
+    run = _home_run(kind, run_id, JOURNAL_KINDS)
     kind, run_id = run.split("/")
     return "{}/{}/runs/{}/transaction.toml".format(JOURNALS_REL, kind, run_id)
 
@@ -284,7 +294,7 @@ def txn_record(kind, run_id):
 def allocation_record(kind, run_id):
     """Store-root-relative permanent ID reservation of one run. It lives in the journal home, so
     require_ordinary_target refuses it as a publication or rollback operand."""
-    run = _home_run(kind, run_id)
+    run = _home_run(kind, run_id, JOURNAL_KINDS)
     kind, run_id = run.split("/")
     return "{}/{}/allocations/{}.toml".format(JOURNALS_REL, kind, run_id)
 

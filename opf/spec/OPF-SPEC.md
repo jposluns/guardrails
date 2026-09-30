@@ -185,9 +185,12 @@ In homes 2, OPF MUST NOT write state outside `.working/` except the operation-lo
 substrate in the git common directory, and MUST NOT write any under `.aiqt/`. The record archive
 MUST remain inside the discovered machine store, and the example name `toml` MUST NOT be hardcoded.
 
-The closed kind vocabulary is `import`, `ingest`, `adoption`, `layout`, `preview`. Import and
+The closed kind vocabulary is `import`, `ingest`, `adoption`, `layout`, `preview`, `record`.
+Import and
 ingest run IDs use `imp-<YYYYMMDD>T<HHMMSS>Z-<hash16>`; adoption uses `adopt-` with that
-suffix. Layout and preview reserve `layout-` and `preview-` with the same suffix. Here
+suffix. Layout and preview reserve `layout-` and `preview-` with the same suffix. Record
+reserves `record-` with the same suffix; it is a journal-only kind that names just its
+journal home, `journals/record/`, never a staging or imported home. Here
 `hash16` is 16 lowercase hexadecimal characters; constructors check lexical shape, not calendar
 validity or filesystem safety. File operands MUST use canonical contained relative paths: no empty,
 dot, or parent components, absolute/drive/backslash forms, control characters, or line separators.
@@ -1137,7 +1140,8 @@ guarantees:
    doctor.
 6. Every rewritten file MUST be published in one crash-durable journaled transaction, so an
    interruption leaves the store exactly at its prestate or exactly at its poststate once
-   reconciled. The reference tooling keeps that journal under `.aiqt/record/journal` at homes 1.
+   reconciled. The reference tooling keeps that journal under `.aiqt/record/journal` at homes 1
+   and under `.working/journals/record/journal` at homes 2.
 7. The declared views are rendered.
    Then a full doctor MUST report VALID; a failure leaves the change for review with recovery
    advice scoped to the planned paths. One exception applies to a status change: doctor compares
@@ -1161,7 +1165,8 @@ imported counter rows first, the touched `<type>.imported.index.toml` and
 `worklog.imported.toml` files, and the evidence bundle: the exact original at
 `.working/imported/import/<run-id>/originals/<source-path>` and `inventory.toml` in the retained
 `opf.evidence.inventory/v1` format (section 4.2). The journal remains
-`.aiqt/record/journal` at homes 1. It MUST NOT rewrite clean records or clean counters.
+`.aiqt/record/journal` at homes 1 and `.working/journals/record/journal` at homes 2. It MUST NOT
+rewrite clean records or clean counters.
 
 Import MUST refuse with exit 2 on a non-importer actor, absent or invalid provenance, a
 clean-series record operand, an imported-to-clean link, a historical timestamp later than the
@@ -1927,6 +1932,8 @@ and adoption provenance, including originals under `imported/` and retired files
 MUST stay inside the adopter's own repositories. In homes 2, `.aiqt/` is AIQT-owned material, not an
 OPF state home; OPF operates without it. Only homes migration MAY read explicitly inventoried OPF
 artefacts from former `.aiqt/` locations, without touching unrelated AIQT material.
+A no-follow existence probe of a former `.aiqt/` location, used only to refuse an operation, is
+not a read of that material.
 Experimental fields MUST ride registered
 `x-<vendor>` tables only, within the limits of section 8.7.
 
