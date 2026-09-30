@@ -7397,7 +7397,11 @@ def _watchdog_completion_case(mode):
         # loop's non-allocating slot store, an injected restore
         # failure abandoning later callbacks, a pre-existing
         # local-event mask surviving a case, a planted
-        # interrupt right after the claim).
+        # interrupt right after the claim); and the fix 36
+        # vectors (a real SIGINT before the save loop's first
+        # slot store and one in the release, each repeated with
+        # the mask removed, and the single allocator/audit/async
+        # exclusion wording).
         # -- leg 19 bound (two identical copies, fix 30) --
         # derived_overrides IS the authoritative grammar. Every case
         # runs under every fixture state derived_overrides returns
@@ -7426,7 +7430,15 @@ def _watchdog_completion_case(mode):
         # re-raised; setup that fails re-registers only the
         # callbacks it had saved, never frees an id it did not
         # take, and releases an id it did take even when
-        # interrupted after the claim; an id
+        # interrupted after the claim; the save loop through
+        # the claim and its publication, and the whole
+        # release, run with SIGINT and every signal the
+        # process currently has a Python-level handler for
+        # blocked at the OS level, the prior mask restored
+        # after the section, so a pending signal is
+        # delivered only then (Python runs signal handlers
+        # on the main thread; where pthread_sigmask is
+        # unavailable the sections run unmasked); an id
         # freed and retaken under another name is left alone; a run
         # whose observation cannot be held or is not intact after
         # its driver returns, or with an exception raised inside its
@@ -7434,9 +7446,7 @@ def _watchdog_completion_case(mode):
         # into a cell, allocates nothing before its protected region,
         # and stores a preallocated failure flag first, without
         # allocating, and the flag alone
-        # fails the run, though under an interpreter allocation
-        # failure inside the callback anything beyond that flag, the
-        # recorded detail included, may be lost -- the entry frame's
+        # fails the run -- the entry frame's
         # self is the fixture, whose attribute under the deviation's
         # key, read once, must hold its value (type-aware) and the
         # key must be a name the member's compiled code, nested code
@@ -7444,9 +7454,11 @@ def _watchdog_completion_case(mode):
         # deliberately replaces is listed in behavioural_overwrites
         # and must instead be loaded with no entry holding its
         # value, and any other deviation failing the check fails the
-        # suite. An interpreter allocation failure or an audit hook
-        # raising anywhere in the observation machinery -- setup,
-        # callback or release -- is outside this bound. Only the
+        # suite. An interpreter allocation failure, an audit hook
+        # raising, or any other asynchronous exception (for
+        # example one injected into the thread) anywhere in the
+        # observation machinery -- setup, callback or release --
+        # is outside this bound. Only the
         # default state must fire both the pending
         # point and the injected fault. Under a deviation, a run
         # whose pending point does not fire is checked at entry
@@ -7540,7 +7552,15 @@ def _watchdog_completion_case(mode):
             # re-raised; setup that fails re-registers only the
             # callbacks it had saved, never frees an id it did not
             # take, and releases an id it did take even when
-            # interrupted after the claim; an id
+            # interrupted after the claim; the save loop through
+            # the claim and its publication, and the whole
+            # release, run with SIGINT and every signal the
+            # process currently has a Python-level handler for
+            # blocked at the OS level, the prior mask restored
+            # after the section, so a pending signal is
+            # delivered only then (Python runs signal handlers
+            # on the main thread; where pthread_sigmask is
+            # unavailable the sections run unmasked); an id
             # freed and retaken under another name is left alone; a run
             # whose observation cannot be held or is not intact after
             # its driver returns, or with an exception raised inside its
@@ -7548,9 +7568,7 @@ def _watchdog_completion_case(mode):
             # into a cell, allocates nothing before its protected region,
             # and stores a preallocated failure flag first, without
             # allocating, and the flag alone
-            # fails the run, though under an interpreter allocation
-            # failure inside the callback anything beyond that flag, the
-            # recorded detail included, may be lost -- the entry frame's
+            # fails the run -- the entry frame's
             # self is the fixture, whose attribute under the deviation's
             # key, read once, must hold its value (type-aware) and the
             # key must be a name the member's compiled code, nested code
@@ -7558,9 +7576,11 @@ def _watchdog_completion_case(mode):
             # deliberately replaces is listed in behavioural_overwrites
             # and must instead be loaded with no entry holding its
             # value, and any other deviation failing the check fails the
-            # suite. An interpreter allocation failure or an audit hook
-            # raising anywhere in the observation machinery -- setup,
-            # callback or release -- is outside this bound. Only the
+            # suite. An interpreter allocation failure, an audit hook
+            # raising, or any other asynchronous exception (for
+            # example one injected into the thread) anywhere in the
+            # observation machinery -- setup, callback or release --
+            # is outside this bound. Only the
             # default state must fire both the pending
             # point and the injected fault. Under a deviation, a run
             # whose pending point does not fire is checked at entry
@@ -8210,6 +8230,7 @@ def _watchdog_completion_case(mode):
             "a listed driver overwrite no longer replaces a value the "
             "member reads at entry (fix 30)")
         import dis
+        import signal
         unobserved_entries = (
             "the member's entries were not all observed: no free "
             "sys.monitoring tool id, the observation was not intact "
@@ -8232,6 +8253,37 @@ def _watchdog_completion_case(mode):
             value for name, value in vars(monitoring.events).items()
             if name != "BRANCH" and isinstance(value, int)
             and value > 0 and not value & (value - 1)))
+
+        def mask_handled_signals():
+            # fix 36 (QA57 codex MAJOR x2): the save loop through
+            # the claim, and the whole release, run with SIGINT
+            # and every signal this process currently has a
+            # Python-level handler for blocked at the OS level,
+            # so a real signal cannot fire a handler inside the
+            # section -- Python runs signal handlers on the main
+            # thread, where the mask holds a delivery pending;
+            # the caller restores the returned prior mask in a
+            # finally, so a pending signal is delivered only
+            # after the section. Where pthread_sigmask is
+            # unavailable the section runs unmasked, as the
+            # bound discloses.
+            if not hasattr(signal, "pthread_sigmask"):
+                return None
+            handled = {signal.SIGINT}
+            for number in signal.valid_signals():
+                try:
+                    handler = signal.getsignal(number)
+                except (OSError, ValueError):
+                    continue
+                if callable(handler):
+                    handled.add(number)
+            return signal.pthread_sigmask(signal.SIG_BLOCK,
+                                          handled)
+
+        def unmask_handled_signals(previous):
+            if previous is not None:
+                signal.pthread_sigmask(signal.SIG_SETMASK,
+                                       previous)
 
         def entry_checked_case(label, driver, cancellation, fault,
                                state, overwrites):
@@ -8360,38 +8412,53 @@ def _watchdog_completion_case(mode):
                     # reached
                     saved = [absent] * len(callback_events)
                     taken = False
+                    # fix 36 (QA57 codex MAJOR): a real SIGINT
+                    # between a removal returning and its slot
+                    # store loses that callback -- the slot
+                    # still holds `absent`, which restore_saved
+                    # skips -- so the save loop, the
+                    # publication, the claim and the
+                    # failure-path restore all run with handled
+                    # signals blocked; the prior mask comes
+                    # back in the outermost finally, delivering
+                    # a pending signal only after the section,
+                    # when the release below is armed
+                    unmasked = mask_handled_signals()
                     try:
-                        # fix 34 (QA55 codex MAJOR): EVERY
-                        # event's callback on the id --
-                        # registration needs no claimed id -- is
-                        # saved before the case takes it, to be
-                        # restored exactly on release;
-                        # free_tool_id clears them all
-                        for at, event in enumerate(
-                                callback_events):
-                            saved[at] = monitoring.register_callback(
-                                candidate, event, None)
                         try:
-                            # fix 35 (QA56 gemini): the id and
-                            # its saved callbacks are published
-                            # BEFORE the claim and the taken
-                            # flag, so an interrupt landing
-                            # after the claim finds the release
-                            # below armed and never leaves a
-                            # taken id unreleased
-                            tool, saved_callbacks = candidate, saved
-                            monitoring.use_tool_id(candidate,
-                                                   case_tool_name)
-                            taken = True
-                        except ValueError:
-                            tool, saved_callbacks = None, ()
+                            # fix 34 (QA55 codex MAJOR): EVERY
+                            # event's callback on the id --
+                            # registration needs no claimed id -- is
+                            # saved before the case takes it, to be
+                            # restored exactly on release;
+                            # free_tool_id clears them all
+                            for at, event in enumerate(
+                                    callback_events):
+                                saved[at] = monitoring.register_callback(
+                                    candidate, event, None)
+                            try:
+                                # fix 35 (QA56 gemini): the id and
+                                # its saved callbacks are published
+                                # BEFORE the claim and the taken
+                                # flag, so an interrupt landing
+                                # after the claim finds the release
+                                # below armed and never leaves a
+                                # taken id unreleased
+                                tool, saved_callbacks = candidate, saved
+                                monitoring.use_tool_id(candidate,
+                                                       case_tool_name)
+                                taken = True
+                            except ValueError:
+                                tool, saved_callbacks = None, ()
+                        finally:
+                            if not taken:
+                                # fix 34 (QA55 codex MAJOR): setup
+                                # that fails puts back only the
+                                # callbacks it saved and never frees
+                                # an id it did not take
+                                restore_saved(candidate, saved)
                     finally:
-                        if not taken:
-                            # fix 34 (QA55 codex MAJOR): setup
-                            # that fails puts back only the
-                            # callbacks it saved and never frees
-                            # an id it did not take
-                            restore_saved(candidate, saved)
+                        unmask_handled_signals(unmasked)
                     if taken:
                         break
                 if tool is None:
@@ -8418,34 +8485,46 @@ def _watchdog_completion_case(mode):
                           and monitoring.get_local_events(
                               tool, member_code) == entry_event)
             finally:
-                # release exactly the id this case took; an id a
-                # driver freed, and someone else then took -- under
-                # the shared name included -- is left alone (fix 33)
-                if (tool is not None
-                        and monitoring.get_tool(tool)
-                        == case_tool_name):
-                    # fix 35 (QA56 codex MAJOR, claude MINOR):
-                    # the member's local-event mask goes back
-                    # exactly as saved -- a mask never saved was
-                    # never overwritten -- and freeing clears no
-                    # local events on other code objects, so
-                    # none need saving
-                    if saved_local_events is not None:
-                        monitoring.set_local_events(
-                            tool, member_code, saved_local_events)
-                    released = (monitoring.register_callback(
-                        tool, entry_event, None) if registered
-                        else None)
-                    monitoring.free_tool_id(tool)
-                    # fix 33/34 (QA54/QA55 codex MAJOR):
-                    # free_tool_id clears the id's callbacks, so
-                    # every callback saved before the case took
-                    # the id is put back afterwards, restoring
-                    # the id exactly as this case found it; a
-                    # registration that failed is not treated as
-                    # a release
-                    restore_saved(tool, saved_callbacks)
-                    intact = intact and released is entered
+                # fix 36 (QA57 codex MAJOR): the WHOLE release
+                # runs with handled signals blocked -- a real
+                # SIGINT after the member's mask went back and
+                # before free_tool_id and restore_saved leaves
+                # the id claimed and no callback restored -- the
+                # prior mask restored in a finally, so a pending
+                # signal is delivered only once the release is
+                # complete
+                unmasked = mask_handled_signals()
+                try:
+                    # release exactly the id this case took; an id a
+                    # driver freed, and someone else then took -- under
+                    # the shared name included -- is left alone (fix 33)
+                    if (tool is not None
+                            and monitoring.get_tool(tool)
+                            == case_tool_name):
+                        # fix 35 (QA56 codex MAJOR, claude MINOR):
+                        # the member's local-event mask goes back
+                        # exactly as saved -- a mask never saved was
+                        # never overwritten -- and freeing clears no
+                        # local events on other code objects, so
+                        # none need saving
+                        if saved_local_events is not None:
+                            monitoring.set_local_events(
+                                tool, member_code, saved_local_events)
+                        released = (monitoring.register_callback(
+                            tool, entry_event, None) if registered
+                            else None)
+                        monitoring.free_tool_id(tool)
+                        # fix 33/34 (QA54/QA55 codex MAJOR):
+                        # free_tool_id clears the id's callbacks, so
+                        # every callback saved before the case took
+                        # the id is put back afterwards, restoring
+                        # the id exactly as this case found it; a
+                        # registration that failed is not treated as
+                        # a release
+                        restore_saved(tool, saved_callbacks)
+                        intact = intact and released is entered
+                finally:
+                    unmask_handled_signals(unmasked)
             # fix 34 (QA55 codex BLOCKER): the flag, checked
             # before any other outcome; the detailed record may
             # be absent if recording it failed
@@ -9666,6 +9745,138 @@ def _watchdog_completion_case(mode):
             [event for (event, callback), (_, after)
              in zip(interrupt_prior, interrupt_after)
              if after is not callback])
+        # fix 36 (QA57 codex MAJOR x2): one REAL SIGINT, delivered
+        # by an opcode trace at the reported instruction -- once
+        # immediately before the save loop's first STORE_SUBSCR,
+        # after register_callback(..., None) returned, and once in
+        # the release at the entry-callback unregistration, after
+        # the member's mask went back and before free_tool_id and
+        # restore_saved -- must leave every saved callback
+        # restored and the id unclaimed, the pending SIGINT
+        # delivered only after the masked section. Each delivery
+        # is then repeated with the mask removed --
+        # signal.pthread_sigmask stubbed out, the reviewed-HEAD
+        # behaviour -- and must go red through this vector's own
+        # restoration assertions.
+        if hasattr(signal, "pthread_sigmask"):
+            save_store_offset = case_instructions[
+                held_saves[0]].offset
+            release_calls = [
+                at for at, instruction in enumerate(
+                    case_instructions)
+                if instruction.opname == "CALL"
+                and any(prior.argval == "register_callback"
+                        for prior in case_instructions[
+                            max(0, at - 9):at])
+                and any(later.opname == "STORE_FAST"
+                        and later.argval == "released"
+                        for later in case_instructions[
+                            at + 1:at + 5])]
+            # the compiler may emit the release finally twice
+            # (a normal-path and an exception-path copy): every
+            # match must be that one source statement
+            assert (release_calls and len(release_calls) <= 2
+                    and len(set(
+                        case_instructions[at].positions.lineno
+                        for at in release_calls)) == 1), (
+                "the release's entry-callback unregistration is "
+                "no longer a uniquely traceable statement "
+                "(fix 36, QA57)", release_calls)
+            release_offsets = tuple(
+                case_instructions[at].offset
+                for at in release_calls)
+
+            def sigint_delivery(target_offsets):
+                # one real SIGINT at one of target_offsets
+                # in entry_checked_case, the QA57 technique:
+                # tracing is disabled before the signal is sent
+                signal_tool = next(
+                    tool for tool in entry_tool_ids
+                    if monitoring.get_tool(tool) is None)
+                prior = [(event, preregistered_for(event))
+                         for event in callback_events]
+                for event, callback in prior:
+                    monitoring.register_callback(
+                        signal_tool, event, callback)
+                fired = []
+
+                def traced_opcode(frame, event, arg):
+                    if (event == "opcode" and not fired
+                            and frame.f_lasti in target_offsets):
+                        fired.append(frame.f_lasti)
+                        sys.settrace(None)
+                        frame.f_trace = None
+                        os.kill(os.getpid(), signal.SIGINT)
+                    return traced_opcode
+
+                def traced_call(frame, event, arg):
+                    if frame.f_code is entry_checked_case.__code__:
+                        frame.f_trace_opcodes = True
+                        return traced_opcode
+                    return None
+
+                try:
+                    sys.settrace(traced_call)
+                    try:
+                        drive_matrix(
+                            [held_case],
+                            dict([(held_case[0],
+                                   [dict(armed=True)])]),
+                            lambda: [RuntimeError(
+                                "injected cleanup fault")])
+                    except KeyboardInterrupt:
+                        pass
+                    else:
+                        raise AssertionError(
+                            "the real SIGINT was not delivered "
+                            "outward (fix 36, QA57)",
+                            target_offsets)
+                finally:
+                    sys.settrace(None)
+                    after = [
+                        (event, monitoring.register_callback(
+                            signal_tool, event, None))
+                        for event, callback in prior]
+                    still_claimed = monitoring.get_tool(
+                        signal_tool)
+                    if still_claimed is not None:
+                        monitoring.free_tool_id(signal_tool)
+                assert (len(fired) == 1
+                        and fired[0] in target_offsets), (
+                    "the SIGINT vector never reached its target "
+                    "instruction (fix 36, QA57)", target_offsets,
+                    fired)
+                assert still_claimed is None, (
+                    "a real SIGINT left the tool id claimed "
+                    "(fix 36, QA57)", signal_tool, still_claimed)
+                lost = [event
+                        for (event, callback), (_, restored)
+                        in zip(prior, after)
+                        if restored is not callback]
+                assert not lost, (
+                    "a real SIGINT lost saved callbacks "
+                    "(fix 36, QA57)", target_offsets, lost)
+
+            for target_offsets in ((save_store_offset,),
+                                   release_offsets):
+                sigint_delivery(target_offsets)
+                # the proving mutation: the mask removed --
+                # pthread_sigmask stubbed to block nothing, the
+                # reviewed-HEAD behaviour -- must go red through
+                # the vector's own assertion, not a NameError
+                unfixed = None
+                try:
+                    with patch.object(
+                            signal, "pthread_sigmask",
+                            lambda how, signals: None):
+                        sigint_delivery(target_offsets)
+                except AssertionError as exc:
+                    unfixed = exc
+                assert (unfixed is not None
+                        and "fix 36" in str(unfixed.args[0])), (
+                    "removing the signal mask did not turn the "
+                    "SIGINT vector red through its own assertion "
+                    "(fix 36, QA57)", target_offsets, unfixed)
         mutant_member = copy.deepcopy(
             scope["m:_FixtureProcess._finish_close"])
         capture_assigns = [
@@ -9777,6 +9988,18 @@ def _watchdog_completion_case(mode):
             "the leg 19 bound no longer qualifies the case name's "
             "uniqueness to live cases in both copies "
             "(fix 34, QA55)", own_text.count(live_needle))
+        # fix 36 (QA57 codex MINOR): the general exclusion is the
+        # single disclosure -- its wording appears exactly once
+        # per copy, and the removed narrower allocator-detail
+        # qualification stays gone
+        allocation_needle = b"interpreter " + b"allocation"
+        async_needle = b"any other " + b"asynchronous exception"
+        assert (own_text.count(allocation_needle) == 2
+                and own_text.count(async_needle) == 2), (
+            "the allocator/audit/async exclusion no longer "
+            "appears exactly once per bound copy (fix 36, "
+            "QA57)", own_text.count(allocation_needle),
+            own_text.count(async_needle))
         mark_end = own_text.index(bound_marks[0]) + len(bound_marks[0])
         cut = own_text.index(b"\n", mark_end + 1)
         blocks_fault = "not exactly two terminated leg 19 bound blocks"
