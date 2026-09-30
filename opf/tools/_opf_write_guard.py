@@ -607,7 +607,7 @@ def _homes_read_gitignore(store_root, verb):
             raise WriteGuardError("homes-gitignore-unreadable: cannot stat {} ({}); cannot-evaluate "
                                   "(fail-closed)".format(_HOMES_GITIGNORE_REL, exc))
         finally:
-            os.close(pfd)
+            journal._close_fd_propagating(pfd)
         try:
             data, _st = journal._read_contained(root_fd, _HOMES_GITIGNORE_REL,
                                                 require_single_link=True)
@@ -616,7 +616,7 @@ def _homes_read_gitignore(store_root, verb):
                                   "(fail-closed)".format(_HOMES_GITIGNORE_REL, exc))
         return data
     finally:
-        os.close(root_fd)
+        journal._close_fd_propagating(root_fd)
 
 
 def _homes_index_holds(git, repo, prefix, verb):
@@ -1021,7 +1021,7 @@ def lease_held_message(pfd, name, lease_rel, verb):
                     detail = "held by {!r} (operation {!r}, acquired_at {!r})".format(
                         data.get("holder"), data.get("operation"), data.get("acquired_at"))
         finally:
-            os.close(fd)
+            _opf_store._journal._close_fd_quietly(fd)
     except Exception:  # noqa: BLE001  a present-but-unreadable lease still refuses (present is held)
         pass
     return ("another opf run holds the single-writer lease {}: {}. The lease is never seized (spec 5.7). "
@@ -1064,7 +1064,7 @@ def acquire_lease(root_fd, machine_rel, verb):
                 journal._write_all(fd, payload)
                 os.fsync(fd)
             finally:
-                os.close(fd)
+                journal._close_fd_propagating(fd)
             os.fsync(pfd)
         except BaseException as exc:
             # Any failure AFTER the O_EXCL create but BEFORE successful acquisition (a failed payload write,
@@ -1085,7 +1085,7 @@ def acquire_lease(root_fd, machine_rel, verb):
                 "(the tool never removes it), then re-run opf {}.".format(
                     verb, lease_rel, exc, verb, verb)) from exc
     finally:
-        os.close(pfd)
+        journal._close_fd_propagating(pfd)
     return payload
 
 
@@ -1105,7 +1105,7 @@ def read_lease_payload(pfd, name):
     except OSError:
         return None
     finally:
-        os.close(fd)
+        _opf_store._journal._close_fd_propagating(fd)
 
 
 def lease_holder_of(raw):
@@ -1176,4 +1176,4 @@ def release_lease(root_fd, machine_rel, expected_payload, verb):
         unlink_owned_lease(pfd, name, lease_rel, expected_payload, verb)
         os.fsync(pfd)
     finally:
-        os.close(pfd)
+        journal._close_fd_propagating(pfd)

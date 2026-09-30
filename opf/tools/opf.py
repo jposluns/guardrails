@@ -1033,7 +1033,7 @@ def _init_inventory(root_fd):
                     try:
                         walk(child_fd, relpath, depth + 1)
                     finally:
-                        os.close(child_fd)
+                        journal._close_fd_propagating(child_fd)
 
     try:
         working = _opf_store.WORKING_DIRNAME
@@ -1047,7 +1047,7 @@ def _init_inventory(root_fd):
                 try:
                     walk(working_fd, working, 0)
                 finally:
-                    os.close(working_fd)
+                    journal._close_fd_propagating(working_fd)
         report["complete"] = True
     except Exception as exc:  # noqa: BLE001  an incomplete inventory never licenses a write
         report["error"] = ascii(exc)
@@ -1079,7 +1079,7 @@ def _init_repo(root):
     if root != repo and repo not in root.parents:
         raise RuntimeError("git preflight: reported repository does not contain root")
     repo_fd = _opf_store._open_dir_nofollow(repo)
-    os.close(repo_fd)
+    _opf_store._journal._close_fd_propagating(repo_fd)
     if _init_git(git, repo, args) != raw:
         raise RuntimeError("git preflight: repository identity changed during confirmation")
     return git, repo
@@ -1174,7 +1174,7 @@ def _init_same_root(root, root_fd):
         if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
             raise RuntimeError("root changed since its contained directory was opened")
     finally:
-        os.close(check_fd)
+        _opf_store._journal._close_fd_propagating(check_fd)
 
 
 def _init_create(root_fd, relpath, data):
@@ -1194,7 +1194,7 @@ def _init_create(root_fd, relpath, data):
             raise RuntimeError("create-only publication refused {!r}: {!r}".format(
                 relpath, exc)) from exc
     finally:
-        os.close(pfd)
+        journal._close_fd_propagating(pfd)
 
 
 def _init_observed(root_fd, directories, payloads):
@@ -1220,7 +1220,7 @@ def _init_observed(root_fd, directories, payloads):
                     data, opened = journal._read_at(
                         pfd, name, relpath, cap=len(payloads[relpath]) + 1)
                 finally:
-                    os.close(pfd)
+                    journal._close_fd_propagating(pfd)
                 row["state"] = (
                     "matches-payload" if opened.st_nlink == 1 and data == payloads[relpath]
                     else "different-content-or-link-count")
@@ -1347,7 +1347,7 @@ def _cmd_init(rest):
                 os.mkdir(name, 0o755, dir_fd=pfd)
                 os.fsync(pfd)
             finally:
-                os.close(pfd)
+                journal._close_fd_propagating(pfd)
         for relpath, data in payloads.items():
             stage = "creating " + relpath
             _init_same_root(root, root_fd)
@@ -1491,7 +1491,7 @@ def _upgrade_replace(root_fd, relpath, data):
                 journal._write_all(fd, data)
                 os.fsync(fd)
             finally:
-                os.close(fd)
+                journal._close_fd_propagating(fd)
             os.rename(tmpname, name, src_dir_fd=pfd, dst_dir_fd=pfd)
             renamed = True
             os.fsync(pfd)
@@ -1502,7 +1502,7 @@ def _upgrade_replace(root_fd, relpath, data):
                 except OSError:
                     pass
     finally:
-        os.close(pfd)
+        journal._close_fd_propagating(pfd)
 
 
 def _upgrade_create_index(root_fd, relpath, data):
@@ -1518,7 +1518,7 @@ def _upgrade_create_index(root_fd, relpath, data):
         os.fsync(pfd)
         return True
     finally:
-        os.close(pfd)
+        journal._close_fd_propagating(pfd)
 
 
 def _upgrade_plan(manifest_model, counters_model):
@@ -2104,7 +2104,7 @@ def _upgrade_run(root):
                     raise _UpgradeError("upgrade destination {!r} is not a regular file "
                                         "(fail-closed)".format(relpath))
             finally:
-                os.close(pfd)
+                _opf_store._journal._close_fd_propagating(pfd)
         # DISTINCT roots for the recovery/staging advice (R1): `.working` lives under the STORE root, product-
         # scope targets under the PRODUCT root; the two differ for a RELOCATED store.
         recovery_store_root = res.store_root
@@ -2243,7 +2243,7 @@ def _upgrade_run(root):
             print(_upgrade_recovery_text(*recovery), file=sys.stderr)
         raise
     finally:
-        os.close(root_fd)
+        _opf_store._journal._close_fd_propagating(root_fd)
 
 
 def _import_exit(verdict):
@@ -4204,6 +4204,278 @@ def _cli_self_test():
         return EXIT_MALFORMED
 
 
+def _retained_close_offpath_self_test():
+    """F-RETAINED-CLOSE-OFFPATH (part B): the K9a round-7 retained-close class, swept over every
+    descriptor-closing helper family OFF the adopt status/plan paths K9a hardened. Each family's fixture
+    call runs clean to count the os.close calls made from opf/tools code (an ExitStack callback is
+    attributed to the code that registered it; _journal's own bare closes are part A's), then once per
+    position N in each of two modes with the N-th such close raising: "retained" raises OSError(EIO)
+    BEFORE releasing the descriptor (the codex model), "released" releases it and then raises
+    OSError(EINTR). Whatever the call then returns or
+    raises, every descriptor it opened (os.open / os.dup / os.pipe) must be closed afterwards: a bare
+    os.close leaks the number it failed to release (and a raising first close in a two-close finally
+    skips the second), while _journal._close_fd_propagating / _close_fd_quietly fstat-confirm the number
+    and release it. Returns 0 clean, 1 on a failing check, 2 on a harness error."""
+    import contextlib
+    import errno
+    import io
+    import shutil
+    import tempfile
+    import types
+    import check_opf_prompt_pack
+    import _opf_adopt_observe
+    tools = os.path.dirname(os.path.abspath(__file__))
+    real_open, real_dup, real_pipe, real_close = os.open, os.dup, os.pipe, os.close
+    failures = []
+    ran = []
+
+    def tools_caller():
+        frame = sys._getframe(2)
+        while frame is not None and os.path.basename(frame.f_code.co_filename) == "contextlib.py":
+            frame = frame.f_back
+        if frame is None or os.path.dirname(os.path.abspath(frame.f_code.co_filename)) != tools:
+            return False
+        # _journal's own remaining bare closes (_read_at, _recreate_file, the path-based lock reader, the
+        # _fsync_* helpers) are hardened by part A of this fix and are not injection points here; the two
+        # confirm-then-release helpers every part-B site now routes through are.
+        return (os.path.basename(frame.f_code.co_filename) != "_journal.py"
+                or frame.f_code.co_name in ("_close_fd_propagating", "_close_fd_quietly"))
+
+    def sweep(call):
+        """(positions, survivors) of `call` under the injection at every close position, in both modes."""
+        state = types.SimpleNamespace(opened=[], seen=0, target=None, mode=None, fired=False)
+
+        def _open(*args, **kwargs):
+            fd = real_open(*args, **kwargs)
+            state.opened.append(fd)
+            return fd
+
+        def _dup(fd):
+            new = real_dup(fd)
+            state.opened.append(new)
+            return new
+
+        def _pipe():
+            pair = real_pipe()
+            state.opened.extend(pair)
+            return pair
+
+        def _close(fd):
+            if tools_caller():
+                state.seen += 1
+                if state.seen - 1 == state.target:
+                    state.fired = True
+                    if state.mode == "retained":
+                        raise OSError(errno.EIO, "injected retained-close failure")   # NOT released
+                    real_close(fd)
+                    raise OSError(errno.EINTR, "injected released-close failure")
+            real_close(fd)
+
+        def run(target, mode):
+            state.opened, state.seen, state.target, state.mode, state.fired = [], 0, target, mode, False
+            os.open, os.dup, os.pipe, os.close = _open, _dup, _pipe, _close
+            os.supports_dir_fd.add(_open)     # _containment.probe keys off os.open's dir_fd support
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    try:
+                        call()
+                    except Exception:  # noqa: BLE001  graded on descriptor retention only
+                        pass
+            finally:
+                os.supports_dir_fd.discard(_open)
+                os.open, os.dup, os.pipe, os.close = real_open, real_dup, real_pipe, real_close
+            left = []
+            for fd in sorted(set(state.opened)):
+                try:
+                    os.fstat(fd)
+                except OSError:
+                    continue
+                left.append(fd)
+            for fd in left:                   # a pre-fix run leaks; release so the suite itself stays clean
+                try:
+                    real_close(fd)
+                except OSError:
+                    pass
+            return left
+
+        run(None, None)                       # warm any one-time probe so every counted run is identical
+        survivors = [("clean", fd) for fd in run(None, None)]
+        positions = state.seen
+        for mode in ("retained", "released"):
+            for target in range(positions):
+                left = run(target, mode)
+                if not state.fired:
+                    survivors.append((mode, target, "injection did not fire"))
+                survivors.extend((mode, target, fd) for fd in left)
+        return positions, survivors
+
+    def expect(name, call):
+        positions, survivors = sweep(call)
+        ran.append(name)
+        ok = positions > 0 and not survivors
+        print("  {} {}: {} close positions x 2 modes; surviving descriptors: {!r} (first six)".format(
+            "PASS" if ok else "FAIL", name, positions, survivors[:6]))
+        if not ok:
+            failures.append(name)
+
+    base = Path(tempfile.mkdtemp(prefix="opf-retained-close-offpath-")).resolve()
+    held = []
+    try:
+        # A render-clean empty-state store (the check_opf_drift fixture idiom), its views populated through
+        # the engine's own planner, plus a store-control .gitignore for the write-guard reader.
+        root = base / "store"
+        machine_rel = _opf_store.WORKING_DIRNAME + "/" + _opf_store.DEFAULT_MACHINE_SUBDIR
+        machine = root / machine_rel
+        machine.mkdir(parents=True)
+        types_block = "".join(
+            "[types." + name + ']\nnamespace = "' + ns + '"\n' for name, ns in _opf_store.BASELINE_TYPES.items())
+        views_block = "".join(
+            _opf_views._view(name, kind, list(sources))
+            for name, (kind, sources, _renderer) in _opf_views.NAMED_VIEWS.items())
+        manifest = (
+            "[opf]\n"
+            'standard = "opf"\n'
+            'spec_version = "' + _opf_store.SUPPORTED_SPEC_VERSION + '"\n'
+            'layout = "inline"\n'
+            'posture = "required"\n'
+            'import_status = "none"\n'
+            "\n[store]\n"
+            'sync_target = ""\n'
+            "\n[modules]\ngovernance = true\noperational_policy = true\nconcurrent_operation = true\n\n"
+            + types_block + "\n[vendors]\nregistered = []\n\n" + views_block)
+        (machine / _opf_store.MANIFEST_NAME).write_text(manifest, encoding="utf-8")
+        for name in _opf_store.BASELINE_TYPES:
+            if name != "worklog":
+                (machine / (name + ".index.toml")).write_text("schema = 1\n", encoding="utf-8")
+        (machine / "worklog.toml").write_text("schema = 1\n", encoding="utf-8")
+        (machine / "version.toml").write_text(
+            "schema = 1\n\n[[release]]\n"
+            'version = "0.1.0"\n'
+            'date = "2026-01-01T00:00:00Z"\n'
+            "worklog_span = []\n"
+            'coverage_digest = "' + _opf_release.coverage_digest([]) + '"\n', encoding="utf-8")
+        (root / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
+        (root / _opf_store.WORKING_DIRNAME / ".gitignore").write_text("*.tmp\n", encoding="utf-8")
+        store_view = None
+        plan_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for _name, scope, dest_rel, text in _opf_views.plan_views(plan_fd, machine_rel):
+                (root / dest_rel).write_text(text, encoding="utf-8")
+                if scope == "store" and store_view is None:
+                    store_view = dest_rel
+        finally:
+            os.close(plan_fd)
+        res = _opf_store.resolve_store(root)
+        if res.status != _opf_store.RESOLVED or store_view is None:
+            print("opf retained-close offpath self-test: harness error: the fixture store did not resolve "
+                  "with a store-scope view ({})".format(res.detail), file=sys.stderr)
+            return EXIT_MALFORMED
+
+        # _opf_store: the path-based resolve chain (resolve_store -> _resolve_at -> discover_machine_store
+        # -> _immediate_subdirs) and load_manifest.
+        expect("offpath-store-resolve-chain", lambda: _opf_store.load_manifest(_opf_store.resolve_store(root)))
+        # _opf_views: the render check and write bodies, and the rollback restore.
+        expect("offpath-views-render-check", lambda: _opf_views._render_resolved_store(root, res, True))
+
+        def render_write():
+            (root / store_view).write_text("stale\n", encoding="utf-8")
+            _opf_views._render_resolved_store(root, res, False)
+
+        expect("offpath-views-render-write", render_write)
+        preimages = dict()
+        preimages[("store", store_view)] = b"restored\n"
+        expect("offpath-views-restore", lambda: _opf_views._restore_preimages(root, res, preimages))
+        # _opf_absorb / _opf_changelog: the resolved-store input readers.
+        expect("offpath-absorb-load-done", lambda: _opf_absorb._load_done(res, frozenset()))
+        expect("offpath-changelog-load-inputs", lambda: _opf_changelog._load_inputs(res, root))
+        # _opf_observe: git's open+fstat fallback probe.
+        expect("offpath-observe-worktree-open",
+               lambda: _opf_observe._worktree_open_succeeds(root / "CHANGELOG.md"))
+        # _opf_write_guard: the gitignore reader and the lease acquire / held-lease message / release cycle.
+        expect("offpath-write-guard-gitignore", lambda: _opf_write_guard._homes_read_gitignore(root, "render"))
+        root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+        held.append(root_fd)
+        lease = root / machine_rel / _opf_check.LEASE_NAME
+
+        def lease_cycle():
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(str(lease))
+            payload = _opf_write_guard.acquire_lease(root_fd, machine_rel, "render")
+            with contextlib.suppress(_opf_write_guard.WriteGuardError):
+                _opf_write_guard.acquire_lease(root_fd, machine_rel, "render")    # held: names the holder
+            _opf_write_guard.release_lease(root_fd, machine_rel, payload, "render")
+
+        expect("offpath-write-guard-lease", lease_cycle)
+        # check_opf_prompt_pack: the regular-file reader refusing a directory after its open.
+        expect("offpath-prompt-pack-read-regular",
+               lambda: check_opf_prompt_pack._read_regular(str(root), 16, "probe"))
+        # _opf_adopt_observe: _open_directory's refusal teardown and the ExitStack descriptor callbacks.
+        observe = base / "observe"
+        (observe / "public").mkdir(parents=True)
+        os.chmod(str(observe / "public"), 0o755)
+        (observe / "archive.tar.gz").write_bytes(b"archive")
+        observe_fd = os.open(str(observe), os.O_RDONLY | os.O_DIRECTORY)
+        held.append(observe_fd)
+        deadline = types.SimpleNamespace(left=lambda: 1.0)
+        expect("offpath-adopt-observe-open-directory",
+               lambda: _opf_adopt_observe._open_directory(observe_fd, "public", owner=types.SimpleNamespace()))
+
+        def put_and_read():
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink("member", dir_fd=observe_fd)
+            _opf_adopt_observe._put(observe_fd, "member", b"payload", deadline)
+            _opf_adopt_observe._read_archive(observe_fd, deadline)
+
+        expect("offpath-adopt-observe-descriptor-stack", put_and_read)
+        # _opf_adopt_apply: the product-root closes of verify_bundle, reconcile, the default-store probe
+        # and a transaction refused at the store posture (nothing written).
+        run_id = "adopt-20260101T000000Z-0123456789abcdef"
+        expect("offpath-adopt-apply-verify-bundle", lambda: _opf_adopt_apply.verify_bundle(str(root), run_id))
+        expect("offpath-adopt-apply-reconcile", lambda: _opf_adopt_apply.reconcile(str(root)))
+        expect("offpath-adopt-apply-default-store-probe",
+               lambda: _opf_adopt_apply._default_store_present_without_manifest(str(root)))
+        expect("offpath-adopt-apply-transaction-refusal",
+               lambda: _opf_adopt_apply.run_adopt_transaction(str(root), run_id, lambda ops: None))
+        # opf.py: the init inventory / root-binding / create-only / observation helpers and the upgrade
+        # replace / create-index writers, beneath a held root.
+        init = base / "init"
+        (init / _opf_store.WORKING_DIRNAME / "a" / "b").mkdir(parents=True)
+        (init / "VERSION").write_bytes(b"1.0.0\n")
+        init_fd = os.open(str(init), os.O_RDONLY | os.O_DIRECTORY)
+        held.append(init_fd)
+
+        def init_helpers():
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink("created.txt", dir_fd=init_fd)
+            _init_inventory(init_fd)
+            _init_same_root(init, init_fd)
+            _init_create(init_fd, "created.txt", b"x\n")
+            _init_observed(init_fd, [_opf_store.WORKING_DIRNAME], dict(VERSION=b"1.0.0\n"))
+
+        expect("offpath-opf-init-helpers", init_helpers)
+
+        def upgrade_helpers():
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink("new.index.toml", dir_fd=init_fd)
+            _upgrade_replace(init_fd, "VERSION", b"1.0.0\n")
+            _upgrade_create_index(init_fd, "new.index.toml", b"schema = 1\n")
+
+        expect("offpath-opf-upgrade-helpers", upgrade_helpers)
+    except Exception as exc:  # noqa: BLE001  a fixture that cannot be built is a harness error, never a pass
+        print("opf retained-close offpath self-test: harness error ({!r})".format(exc), file=sys.stderr)
+        return EXIT_MALFORMED
+    finally:
+        for fd in held:
+            os.close(fd)
+        shutil.rmtree(str(base), ignore_errors=True)
+    if failures:
+        print("opf retained-close offpath self-test: FAIL: {} (failing {} of {} checks)".format(
+            ", ".join(failures), len(failures), len(ran)), file=sys.stderr)
+        return EXIT_FINDING
+    print("opf retained-close offpath self-test: PASS ({} checks)".format(len(ran)))
+    return EXIT_OK
+
+
 # Registered helper self-tests, run by `opf.py --self-test`. Each is (label, callable) returning a
 # 0/1/2 exit code (0 clean, 1 finding, 2 cannot-evaluate). Later units append their own helper here.
 # Built by a function rather than a module-level tuple because the _opf_* helpers it references are bound by
@@ -4231,6 +4503,7 @@ def _self_tests():
     ("opf-watchdog-shared-restore", _watchdog_shared_restore_self_test),
     ("opf-watchdog-shared-restore-deadline", _watchdog_shared_restore_deadline_self_test),
     ("opf-aggregator", _aggregator_self_test),
+    ("opf-retained-close-offpath", _retained_close_offpath_self_test),
     ("opf-cli", _cli_self_test),
 )
 

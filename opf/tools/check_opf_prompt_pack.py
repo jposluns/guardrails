@@ -46,6 +46,7 @@ from _opf_adopt import (  # noqa: E402
     VALID, INVALID, CANNOT_EVALUATE, _DIGEST_RE, _is_contained_filepath,
 )
 from _semver import _parse as _parse_version  # noqa: E402
+import _journal  # noqa: E402  retained-close-safe descriptor release
 
 PACK_FORMAT = "opf.prompt-pack/v1"
 MANIFEST_NAME = "pack.toml"
@@ -97,7 +98,7 @@ def _read_regular(path, limit, what):
             data = handle.read(limit + 1)
     finally:
         if fd is not None:
-            os.close(fd)
+            _journal._close_fd_propagating(fd)
     _require(len(data) <= limit, what + "-bound", what + " exceeds the size bound", CANNOT_EVALUATE)
     return data
 

@@ -723,7 +723,7 @@ def _immediate_subdirs(store_root_fd, working_rel):
     try:
         return _list_real_subdirs(wfd, working_rel)
     finally:
-        os.close(wfd)
+        _journal._close_fd_propagating(wfd)
 
 
 def _open_working_dir_fd(store_root_fd, working_rel):
@@ -1032,7 +1032,7 @@ def resolve_store(product_root, accept_tokens=None):
         except StoreError as exc:
             return Resolution(CANNOT_EVALUATE, str(exc))
     finally:
-        os.close(product_root_fd)
+        _journal._close_fd_propagating(product_root_fd)
 
     if local is not None or committed is not None:
         # A pointer named the store: the override wins wholesale, else it completes with the committed
@@ -1090,7 +1090,7 @@ def _resolve_at(store_root, source, target, pointer, accept_tokens=None):
             return Resolution(CANNOT_EVALUATE, str(exc), store_root=store_root, target=target,
                               pointer_source=source)
     finally:
-        os.close(store_root_fd)
+        _journal._close_fd_propagating(store_root_fd)
 
     if status == "one":
         return Resolution(RESOLVED, detail, store_root=store_root, machine_dir=machine_dir,
@@ -1927,7 +1927,7 @@ def load_manifest(resolution, supported_profiles=None):
     except StoreError as exc:
         return ManifestValidation(CANNOT_EVALUATE, [str(exc)])
     finally:
-        os.close(store_root_fd)
+        _journal._close_fd_propagating(store_root_fd)
     if data is None:
         # Discovery already read this file, so its disappearance now is a race/fail-closed error.
         return ManifestValidation(CANNOT_EVALUATE, ["{} vanished after discovery".format(manifest_rel)])
