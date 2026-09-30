@@ -2940,10 +2940,14 @@ def _cli_self_test():
                 expect(["upgrade", "--root", not_adopted], EXIT_OK)
                 expect(["upgrade", "--root", broken], EXIT_MALFORMED)
                 # the upgrade parser accepts only one non-empty --root: the retired --homes-plan, a missing
-                # or empty --root, a repeated --root and an unknown option each exit 2
+                # or empty --root, a repeated --root and an unknown option each exit 2, leaving the fixture
+                # tree exactly as it was (the parser refuses before any root is touched)
+                tree_before = sorted((d, sorted(dn), sorted(fn)) for d, dn, fn in os.walk(base))
                 for bad in (["--homes-plan"], ["--root"], ["--root", ""],
                             ["--root", not_adopted, "--root", not_adopted], ["--unknown"]):
                     expect(["upgrade"] + bad, EXIT_MALFORMED)
+                if sorted((d, sorted(dn), sorted(fn)) for d, dn, fn in os.walk(base)) != tree_before:
+                    failures.append("a refused upgrade argument changed the fixture tree")
                 # absorb over the same synthetic roots: a NOT-ADOPTED root reports NOT APPLICABLE and returns
                 # 0 -- the wiring discriminator (reverting the absorb route sends `absorb` to the fail-closed
                 # KNOWN_VERBS branch, which returns 2 here, failing this case); a garbage store fails closed
