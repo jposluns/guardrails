@@ -2939,6 +2939,11 @@ def _cli_self_test():
                 # rides check_opf_upgrade.py --self-test end to end over a byte-pinned committed 1.0.0 store.
                 expect(["upgrade", "--root", not_adopted], EXIT_OK)
                 expect(["upgrade", "--root", broken], EXIT_MALFORMED)
+                # the upgrade parser accepts only one non-empty --root: the retired --homes-plan, a missing
+                # or empty --root, a repeated --root and an unknown option each exit 2
+                for bad in (["--homes-plan"], ["--root"], ["--root", ""],
+                            ["--root", not_adopted, "--root", not_adopted], ["--unknown"]):
+                    expect(["upgrade"] + bad, EXIT_MALFORMED)
                 # absorb over the same synthetic roots: a NOT-ADOPTED root reports NOT APPLICABLE and returns
                 # 0 -- the wiring discriminator (reverting the absorb route sends `absorb` to the fail-closed
                 # KNOWN_VERBS branch, which returns 2 here, failing this case); a garbage store fails closed
