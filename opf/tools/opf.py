@@ -2802,10 +2802,23 @@ def _adopt_read_inputs(path):
     try:
         parent, name = os.path.split(path if os.path.isabs(path) else os.path.join(os.getcwd(), path))
         pfd = _opf_store._open_dir_nofollow(parent)
+        fd = None
         try:
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
         finally:
-            os.close(pfd)
+            try:
+                os.close(pfd)
+            except OSError:
+                # A failing parent close must not leak the just-opened worksheet fd (round-5 defect 2):
+                # close it in its own guarded step before the parent's close error propagates (on Linux
+                # a failing close still releases the number, so this is a close of a live descriptor,
+                # never a double-close); the propagating error still fails the read closed below.
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                raise
     except FileNotFoundError:
         raise ValueError("--inputs worksheet not found: {}".format(path))
     except (OSError, ValueError) as exc:   # ELOOP/ENOTDIR: a symlinked worksheet or ancestor, never followed
@@ -4146,6 +4159,62 @@ def _cli_self_test():
                     if rc != EXIT_MALFORMED or needle not in out:
                         failures.append("adopt plan with {} worksheet: rc={!r} (expected 2 + {!r})".format(
                             label, rc, needle))
+
+                # Round-5 defect 2 (K9a fix 5): a parent-directory close that reports an error inside
+                # the --inputs open must not leak the just-opened worksheet fd. Inject the failure at
+                # the REAL close (the number is still released, as on Linux); the read still fails
+                # closed (ValueError -> the cannot-evaluate exit) and the worksheet fd is closed
+                # afterwards, proven on the recorded fd itself.
+                _wl_real_walk = _opf_store._open_dir_nofollow
+                _wl_real_open = os.open
+                _wl_real_close = os.close
+                _wl_seen = {}
+
+                def _wl_walk(path):
+                    fd = _wl_real_walk(path)
+                    _wl_seen["pfd"] = fd
+                    return fd
+
+                def _wl_open(*a, **kw):
+                    fd = _wl_real_open(*a, **kw)
+                    if kw.get("dir_fd") is not None and kw.get("dir_fd") == _wl_seen.get("pfd"):
+                        _wl_seen["wfd"] = fd
+                    return fd
+
+                def _wl_close(fd):
+                    _wl_real_close(fd)
+                    if fd == _wl_seen.get("pfd") and "fired" not in _wl_seen:
+                        _wl_seen["fired"] = True
+                        raise OSError(5, "injected close failure")
+
+                _opf_store._open_dir_nofollow = _wl_walk
+                os.open = _wl_open
+                os.close = _wl_close
+                try:
+                    try:
+                        _adopt_read_inputs(stale)
+                        _wl_out = "returned"
+                    except ValueError:
+                        _wl_out = "valueerror"
+                    except OSError:
+                        _wl_out = "oserror"
+                finally:
+                    os.close = _wl_real_close
+                    os.open = _wl_real_open
+                    _opf_store._open_dir_nofollow = _wl_real_walk
+                if "fired" not in _wl_seen or "wfd" not in _wl_seen:
+                    failures.append("adopt --inputs close-injection harness did not observe the "
+                                    "parent walk, the worksheet open, or the injected close")
+                else:
+                    if _wl_out != "valueerror":
+                        failures.append("adopt --inputs with a failing parent close: expected the "
+                                        "fail-closed ValueError, got {}".format(_wl_out))
+                    try:
+                        os.fstat(_wl_seen["wfd"])
+                        failures.append("adopt --inputs leaked the worksheet fd (fd {} still open "
+                                        "after the parent close failed)".format(_wl_seen["wfd"]))
+                    except OSError:
+                        pass
 
                 # plan with the FRESH digest and one SCHEMA-VIOLATING op row (a known op missing its
                 # required inputs) -> 1: INVALID rides _opf_adopt.validate_op through the wired planner

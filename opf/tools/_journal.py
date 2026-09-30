@@ -337,8 +337,14 @@ def _read_contained(root_fd, relpath, require_single_link=False):
                                "our singly-linked control file)".format(relpath, st.st_nlink))
         return _read_fd(fd, cap=_MAX_PRODUCT_READ_BYTES), st
     finally:
-        os.close(fd)
-        os.close(pfd)
+        # Each close in its own try/finally (round-5 defect 3): a FILE close that reports an error must
+        # not skip the parent close and leak pfd. On Linux a failing close still releases the number, so
+        # both descriptors are released either way, and the file-close error keeps propagating
+        # fail-closed to the caller.
+        try:
+            os.close(fd)
+        finally:
+            os.close(pfd)
 
 
 def _fsync_dir_fd(fd):
