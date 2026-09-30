@@ -2003,94 +2003,98 @@ def _publish(ctx, plan, subcommand, cap=None):
         raise RecordError("cannot prepare the record journal {} ({}); preparation may already have "
                           "created its directories, and no operand, journal entry or lock was "
                           "written (fail-closed)".format(JOURNAL_REL, exc))
-    held = retain = False
-    # The run's own failure in flight, recorded by the except below (PR D fix 14): the cleanup reads
-    # this, never sys.exc_info(), which inside an embedding caller's except block reads the caller's
-    # handled exception as a refusal in flight (T67).
-    pending = None
-    # The token binds this run's journal lock to the one transaction it opens (_leftover_lock_outcome).
-    token = os.urandom(16).hex()
+    # PR D fix 15: this one enclosing cleanup closes the journal root descriptor on every exit,
+    # the token allocation's failure and a raising clean-exit release included, exactly once.
     try:
+        held = retain = False
+        # The run's own failure in flight, recorded by the except below (PR D fix 14): the cleanup reads
+        # this, never sys.exc_info(), which inside an embedding caller's except block reads the caller's
+        # handled exception as a refusal in flight (T67).
+        pending = None
+        # The token binds this run's journal lock to the one transaction it opens (_leftover_lock_outcome).
+        token = os.urandom(16).hex()
         try:
-            if _journal.read_lock_owner(journal_root) is not None:
-                raise RecordError("the record journal lock is held; the journal preparation may already have "
-                                  "created its directories, and no operand, journal entry or lock was written "
-                                  "by this run (fail-closed)")
-            _journal.acquire_lock(journal_root, "{}.{}".format(SESSION_ID, token))
-        except _journal.JournalError as exc:
-            raise RecordError("cannot take the record journal lock ({}); the journal preparation may already "
-                              "have created its directories, and no operand, journal entry or lock was written "
-                              "by this run (fail-closed)".format(exc))
-        except OSError as exc:
-            # PR D fix 10 (R3): acquire_lock can fail AFTER its O_EXCL create (the payload write, its
-            # fsync, or the journal directory's), leaving the created lock; without this branch the
-            # OSError reached the cli's cannot-evaluate backstop, which said nothing about the lock.
-            raise RecordError("cannot take the record journal lock ({}); the journal preparation may already "
-                              "have created its directories, the lock itself may be left in place (a failure "
-                              "after its O_EXCL create leaves the created lock, which is for the next opf "
-                              "record run's reconciliation), and no operand or journal entry was written by "
-                              "this run (fail-closed)".format(exc))
-        held = True
-        ops = []
-        content = {}
-        for operand in plan.operands:
-            ops.append({"op": "write", "path": operand.rel,
-                        "poststate": {"kind": "file", "content-sha256": _sha256(operand.new_raw)},
-                        "source-poststate": {"kind": "file", "mode": operand.mode,
-                                             "sha256": _sha256(operand.raw)}})
-            content[operand.rel] = operand.new_raw
-        txn_id = _record_run_id(token)
-        header = {"unit": SESSION_ID, "kind": "record-" + subcommand,
-                  "staged": [base64.b64encode(operand.new_raw).decode("ascii") for operand in plan.operands]}
-        try:
-            _journal.run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops,
-                                     lambda op: content[op["path"]], SESSION_ID)
-        except (_journal.JournalError, OSError) as exc:
-            # An absent transaction directory reads as nothing-opened (read_frames), so a failure before
-            # INTENT (the budget refusal, a failed mkdir or preimage capture) is told apart from one after it.
             try:
-                state = _journal.classify_state(jr_fd, journal_root / txn_id)
-            except _journal.JournalError:
-                state = None
-            if state == "nothing-opened":
-                raise RecordError("the publication was refused before its transaction opened ({}); no operand "
-                                  "was touched and nothing recorded (fail-closed)".format(exc))
-            if state == "rolled-back":
-                raise RecordError("the publication was refused and rolled back to the prestate ({}); nothing "
-                                  "recorded (fail-closed)".format(exc))
-            retain = True
-            raise RecordError("the publication FAILED and its transaction {} is {} ({}); the journal lock is "
-                              "retained, leaving it for the next opf record run's reconciliation, which acts on "
-                              "it only as far as each step succeeds (fail-closed)".format(
-                                  txn_id, _FAILED_STATE.get(state, "in an unreadable state"), exc))
-    except BaseException as exc:  # noqa: BLE001  recorded for the cleanup, re-raised unchanged
-        pending = exc
-        raise
-    finally:
-        if held and not retain:
+                if _journal.read_lock_owner(journal_root) is not None:
+                    raise RecordError("the record journal lock is held; the journal preparation may already have "
+                                      "created its directories, and no operand, journal entry or lock was written "
+                                      "by this run (fail-closed)")
+                _journal.acquire_lock(journal_root, "{}.{}".format(SESSION_ID, token))
+            except _journal.JournalError as exc:
+                raise RecordError("cannot take the record journal lock ({}); the journal preparation may already "
+                                  "have created its directories, and no operand, journal entry or lock was written "
+                                  "by this run (fail-closed)".format(exc))
+            except OSError as exc:
+                # PR D fix 10 (R3): acquire_lock can fail AFTER its O_EXCL create (the payload write, its
+                # fsync, or the journal directory's), leaving the created lock; without this branch the
+                # OSError reached the cli's cannot-evaluate backstop, which said nothing about the lock.
+                raise RecordError("cannot take the record journal lock ({}); the journal preparation may already "
+                                  "have created its directories, the lock itself may be left in place (a failure "
+                                  "after its O_EXCL create leaves the created lock, which is for the next opf "
+                                  "record run's reconciliation), and no operand or journal entry was written by "
+                                  "this run (fail-closed)".format(exc))
+            held = True
+            ops = []
+            content = {}
+            for operand in plan.operands:
+                ops.append({"op": "write", "path": operand.rel,
+                            "poststate": {"kind": "file", "content-sha256": _sha256(operand.new_raw)},
+                            "source-poststate": {"kind": "file", "mode": operand.mode,
+                                                 "sha256": _sha256(operand.raw)}})
+                content[operand.rel] = operand.new_raw
+            txn_id = _record_run_id(token)
+            header = {"unit": SESSION_ID, "kind": "record-" + subcommand,
+                      "staged": [base64.b64encode(operand.new_raw).decode("ascii") for operand in plan.operands]}
             try:
-                _journal.release_lock(journal_root)
-            except BaseException as exc:  # noqa: BLE001  surfaced, never displaces a refusal in flight
-                # Surfaced: a lock left in place is for the next run's reconciliation once this process
-                # has exited (_reconcile_journal). This handler runs on the clean exit and under a
-                # refusal in flight, one raised before the transaction opened (nothing-opened) included,
-                # never only after a terminal transaction. An ordinary release failure is never fatal
-                # here (T55); a refusal in flight still governs, whatever the release raised (PR D fix
-                # 13); any other raising release on the clean exit is the run's own failure; and the
-                # surfacing write itself failing is dropped (PR D fix 12). The refusal in flight is
-                # read from this run's own record of it (pending), never from sys.exc_info(), which
-                # inside an embedding caller's except block reads the caller's handled exception as a
-                # refusal in flight, turning a clean-exit release failure into a warned success (PR D
-                # fix 14, T67).
-                if pending is None and not isinstance(exc, (_journal.JournalError, OSError)):
-                    raise
+                _journal.run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops,
+                                         lambda op: content[op["path"]], SESSION_ID)
+            except (_journal.JournalError, OSError) as exc:
+                # An absent transaction directory reads as nothing-opened (read_frames), so a failure before
+                # INTENT (the budget refusal, a failed mkdir or preimage capture) is told apart from one after it.
                 try:
-                    print("opf record: the record journal lock under {} could not be released ({}); it may be "
-                          "left in place (a failure after its unlink leaves it removed, not durably), and a lock "
-                          "left there is for the next opf record run's reconciliation, which refuses once, naming "
-                          "the outcome.".format(JOURNAL_REL, exc), file=sys.stderr)
-                except BaseException:
-                    pass
+                    state = _journal.classify_state(jr_fd, journal_root / txn_id)
+                except _journal.JournalError:
+                    state = None
+                if state == "nothing-opened":
+                    raise RecordError("the publication was refused before its transaction opened ({}); no operand "
+                                      "was touched and nothing recorded (fail-closed)".format(exc))
+                if state == "rolled-back":
+                    raise RecordError("the publication was refused and rolled back to the prestate ({}); nothing "
+                                      "recorded (fail-closed)".format(exc))
+                retain = True
+                raise RecordError("the publication FAILED and its transaction {} is {} ({}); the journal lock is "
+                                  "retained, leaving it for the next opf record run's reconciliation, which acts on "
+                                  "it only as far as each step succeeds (fail-closed)".format(
+                                      txn_id, _FAILED_STATE.get(state, "in an unreadable state"), exc))
+        except BaseException as exc:  # noqa: BLE001  recorded for the cleanup, re-raised unchanged
+            pending = exc
+            raise
+        finally:
+            if held and not retain:
+                try:
+                    _journal.release_lock(journal_root)
+                except BaseException as exc:  # noqa: BLE001  surfaced, never displaces a refusal in flight
+                    # Surfaced: a lock left in place is for the next run's reconciliation once this process
+                    # has exited (_reconcile_journal). This handler runs on the clean exit and under a
+                    # refusal in flight, one raised before the transaction opened (nothing-opened) included,
+                    # never only after a terminal transaction. An ordinary release failure is never fatal
+                    # here (T55); a refusal in flight still governs, whatever the release raised (PR D fix
+                    # 13); any other raising release on the clean exit is the run's own failure; and the
+                    # surfacing write itself failing is dropped (PR D fix 12). The refusal in flight is
+                    # read from this run's own record of it (pending), never from sys.exc_info(), which
+                    # inside an embedding caller's except block reads the caller's handled exception as a
+                    # refusal in flight, turning a clean-exit release failure into a warned success (PR D
+                    # fix 14, T67).
+                    if pending is None and not isinstance(exc, (_journal.JournalError, OSError)):
+                        raise
+                    try:
+                        print("opf record: the record journal lock under {} could not be released ({}); it may be "
+                              "left in place (a failure after its unlink leaves it removed, not durably), and a lock "
+                              "left there is for the next opf record run's reconciliation, which refuses once, naming "
+                              "the outcome.".format(JOURNAL_REL, exc), file=sys.stderr)
+                    except BaseException:
+                        pass
+    finally:
         _journal._close_fd_quietly(jr_fd)
 
 

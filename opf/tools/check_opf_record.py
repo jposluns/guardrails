@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T68)
+  check_opf_record.py --self-test                    the fixture suite (T1-T69)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -265,6 +265,11 @@ Each case runs on its own copy of that template; the root is removed in a finall
       region: a trap that fails the copy only once the lease is held never fires and the run
       records (flip: the fix-13 head's ordering, whose post-acquisition copy fails and strands the
       just-acquired lease)
+  T69 the homes-1 publication's journal root descriptor is closed exactly once on every exit: a
+      non-ordinary clean-exit journal-lock release failure inside an embedding caller's except block,
+      and an allocation failure at the lock token, each leave no journal descriptor open, the original
+      failure governing the exit (flip: the fix-14 head's _publish, whose token allocation precedes its
+      cleanup region and whose release handler's re-raise skips the trailing close)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -4258,6 +4263,175 @@ def flip_t68():
     return patch.object(record, "_acquire_guard", head_order)
 
 
+# --- T69: the PR D fix-15 vector ------------------------------------------------------------------------
+
+def _fd_identity(fd):
+    """The (device, inode) a descriptor number currently names, or None when it names nothing."""
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        return None
+    return st.st_dev, st.st_ino
+
+
+@contextlib.contextmanager
+def journal_fd_ledger():
+    """Every journal root descriptor the run opens, as [fd, identity, close attempts]. A close is
+    counted on the latest open of its number, and only while that number still names the opened
+    directory or nothing (a second close); a number since reused by another object is not counted."""
+    ledger = []
+    real_open, real_close = journal.open_journal_root_fd, journal._close_fd_quietly
+
+    def opening(root_fd, journal_rel):
+        fd = real_open(root_fd, journal_rel)
+        ledger.append([fd, _fd_identity(fd), 0])
+        return fd
+
+    def closing(fd):
+        for entry in reversed(ledger):
+            if entry[0] == fd:
+                if _fd_identity(fd) in (entry[1], None):
+                    entry[2] += 1
+                break
+        return real_close(fd)
+    with patch.object(journal, "open_journal_root_fd", opening), \
+            patch.object(journal, "_close_fd_quietly", closing):
+        yield ledger
+
+
+def _settle(ledger):
+    """The ledger's descriptors still open, each closed here so a red run leaks nothing into later cases."""
+    latest = {}
+    for entry in ledger:
+        latest[entry[0]] = entry
+    alive = [entry for entry in latest.values() if _fd_identity(entry[0]) == entry[1]]
+    for entry in alive:
+        os.close(entry[0])
+    return alive
+
+
+def t69_release_failure_closes_fd(fx):
+    """The homes-1 publication's journal root descriptor is closed exactly once when the journal-lock
+    release raises a non-ordinary RuntimeError on the clean exit inside an embedding caller's except
+    block: the release failure governs (exit 2, no success report, the lock left), no journal
+    descriptor survives, and the single-writer lease is released. On the fix-14 head the release
+    handler's re-raise skipped the trailing close, leaking the descriptor (QA round 14, M1)."""
+    env = fx.env
+    root = fx.case("t69-release-in-handler")
+
+    def raising_release(_journal_root):
+        raise RuntimeError("fd release witness")
+    with journal_fd_ledger() as ledger, patch.object(journal, "release_lock", raising_release):
+        try:
+            raise ValueError("the embedding caller's handled exception")
+        except ValueError:
+            result = record_cli(env, root, CREATE)
+    alive = _settle(ledger)
+    rc, out, err = result
+    assert rc == 2, ("T69 the clean-exit release failure governs", rc, out[-800:], err[-800:])
+    assert RECORDED_EVENT not in out, ("T69 no success report", out[-800:])
+    assert "fd release witness" in err, ("T69 the release failure governs the exit", err[-800:])
+    assert (Path(root) / record.JOURNAL_REL / "lock").exists(), "T69 the unreleased lock is left"
+    assert not (Path(root) / LEASE).exists(), "T69 the single-writer lease is released"
+    assert ledger, "T69 the publication opened its journal root for real"
+    assert not alive, ("T69 a raising clean-exit release leaves no journal descriptor open",
+                       [entry[0] for entry in alive])
+    assert [entry[2] for entry in ledger] == [1] * len(ledger), (
+        "T69 each journal descriptor is closed exactly once", [entry[2] for entry in ledger])
+
+
+def t69_token_failure_closes_fd(fx):
+    """The homes-1 publication's journal root descriptor is closed exactly once when os.urandom fails
+    with a MemoryError as _publish allocates the lock token: that failure governs (exit 2, no success
+    report, no journal lock taken), no journal descriptor survives, and the single-writer lease is
+    released. On the fix-14 head the token was allocated after the open but outside the cleanup
+    region, leaking the descriptor (QA round 14, M1)."""
+    env = fx.env
+    root = fx.case("t69-token-allocation")
+    real_urandom = os.urandom
+    fired = []
+
+    def urandom_trap(n):
+        if sys._getframe(1).f_code is record._publish.__code__:
+            fired.append(n)
+            raise MemoryError("synthetic token allocation failure")
+        return real_urandom(n)
+    with journal_fd_ledger() as ledger, patch.object(os, "urandom", urandom_trap):
+        result = record_cli(env, root, CREATE)
+    alive = _settle(ledger)
+    rc, out, err = result
+    assert fired, "T69 the token allocation failed for real"
+    assert rc == 2, ("T69 the allocation failure governs", rc, out[-800:], err[-800:])
+    assert RECORDED_EVENT not in out, ("T69 no success report", out[-800:])
+    assert "synthetic token allocation failure" in err, ("T69 the allocation failure governs the exit",
+                                                         err[-800:])
+    assert not (Path(root) / record.JOURNAL_REL / "lock").exists(), "T69 no journal lock is taken"
+    assert not (Path(root) / LEASE).exists(), "T69 the single-writer lease is released"
+    assert ledger, "T69 the publication opened its journal root for real"
+    assert not alive, ("T69 a failed token allocation leaves no journal descriptor open",
+                       [entry[0] for entry in alive])
+    assert [entry[2] for entry in ledger] == [1] * len(ledger), (
+        "T69 each journal descriptor is closed exactly once", [entry[2] for entry in ledger])
+
+
+def flip_t69():
+    """The fix-14 head's _publish: the lock token is allocated after the journal root's open but before
+    the cleanup region, and the descriptor's close trails the release handler, whose re-raise of a
+    clean-exit non-ordinary release failure skips it."""
+    def head_publish(ctx, plan, subcommand, cap=None):
+        if ctx.journal_rel != record.JOURNAL_REL:
+            return record._publish_homes2(ctx, plan, subcommand, cap)
+        root_fd = ctx.root_fd
+        journal_root = record._journal_root(ctx)
+        journal.require_containment()
+        journal.ensure_journal_dirs(root_fd, record.JOURNAL_REL)
+        jr_fd = journal.open_journal_root_fd(root_fd, record.JOURNAL_REL)
+        held = retain = False
+        pending = None
+        token = os.urandom(16).hex()   # the head's allocation outside the cleanup region
+        try:
+            if journal.read_lock_owner(journal_root) is not None:
+                raise record.RecordError("the record journal lock is held (fail-closed)")
+            journal.acquire_lock(journal_root, "{}.{}".format(record.SESSION_ID, token))
+            held = True
+            ops, content, staged = [], dict(), []
+            for operand in plan.operands:
+                post = dict((("kind", "file"), ("content-sha256", record._sha256(operand.new_raw))))
+                source = dict((("kind", "file"), ("mode", operand.mode),
+                               ("sha256", record._sha256(operand.raw))))
+                ops.append(dict((("op", "write"), ("path", operand.rel), ("poststate", post),
+                                 ("source-poststate", source))))
+                content.update(((operand.rel, operand.new_raw),))
+                staged.append(record.base64.b64encode(operand.new_raw).decode("ascii"))
+            txn_id = record._record_run_id(token)
+            header = dict((("unit", record.SESSION_ID), ("kind", "record-" + subcommand),
+                           ("staged", staged)))
+            try:
+                journal.run_transaction(root_fd, jr_fd, journal_root, txn_id, header, ops,
+                                        lambda op: content.get(op.get("path")), record.SESSION_ID)
+            except (journal.JournalError, OSError) as exc:
+                retain = True
+                raise record.RecordError("the publication FAILED ({})".format(exc))
+        except BaseException as exc:  # noqa: BLE001  the head's own record of the failure in flight
+            pending = exc
+            raise
+        finally:
+            if held and not retain:
+                try:
+                    journal.release_lock(journal_root)
+                except BaseException as exc:  # noqa: BLE001  the head's cleanup handler
+                    if pending is None and not isinstance(exc, (journal.JournalError, OSError)):
+                        raise   # the head's re-raise, skipping the close below
+                    try:
+                        print("opf record: the record journal lock under {} could not be released "
+                              "({}); it may be left in place.".format(record.JOURNAL_REL, exc),
+                              file=sys.stderr)
+                    except BaseException:
+                        pass
+            journal._close_fd_quietly(jr_fd)
+    return patch.object(record, "_publish", head_publish)
+
+
 # --- the runner ------------------------------------------------------------------------------------------------
 
 TESTS = (
@@ -4342,6 +4516,8 @@ TESTS = (
     ("T66-release-interrupt-never-displaces", t66_release_interrupt_never_displaces, flip_t66),
     ("T67-ambient-exception-not-pending", t67_ambient_exception_not_pending, flip_t67),
     ("T68-release-mark-before-acquisition", t68_release_mark_before_acquisition, flip_t68),
+    ("T69-release-failure-closes-fd", t69_release_failure_closes_fd, flip_t69),
+    ("T69-token-failure-closes-fd", t69_token_failure_closes_fd, flip_t69),
 )
 
 
