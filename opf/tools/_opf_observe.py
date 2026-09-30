@@ -435,19 +435,25 @@ def _config_discovery_env():
     return env
 
 
-def _run_git_config_discovery(git, store_root, args, timeout=_GIT_TIMEOUT_S, input_bytes=None):
+def _run_git_config_discovery(git, store_root, args, timeout=_GIT_TIMEOUT_S, input_bytes=None, logical=False):
     """Like _run_git, but under the config-discovery environment (OPF-D2B), and with core.fsmonitor forced
     off by a command-scope `-c` so an adopter fsmonitor config cannot launch a monitor process during the
     read-only probe (a command-line `-c` overrides file and runtime config for fsmonitor; trace2 is instead
     forced off through the environment in _config_discovery_env, since its early config read ignores `-c`).
     The probe also passes --no-pager, so a pager configured for check-ignore cannot launch a process (defence
     in depth: the captured, non-TTY stdout already suppresses the pager). Optional input_bytes is sent on
-    stdin; callers supply bytes, never shell text.
+    stdin; callers supply bytes, never shell text. `logical` runs the probe with its working directory and
+    PWD at store_root as given (a path through a symlink, unresolved), PWD being the one name added to that
+    environment: git then derives the repository path from PWD, as an adopter's shell there does, so an
+    includeIf "gitdir:" rule matching only that path applies (git 2.53.0).
     Returns a _GitOutcome shaped exactly as _run_git's."""
     cmd = [git, "--no-pager", "--no-replace-objects", "-c", "core.fsmonitor=false", "-C", str(store_root)] + list(args)
+    env = _config_discovery_env()
+    if logical:
+        env["PWD"] = str(store_root)
     try:
         proc = subprocess.run(cmd, input=input_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              env=_config_discovery_env(), timeout=timeout)
+                              env=env, cwd=str(store_root) if logical else None, timeout=timeout)
     except subprocess.TimeoutExpired:
         return _GitOutcome(False, None, b"", "git timed out after {}s".format(timeout))
     except OSError as exc:

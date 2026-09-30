@@ -448,15 +448,43 @@ def _homes_config_overrides():
                   and (name == "GIT_CONFIG" or name.startswith("GIT_CONFIG_")))
 
 
+def _homes_logical_path(physical):
+    """The logical path through which the ambient working directory reaches `physical`, or None when
+    there is none. git trusts PWD only when it names the process's current directory, so PWD must be
+    absolute and the same directory as the cwd; `physical` is then reached from PWD by the relative
+    path git's physical cwd has to it, resolved lexically (the shell's logical `cd`). None when PWD is
+    unusable, when that path is the physical one, or when it does not resolve to the same directory."""
+    pwd = os.environ.get("PWD")
+    if not pwd or not os.path.isabs(pwd):
+        return None
+    try:
+        cwd = os.getcwd()
+        if not os.path.samefile(pwd, cwd):
+            return None
+        logical = os.path.normpath(os.path.join(pwd, os.path.relpath(str(physical), cwd)))
+        if logical == os.path.normpath(str(physical)) or not os.path.samefile(logical, str(physical)):
+            return None
+    except (OSError, ValueError):
+        return None
+    return logical
+
+
 def _homes_run_git_discovery(git, root, args, input_bytes=None):
     """_opf_observe._run_git_config_discovery behind the same verb allowlist and stderr refusal, refused
     before launch while the environment carries a runtime configuration override that runner drops
     (_homes_config_overrides): the probe's answer could then differ from the adopter's own git there
     (with core.ignoreCase=true supplied through GIT_CONFIG_COUNT, `!/STAGING/` re-includes the staging
-    home), so it is cannot-evaluate, never replayed. Disclosed residual (configuration divergence): the
-    probe reads the configuration git discovers at inspection time through HOME, XDG_CONFIG_HOME and the
-    system config, in the store's containing repository; a later configuration edit, a different HOME,
-    or a repository or index variable (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, dropped by the runner's
+    home), so it is cannot-evaluate, never replayed. When the ambient working directory reaches `root`
+    through a logical path (_homes_logical_path), the probe runs ALSO from that path, with cwd and PWD
+    there: git derives the repository path from PWD, so an includeIf "gitdir:" rule matching only the
+    logical path applies to the adopter's git in that shell but not to the physical probe, and any
+    disagreement between the two answers is cannot-evaluate, naming both paths. Disclosed residual
+    (configuration divergence): the probe reads the configuration git discovers at inspection time through
+    HOME, XDG_CONFIG_HOME and the system config, in the store's containing repository, from the physical
+    path and the one logical path the ambient PWD names; a later configuration edit, a different HOME,
+    another logical path (a different symlink, another shell's PWD), a replacement ref the adopter's git
+    would follow (the probe passes --no-replace-objects, so it never reads replaced objects), or a
+    repository or index variable (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, dropped by the runner's
     allowlist) at the adopter's own git call is not bound by this inspection."""
     head = _homes_allowlisted_verb(args)
     dropped = _homes_config_overrides()
@@ -465,8 +493,16 @@ def _homes_run_git_discovery(git, root, args, input_bytes=None):
                               "the homes gitignore inspection's config-discovery probe drops, so its answer "
                               "could differ from the adopter's own git; unset them and retry "
                               "(cannot-evaluate, fail-closed)".format(", ".join(dropped)))
-    return _homes_checked(head, _opf_observe._run_git_config_discovery(
-        git, root, args, input_bytes=input_bytes), False)
+    out = _opf_observe._run_git_config_discovery(git, root, args, input_bytes=input_bytes)
+    logical = _homes_logical_path(root)
+    if logical is not None and _opf_observe._run_git_config_discovery(
+            git, logical, args, input_bytes=input_bytes, logical=True) != out:
+        raise WriteGuardError("git {} answers differently from the physical path {!r} and from the logical "
+                              "path {!r} the working directory reaches it through (an includeIf "
+                              "\"gitdir:\" rule, for example, can match only one), so the adopter's "
+                              "effective ignore rules cannot be determined; cannot-evaluate "
+                              "(fail-closed)".format(head, str(root), logical))
+    return _homes_checked(head, out, False)
 
 
 def _homes_repo_prefix(store_root, git, verb):
@@ -782,8 +818,10 @@ def inspect_homes_gitignore(store_root, verb, approved_rewrite=None, reviewed_ex
     (homes-gitignore-unreadable), a flagged index entry for that file, a probe that cannot run, fails
     or writes a diagnostic to stderr, an ambient runtime git configuration override the config-discovery
     probe drops (named; the remaining configuration divergence is disclosed at _homes_run_git_discovery),
-    an index entry that would mask a probe, an ignored home whose governing rule does not exclude the
-    home itself, or an unavailable indexed ignore blob in a partial clone.
+    a probe answer that differs between the physical store path and the logical path the working
+    directory reaches it through (both named), an index entry that would mask a probe, an ignored home
+    whose governing rule does not exclude the home itself, or an unavailable indexed ignore blob in a
+    partial clone.
 
     The index is never mutated: only rev-parse, ls-files, check-ignore, config and cat-file run
     (structurally allowlisted: every call, the shared indexed_ignore_availability's included, runs

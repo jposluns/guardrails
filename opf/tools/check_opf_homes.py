@@ -2785,6 +2785,58 @@ def _gitignore_reconciliation_self_test(check):
                 h.startswith("durable-evidence-ignored") and "imported" in h
                 for h in guard.inspect_homes_gitignore(root11, "init")[1]))
 
+        # A store the working directory reaches through a symlink (Claude's round-4 reproduction): an
+        # includeIf "gitdir:" rule matching only that logical path gives the adopter's git there, with cwd
+        # and PWD at the link, a core.excludesFile that ignores imported/, while a probe from the physical
+        # path alone reads it as not ignored. The probe runs from both paths and refuses the disagreement,
+        # naming both; answers that agree (a rule matching the physical path, or no rule) stand, and a
+        # working directory at the physical path has no logical path, so nothing changes there.
+        homel = base / "homel"
+        (homel / "cfg").mkdir(parents=True)
+        (homel / "excludes").write_text("/.working/imported/\n", encoding="utf-8")
+        (homel / "excludes.inc").write_text(
+            "[core]\n\texcludesFile = {}\n".format(homel / "excludes"), encoding="utf-8")
+        (base / "lphys").mkdir()
+        os.symlink("lphys", base / "llink")
+        env_isol = dict(HOME=str(homel), XDG_CONFIG_HOME=str(homel / "cfg"), GIT_CONFIG_NOSYSTEM="1")
+
+        def from_dir(path, thunk):
+            # Run `thunk` with the working directory and PWD at `path` as given (symlinks unresolved),
+            # as an adopter's shell there does; both are restored.
+            previous = os.getcwd()
+            os.chdir(path)
+            try:
+                with patch.dict(os.environ, PWD=str(path)):
+                    return thunk()
+            finally:
+                os.chdir(previous)
+
+        def include_if(gitdir):
+            rule = "[includeIf \"gitdir:{}/\"]\n\tpath = {}\n".format(gitdir, homel / "excludes.inc")
+            (homel / ".gitconfig").write_text("" if gitdir is None else rule, encoding="utf-8")
+
+        with patch.dict(os.environ, env_isol):
+            for name in guard._homes_config_overrides():
+                del os.environ[name]
+            repol, rootl = fixture("lphys/repo")
+            (rootl / ".working" / ".gitignore").write_bytes(block)
+            logical = base / "llink" / "repo"
+            include_if(base / "llink")
+            check("gi-logical-path-disagree", lambda: all(from_dir(logical, lambda f=f: guard_refuses(
+                lambda: f(rootl, "init"), "answers differently from the physical path {!r} and from the "
+                "logical path {!r}".format(str(rootl), str(logical)))) for f in (
+                    guard.inspect_homes_gitignore, guard.verify_homes_gitignore_effective)))
+            check("gi-logical-path-physical-cwd", lambda: from_dir(
+                rootl, lambda: guard.inspect_homes_gitignore(rootl, "init")[:2] == (None, [])))
+            include_if(os.path.realpath(base / "lphys"))
+            check("gi-logical-path-agree-held", lambda: from_dir(logical, lambda: any(
+                h.startswith("durable-evidence-ignored")
+                for h in guard.inspect_homes_gitignore(rootl, "init")[1])))
+            include_if(None)
+            check("gi-logical-path-agree-clean", lambda: from_dir(logical, lambda: guard._homes_logical_path(
+                rootl) == str(logical) and guard.inspect_homes_gitignore(rootl, "init")[:2] == (None, [])
+                and guard.verify_homes_gitignore_effective(rootl, "init") == []))
+
 
 def self_test():
     import _opf_adopt as adopt
