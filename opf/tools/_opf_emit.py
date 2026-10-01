@@ -2734,17 +2734,18 @@ class _FixtureProcess:
         import time
         pending = None
 
+        # Ownership first (#378 P1): the attribute lets go of the number
+        # before os.close, so a raising close (the number counts as
+        # released) never leaves it named for a later signal through it.
         def close_guardian_pidfd():
-            fd = self.pidfd
+            fd, self.pidfd = self.pidfd, None
             if fd is not None:
                 os.close(fd)
-                self.pidfd = None
 
         def close_subject_pidfd():
-            fd = self.subject_pidfd
+            fd, self.subject_pidfd = self.subject_pidfd, None
             if fd is not None:
                 os.close(fd)
-                self.subject_pidfd = None
 
         def close_report():
             self.report.close()
@@ -4126,6 +4127,57 @@ def self_test():
                                 "skipped the child reap (zombie left; finding 7)".format(_tag7))
         _close_real6(_oth_r6)
         _close_real6(_oth_w6)
+
+    # (#378 P1, close policy) _finish_close's held-pidfd closes let go of the attribute BEFORE os.close: a close
+    # that raises has released the number all the same, so an attribute still naming it would let a later
+    # _interrupt_collect -> _address_failed_subject / _escalate signal through a number another lane may hold.
+    # Drive _finish_close on a stand-in whose guardian and subject "pidfds" are the read ends of this leg's own
+    # pipes, with a close stub that releases each of them on its first close and then raises, and require both
+    # attributes None afterwards. The pre-fix close-then-clear left both naming their released numbers. The
+    # stub releases each number once; the leg never closes either read end itself, only the write ends it kept.
+    import types as _types8
+    _close_real8 = _os6.close
+    _g_r8, _g_w8 = _os6.pipe()
+    _s_r8, _s_w8 = _os6.pipe()
+    _armed8 = {_g_r8, _s_r8}
+    _released8 = []
+
+    def _boom_close8(fd):
+        if fd in _armed8:
+            _armed8.discard(fd)
+            _released8.append(fd)
+            _close_real8(fd)                           # really released, as a raising close counts it ...
+            raise OSError(5, "EIO (self-test injected pidfd close)")   # ... then the close raises
+        return _close_real8(fd)
+
+    def _noop8():
+        return None
+
+    _fake8 = _types8.SimpleNamespace(
+        pid=None, collected=True, armed=False, unresolved=False, cleaned=False, _failure=None,
+        pidfd=_g_r8, subject_pidfd=_s_r8, subject_pid=None, _recv_subject=_noop8, _interrupt_collect=_noop8,
+        control=_types8.SimpleNamespace(close=_noop8), peer=_types8.SimpleNamespace(close=_noop8),
+        report=_types8.SimpleNamespace(close=_noop8))
+    _raised8 = None
+    try:
+        _os6.close = _boom_close8
+        try:
+            _FixtureProcess._finish_close(_fake8)
+        except OSError as _exc8:
+            _raised8 = _exc8
+    finally:
+        _os6.close = _close_real8
+    if sorted(_released8) != sorted((_g_r8, _s_r8)) or _raised8 is None:
+        failures.append("finish-close/raising-close-setup: expected both injected closes to release and raise "
+                        "(released {}, raised {!r})".format(_released8, _raised8))
+    if _fake8.pidfd is not None:
+        failures.append("finish-close/raising-guardian-close: the guardian pidfd attribute still names its "
+                        "released number {} (close-then-clear)".format(_fake8.pidfd))
+    if _fake8.subject_pidfd is not None:
+        failures.append("finish-close/raising-subject-close: the subject pidfd attribute still names its "
+                        "released number {} (close-then-clear)".format(_fake8.subject_pidfd))
+    _close_real8(_g_w8)
+    _close_real8(_s_w8)
 
     # _model_equal type-strictness pins: the exact-type clause is the sole carrier of the strictness that
     # makes the round-trip proof meaningful rather than merely plausible. A mutant dropping that clause
