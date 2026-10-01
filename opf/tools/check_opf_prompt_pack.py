@@ -385,6 +385,16 @@ def _close_vectors(tmp):
 
 
 def self_test():
+    """Run the vectors behind main()'s cannot-evaluate backstop, so the canonical `--self-test` entry maps an
+    exception escaping them to exit 2 exactly as `main(["--self-test"])` does."""
+    try:
+        return _self_test_vectors()
+    except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false 0
+        print("check_opf_prompt_pack: cannot evaluate: unexpected error ({!r})".format(exc), file=sys.stderr)
+        return 2
+
+
+def _self_test_vectors():
     """0 every vector returned its exact status and guard, 1 a discriminator failed, 2 harness error."""
     failures = []
     count = 0
@@ -510,4 +520,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
     sys.exit(main())

@@ -478,4 +478,6 @@ def self_test():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
     raise SystemExit(self_test())
