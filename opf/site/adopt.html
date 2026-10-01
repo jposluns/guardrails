@@ -93,8 +93,8 @@
       validation results, and the records-first instructions added to your project.</p>
     <p>Provide the machine-readable <a href="/llms.txt"><code>/llms.txt</code></a> index and
       <a href="/adopt.md"><code>/adopt.md</code></a> guide as starting material. If adopting AIQT,
-      include OPFiles and any existing operational files in the plan; review imports before applying
-      them. You can also adopt OPFiles alone.</p>
+      include OPFiles and any existing operational files in the plan, and review the plan before
+      authorizing it. You can also adopt OPFiles alone.</p>
   </div>
 </section>
 
@@ -197,9 +197,10 @@
     <p><b style="color:var(--ink)">How it works.</b> Each former mode refuses with a pointer, in words,
       to clean-start adoption and the prompt pack. The refusal comes before the root is resolved and
       before any named file is read, so it is the same on an adopted store and on a directory that has
-      not adopted OPFiles, and the former companion flags meet the same refusal. Only a malformed command
-      line (an unknown flag, a flag missing its value, a repeated flag, or no mode or two modes) is a
-      usage error instead, also exit 2.</p>
+      not adopted OPFiles, and the former companion flags meet the same refusal, spelled in full or by
+      an unambiguous prefix and repeated or not. Only a malformed command line (an unknown flag, an
+      ambiguous prefix, a flag missing its value, or no mode or two modes) is a usage error instead,
+      also exit 2.</p>
     <p><b style="color:var(--ink)">Result.</b> Exit 2 and no change, whatever the mode: nothing is
       staged under <code>.working/imports/</code>, and nothing is promoted into the store.</p>
     <p class="refchips"><code>opf import --apply R</code> <span>refused, exit 2</span></p>

@@ -1355,21 +1355,35 @@ def _staged_ids(root_fd, homes, rep):
     `<run>/candidate|fragments/<type>.index.toml` or `worklog.toml` must be a closed `{schema, record}`
     index at the supported schema whose rows are tables carrying a well-formed id. Nothing is validated
     beyond what uniqueness needs. An unreadable listing or file, an exotic entry, and any malformed staged
-    index are CANNOT-EVALUATE naming the input, never skipped, so a staged id cannot drop out of the union."""
+    index are CANNOT-EVALUATE naming the input, never skipped, so a staged id cannot drop out of the union.
+    The staged layout has no nesting: ANY directory under candidate/ or fragments/ is CANNOT-EVALUATE naming
+    it, whether it sits at a staged index path (`<type>.index.toml` or `worklog.toml` as a directory) or is
+    an unknown subdirectory, since its content is not enumerated and could hide staged ids. A regular file
+    with neither an index name nor the worklog name stages nothing and is left to C-CONTAINMENT."""
     ids = []
     for staging_rel in _staged_run_roots(homes):
         runs, _files = _list_dir(root_fd, staging_rel, rep)
         for run in runs or ():
             for sub in _STAGED_ID_SUBDIRS:
                 sub_rel = _rel(staging_rel, run, sub)
-                _subs, names = _list_dir(root_fd, sub_rel, rep)
+                subs, names = _list_dir(root_fd, sub_rel, rep)
+                for entry in subs or ():
+                    what = ("is a directory at a staged index path" if entry.endswith(INDEX_SUFFIX)
+                            or entry == WORKLOG_NAME else "is an unknown subdirectory")
+                    rep.cant("{}: {} under a staged run's {}/; the staged-id enumeration reads only regular "
+                             "index files there, so its content could hide staged ids (fail-closed)".format(
+                                 _safe_display(_rel(sub_rel, entry)), what, sub))
                 for entry in names or ():
                     if not (entry.endswith(INDEX_SUFFIX) or entry == WORKLOG_NAME):
                         continue
                     where = _safe_display(_rel(sub_rel, entry))
                     data, st = _read_toml(root_fd, _rel(sub_rel, entry), rep)
+                    if st == "absent":
+                        # Listed as a regular file but gone at read: the tree changed under the walk, so the
+                        # staged ids it held are unknown (fail-closed, never an empty contribution).
+                        rep.cant("{}: staged index was listed but is absent at read (fail-closed)".format(where))
                     if st != "ok":
-                        continue        # an error is already CANNOT-EVALUATE; an absent file stages nothing
+                        continue        # an error is already CANNOT-EVALUATE
                     extra = set(data) - INDEX_TOP_KEYS
                     sch = data.get("schema")
                     records = data.get("record")
@@ -3891,6 +3905,50 @@ def self_test():
         check("staged-malformed-row-cant",
               stbad is not None and stbad.status == CANNOT_EVALUATE
               and stbad.checks.get("C-ID-SPACE") == "CANNOT-EVALUATE")
+        # A DIRECTORY under candidate/ or fragments/ is never skipped: at a staged index path (here holding a
+        # duplicate BI-1) or as an unknown subdirectory, its content is not enumerated, so the store is
+        # CANNOT-EVALUATE naming it under C-ID-SPACE. Flip: iterating only the listed files there (the
+        # round-3 defect) validates each of these VALID, since containment only triages the run interior.
+        def staged_tree(files):
+            sp = clean_machine()
+            sp["manifest.toml"] = base_manifest()
+            sp["manifest.toml"]["opf"]["import_status"] = "partial"
+            working = {"imports/{}/plan.toml".format(RUNID): "schema = 1"}
+            working.update(("imports/{}/{}".format(RUNID, k), v) for k, v in files.items())
+            return run(sp, working=working)
+        for label, sub, entry in (("index", "candidate", "backlog_item.index.toml"),
+                                  ("worklog", "fragments", WORKLOG_NAME),
+                                  ("unknown", "candidate", "nested")):
+            stdir = staged_tree({"{}/{}/backlog_item.index.toml".format(sub, entry): idx([bi(1, "open")])})
+            check("staged-dir-{}-cant".format(label),
+                  stdir is not None and stdir.status == CANNOT_EVALUATE
+                  and stdir.checks.get("C-ID-SPACE") == "CANNOT-EVALUATE"
+                  and any("{}/{}".format(sub, entry) in m and "could hide staged ids" in m
+                          for m in stdir.by_check.get("C-ID-SPACE", [])))
+        # The same directory per homes-2 staging root (staging/import and staging/ingest), at the
+        # _staged_ids level: homes 2 is latent in this build, so no shipped store reaches those roots
+        # through validate_store. The regular-file control in each root still contributes its id.
+        for root_kind in ("imports", "staging/import", "staging/ingest"):
+            for shape in ("dir", "file"):
+                tail = "candidate/backlog_item.index.toml"
+                if shape == "dir":
+                    tail += "/backlog_item.index.toml"
+                sroot = build(clean_machine(),
+                              working={"{}/{}/{}".format(root_kind, RUNID, tail): idx([bi(1, "open")])})
+                sfd = os.open(str(sroot), os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    srep = _Report()
+                    srep.ran("C-ID-SPACE")
+                    sids = _staged_ids(sfd, 2, srep)
+                finally:
+                    os.close(sfd)
+                if shape == "dir":
+                    check("staged-ids-dir-{}-cant".format(root_kind.replace("/", "-")),
+                          sids == [] and srep.checks.get("C-ID-SPACE") == "CANNOT-EVALUATE"
+                          and any("is a directory at a staged index path" in m for m in srep.cannot))
+                else:
+                    check("staged-ids-file-{}-read".format(root_kind.replace("/", "-")),
+                          sids == ["BI-1"] and not srep.cannot)
         # codex-2: a STALE partial with no active run does not launder; the stray path grades as a finding
         # and the unsubstantiated declaration is itself flagged -> INVALID.
         stale = clean_machine()

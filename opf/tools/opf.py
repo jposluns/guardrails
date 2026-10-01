@@ -11832,34 +11832,47 @@ def _cmd_import(rest):
     flags, so every former form meets the pointer: the root-ingest planner's `--dispositions FILE`,
     `--ingest-options FILE` and repeatable `--include GLOB`, and the review aids `--show-review` and
     `--diff-review OLD_RUN` (each named file is never read). Every valued flag also takes the joined
-    `--flag=value` spelling, split into the separate form so its value meets the same validation. Only the
-    token parser (an unknown flag, a duplicate, an empty or missing value) and the exactly-one-mode rule
-    precede it: a bare `opf import` or two modes is a usage error (exit 2) without the pointer. The parser
-    is the house fail-closed idiom,
-    matching _cmd_render's --root loop. The root is never resolved, so an unresolved / NOT-ADOPTED root
-    refuses the same way (D7: import is a REQUESTED operation, so its refusal is a cannot-evaluate, never
-    the NOT-APPLICABLE exit 0 that doctor/render/upgrade report on a non-adopter root)."""
-    root = None
+    `--flag=value` spelling, split into the separate form so its value meets the same validation. An
+    unambiguous prefix of a former flag (`--rev` for --review, `--ro` for --root), alone or joined, is taken
+    as that flag, as the former argparse review aid took it, and a repeated former flag other than a mode is
+    accepted (the verb refuses anyway, so no value is kept). Only the token parser (an unknown flag, an
+    ambiguous prefix, an empty or missing value) and the exactly-one-mode rule, which a repeated mode also
+    breaks, precede it: a bare `opf import` or two modes is a usage error (exit 2) without the pointer. The
+    root is never resolved, so an unresolved / NOT-ADOPTED root refuses the same way (D7: import is a
+    REQUESTED operation, so its refusal is a cannot-evaluate, never the NOT-APPLICABLE exit 0 that
+    doctor/render/upgrade report on a non-adopter root)."""
     mode = None
-    set_file = None
-    actor = None
-    decisions_file = None
-    interactive = False
-    dispositions_file = None      # the former root-ingest --plan companions, accepted to meet the pointer
-    ingest_options_file = None
-    include = []                  # repeatable, as it was
-    show_review = False           # the former review aids, likewise
-    diff_review = None
-
-    # A joined `--flag=value` for a valued flag splits into `--flag value`, so an empty value is the usual
-    # usage error. Any other `=`-joined token, `--x=y` or a valueless flag such as `--show-review=x`, is
-    # left whole and stays unrecognized.
+    # Every flag the verb accepted before its retirement: the four modes, their companions, the
+    # root-ingest planner's companions and the review aids.
+    modes = ("--scan", "--plan", "--review", "--apply")
     valued = ("--review", "--apply", "--root", "--set", "--actor", "--decisions", "--dispositions",
               "--ingest-options", "--include", "--diff-review")
+    valueless = ("--scan", "--plan", "--interactive", "--show-review")
+    former = valued + valueless
+
+    def _prefixed(name):
+        # The former flags `name` abbreviates: itself alone on an exact match, else every flag it prefixes.
+        if name in former:
+            return [name]
+        if not name.startswith("--") or len(name) <= 2:
+            return []
+        return sorted(f for f in former if f.startswith(name))
+
+    # An unambiguous prefix is expanded to its flag, and a joined `--flag=value` for a valued flag splits
+    # into `--flag value`, so an empty value is the usual usage error. Any other `=`-joined token, `--x=y`
+    # or a valueless flag such as `--show-review=x`, is left whole and stays unrecognized; an ambiguous
+    # prefix is left whole too, and the loop names its candidates.
     tokens = []
     for tok in rest:
         name, eq, val = tok.partition("=")
-        tokens += [name, val] if eq and name in valued else [tok]
+        hits = _prefixed(name)
+        flag = hits[0] if len(hits) == 1 else None
+        if flag in valued and eq:
+            tokens += [flag, val]
+        elif flag is not None and not eq:
+            tokens.append(flag)
+        else:
+            tokens.append(tok)
     rest = tokens
 
     def _need_value(flag, idx):
@@ -11876,98 +11889,25 @@ def _cmd_import(rest):
     i = 0
     while i < len(rest):
         tok = rest[i]
-        if tok in ("--scan", "--plan"):
+        if tok in modes:
             if mode is not None:
                 print("opf import: give exactly one mode (--scan / --plan / --review / --apply)",
                       file=sys.stderr)
                 return EXIT_MALFORMED
             mode = tok[2:]
-            i += 1
-        elif tok in ("--review", "--apply"):
-            if mode is not None:
-                print("opf import: give exactly one mode (--scan / --plan / --review / --apply)",
-                      file=sys.stderr)
-                return EXIT_MALFORMED
+        if tok in valued:
             if _need_value(tok, i) is None:
                 return EXIT_MALFORMED
-            mode = tok[2:]
             i += 2
-        elif tok == "--root":
-            if root is not None:
-                print("opf import: --root given more than once", file=sys.stderr)
-                return EXIT_MALFORMED
-            root = _need_value(tok, i)
-            if root is None:
-                return EXIT_MALFORMED
-            i += 2
-        elif tok == "--set":
-            if set_file is not None:
-                print("opf import: --set given more than once", file=sys.stderr)
-                return EXIT_MALFORMED
-            set_file = _need_value(tok, i)
-            if set_file is None:
-                return EXIT_MALFORMED
-            i += 2
-        elif tok == "--actor":
-            if actor is not None:
-                print("opf import: --actor given more than once", file=sys.stderr)
-                return EXIT_MALFORMED
-            actor = _need_value(tok, i)
-            if actor is None:
-                return EXIT_MALFORMED
-            i += 2
-        elif tok == "--decisions":
-            if decisions_file is not None:
-                print("opf import: --decisions given more than once", file=sys.stderr)
-                return EXIT_MALFORMED
-            decisions_file = _need_value(tok, i)
-            if decisions_file is None:
-                return EXIT_MALFORMED
-            i += 2
-        elif tok == "--interactive":
-            if interactive:
-                print("opf import: --interactive given more than once", file=sys.stderr)
-                return EXIT_MALFORMED
-            interactive = True
+        elif tok in valueless:
             i += 1
-        elif tok == "--dispositions":
-            if dispositions_file is not None:
-                print("opf import: --dispositions given more than once", file=sys.stderr)
-                return EXIT_MALFORMED
-            dispositions_file = _need_value(tok, i)
-            if dispositions_file is None:
-                return EXIT_MALFORMED
-            i += 2
-        elif tok == "--ingest-options":
-            if ingest_options_file is not None:
-                print("opf import: --ingest-options given more than once", file=sys.stderr)
-                return EXIT_MALFORMED
-            ingest_options_file = _need_value(tok, i)
-            if ingest_options_file is None:
-                return EXIT_MALFORMED
-            i += 2
-        elif tok == "--include":
-            val = _need_value(tok, i)
-            if val is None:
-                return EXIT_MALFORMED
-            include.append(val)
-            i += 2
-        elif tok == "--show-review":
-            if show_review:
-                print("opf import: --show-review given more than once", file=sys.stderr)
-                return EXIT_MALFORMED
-            show_review = True
-            i += 1
-        elif tok == "--diff-review":
-            if diff_review is not None:
-                print("opf import: --diff-review given more than once", file=sys.stderr)
-                return EXIT_MALFORMED
-            diff_review = _need_value(tok, i)
-            if diff_review is None:
-                return EXIT_MALFORMED
-            i += 2
         else:
-            print("opf import: unrecognized argument {!r}".format(tok), file=sys.stderr)
+            hits = _prefixed(tok.partition("=")[0])
+            if len(hits) > 1:
+                print("opf import: ambiguous option {!r} could match {}".format(tok, ", ".join(hits)),
+                      file=sys.stderr)
+            else:
+                print("opf import: unrecognized argument {!r}".format(tok), file=sys.stderr)
             return EXIT_MALFORMED
 
     if mode is None:
@@ -12604,9 +12544,10 @@ def _cli_self_test():
             so does a mode-specific argv violation (a missing or extra companion flag, a run-id outside the
             former grammar) and every former companion flag (the root-ingest --dispositions,
             --ingest-options and repeatable --include; the review aids --show-review and --diff-review), in
-            the separate and the joined `--flag=value` spellings alike. Only a token-parser usage error (a
-            flag missing its value, an empty joined value, a duplicate, an unknown flag) and the
-            exactly-one-mode rule exit 2 before it, without the refusal text. The pointer names adoption and
+            the separate and the joined `--flag=value` spellings alike, by an unambiguous prefix as well,
+            and with a non-mode former flag repeated. Only a token-parser usage error (a flag missing its
+            value, an empty joined value, an ambiguous prefix, an unknown flag) and the exactly-one-mode
+            rule, a repeated mode included, exit 2 before it, without the refusal text. The pointer names adoption and
             the prompt pack in words and no command. Flip: routing `import` to the fail-closed KNOWN_VERBS
             branch, restoring a mode-specific check or an input reader ahead of the refusal, or dropping a
             former companion flag from the token parser, turns rows red."""
@@ -12780,6 +12721,32 @@ def _cli_self_test():
                          "--review --diff-review=OLD_RUN"),
                 ):
                     refused(argv, what)
+                # An unambiguous prefix of a former flag, alone or joined, is that flag, as the former
+                # argparse review aid took it; a repeated former flag other than a mode meets the refusal
+                # rather than a duplicate usage error.
+                for argv, what in (
+                        (["import", "--rev", _RID, "--show-review", "--root", store],
+                         "--rev R --show-review --root DIR"),
+                        (["import", "--review", _RID, "--show", "--ro", not_adopted],
+                         "--review R --show --ro DIR (not adopted)"),
+                        (["import", "--rev=" + _RID, "--diff=" + _RID, "--ro=" + store],
+                         "--rev=R --diff=OLD --ro=DIR"),
+                        (["import", "--sc", "--se", path("set.toml"), "--ro", store], "--sc --se FILE"),
+                        (["import", "--pl", "--disp", path("not-toml.toml"), "--ing", path("missing.toml"),
+                          "--inc", "*", "--root", store], "--pl --disp --ing --inc"),
+                        (["import", "--ap", _RID, "--ac", "x", "--root", store], "--ap R --ac NAME"),
+                        (["import", "--review", _RID, "--act", "x", "--dec", path("not-json.json"), "--int",
+                          "--root", store], "--review --act --dec --int"),
+                        (["import", "--plan", "--dispositions", path("set.toml"), "--dispositions",
+                          path("set.toml"), "--root", store], "--plan with two --dispositions"),
+                        (["import", "--review", _RID, "--show-review", "--show-review", "--root", store],
+                         "--review with two --show-review"),
+                        (["import", "--plan", "--root=" + store, "--root=" + store], "--plan with two --root="),
+                        (["import", "--rev", _RID, "--show-review", "--ro", store, "--root", not_adopted,
+                          "--diff-review", _RID, "--diff", _RID, "--actor", "a", "--act", "b", "--interactive",
+                          "--interactive"], "--review with every review-side flag repeated"),
+                ):
+                    refused(argv, what)
                 if tree_snapshot(ibase) != before:
                     failures.append("a refused import mode changed the fixture tree")
                 # Only the token parser and the exactly-one-mode rule precede the refusal.
@@ -12794,10 +12761,23 @@ def _cli_self_test():
                       "--review with a trailing valueless --diff-review")
                 usage(["import", "--plan", "--include", "", "--root", store], "requires a non-empty argument",
                       "--plan with an empty --include")
-                usage(["import", "--plan", "--dispositions", path("set.toml"), "--dispositions",
-                       path("set.toml")], "--dispositions given more than once", "--plan with two --dispositions")
-                usage(["import", "--review", _RID, "--show-review", "--show-review"],
-                      "--show-review given more than once", "--review with two --show-review")
+                usage(["import", "--scan", "--scan", "--set", path("set.toml")], "give exactly one mode",
+                      "with a repeated mode")
+                usage(["import", "--rev", _RID, "--review", _RID, "--show-review"], "give exactly one mode",
+                      "with a repeated mode spelled by prefix")
+                usage(["import", "--review", _RID, "--d", _RID, "--root", store],
+                      "ambiguous option '--d' could match --decisions, --diff-review, --dispositions",
+                      "--review with the ambiguous prefix --d")
+                usage(["import", "--r", _RID, "--show-review"], "ambiguous option '--r'",
+                      "the ambiguous prefix --r")
+                usage(["import", "--plan", "--in=x", "--root", store], "ambiguous option '--in=x'",
+                      "--plan with the ambiguous joined prefix --in=")
+                usage(["import", "--review", _RID, "--sh=x"], "unrecognized argument",
+                      "--review with a joined value on a prefix of the valueless --show-review")
+                usage(["import", "--review", _RID, "--show-reviews"], "unrecognized argument",
+                      "--review with a flag a former flag only prefixes")
+                usage(["import", "--plan", "--", "--root", store], "unrecognized argument",
+                      "--plan with a bare --")
                 usage(["import", "--show-review", "--root", store], "give exactly one mode",
                       "--show-review with no mode")
                 usage(["import", "--plan", "--no-such-flag", "--root", store], "unrecognized argument",
@@ -12810,8 +12790,6 @@ def _cli_self_test():
                       "--apply with an empty --root=")
                 usage(["import", "--review=", "--root", store], "requires a non-empty argument",
                       "an empty --review=")
-                usage(["import", "--plan", "--root=" + store, "--root=" + store],
-                      "--root given more than once", "--plan with two --root=")
                 # The pointer is to adoption and the prompt pack in words, naming no command (spec 14.1).
                 if not ("adoption (OPF spec 14.1)" in refusal and "prompt pack" in refusal
                         and not re.search(r"`|\bopf [a-z]", refusal)):
