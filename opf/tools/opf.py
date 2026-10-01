@@ -11833,32 +11833,31 @@ def _cmd_import(rest):
     REQUESTED operation, so its refusal is a cannot-evaluate, never the NOT-APPLICABLE exit 0 that
     doctor/render/upgrade report on a non-adopter root).
 
-    The CLI self-test checks this two ways. A structural check proves this function's source as parsed
-    from the file's bytes, decoded as the interpreter decodes them (a coding declaration other than
-    utf-8 on line 1 or 2 is itself a finding): after this docstring the body is exactly the one print
-    of the pointer to stderr and the one return of EXIT_MALFORMED, with no reference to `rest` and no
-    other call; no binding form it models, in any expression evaluated at module scope, rebinds print,
-    _cmd_import, sys, IMPORT_RETIRED,
-    EXIT_MALFORMED or __builtins__ (both _import_body_findings); the live `_cmd_import.__code__` is
-    exactly the code compiled from that parsed definition (_import_code_findings); and the live
-    function resolves names through this module's own namespace and the interpreter's real builtins
-    mapping (_import_namespace_findings). Within that bound no argument list can reach a read, a parse
-    or a write inside _cmd_import. The structural check covers _cmd_import only: main() first runs
-    _bootstrap() (the guarded _opf_* helper import) and its own dispatch (the --self-test and --help
-    tests, then the verb match) before `return _cmd_import(rest)`, and only the runtime probe below
-    exercises that path. This module's own import-time top-level code, which runs on every `opf
-    import` before main(), is outside BOTH checks (the probe calls main() on the already-imported
-    module), a DISCLOSED residual, except that the binding scan requires sys, IMPORT_RETIRED and
-    EXIT_MALFORMED each bound by one direct top-level statement ahead of this def, never nested in an
-    if, try, with, loop, match or function. The check does NOT catch reflective or dynamic changes:
-    stores through globals() or vars() (globals().update included), setattr on the module object
-    (through sys.modules included), reassigning builtins.print, sys.stderr or another sys attribute,
-    exec or eval of a string, and another module patching this one are DISCLOSED residual classes, not
-    enforced. A runtime probe covers only a representative set of argument lists: while each runs, a
-    call to any probed filesystem read or write, process-spawn or stdin function through a module
-    attribute the probe patches is recorded and refused, and the row fails; a route it does not patch
-    (a call through the posix or _io modules directly, an already-open file object or descriptor, a
-    socket, ctypes) is outside the probe."""
+    The CLI self-test checks this two ways. The verb's runtime behaviour, exit 2 with the pointer for
+    every representative argument list, is what the RUNTIME probe observes; the STRUCTURAL checks are a
+    tripwire against an accidental regression of this function, not a proof of its behaviour. Over this
+    function's source as parsed from the file's bytes, decoded as the interpreter decodes them, they flag:
+    a coding declaration other than utf-8 on line 1 or 2; a body after this docstring other than exactly
+    the one print of the pointer to stderr and the one return of EXIT_MALFORMED, a reference to `rest`
+    or any other call included; a binding of print, _cmd_import, sys, IMPORT_RETIRED, EXIT_MALFORMED or
+    __builtins__ by a form the binding scan models, in any expression evaluated at module scope, a
+    `global` of one of them, or a star import; and sys, IMPORT_RETIRED or EXIT_MALFORMED not bound by
+    one direct top-level statement ahead of this def (one nested in an if, try, with, loop, match or
+    function, or one after the def) (all _import_body_findings); a live `_cmd_import.__code__` other
+    than the code compiled from that parsed definition (_import_code_findings); and a live function
+    whose globals are not this module's namespace or whose builtins are not the interpreter's real
+    builtins mapping (_import_namespace_findings). They do not cover reflective or dynamic changes
+    (stores through globals() or vars(), setattr and attribute stores such as builtins.print or
+    sys.stderr, exec, eval or compile, importlib), source-decoding and loader tricks beyond the
+    coding-declaration check, this module's own import-time top-level code (which runs on every `opf
+    import` before main() and which the runtime probe does not cover either, as it calls main() on the
+    already-imported module), the _bootstrap() (the guarded _opf_* helper import) and dispatch main()
+    runs before `return _cmd_import(rest)` (covered only by the runtime probe), calls through routes the
+    probe does not patch (posix, _io, ctypes, already-open file objects or descriptors, a socket), or
+    another module patching this one. The runtime probe covers only a representative set of argument
+    lists: while each runs, a call to any probed filesystem read or write, process-spawn or stdin
+    function through a module attribute the probe patches is recorded and refused, and the row fails; a
+    route it does not patch is outside it."""
     # `rest` is deliberately never read: every argument list meets the pointer.
     print("opf import: {}".format(IMPORT_RETIRED), file=sys.stderr)
     return EXIT_MALFORMED
@@ -11883,29 +11882,29 @@ _IMPORT_BODY = ('print("opf import: {}".format(IMPORT_RETIRED), file=sys.stderr)
 
 
 def _import_body_findings(source):
-    """The structural no-read check for the retired import verb over the module source `source` (the
+    """The structural tripwire for the retired import verb over the module source `source` (the
     BYTES of opf.py itself in the CLI self-test; a str is parsed as given). Returns a list of findings,
-    empty when clean. Bytes are parsed as the interpreter decodes the file, honouring a PEP 263 coding
-    declaration, so the checked text is the text the interpreter runs; and any coding declaration other
-    than utf-8 on line 1 or 2 is itself a finding (an absent one means utf-8), so a declaration that
+    empty when clean; a clean result is no proof of the verb's behaviour, which the runtime probe
+    observes. Bytes are parsed as the interpreter decodes the file, honouring a PEP 263 coding
+    declaration, so the checked text is decoded as the interpreter decodes it; and any coding declaration
+    other than utf-8 on line 1 or 2 is itself a finding (an absent one means utf-8), so a declaration that
     decodes a comment into a statement (raw_unicode_escape turns a backslash-u000a escape into a
-    newline) is flagged both ways. It parses the source and requires that the module defines
-    `_cmd_import` once, undecorated, taking only `rest`;
-    that its body after the docstring is exactly _IMPORT_BODY (one print of the pointer to sys.stderr,
-    one return of EXIT_MALFORMED) with no other statement, no reference to `rest` and no call other
-    than that print and its str.format; and that the names the body uses keep their plain meaning at
-    module level (`sys` bound only by `import sys`, EXIT_MALFORMED only to the literal 2,
-    IMPORT_RETIRED only to a string literal, `print` and `_cmd_import` not rebound, `__builtins__` not
-    bound in any form (a binding ahead of the def changes what print resolves to inside _cmd_import
-    without binding print), no `global` of any of them, no star import). The binding scan walks every
+    newline) is flagged both ways. It parses the source and flags a module that does not define
+    `_cmd_import` once, undecorated, taking only `rest`; a body after the docstring other than exactly
+    _IMPORT_BODY (one print of the pointer to sys.stderr, one return of EXIT_MALFORMED), any other
+    statement, a reference to `rest` or a call other than that print and its str.format included; and
+    a modeled module-level binding that changes a name the body uses (`sys` bound other than by one
+    `import sys`, EXIT_MALFORMED other than to the literal 2, IMPORT_RETIRED other than to a string
+    literal, `print` or `_cmd_import` rebound, `__builtins__` bound (a binding ahead of the def changes
+    what print resolves to inside _cmd_import without binding print), a `global` of any of them, a star
+    import, or sys, IMPORT_RETIRED or EXIT_MALFORMED not bound by one direct top-level statement ahead
+    of the def). The binding scan walks every
     expression evaluated at module scope, the decorators, argument defaults, annotations, class bases
     and class keywords of a def or class included; inside a lambda or a comprehension any store to a
     watched name counts (a walrus there, a comprehension's loop target or a walrus in a lambda body
     alike), an over-approximation. It models exactly the binding forms its walk enumerates and NO
-    MORE: reflective or dynamic stores
-    (globals() / vars() stores, setattr on the module, builtins or sys attribute reassignment,
-    exec / eval, another module patching this one) are the DISCLOSED residual classes in
-    _cmd_import's docstring, not enforced here. The source is parsed unoptimized (no AST optimizer), so the
+    MORE: every other change, the reflective or dynamic ones included, is in the residual class named in
+    _cmd_import's docstring, not flagged here. The source is parsed unoptimized (no AST optimizer), so the
     docstring the body check skips survives under python -O and -OO. It reads no file."""
     import ast
     import codecs
@@ -12590,7 +12589,7 @@ def _cli_self_test():
         # import verb ROUTING (OPF-IMPORT-VERB), judged on exit code only. The retired verb parses no
         # argument, so every argument list, a bare `import` included, meets its retirement pointer at exit 2
         # before any store resolution and needs no store on disk (the exact pointer text, the structural
-        # no-read check and the probed no-read and no-write rows are asserted in _import_leg below, the
+        # tripwire and the probed no-read and no-write rows are asserted in _import_leg below, the
         # wiring discriminator).
         _VALID_RID = "imp-20260101T000000Z-0123456789abcdef"   # the former run-id grammar; names no staged run
         expect(["import"], EXIT_MALFORMED)                       # bare
@@ -12745,9 +12744,9 @@ def _cli_self_test():
         def _import_leg():
             """Drive the retired import verb (spec 14.1), judged on the exact output, the exit code AND
             observable side effects. Returns None on success or EXIT_MALFORMED on a harness (fixture I/O)
-            error. _cmd_import parses no argument, so every argument list prints exactly the retirement
-            pointer on stderr (a literal pinned here, so a suffix appended to IMPORT_RETIRED is red),
-            nothing on stdout, and exits 2. Vectors: no arguments,
+            error. _cmd_import parses no argument, so each argument list below must print exactly the
+            retirement pointer on stderr (a literal pinned here, so a suffix appended to IMPORT_RETIRED
+            is red), nothing on stdout, and exit 2. Vectors: no arguments,
             `--help` / `-h`, each of the 14 former flags alone, with a separate value, with a joined value
             and with an empty joined value; abbreviated and ambiguous prefixes, alone and joined; the
             former argparse review-aid forms (`--review -1 --show-review`, an empty `--root=`, a repeated
@@ -12756,20 +12755,21 @@ def _cli_self_test():
             missing named files; two modes; an unknown flag, a positional token and `--`. The pointer
             names adoption and the prompt pack in words and no command.
 
-            The no-read claim is checked two ways. The STRUCTURAL check proves _cmd_import's source as
-            parsed: _import_body_findings over this file's BYTES (read in binary and parsed as the
-            interpreter decodes them, so a coding declaration is honoured, and any declaration other than
-            utf-8 on line 1 or 2 is itself a finding) requires _cmd_import's body after its docstring
-            to be exactly the one print of the pointer to stderr and the one return of EXIT_MALFORMED,
-            with no reference to `rest` and no other call, and no modeled binding of print, _cmd_import,
-            sys, IMPORT_RETIRED, EXIT_MALFORMED or __builtins__ in any expression evaluated at module
-            scope; _import_code_findings requires the live `_cmd_import.__code__` to equal the code
+            The no-read contract is checked two ways. The verb's runtime behaviour, exit 2 with the
+            pointer for every representative argument list, is what the RUNTIME probe below observes;
+            the STRUCTURAL checks are a tripwire against an accidental regression of _cmd_import, not a
+            proof. _import_body_findings over this file's BYTES (read in binary and parsed as the
+            interpreter decodes them, so a coding declaration is honoured) flags a coding declaration
+            other than utf-8 on line 1 or 2; a body after _cmd_import's docstring other than exactly the
+            one print of the pointer to stderr and the one return of EXIT_MALFORMED, a reference to
+            `rest` or any other call included; a modeled binding of print, _cmd_import, sys,
+            IMPORT_RETIRED, EXIT_MALFORMED or __builtins__ in any expression evaluated at module scope;
+            and sys, IMPORT_RETIRED or EXIT_MALFORMED not bound by one direct top-level statement ahead
+            of the def. _import_code_findings flags a live `_cmd_import.__code__` other than the code
             compiled from that parsed definition (co_code, co_consts recursively, names, argument counts,
-            flags, first line, filename); _import_namespace_findings requires the live function's
-            __globals__ to be this module's namespace and its __builtins__ the interpreter's builtins
-            mapping. It covers _cmd_import only: main() runs _bootstrap() and its own dispatch before
-            `return _cmd_import(rest)`, a path only the runtime probe exercises, and the module's
-            import-time top-level code is outside both checks (disclosed). Planted reads and
+            flags, first line, filename); _import_namespace_findings flags a live function whose
+            __globals__ is not this module's namespace or whose __builtins__ is not the interpreter's
+            builtins mapping. Planted reads and
             writes in the body (a listing of an `--apply` root or of the cwd, io.FileIO reads, a shell
             `cat`, a read of the `--ingest-options` file, an os.mkdir of an argument), planted rebindings
             (a rebound `_cmd_import`, `print` or EXIT_MALFORMED, a walrus binding in a comprehension,
@@ -12782,13 +12782,16 @@ def _cli_self_test():
             non-utf-8 declaration alone, a swapped `__code__` with the same
             argument count and names, the live code rebuilt over a scratch module holding each of those
             `__builtins__` values, and a function over a copy of this module's globals are each asserted
-            flagged. The structural check parses unoptimized and compiles at the interpreter's level, so
-            it is clean under python -O and -OO too. It does NOT
-            catch reflective or dynamic changes (globals() / vars() stores, setattr on the module,
-            builtins.print or sys.stderr reassignment, exec / eval, another module patching this one);
-            those are disclosed in _cmd_import's docstring, not enforced. The RUNTIME probe
-            (representative only) runs every argument list above inside one probe context that records,
-            and refuses, a call through the module attributes it patches (builtins, io, os, os.path,
+            flagged. The structural checks parse unoptimized and compile at the interpreter's level, so
+            they are clean under python -O and -OO too. They do not cover reflective or dynamic changes
+            (globals() or vars() stores, setattr and attribute stores such as builtins.print or
+            sys.stderr, exec, eval or compile, importlib), source-decoding and loader tricks beyond the
+            coding-declaration check, the module's own import-time top-level code (outside the runtime
+            probe too), the _bootstrap() and dispatch main() runs before `return _cmd_import(rest)`
+            (covered only by the runtime probe), calls through routes the probe does not patch (posix,
+            _io, ctypes, already-open handles, sockets), or another module patching this one. The RUNTIME
+            probe (representative only) runs every argument list above inside one probe context that
+            records, and refuses, a call through the module attributes it patches (builtins, io, os, os.path,
             subprocess, pathlib.Path) to the open, stat, listing, walk, access, readlink, cwd, os.path
             existence and type, pathlib.Path read, query and write, filesystem write and remove (os.mkdir,
             makedirs, mkfifo, mknod, unlink, remove, removedirs, rename, renames, replace, rmdir, symlink,
@@ -12869,11 +12872,11 @@ def _cli_self_test():
                             snap[os.path.relpath(p, rootdir)] = fh.read()
                 return snap
 
-            # The STRUCTURAL check, total over argument lists: _cmd_import's body is exactly the print and
-            # the return, and the live function is the checked one. The source is read as BYTES and those
-            # bytes are parsed, so a coding declaration is honoured as the interpreter honours it and the
-            # checked text is the text that runs (a utf-8 text read would check other text); the mutants
-            # below are built over its utf-8 text.
+            # The STRUCTURAL tripwire, independent of argument lists and no proof: it flags a body other
+            # than exactly the print and the return, and a live function other than the checked one. The
+            # source is read as BYTES and those bytes are parsed, so a coding declaration is honoured as
+            # the interpreter honours it (a utf-8 text read would check other text); the mutants below
+            # are built over its utf-8 text.
             try:
                 with open(__file__, "rb") as fh:
                     own_source = fh.read()
@@ -12888,11 +12891,12 @@ def _cli_self_test():
                 own_text = own_source.decode("utf-8", "replace")
             for finding in _import_body_findings(own_source):
                 failures.append("import structural check: {}".format(finding))
-            # The live-code tie: the live code object is exactly the one the parsed definition compiles to.
+            # The live-code tie flags a live code object other than the one the parsed definition
+            # compiles to.
             for finding in _import_code_findings(own_source, _cmd_import, __file__):
                 failures.append("import structural check: {}".format(finding))
-            # The live-namespace tie: the live function resolves names through this module and the real
-            # builtins mapping, so no `__builtins__` binding ahead of the def has redirected print.
+            # The live-namespace tie flags a live function that does not resolve names through this module
+            # and the real builtins mapping (as after a `__builtins__` binding ahead of the def).
             for finding in _import_namespace_findings(_cmd_import):
                 failures.append("import structural check: {}".format(finding))
             # A `__code__` swap keeping the argument count, varnames, names and filename (the former,
@@ -13898,23 +13902,23 @@ def _cli_self_test():
               "the retired import verb (spec 14.1) prints exactly its retirement pointer at exit 2 for every "
               "argument list tried (none, --help, each former flag alone, valued, joined or abbreviated, "
               "the former review-aid forms, two modes, an unknown flag, --), over a NOT-ADOPTED root and "
-              "over an adopted store, mutating nothing; a structural check proves _cmd_import's source as "
-              "parsed from the file's bytes as the interpreter decodes them, a coding declaration other "
-              "than utf-8 being a finding (its body exactly the pointer print and the exit-2 return, no "
-              "use of its arguments, "
-              "no other call, no modeled module-scope binding of the names it uses or of __builtins__, "
-              "each constant it uses bound unconditionally ahead of it), "
-              "ties the live code object to it exactly and the live function to this module's globals "
-              "and the real builtins mapping; it covers _cmd_import only, not the _bootstrap() and verb "
-              "dispatch main() runs before it, which only the runtime probe exercises, nor this module's "
-              "import-time top-level code before main() (neither check covers it), and does not "
-              "catch reflective or dynamic changes (globals() "
-              "stores, setattr on the module, builtins or sys.stderr reassignment, exec/eval, another "
-              "module patching this one); a runtime probe over those representative lists only records "
-              "no call through the module attributes it patches to its probed filesystem read, write and "
-              "remove, process-spawn or stdin functions, and a route it does not patch (a call through "
-              "the posix or _io modules directly, an already-open file object or descriptor, a socket, "
-              "ctypes) is outside it; "
+              "over an adopted store, mutating nothing (the verb's runtime behaviour, which the runtime "
+              "probe observes over those representative lists only, recording no call through the module "
+              "attributes it patches to its probed filesystem read, write and remove, process-spawn or "
+              "stdin functions); structural checks, a tripwire against accidental regression and not a "
+              "proof, parse _cmd_import's source from the file's bytes as the interpreter decodes them "
+              "and flag a coding declaration other than utf-8, a body other than "
+              "exactly the pointer print and the exit-2 return (a use of its arguments or any other call "
+              "included), a modeled module-scope binding of the names it uses or of __builtins__, a "
+              "constant it uses not bound unconditionally ahead of it, a live code object other than the "
+              "parsed definition's, and a live function not on this module's globals and the real "
+              "builtins mapping; they do not cover reflective or dynamic changes (globals(), vars, "
+              "setattr and attribute stores such as builtins.print or sys.stderr, exec/eval/compile, "
+              "importlib), source-decoding and loader tricks beyond the coding "
+              "declaration check, this module's import-time top-level code (outside the probe too), the "
+              "_bootstrap() and verb dispatch main() runs first (covered only by the probe), calls "
+              "through routes the probe does not patch (posix, _io, ctypes, already-open handles, "
+              "sockets), or another module patching this one; "
               "adopt (K9a) wires the read-only plan/status subcommands onto the "
               "adoption planner -- bare/malformed usage and the deferred approve/apply/complete/reconcile "
               "fail closed to exit 2, status -> 0 no-run or verified run / 1 open-transaction or invalid-"
