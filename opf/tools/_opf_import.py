@@ -8928,14 +8928,12 @@ def self_test_isolated():
             check(n1_label + "-manifest-cannot-eval", vN1big == CANNOT_EVALUATE)
 
         # N2a (PRC-N2 round-4, unit): _journal._close_fd_quietly swallows a close-time OSError rather than
-        # propagating it. A double close (the second os.close raises EBADF) returns cleanly; a raw os.close
-        # would raise EBADF out to the caller.
-        _rp_n2, _wp_n2 = os.pipe()
-        os.close(_wp_n2)
-        os.close(_rp_n2)                       # first, real close
+        # propagating it. Its close of -1, a number no descriptor can hold, raises EBADF and returns cleanly;
+        # a raw os.close would raise EBADF out to the caller. (#378 P1: the leg never closes a number it
+        # released to provoke EBADF, since another thread may have reused that number meanwhile.)
         _n2a_raised = False
         try:
-            _journal._close_fd_quietly(_rp_n2)   # second close: EBADF, swallowed
+            _journal._close_fd_quietly(-1)        # EBADF, swallowed
         except OSError:
             _n2a_raised = True
         check("N2a-close-quietly-swallows-oserror", _n2a_raised is False)

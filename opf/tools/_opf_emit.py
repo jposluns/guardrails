@@ -3299,7 +3299,7 @@ def _bounded_child_result(data, wstatus):
     return data.decode("utf-8", "replace")
 
 
-def _st_guardian_setup_failure(drive, setup_failed, recorded, journal, open_fd=None, private=None):
+def _st_guardian_setup_failure(drive, setup_failed, recorded, journal, open_fd=None, private=None, reuse=None):
     """#378: the guardian close vector with its first send raising. Its result must be this vector's named
     red (NOFIRE, the guardian never ran, and WRONG naming SetupFailed) with no LEAK; every resource the setup
     created must be closed through its own object; and descriptors opened afterwards, which take the
@@ -3308,9 +3308,14 @@ def _st_guardian_setup_failure(drive, setup_failed, recorded, journal, open_fd=N
     private directory (`private`, a fresh temporary directory unless a leg passes one it keeps until it has
     checked the numbers), so its (st_dev, st_ino), recorded at open, is unique to this check while the
     directory exists and no other lane's open of a reused number (of /dev/null or any other file) compares
-    equal. Each is owned by an ExitStack the moment it is opened, so an open that fails (`open_fd`, os.open
-    unless a leg injects one) closes the ones already opened and is this check's own named failure, never an
-    escaping exception. Returns the failures."""
+    equal. Each is owned from its open on (a failing fstat of it closes it, its number never yet released)
+    and by an ExitStack from its identity on, so an open that fails (`open_fd`, os.open unless a leg injects
+    one) releases the ones already opened and is this check's own named failure, never an escaping
+    exception. The stack's release closes a number only while fstat still returns the identity recorded at
+    its open, so a number this check expected released, and another lane reopened onto any other file, is
+    never closed by this check's cleanup either (#378 P1). `reuse`, when a leg passes one, is called with
+    the descriptors after gc.collect() and before they are checked, so the leg can put another file on one.
+    Returns the failures."""
     import contextlib
     import errno
     import gc
@@ -3333,11 +3338,18 @@ def _st_guardian_setup_failure(drive, setup_failed, recorded, journal, open_fd=N
         failures.append("guardian-close-reuse setup failure: expected its 3 resources each closed through "
                         "its object, got {}".format(created))
 
-    def release(fd):
+    def release(fd, ident):
+        """Close fd only while it still names the file recorded at its open, this check's own."""
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            return                                        # released already: never closed again
+        if (st.st_dev, st.st_ino) != ident:
+            return                                        # another file holds the number now: not ours
         try:
             os.close(fd)
         except OSError:
-            pass
+            pass                                          # released either way (close(2)); never re-touched
     with contextlib.ExitStack() as owned:
         if private is None:                               # removed after every descriptor is released
             private = owned.enter_context(tempfile.TemporaryDirectory(prefix="opf-emit-setup-"))
@@ -3347,8 +3359,12 @@ def _st_guardian_setup_failure(drive, setup_failed, recorded, journal, open_fd=N
             for index in range(4):
                 fd = opener(os.path.join(private, "fresh-{}".format(index)), os.O_RDONLY | os.O_CREAT | os.O_EXCL,
                             0o600)
-                owned.callback(release, fd)               # owned the moment it is opened
-                st = os.fstat(fd)
+                try:
+                    st = os.fstat(fd)
+                except BaseException:
+                    os.close(fd)                          # never released yet: still this check's own number
+                    raise
+                owned.callback(release, fd, (st.st_dev, st.st_ino))   # owned from its identity on
                 fresh.append(fd)
                 ident.append((st.st_dev, st.st_ino))      # this check's own file, recorded at open
         except OSError as exc:
@@ -3357,6 +3373,8 @@ def _st_guardian_setup_failure(drive, setup_failed, recorded, journal, open_fd=N
             return failures
         del created[:]
         gc.collect()
+        if reuse is not None:
+            reuse(list(fresh))
         after = []
         for fd in fresh:
             try:
@@ -3384,8 +3402,10 @@ def _st_guardian_close_reuse():
     again with the second of the descriptors it opens afterwards failing to open: that is its named failure,
     with the descriptor opened first closed. Every descriptor that leg owns opens a file it creates in a
     private directory, so a number it expected released is closed only while fstat shows that file's
-    identity: an identity leg shows a number another lane reopened onto /dev/null is never closed and is no
-    failure, and a genuine leak is still reported and closed.
+    identity, by the leg and by the setup check's own cleanup alike: an identity leg shows a number another
+    lane reopened onto another file is never closed and is no failure, a reuse leg shows the setup check
+    reports a number replaced after gc.collect() and its cleanup leaves that number open, and a genuine leak
+    is still reported and closed.
     The harness is loaded from its sibling FILE by explicit path, as _load_byte_canon_authority loads its
     authority, so this runs under `python3 -I` too. Returns the failures."""
     import contextlib
@@ -3532,27 +3552,45 @@ def _st_guardian_close_reuse():
             if close_if_left_open(fd, ident):
                 failures.append("guardian-close-reuse setup failure with its second open failing: the "
                                 "descriptor opened first was left open")
-        # Another lane opening /dev/null onto the released number: dup2 puts a /dev/null descriptor onto a
-        # number this leg still owns, so the number is never free for a real lane to take meanwhile. It must
-        # not be closed and must not be reported.
-        null = os.open(os.devnull, os.O_RDONLY)
+        # Another lane opening a file onto the released number: dup2 puts a descriptor on this leg's own
+        # "other-lane" file onto a number this leg still owns, so the number is never free for a real lane to
+        # take meanwhile. It must not be closed and must not be reported; the leg then closes it only while
+        # it still names the other-lane file, whose identity no other lane's open shares.
+        other, other_ident = own_file("other-lane")
         try:
             reused, ident = own_file("reused")
             try:
-                os.dup2(null, reused)
+                os.dup2(other, reused)
             except BaseException:
-                os.close(reused)
+                os.close(reused)                          # dup2 failed: still this leg's own file
                 raise
             if close_if_left_open(reused, ident):
                 failures.append("guardian-close-reuse identity check: closed a number another lane reopened "
-                                "onto /dev/null")
+                                "onto another file")
+            elif identity(reused) != other_ident:
+                failures.append("guardian-close-reuse identity check: the number another lane reopened no "
+                                "longer names that lane's file")
             else:
-                if identity(reused) != identity(null):
-                    failures.append("guardian-close-reuse identity check: the number reopened onto /dev/null "
-                                    "no longer names /dev/null")
-                os.close(reused)
+                os.close(reused)                          # the other-lane file, which this leg owns
+            # The setup check's own cleanup: after gc.collect() another lane's file replaces the second
+            # descriptor the check opened (dup2 onto a number the check still owns). The check must report
+            # it replaced, and its ExitStack must leave the number open, as it names another file.
+            hit = []
+
+            def reuse(fresh):
+                os.dup2(other, fresh[1])
+                hit.append(fresh[1])
+            got = _st_guardian_setup_failure(drive, SetupFailed, recorded, _journal, reuse=reuse)
+            if len(got) != 1 or "closed or replaced" not in got[0]:
+                failures.append("guardian-close-reuse setup failure with a number another lane reused: expected "
+                                "that number reported replaced alone, got {}".format(got or "green"))
+            if len(hit) != 1 or identity(hit[0]) != other_ident:
+                failures.append("guardian-close-reuse setup failure: its cleanup closed a number another lane "
+                                "reused ({})".format(hit))
+            else:
+                os.close(hit[0])                          # the other-lane file, which this leg owns
         finally:
-            os.close(null)
+            os.close(other)
         # A genuine leak: a number still naming this leg's own file is reported and closed.
         leaked, ident = own_file("leaked")
         if not close_if_left_open(leaked, ident) or identity(leaked) == ident:

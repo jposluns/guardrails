@@ -2293,12 +2293,10 @@ def _st_close_run(call, masking, expect, watch=True):
         problems.append("REUSE: a released number was closed again under its new owner {}".format(lost))
     if fault.probes:
         problems.append("PROBE: a released number was touched again {}".format(fault.probes))
+    # A leaked number is reported and left open: no open of it was recorded here, so the harness cannot
+    # show it still names the file the call leaked rather than one another thread opened on it since (a
+    # released number included), and it never closes a number it cannot show is its own (#378 P1).
     leaked = sorted(fd for fd, ident in after.items() if before.get(fd) != ident)
-    for fd in leaked:
-        try:
-            os.close(fd)                                  # the harness's own cleanup of a flipped run
-        except OSError:
-            pass
     if leaked:
         problems.append("LEAK: descriptor(s) {} survived the failing close".format(leaked))
     if masking is None:

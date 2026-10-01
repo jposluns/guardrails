@@ -1257,35 +1257,44 @@ def _recover_close_vectors(base, onop, onpay, rel1):
 
     def printing(fn):
         """A print that raises after the close succeeded, its number already taken by a reuser: returns
-        (exit code, whether the reuser still owns the number)."""
+        (exit code, whether the reuser still owns the number). The root descriptor's close puts the reuser's
+        pipe on the number with dup2 instead of freeing it (#378 P1), so the number is never free for a
+        real lane to take meanwhile and is closed here only while it still names that pipe."""
         root, g = fixture("none"), fn.__globals__
-        real_open, seen = g["_open_root_fd"], {}
+        real_open, real_close, seen = g["_open_root_fd"], os.close, {}
 
         def open_spy(path):
             seen["fd"] = real_open(path)
-            seen["pipe"] = os.pipe()                      # opened before the release, never on the number
             return seen["fd"]
+
+        def close_spy(fd):
+            if fd != seen.get("fd") or "ident" in seen:
+                return real_close(fd)
+            rfd, wfd = os.pipe()                          # opened while the number is still held
+            try:
+                os.dup2(rfd, fd)                          # the close: the number goes straight to the reuser
+                st = os.fstat(fd)
+                seen["ident"] = (st.st_dev, st.st_ino)
+            finally:
+                real_close(rfd)
+                real_close(wfd)
 
         def print_spy(*args, **kwargs):
             del g["print"]                                # one shot: _fail's own print is the real one
-            rfd, wfd = seen["pipe"]
-            os.dup2(rfd, seen["fd"])
-            os.close(rfd)
-            os.close(wfd)
-            st = os.fstat(seen["fd"])
-            seen["ident"] = (st.st_dev, st.st_ino)
             raise OSError(errno.EPIPE, "self-test injected print failure")
         g["_open_root_fd"], g["print"] = open_spy, print_spy
+        os.close = close_spy
         try:
             with redirect_stderr(io.StringIO()):
                 rc = fn(root)
         finally:
+            os.close = real_close
             g["_open_root_fd"] = real_open
             g.pop("print", None)
         try:
             st = os.fstat(seen["fd"])
             owned = (st.st_dev, st.st_ino) == seen["ident"]
-        except OSError:
+        except (KeyError, OSError):
             owned = False
         if owned:
             os.close(seen["fd"])
