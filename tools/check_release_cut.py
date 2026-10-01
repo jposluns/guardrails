@@ -1805,8 +1805,10 @@ _CLOSE_SWEEP_SHAPES = (
 _CS_LOOP_ELSE = ("for else after a swallowed close", "while else after a swallowed close", "for else re-binds",
                  "while else re-binds")
 
-# A synthetic corpus with one function per compound statement kind, closes and re-bindings in every block:
-# the sweep must run over each, and over every tools/ and opf/tools/ source, without raising.
+# A synthetic corpus with one function per compound statement kind, closes and re-bindings in every block,
+# and one per simple statement kind the others do not already hold (a return, an assignment, an expression and
+# pass appear in them; break and continue sit inside a loop): the sweep must run over each, and over every
+# tools/ and opf/tools/ source, without raising.
 _CLOSE_SWEEP_CORPUS = (
     ("if", "def f(fd, c):\n    if c:\n        os.close(fd)\n    elif fd:\n        fd = None\n    else:\n"
      "        os.close(fd)\n    fd = 1\n"),
@@ -1849,6 +1851,12 @@ _CLOSE_SWEEP_CORPUS = (
     ("raise", "def f(fd):\n    try:\n        os.close(fd)\n    except OSError as exc:\n"
      "        raise ValueError(fd) from exc\n    raise\n"),
     ("annotation only", "def f(self, fd, fds):\n    x: int\n    self.y: int\n    fds[0]: int\n    os.close(fd)\n"),
+    ("augmented assignment", "def f(self, fd, fds):\n    os.close(fd)\n    fd += 1\n    self.fd -= 1\n"
+     "    fds[0] |= fd\n"),
+    ("break", "def f(fds):\n    for fd in fds:\n        os.close(fd)\n        break\n    while fds:\n"
+     "        break\n"),
+    ("continue", "def f(fds):\n    for fd in fds:\n        if fd:\n            continue\n        os.close(fd)\n"
+     "    while fds:\n        continue\n"),
 ) + ((("type alias", "def f(fd):\n    type Fds = list[int]\n    os.close(fd)\n"),)
      if sys.version_info >= (3, 12) else ())        # a type alias statement parses from Python 3.12 on
 

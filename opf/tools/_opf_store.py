@@ -2675,7 +2675,10 @@ def self_test():
         # its number, and any later close of the number reaches the real close, so a second close by the
         # code under test closes the other-lane file. After that run the number must still name the
         # other-lane file (nothing closed it again, the code under test and the leg's cleanup included), and
-        # only then does the leg close it, its own other-lane descriptor.
+        # only then does the leg close it, its own other-lane descriptor. The ledger is pid-gated, as
+        # _opf_emit's run_bounded legs' is: it records the pid that armed it, and only in that process does an
+        # open record, a close release or fire the injection, or a left-open check find or close anything
+        # (these legs do not fork; a forked child would hold its own copy of the numbers, never the leg's).
         def _r7_ident(fd):
             try:
                 st = os.fstat(fd)
@@ -2683,30 +2686,47 @@ def self_test():
                 return None
             return st.st_dev, st.st_ino
 
+        def _r7_ledger():
+            """A leg's ledger, armed in this process: its opens, and the pid it acts in."""
+            return {"owner": os.getpid(), "opens": []}
+
+        def _r7_mine(seen):
+            """Whether this is the process that armed the leg's ledger: only there does its close fire."""
+            return os.getpid() == seen["opened"]["owner"]
+
         def _r7_opened(ledger, fd, real_close=None):
-            """Record fd's open with its identity. An open stand-in passes real_close, so a failing fstat
-            closes the number it just opened (never released yet) instead of leaking it."""
+            """Record fd's open with its identity, in the ledger's own process only. An open stand-in passes
+            real_close, so a failing fstat closes the number it just opened (never released yet) instead of
+            leaking it."""
+            if os.getpid() != ledger["owner"]:
+                return fd                               # a forked child's open: not the leg's to record
             try:
                 st = os.fstat(fd)
             except BaseException:
                 if real_close is not None:
                     real_close(fd)
                 raise
-            ledger.append({"fd": fd, "ident": (st.st_dev, st.st_ino), "released": False})
+            ledger["opens"].append({"fd": fd, "ident": (st.st_dev, st.st_ino), "released": False})
             return fd
 
         def _r7_released(ledger, fd):
-            """A close of fd: the latest open of fd that no close has released yet is released now. Returns
-            whether this close released a recorded open (False for a repeated close of a released number)."""
-            for entry in reversed(ledger):
+            """A close of fd in the ledger's own process: the latest open of fd that no close has released
+            yet is released now. Returns whether this close released a recorded open (False for a repeated
+            close of a released number, and for any close in another process)."""
+            if os.getpid() != ledger["owner"]:
+                return False                            # a forked child's close: never the leg's release
+            for entry in reversed(ledger["opens"]):
                 if entry["fd"] == fd and not entry["released"]:
                     entry["released"] = True
                     return True
             return False
 
         def _r7_left_open(ledger):
-            """The opens no close released whose number still names the file recorded at the open."""
-            return [entry for entry in ledger
+            """The opens no close released whose number still names the file recorded at the open (none
+            outside the ledger's own process)."""
+            if os.getpid() != ledger["owner"]:
+                return []
+            return [entry for entry in ledger["opens"]
                     if not entry["released"] and _r7_ident(entry["fd"]) == entry["ident"]]
 
         def _r7_close_left(ledger):
@@ -2762,7 +2782,7 @@ def self_test():
         _r5_real_close = os.close
         for _r5_reuse in (False, True):
             _r5_tag = "-reused" if _r5_reuse else ""
-            _r5_seen = dict(opened=[])
+            _r5_seen = dict(opened=_r7_ledger())
 
             def _r5_open_parent(root_fd, relpath):
                 pfd, name = _r5_real_open_parent(root_fd, relpath)
@@ -2771,7 +2791,7 @@ def self_test():
 
             def _r5_close(fd):
                 _r5_first = _r7_released(_r5_seen["opened"], fd)
-                if "pfd" in _r5_seen and fd != _r5_seen["pfd"] and "fired" not in _r5_seen:
+                if "pfd" in _r5_seen and fd != _r5_seen["pfd"] and "fired" not in _r5_seen and _r7_mine(_r5_seen):
                     # the first non-parent close after _open_parent returned is the FILE fd's close
                     _r5_seen["fired"] = True
                     _r7_fire(fd, _r5_real_close, False)
@@ -2813,7 +2833,7 @@ def self_test():
         _r6_real_close = os.close
         for _r6_reuse in (False, True):
             _r6_tag = "-reused" if _r6_reuse else ""
-            _r6_seen = dict(opened=[])
+            _r6_seen = dict(opened=_r7_ledger())
 
             def _r6_open_parent(root_fd, relpath):
                 pfd, name = _r6_real_open_parent(root_fd, relpath)
@@ -2828,7 +2848,7 @@ def self_test():
 
             def _r6_close(fd):
                 _r6_first = _r7_released(_r6_seen["opened"], fd)
-                if fd == _r6_seen.get("pfd") and "fired" not in _r6_seen:
+                if fd == _r6_seen.get("pfd") and "fired" not in _r6_seen and _r7_mine(_r6_seen):
                     _r6_seen["fired"] = True
                     _r7_fire(fd, _r6_real_close, False)
                 if fd == _r6_seen.get("wfd") and _r6_first:
@@ -2868,7 +2888,7 @@ def self_test():
         _r6j_real_odc = _journal._open_dir_contained
         for _r6j_reuse in (False, True):
             _r6j_tag = "-reused" if _r6j_reuse else ""
-            _r6j_seen = dict(opened=[])
+            _r6j_seen = dict(opened=_r7_ledger())
 
             def _r6j_odc(root_fd, relpath):
                 _r6j_seen["root_fd"] = _r7_opened(_r6j_seen["opened"], root_fd)
@@ -2878,7 +2898,7 @@ def self_test():
 
             def _r6j_close(fd):
                 _r6j_first = _r7_released(_r6j_seen["opened"], fd)
-                if fd == _r6j_seen.get("root_fd") and "fired" not in _r6j_seen:
+                if fd == _r6j_seen.get("root_fd") and "fired" not in _r6j_seen and _r7_mine(_r6j_seen):
                     _r6j_seen["fired"] = True
                     _r7_fire(fd, _r6_real_close, False)
                 if fd == _r6j_seen.get("jr") and _r6j_first:
@@ -2917,14 +2937,14 @@ def self_test():
         _r7_real_close = os.close
         for _r7_reuse in (False, True):
             _r7_tag = "-reused" if _r7_reuse else ""
-            _r7_seen = {"opened": []}
+            _r7_seen = {"opened": _r7_ledger()}
 
             def _r7_open(*args, **kwargs):
                 return _r7_opened(_r7_seen["opened"], _r7_real_open(*args, **kwargs), _r7_real_close)
 
             def _r7_close(fd):
                 _r7_released(_r7_seen["opened"], fd)
-                if "fired" not in _r7_seen:
+                if "fired" not in _r7_seen and _r7_mine(_r7_seen):
                     _r7_seen["fired"] = fd
                     _r7_fire(fd, _r7_real_close, _r7_reuse)
                 _r7_real_close(fd)
@@ -2958,7 +2978,7 @@ def self_test():
         _r7w_real_close = os.close
         for _r7_reuse in (False, True):
             _r7_tag = "-reused" if _r7_reuse else ""
-            _r7w_seen = {"opened": []}
+            _r7w_seen = {"opened": _r7_ledger()}
 
             def _r7w_open_parent(root_fd, relpath):
                 pfd, name = _r7w_real_open_parent(root_fd, relpath)
@@ -2973,7 +2993,7 @@ def self_test():
 
             def _r7w_close(fd):
                 _r7_released(_r7w_seen["opened"], fd)
-                if fd == _r7w_seen.get("pfd") and "fired" not in _r7w_seen:
+                if fd == _r7w_seen.get("pfd") and "fired" not in _r7w_seen and _r7_mine(_r7w_seen):
                     _r7w_seen["fired"] = True
                     _r7_fire(fd, _r7w_real_close, _r7_reuse)
                 _r7w_real_close(fd)
@@ -3010,7 +3030,7 @@ def self_test():
         _r7j_real_close = os.close
         for _r7_reuse in (False, True):
             _r7_tag = "-reused" if _r7_reuse else ""
-            _r7j_seen = {"opened": []}
+            _r7j_seen = {"opened": _r7_ledger()}
 
             def _r7j_odc(root_fd, relpath):
                 _r7j_seen["root_fd"] = _r7_opened(_r7j_seen["opened"], root_fd)
@@ -3020,7 +3040,7 @@ def self_test():
 
             def _r7j_close(fd):
                 _r7_released(_r7j_seen["opened"], fd)
-                if fd == _r7j_seen.get("root_fd") and "fired" not in _r7j_seen:
+                if fd == _r7j_seen.get("root_fd") and "fired" not in _r7j_seen and _r7_mine(_r7j_seen):
                     _r7j_seen["fired"] = True
                     _r7_fire(fd, _r7j_real_close, _r7_reuse)
                 _r7j_real_close(fd)
