@@ -48,6 +48,8 @@ forged-checksum journal above. The robust fix, an OS-held fcntl lease bound to t
 lifetime, is a tracked post-1.0.0 hardening.
 
 Exit convention of the CLIs built on this module: 0 clean/NA, 1 finding, 2 malformed or read error.
+
+  _journal.py --self-test   the descriptor-helper vectors (read-error conversion, quiet cleanup close)
 """
 import hashlib
 import json
@@ -2076,3 +2078,118 @@ def build_inverse_ops(intent_ops):
         else:
             raise JournalError("cannot invert unknown op kind {!r}".format(kind))
     return inverse
+
+
+# --- self-test: the direct _journal lane ---------------------------------------------------------------
+
+def self_test():
+    """Descriptor-helper vectors, ported from the retired import engine's self-test (their only former
+    home), each driving the helper directly with a patched os primitive and judged on its own contract:
+      C1-osread  _read_fd converts a read-time OSError to a JournalError, never a raw OSError or a
+                 truncated result (with a positive control: a readable descriptor returns its bytes).
+      N2a        _close_fd_quietly swallows the close-time OSError of an already-closed descriptor (fstat
+                 confirms it gone) rather than propagating it.
+      N2d        _close_fd_quietly's diagnostic path never raises: both closes fail while fstat proves the
+                 descriptor live, and the stderr write itself raises; the helper still returns.
+    No store, no journal and no subprocess; every patched primitive is restored in a finally. Returns 0
+    pass, 1 fail."""
+    import errno
+    failures, count = [], [0]
+
+    def check(name, cond):
+        count[0] += 1
+        if not cond:
+            failures.append(name)
+
+    # C1-osread: the one choke point every contained reader routes bytes through.
+    rpipe, wpipe = os.pipe()
+    try:
+        os.write(wpipe, b"journal bytes")
+        os.close(wpipe)
+        wpipe = None
+        check("C1-osread-control-reads", _read_fd(rpipe) == b"journal bytes")
+    finally:
+        os.close(rpipe)
+        if wpipe is not None:
+            os.close(wpipe)
+    rpipe, wpipe = os.pipe()
+    saved_read = os.read
+
+    def failing_read(_fd, _n):
+        raise OSError(errno.EIO, "simulated read error")
+
+    os.read = failing_read
+    try:
+        try:
+            _read_fd(rpipe)
+            vread = "no-raise"
+        except JournalError:
+            vread = "journal-error"
+        except OSError:
+            vread = "raw-oserror"
+    finally:
+        os.read = saved_read
+        os.close(rpipe)
+        os.close(wpipe)
+    check("C1-osread-converts-to-journalerror", vread == "journal-error")
+
+    # N2a: a double close (the second os.close raises EBADF and fstat confirms the fd gone) returns cleanly;
+    # a raw os.close would raise EBADF out to the caller.
+    rp, wp = os.pipe()
+    os.close(wp)
+    os.close(rp)                                     # first, real close
+    try:
+        _close_fd_quietly(rp)                        # second close: EBADF; fstat EBADF -> confirmed gone
+        n2a_raised = False
+    except OSError:
+        n2a_raised = True
+    check("N2a-close-quietly-swallows-oserror", n2a_raised is False)
+
+    # N2d: drive the fail-surface branch (both os.close calls raise while fstat proves the fd still open)
+    # AND make the stderr write itself raise OSError (a broken stderr): the helper must RETURN.
+    rp, wp = os.pipe()                               # a real, open fd so the helper's fstat confirms it live
+    saved_close, saved_stderr = os.close, sys.stderr
+
+    class BrokenStderr:
+        def write(self, *_a, **_k):
+            raise OSError(errno.EIO, "broken stderr write")
+
+        def flush(self, *_a, **_k):
+            raise OSError(errno.EIO, "broken stderr flush")
+
+    def failing_close(_fd):
+        raise OSError(errno.EIO, "injected close failure")
+
+    n2d_raised = False
+    try:
+        os.close = failing_close                     # BOTH closes in the helper now raise
+        sys.stderr = BrokenStderr()                  # ... and the diagnostic write raises too
+        try:
+            _close_fd_quietly(rp)
+        except BaseException:
+            n2d_raised = True
+    finally:
+        os.close, sys.stderr = saved_close, saved_stderr
+    os.close(rp)                                     # real cleanup of the still-open fds
+    os.close(wp)
+    check("N2d-close-quietly-diagnostic-nonthrow", n2d_raised is False)
+
+    if failures:
+        print("OPF-JOURNAL SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), count[0]))
+        for name in failures:
+            print("  FAILED: {}".format(name))
+        return 1
+    print("OPF-JOURNAL SELF-TEST: PASS ({} descriptor-helper checks)".format(count[0]))
+    return 0
+
+
+def main(argv=None):
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args == ["--self-test"]:
+        return self_test()
+    print("usage: _journal.py --self-test", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

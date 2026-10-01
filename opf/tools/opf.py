@@ -33,17 +33,12 @@ and handled separately by lease acquisition. It then applies the schema delta,
 renders declared views, and requires a full doctor VALID before offering the uncommitted change for
 review and merge. A store already at the
 tooling spec_version is a byte no-op when doctor-VALID and exits 2 otherwise; a NOT-ADOPTED root reports
-NOT APPLICABLE and exits 0. `import` HAS
-landed (OPF-IMPORT-VERB): `opf import [--root DIR] (--scan --set FILE | --plan --set FILE | --review
-<run-id> --actor NAME (--decisions FILE | --interactive) | --apply <run-id>)` wires the reserved verb onto
-the U7 operation layer (_opf_import scan/plan/review/apply). Exactly one mode is required; `--scan` renders
-the canonical inventory to stdout writing nothing, `--plan` stages a candidate run, `--review` captures an
-attributed acceptance.json (no live-store write), and `--apply` wires onto the PR-C apply-promotion
-(the journaled, verified-restore cutover that promotes an accepted run). Each mode maps the operation layer's
-0/1/2 verdict to the CLI exit contract. Those four modes are now RETIRED (spec 14.1): the operation layer
-refuses each on every root, a NOT-ADOPTED one included, before any write, and the verb surfaces that
-refusal at exit 2 before reading any input file (only its argv usage checks precede it); `--show-review`
-and `--diff-review` remain.
+NOT APPLICABLE and exits 0. `import`'s former
+modes, `opf import [--root DIR] (--scan --set FILE | --plan --set FILE | --review <run-id> --actor NAME
+(--decisions FILE | --interactive) | --apply <run-id>)`, are RETIRED (spec 14.1) and their engine is
+removed: the verb refuses each mode on every root, a NOT-ADOPTED one included, at exit 2 with a pointer to
+adoption and the prompt pack, before reading any input file or writing anything (only its argv usage checks
+precede it).
 
 `init` HAS landed: `opf init [--root DIR]` creates validated store sources, a pointer, and a starter
 `CHANGELOG.md` when none exists, without git writes or rendering.
@@ -102,8 +97,8 @@ def _bootstrap():
     invocation. Returns EXIT_OK on success, or EXIT_MALFORMED with a located diagnostic naming the helper
     that could not be brought in."""
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
-    global _opf_emit, _opf_views, _opf_fuzz, _opf_import, _opf_importers, _opf_observe, _opf_absorb
-    global _opf_ingest, _opf_write_guard, _opf_record, _opf_adopt_apply, _opf_adopt_plan
+    global _opf_emit, _opf_views, _opf_fuzz, _opf_observe, _opf_absorb
+    global _opf_write_guard, _opf_record, _opf_adopt_apply, _opf_adopt_plan
     try:
         import _opf_store       # U1: store resolution + discovery + manifest base/profile schema
         import _opf_schema      # U2: record envelope + baseline type schemas + status/transition + counters
@@ -113,9 +108,6 @@ def _bootstrap():
         import _opf_emit        # U8: the constrained-subset TOML emitter (canonical, byte-canon-clean)
         import _opf_views       # U4: deterministic view generators + the closed transform vocabulary
         import _opf_fuzz        # adversarial input-hardening proof (membership/type-guard class closure)
-        import _opf_import      # U7: import staging (module + self-test; the live import verb is wired below)
-        import _opf_importers   # MIG-PR2: the shared import layer (deterministic importers + loss accounting)
-        import _opf_ingest      # MIG-PR3: root-ingest detect + the disposition planner (plan_ingest)
         import _opf_observe     # PR-B: caller-side git-derived observations for the doctor verb (validate_store)
         import _opf_absorb      # OPF-CHANGELOG-ABSORB: read-only CHANGELOG.md drafter (composes on U5)
         import _opf_write_guard  # the in-place writers' shared cleanliness gate and single-writer lease
@@ -2246,257 +2238,32 @@ def _upgrade_run(root):
         os.close(root_fd)
 
 
-def _import_exit(verdict):
-    """Map an operation-layer verdict (_opf_import CLEAN/FINDING/CANNOT_EVALUATE) to the CLI 0/1/2 exit
-    contract, fail-closed: a verdict outside {0, 1, 2} (a first-party contract violation) is exit 2, never
-    a false clean. The verdict constants are numerically the exit codes, but the mapping is explicit so a
-    future divergence cannot silently pass an out-of-range value through as clean."""
-    if verdict == _opf_import.CLEAN:
-        return EXIT_OK
-    if verdict == _opf_import.FINDING:
-        return EXIT_FINDING
-    return EXIT_MALFORMED   # CANNOT_EVALUATE, or any unexpected value, fails closed
-
-
-def _import_read_set(path):
-    """Read the `--set` import-set manifest (a TOML file), fail-closed. Returns (sources, proposals): a
-    non-empty list of relative source-path strings and the optional inert model-proposal tables (a list, or
-    None). The manifest is CALLER input, not a store artefact, so it may live outside the store and is read
-    directly; a missing, unreadable, or malformed manifest is a ValueError (the caller maps it to a
-    cannot-evaluate exit 2, never a silent nothing-to-do). Shape (surfaced for maintainer sign-off,
-    PD-OPF-IMPORT-VERB-APPLY-SEAMS): `schema = 1`, `source = ["rel/path", ...]`, optional `[[proposal]]`
-    rows in the _opf_import proposal keyset {source_path, span, suggested_state, note}. This reader
-    validates each proposal row's STRUCTURE fail-closed (a closed keyset, a non-empty str source_path, a
-    two-int span, a str suggested_state, an optional str note); a structurally-malformed row is a ValueError
-    the caller maps to exit 2, consistently for `--scan` and `--plan`, so a malformed --set FILE cannot be
-    silently ignored by one mode and forwarded by the other. The operation layer (`_validate_proposals`)
-    still owns the SEMANTICS as a finding (exit 1): source_path must name a scanned source (the
-    contained-relpath / confinement discipline), span must lie within [0, size], and suggested_state must be
-    a mapping-state member; those checks are not duplicated here. Proposals are consumed only by `--plan`
-    (they are recorded verbatim in the review surface); `--scan` enumerates sources and ignores any proposal
-    rows, but still rejects a structurally-malformed --set FILE at read time."""
-    import tomllib
-    try:
-        with open(path, "rb") as fh:
-            doc = tomllib.load(fh)
-    except FileNotFoundError:
-        raise ValueError("--set manifest not found: {}".format(path))
-    except (OSError, ValueError, RecursionError) as exc:
-        raise ValueError("--set manifest unreadable or malformed ({}): {}".format(path, exc))
-    if not (isinstance(doc, dict) and type(doc.get("schema")) is int and doc.get("schema") == 1):
-        raise ValueError("--set manifest must be a TOML table carrying `schema = 1` (an integer 1, not a "
-                         "bool or float)")
-    extra = set(doc) - {"schema", "source", "proposal"}
-    if extra:
-        raise ValueError("--set manifest carries unknown key(s): {} (a set is a closed {{schema, source, "
-                         "proposal}})".format(", ".join(sorted(extra))))
-    sources = doc.get("source")
-    if not (isinstance(sources, list) and sources and all(isinstance(s, str) and s for s in sources)):
-        raise ValueError("--set manifest `source` must be a non-empty array of source-path strings")
-    proposals = doc.get("proposal")
-    if proposals is not None and not isinstance(proposals, list):
-        raise ValueError("--set manifest `proposal` must be an array of proposal tables when present")
-    # Validate each proposal row's STRUCTURE fail-closed (a malformed --set FILE is exit 2, consistently for
-    # scan and plan). The operation layer (`_validate_proposals`) still owns the SEMANTICS: source_path names
-    # a scanned source, span lies within [0, size], suggested_state is a mapping-state member (each a
-    # finding, exit 1). Row shape here is the _opf_import proposal keyset {source_path, span,
-    # suggested_state, note}: a closed keyset, a non-empty str source_path, a two-int span, a str
-    # suggested_state, and an optional str note. The semantic checks are NOT duplicated here.
-    for idx, row in enumerate(proposals or []):
-        where = "--set manifest `proposal`[{}]".format(idx)
-        if not isinstance(row, dict):
-            raise ValueError("{} must be a table".format(where))
-        extra_row = set(row) - {"source_path", "span", "suggested_state", "note"}
-        if extra_row:
-            raise ValueError("{} carries unknown key(s): {} (a proposal row is a closed {{source_path, "
-                             "span, suggested_state, note}})".format(where, ", ".join(sorted(extra_row))))
-        if not (isinstance(row.get("source_path"), str) and row.get("source_path")):
-            raise ValueError("{} `source_path` must be a non-empty string".format(where))
-        span = row.get("span")
-        if not (isinstance(span, list) and len(span) == 2 and all(type(x) is int for x in span)):
-            raise ValueError("{} `span` must be a list of exactly two integers".format(where))
-        if not isinstance(row.get("suggested_state"), str):
-            raise ValueError("{} `suggested_state` must be a string".format(where))
-        if "note" in row and not isinstance(row.get("note"), str):
-            raise ValueError("{} `note` must be a string when present".format(where))
-    return sources, proposals
-
-
-def _import_read_worksheet(path):
-    """Read the `--dispositions` triaged worksheet (a TOML file) for the root-ingest planner (MIG-PR3),
-    fail-closed. Returns the parsed dict UNCHANGED: the SHAPE/vocabulary/digest validation is owned by
-    `_opf_ingest.validate_worksheet` (the single worksheet authority) and the semantics by `plan_ingest`,
-    never duplicated here. The file is CALLER input (it may live outside the store); a missing, unreadable,
-    or malformed worksheet is a ValueError the caller maps to cannot-evaluate exit 2, never a silent
-    nothing-to-do (mirrors `_import_read_set`'s read-boundary discipline)."""
-    import tomllib
-    try:
-        with open(path, "rb") as fh:
-            return tomllib.load(fh)
-    except FileNotFoundError:
-        raise ValueError("--dispositions worksheet not found: {}".format(path))
-    except (OSError, ValueError, RecursionError) as exc:
-        raise ValueError("--dispositions worksheet unreadable or malformed ({}): {}".format(path, exc))
-
-
-def _import_read_options(path):
-    """Read the `--ingest-options` companion (a TOML file) for the root-ingest planner (MIG-PR3),
-    fail-closed. Returns the parsed dict UNCHANGED: the SHAPE validation is owned by
-    `_opf_ingest.validate_options` and the semantic binding by `plan_ingest`, never duplicated here. The file
-    is CALLER input (it may live outside the store); a missing, unreadable, or malformed options file is a
-    ValueError the caller maps to cannot-evaluate exit 2, never a silent nothing-to-do."""
-    import tomllib
-    try:
-        with open(path, "rb") as fh:
-            return tomllib.load(fh)
-    except FileNotFoundError:
-        raise ValueError("--ingest-options file not found: {}".format(path))
-    except (OSError, ValueError, RecursionError) as exc:
-        raise ValueError("--ingest-options file unreadable or malformed ({}): {}".format(path, exc))
-
-
-def _import_decode_decisions(raw, run_id):
-    """Decode the closed ordinary or ingest envelope without accepting any decision implicitly."""
-    import _opf_import as imp
-    doc = imp._strict_json(raw)
-    if not isinstance(doc, dict) or type(doc.get("schema")) is not int or doc["schema"] not in (1, 2):
-        raise ValueError("--decisions requires integer schema 1 or 2")
-    keys = {"schema", "run_id", "decisions"} | ({"ingest"} if doc["schema"] == 2 else set())
-    if set(doc) != keys or doc["run_id"] != run_id or not isinstance(doc["decisions"], list):
-        raise ValueError("--decisions envelope keys, run binding, or decisions array are invalid")
-    if doc["schema"] == 2:
-        block = doc["ingest"]
-        if not (isinstance(block, dict) and set(block) == {"format", "binding", "units"}
-                and block["format"] == imp.INGEST_ACCEPTANCE_BLOCK
-                and isinstance(block["binding"], dict) and isinstance(block["units"], list)):
-            raise ValueError("--decisions ingest block is malformed")
-        return doc
-    return doc["decisions"]
-
-
-def _import_read_decisions(path, run_id):
-    """Read the `--decisions` batch file (canonical JSON), fail-closed. Returns the decisions list. The file
-    is CALLER input (it may live outside the store); its envelope (surfaced for maintainer sign-off,
-    PD-OPF-IMPORT-VERB-APPLY-SEAMS) is `{"schema": 1, "run_id": ..., "decisions": [ {fragment_id, decision,
-    origin, proposed_state, note}, ... ]}`. `run_id` MUST equal the CLI `--review` operand
-    (explicit-binding-over-ambient-context: the file is bound to the exact run under review, never trusted
-    to name a different one). Each decision table's own shape is validated at the operation layer
-    (`review_import`), never here. A missing/unreadable/malformed file, a schema or run-id mismatch, or a
-    non-list `decisions` is a ValueError (cannot-evaluate exit 2). A schema-2 ingest envelope is
-    decoded by _import_decode_decisions: bounded, duplicate-key and non-finite refusing, closed."""
-    try:
-        with open(path, "rb") as fh:
-            raw = fh.read()
-    except (OSError, ValueError, RecursionError) as exc:
-        raise ValueError("--decisions file unreadable or malformed ({}): {}".format(path, exc))
-    try:
-        doc = json.loads(raw)
-    except (ValueError, RecursionError) as exc:
-        # A deeply-nested --decisions JSON raises RecursionError from json.loads (not fh.read); catch it at
-        # the reader so it fails closed with a LOCATED message (R8-F1 read-boundary parity with
-        # _import_read_set's tomllib.load guard), never only at _cmd_import's outer backstop.
-        raise ValueError("--decisions file is not valid JSON or is too deeply nested ({}): {}".format(
-            path, exc))
-    # Only a schema-2 ingest envelope takes the bounded, strict decoder; an ordinary schema-1 file keeps
-    # the unbounded read, lenient decode, and located messages below.
-    if isinstance(doc, dict) and type(doc.get("schema")) is int and doc.get("schema") == 2:
-        try:
-            return _import_decode_decisions(raw, run_id)
-        except (ValueError, RecursionError) as exc:
-            raise ValueError("--decisions file unreadable or malformed ({}): {}".format(path, exc))
-    if not (isinstance(doc, dict) and type(doc.get("schema")) is int and doc.get("schema") == 1):
-        raise ValueError("--decisions file must be a JSON object carrying \"schema\": 1 (an integer 1, not "
-                         "a bool or float)")
-    if doc.get("run_id") != run_id:
-        raise ValueError("--decisions file run_id {!r} does not match the --review run-id {!r}; the "
-                         "decisions file is bound to the exact run under review".format(
-                             doc.get("run_id"), run_id))
-    decisions = doc.get("decisions")
-    if not isinstance(decisions, list):
-        raise ValueError("--decisions file \"decisions\" must be an array")
-    extra = set(doc) - {"schema", "run_id", "decisions"}
-    if extra:
-        raise ValueError("--decisions file carries unknown key(s): {} (the envelope is a closed {{schema, "
-                         "run_id, decisions}})".format(", ".join(sorted(extra))))
-    return decisions
-
-
-def _cmd_import_review_aid(rest):
-    """Read-only template and stale-acceptance comparison; no decision is copied."""
-    import argparse
-    parser = argparse.ArgumentParser(prog="opf import")
-    parser.add_argument("--root", default=".")
-    parser.add_argument("--review", required=True)
-    choice = parser.add_mutually_exclusive_group(required=True)
-    choice.add_argument("--show-review", action="store_true")
-    choice.add_argument("--diff-review", metavar="OLD_RUN")
-    try:
-        args = parser.parse_args(rest)
-        result = _opf_import.ingest_review_aid(os.path.abspath(args.root), args.review, args.diff_review)
-        print(json.dumps(result, sort_keys=True, indent=2, ensure_ascii=True))
-        return EXIT_OK
-    except SystemExit as exc:
-        return exc.code
-    except Exception as exc:
-        print("opf import: review aid cannot be evaluated ({})".format(
-            _opf_import._ingest_md_escape(str(exc))), file=sys.stderr)
-        return EXIT_MALFORMED
+# Spec 14.1: the former --scan, --plan, --review and --apply modes refuse with a pointer to adoption and the
+# prompt pack. The pointer is in words only; it names no command this build lacks.
+IMPORT_RETIRED = (
+    "the ordinary import modes (scan, plan, review and apply) are retired: clean-start adoption (OPF spec "
+    "14.1) is the only intake, and post-adoption import uses the approved prompt pack; nothing was written")
 
 
 def _cmd_import(rest):
     """`opf import [--root DIR] (--scan --set FILE | --plan --set FILE | --review <run-id> --actor NAME
-    (--decisions FILE | --interactive) | --apply <run-id>)`: the store import verb.
+    (--decisions FILE | --interactive) | --apply <run-id>)`: the retired store import verb.
 
-    Wires the reserved import grammar onto the U7 operation layer (_opf_import scan/plan/review/apply); it
-    adds NO operation-layer behaviour. EXACTLY ONE mode is required: a bare `opf import` or two modes is a
-    usage error (exit 2). The parser is the house fail-closed idiom (unknown token, an empty or
-    option-looking or duplicate value -> exit 2), matching _cmd_render's --root loop.
-
-    RETIRED (spec 14.1): each mode below now reaches the operation layer's refusal, exit 2, before the
-    clock, any input file or any write, and BEFORE any mode-specific argv validation (round-2 MINOR): the
-    former mode-combination rules and the CLI run-id grammar check are retired with the modes, so a missing
-    or extra companion flag or a run-id outside the grammar meets the retirement pointer, never a usage
-    error for a mode this build refuses. Only the token parser (an unknown flag, a duplicate, an empty or
-    missing value) and the exactly-one-mode rule precede it. The per-mode contract that follows describes
-    the retained engine behind it.
-
-    Modes and the 0/1/2 exit contract (0 clean, 1 finding, 2 cannot-evaluate), read straight from the
-    operation-layer verdict via _import_exit:
-      --scan  --set FILE : scan_import; renders the canonical inventory TOML to stdout; ZERO writes.
-                           (0 enumerated; 2 unreadable/malformed --set or unresolved store)
-      --plan  --set FILE : plan_import; stages a candidate run and prints the run id, the store-relative
-                           report path, and the migration-incomplete signal. (0 staged, quarantine-heavy
-                           still 0 as the artefact signals review need; 1 a plan finding; 2 unreadable
-                           input / malformed set / unresolved store)
-      --review RUN --actor NAME (--decisions FILE | --interactive) : review_import (batch) or
-                           review_import_interactive (a non-TTY --interactive is refused, exit 2); writes
-                           acceptance.json, NO live-store write. (0 captured; 1 a decisions finding; 2 an
-                           unresolved/missing/not-promotion-ready run, missing actor, unreadable decisions
-                           file, or non-TTY --interactive)
-      --apply RUN        : apply_import (PR-C, the real fail-closed promotion): promotes an accepted staged
-                           run to the active store (0 promoted / verified no-op; 1 a reject or composition
-                           finding; 2 not-promotion-ready / unverifiable / indeterminate). Mutates the store
-                           only through the journaled, verified-restore cutover.
-
-    D7 (verb-family precedent, deliberate divergence from the sibling verbs): an unresolved / NOT-ADOPTED
-    root is exit 2, NOT the NOT-APPLICABLE exit 0 that doctor/render/upgrade report on a non-adopter root;
-    import is a REQUESTED operation, so its refusal is a cannot-evaluate rather than not-applicable.
-
-    Every residual escape from the operation layer fails closed to exit 2 (never a false 0 or an uncaught
-    exit-1), the same class-width backstop render/doctor carry."""
-    if "--show-review" in rest or "--diff-review" in rest:
-        return _cmd_import_review_aid(rest)
-
+    RETIRED (spec 14.1), its engine removed: every mode refuses with IMPORT_RETIRED at exit 2, on every
+    root, before the clock, any input file or any write, and BEFORE any mode-specific argv validation, so a
+    missing or extra companion flag or a run-id outside the former grammar meets the retirement pointer,
+    never a usage error for a mode this build refuses. Only the token parser (an unknown flag, a duplicate,
+    an empty or missing value) and the exactly-one-mode rule precede it: a bare `opf import` or two modes is
+    a usage error (exit 2) without the pointer. The parser is the house fail-closed idiom, matching
+    _cmd_render's --root loop. The root is never resolved, so an unresolved / NOT-ADOPTED root refuses the
+    same way (D7: import is a REQUESTED operation, so its refusal is a cannot-evaluate, never the
+    NOT-APPLICABLE exit 0 that doctor/render/upgrade report on a non-adopter root)."""
     root = None
     mode = None
-    run_id = None
     set_file = None
     actor = None
     decisions_file = None
     interactive = False
-    dispositions_file = None      # MIG-PR3: the triaged worksheet for the root-ingest --plan form
-    ingest_options_file = None    # MIG-PR3: the companion --ingest-options for the root-ingest --plan form
-    include = []                  # MIG-PR3: repeatable --include globs for the root-ingest --plan form
 
     def _need_value(flag, idx):
         if idx + 1 >= len(rest):
@@ -2524,47 +2291,41 @@ def _cmd_import(rest):
                 print("opf import: give exactly one mode (--scan / --plan / --review / --apply)",
                       file=sys.stderr)
                 return EXIT_MALFORMED
-            val = _need_value(tok, i)
-            if val is None:
+            if _need_value(tok, i) is None:
                 return EXIT_MALFORMED
             mode = tok[2:]
-            run_id = val
             i += 2
         elif tok == "--root":
             if root is not None:
                 print("opf import: --root given more than once", file=sys.stderr)
                 return EXIT_MALFORMED
-            val = _need_value(tok, i)
-            if val is None:
+            root = _need_value(tok, i)
+            if root is None:
                 return EXIT_MALFORMED
-            root = val
             i += 2
         elif tok == "--set":
             if set_file is not None:
                 print("opf import: --set given more than once", file=sys.stderr)
                 return EXIT_MALFORMED
-            val = _need_value(tok, i)
-            if val is None:
+            set_file = _need_value(tok, i)
+            if set_file is None:
                 return EXIT_MALFORMED
-            set_file = val
             i += 2
         elif tok == "--actor":
             if actor is not None:
                 print("opf import: --actor given more than once", file=sys.stderr)
                 return EXIT_MALFORMED
-            val = _need_value(tok, i)
-            if val is None:
+            actor = _need_value(tok, i)
+            if actor is None:
                 return EXIT_MALFORMED
-            actor = val
             i += 2
         elif tok == "--decisions":
             if decisions_file is not None:
                 print("opf import: --decisions given more than once", file=sys.stderr)
                 return EXIT_MALFORMED
-            val = _need_value(tok, i)
-            if val is None:
+            decisions_file = _need_value(tok, i)
+            if decisions_file is None:
                 return EXIT_MALFORMED
-            decisions_file = val
             i += 2
         elif tok == "--interactive":
             if interactive:
@@ -2572,66 +2333,15 @@ def _cmd_import(rest):
                 return EXIT_MALFORMED
             interactive = True
             i += 1
-        elif tok == "--dispositions":
-            if dispositions_file is not None:
-                print("opf import: --dispositions given more than once", file=sys.stderr)
-                return EXIT_MALFORMED
-            val = _need_value(tok, i)
-            if val is None:
-                return EXIT_MALFORMED
-            dispositions_file = val
-            i += 2
-        elif tok == "--ingest-options":
-            if ingest_options_file is not None:
-                print("opf import: --ingest-options given more than once", file=sys.stderr)
-                return EXIT_MALFORMED
-            val = _need_value(tok, i)
-            if val is None:
-                return EXIT_MALFORMED
-            ingest_options_file = val
-            i += 2
-        elif tok == "--include":
-            val = _need_value(tok, i)
-            if val is None:
-                return EXIT_MALFORMED
-            include.append(val)
-            i += 2
         else:
             print("opf import: unrecognized argument {!r}".format(tok), file=sys.stderr)
             return EXIT_MALFORMED
 
-    ingest_form = dispositions_file is not None or ingest_options_file is not None
     if mode is None:
         print("opf import: give exactly one mode (--scan / --plan / --review / --apply)", file=sys.stderr)
         return EXIT_MALFORMED
-    # Spec 14.1: every mode is retired, and its operation-layer refusal reads no operand, so the verb
-    # forwards to it BEFORE any mode-specific argv validation and before the clock or any --set /
-    # --dispositions / --ingest-options / --decisions file is read (round-1 MINOR-2; round-2 MINOR): a
-    # missing or extra companion flag, a run-id outside the grammar, and a malformed input file each meet
-    # the retirement pointer, never a mode-specific usage error or a reader error for a mode this build
-    # refuses. The former mode-combination rules and the CLI run-id grammar check are retired with the
-    # modes; the readers stay, unused on this path, until the import engine is removed.
-    root_abs = os.path.abspath(root if root is not None else ".")
-    try:
-        if mode == "scan":
-            res = _opf_import.scan_import(root_abs, [])
-        elif mode == "plan" and ingest_form:             # root-ingest disposition planner (MIG-PR3)
-            res = _opf_ingest.plan_ingest(root_abs, None, None)
-        elif mode == "plan":                             # declared-set importer
-            res = _opf_import.plan_import(root_abs, [])
-        elif mode == "review" and interactive:
-            res = _opf_import.review_import_interactive(root_abs, run_id)
-        elif mode == "review":
-            res = _opf_import.review_import(root_abs, run_id)
-        else:
-            res = _opf_import.apply_import(root_abs, run_id)
-    except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false verdict or uncaught exit-1
-        print("opf import: cannot evaluate: unexpected error ({!r}); failing closed to exit 2".format(exc),
-              file=sys.stderr)
-        return EXIT_MALFORMED
-    for f in res.findings:
-        print("opf import: {}".format(f), file=sys.stderr)
-    return _import_exit(res.verdict)
+    print("opf import: {}".format(IMPORT_RETIRED), file=sys.stderr)
+    return EXIT_MALFORMED
 
 
 def _cmd_record(rest):
@@ -3086,10 +2796,8 @@ def _cli_self_test():
         # import verb ROUTING (OPF-IMPORT-VERB), judged on exit code only. These cases fail closed BEFORE
         # any store resolution, so they need no store on disk. A bare `import`, a token-parser error and a
         # duplicate mode are usage errors (exit 2); a well-parsed retired mode, whatever its companion
-        # flags, meets the operation layer's retirement refusal (also exit 2). Every row here expects 2, so
-        # these rows can tell neither the refusal from a usage error nor a reverted import dispatch (the
-        # fail-closed KNOWN_VERBS branch also returns 2) from the wired verb; _import_leg below makes both
-        # splits on the refusal text (present for a retired mode, absent for a token-parser usage error).
+        # flags, meets the verb's retirement refusal (also exit 2; the refusal/usage split and the pointer
+        # text are asserted in _import_leg below, the wiring discriminator).
         _VALID_RID = "imp-20260101T000000Z-0123456789abcdef"   # syntactically valid; names no staged run
         expect(["import"], EXIT_MALFORMED)                       # bare: exactly one mode required
         expect(["import", "--root", "."], EXIT_MALFORMED)        # --root but no mode
@@ -3255,30 +2963,21 @@ def _cli_self_test():
             return None
 
         def _import_leg():
-            """Build a VALID synthetic store and drive the retired import modes (spec 14.1), judged on exit
-            codes, the refusal text AND observable side effects. Returns None on success or EXIT_MALFORMED
-            on a harness (fixture I/O) error. Vectors, each checked for exit 2 with the operation layer's
-            retirement refusal text, in three fixture phases: before any run is staged, --scan and --plan
-            over a NOT-ADOPTED root and over the adopted store, with the store tree byte-unchanged; after
-            the retained engine stages a run and before it is accepted, --review (batch and --interactive)
-            over that run, checked only for writing no acceptance.json; after the retained engine accepts
-            the run, --apply over it, over an unknown run and over the NOT-ADOPTED root, with the store tree
-            byte-unchanged. The NOT-ADOPTED root is never driven with --review, and its own tree is not
-            snapshotted. Either mutation of one public refusal fails the suite: restoring the retained
-            engine in place of it turns that refusal's rows red; literally deleting its return makes the
-            entry return None, which crashes the self-test (this vector, where the import dispatcher's
-            res.findings read raises AttributeError, or earlier the opf-import refusal suite where it
-            drives the same refusal), which each runner reports as a non-passing result. A malformed --set /
-            --decisions / --dispositions / --ingest-options file meets the same refusal, its reader never
-            run, and so does a mode-specific argv violation (a missing or extra companion flag, a run-id
-            outside the grammar): the refusal precedes the retired mode-combination validation (round-2
-            MINOR). Only a token-parser usage error (a flag missing its value) still exits 2 before it,
-            without the refusal text."""
-            import datetime
-            import tomllib
+            """Drive the retired import modes (spec 14.1) over a VALID synthetic store and a NOT-ADOPTED root,
+            judged on exit codes, the refusal text AND observable side effects. Returns None on success or
+            EXIT_MALFORMED on a harness (fixture I/O) error. Vectors: --scan, --plan, --review (batch and
+            --interactive) and --apply each exit 2 with IMPORT_RETIRED over both roots and write nothing; a
+            malformed or missing --set / --decisions file meets the same refusal (no input file is read), and
+            so does a mode-specific argv violation (a missing or extra companion flag, a run-id outside the
+            former grammar). Only a token-parser usage error (a flag missing its value, an unknown flag,
+            the retired --show-review) and the exactly-one-mode rule exit 2 before it, without the refusal
+            text. The pointer names adoption and the prompt pack in words and no command. Flip: routing
+            `import` to the fail-closed KNOWN_VERBS branch, or restoring a mode-specific check or an input
+            reader ahead of the refusal, turns rows red."""
+            import re
 
-            refusal = _opf_import.ORDINARY_IMPORT_RETIRED
-            engine_now = datetime.datetime(2026, 9, 9, 12, 0, 0, tzinfo=datetime.timezone.utc)
+            refusal = IMPORT_RETIRED
+            _RID = "imp-20260101T000000Z-0123456789abcdef"   # the former run-id grammar; names no run
 
             def run_cli(argv):
                 buf = io.StringIO()
@@ -3291,12 +2990,17 @@ def _cli_self_test():
                 if rc != EXIT_MALFORMED or refusal not in out:
                     failures.append("import {}: rc={!r} (expected 2 + the retirement refusal)".format(what, rc))
 
-            def malformed(argv):
-                refused(argv, "{} (a malformed input file, never read)".format(" ".join(argv[1:4])))
+            def usage(argv, needle, what):
+                rc, out = run_cli(argv)
+                if rc != EXIT_MALFORMED or refusal in out or needle not in out:
+                    failures.append("import {}: rc={!r} (expected the usage error {!r} at exit 2, before the "
+                                    "refusal)".format(what, rc, needle))
 
             def tree_snapshot(rootdir):
                 snap = {}
-                for dirpath, _dirs, files in os.walk(rootdir):
+                for dirpath, dirs, files in os.walk(rootdir):
+                    for name in dirs:
+                        snap[os.path.relpath(os.path.join(dirpath, name), rootdir)] = None
                     for name in files:
                         p = os.path.join(dirpath, name)
                         with open(p, "rb") as fh:
@@ -3312,8 +3016,7 @@ def _cli_self_test():
             try:
                 try:
                     store = os.path.join(ibase, "store")
-                    working = os.path.join(store, ".working")
-                    machine = os.path.join(working, "toml")
+                    machine = os.path.join(store, ".working", "toml")
                     os.makedirs(machine)
                     manifest = "\n".join([
                         "[opf]", 'standard = "opf"',
@@ -3330,11 +3033,19 @@ def _cli_self_test():
                         fh.write("schema = 1\n\n[counters]\nBI = 0\nLF = 0\nWL = 0\n")
                     with open(os.path.join(store, "a.txt"), "w", encoding="utf-8") as fh:
                         fh.write("first source body\n")
-                    with open(os.path.join(store, "b.txt"), "w", encoding="utf-8") as fh:
-                        fh.write("second source body\n")
-                    set_file = os.path.join(ibase, "set.toml")
-                    with open(set_file, "w", encoding="utf-8") as fh:
-                        fh.write('schema = 1\nsource = ["a.txt", "b.txt"]\n')
+                    inputs = {
+                        "set.toml": 'schema = 1\nsource = ["a.txt"]\n',
+                        "set-schema-true.toml": 'schema = true\nsource = ["a.txt"]\n',
+                        "set-schema-float.toml": 'schema = 1.0\nsource = ["a.txt"]\n',
+                        "set-badprop.toml": 'schema = 1\nsource = ["a.txt"]\nproposal = [5, 7]\n',
+                        "not-toml.toml": "option = [\n",
+                        "decisions.json": json.dumps({"schema": 1, "run_id": _RID, "decisions": []}),
+                        "dec-schema-true.json": json.dumps({"schema": True, "run_id": _RID, "decisions": []}),
+                        "not-json.json": "{",
+                    }
+                    for name, body in inputs.items():
+                        with open(os.path.join(ibase, name), "w", encoding="utf-8") as fh:
+                            fh.write(body)
                     not_adopted = os.path.join(ibase, "not-adopted")
                     os.mkdir(not_adopted)
                 except OSError as exc:
@@ -3342,193 +3053,71 @@ def _cli_self_test():
                           "({})".format(exc), file=sys.stderr)
                     return EXIT_MALFORMED
 
-                # 1-2: --scan and --plan refuse over a NOT-ADOPTED root and over the adopted store, and the
-                # store tree stays byte-unchanged (no run is staged).
-                before = tree_snapshot(store)
-                refused(["import", "--scan", "--set", set_file, "--root", not_adopted], "--scan (not adopted)")
-                refused(["import", "--plan", "--set", set_file, "--root", not_adopted], "--plan (not adopted)")
-                refused(["import", "--scan", "--set", set_file, "--root", store], "--scan")
-                refused(["import", "--plan", "--set", set_file, "--root", store], "--plan")
-                if tree_snapshot(store) != before:
-                    failures.append("a refused import --scan / --plan mutated the store tree")
+                def path(name):
+                    return os.path.join(ibase, name)
 
-                # 3: the retained engine (never the CLI) stages exactly one run for the vectors below.
-                staged = _opf_import._plan_import(store, ["a.txt", "b.txt"], now=engine_now, run_nonce="cli")
-                if staged.verdict != _opf_import.CLEAN:
-                    failures.append("the retained engine did not stage the fixture run: {}".format(
-                        staged.findings))
-                    return None
-                imports_dir = os.path.join(working, "imports")
-                run_ids = sorted(os.listdir(imports_dir)) if os.path.isdir(imports_dir) else []
-                if len(run_ids) != 1:
-                    failures.append("the engine staged {} run(s), expected exactly 1".format(
-                        len(run_ids)))
-                    return None
-                rid = run_ids[0]
-                run_dir = os.path.join(imports_dir, rid)
-
-                # Build the decisions from the staged inventory + mappings: join fragment_id (inventory) to
-                # the AUTHORITATIVE origin/state (mappings) by (source_path, span). _validate_review_decisions
-                # requires the decision to echo the staged origin/proposed_state, so a changed baseline
-                # classification would break this vector loudly (a change detector), never silently.
-                with open(os.path.join(run_dir, "inventory.toml"), "rb") as fh:
-                    inv = tomllib.load(fh)
-                with open(os.path.join(run_dir, "mappings.toml"), "rb") as fh:
-                    maps = tomllib.load(fh)
-                meta = {(m["source_path"], tuple(m["span"])): (m["origin"], m["state"])
-                        for m in maps["mapping"]}
-                all_decisions = []
-                for frag in inv["fragment"]:
-                    origin, state = meta[(frag["source_path"], tuple(frag["span"]))]
-                    all_decisions.append({"fragment_id": frag["fragment_id"], "decision": "accept",
-                                          "origin": origin, "proposed_state": state, "note": ""})
-                if len(all_decisions) != 2:
-                    failures.append("staged plan carried {} fragment(s), expected 2".format(
-                        len(all_decisions)))
-                    return None
-                complete = os.path.join(ibase, "complete.json")
-                with open(complete, "w", encoding="utf-8") as fh:
-                    json.dump({"schema": 1, "run_id": rid, "decisions": all_decisions}, fh)
-                acceptance = os.path.join(run_dir, "acceptance.json")
-
-                # 4-5: --review with a COMPLETE decisions file, and --review --interactive, refuse and write
-                # no acceptance.json. The interactive refusal precedes the TTY check (stdin is a StringIO,
-                # hermetic regardless of the test process's real stdin).
-                refused(["import", "--review", rid, "--actor", "tester", "--decisions", complete,
-                         "--root", store], "--review")
-
-                real_stdin = sys.stdin
-                sys.stdin = io.StringIO("")
-                try:
-                    refused(["import", "--review", rid, "--actor", "tester", "--interactive", "--root", store],
-                            "--review --interactive")
-                finally:
-                    sys.stdin = real_stdin
-                if os.path.exists(acceptance):
-                    failures.append("a refused import --review wrote acceptance.json")
-
-                # 6-7: the retained engine accepts the run; --apply over that accepted run (one the retained
-                # apply engine rejects: this minimal store is not doctor-composable), over an unknown run, and
-                # over a NOT-ADOPTED root refuses, and the store tree is byte-unchanged.
-                accepted = _opf_import._review_import(store, rid, actor="tester", decisions=all_decisions,
-                                                      now=engine_now)
-                if accepted.verdict != _opf_import.CLEAN:
-                    failures.append("the retained engine did not accept the fixture run: {}".format(
-                        accepted.findings))
-                store_before = tree_snapshot(store)
-                refused(["import", "--apply", rid, "--root", store], "--apply (accepted run)")
-                refused(["import", "--apply", _VALID_RID, "--root", store], "--apply (unknown run)")
-                refused(["import", "--apply", _VALID_RID, "--root", not_adopted], "--apply (not adopted)")
-                if tree_snapshot(store) != store_before:
-                    failures.append("a refused import --apply mutated the store")
-
-                # 8-13 (round-1 MINOR-2): each mode refuses BEFORE its input reader, so a MALFORMED --set (a
-                # bool or float schema, scalar or incomplete proposal rows, a bad span), --decisions (a bool
-                # schema, a parse that would raise RecursionError, an extra envelope key), --dispositions or
-                # --ingest-options file meets the retirement refusal, never a reader error. Flip: restoring a
-                # reader ahead of the refusal turns its rows red.
-                set_true = os.path.join(ibase, "set-schema-true.toml")
-                with open(set_true, "w", encoding="utf-8") as fh:
-                    fh.write('schema = true\nsource = ["a.txt"]\n')
-                malformed(["import", "--scan", "--set", set_true, "--root", store])
-                set_float = os.path.join(ibase, "set-schema-float.toml")
-                with open(set_float, "w", encoding="utf-8") as fh:
-                    fh.write('schema = 1.0\nsource = ["a.txt"]\n')
-                malformed(["import", "--scan", "--set", set_float, "--root", store])
-                dec_true = os.path.join(ibase, "dec-schema-true.json")
-                with open(dec_true, "w", encoding="utf-8") as fh:
-                    json.dump({"schema": True, "run_id": rid, "decisions": []}, fh)
-                malformed(["import", "--review", rid, "--actor", "tester", "--decisions", dec_true,
-                           "--root", store])
-
-                # Structurally malformed --set proposal rows, for --scan AND --plan.
-                set_badprop = os.path.join(ibase, "set-badprop.toml")   # scalars where tables are required
-                with open(set_badprop, "w", encoding="utf-8") as fh:
-                    fh.write('schema = 1\nsource = ["a.txt"]\nproposal = [5, 7]\n')
-                malformed(["import", "--scan", "--set", set_badprop, "--root", store])
-                malformed(["import", "--plan", "--set", set_badprop, "--root", store])
-                set_misskey = os.path.join(ibase, "set-misskey.toml")   # a row missing source_path
-                with open(set_misskey, "w", encoding="utf-8") as fh:
-                    fh.write('schema = 1\nsource = ["a.txt"]\n\n[[proposal]]\n'
-                             'span = [0, 1]\nsuggested_state = "mapped"\n')
-                malformed(["import", "--scan", "--set", set_misskey, "--root", store])
-                malformed(["import", "--plan", "--set", set_misskey, "--root", store])
-                set_badspan = os.path.join(ibase, "set-badspan.toml")   # span not a two-int list
-                with open(set_badspan, "w", encoding="utf-8") as fh:
-                    fh.write('schema = 1\nsource = ["a.txt"]\n\n[[proposal]]\n'
-                             'source_path = "a.txt"\nspan = [0, 1, 2]\nsuggested_state = "mapped"\n')
-                malformed(["import", "--plan", "--set", set_badspan, "--root", store])
-
-                # A --decisions file whose parse would raise RecursionError, driven HERMETICALLY by patching
-                # json.loads for the call (restored in a finally; the same stdlib-injection idiom as
-                # _expect_harness below): the refusal precedes the reader, so the retirement pointer is
-                # present and the reader's located "--decisions file" message absent.
-                real_loads = json.loads
-
-                def _boom_loads(*_a, **_k):
-                    raise RecursionError("maximum recursion depth exceeded (simulated deep --decisions JSON)")
-
-                json.loads = _boom_loads
-                try:
-                    buf = io.StringIO()
-                    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                        rc = main(["import", "--review", rid, "--actor", "tester", "--decisions", complete,
-                                   "--root", store])
-                finally:
-                    json.loads = real_loads
-                out = buf.getvalue()
-                if rc != EXIT_MALFORMED or refusal not in out or "--decisions file" in out:
-                    failures.append("import --review with a RecursionError-raising decisions JSON: rc={!r} "
-                                    "(expected 2 + the retirement refusal, the reader never run)".format(rc))
-
-                # An otherwise-valid --decisions file carrying an extra (deeply nested) envelope key.
-                dec_extra = os.path.join(ibase, "dec-extra-key.json")
-                junk = "x"
-                for _ in range(40):
-                    junk = {"n": junk}
-                with open(dec_extra, "w", encoding="utf-8") as fh:
-                    json.dump({"schema": 1, "run_id": rid, "decisions": all_decisions, "extra": junk}, fh)
-                malformed(["import", "--review", rid, "--actor", "tester", "--decisions", dec_extra,
-                           "--root", store])
-                # The root-ingest --plan form: a --dispositions / --ingest-options file that is not TOML.
-                not_toml = os.path.join(ibase, "not-toml.toml")
-                with open(not_toml, "w", encoding="utf-8") as fh:
-                    fh.write("option = [\n")
-                malformed(["import", "--plan", "--dispositions", not_toml, "--ingest-options", not_toml,
-                           "--root", store])
-
-                # Round-2 MINOR: a retired mode flag meets the refusal BEFORE the retired mode-specific
-                # argv validation, so a missing or extra companion flag or a run-id outside the grammar
-                # reaches the retirement pointer, never a usage error for a retired mode. Flip: restoring
-                # the mode-combination validation (or the CLI run-id grammar check) ahead of the dispatch
-                # turns its rows red.
-                usage_texts = ("requires --set FILE", "are valid only with", "requires exactly one of",
-                               "requires BOTH", "are not valid with", "requires --actor NAME",
-                               "takes only a <run-id>", "does not match the run-id grammar")
+                before = tree_snapshot(ibase)
+                # Every retired mode refuses over the adopted store and over a NOT-ADOPTED root.
+                for label, top in (("store", store), ("not adopted", not_adopted)):
+                    refused(["import", "--scan", "--set", path("set.toml"), "--root", top],
+                            "--scan ({})".format(label))
+                    refused(["import", "--plan", "--set", path("set.toml"), "--root", top],
+                            "--plan ({})".format(label))
+                    refused(["import", "--review", _RID, "--actor", "tester", "--decisions",
+                             path("decisions.json"), "--root", top], "--review ({})".format(label))
+                    real_stdin = sys.stdin
+                    sys.stdin = io.StringIO("accept\n")
+                    try:
+                        refused(["import", "--review", _RID, "--actor", "tester", "--interactive", "--root", top],
+                                "--review --interactive ({})".format(label))
+                        consumed = sys.stdin.read() != "accept\n"
+                    finally:
+                        sys.stdin = real_stdin
+                    if consumed:
+                        failures.append("a refused import --review --interactive read stdin ({})".format(label))
+                    refused(["import", "--apply", _RID, "--root", top], "--apply ({})".format(label))
+                # No input file is read: a malformed or missing --set / --decisions file meets the refusal,
+                # never a reader error.
+                for name in ("set-schema-true.toml", "set-schema-float.toml", "set-badprop.toml",
+                             "not-toml.toml", "missing.toml"):
+                    refused(["import", "--scan", "--set", path(name), "--root", store], "--scan --set " + name)
+                    refused(["import", "--plan", "--set", path(name), "--root", store], "--plan --set " + name)
+                for name in ("dec-schema-true.json", "not-json.json", "missing.json"):
+                    refused(["import", "--review", _RID, "--actor", "tester", "--decisions", path(name),
+                             "--root", store], "--review --decisions " + name)
+                # A mode-specific argv violation meets the refusal: the former mode-combination rules and
+                # the run-id grammar check are retired with the modes.
                 for argv, what in (
                         (["import", "--scan", "--root", store], "--scan without --set"),
-                        (["import", "--plan", "--root", store], "--plan without --set/--dispositions"),
-                        (["import", "--scan", "--set", set_file, "--actor", "x", "--root", store],
+                        (["import", "--plan", "--root", store], "--plan without --set"),
+                        (["import", "--scan", "--set", path("set.toml"), "--actor", "x", "--root", store],
                          "--scan with --actor"),
-                        (["import", "--review", rid, "--root", store], "--review without --actor"),
-                        (["import", "--review", rid, "--actor", "tester", "--decisions", complete,
-                          "--interactive", "--root", store],
-                         "--review with both --decisions/--interactive"),
-                        (["import", "--apply", rid, "--set", set_file, "--root", store],
+                        (["import", "--review", _RID, "--root", store], "--review without --actor"),
+                        (["import", "--review", _RID, "--actor", "tester", "--decisions", path("decisions.json"),
+                          "--interactive", "--root", store], "--review with both --decisions/--interactive"),
+                        (["import", "--apply", _RID, "--set", path("set.toml"), "--root", store],
                          "--apply with --set"),
                         (["import", "--apply", "not-a-run-id", "--root", store],
                          "--apply outside the run-id grammar"),
                 ):
-                    rc, out = run_cli(argv)
-                    if rc != EXIT_MALFORMED or refusal not in out or any(t in out for t in usage_texts):
-                        failures.append("import {}: rc={!r} (expected the retirement refusal before the "
-                                        "retired mode-specific argv validation)".format(what, rc))
-                # A token-parser usage error (a flag missing its value) is still decided before the refusal
-                # and stays exit 2 without its text.
-                rc, out = run_cli(["import", "--scan", "--set", "--root", store])
-                if rc != EXIT_MALFORMED or refusal in out or "requires a non-empty argument" not in out:
-                    failures.append("import --scan with a valueless --set: rc={!r} (expected the token-"
-                                    "parser usage error at exit 2, before the refusal)".format(rc))
+                    refused(argv, what)
+                if tree_snapshot(ibase) != before:
+                    failures.append("a refused import mode changed the fixture tree")
+                # Only the token parser and the exactly-one-mode rule precede the refusal.
+                usage(["import", "--scan", "--set", "--root", store], "requires a non-empty argument",
+                      "--scan with a valueless --set")
+                usage(["import", "--root", store], "give exactly one mode", "with no mode")
+                usage(["import", "--scan", "--plan", "--set", path("set.toml")], "give exactly one mode",
+                      "with two modes")
+                usage(["import", "--show-review", "--review", _RID, "--root", store], "unrecognized argument",
+                      "--show-review (the retired review aid)")
+                usage(["import", "--plan", "--dispositions", path("not-toml.toml"), "--root", store],
+                      "unrecognized argument", "--dispositions (the retired root-ingest planner)")
+                # The pointer is to adoption and the prompt pack in words, naming no command (spec 14.1).
+                if not ("adoption (OPF spec 14.1)" in refusal and "prompt pack" in refusal
+                        and not re.search(r"`|\bopf [a-z]", refusal)):
+                    failures.append("the import retirement refusal does not point to adoption and the "
+                                    "prompt pack in words only")
             finally:
                 shutil.rmtree(ibase, ignore_errors=True)
             return None
@@ -4183,14 +3772,12 @@ def _cli_self_test():
         print("opf cli self-test: PASS (verb routing: unknown/unwired verbs and render/doctor/import usage "
               "errors fail closed; render --check forwards to the U4 engine; doctor resolves + validates a "
               "store, NOT-ADOPTED -> 0 (2 with --require-store) and a garbage store -> 2; "
-              "import surfaces the retired --scan / --plan / --review / --apply refusal (spec 14.1) at exit 2: "
-              "--scan and --plan over a NOT-ADOPTED root and over the adopted store before any run is staged, "
-              "the store tree byte-unchanged; --review (batch and --interactive) over a staged run before its "
-              "acceptance, writing no acceptance.json; --apply over the accepted run, an unknown run and a "
-              "NOT-ADOPTED root, the store tree byte-unchanged; each refusal comes before any "
-              "input reader AND before any mode-specific argv validation (a malformed --set / --decisions / "
-              "--dispositions / --ingest-options, a missing or extra companion flag, and a run-id outside "
-              "the grammar each meet the refusal; only a token-parser usage error precedes it); "
+              "import surfaces the retired --scan / --plan / --review / --apply refusal (spec 14.1) at exit 2 "
+              "over a NOT-ADOPTED root and over an adopted store, each mutating nothing, before any input "
+              "file is read AND before any mode-specific argv validation (a malformed or missing --set / "
+              "--decisions file, a missing or extra companion flag, and a run-id outside the former grammar "
+              "each meet the refusal; only a token-parser usage error or the exactly-one-mode rule precedes "
+              "it); "
               "adopt (K9a) wires the read-only plan/status subcommands onto the "
               "adoption planner -- bare/malformed usage and the deferred approve/apply/complete/reconcile "
               "fail closed to exit 2, status -> 0 no-run or verified run / 1 open-transaction or invalid-"
@@ -4218,8 +3805,6 @@ def _self_tests():
     ("opf-changelog", _opf_changelog.self_test),
     ("opf-emit", _opf_emit.self_test),
     ("opf-views", _opf_views.self_test),
-    ("opf-import", _opf_import.self_test),
-    ("opf-importers", _opf_importers.self_test),
     ("opf-observe", _opf_observe.self_test),
     ("opf-absorb", _opf_absorb.self_test),
     ("opf-record", _opf_record.self_test),
@@ -4241,7 +3826,7 @@ KNOWN_VERBS = ("init", "adopt", "import", "doctor", "render", "migrate", "sync",
 
 # Helper self-tests that pin sys.set_int_max_str_digits(4300) inside a fixture and MUST restore the ambient
 # value in a finally (the round-7 int-limit hermeticity work). run_self_tests guards that RESTORE half below.
-_INT_LIMIT_SELF_TESTS = frozenset({"opf-release", "opf-emit", "opf-schema", "opf-fuzz", "opf-import"})
+_INT_LIMIT_SELF_TESTS = frozenset({"opf-release", "opf-emit", "opf-schema", "opf-fuzz"})
 
 
 def run_self_tests(tests=None):

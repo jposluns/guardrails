@@ -6,15 +6,14 @@ This gate proves, by PHYSICAL ABSENCE, that the `opf/` subtree is dependency-clo
 tooling's own gate subset there. Because the subset runs under `python3 -I` (isolated: neither the current
 working directory nor PYTHONPATH is on sys.path) with only the copied `opf/tools/` directory reachable, any
 surviving UPWARD edge into `tools/` (a `from check_versions import _parse`, an `import check_byte_canon`,
-the emitter's pinned sibling-file authority load, the lazy `check_opf_import`) fails at import or run time
+the emitter's pinned sibling-file authority load) fails at import or run time
 in the isolated copy. Grep evidence is not accepted; closure is OBSERVED, not inferred. This is the durable
 check the restructure carries: it fails without the self-containment property (see --self-test).
 
-The three closure-critical edges are lazy or dynamic, so an import-only or `--help` smoke test would miss a
+The two closure-critical edges are lazy or dynamic, so an import-only or `--help` smoke test would miss a
 survivor. The subset therefore drives the exact command paths that exercise them: `opf.py --self-test` runs
-the render leg (the lazy `_byte_canon` import), the emitter self-test (the pinned sibling-file authority
-load), and the import scan/plan/review dispatch (the lazy `check_opf_import` import); the commonmark
-selftests exercise the vendored parser and its manifest.
+the render leg (the lazy `_byte_canon` import) and the emitter self-test (the pinned sibling-file authority
+load); the commonmark selftests exercise the vendored parser and its manifest.
 
   check_opf_standalone_closure.py             materialize opf/ alone and run the subset (also the default)
   check_opf_standalone_closure.py --self-test  the same, PLUS a deliberate flip proving it fails without the move
@@ -37,7 +36,7 @@ from _gen_common import repo_root  # noqa: E402
 # The OPF gate subset, relative to the copied opf/tools/ directory. Each entry is (name, [args...]); the
 # self-test legs are deterministic and git-independent (they build their own throwaway fixtures), so they
 # run correctly in an isolated copy that is not itself an adopter or a git repository, while still driving
-# the lazy render / emit / import paths that a survivor would break.
+# the lazy render / emit paths that a survivor would break.
 _SUBSET = [
     ("opf-homes-selftest", "check_opf_homes.py", ["--self-test"]),
     ("opf-homes-contract", "check_opf_homes.py", []),
@@ -48,9 +47,6 @@ _SUBSET = [
     ("opf-init-contract-validator-selftest", "_opf_init_contract.py", ["--self-test"]),
     ("opf-init-contract-check-selftest", "check_opf_init_contract.py", ["--self-test"]),
     ("opf-upgrade-selftest", "check_opf_upgrade.py", ["--self-test"]),
-    ("opf-import-selftest", "check_opf_import.py", ["--self-test"]),
-    ("opf-ingest-selftest", "check_opf_ingest.py", ["--self-test"]),
-    ("opf-ingest-apply-selftest", "_opf_ingest_apply.py", ["--self-test"]),
     ("opf-adopt-selftest", "_opf_adopt.py", ["--self-test"]),
     ("opf-adopt-apply-selftest", "_opf_adopt_apply.py", ["--self-test"]),
     ("opf-adopt-hook-selftest", "_opf_adopt_hook.py", ["--self-test"]),

@@ -91,8 +91,8 @@ run_gate "opf-render-selftest" python3 -I -B tools/selftest_opf_render.py
 run_gate "opf-homes-selftest" python3 -I -B opf/tools/check_opf_homes.py --self-test
 run_gate "opf-homes-contract" python3 -I -B opf/tools/check_opf_homes.py
 run_gate "opf-tooling-selftest" python3 -I -B opf/tools/opf.py --self-test
-run_gate "opf-import-direct-selftest" python3 -I -B opf/tools/_opf_import.py --self-test
-run_gate "opf-ingest-direct-selftest" python3 -I -B opf/tools/_opf_ingest.py --self-test
+run_gate "opf-journal-direct-selftest" python3 -I -B opf/tools/_journal.py --self-test
+run_gate "opf-allocation-direct-selftest" python3 -I -B opf/tools/_opf_allocation.py --self-test
 run_gate "opf-observe-direct-selftest" python3 -I -B opf/tools/_opf_observe.py --self-test
 run_gate "opf-drift-selftest" python3 -I -B opf/tools/check_opf_drift.py --self-test
 run_gate "opf-drift" python3 -I -B opf/tools/check_opf_drift.py
@@ -106,11 +106,6 @@ run_gate "opf-init-contract-check" python3 -I -B opf/tools/check_opf_init_contra
 run_gate "opf-upgrade-selftest" python3 -I -B opf/tools/check_opf_upgrade.py --self-test
 run_gate "opf-upgrade" python3 -I -B opf/tools/check_opf_upgrade.py
 run_gate "opf-record-selftest" python3 -I -B opf/tools/check_opf_record.py --self-test --red-on-revert
-run_gate "opf-import-selftest" python3 -I -B opf/tools/check_opf_import.py --self-test
-run_gate "opf-import" python3 -I -B opf/tools/check_opf_import.py
-run_gate "opf-ingest-selftest" python3 -I -B opf/tools/check_opf_ingest.py --self-test
-run_gate "opf-ingest" python3 -I -B opf/tools/check_opf_ingest.py
-run_gate "opf-ingest-apply-selftest" python3 -I -B opf/tools/_opf_ingest_apply.py --self-test --red-on-revert
 run_gate "opf-adopt-selftest" python3 -I -B opf/tools/_opf_adopt.py --self-test
 run_gate "opf-adopt-apply-selftest" python3 -I -B opf/tools/_opf_adopt_apply.py --self-test
 run_gate "opf-adopt-hook-selftest" python3 -I -B opf/tools/_opf_adopt_hook.py --self-test

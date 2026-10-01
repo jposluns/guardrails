@@ -5,7 +5,7 @@ Offline, stdlib only, fail-closed, parse-only and read-only over the store. U2 (
 ONE record at a time and U3 (`_opf_release`) validates ONE ledger at a time; neither can see the whole
 store, so the class of spec-MANDATED cross-record, historical, archive, view, changelog, and topology
 invariants the integrity layer owns (OPF-SPEC 11) has no owner. THIS unit builds that whole-store layer as
-a reusable ENGINE, `validate_store`, that REUSES the U1/U2/U3/U4/U5/U7/U8 primitives and never
+a reusable ENGINE, `validate_store`, that REUSES the U1/U2/U3/U4/U5/U8 primitives and never
 re-implements per-record or per-ledger logic. It is the engine the future `opf doctor` VERB will drive; the
 verb itself is deliberately NOT wired here (see the sequencing note below).
 
@@ -50,6 +50,7 @@ import collections
 import hashlib
 import ipaddress
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -58,7 +59,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _opf_store     # noqa: E402  shared homes and operand boundaries
 import _journal        # noqa: E402  contained no-follow parent-open primitive (reused for listing / raw reads)
 import _opf_emit       # noqa: E402  U8 canonical emitter (the per-record digest basis)
-import _opf_import     # noqa: E402  U7 staging enumerator (imports/<run-id>/ sibling ids)
 import _opf_views      # noqa: E402  U4 deterministic view planner (byte-drift comparison)
 import _opf_changelog  # noqa: E402  U5 changelog range-coverage + freeze gates (composed here)
 # U1 supplies the outcome model, the contained readers, the manifest validator, the taxonomy, and helpers.
@@ -96,6 +96,20 @@ ARCHIVE_DIRNAME = "archive"
 ARCHIVE_MANIFEST_NAME = "archive.toml"
 EVIDENCE_FORMAT = _opf_store.EVIDENCE_INVENTORY_FORMAT
 INDEX_SUFFIX = ".index.toml"
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}\Z")
+# The legacy imports staging tree `.working/imports`, store scope and a sibling of the machine subdir: the
+# control root store_control_roots(1) reserves (spec 14.1). Nothing writes it since the import engine was
+# removed, but the reservation stands, so containment still registers it and grades its interior.
+IMPORTS_REL = _opf_store.store_control_roots(1)[0]
+
+
+def _is_import_run_id(name):
+    """Whether `name` is an `imp-<UTCSTAMP>Z-<hash16>` run id, the import-home grammar _opf_store owns."""
+    try:
+        _opf_store._home_run("import", name)
+    except ValueError:
+        return False
+    return True
 
 # The containment walk is bounded by an explicit depth ceiling so a pathologically deep directory chain
 # fails closed to a CANNOT-EVALUATE rather than a RecursionError (B6). A real store tree is a few levels
@@ -153,7 +167,7 @@ def _schema_deferred(tname):
 # the emitted set against this tuple, so a silently-skipped check becomes CANNOT-EVALUATE, never VALID.
 REQUIRED_CHECKS = (
     "C-MANIFEST", "C-PROFILES", "C-ROSTER", "C-RECORDS", "C-PERRECORD-RECONCILE", "C-ARCHIVE-ENUM",
-    "C-VERSION-LEDGER", "C-COUNTERS", "C-ROTATION", "C-STAGING", "C-LEASE", "C-ID-SPACE", "C-RECEIPTS",
+    "C-VERSION-LEDGER", "C-COUNTERS", "C-ROTATION", "C-LEASE", "C-ID-SPACE", "C-RECEIPTS",
     "C-HANDOFF",
     "C-DECISION-CHAINS", "C-LINKS", "C-FROZEN-COVERAGE", "C-NO-DELETION", "C-PARTITION", "C-CONTIGUITY",
     "C-TRACKED", "C-SYNC-AGREE", "C-CONTAINMENT", "C-VIEW-DRIFT", "C-VERSION-FILE", "C-CHANGELOG-GATES",
@@ -1287,13 +1301,13 @@ def _has_active_import_run(root_fd, machine_rel, rep, homes=1):
     substantiate partial imports until their plan readers are registered. Listing errors are
     cannot-evaluate. machine_rel is retained for call-site symmetry.
     """
-    roots = (_opf_import.IMPORTS_REL,)
+    roots = (IMPORTS_REL,)
     if homes >= 2:
         roots += tuple(_opf_store.STAGING_REL + "/" + kind for kind in ("import", "ingest"))
     for imports_rel in roots:
         subdirs, _files = _list_dir(root_fd, imports_rel, rep)
         for d in subdirs or ():
-            if not _opf_import._RUN_ID_RE.fullmatch(d):
+            if not _is_import_run_id(d):
                 continue
             _rsubs, rfiles = _list_dir(root_fd, _rel(imports_rel, d), rep)
             if rfiles is not None and "plan.toml" in rfiles:
@@ -1784,7 +1798,7 @@ class _LegacyIngestInventory(ValueError):
 
 
 def _evidence_rows(bundle, kind, run_id, doc):
-    """Shared schema/path validation for doctor and completed-ingest replay; never upgrades old bytes."""
+    """Shared schema/path validation for doctor and the adoption apply shell; never upgrades old bytes."""
     if isinstance(doc, dict) and doc.get("format") == "opf.ingest.evidence-inventory/v1":
         raise _LegacyIngestInventory("legacy-ingest-inventory: old-format ingest inventory is unsupported; "
                                      "refused without migration or rewrite")
@@ -1797,7 +1811,7 @@ def _evidence_rows(bundle, kind, run_id, doc):
         _evidence_claim(bundle, kind, run_id, row["path"])
         if type(row["size"]) is not int or row["size"] < 0:
             raise ValueError("size must be a nonnegative integer")
-        if not isinstance(row["sha256"], str) or not _opf_import._HEX64_RE.fullmatch(row["sha256"]):
+        if not isinstance(row["sha256"], str) or not _HEX64_RE.fullmatch(row["sha256"]):
             raise ValueError("sha256 must be 64 lowercase hex digits")
     return doc["file"]
 
@@ -1953,9 +1967,9 @@ def _check_evidence(root_fd, homes, rep):
 
 # --- containment (C-CONTAINMENT, OPF-SPEC 14.2) ------------------------------------------------------
 
-# The pure classification `classify_containment` returns, the SINGLE authority both `_check_containment`
-# (below) and the migration root-ingest detector (`_opf_ingest`) consume so they cannot diverge on
-# adoption content by construction (F10-1). `view_targets` is the store-scope contained view spec
+# The pure classification `classify_containment` returns, the SINGLE authority `_check_containment`
+# (below) consumes, so a future reader of adoption content cannot diverge from it by construction
+# (F10-1). `view_targets` is the store-scope contained view spec
 # destinations (managed leaves, matched by equality); `valid_unmanaged` the surviving [unmanaged]
 # declarations (canonicalized, contained-only, collision-filtered, matched by subtree containment);
 # `malformed` / `colliding` the messages for a malformed entry (a CANNOT-EVALUATE) and a colliding
@@ -1972,11 +1986,10 @@ ContainmentClassification = collections.namedtuple(
 def classify_containment(manifest_data, machine_rel):
     """Pure, side-effect-free derivation of the C-CONTAINMENT managed-set classification from the manifest
     and the machine-store relpath (spec 14.2). It does NO I/O and holds no `rep`: a malformed [unmanaged]
-    entry is collected into `malformed` (the checker re-emits it as a CANNOT-EVALUATE, ingest raises a
-    located cannot-evaluate) and a colliding declaration into `colliding` (the checker re-emits it as a
-    C-CONTAINMENT finding, ingest raises a located finding; a colliding declaration covers NOTHING). This is
-    the SINGLE authority both `_check_containment` and the migration root-ingest detector (`_opf_ingest`)
-    derive their adoption-content managed set from, so they cannot diverge by construction (F10-1).
+    entry is collected into `malformed` (the checker re-emits it as a CANNOT-EVALUATE) and a colliding
+    declaration into `colliding` (the checker re-emits it as a C-CONTAINMENT finding; a colliding
+    declaration covers NOTHING). This is the SINGLE authority `_check_containment` derives its
+    adoption-content managed set from, so a second consumer cannot diverge from it by construction (F10-1).
     `enabled_types` and `layout` are derived internally from `manifest_data` by the SAME pure helpers the
     caller uses (D2), so the classification cannot drift from the manifest the caller validated. Returns a
     ContainmentClassification."""
@@ -2028,9 +2041,9 @@ def classify_containment(manifest_data, machine_rel):
     importer_index_types = frozenset(IMPORTER_TYPES) - _LEDGER_TYPES
     archive_root = _rel(mrel, ARCHIVE_DIRNAME)
     # imports is store-scope (`.working/imports`), a SIBLING of the machine subdir (disjoint from mrel), read
-    # from the shared _opf_import.IMPORTS_REL constant so the checker and U7 cannot drift (spec 14.1). The
-    # walk starts at `.working/`, so this root is reached and graded exactly as before, one level up.
-    imports_root = _opf_import.IMPORTS_REL
+    # from IMPORTS_REL, the legacy control root _opf_store reserves (spec 14.1). The walk starts at
+    # `.working/`, so this root is reached and graded exactly as before, one level up.
+    imports_root = IMPORTS_REL
     # A legacy store (homes 1) registers only the imports tree; the homes-2 names grade as ordinary paths.
     homes = _opf_store.homes_generation(manifest_data)
     control_roots = _opf_store.store_control_roots(homes)
@@ -2126,9 +2139,9 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
     skipped, so a leftover run or stray bytes is graded (F3). An unmanaged declaration that names or
     contains a managed path is a finding. Listing failure is CANNOT-EVALUATE. The managed-set classification
     (view targets, the collision-filtered valid_unmanaged, and the malformed / colliding declarations) is
-    derived by the pure `classify_containment`, the SINGLE authority the migration root-ingest detector
-    shares, so this check and ingest cannot diverge on adoption content (F10-1). enabled_types / layout are
-    derived inside that helper from the manifest (D2), so they are no longer passed in."""
+    derived by the pure `classify_containment`, the SINGLE authority for adoption content (F10-1).
+    enabled_types / layout are derived inside that helper from the manifest (D2), so they are no longer
+    passed in."""
     cls = classify_containment(manifest_data, machine_rel)
     # Re-emit the classifier's collected messages in the ORIGINAL order (all malformed CANNOT-EVALUATEs, then
     # all colliding findings), exactly as the inline classification emitted them before the extraction.
@@ -2399,7 +2412,7 @@ def validate_store(resolution, supported_profiles=None, *, observations=None, an
     is the inert, all-optional git-derived-facts object the git-aware caller (the future doctor verb; the
     self-test now) injects: `tracked` ("tracked"/"untracked"), `actual_remote` (the store repository's real
     push URL), and `prior` (the prior committed snapshot, already parsed). The module reads every declared
-    input through U1's contained no-follow readers and reuses the U2/U3/U4/U5/U7/U8 primitives; it owns the
+    input through U1's contained no-follow readers and reuses the U2/U3/U4/U5/U8 primitives; it owns the
     cross-record, historical, archive, view, changelog, and topology invariants no single-record or
     single-ledger pass can see. Returns a StoreValidation (VALID / INVALID / CANNOT-EVALUATE) plus the
     per-check verdicts, the partial-import triage surface, the profile scope, and the disclosed residuals.
@@ -2615,33 +2628,21 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
             for f in check_rotation_only_released(archive_wl_ids, version_data):
                 rep.finding("C-ROTATION: {}".format(f))
 
-    # --- C-STAGING: staged ids under imports/<run-id>/ (spec 14.1), reusing U7's enumerator ------------
-    rep.ran("C-STAGING")
-    staged_ids = []
-    try:
-        staged_ids = _opf_import._sibling_ids(root_fd, machine_rel, _opf_import._roster(),
-                                              registered_vendors)
-    except _opf_import._StageError as exc:
-        if exc.verdict == _opf_import.FINDING:
-            rep.finding("C-STAGING: {}".format(exc.message))
-        else:
-            rep.cant("C-STAGING: {}".format(exc.message))
-
     # --- C-LEASE: the single-writer lease payload, present only while held (spec 5.7) -----------------
     rep.ran("C-LEASE")
     _check_lease(root_fd, machine_rel, rep)
 
-    # --- C-ID-SPACE (R6/H4): store-wide uniqueness (incl. staging) + ids-within-counters --------------
+    # --- C-ID-SPACE (R6/H4): store-wide uniqueness + ids-within-counters -------------------------------
     rep.ran("C-ID-SPACE")
     committed_ids = [r.id for r in active_recs if isinstance(r.id, str)]
     committed_ids += [r.id for r in archive_recs if isinstance(r.id, str)]
     committed_ids += ["WL-{}".format(n) for n in active_worklog]
     for _year, wl_map in archive_worklogs.items():
         committed_ids += ["WL-{}".format(n) for n in wl_map]
-    # Uniqueness spans active + archive + staging (spec 11); ids-within-counters is scoped to the committed
-    # store, because staging legitimately mints ids above the committed high-water pending promotion
-    # (StageResult.new_high_water), so a staged id is never a counter violation.
-    for f in check_unique_ids(committed_ids + list(staged_ids)):
+    # Uniqueness spans active + archive. The C-STAGING enumeration of ids staged under imports/<run-id>/
+    # retired with the import engine: nothing stages ids there, and containment grades any leftover run
+    # interior as unregistered.
+    for f in check_unique_ids(committed_ids):
         rep.finding("C-ID-SPACE: {}".format(f))
     for f in check_ids_within_counters(committed_ids, high):
         rep.finding("C-ID-SPACE: {}".format(f))
@@ -3744,39 +3745,31 @@ def self_test():
         imp2 = clean_machine()
         check("imports-leftover-run-none-invalid",
               run(imp2, working={"imports/{}/plan.toml".format(RUNID0): "schema = 1"}).status == INVALID)
-        # OPF-IMPORTS-RELOCATE: the fail-closed legacy-location guard fires in `opf check` too. An import run
-        # at the OLD machine-subdir path `.working/toml/imports/` (a `machine`-dict fixture) is CANNOT-EVALUATE
-        # via C-STAGING with the legacy message; the cant DOMINATES, so a legacy run can never be silently
-        # triaged, ignored, or graded as an ordinary stray. Bite: pre-relocation the old path WAS the staging
-        # location and there was no guard, so a run there validated normally.
+        # OPF-IMPORTS-RELOCATE, after the import engine's removal: a run at the OLD machine-subdir path
+        # `.working/toml/imports/` (a `machine`-dict fixture) is no staging location, only an unregistered
+        # directory under the machine store, so C-CONTAINMENT grades it as a finding at steady state
+        # (INVALID). The retired C-STAGING legacy-location CANNOT-EVALUATE no longer runs. Flip: a walk that
+        # recursed or skipped the old path would let the run validate.
         LEGRUN = "imp-20260601T000000Z-0123456789abcdef"
         _lg = clean_machine()
         _lg["imports/{}/plan.toml".format(LEGRUN)] = "schema = 1"
         _lgr = run(_lg)
-        check("legacy-imports-check-cannot-eval", _lgr is not None and _lgr.status == CANNOT_EVALUATE)
+        check("legacy-imports-check-invalid", _lgr is not None and _lgr.status == INVALID)
         check("legacy-imports-check-named",
-              _lgr is not None and any("legacy location" in m for m in _lgr.cannot_evaluate))
-        # declaring the OLD path under [unmanaged] does NOT launder it: the C-STAGING guard is independent of
-        # the unmanaged-path machinery, so the store stays CANNOT-EVALUATE.
-        _lgu = clean_machine()
-        _lgu["manifest.toml"] = base_manifest()
-        _lgu["manifest.toml"]["unmanaged"] = {"paths": [".working/toml/imports"]}
-        _lgu["imports/{}/plan.toml".format(LEGRUN)] = "schema = 1"
-        _lgur = run(_lgu)
-        check("legacy-imports-unmanaged-not-launderable",
-              _lgur is not None and _lgur.status == CANNOT_EVALUATE
-              and any("legacy location" in m for m in _lgur.cannot_evaluate))
+              _lgr is not None and any("C-CONTAINMENT" in f and "toml/imports" in f and "unregistered" in f
+                                       for f in _lgr.findings)
+              and "C-STAGING" not in _lgr.checks)
         # an OLD-path-only run does NOT substantiate import_status = "partial": the unsubstantiated-partial
-        # finding fires (imports is read at the NEW root, which is empty) AND the legacy cant dominates.
+        # finding fires (imports is read at the NEW root, which is empty) and the old path stays a finding.
         _lgp = clean_machine()
         _lgp["manifest.toml"] = base_manifest()
         _lgp["manifest.toml"]["opf"]["import_status"] = "partial"
         _lgp["imports/{}/plan.toml".format(LEGRUN)] = "schema = 1"
         _lgpr = run(_lgp)
         check("legacy-imports-partial-not-substantiated",
-              _lgpr is not None and _lgpr.status == CANNOT_EVALUATE
-              and any("legacy location" in m for m in _lgpr.cannot_evaluate)
-              and any("no active" in f and "partial" in f for f in _lgpr.findings))
+              _lgpr is not None and _lgpr.status == INVALID
+              and any("no active" in f and "partial" in f for f in _lgpr.findings)
+              and any("C-CONTAINMENT" in f and "toml/imports" in f for f in _lgpr.findings))
 
         # --- C-LEASE (codex-1): the single-writer lease payload (spec 5.7) --------------------------
         def lease(**over):
@@ -4175,19 +4168,34 @@ def self_test():
               lfir is not None and not any("LF" in f and "not a known namespace" in f
                                            for f in lfir.findings))
 
-        # C-STAGING (enumeration): a staged sibling id that collides with a committed id is only caught
-        # because the staging enumerator contributes it to the uniqueness union; removing that enumeration
-        # makes the store validate clean.
+        # C-STAGING retired: C-ID-SPACE's uniqueness union is the committed store only. A leftover run under
+        # imports/<run-id>/ holding a candidate BI-1 that duplicates the committed BI-1 is graded by
+        # C-CONTAINMENT (an unregistered path, INVALID), never as a duplicate id. Flip: restoring the staged
+        # enumeration into the union adds the C-ID-SPACE duplicate-id finding.
         stf = clean_machine()
         stfr = run(stf, working={
             "imports/imp-20260601T000000Z-0123456789abcdef/candidate/backlog_item.index.toml":
                 idx([bi(1, "open")])})
-        check("c-staging-collision-not-valid", stfr is not None and stfr.status != VALID)
-        # 4i: assert the SPECIFIC duplicate-id finding the relocated staging enumerator contributes (staged
-        # BI-1 vs committed BI-1), so containment cannot independently satisfy "not VALID" and mask a broken
-        # enumerator. If the enumeration no longer reads `.working/imports`, this exact finding vanishes.
-        check("c-staging-collision-duplicate-id-named",
-              stfr is not None and any("C-ID-SPACE" in f and "BI-1" in f for f in stfr.findings))
+        check("c-id-space-committed-only-roster",
+              stfr is not None and "C-STAGING" not in stfr.checks and "C-STAGING" not in REQUIRED_CHECKS
+              and stfr.checks.get("C-ID-SPACE") == "PASS")
+        check("c-id-space-leftover-run-contained",
+              stfr is not None and stfr.status == INVALID
+              and any("C-CONTAINMENT" in f and "imports/imp-20260601T000000Z-0123456789abcdef" in f
+                      for f in stfr.findings)
+              and not any("C-ID-SPACE" in f for f in stfr.findings))
+        # The committed union still catches an active/archive duplicate: HO-1 archived while the active
+        # handoff index still holds HO-1 is a named C-ID-SPACE duplicate-id finding.
+        idd = clean_machine()
+        idd["archive/2026/archive.toml"] = {
+            "schema": 1,
+            "moved": [{"id": "HO-1", "type": "handoff", "destination": "archive/2026/handoff.index.toml"}],
+            "worklog_moved": [{"span": ["WL-1", "WL-2"], "destination": "archive/2026/worklog.toml"}]}
+        idd["archive/2026/handoff.index.toml"] = idx([ho(1)])
+        iddr = run(idd)
+        check("c-id-space-active-archive-duplicate-named",
+              iddr is not None and iddr.checks.get("C-ID-SPACE") == "FINDING"
+              and any("C-ID-SPACE" in f and "duplicate id 'HO-1'" in f for f in iddr.findings))
 
         # --- M2: archive destinations confined + verified --------------------------------------------
         m2a = clean_machine()

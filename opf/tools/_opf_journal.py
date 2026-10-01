@@ -1,5 +1,6 @@
-"""Capability-bound store journal API. Its first writer is the MIG-PR5 ingest promotion coordinator
-(publication attempts and the ingest writer lock); other writers keep their legacy homes.
+"""Capability-bound store journal API. Its first writer, the MIG-PR5 ingest promotion coordinator
+(publication attempts and the ingest writer lock), retired with the import engine; other writers keep
+their legacy homes.
 
 Homes-2 store writers must use this API for journal frames and terminal projections. Paths derive from
 kind and run identity; callers cannot choose a destination. Recovery opens existing state
@@ -80,8 +81,8 @@ def _opened(cap, kind, run_id, create):
 
 
 # --- shared native-journal validation (PR B): pure, kind-generic, non-mutating -------------------------
-# The staged-run gate (check_opf_import, generation 2) grades typed evidence through EXACTLY these
-# validators and the projection model below, so the writer and the reader cannot drift. All of them are
+# Typed journal evidence is read through EXACTLY these validators and the projection model below, so a
+# writer and a reader cannot drift. All of them are
 # pure over already-captured frames or identity strings: no descriptor is opened, no directory is created,
 # and no state is mutated. Identity is validated through the shared _opf_store constructors, so every
 # registered kind (import, ingest, adoption, layout, preview, and the journal-only record) is admitted
@@ -285,8 +286,8 @@ def check_attempt_frames(frames, kind, run_id, attempt):
 
 def read_attempt_intent(jr_fd, kind, run_id, attempt):
     """Read-only: the INTENT of a COMPLETE attempt, read beneath an ALREADY-OPEN journal-root descriptor
-    and bound to its own identity; anything else refuses. Shared by the capability wrapper below and the
-    generation-2 staged-run gate, which must never enter the create-capable _opened path."""
+    and bound to its own identity; anything else refuses. Shared by the capability wrapper below and any
+    read-only reader, which must never enter the create-capable _opened path."""
     txn = attempt_txn(kind, run_id, attempt)
     frames, _torn, _good = _journal.read_frames(jr_fd, txn)
     _journal._validate_terminal_agreement(frames)

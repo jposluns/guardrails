@@ -90,7 +90,7 @@ WORKING_DIRNAME = ".working"           # fixed store-tree name at the STORE root
 # Store-root exclusions, anchored only at the STORE ROOT. In homes 2, .aiqt is AIQT-only
 # content; OPF writes no state here. Until homes 2 is activated, legacy import state still
 # lives there. Keep this exclusion for those stores and for AIQT-owned material afterwards.
-# _opf_import._assemble_preview and _opf_ingest derive their root exclusions from this tuple.
+# _opf_adopt derives its store-root exclusions from this tuple.
 STORE_ROOT_CONTROL_DIRS = (".git", ".aiqt")
 # Homes-2 topology is inert until migration and writer activation (spec 4.2 / 9.2).
 # SUPPORTED_HOMES is the highest homes generation this tooling activates; homes 2 activates with the

@@ -17,8 +17,8 @@ observation can never read as a pass).
 Constants verified against source at repo HEAD: ACTOR_KINDS mirrors opf/tools/_opf_schema.py; the reserved
 managed set mirrors opf/tools/_opf_store.py (WORKING_DIRNAME=".working", DEFAULT_MACHINE_SUBDIR="toml",
 store-level `imports`, archive) and the classify_containment authority (opf/tools/_opf_check.py) plus the
-pinned initial views (opf/tools/_opf_init.py) and the .opf.toml pointer. Canonical JSON mirrors the import
-acceptance emitter (opf/tools/_opf_import.py).
+pinned initial views (opf/tools/_opf_init.py) and the .opf.toml pointer. Canonical JSON keeps the form of
+the retired import acceptance emitter.
 
 Run: python3 -I -B opf/tools/_opf_init_contract.py --self-test
 Exit: 0 self-test clean; 2 self-test failure.

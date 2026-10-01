@@ -9,7 +9,7 @@ retained bytes it lists (spec 4.2), a base `inventory.toml` then one `inventory-
 phase, never rewritten; the homes-1 bundle verification the completion checks carry themselves while
 C-EVIDENCE-ENUM is inactive (spec 14.1), which RE-READS the inventories and payload digests from disk;
 the preserve-first composition of spec 14.2; live re-observation of every operand; one journaled
-transaction per (run, phase), reconcile-first; and a dispatch table keyed by the closed twelve-op
+transaction per (run, phase), reconcile-first; and a dispatch table keyed by the closed eleven-op
 ADOPT_OPS vocabulary in which EVERY op returns a refusing not-yet-executable verdict. No operation
 executes: the file ops, init-store composition, trust verification, approval capture, hook activation,
 rendering, receipt writing, the completion checks, retirement, and the MUTATING CLI subcommands (approve,
@@ -491,7 +491,8 @@ def derive_rows(run_id, ops, staged):
 
 def _pinned_remove(rel, data, mode):
     """Remove a file only while it still holds the verified bytes and mode; the journal verifies the pin
-    at capture, under its lock, before it takes the preimage (the _opf_ingest_apply idiom)."""
+    at capture, under its lock, before it takes the preimage (the pinned-remove idiom of the retired
+    ingest execution coordinator)."""
     return dict(op="remove", path=rel, poststate=dict(kind="absent"),
                 **{"source-poststate": dict(kind="file", mode=mode, sha256=_sha256(data))})
 
@@ -1014,7 +1015,6 @@ OP_HANDLERS = {
     "init-store": _not_yet_executable,
     "create-file": _not_yet_executable,
     "plant-governance": _not_yet_executable,
-    "import-file": _not_yet_executable,
     "register-unmanaged": _not_yet_executable,
     "move-file": _not_yet_executable,
     "repoint-consumer": _not_yet_executable,

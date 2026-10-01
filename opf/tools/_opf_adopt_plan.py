@@ -19,8 +19,8 @@ VALID means an inert, digest-bound proposal, NEVER permission/readiness to apply
 No release is trusted, acceptance verified, hook activated, or transaction run.
 The frozen plan is `opf.adoption.plan/v2` (spec 14.1). A migrate decision
 resolves: the source is kept for post-adoption import, preserved under the
-run's adoption preimage home, named in the import scope, and given no
-import-file row; import references are refused as decision inputs. A candidate
+run's adoption preimage home, named in the import scope, and given no import
+op; import references are refused as decision inputs. A candidate
 at a planned managed destination (a declared view of the resolved or default
 manifest, or a path under the planned machine store) is occupying (spec 14.2):
 keep refuses, and any other disposition is preserved under the adoption archive.
@@ -668,7 +668,7 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
             checked = schema.validate_op(row, homes=homes)
             if checked.status != store.VALID:
                 return AdoptResult(checked.status, checked.findings, observation=observed.observation)
-            if row["op"] in ("register-unmanaged", "move-file", "retire-file", "import-file"):
+            if row["op"] in ("register-unmanaged", "move-file", "retire-file"):
                 raise PlanError("disposition ops must come from attributed decisions")
             for field, value in row.items():
                 if schema._FIELD_KINDS.get(field) in ("filepath", "dirpath") and value != ".":
@@ -974,7 +974,7 @@ def self_test():
         def test_migrate_resolves_keep_frozen(self):
             # A bare migrate decision resolves (spec 14.2): kept for post-adoption import,
             # preserved under the adoption preimage home, named in the import scope, and
-            # given no import-file row.
+            # given no import op.
             before = self.snapshot()
             result = self.make_plan(decisions=[dict(self.decision, disposition="migrate")])
             self.assertEqual(result.status, store.VALID, result.findings)

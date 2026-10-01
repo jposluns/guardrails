@@ -17,18 +17,26 @@ allocation history; it prevents reuse through cooperating apply, rollback, and r
 is reconciled only in part: a durable reservation whose counter advance was lost is re-applied here
 (componentwise maximum), while a leftover temporary refuses rather than being cleaned, pending the
 slice-2 recovery design.
+
+Its only caller, the ingest execution coordinator, retired with the import engine; the module is kept,
+uncalled, with its own direct lane:
+
+  _opf_allocation.py --self-test   the reservation vectors over a synthetic store
 """
 import hashlib
 import os
 import stat
+import sys
 import tomllib
+from pathlib import Path
 
-import _journal
-import _opf_emit
-import _opf_journal
-import _opf_oplock
-import _opf_schema
-import _opf_store
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # the sibling helpers, for the direct --self-test lane
+import _journal  # noqa: E402
+import _opf_emit  # noqa: E402
+import _opf_journal  # noqa: E402
+import _opf_oplock  # noqa: E402
+import _opf_schema  # noqa: E402
+import _opf_store  # noqa: E402
 
 RESERVATION_FORMAT = "opf.ingest.reservation/v1"
 SCHEMA = 1
@@ -294,3 +302,158 @@ def _reserve(machine_fd, dir_fd, run_id, rec_name, binding, demand, stamp, live_
                           run_id)
     ids = dict((row["key"], row["id"]) for row in model["allocation"])
     return Reservation(run_id, ids, model["stamp"], _sha(raw), reused, dict(target))
+
+
+# --- self-test: the direct allocation lane --------------------------------------------------------------
+
+def self_test():
+    """Allocation vectors over a synthetic inline store, ported from the retired ingest execution
+    coordinator's suite (its retry-monotonicity and mint-move-toctou legs and its
+    allocation/journal-lock-required discriminator), driven through the real capability and journal
+    writer lock:
+      capability-required   a released capability refuses before any read or write.
+      journal-lock-required the capability alone refuses (the ingest journal writer lock is required too),
+                            nothing reserved and counters byte-unchanged.
+      mint-under-both-locks ids come from the live counters in demand order, the reservation record is
+                            published in the journal home, and counters advance to exactly the minted ids.
+      retry-same-allocation identical bindings reuse the SAME reservation and mint nothing.
+      retry-no-regression   a counters file rolled back beneath the durable reservation is re-advanced to
+                            the componentwise maximum on retry, never below it, and the ids are unchanged.
+      binding-changed       a changed binding refuses and the consumed reservation stays as it was.
+      reservation-floor     another run allocates above an earlier run's reservation even when counters were
+                            rolled back, so a reserved number is never handed out twice.
+      uncovered-live-id     a durable id above its counter refuses (a regressed counter is never a licence).
+      interrupted-replace   a leftover counters temporary refuses until recovery.
+    Returns 0 pass, 1 fail, 2 on a harness error."""
+    import shutil
+    import tempfile
+    failures, count = [], [0]
+
+    def check(name, cond):
+        count[0] += 1
+        if not cond:
+            failures.append(name)
+
+    def binding(run_id, digest="x"):
+        return dict(run_id=run_id, review_model_digest=digest, bundle_digest="x", acceptance_digest="x")
+
+    def refusal(cap, run_id, bind, demand, live_ids=()):
+        try:
+            reserve_ingest_ids(cap, run_id, bind, demand, "stamp", set(live_ids))
+        except AllocationError as exc:
+            return str(exc)
+        return None
+
+    run1 = "imp-20260910T120000Z-0000000000000001"
+    run2 = "imp-20260910T120000Z-0000000000000002"
+    demand = [("bi", "BI"), ("lf-a", "LF"), ("lf-b", "LF")]
+    try:
+        base = Path(tempfile.mkdtemp(prefix="opf-allocation-selftest-")).resolve()
+    except OSError as exc:
+        print("OPF-ALLOCATION SELF-TEST: harness error: cannot create the fixture ({})".format(exc))
+        return 2
+    try:
+        root = base / "store"
+        machine = root / _opf_store.WORKING_DIRNAME / _opf_store.DEFAULT_MACHINE_SUBDIR
+        machine.mkdir(parents=True)
+        (machine / _opf_store.MANIFEST_NAME).write_text("\n".join([
+            "[opf]", 'standard = "opf"', 'spec_version = "{}"'.format(_opf_store.SUPPORTED_SPEC_VERSION),
+            'layout = "inline"', 'posture = "required"', 'import_status = "none"', "", "[store]",
+            'sync_target = ""', "", "[modules]", "governance = true", "", "[types.backlog_item]",
+            'namespace = "BI"', "", "[vendors]", "registered = []", ""]) + "\n", encoding="utf-8")
+        counters = machine / COUNTERS_NAME
+
+        def set_counters(bi, lf):
+            counters.write_text("schema = 1\n\n[counters]\nBI = {}\nLF = {}\nWL = 0\n".format(bi, lf),
+                                encoding="utf-8")
+
+        def high():
+            return _opf_schema.validate_counters(tomllib.loads(counters.read_text(encoding="utf-8")))[0]
+
+        def record(run_id):
+            path = root / _opf_store.allocation_record(KIND, run_id)
+            return path.read_bytes() if path.is_file() else None
+
+        # Another run consumed LF numbers first: permanent ids come from the live counters.
+        set_counters(0, 10)
+        cap = _opf_oplock.acquire_operation(str(root), "allocation-selftest")
+        released = False
+        try:
+            before = counters.read_bytes()
+            message = refusal(cap, run1, binding(run1), demand)
+            # Flip: dropping the journal-lock requirement mints BI-1 here and advances counters.
+            check("journal-lock-required", message is not None and "journal writer lock" in message
+                  and counters.read_bytes() == before and record(run1) is None)
+            _opf_journal.acquire_writer_lock(cap, KIND)
+            try:
+                first = reserve_ingest_ids(cap, run1, binding(run1), demand, "stamp-1", set())
+                published = record(run1)
+                check("mint-under-both-locks", first.ids == {"bi": "BI-1", "lf-a": "LF-11", "lf-b": "LF-12"}
+                      and first.reused is False and first.counters_after == dict(BI=1, LF=12, WL=0)
+                      and high() == dict(BI=1, LF=12, WL=0))
+                check("reservation-published", published is not None and first.digest == _sha(published)
+                      and _validate_reservation(_parse(published, run1), run1) == dict(BI=1, LF=12, WL=0))
+                # Flip: allocating anew on retry mints BI-2/LF-13.. (or refuses on the existing record).
+                again = reserve_ingest_ids(cap, run1, binding(run1), demand, "stamp-2", set())
+                check("retry-same-allocation", again.reused is True and again.ids == first.ids
+                      and again.stamp == "stamp-1" and again.digest == first.digest
+                      and record(run1) == published and high() == dict(BI=1, LF=12, WL=0))
+                # A counters file rolled back beneath the durable reservation must not free its numbers.
+                set_counters(0, 0)
+                rolled = reserve_ingest_ids(cap, run1, binding(run1), demand, "stamp-3", set())
+                check("retry-no-regression", rolled.reused is True and rolled.ids == first.ids
+                      and high() == dict(BI=1, LF=12, WL=0))
+                before = counters.read_bytes()
+                message = refusal(cap, run1, binding(run1, digest="changed"), demand)
+                check("binding-changed-refused", message is not None and "different review/acceptance" in message
+                      and record(run1) == published and counters.read_bytes() == before)
+                message = refusal(cap, run1, binding(run1), demand[:1])
+                check("demand-changed-refused", message is not None and "allocation demand" in message
+                      and record(run1) == published)
+                # A later run allocates above the earlier reservation even under a rolled-back counter.
+                set_counters(0, 0)
+                second = reserve_ingest_ids(cap, run2, binding(run2), [("bi", "BI")], "stamp-4", set())
+                check("reservation-floor", second.ids == {"bi": "BI-2"} and second.reused is False
+                      and high() == dict(BI=2, LF=12, WL=0))
+                message = refusal(cap, run2, binding(run2), [("bi", "BI")], live_ids=("BI-9",))
+                check("uncovered-live-id-refused", message is not None and "not covered by counters" in message)
+                leftover = machine / (_TMP_PREFIX + "interrupted")
+                leftover.write_bytes(b"")
+                message = refusal(cap, run2, binding(run2), [("bi", "BI")])
+                check("interrupted-replace-refused", message is not None and "interrupted counters" in message)
+                leftover.unlink()
+            finally:
+                _opf_journal.release_writer_lock(cap, KIND)
+            _opf_oplock.release_operation(cap)
+            released = True
+            before = counters.read_bytes()
+            message = refusal(cap, run2, binding(run2), [("bi", "BI")])
+            check("capability-required", message is not None and "held store capability" in message
+                  and counters.read_bytes() == before)
+        finally:
+            if not released:
+                _opf_oplock.release_operation(cap)
+    except (OSError, _opf_oplock.OpLockError, _journal.JournalError, AllocationError) as exc:
+        print("OPF-ALLOCATION SELF-TEST: harness error: {!r}".format(exc))
+        return 2
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    if failures:
+        print("OPF-ALLOCATION SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), count[0]))
+        for name in failures:
+            print("  FAILED: {}".format(name))
+        return 1
+    print("OPF-ALLOCATION SELF-TEST: PASS ({} reservation checks)".format(count[0]))
+    return 0
+
+
+def main(argv=None):
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args == ["--self-test"]:
+        return self_test()
+    print("usage: _opf_allocation.py --self-test", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
