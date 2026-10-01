@@ -2083,11 +2083,7 @@ class _StCloseFault:
     reports each reuser that lost its number (REUSE). While `watch` is set, every later os.close of a
     released number by the faulting thread, and every call that inspects it by number (_ST_WATCHED: os.stat
     given the number itself, os.fstat, os.fstatvfs, os.lseek, os.get_inheritable, os.isatty, fcntl.fcntl,
-    fcntl.flock, fcntl.lockf, fcntl.ioctl), is recorded in `probes` (PROBE). While active, every number
-    os.open or os.dup returns is recorded in `opened` with the (st_dev, st_ino) fstat gives the moment it
-    returns, while the number is still held, and every close the stand-in sees releases the latest open of
-    its number; close_left() then closes a leaked number only while that open is unreleased and fstat still
-    returns its recorded identity (#378 P1)."""
+    fcntl.flock, fcntl.lockf, fcntl.ioctl), is recorded in `probes` (PROBE)."""
 
     def __init__(self, watch=True):
         import errno
@@ -2096,12 +2092,10 @@ class _StCloseFault:
         self.fired = []
         self.probes = []
         self.lost = []
-        self.opened = []
         self.watch = watch
         self.err = OSError(errno.EIO, "self-test injected close failure")
         self._close = os.close
         self._fstat = os.fstat
-        self._opens = [("open", os.open), ("dup", os.dup)]
         fcntl = _st_fcntl()
         self._watched = [(module, name, getattr(module, name)) for module, names in ((os, _ST_WATCHED[0]),
                          (fcntl, _ST_WATCHED[1])) if module for name in names if hasattr(module, name)]
@@ -2150,54 +2144,7 @@ class _StCloseFault:
         if state["owned"]:
             self._close(state["fd"])                      # the second thread releases what it still owns
 
-    def _opener(self, real):
-        """The stand-in for os.open or os.dup: it records the number the real call returns with the identity
-        fstat gives at once. A number fstat cannot read is left unrecorded, so close_left never closes it."""
-        def opener(*args, **kwargs):
-            fd = real(*args, **kwargs)
-            try:
-                st = self._fstat(fd)
-            except OSError:
-                return fd
-            self.opened.append({"fd": fd, "ident": (st.st_dev, st.st_ino), "released": False})
-            return fd
-        return opener
-
-    def _latest_open(self, fd):
-        """The latest recorded open of fd, or None when none was recorded."""
-        for entry in reversed(self.opened):
-            if entry["fd"] == fd:
-                return entry
-        return None
-
-    def close_left(self, leaked):
-        """After the leak check: close each leaked number whose latest recorded open no close released and
-        which fstat still shows with the identity recorded at that open, so it is still the call's own. A
-        number with no recorded open, one released since, or one naming another file now is left open: it
-        cannot be shown to be the call's. Returns the numbers closed."""
-        closed = []
-        for fd in leaked:
-            entry = self._latest_open(fd)
-            if entry is None or entry["released"]:
-                continue
-            try:
-                st = self._fstat(fd)
-            except OSError:
-                continue
-            if (st.st_dev, st.st_ino) != entry["ident"]:
-                continue
-            entry["released"] = True
-            closed.append(fd)
-            try:
-                self._close(fd)
-            except OSError:
-                pass                                      # released all the same (close(2) on Linux)
-        return closed
-
     def _fake_close(self, fd):
-        entry = self._latest_open(fd)
-        if entry is not None:
-            entry["released"] = True
         if fd in self._released and self.watch and self._threading.get_ident() == self._faulting:
             self.probes.append(("close", fd))
         if fd not in self.armed:
@@ -2263,22 +2210,19 @@ class _StCloseFault:
     def __enter__(self):
         os.close = self._fake_close
         self._stand_ins = []
-        replaced = [(module, name, real, self._watcher(name, real)) for module, name, real in self._watched]
-        replaced += [(os, name, real, self._opener(real)) for name, real in self._opens]
-        for module, name, real, stand_in in replaced:
-            setattr(module, name, stand_in)
+        for module, name, real in self._watched:
+            watched = self._watcher(name, real)
+            setattr(module, name, watched)
             for table in _st_supports(module):
-                if real in table:                         # a capability probe (os.stat or os.open in
-                    table.add(stand_in)                   # os.supports_dir_fd) still finds the call
-                    self._stand_ins.append((table, stand_in))
+                if real in table:                         # a capability probe (os.stat in
+                    table.add(watched)                    # os.supports_dir_fd) still finds the call
+                    self._stand_ins.append((table, watched))
         return self
 
     def __exit__(self, *exc_info):
         os.close = self._close
         for module, name, real in self._watched:
             setattr(module, name, real)
-        for name, real in self._opens:
-            setattr(os, name, real)
         for table, watched in self._stand_ins:
             table.discard(watched)
         return False
@@ -2349,15 +2293,13 @@ def _st_close_run(call, masking, expect, watch=True):
         problems.append("REUSE: a released number was closed again under its new owner {}".format(lost))
     if fault.probes:
         problems.append("PROBE: a released number was touched again {}".format(fault.probes))
-    # A leaked number is reported, then closed only while it is still the call's own: its latest open
-    # recorded while the fault was active, no close released since, and fstat still returning the identity
-    # recorded at that open. Any other leaked number is left open: the harness cannot show it names the
-    # file the call leaked rather than one another thread opened on it since, and it never closes a number
-    # it cannot show is its own (#378 P1).
+    # A deliberately leaked number is reported and left open: the harness records no opens, so it cannot
+    # prove the number is still the tested call's own. Another thread may have reused it (a released
+    # number included) through os.open, builtin open() or any other route, so closing it could close
+    # someone else's descriptor (#378 P1).
     leaked = sorted(fd for fd, ident in after.items() if before.get(fd) != ident)
     if leaked:
         problems.append("LEAK: descriptor(s) {} survived the failing close".format(leaked))
-        fault.close_left(leaked)
     if masking is None:
         if raised is not None:
             problems.append("WRONG: expected the quiet close to swallow its error, got {!r}".format(raised))
