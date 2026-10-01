@@ -3309,10 +3309,18 @@ def self_test(vectors_only=False):
         fired=[("request",)])
     add("TG-11/read-inactivity", CANNOT_EVALUATE, "inactivity",
         mode="stall", fetch_bound=0.50, fired=[("inactivity", "_receive")])
+    # No guard attribution: this mutant cannot meet the bound under any load.
+    # Its result.get() has no timeout, so it waits out the fixture recv's
+    # 1.0 s timeout, above the 0.50 bound; host delay only lengthens that.
     add("TG-11/stalled-resolver", CANNOT_EVALUATE, "resolver-deadline",
         stalled_resolver=True, fetch_bound=0.50)
+    # Without the connect deadline, a scheduling delay before the fetch can
+    # clamp the request deadline to the gather deadline, and that guard can
+    # refuse the mutant inside the 0.50 bound. Name the connect guard where
+    # the unmutated run records it for both fetches: the timeout _fetch arms
+    # for _connect.
     add("TG-11/connect-timeout", CANNOT_EVALUATE, "connect-deadline",
-        connect_stall=True, fetch_bound=0.50)
+        connect_stall=True, fetch_bound=0.50, fired=[("connect", "_fetch")] * 2)
     add("TG-11/tls-timeout", CANNOT_EVALUATE, "tls-deadline",
         mode="tls-stall", fetch_bound=0.50, fired=[("connect", "_tls")] * 2)
     add("TG-12/observer-backstop", CANNOT_EVALUATE, "backstop", exception=True)
@@ -3866,16 +3874,32 @@ def self_test(vectors_only=False):
                 passed = (passed and elapsed < 1.60 and bool(fetch_durations)
                           and all(duration < config["fetch_bound"]
                                   for duration in fetch_durations))
+            fired = True
             if "fired" in config:
                 # Name the guard behind each refused fetch: under host load a
-                # different guard can refuse a mutant inside every time bound.
-                passed = passed and len(fetch_guards) == len(config["fired"]) and all(
+                # different guard can refuse a mutant inside every time bound,
+                # so a mutant whose guard differs is detected.
+                # Trade-off: load can also stop the unmutated run by another
+                # guard inside every bound (slow-drip's 0.15 s inactivity cap
+                # against its 0.04 s drip; tls-timeout's connect deadline
+                # expiring before _tls). That run cannot evaluate its mutant:
+                # the row reports CANNOT-EVALUATE and the suite exits 2, a
+                # failure apart from INVALID, never a pass and never retried.
+                # Main's source, without attribution, passed such a run. An
+                # unmutated run that fails any other check stays INVALID.
+                # Residuals: _resolve converts queue.Empty into a fresh
+                # ObserveError, attributed only as ("ObserveError",); non-timing
+                # CANNOT-EVALUATE rows (wrong-hostname and others) run with 10x
+                # deadlines and are judged by verdict, without attribution.
+                fired = len(fetch_guards) == len(config["fired"]) and all(
                     guard[:len(want)] == want
                     for guard, want in zip(fetch_guards, config["fired"])
                 )
+                if mutated:
+                    passed = passed and fired
             if identifier.startswith("TG-05/"):
                 passed = passed and fetch_calls == [release_url, ANCHOR_URL]
-            return passed, status, elapsed, fetch_guards
+            return passed, status, elapsed, fetch_guards, fired
         finally:
             if resolver_sockets is not None:
                 resolver_sockets[1].close()
@@ -3931,7 +3955,7 @@ def self_test(vectors_only=False):
 
             # Establish an actual positive TLS/quarantine fixture before negatives.
             positive = ("positive/local-tls-quarantine", VALID, "archive", {})
-            passed, status, elapsed, _ = run_case(base, contexts, positive, False)
+            passed, status, elapsed, _, _ = run_case(base, contexts, positive, False)
             executed.append({
                 "id": positive[0], "expected": VALID, "observed": status,
                 "test_status": VALID if passed else INVALID,
@@ -3945,8 +3969,8 @@ def self_test(vectors_only=False):
             guard_rows = _guard_self_test() + _ownership_self_test() + _cancellation_self_test()
             executed.extend(guard_rows)
             for case in cases:
-                passed, status, elapsed, guards = run_case(base, contexts, case, False)
-                mutant_passed, mutant_status, mutant_elapsed, mutant_guards = run_case(
+                passed, status, elapsed, guards, fired = run_case(base, contexts, case, False)
+                mutant_passed, mutant_status, mutant_elapsed, mutant_guards, _ = run_case(
                     base, contexts, case, True,
                 )
                 executed.append({
@@ -3957,13 +3981,18 @@ def self_test(vectors_only=False):
                     "mutant_observed": mutant_status,
                     "mutant_test_status": VALID if mutant_passed else INVALID,
                     "mutation_detected": not mutant_passed,
-                    "test_status": VALID if passed and not mutant_passed else INVALID,
+                    "test_status": (CANNOT_EVALUATE if passed and not fired else
+                                    VALID if passed and not mutant_passed else INVALID),
                     "elapsed_seconds": elapsed,
                     "mutant_elapsed_seconds": mutant_elapsed,
                 })
                 if "fetch_bound" in case[3]:
                     executed[-1]["fired"] = [list(guard) for guard in guards]
                     executed[-1]["mutant_fired"] = [list(guard) for guard in mutant_guards]
+                if passed and not fired:
+                    executed[-1]["detail"] = (
+                        "the guard under test did not fire in the unmutated run, so the row"
+                        " cannot evaluate its mutant; typically host scheduling delay")
     except Exception as exc:
         executed.append({
             "id": "fixture/setup-or-teardown",
@@ -3980,8 +4009,12 @@ def self_test(vectors_only=False):
                     + [case[0] for case in cases])
     if [row["id"] for row in executed] != expected_ids:
         return 1
-    if any(row["test_status"] != VALID for row in executed):
+    if any(row["test_status"] not in (VALID, CANNOT_EVALUATE) for row in executed):
         return 1
+    if any(row["test_status"] == CANNOT_EVALUATE for row in executed):
+        # As for fixture setup, a row that cannot evaluate fails with exit 2,
+        # which the registered runner propagates apart from INVALID's exit 1.
+        return 2
     if not vectors_only:
         try:
             _runner_registration_test(expected_ids)
