@@ -1685,8 +1685,8 @@ def _physical_home(rd, rel):
         for depth, comp in enumerate(reversed(rel.split("/"))):
             below = _fd_identity(cur)
             parent = os.open("..", _DIR_ID_FLAGS, dir_fd=cur)
-            os.close(cur)
-            cur = parent
+            prev, cur = cur, parent                       # ownership moves first: a failed close is
+            os.close(prev)                                # never closed again by the finally (P1, #378)
             try:
                 entry = os.stat(comp, dir_fd=cur, follow_symlinks=False)
             except FileNotFoundError:
@@ -1736,8 +1736,8 @@ def _spelled_route(rd, visit, ancestor_depth):
             for _ in range(ancestor_depth):
                 parent = os.open("..", flags, dir_fd=ancestor)
                 same = _fd_identity(parent) == _fd_identity(ancestor)
-                os.close(ancestor)
-                ancestor = parent
+                prev, ancestor = ancestor, parent         # ownership first (P1, #378)
+                os.close(prev)
                 visit(ancestor, edges)
                 if same:
                     break
@@ -1769,13 +1769,13 @@ def _spelled_route(rd, visit, ancestor_depth):
                     pending[:0] = target.split("/")
                     if target.startswith("/"):
                         nfd = os.open("/", flags)
-                        os.close(cur)
-                        cur = nfd
+                        prev, cur = cur, nfd              # ownership first (P1, #378)
+                        os.close(prev)
                         visit(cur, expanded)
                     continue
             nfd = os.open(comp, flags, dir_fd=cur)
-            os.close(cur)
-            cur = nfd
+            prev, cur = cur, nfd                          # ownership first (P1, #378)
+            os.close(prev)
             visit(cur, expanded)
         if _fd_identity(cur) != _fd_identity(rd.fd):
             raise _GateError("the supplied run path no longer resolves to the opened run directory (changed "

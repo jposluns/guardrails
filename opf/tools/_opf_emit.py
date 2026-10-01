@@ -2025,8 +2025,8 @@ class _FixtureProcess:
             status = _fixture_drain(subject, subject_fd, deadline=cleanup_deadline)
             subject = None
             if subject_fd is not None:
-                os.close(subject_fd)
-                subject_fd = None
+                fd, subject_fd = subject_fd, None         # ownership first: a failed close is never
+                os.close(fd)                              # closed again by the cleanup (P1, #378)
             if status is None:
                 raise ChildStatusUnavailable("subject status unavailable")
             stage = "receipt"

@@ -4469,11 +4469,13 @@ def self_test():
         # descriptor put on the freed number (inline, and from a real second thread), then the error.
         # Green: the reuser still owns its number (REUSE), the helper made exactly one close and no fstat
         # of the number afterwards (PROBE), and the error is swallowed. Each vector is red under RECLOSE
-        # (the old body put back) by REUSE alone and under an fstat-only probe by PROBE alone. ----------
+        # (the old body put back) by REUSE alone and under an fstat-only probe by PROBE alone; each V1
+        # vector also under an fcntl F_GETFD probe by PROBE alone, where fcntl exists (2 more runs). ----
         _q_failures, _q_runs = _journal._st_close_check(globals(), _journal._st_helper_vectors(globals()))
         for _q_failure in _q_failures:
             print("  close vector: {}".format(_q_failure), file=sys.stderr)
-        check("p1-close-fd-quietly-single-close", not _q_failures and _q_runs == 8)
+        check("p1-close-fd-quietly-single-close",
+              not _q_failures and _q_runs == (10 if _journal._st_fcntl() else 8))
 
         # --- S4-F3: validate_store's `finally` block closes its store / product-root descriptors OUTSIDE
         # the B6 barrier, so a close that raises during teardown (EINTR / EIO / an invalid fd) must be

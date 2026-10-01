@@ -2080,8 +2080,8 @@ class _StCloseFault:
     fired, or fired on a closed descriptor, proves nothing and is red (NOFIRE). The reuser is a pipe end
     put on the number with dup2, inline or, armed with thread=True, by a real second thread that takes
     the number while the close is still in progress and checks afterwards that it still owns it; settle()
-    reports each reuser that lost its number (REUSE). While `watch` is set, every later os.fstat or
-    os.close of a released number by the faulting thread is recorded in `probes` (PROBE)."""
+    reports each reuser that lost its number (REUSE). While `watch` is set, every later os.fstat,
+    os.close or fcntl.fcntl of a released number by the faulting thread is recorded in `probes` (PROBE)."""
 
     def __init__(self, watch=True):
         import errno
@@ -2094,6 +2094,8 @@ class _StCloseFault:
         self.err = OSError(errno.EIO, "self-test injected close failure")
         self._close = os.close
         self._fstat = os.fstat
+        self._fcntl_module = _st_fcntl()
+        self._fcntl = self._fcntl_module and self._fcntl_module.fcntl
         self._threading = threading
         self._released = set()
         self._faulting = None
@@ -2176,6 +2178,11 @@ class _StCloseFault:
             self.probes.append(("fstat", fd))
         return self._fstat(fd, *args, **kwargs)
 
+    def _fake_fcntl(self, fd, *args, **kwargs):
+        if fd in self._released and self.watch and self._threading.get_ident() == self._faulting:
+            self.probes.append(("fcntl", fd))
+        return self._fcntl(fd, *args, **kwargs)
+
     def settle(self):
         """After the call: confirm each reuser still owns its number, then release it. Returns the losses."""
         for fd, ident in self._inline:
@@ -2200,12 +2207,26 @@ class _StCloseFault:
     def __enter__(self):
         os.close = self._fake_close
         os.fstat = self._fake_fstat
+        if self._fcntl_module:
+            self._fcntl_module.fcntl = self._fake_fcntl
         return self
 
     def __exit__(self, *exc_info):
         os.close = self._close
         os.fstat = self._fstat
+        if self._fcntl_module:
+            self._fcntl_module.fcntl = self._fcntl
         return False
+
+
+def _st_fcntl():
+    """The fcntl module, or None where it does not exist (it is POSIX-only): there nothing can call
+    fcntl.fcntl, so there is nothing to watch, and the fcntl probe flip (F) is not run."""
+    try:
+        import fcntl
+    except ImportError:
+        return None
+    return fcntl
 
 
 def _st_fd_table():
@@ -2225,8 +2246,8 @@ def _st_close_run(call, masking, expect, watch=True):
     """Run one vector: call(fault) drives the site with the fault active. Returns its problems, each
     "TAG: detail": NOFIRE (the fault did not fire on an open descriptor), REUSE (the descriptor that took
     the released number no longer owns it: the number was closed again), PROBE (the faulting thread
-    fstat'ed or closed the released number after the failed close; checked only while `watch`), LEAK (a
-    descriptor the call opened is still open), MASKED (the injected close error replaced the in-flight
+    fstat'ed, fcntl'ed or closed the released number after the failed close; checked only while `watch`),
+    LEAK (a descriptor the call opened is still open), MASKED (the injected close error replaced the in-flight
     exception), SILENT (a normal-path failing close did not raise), WRONG (any other outcome). `masking` is
     True where an exception is in flight, False on a normal path whose close error must raise, and None on
     a quiet teardown path that must swallow it. Empty means green."""
@@ -2278,7 +2299,8 @@ def _st_close_check(ns, vectors):
     (red: SILENT); C, the caller-frame check removed (red: SILENT); R (RECLOSE), the pre-P1 bodies of
     _close_fd_propagating and _close_fd_quietly put back, which fstat the number after a failed close and
     close it again when it looks open (red: REUSE alone, so this leg runs with the PROBE watch off); P, an
-    fstat probe after the failed close with no second close (red: PROBE); S, _close_fd_quietly replaced by
+    fstat probe after the failed close with no second close (red: PROBE); F, the same probe made with
+    fcntl.fcntl(fd, F_GETFD) (red: PROBE; run where fcntl exists); S, _close_fd_quietly replaced by
     the propagating close, so a cleanup loop stops at the first failing close (red: LEAK and WRONG).
     Returns (failures, runs)."""
     prop = ns.get("_close_fd_propagating")
@@ -2319,7 +2341,7 @@ def _st_close_check(ns, vectors):
                 raise first
         return body
 
-    def probe(swallow):
+    def probe(swallow, touch=lambda fd: os.fstat(fd)):
         def body(fd):
             try:
                 os.close(fd)
@@ -2327,12 +2349,14 @@ def _st_close_check(ns, vectors):
             except OSError as exc:
                 first = exc
             try:
-                os.fstat(fd)
+                touch(fd)
             except OSError:
                 pass
             if not swallow:
                 raise first
         return body
+
+    fcntl = _st_fcntl()
 
     flips = {"A": ({"_close_fd_yielding": prop}, ("MASKED",), True),
              "B": ({"_close_fd_yielding": quiet}, ("SILENT",), True),
@@ -2341,9 +2365,14 @@ def _st_close_check(ns, vectors):
                    False),
              "P": ({"_close_fd_propagating": probe(False), "_close_fd_quietly": probe(True)}, ("PROBE",),
                    True),
+             "F": ({"_close_fd_propagating": probe(False, lambda fd: fcntl.fcntl(fd, fcntl.F_GETFD)),
+                    "_close_fd_quietly": probe(True, lambda fd: fcntl.fcntl(fd, fcntl.F_GETFD))}, ("PROBE",),
+                   True),
              "S": ({"_close_fd_quietly": prop}, ("LEAK", "WRONG"), True)}
     failures, runs = [], 0
     for label, masking, want, call, expect in vectors:
+        if fcntl is None:
+            want = want.replace("F", "")
         runs += 1
         got = _st_close_run(call, masking, expect)
         if got:
@@ -2366,7 +2395,7 @@ def _st_close_check(ns, vectors):
 def _st_helper_vectors(ns):
     """The helpers' own vectors, calling each close helper through `ns` so a flip applies: the four
     _close_fd_yielding vectors, then for each helper `ns` defines, V1 (the released number reused inline,
-    once per errno, EINTR and EIO) and V2 (reused by a real second thread)."""
+    once per errno, EINTR and EIO; red under R, P and F) and V2 (reused by a real second thread)."""
     import errno
 
     def devnull(fault, **arm):
@@ -2419,7 +2448,7 @@ def _st_helper_vectors(ns):
             continue
         for errnum in (errno.EINTR, errno.EIO):
             vectors += (("helper {} V1: {} after the number is released and reused".format(
-                name, errno.errorcode[errnum]), masking, "RP", direct(name, errnum=errnum), None),)
+                name, errno.errorcode[errnum]), masking, "RPF", direct(name, errnum=errnum), None),)
         vectors += (("helper {} V2: a second thread takes the released number".format(name), masking, "R",
                      direct(name, thread=True), None),)
     return vectors

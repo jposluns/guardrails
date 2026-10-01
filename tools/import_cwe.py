@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Two-phase importer that vendors the MITRE CWE weakness catalogue into .aiqt/standards/cwe.toml.
 
-This is AUTHORING tooling, not a CI gate: CI validates the committed cwe.toml through the existing
-standards gates and never reaches the network. The importer is split so the one network step is
+acquire and render are AUTHORING tooling, not CI gates: CI validates the committed cwe.toml through the
+existing standards gates and never reaches the network; its one CI gate is the offline --self-test
+(cwe-importer-selftest). The importer is split so the one network step is
 separable from the deterministic render, and the render is reproducible from staged bytes:
 
   python3 tools/import_cwe.py acquire --staging-dir <abs dir>            # network; authoring-time only

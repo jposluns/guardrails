@@ -1106,14 +1106,33 @@ def _close_vectors(base):
     return _close_selftest._st_close_check(ns, vectors)
 
 
+# The exact bytes of tools/_close_selftest.py ahead of its harness: the docstring and the two imports.
+_CLOSE_HARNESS_PREAMBLE = '''"""Self-test harness for the #378 close vectors in the tools that carry a local copy of
+_close_fd_propagating and _close_fd_yielding (check_footer, check_gensrc_failclose, check_overclaim,
+check_release_cut, gen_crosswalk) or of _close_fd_propagating alone (import_cwe). It is a copy of the harness at the end of opf/tools/_journal.py, kept
+here so those tools' --self-test runs without opf/tools present; keep the two in step. Each tool passes its
+own module namespace, so the vectors and flips exercise that tool's helper copy and its own site.
+check_release_cut compares this whole file: the harness byte for byte against _journal's, and what comes
+ahead of it (this docstring and the two imports) against the exact bytes it records.
+
+Imported only by a self-test; nothing here runs on a production path."""
+
+import os
+import sys
+
+'''
+
+
 def _close_harness_in_step(journal, copy):
     """#378: tools/_close_selftest.py is a copy of the close-vector harness at the end of
     opf/tools/_journal.py; from class _StSentinel through _st_helper_vectors (where the copy ends and
-    _journal goes on to its own site vectors) the two must stay byte-identical."""
+    _journal goes on to its own site vectors) the two must stay byte-identical. The whole copy is compared:
+    what precedes the harness must be _CLOSE_HARNESS_PREAMBLE exactly, so no statement can be inserted
+    ahead of it (a rebound os.close there would disarm every vector)."""
     start, stop = "\nclass _StSentinel(", "\n\n\ndef _st_site_vectors("
     require(journal.count(start) == journal.count(stop) == copy.count(start) == 1,
             "close harness: _journal.py or _close_selftest.py lost its harness anchors")
-    return copy[copy.index(start):] == journal[journal.index(start):journal.index(stop)] + "\n"
+    return copy == _CLOSE_HARNESS_PREAMBLE + journal[journal.index(start):journal.index(stop)] + "\n"
 
 
 def self_test(red_on_revert):
@@ -1196,6 +1215,9 @@ def _self_test_isolated(red_on_revert):
         require(copy.count("raise self.err") == 1, "close harness: drift flip anchor is not unique")
         check("close-harness-drift-red",
               not _close_harness_in_step(journal, copy.replace("raise self.err", "return None")))
+        require(copy.count("\nimport sys\n") == 1, "close harness: preamble flip anchor is not unique")
+        check("close-harness-preamble-red", not _close_harness_in_step(
+            journal, copy.replace("\nimport sys\n", "\nimport sys\nos.close = lambda fd: None\n")))
         print("PASS close-harness-in-step")
         if red_on_revert:
             source = script.read_text(encoding="utf-8")
