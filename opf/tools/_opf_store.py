@@ -2670,9 +2670,12 @@ def self_test():
         # shows the number was never released. Each leg runs twice: with its closes releasing their numbers,
         # and with another lane's file put on a number instead (dup2 of the leg's "other-lane" file onto the
         # number, which the stub still holds, so it is never free for a real lane meanwhile): the r7 legs' on
-        # the number whose close is injected, the r5 and r6 legs' on the number the leg checks. After that run
-        # the number must still name the other-lane file (nothing closed it again, the leg's cleanup
-        # included), and only then does the leg close it, its own other-lane descriptor.
+        # the number whose close is injected, the r5 and r6 legs' on the number the leg checks. That move is
+        # one-shot per recorded open: only the close that releases the open moves the other-lane file onto
+        # its number, and any later close of the number reaches the real close, so a second close by the
+        # code under test closes the other-lane file. After that run the number must still name the
+        # other-lane file (nothing closed it again, the code under test and the leg's cleanup included), and
+        # only then does the leg close it, its own other-lane descriptor.
         def _r7_ident(fd):
             try:
                 st = os.fstat(fd)
@@ -2693,11 +2696,13 @@ def self_test():
             return fd
 
         def _r7_released(ledger, fd):
-            """A close of fd: the latest open of fd that no close has released yet is released now."""
+            """A close of fd: the latest open of fd that no close has released yet is released now. Returns
+            whether this close released a recorded open (False for a repeated close of a released number)."""
             for entry in reversed(ledger):
                 if entry["fd"] == fd and not entry["released"]:
                     entry["released"] = True
-                    return
+                    return True
+            return False
 
         def _r7_left_open(ledger):
             """The opens no close released whose number still names the file recorded at the open."""
@@ -2727,8 +2732,10 @@ def self_test():
             raise OSError(5, "injected close failure after release")
 
         def _r7_let_close(fd, real_close, reuse):
-            """A close of the number a leg checks: release fd, or under `reuse` put the other-lane file on it
-            instead (the number goes straight to another lane), so the leg's check must leave it alone."""
+            """The close that releases the recorded open a leg checks: release fd, or under `reuse` put the
+            other-lane file on it instead (the number goes straight to another lane), so the leg's check must
+            leave it alone. A stub calls this once per recorded open (its _r7_released returned True); a later
+            close of the number goes to the real close, so a repeated close closes the other-lane file."""
             if reuse:
                 os.dup2(_r7_other_fd, fd)
             else:
@@ -2763,12 +2770,12 @@ def self_test():
                 return pfd, name
 
             def _r5_close(fd):
-                _r7_released(_r5_seen["opened"], fd)
+                _r5_first = _r7_released(_r5_seen["opened"], fd)
                 if "pfd" in _r5_seen and fd != _r5_seen["pfd"] and "fired" not in _r5_seen:
                     # the first non-parent close after _open_parent returned is the FILE fd's close
                     _r5_seen["fired"] = True
                     _r7_fire(fd, _r5_real_close, False)
-                if fd == _r5_seen.get("pfd"):
+                if fd == _r5_seen.get("pfd") and _r5_first:
                     _r7_let_close(fd, _r5_real_close, _r5_reuse)   # the parent, which the leg checks
                     return
                 _r5_real_close(fd)
@@ -2820,11 +2827,11 @@ def self_test():
                 return fd
 
             def _r6_close(fd):
-                _r7_released(_r6_seen["opened"], fd)
+                _r6_first = _r7_released(_r6_seen["opened"], fd)
                 if fd == _r6_seen.get("pfd") and "fired" not in _r6_seen:
                     _r6_seen["fired"] = True
                     _r7_fire(fd, _r6_real_close, False)
-                if fd == _r6_seen.get("wfd"):
+                if fd == _r6_seen.get("wfd") and _r6_first:
                     _r7_let_close(fd, _r6_real_close, _r6_reuse)   # the child, which the leg checks
                     return
                 _r6_real_close(fd)
@@ -2870,11 +2877,11 @@ def self_test():
                 return fd
 
             def _r6j_close(fd):
-                _r7_released(_r6j_seen["opened"], fd)
+                _r6j_first = _r7_released(_r6j_seen["opened"], fd)
                 if fd == _r6j_seen.get("root_fd") and "fired" not in _r6j_seen:
                     _r6j_seen["fired"] = True
                     _r7_fire(fd, _r6_real_close, False)
-                if fd == _r6j_seen.get("jr"):
+                if fd == _r6j_seen.get("jr") and _r6j_first:
                     _r7_let_close(fd, _r6_real_close, _r6j_reuse)   # the journal root, which the leg checks
                     return
                 _r6_real_close(fd)
