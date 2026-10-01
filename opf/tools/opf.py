@@ -424,7 +424,8 @@ def _self_test_entry_gap(tree):
                  or (isinstance(node.value, ast.Constant) and node.value.value is None)]
         if empty:
             return True, "its self_test (line {}) returns None (a bare `return` or `return None`, line {}): " \
-                         "that path exits 0 whatever the suite found".format(binding.lineno, min(empty))
+                         "the required return shape is a `return <expression>`".format(
+                             binding.lineno, min(empty))
         if not returns:
             return True, "its self_test (line {}) lacks the required return shape: no `return <expression>` " \
                          "in its own scope".format(binding.lineno)
@@ -542,9 +543,12 @@ def _self_test_entry_gaps(directory, required=()):
     look); exec, eval and compile; aliasing (`import sys as s` then `s.exit = print`, `(s := sys)` then a later
     `s.exit = print`, `import builtins as b` then `b.len = None`, `import __main__ as m` then
     `m.self_test = int`, `run = self_test` then `run.__code__ = ...`, `from sys import argv`, `argv = sys.argv`,
-    `modules = sys.modules`, a method taken from sys.argv and called later); and calls into other code that
+    `modules = sys.modules`, a method taken from sys.argv and called later, another module's reference to
+    sys, `import os` then `os.sys.exit = print` say, and a function's `__globals__` or `__builtins__`,
+    `helper.__globals__["sys"] = None` say); and calls into other code that
     runs before the entry (a function, a decorator, a method, one on an attribute of sys other than argv
-    included, `sys.stdout.close()` say, a store spelled from a name through a call, `holder()[0].exit = print`
+    included, `sys.stdout.close()` say, a method reached through a class, `sys.argv.__class__.clear(sys.argv)`
+    say, a store spelled from a name through a call, `holder()[0].exit = print`
     say, which the guard counts as through that name, or another module's import-time code). Nor does it
     catch a statement that ends the run before the entry or never returns (a top-level sys.exit or os._exit,
     including one under a `__main__` test it does not count, such as one in a function body or one reached
@@ -552,8 +556,9 @@ def _self_test_entry_gaps(directory, required=()):
     a name, so its `if` is not counted as a `__main__` test. Nor does it catch exit subversion after the call
     (an atexit hook, os._exit, a SystemExit handler, a stateful self_test).
 
-    The guard does not check what self_test returns, or how sys.exit treats that value. How sys.exit treats a
-    value is platform- and version-dependent, and no rule for it is stated here. Examples, measured on
+    Beyond the return shape above, the guard does not check the value self_test returns at run time, or how
+    sys.exit treats that value. How sys.exit treats a value is platform- and version-dependent, and no rule
+    for it is stated here. Examples, measured on
     CPython 3.14.4 on Linux x86_64 (examples only, not a rule): `sys.exit(value)` exited 0 for None, 0,
     False, an int subclass's 512, 256, -256, 2**31, 2**32, 2**32 + 256, 2**63 - 256, -2**63, and the tuples
     (), (None,), (0,) and (256,); it exited 255 for 2**63, 2**64, 2**100, -2**63 - 256 and -2**64; and it
