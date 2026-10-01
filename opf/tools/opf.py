@@ -11833,13 +11833,18 @@ def _cmd_import(rest):
     REQUESTED operation, so its refusal is a cannot-evaluate, never the NOT-APPLICABLE exit 0 that
     doctor/render/upgrade report on a non-adopter root).
 
-    The CLI self-test checks this two ways. A structural check proves the source as parsed: after this
-    docstring the body is exactly the one print of the pointer to stderr and the one return of
-    EXIT_MALFORMED, with no reference to `rest` and no other call; no binding form it models, in any
-    expression evaluated at module scope, rebinds print, _cmd_import, sys, IMPORT_RETIRED or
-    EXIT_MALFORMED (both _import_body_findings); and the live `_cmd_import.__code__` is exactly the
-    code compiled from that parsed definition (_import_code_findings). Within that bound no argument
-    list can reach a read, a parse or a write. The check does NOT catch reflective or dynamic changes:
+    The CLI self-test checks this two ways. A structural check proves this function's source as parsed:
+    after this docstring the body is exactly the one print of the pointer to stderr and the one return
+    of EXIT_MALFORMED, with no reference to `rest` and no other call; no binding form it models, in any
+    expression evaluated at module scope, rebinds print, _cmd_import, sys, IMPORT_RETIRED,
+    EXIT_MALFORMED or __builtins__ (both _import_body_findings); the live `_cmd_import.__code__` is
+    exactly the code compiled from that parsed definition (_import_code_findings); and the live
+    function resolves names through this module's own namespace and the interpreter's real builtins
+    mapping (_import_namespace_findings). Within that bound no argument list can reach a read, a parse
+    or a write inside _cmd_import. The structural check covers _cmd_import only: main() first runs
+    _bootstrap() (the guarded _opf_* helper import) and its own dispatch (the --self-test and --help
+    tests, then the verb match) before `return _cmd_import(rest)`, and only the runtime probe below
+    exercises that path. The check does NOT catch reflective or dynamic changes:
     stores through globals() or vars() (globals().update included), setattr on the module object
     (through sys.modules included), reassigning builtins.print, sys.stderr or another sys attribute,
     exec or eval of a string, and another module patching this one are DISCLOSED residual classes, not
@@ -11864,19 +11869,22 @@ def _import_body_findings(source):
     one return of EXIT_MALFORMED) with no other statement, no reference to `rest` and no call other
     than that print and its str.format; and that the names the body uses keep their plain meaning at
     module level (`sys` bound only by `import sys`, EXIT_MALFORMED only to the literal 2,
-    IMPORT_RETIRED only to a string literal, `print` and `_cmd_import` not rebound, no `global` of
-    any of them, no star import). The binding scan walks every expression evaluated at module scope,
-    the decorators, argument defaults, annotations, class bases and class keywords of a def or class
-    included; inside a lambda or a comprehension any store to a watched name counts (a walrus there,
-    a comprehension's loop target or a walrus in a lambda body alike), an over-approximation. It
-    models exactly the binding forms its walk enumerates and NO MORE: reflective or dynamic stores
+    IMPORT_RETIRED only to a string literal, `print` and `_cmd_import` not rebound, `__builtins__` not
+    bound in any form (a binding ahead of the def changes what print resolves to inside _cmd_import
+    without binding print), no `global` of any of them, no star import). The binding scan walks every
+    expression evaluated at module scope, the decorators, argument defaults, annotations, class bases
+    and class keywords of a def or class included; inside a lambda or a comprehension any store to a
+    watched name counts (a walrus there, a comprehension's loop target or a walrus in a lambda body
+    alike), an over-approximation. It models exactly the binding forms its walk enumerates and NO
+    MORE: reflective or dynamic stores
     (globals() / vars() stores, setattr on the module, builtins or sys attribute reassignment,
     exec / eval, another module patching this one) are the DISCLOSED residual classes in
-    _cmd_import's docstring, not enforced here. It reads no file."""
+    _cmd_import's docstring, not enforced here. The source is parsed unoptimized (optimize=0), so the
+    docstring the body check skips survives under python -O and -OO. It reads no file."""
     import ast
 
     try:
-        tree = ast.parse(source)
+        tree = ast.parse(source, optimize=0)
     except SyntaxError as exc:
         return ["the source does not parse ({})".format(exc)]
     findings = []
@@ -11892,7 +11900,8 @@ def _import_body_findings(source):
     # evaluated here; inside a lambda or comprehension every store to a watched name counts
     # (over-approximation: a comprehension's own loop target or a walrus in a lambda body is flagged
     # although it binds only in that inner scope).
-    bindings = {name: [] for name in ("_cmd_import", "print", "sys", "EXIT_MALFORMED", "IMPORT_RETIRED")}
+    bindings = {name: [] for name in ("_cmd_import", "print", "sys", "EXIT_MALFORMED", "IMPORT_RETIRED",
+                                      "__builtins__")}
     scoped = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
     own_scope = (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
     pending = list(tree.body)
@@ -11950,6 +11959,8 @@ def _import_body_findings(source):
             len(bindings["_cmd_import"])))
     if bindings["print"]:
         findings.append("print is rebound at module level")
+    if bindings["__builtins__"]:
+        findings.append("__builtins__ is bound at module level (it changes what print resolves to)")
     sys_nodes = bindings["sys"]
     if not (len(sys_nodes) == 1 and isinstance(sys_nodes[0], ast.Import)
             and [(a.name, a.asname) for a in sys_nodes[0].names] == [("sys", None)]):
@@ -11978,7 +11989,7 @@ def _import_body_findings(source):
             if isinstance(sub, ast.Name) and sub.id == "rest":
                 findings.append("_cmd_import references rest at line {}".format(sub.lineno))
     calls = [sub for node in body for sub in ast.walk(node) if isinstance(sub, ast.Call)]
-    want = ast.parse(_IMPORT_BODY).body
+    want = ast.parse(_IMPORT_BODY, optimize=0).body
     if len(body) != len(want):
         findings.append("_cmd_import has {} statements after its docstring (want {})".format(
             len(body), len(want)))
@@ -11993,9 +12004,11 @@ def _import_body_findings(source):
 
 def _import_code_findings(source, func, filename):
     """The live-code tie for the retired import verb: compile the `_cmd_import` definition parsed from
-    the module source text `source` on its own, under `filename` and at its own line numbers, with the
-    source's __future__ flags only, and require the function `func` (the live _cmd_import in the CLI
-    self-test) to carry exactly that code: equal co_code, co_consts (compared by type and repr, nested
+    the module source text `source` (parsed unoptimized) on its own, under `filename` and at its own
+    line numbers, with the source's __future__ flags only and at the interpreter's own optimization
+    level (sys.flags.optimize, so under python -O or -OO both sides drop the same docstring), and
+    require the function `func` (the live _cmd_import in the CLI self-test) to carry exactly that
+    code: equal co_code, co_consts (compared by type and repr, nested
     code objects recursively under these same fields), co_names, co_varnames, co_freevars, co_cellvars,
     argument counts, co_flags, co_firstlineno, co_name, co_filename and co_exceptiontable, and no
     argument defaults. Returns a list of findings, empty when they match. Matching names alone never
@@ -12005,7 +12018,7 @@ def _import_code_findings(source, func, filename):
     import types
 
     try:
-        tree = ast.parse(source)
+        tree = ast.parse(source, optimize=0)
     except SyntaxError as exc:
         return ["the source does not parse ({})".format(exc)]
     defs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_cmd_import"]
@@ -12018,7 +12031,7 @@ def _import_code_findings(source, func, filename):
                 flags |= getattr(getattr(__future__, alias.name, None), "compiler_flag", 0)
     try:
         module_code = compile(ast.Module(body=defs, type_ignores=[]), filename, "exec", flags=flags,
-                              dont_inherit=True)
+                              dont_inherit=True, optimize=sys.flags.optimize)
     except (SyntaxError, ValueError) as exc:
         return ["the parsed _cmd_import does not compile ({})".format(exc)]
     want = [c for c in module_code.co_consts if isinstance(c, types.CodeType) and c.co_name == "_cmd_import"]
@@ -12047,6 +12060,28 @@ def _import_code_findings(source, func, filename):
         findings.append("the live _cmd_import's co_consts differ from the parsed definition's")
     if getattr(func, "__defaults__", None) is not None or getattr(func, "__kwdefaults__", None) is not None:
         findings.append("the live _cmd_import carries argument defaults the parsed definition lacks")
+    return findings
+
+
+def _import_namespace_findings(func):
+    """The live-namespace tie for the retired import verb: require the function `func` (the live
+    _cmd_import in the CLI self-test) to resolve its global names through its own module's namespace
+    (`func.__globals__ is sys.modules[func.__module__].__dict__`) and its builtins through the
+    interpreter's real builtins mapping (`func.__builtins__ is builtins.__dict__`). A module-level
+    `__builtins__` binding ahead of the def (a dict, a copy of the builtins with print replaced, or an
+    imported module) changes what print resolves to inside the function without binding print, and
+    neither the binding scan of print nor the code tie sees it; this check flags the function it
+    produced. Returns a list of findings, empty when both hold. Reassigning an attribute of the real
+    builtins module (builtins.print) leaves both identities intact and stays a DISCLOSED residual
+    class. It reads no file."""
+    import builtins
+
+    findings = []
+    if getattr(func, "__builtins__", None) is not builtins.__dict__:
+        findings.append("the live _cmd_import's __builtins__ is not the interpreter's builtins mapping")
+    module = sys.modules.get(getattr(func, "__module__", None))
+    if module is None or getattr(func, "__globals__", None) is not getattr(module, "__dict__", None):
+        findings.append("the live _cmd_import's __globals__ is not its module's namespace")
     return findings
 
 
@@ -12657,7 +12692,7 @@ def _cli_self_test():
         def _import_leg():
             """Drive the retired import verb (spec 14.1), judged on the exact output, the exit code AND
             observable side effects. Returns None on success or EXIT_MALFORMED on a harness (fixture I/O)
-            error. The verb parses no argument, so every argument list prints exactly the retirement
+            error. _cmd_import parses no argument, so every argument list prints exactly the retirement
             pointer (IMPORT_RETIRED) on stderr, nothing on stdout, and exits 2. Vectors: no arguments,
             `--help` / `-h`, each of the 14 former flags alone, with a separate value, with a joined value
             and with an empty joined value; abbreviated and ambiguous prefixes, alone and joined; the
@@ -12667,19 +12702,27 @@ def _cli_self_test():
             missing named files; two modes; an unknown flag, a positional token and `--`. The pointer
             names adoption and the prompt pack in words and no command.
 
-            The no-read claim is checked two ways. The STRUCTURAL check proves the source as parsed:
-            _import_body_findings over this file requires _cmd_import's body after its docstring to be
-            exactly the one print of the pointer to stderr and the one return of EXIT_MALFORMED, with no
-            reference to `rest` and no other call, and no modeled binding of print, _cmd_import, sys,
-            IMPORT_RETIRED or EXIT_MALFORMED in any expression evaluated at module scope;
-            _import_code_findings requires the live `_cmd_import.__code__` to equal the code compiled
-            from that parsed definition (co_code, co_consts recursively, names, argument counts, flags,
-            first line, filename). Planted reads and writes in the body (a listing of an `--apply` root
-            or of the cwd, io.FileIO reads, a shell `cat`, a read of the `--ingest-options` file, an
-            os.mkdir of an argument), planted rebindings (a rebound `_cmd_import`, `print` or
-            EXIT_MALFORMED, and a walrus binding in a comprehension, generator expression, lambda,
-            argument default, keyword default, decorator, class base or class keyword) and a swapped
-            `__code__` with the same argument count and names are each asserted flagged. It does NOT
+            The no-read claim is checked two ways. The STRUCTURAL check proves _cmd_import's source as
+            parsed: _import_body_findings over this file requires _cmd_import's body after its docstring
+            to be exactly the one print of the pointer to stderr and the one return of EXIT_MALFORMED,
+            with no reference to `rest` and no other call, and no modeled binding of print, _cmd_import,
+            sys, IMPORT_RETIRED, EXIT_MALFORMED or __builtins__ in any expression evaluated at module
+            scope; _import_code_findings requires the live `_cmd_import.__code__` to equal the code
+            compiled from that parsed definition (co_code, co_consts recursively, names, argument counts,
+            flags, first line, filename); _import_namespace_findings requires the live function's
+            __globals__ to be this module's namespace and its __builtins__ the interpreter's builtins
+            mapping. It covers _cmd_import only: main() runs _bootstrap() and its own dispatch before
+            `return _cmd_import(rest)`, a path only the runtime probe exercises. Planted reads and
+            writes in the body (a listing of an `--apply` root or of the cwd, io.FileIO reads, a shell
+            `cat`, a read of the `--ingest-options` file, an os.mkdir of an argument), planted rebindings
+            (a rebound `_cmd_import`, `print` or EXIT_MALFORMED, a walrus binding in a comprehension,
+            generator expression, lambda, argument default, keyword default, decorator, class base or
+            class keyword, and a `__builtins__` binding ahead of the def: a dict, a copy of the builtins
+            with print replaced, an `import ... as __builtins__`), a swapped `__code__` with the same
+            argument count and names, the live code rebuilt over a scratch module holding each of those
+            `__builtins__` values, and a function over a copy of this module's globals are each asserted
+            flagged. The structural check parses unoptimized and compiles at the interpreter's level, so
+            it is clean under python -O and -OO too. It does NOT
             catch reflective or dynamic changes (globals() / vars() stores, setattr on the module,
             builtins.print or sys.stderr reassignment, exec / eval, another module patching this one);
             those are disclosed in _cmd_import's docstring, not enforced. The RUNTIME probe
@@ -12762,6 +12805,10 @@ def _cli_self_test():
             # The live-code tie: the live code object is exactly the one the parsed definition compiles to.
             for finding in _import_code_findings(own_source, _cmd_import, __file__):
                 failures.append("import structural check: {}".format(finding))
+            # The live-namespace tie: the live function resolves names through this module and the real
+            # builtins mapping, so no `__builtins__` binding ahead of the def has redirected print.
+            for finding in _import_namespace_findings(_cmd_import):
+                failures.append("import structural check: {}".format(finding))
             # A `__code__` swap keeping the argument count, varnames, names and filename (the former,
             # metadata-only tie accepted it) is flagged: this replacement parses its arguments.
             swap_src = ("def _cmd_import(rest):\n"
@@ -12816,9 +12863,53 @@ def _cli_self_test():
             )
             mutants = [(t, "".join(lines[:at] + ["    " + t + "\n"] + lines[at:])) for t in planted_body]
             mutants += [(t, own_source + "\n" + t + "\n") for t in planted_tail]
+            # A `__builtins__` binding ahead of the def changes what print resolves to inside _cmd_import
+            # without binding print (the round-8 reproductions: a dict, a builtins copy, an import).
+            planted_head = (
+                '__builtins__ = {"print": p}',
+                "__builtins__ = dict(vars(builtins), print=p)",
+                "import evil as __builtins__",
+            )
+            def_at = fn_node.lineno - 1
+            mutants += [(t, "".join(lines[:def_at] + [t + "\n"] + lines[def_at:])) for t in planted_head]
             for text, mutant in mutants:
                 if not _import_body_findings(mutant):
                     failures.append("import structural check: a planted {!r} was not flagged".format(text))
+            # The live-namespace tie flags each of those bindings at run time. A def takes its builtins from
+            # its module's `__builtins__` when it runs, so the live code is rebuilt as a function over a
+            # scratch module registered in sys.modules (its globals pass) whose `__builtins__` holds each
+            # planted value: a dict, a builtins copy with print replaced, an imported module. The builtins
+            # module itself is the clean control and must pass; a function over a copy of this module's
+            # globals is flagged too.
+            shadow = types.ModuleType("_opf_import_shadow_builtins")
+            shadow.print = lambda *a, **k: None
+            planted_values = ((None, builtins_mod),
+                              (planted_head[0], dict(print=shadow.print)),
+                              (planted_head[1], dict(vars(builtins_mod), print=shadow.print)),
+                              (planted_head[2], shadow))
+            probe_name = "_opf_import_namespace_probe"
+            saved = sys.modules.get(probe_name)
+            try:
+                for text, value in planted_values:
+                    probe = types.ModuleType(probe_name)
+                    probe.__builtins__ = value
+                    sys.modules[probe_name] = probe
+                    got = _import_namespace_findings(types.FunctionType(_cmd_import.__code__, probe.__dict__))
+                    if text is None and got:
+                        failures.append("import structural check: the clean namespace control was flagged "
+                                        "(harness): {!r}".format(got))
+                    if text is not None and not any("__builtins__" in f for f in got):
+                        failures.append("import structural check: a planted {!r} ahead of the def was not "
+                                        "flagged at run time".format(text))
+            finally:
+                if saved is None:
+                    sys.modules.pop(probe_name, None)
+                else:
+                    sys.modules[probe_name] = saved
+            copied = types.FunctionType(_cmd_import.__code__, dict(_cmd_import.__globals__))
+            if not any("__globals__" in f for f in _import_namespace_findings(copied)):
+                failures.append("import structural check: a function over a copy of the module globals was "
+                                "not flagged")
 
             try:
                 ibase = tempfile.mkdtemp(prefix="opf-cli-import-")
@@ -13677,8 +13768,11 @@ def _cli_self_test():
               "the former review-aid forms, two modes, an unknown flag, --), over a NOT-ADOPTED root and "
               "over an adopted store, mutating nothing; a structural check proves _cmd_import's source as "
               "parsed (its body exactly the pointer print and the exit-2 return, no use of its arguments, "
-              "no other call, no modeled module-scope rebinding of the names it uses) and ties the live "
-              "code object to it exactly, but does not catch reflective or dynamic changes (globals() "
+              "no other call, no modeled module-scope binding of the names it uses or of __builtins__), "
+              "ties the live code object to it exactly and the live function to this module's globals "
+              "and the real builtins mapping; it covers _cmd_import only, not the _bootstrap() and verb "
+              "dispatch main() runs before it, which only the runtime probe exercises, and does not "
+              "catch reflective or dynamic changes (globals() "
               "stores, setattr on the module, builtins or sys.stderr reassignment, exec/eval, another "
               "module patching this one); a runtime probe over those representative lists only records "
               "no call at all to its probed filesystem read, write and remove, process-spawn or stdin "
