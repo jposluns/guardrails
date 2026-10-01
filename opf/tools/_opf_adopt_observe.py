@@ -1218,6 +1218,11 @@ def _gather_release(request, policy, observation, notes, owners):
               "observation could not be sealed: " + type(exc).__name__)
 
 
+# The cancellation sweep's row id, so self_test can record that row when the
+# sweep is not run.
+_CANCELLATION_ROW = "TG-12/public-cancellation-line-sweep"
+
+
 def _cancellation_self_test():
     """Replay every observed production line event, including repeated lines.
 
@@ -1876,7 +1881,7 @@ def _cancellation_self_test():
                 # lock. Repair it only after recording the invariant failure.
                 if _GATHER_LOCK.locked():
                     _GATHER_LOCK.release()
-    return [{"id": "TG-12/public-cancellation-line-sweep", "test_status": VALID,
+    return [{"id": _CANCELLATION_ROW, "test_status": VALID,
              "line_events": line_events, "unique_lines": unique_lines,
              "opcode_events": opcode_events,
              "signal_interruptions": signal_interruptions,
@@ -3535,6 +3540,8 @@ def self_test(vectors_only=False):
     BLOCKED = "not evaluated: refused the resolver while a straggler was alive, started by "
     RETAINED = "resolver slot not back within 1.0 s of the fixture lookup's release"
     BLOCKED_FAILED = "the blocked run failed checks that apply without an observation: "
+    BLOCKED_SWEEP = "not evaluated: not run while a resolver straggler was alive, started by "
+    LEAKED = "resolver slot held with no live resolver worker"
 
     def run_case(base, contexts, case, mutated):
         identifier, expected, mutation, config = case
@@ -3611,6 +3618,25 @@ def self_test(vectors_only=False):
             endpoint = (address, 443, 0, 0) if family == socket.AF_INET6 else (address, 443)
             return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", endpoint)]
 
+        published = []
+
+        class HoldingQueue(queue.Queue):
+            # Resolver vectors only: the second resolver worker publishes its
+            # result, then takes the slot again and holds it until the vector
+            # sets the Event (bounded so it cannot hang).
+            def put(self, item, *args, **kwargs):
+                super().put(item, *args, **kwargs)
+                published.append(item)
+                if len(published) == 2 and _RESOLVER_SLOT.acquire(timeout=1.0):
+                    try:
+                        config["hold_after_publish"].wait(120.0)
+                    finally:
+                        _RESOLVER_SLOT.release()
+
+        class holding_queue:
+            Queue = HoldingQueue
+            Empty = queue.Empty
+
         def connect(sock, endpoint, timeout):
             connect_calls.append(endpoint)
             environments.append(set(os.environ))
@@ -3619,10 +3645,16 @@ def self_test(vectors_only=False):
             sock.connect(("127.0.0.1", port))
 
         class TrackedDeadline(original_deadline):
-            # Diagnostic only; nothing here reaches a status or exit code.
-            # Name the deadline each left() queries: a deadline clamped to its
-            # parent inherits the parent's name, and a left() whose
-            # INACTIVITY_SECONDS cap binds is named "inactivity".
+            # Replaces _Deadline in both runs of the five timing rows. Its
+            # bookkeeping names the deadline each left() queries: a deadline
+            # clamped to its parent inherits the parent's name, and a left()
+            # whose INACTIVITY_SECONDS cap binds is named "inactivity". It
+            # never changes a deadline's end, nor what left() returns or
+            # raises. An exception raised by the bookkeeping itself would
+            # change the run: gather records it as an unexpected observer
+            # failure, CANNOT-EVALUATE, which is the status these rows
+            # expect, so the row then turns on whether its mutant run is
+            # detected.
             def __init__(self, seconds, parent=None):
                 super().__init__(seconds, parent)
                 self.guard = (parent.guard if parent is not None and self.end == parent.end
@@ -3774,6 +3806,8 @@ def self_test(vectors_only=False):
                         raise AssertionError("timing deadlines must be distinct")
                     patch(module, "_Deadline", TrackedDeadline)
                 patch(module, "_lookup", lookup)
+                if "hold_after_publish" in config:
+                    patch(module, "queue", holding_queue)
                 patch(module, "_connect", connect)
                 patch(module, "_peer", lambda sock: (
                     "127.0.0.1" if config.get("rebound") else public_ip, 443,
@@ -4201,8 +4235,7 @@ def self_test(vectors_only=False):
             row["test_status"] = INVALID
             row["resolver_slot_leaked"] = leaks
             row["mutant_resolver_slot_leaked"] = mutant_leaks
-            add_detail(
-                row, "resolver slot held with no live resolver worker")
+            add_detail(row, LEAKED)
         if stragglers or mutant_stragglers:
             # The straggler is evidence about this row's runs: INVALID,
             # as main records the run it disturbed. mutation_detected
@@ -4220,18 +4253,44 @@ def self_test(vectors_only=False):
             add_detail(row, RETAINED)
         return row
 
+    def cancellation_rows(sweep):
+        # The cancellation sweep runs the production resolver worker against
+        # the real _RESOLVER_SLOT, so it depends on the resolver as a case run
+        # does; the guard and ownership rows never reach the resolver. While a
+        # resolver worker an earlier run started is alive (a straggler, which
+        # may hold the slot) the sweep is not run: its row is CANNOT-EVALUATE,
+        # NOT-EVALUATED naming the run that started the worker, so no row goes
+        # missing. A slot held once no worker is alive was leaked: it is
+        # released, as before a case, and fails the sweep's row INVALID.
+        alive, leaked = settle_resolvers(2.0)
+        if alive:
+            blocked = sorted(set(
+                straggler_runs.get(thread, "an unrecorded run") for thread in alive))
+            return [{"id": _CANCELLATION_ROW, "test_status": CANNOT_EVALUATE,
+                     "observed": "NOT-EVALUATED", "resolver_blocked_by": blocked,
+                     "detail": BLOCKED_SWEEP + ", ".join(blocked)}]
+        rows = sweep()
+        if leaked:
+            for row in rows:
+                row["test_status"] = INVALID
+                row["resolver_slot_leaked"] = ["before"]
+                add_detail(row, LEAKED)
+        return rows
+
     # Resolver vectors: durable checks, run after the rows on every self-test,
-    # that the resolver accounting above is required. Each fixture lookup
-    # waits on an Event its vector owns, so every straggler and linger is
-    # made by the vector, never by a race with a bound. Each vector's mutant
-    # run is this synthetic detected run, so its row turns on one run alone;
-    # the blocked-mutant vector instead pairs this synthetic evaluated run
-    # with blocked runs as the mutant.
+    # that the resolver accounting above is required. Each held resolver
+    # worker waits on an Event its vector owns, so every straggler and linger
+    # is made by the vector, never by a race with a bound. Each vector's
+    # mutant run is this synthetic detected run, so its row turns on one run
+    # alone; the blocked-mutant vector instead pairs this synthetic evaluated
+    # run with blocked runs as the mutant, and the positive-held-slot vector
+    # judges the cancellation sweep's row.
     VECTOR_NAMES = ("resolver-vector/straggler", "resolver-vector/blocked",
                     "resolver-vector/blocked-effect", "resolver-vector/blocked-residue",
                     "resolver-vector/blocked-connect", "resolver-vector/blocked-fetch-order",
                     "resolver-vector/blocked-timing", "resolver-vector/blocked-mutant",
-                    "resolver-vector/retained-slot", "resolver-vector/cleanup")
+                    "resolver-vector/retained-slot", "resolver-vector/leaked-slot",
+                    "resolver-vector/positive-held-slot", "resolver-vector/cleanup")
     detected = (False, "fixture: detected", 0.0, [], [], [], [], [], [])
     evaluated = (True, "fixture: evaluated", 0.0, [], [], [], [], [], [])
 
@@ -4349,6 +4408,77 @@ def self_test(vectors_only=False):
         finally:
             gate.set()
 
+    class LeakProbe:
+        # The real slot. The first release a resolver worker makes is
+        # dropped, so the slot stays held once that worker has ended: a
+        # leaked slot. Every other release reaches the real slot.
+        def __init__(self, slot):
+            self.slot = slot
+            self.dropped = False
+
+        def acquire(self, blocking=True, timeout=None):
+            return self.slot.acquire(blocking, timeout)
+
+        def release(self):
+            if not self.dropped and threading.current_thread().name == "opf-adopt-resolver":
+                self.dropped = True
+                return
+            self.slot.release()
+
+    def leaked_vector(base, contexts, results):
+        # A run whose resolver worker ends with the slot held fails its row
+        # INVALID (resolver_slot_leaked). Its next resolver worker is refused
+        # the slot, so the run is CANNOT-EVALUATE as expected and the leak
+        # alone fails the row.
+        case = ("vector/leaked-slot", CANNOT_EVALUATE, "resolver-deadline", {})
+        failures = []
+        probe = LeakProbe(_RESOLVER_SLOT)
+        with mock.patch.object(module, "_RESOLVER_SLOT", probe):
+            run = run_case(base, contexts, case, False)
+        row = record_row(case, run, detected)
+        if (not probe.dropped or run[:2] != (True, CANNOT_EVALUATE)
+                or run[4:] != (["after"], [], [], [], [])):
+            failures.append("the leaking run was not a passing run with its slot leaked")
+        if (row["test_status"] != INVALID
+                or row.get("resolver_slot_leaked") != ["after"]
+                or LEAKED not in row.get("detail", "")):
+            failures.append("the leaked slot did not fail its row INVALID")
+        if record_row(case, run[:4] + ([],) + run[5:], detected)["test_status"] != VALID:
+            failures.append("the row fails without its leaked slot")
+        results.append((VECTOR_NAMES[9], failures))
+
+    def held_slot_vector(base, contexts, results):
+        # A positive run whose second resolver worker publishes its result
+        # and then holds the slot passes with a straggler (resolver_straggler).
+        # While that worker holds the slot, the cancellation sweep is not run:
+        # its row is CANNOT-EVALUATE naming that run, so no row goes missing
+        # and the exit is not 0. Run, the sweep raises on the held slot.
+        gate = threading.Event()
+        case = ("vector/positive-held-slot", VALID, "archive", {"hold_after_publish": gate})
+        try:
+            failures = []
+            run = run_case(base, contexts, case, False)
+            if run[:2] != (True, VALID) or run[4:] != ([], ["after", "teardown"], [], [], []):
+                failures.append("the positive run was not a passing run with one straggler")
+            if _RESOLVER_SLOT.acquire(blocking=False):
+                _RESOLVER_SLOT.release()
+                failures.append("the straggler did not hold the resolver slot")
+            try:
+                rows = cancellation_rows(_cancellation_self_test)
+            except Exception as exc:
+                rows = None
+                failures.append("the cancellation sweep raised " + type(exc).__name__
+                                + " instead of being recorded not evaluated")
+            if rows is not None and rows != [{
+                    "id": _CANCELLATION_ROW, "test_status": CANNOT_EVALUATE,
+                    "observed": "NOT-EVALUATED", "resolver_blocked_by": [case[0]],
+                    "detail": BLOCKED_SWEEP + case[0]}]:
+                failures.append("the cancellation sweep's row was not CANNOT-EVALUATE naming "
+                                + case[0])
+            results.append((VECTOR_NAMES[10], failures))
+        finally:
+            gate.set()
+
     def resolver_vectors(base, contexts):
         # Returns (name, failures) per vector; a vector that raises reports
         # "cannot evaluate". Every vector releases its hold, then all workers
@@ -4358,7 +4488,9 @@ def self_test(vectors_only=False):
         lookup_before = module._lookup
         slot_before = module._RESOLVER_SLOT
         for vector, names in ((straggler_vectors, VECTOR_NAMES[:8]),
-                              (retained_vector, VECTOR_NAMES[8:9])):
+                              (retained_vector, VECTOR_NAMES[8:9]),
+                              (leaked_vector, VECTOR_NAMES[9:10]),
+                              (held_slot_vector, VECTOR_NAMES[10:11])):
             try:
                 vector(base, contexts, results)
             except Exception as exc:
@@ -4374,7 +4506,7 @@ def self_test(vectors_only=False):
             failures.append("the vectors left the resolver slot held")
         else:
             _RESOLVER_SLOT.release()
-        results.append((VECTOR_NAMES[9], failures))
+        results.append((VECTOR_NAMES[11], failures))
         return results
 
     try:
@@ -4443,15 +4575,18 @@ def self_test(vectors_only=False):
                 add_detail(executed[-1], STRAGGLER)
             # Main returned here when the positive run failed its own checks,
             # and so does this. A leak, straggler or retained slot fails only
-            # this row: it stays INVALID and the run continues, so no row goes
-            # missing for it, and a later resolver-dependent run is blocked as
-            # for any straggler.
+            # this row: it stays INVALID and the run continues. While its
+            # straggler is alive, holding the slot or not, the cancellation
+            # sweep (cancellation_rows) and each later resolver-dependent run
+            # are recorded not evaluated, naming this run, so no row goes
+            # missing for it.
             if main_failed:
                 SELF_TEST_ROSTER = tuple(executed)
                 print(json.dumps({"opf_adopt_observe_tests": executed}, sort_keys=True))
                 return 1
 
-            guard_rows = _guard_self_test() + _ownership_self_test() + _cancellation_self_test()
+            guard_rows = (_guard_self_test() + _ownership_self_test()
+                          + cancellation_rows(_cancellation_self_test))
             executed.extend(guard_rows)
             for case in cases:
                 run = run_case(base, contexts, case, False)
@@ -4481,8 +4616,13 @@ def self_test(vectors_only=False):
     #   that window this branch can be more lenient than main, exiting 0
     #   where main could have failed the next run's row.
     # - A positive run with a straggler, a leaked slot or a retained slot
-    #   fails its row INVALID and every later row still runs: exit 1. Main
-    #   had no such check there.
+    #   fails its row INVALID and every later row is still recorded: exit 1.
+    #   Main had no such check there.
+    # - The cancellation sweep is not run while a resolver worker an earlier
+    #   run started is alive: its row is CANNOT-EVALUATE naming that run,
+    #   exit 1. A slot leaked before it is released and fails its row
+    #   INVALID, exit 1. Main ran the sweep regardless; a slot still held
+    #   then made it raise, losing that row and every later row: exit 2.
     # - A blocked run makes its row INVALID, naming each check it failed
     #   among those main applies that do not read the observation, or else
     #   CANNOT-EVALUATE: exit 1. Main evaluated that run beside the live
