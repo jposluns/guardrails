@@ -3534,6 +3534,7 @@ def self_test(vectors_only=False):
     STRAGGLER = "resolver straggler: a resolver worker this row started outlived its 2.0 s join"
     BLOCKED = "not evaluated: refused the resolver while a straggler was alive, started by "
     RETAINED = "resolver slot not back within 1.0 s of the fixture lookup's release"
+    BLOCKED_FAILED = "the blocked run failed checks that apply without an observation: "
 
     def run_case(base, contexts, case, mutated):
         identifier, expected, mutation, config = case
@@ -3544,12 +3545,13 @@ def self_test(vectors_only=False):
         # whose row it already failed. Each place a worker this run started
         # outlives the join is recorded as a straggler and fails this run.
         # A slot not back within main's bound is recorded in retained and
-        # fails this run.
+        # fails this run. unmet names each check a blocked run failed.
         inherited, leaked = settle_resolvers(2.0)
         leaks = ["before"] if leaked else []
         stragglers = []
         blocked = []
         retained = []
+        unmet = []
         product = base / secrets.token_hex(8)
         product.mkdir(mode=0o700)
         (product / "product-marker").write_bytes(b"unchanged\n")
@@ -3594,9 +3596,10 @@ def self_test(vectors_only=False):
 
         def lookup(host):
             # Resolver vectors only: hold this worker, and the slot it took,
-            # until the vector sets the Event (bounded so it cannot hang).
+            # until the vector sets the Event (bounded so it cannot hang, and
+            # long enough to outlast every blocked run of straggler_vectors).
             if "hold_lookup" in config:
-                config["hold_lookup"].wait(30.0)
+                config["hold_lookup"].wait(120.0)
             if config.get("stalled_resolver"):
                 resolver_sockets[0].recv(1)
             address = config.get("address", public_ip)
@@ -3668,7 +3671,19 @@ def self_test(vectors_only=False):
                     os.close(os.open(str(product / "product-marker"), os.O_WRONLY))
                 except PermissionError:
                     pass
-            return timed_fetch(original_fetch, url, cap, deadline, context)
+            if config.get("connect_before_resolve"):
+                # Resolver vectors only: a connection made before this fetch
+                # reaches the resolver, so before any address is checked.
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as raw:
+                    module._connect(raw, (public_ip, 443), 1.0)
+            fetch = original_fetch
+            if "delay_before_resolve" in config:
+                # Resolver vectors only: this fetch outlasts its bound before
+                # it reaches the resolver.
+                def fetch(*args):
+                    time.sleep(config["delay_before_resolve"])
+                    return original_fetch(*args)
+            return timed_fetch(fetch, url, cap, deadline, context)
 
         def no_containment():
             raise OSError("synthetic missing containment primitive")
@@ -3793,6 +3808,9 @@ def self_test(vectors_only=False):
                     patch(module, "_work", late_failure)
                 if config.get("cleanup_failure"):
                     patch(_QuarantineOwner, "remove", fail_cleanup)
+                if config.get("skip_cleanup"):
+                    # Resolver vectors only: rollback leaves the quarantine.
+                    patch(_QuarantineOwner, "remove", lambda owner: None)
                 call = gather_release
                 if config.get("public_wrapper") or config.get("wrapper_exception"):
                     call = schema.gather_release
@@ -3951,7 +3969,11 @@ def self_test(vectors_only=False):
                 # A worker that outlives the bound finds the never-resolving
                 # stub (_resolver_stub_bound), never the production resolver.
                 if resolver_sockets is not None:
+                    # Close both ends before the wait, as main's teardown did,
+                    # so the bound covers main's worker path: a lookup still
+                    # reading its end meets an error there, not end of file.
                     resolver_sockets[1].close()
+                    resolver_sockets[0].close()
                     # Main's bound: once the fixture lookup is released, the
                     # slot must be back within 1.0 s, or this run fails. A
                     # blocked run started no resolver worker, so a slot held
@@ -3969,16 +3991,30 @@ def self_test(vectors_only=False):
                     for thread in alive - inherited:
                         straggler_runs.setdefault(thread, label)
 
-            # What the run recorded, judged even for a blocked run.
+            # Main's checks, in main's order and with main's short-circuit.
+            # A blocked run has no observation, so a check that reads the
+            # observation or its status cannot apply to it: status ==
+            # expected, the INVALID and CANNOT-EVALUATE observation and notes,
+            # the VALID record and quarantine, "absent", and the
+            # cleanup-failure residue, which only that row's notes explain.
+            # It is judged on every other check main applies (below), and
+            # unmet names each it fails.
+            def residue():
+                try:
+                    return list((product / ".working" / "adopt").iterdir())
+                except FileNotFoundError:
+                    return []
+
+            order = [release_url, ANCHOR_URL]
             recorded = (
-                not violations
-                and not short_takes
-                and snapshot(product) == before
-                and sys.path == path_before
-                and environment_restored
-                and not server.errors
+                ("refused effect", lambda: not violations),
+                ("short take", lambda: not short_takes),
+                ("product changed", lambda: snapshot(product) == before),
+                ("sys.path changed", lambda: sys.path == path_before),
+                ("environment not restored", lambda: environment_restored),
+                ("fixture server error", lambda: not server.errors),
             )
-            passed = status == expected and recorded
+            passed = status == expected and all(check() for _, check in recorded)
             if status in (INVALID, CANNOT_EVALUATE):
                 passed = passed and (
                     type(observation) is dict
@@ -3988,16 +4024,13 @@ def self_test(vectors_only=False):
                     and all(row["status"] in (INVALID, CANNOT_EVALUATE) for row in notes)
                 )
             if status in (INVALID, CANNOT_EVALUATE, "CANCELLED"):
-                try:
-                    residue = list((product / ".working" / "adopt").iterdir())
-                except FileNotFoundError:
-                    residue = []
+                found = residue()
                 if config.get("cleanup_failure"):
-                    passed = (passed and bool(residue)
+                    passed = (passed and bool(found)
                               and "record" not in observation
                               and any(row["phase"] == "cleanup" for row in notes))
                 else:
-                    passed = passed and not residue
+                    passed = passed and not found
             if config.get("absent"):
                 passed = passed and config["absent"] not in (observation or {})
             if status == VALID:
@@ -4018,25 +4051,54 @@ def self_test(vectors_only=False):
             if config.get("before_connect"):
                 passed = passed and not connect_calls
             if config.get("redirect"):
-                passed = passed and fetch_calls == [release_url, ANCHOR_URL]
-            if config.get("ambient"):
-                passed = passed and bool(environments) and all(
+                passed = passed and fetch_calls == order
+
+            def scrubbed():
+                return bool(environments) and all(
                     names <= {"PATH", "HOME"} for names in environments
                 )
-                passed = passed and all(
+
+            def uncredentialed():
+                return all(
                     b"authorization:" not in request.lower()
                     and b"cookie:" not in request.lower()
                     for request in server.requests
                 )
-            if "fetch_bound" in config:
+
+            def bounded():
                 # Request 0.80 < slow-drip bound 1.00 < gather 1.60.
                 # Connect 0.20 / inactivity 0.15 < other bounds 0.50
                 # < request 0.80; _Deadline reserves at most 0.05 seconds.
-                passed = (passed and elapsed < 1.60 and bool(fetch_durations)
-                          and all(duration < config["fetch_bound"]
-                                  for duration in fetch_durations))
+                return (elapsed < 1.60 and bool(fetch_durations)
+                        and all(duration < config["fetch_bound"]
+                                for duration in fetch_durations))
+
+            if config.get("ambient"):
+                passed = passed and scrubbed()
+                passed = passed and uncredentialed()
+            if "fetch_bound" in config:
+                passed = passed and bounded()
             if identifier.startswith("TG-05/"):
-                passed = passed and fetch_calls == [release_url, ANCHOR_URL]
+                passed = passed and fetch_calls == order
+            if blocked:
+                # A blocked run stops at its first resolve, so its fetches
+                # are judged as a prefix of main's order.
+                ordered = config.get("redirect") or identifier.startswith("TG-05/")
+                unmet = [name for name, check in recorded + (
+                    ("quarantine residue",
+                     lambda: config.get("cleanup_failure") or not residue()),
+                    ("connected before the refusal",
+                     lambda: not (config.get("before_connect") and connect_calls)),
+                    ("fetch order",
+                     lambda: not ordered or fetch_calls == order[:len(fetch_calls)]),
+                    ("environment not scrubbed",
+                     lambda: not config.get("ambient") or scrubbed()),
+                    ("credentials sent",
+                     lambda: not config.get("ambient") or uncredentialed()),
+                    ("timing bound",
+                     lambda: "fetch_bound" not in config or bounded()),
+                ) if not check()]
+                passed = not unmet
         finally:
             if resolver_sockets is not None:
                 resolver_sockets[1].close()
@@ -4058,14 +4120,13 @@ def self_test(vectors_only=False):
         # join, blocked the runs whose live straggler refused this run the
         # resolver (empty if it was evaluated), retained where the slot was
         # not back within main's bound. A blocked run was not evaluated, so
-        # its passed is only whether it recorded no effect before the block.
-        # The caller fails the row on a leak, a straggler or a retained slot
-        # and records a blocked run as not evaluated; none of them counts as
-        # the mutant's detection.
-        if blocked:
-            passed = recorded
+        # its passed is whether it met every check main applies that does not
+        # read the observation, and unmet names each it failed. The caller
+        # fails the row on a leak, a straggler or a retained slot and records
+        # a blocked run as not evaluated, or INVALID when it failed a check;
+        # none of them counts as the mutant's detection.
         return (passed, status, elapsed, fetch_guards, leaks, stragglers, blocked,
-                retained)
+                retained, unmet)
 
     def add_detail(row, text):
         # Append, so a row keeps any detail it already has.
@@ -4075,10 +4136,10 @@ def self_test(vectors_only=False):
         # Main's row from both runs, with the resolver accounting above.
         # The case loop and the resolver vectors share this one rule.
         (passed, status, elapsed, guards, leaks, stragglers,
-         blocked, retained) = run
+         blocked, retained, unmet) = run
         (mutant_passed, mutant_status, mutant_elapsed, mutant_guards,
          mutant_leaks, mutant_stragglers, mutant_blocked,
-         mutant_retained) = mutant_run
+         mutant_retained, _) = mutant_run
         row = {
             "id": case[0],
             "guard": case[2],
@@ -4105,12 +4166,12 @@ def self_test(vectors_only=False):
         if blocked or mutant_blocked:
             # A blocked run was not evaluated: the row is
             # CANNOT-EVALUATE unless a run that was evaluated failed
-            # or the blocked unmutated run recorded an effect before
-            # the block (INVALID beats CANNOT-EVALUATE). Main counts
-            # a mutant run's effect as a detection, and a blocked
-            # mutant run is not a detection, so its effect is not
-            # read. A leak, straggler or retained slot below still
-            # fails the row INVALID.
+            # or the blocked unmutated run failed a check that applies
+            # to it, named in unmet (INVALID beats CANNOT-EVALUATE).
+            # Main counts a mutant run's failed check as a detection,
+            # and a blocked mutant run is not a detection, so its
+            # checks are not read. A leak, straggler or retained slot
+            # below still fails the row INVALID.
             failed = not passed or (not mutant_blocked and mutant_passed)
             row["test_status"] = INVALID if failed else CANNOT_EVALUATE
             if mutant_blocked:
@@ -4121,7 +4182,8 @@ def self_test(vectors_only=False):
             add_detail(row, BLOCKED + ", ".join(
                 sorted(set(blocked + mutant_blocked))))
             if blocked and not passed:
-                add_detail(row, "the blocked run recorded an effect before the block")
+                row["resolver_blocked_failed"] = unmet
+                add_detail(row, BLOCKED_FAILED + ", ".join(unmet))
         if leaks or mutant_leaks:
             # A leaked slot fails the row in either run, as main
             # would by its INVALID. mutation_detected stays main's
@@ -4152,11 +4214,16 @@ def self_test(vectors_only=False):
     # that the resolver accounting above is required. Each fixture lookup
     # waits on an Event its vector owns, so every straggler and linger is
     # made by the vector, never by a race with a bound. Each vector's mutant
-    # run is this synthetic detected run, so its row turns on one run alone.
+    # run is this synthetic detected run, so its row turns on one run alone;
+    # the blocked-mutant vector instead pairs this synthetic evaluated run
+    # with blocked runs as the mutant.
     VECTOR_NAMES = ("resolver-vector/straggler", "resolver-vector/blocked",
-                    "resolver-vector/blocked-effect", "resolver-vector/retained-slot",
+                    "resolver-vector/blocked-effect", "resolver-vector/blocked-residue",
+                    "resolver-vector/blocked-order", "resolver-vector/blocked-timing",
+                    "resolver-vector/blocked-mutant", "resolver-vector/retained-slot",
                     "resolver-vector/cleanup")
-    detected = (False, "fixture: detected", 0.0, [], [], [], [], [])
+    detected = (False, "fixture: detected", 0.0, [], [], [], [], [], [])
+    evaluated = (True, "fixture: evaluated", 0.0, [], [], [], [], [], [])
 
     class SlotProbe:
         # The real slot. The retained-slot bound is the only timed wait for
@@ -4179,8 +4246,9 @@ def self_test(vectors_only=False):
         # A worker that outlives its run fails THAT row INVALID
         # (resolver_straggler). While it lives, a later resolver-dependent
         # run is blocked NOT-EVALUATED naming that run: its row is
-        # CANNOT-EVALUATE, or INVALID naming the effect it recorded before
-        # the block.
+        # CANNOT-EVALUATE, or INVALID naming each check that applies without
+        # an observation and that it failed before the block. A blocked
+        # mutant run is never a detection.
         gate = threading.Event()
         source = ("vector/straggler", CANNOT_EVALUATE, "resolver-deadline",
                   {"hold_lookup": gate})
@@ -4188,7 +4256,8 @@ def self_test(vectors_only=False):
             failures = []
             run = run_case(base, contexts, source, False)
             row = record_row(source, run, detected)
-            if run[:2] != (True, CANNOT_EVALUATE) or run[4:] != ([], ["after", "teardown"], [], []):
+            if (run[:2] != (True, CANNOT_EVALUATE)
+                    or run[4:] != ([], ["after", "teardown"], [], [], [])):
                 failures.append("the held run was not a passing run with one straggler")
             if (row["test_status"] != INVALID
                     or row.get("resolver_straggler") != ["after", "teardown"]
@@ -4197,22 +4266,50 @@ def self_test(vectors_only=False):
             if record_row(source, run[:5] + ([],) + run[6:], detected)["test_status"] != VALID:
                 failures.append("the row fails without its straggler")
             results.append((VECTOR_NAMES[0], failures))
-            for name, config, passed, status, detail in (
-                    (VECTOR_NAMES[1], {}, True, CANNOT_EVALUATE, ""),
-                    (VECTOR_NAMES[2], {"effect_before_resolve": True}, False, INVALID,
-                     "; the blocked run recorded an effect before the block")):
+            blocked_runs = []
+            for name, config, unmet in (
+                    (VECTOR_NAMES[1], dict(), []),
+                    (VECTOR_NAMES[2], dict(effect_before_resolve=True), ["refused effect"]),
+                    (VECTOR_NAMES[3], dict(skip_cleanup=True), ["quarantine residue"]),
+                    (VECTOR_NAMES[4], dict(before_connect=True, connect_before_resolve=True),
+                     ["connected before the refusal"]),
+                    (VECTOR_NAMES[5], dict(fetch_bound=0.50, delay_before_resolve=0.60),
+                     ["timing bound"])):
                 failures = []
                 case = (name.replace("resolver-vector/", "vector/"), VALID, "archive", config)
                 run = run_case(base, contexts, case, False)
+                blocked_runs.append(run)
                 row = record_row(case, run, detected)
-                if (run[:2] != (passed, "NOT-EVALUATED")
-                        or run[4:] != ([], [], [source[0]], [])):
-                    failures.append("the run was not blocked naming " + source[0])
+                status = INVALID if unmet else CANNOT_EVALUATE
+                detail = BLOCKED + source[0] + (
+                    "; " + BLOCKED_FAILED + ", ".join(unmet) if unmet else "")
+                if (run[:2] != (not unmet, "NOT-EVALUATED")
+                        or run[4:] != ([], [], [source[0]], [], unmet)):
+                    failures.append("the run was not blocked naming " + source[0]
+                                    + " and failing exactly " + repr(unmet))
                 if (row["test_status"] != status
                         or row.get("resolver_blocked_by") != [source[0]]
-                        or row.get("detail") != BLOCKED + source[0] + detail):
+                        or row.get("resolver_blocked_failed", []) != unmet
+                        or row.get("detail") != detail):
                     failures.append("the blocked row was not " + status + " naming its cause")
                 results.append((name, failures))
+            # A blocked mutant run, with or without a failed check, is not a
+            # detection: the row is CANNOT-EVALUATE beside an evaluated run.
+            failures = []
+            if len(blocked_runs) < 2:
+                failures.append("cannot evaluate: fewer than two blocked runs")
+            case = ("vector/blocked-mutant", VALID, "archive", dict())
+            for run in blocked_runs[:2]:
+                row = record_row(case, evaluated, run)
+                if (row["test_status"] != CANNOT_EVALUATE
+                        or row["mutant_test_status"] != CANNOT_EVALUATE
+                        or row["mutation_detected"] is not False
+                        or row.get("mutant_resolver_blocked_by") != [source[0]]
+                        or row.get("detail") != BLOCKED + source[0]):
+                    failures.append("a blocked mutant run that "
+                                    + ("passed" if run[0] else "failed a check")
+                                    + " was not a CANNOT-EVALUATE non-detection")
+            results.append((VECTOR_NAMES[6], failures))
         finally:
             gate.set()
 
@@ -4227,15 +4324,15 @@ def self_test(vectors_only=False):
             with mock.patch.object(module, "_RESOLVER_SLOT", SlotProbe(_RESOLVER_SLOT, gate)):
                 run = run_case(base, contexts, case, False)
             row = record_row(case, run, detected)
-            if run[:2] != (True, CANNOT_EVALUATE) or run[4:] != ([], [], [], ["after"]):
+            if run[:2] != (True, CANNOT_EVALUATE) or run[4:] != ([], [], [], ["after"], []):
                 failures.append("the lingering run was not a passing run with its slot retained")
             if (row["test_status"] != INVALID
                     or row.get("resolver_slot_retained") != ["after"]
                     or RETAINED not in row.get("detail", "")):
                 failures.append("the retained slot did not fail its row INVALID")
-            if record_row(case, run[:7] + ([],), detected)["test_status"] != VALID:
+            if record_row(case, run[:7] + ([],) + run[8:], detected)["test_status"] != VALID:
                 failures.append("the row fails without its retained slot")
-            results.append((VECTOR_NAMES[3], failures))
+            results.append((VECTOR_NAMES[7], failures))
         finally:
             gate.set()
 
@@ -4247,8 +4344,8 @@ def self_test(vectors_only=False):
         results = []
         lookup_before = module._lookup
         slot_before = module._RESOLVER_SLOT
-        for vector, names in ((straggler_vectors, VECTOR_NAMES[:3]),
-                              (retained_vector, VECTOR_NAMES[3:4])):
+        for vector, names in ((straggler_vectors, VECTOR_NAMES[:7]),
+                              (retained_vector, VECTOR_NAMES[7:8])):
             try:
                 vector(base, contexts, results)
             except Exception as exc:
@@ -4264,7 +4361,7 @@ def self_test(vectors_only=False):
             failures.append("the vectors left the resolver slot held")
         else:
             _RESOLVER_SLOT.release()
-        results.append((VECTOR_NAMES[4], failures))
+        results.append((VECTOR_NAMES[8], failures))
         return results
 
     try:
@@ -4313,8 +4410,9 @@ def self_test(vectors_only=False):
                 raise AssertionError("resolver worker alive before any case")
             # Establish an actual positive TLS/quarantine fixture before negatives.
             positive = ("positive/local-tls-quarantine", VALID, "archive", {})
-            passed, status, elapsed, _, leaks, stragglers, blocked, retained = run_case(
-                base, contexts, positive, False)
+            (passed, status, elapsed, _, leaks, stragglers, blocked, retained,
+             _) = run_case(base, contexts, positive, False)
+            main_failed = not passed
             passed = (passed and not leaks and not stragglers and not blocked
                       and not retained)
             executed.append({
@@ -4330,7 +4428,12 @@ def self_test(vectors_only=False):
             if stragglers:
                 executed[-1]["resolver_straggler"] = stragglers
                 add_detail(executed[-1], STRAGGLER)
-            if not passed:
+            # Main returned here when the positive run failed its own checks,
+            # and so does this. A leak, straggler or retained slot fails only
+            # this row: it stays INVALID and the run continues, so no row goes
+            # missing for it, and a later resolver-dependent run is blocked as
+            # for any straggler.
+            if main_failed:
                 SELF_TEST_ROSTER = tuple(executed)
                 print(json.dumps({"opf_adopt_observe_tests": executed}, sort_keys=True))
                 return 1
@@ -4360,8 +4463,13 @@ def self_test(vectors_only=False):
     # - In any other run, a straggler or a leaked slot fails its row INVALID:
     #   exit 1. Main had no such check there, so its exit depended on whether
     #   a later run was disturbed.
-    # - A blocked run makes its row CANNOT-EVALUATE or INVALID: exit 1. Main
-    #   evaluated that run beside the live worker.
+    # - A positive run with a straggler, a leaked slot or a retained slot
+    #   fails its row INVALID and every later row still runs: exit 1. Main
+    #   had no such check there.
+    # - A blocked run makes its row INVALID, naming each check it failed
+    #   among those main applies that do not read the observation, or else
+    #   CANNOT-EVALUATE: exit 1. Main evaluated that run beside the live
+    #   worker.
     # - A resolver worker alive before the first case is a setup
     #   CANNOT-EVALUATE: exit 2. Main had no such check.
     # - _resolver_stub_bound turns exit 0 into 2 when a resolver worker
