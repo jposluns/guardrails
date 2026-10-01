@@ -559,6 +559,19 @@ def _round4_tests(opf, check):
                                     b"", lease, [lease], "upgrade") == [])
 
 
+def _source_docstring(path, name=None):
+    """The docstring of the top-level def or class `name` in the Python source at `path` (the module's
+    own when `name` is None), parsed from the file with optimize=0. python -OO strips docstrings and
+    leaves __doc__ None, so a check reading __doc__ would follow the interpreter level, not the source."""
+    import ast
+    with open(path, encoding="utf-8") as fh:
+        node = ast.parse(fh.read(), optimize=0)
+    if name is not None:
+        node = {n.name: n for n in node.body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}[name]
+    return ast.get_docstring(node)
+
+
 def _suite():
     """Keep caller HOME/XDG out of fixture reads, including in-process production helpers."""
     import tempfile
@@ -2105,7 +2118,7 @@ def _suite_isolated():
             # FIX2) the TOCTOU disclosure on _opf_write_guard.unlink_owned_lease now also discloses the false-success
             # (exit-0 "released") over a swapped peer lease, not only the errant unlink, and names the
             # release-only-when-no-run-is-live reachability condition. Assert the extended clause is present.
-            _fix2_doc = (opf._opf_write_guard.unlink_owned_lease.__doc__ or "").lower()
+            _fix2_doc = (_source_docstring(opf._opf_write_guard.__file__, "unlink_owned_lease") or "").lower()
             check("FIX2 TOCTOU disclosure covers the false-success residual",
                   "reports exit-0 success" in _fix2_doc and 'false "released"' in _fix2_doc
                   and "release-only-when-no-run-is-live" in _fix2_doc)

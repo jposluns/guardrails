@@ -1056,6 +1056,19 @@ def apply_plan(plan_doc):
 
 # --- self-test -----------------------------------------------------------------------------------------
 
+def _source_docstring(path, name=None):
+    """The docstring of the top-level def or class `name` in the Python source at `path` (the module's
+    own when `name` is None), parsed from the file with optimize=0. python -OO strips docstrings and
+    leaves __doc__ None, so a check reading __doc__ would follow the interpreter level, not the source."""
+    import ast
+    with open(path, encoding="utf-8") as fh:
+        node = ast.parse(fh.read(), optimize=0)
+    if name is not None:
+        node = {n.name: n for n in node.body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}[name]
+    return ast.get_docstring(node)
+
+
 def self_test():
     """Fail-closed invariants over synthetic vectors and throwaway temporary fixtures, judged on returned
     statuses, byte comparisons and journal states; each check asserting a refusal of the executable shell
@@ -1134,10 +1147,12 @@ def _self_test_checks():
     check("dispatch-malformed-row-invalid", dispatch(dict(op="create-file", path="a/b")).status == INVALID)
 
     # round 3: the module introduction must name the LIVE status surface (`opf adopt status` reads both
-    # adoption homes through this module) instead of calling the module dead code.
+    # adoption homes through this module) instead of calling the module dead code. The introduction is read
+    # from the source, so the check does not depend on the interpreter level.
+    intro = _source_docstring(__file__) or ""
     check("module-intro-names-the-live-status-surface",
-          "dead code" not in (__doc__ or "") and "opf adopt status" in (__doc__ or "")
-          and "the CLI verb remain" not in (__doc__ or ""))
+          "dead code" not in intro and "opf adopt status" in intro
+          and "the CLI verb remain" not in intro)
 
     # 1: run identity. The homes grammar and the schema's shipped grammar agree on every vector; the mint
     # validates its own output; the import family and traversal spellings are refused.

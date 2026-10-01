@@ -5782,6 +5782,7 @@ def _memory_ingest_run():
 
 def _self_test_ingest_acceptance(check):
     """In-memory discriminators; each named flip removes the condition the assertion needs."""
+    import ast
     import copy
     import io
     from unittest.mock import patch
@@ -5946,8 +5947,11 @@ def _self_test_ingest_acceptance(check):
             refused = True
         check("decisions-v2-strict", refused)
     check("accept-template-undecided", all("decision" not in u for u in envelope["ingest"]["units"]))
-    # Flip: a statement placed above the docstring leaves the import verb undocumented (__doc__ is None).
-    check("accept-cli-import-doc", cli._cmd_import.__doc__ is not None)
+    # Flip: a statement placed above the docstring leaves the import verb undocumented (no docstring). The
+    # docstring is parsed from the source: python -OO leaves __doc__ None whatever the source holds.
+    with open(cli.__file__, encoding="utf-8") as fh:
+        cli_defs = {n.name: n for n in ast.parse(fh.read(), optimize=0).body if isinstance(n, ast.FunctionDef)}
+    check("accept-cli-import-doc", ast.get_docstring(cli_defs["_cmd_import"]) is not None)
     # Flip: a subset pass, an extra result, a bool-like value, and a duplicate registry must each refuse.
     for results, registry in (({}, ("a",)), ({"a": (True, "")}, ("a", "b")),
                               ({"a": (1, "")}, ("a",)), ({"a": (True, 1)}, ("a",)),

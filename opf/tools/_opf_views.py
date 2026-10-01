@@ -2075,6 +2075,19 @@ def _gfm_autolinks(markdown):
     return found
 
 
+def _source_docstring(path, name=None):
+    """The docstring of the top-level def or class `name` in the Python source at `path` (the module's
+    own when `name` is None), parsed from the file with optimize=0. python -OO strips docstrings and
+    leaves __doc__ None, so a check reading __doc__ would follow the interpreter level, not the source."""
+    import ast
+    with open(path, encoding="utf-8") as fh:
+        node = ast.parse(fh.read(), optimize=0)
+    if name is not None:
+        node = {n.name: n for n in node.body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}[name]
+    return ast.get_docstring(node)
+
+
 def self_test():
     """Render-leg self-test over SYNTHETIC stores. Judged on returned exit codes and rendered bytes, never
     by grepping output. Exercises: INDEPENDENT expected-bytes goldens per view (a hand-authored expected
@@ -2437,7 +2450,8 @@ def self_test():
         # a writer-less FIFO source fails closed without hanging, is asserted by "fifo-source-fails-closed-
         # not-hang" above (an actual FIFO under a watchdog), which discriminates the real O_NONBLOCK guard.
         check("read-ledger-schema-divergence-disclosed",
-              "optional-marker" in _load_worklog.__doc__ and "optional-marker" in _load_version.__doc__)
+              "optional-marker" in _source_docstring(__file__, "_load_worklog")
+              and "optional-marker" in _source_docstring(__file__, "_load_version"))
         check("entry-writes-fixed-date", 'date = "2026-01-01T00:00:00Z"' in _entry("WL-2", "fixed", "x"))
 
         # F4 (cited sink, B2 class): a spec-VALID free-text severity renders as LITERAL text, forging no

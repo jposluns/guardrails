@@ -1148,6 +1148,19 @@ def _run_cli(argv):
     return rc, buf.getvalue()
 
 
+def _source_docstring(path, name=None):
+    """The docstring of the top-level def or class `name` in the Python source at `path` (the module's
+    own when `name` is None), parsed from the file with optimize=0. python -OO strips docstrings and
+    leaves __doc__ None, so a check reading __doc__ would follow the interpreter level, not the source."""
+    import ast
+    with open(path, encoding="utf-8") as fh:
+        node = ast.parse(fh.read(), optimize=0)
+    if name is not None:
+        node = {n.name: n for n in node.body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}[name]
+    return ast.get_docstring(node)
+
+
 def self_test():
     """Adversarial synthetic-tree flow invariants (B10 root-cause fix: the r1 suite was too shallow and hid
     B1-B9). Each scenario asserts the FAIL/refuse path first, so the guard is proven to bite, then the clean
@@ -1435,7 +1448,7 @@ def self_test():
         _hdr_m2 = _render_history([row(0, 1, GENESIS)]).lower()
         for _tok in ("interior", "tail-edit", "truncation"):
             check("M2: generated pin-history header discloses '{}'".format(_tok), _tok in _hdr_m2)
-        _vdoc_m2 = (verify_chain.__doc__ or "").lower()
+        _vdoc_m2 = (_source_docstring(__file__, "verify_chain") or "").lower()
         check("M2: verify_chain docstring discloses interior-only + tail-edit",
               "interior" in _vdoc_m2 and "tail-edit" in _vdoc_m2)
 
