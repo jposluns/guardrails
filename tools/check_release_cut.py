@@ -316,42 +316,23 @@ def index_snapshot(root):
 
 
 def _close_fd_propagating(fd):
-    """Close a descriptor on a FAIL-CLOSED path: the close error PROPAGATES, but a raising close never
-    leaves the descriptor itself retained. On a raise, fstat CONFIRMS the descriptor is gone (EBADF means it
-    was already released); only when it is genuinely STILL open is it closed once more (fstat has just proven
-    it valid, so this is not a blind double-close), and a failure of that close is surfaced to stderr. The
-    ORIGINAL close error re-raises either way. Inlined from opf/tools/_journal._close_fd_propagating (the
-    same body) so this tool keeps working without opf/tools present (copied, mutated, or shipped alone)."""
-    try:
-        os.close(fd)
-        return
-    except OSError as exc:
-        first = exc
-    try:
-        os.fstat(fd)
-    except OSError:
-        raise first                                       # confirmed gone: still propagate the close error
-    try:
-        os.close(fd)                                      # genuinely still open (fstat proved it valid): release it
-    except OSError as exc2:
-        # The diagnostic itself must never replace the original error; a broken
-        # stderr is swallowed so the original close error below still propagates fail-closed.
-        try:
-            print("warning: fail-closed close of fd {} failed to release it ({} / {}); fail-surfaced"
-                  .format(fd, first, exc2), file=sys.stderr)
-        except OSError:
-            pass
-    raise first
+    """Close a descriptor on a FAIL-CLOSED path: the close error PROPAGATES. Single close (P1, #378):
+    exactly ONE os.close; if it raises, the number counts as released (close(2) on Linux releases it early,
+    even when the close then reports EINTR or EIO, and a retry can close another thread's reused
+    descriptor: man 2 close), so it is never probed or closed again, and the ORIGINAL close error
+    propagates unchanged. Inlined from opf/tools/_journal._close_fd_propagating (the same body) so this
+    tool keeps working without opf/tools present (copied, mutated, or shipped alone)."""
+    os.close(fd)
 
 
 def _close_fd_yielding(fd):
     """Close a descriptor from an `except` handler or a `finally` block without letting a close error
     REPLACE the exception already in flight there: when an exception is unwinding through, or being handled
-    in, the CALLING frame, the confirm-then-release close still runs (the descriptor is never retained) but
-    its close error is dropped so the ORIGINAL exception keeps propagating; on the normal path this is
-    exactly _close_fd_propagating, so a close error still fails closed. Inlined from
-    opf/tools/_journal._close_fd_yielding (the same body) so this tool keeps working without opf/tools
-    present."""
+    in, the CALLING frame, the same single close still runs (P1: one os.close, the number released either
+    way and never touched again) but its close error is dropped so the ORIGINAL exception keeps
+    propagating; on the normal path this is exactly _close_fd_propagating, so a close error still fails
+    closed. Inlined from opf/tools/_journal._close_fd_yielding (the same body) so this tool keeps working
+    without opf/tools present."""
     tb = sys.exc_info()[2]
     if tb is None or tb.tb_frame is not sys._getframe(1):
         _close_fd_propagating(fd)
@@ -1116,11 +1097,11 @@ def _close_vectors(base):
         finally:
             os.fdopen = real_fdopen
 
-    vectors = (("check_release_cut site working_blob: finally while an exception unwinds", True, "AL",
+    vectors = (("check_release_cut site working_blob: finally while an exception unwinds", True, "AR",
                 blob(True), lambda e: e is sent),
-               ("check_release_cut site working_blob: normal path", False, "BL", blob(False), None),
+               ("check_release_cut site working_blob: normal path", False, "BR", blob(False), None),
                ("check_release_cut site working_blob: except handler when fdopen refuses a directory",
-                True, "AL", directory_blob, lambda e: type(e) is IsADirectoryError)
+                True, "AR", directory_blob, lambda e: type(e) is IsADirectoryError)
                ) + _close_selftest._st_helper_vectors(ns)
     return _close_selftest._st_close_check(ns, vectors)
 

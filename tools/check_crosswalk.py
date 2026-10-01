@@ -831,9 +831,9 @@ def _close_vectors(base):
                 ns["_read_all_fd"] = real
         return call
 
-    return (("check_crosswalk site _read_archive_payload: finally while an exception unwinds", True, "AL",
+    return (("check_crosswalk site _read_archive_payload: finally while an exception unwinds", True, "AR",
              read_payload(True), lambda e: e is sent),
-            ("check_crosswalk site _read_archive_payload: normal path", False, "BL", read_payload(False), None))
+            ("check_crosswalk site _read_archive_payload: normal path", False, "BR", read_payload(False), None))
 
 
 def self_test():

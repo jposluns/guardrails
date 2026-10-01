@@ -404,7 +404,7 @@ def _atomic_publish(root, relpath, text):
         pfd, name = _journal._open_parent(root_fd, relpath)
     finally:
         # pfd is HELD across the root close (the _journal.open_journal_root_from_path idiom): a raising
-        # root close releases pfd quietly and keeps propagating, so neither descriptor stays retained.
+        # root close releases pfd quietly and keeps propagating, so neither descriptor stays open.
         try:
             _journal._close_fd_yielding(root_fd)
         except OSError:
@@ -1061,7 +1061,7 @@ def do_status(root):
         _journal._close_fd_yielding(root_fd)
         return _fail(exc)
     except BaseException:
-        _journal._close_fd_quietly(root_fd)              # a raw error (e.g. a retained close below) never strands root_fd
+        _journal._close_fd_quietly(root_fd)              # a raw error (e.g. a failing close below) never strands root_fd
         raise
     _journal._close_fd_propagating(root_fd)
     if pin is None and rows is None and txn is None:
@@ -1193,9 +1193,9 @@ def _close_vectors(base):
                 ns["_open_parent"], os.unlink = real_parent, real_unlink
         return call
 
-    return (("pin site _remove_contained: finally while an exception unwinds", True, "AL", remove(True),
+    return (("pin site _remove_contained: finally while an exception unwinds", True, "AR", remove(True),
              lambda e: e is sent),
-            ("pin site _remove_contained: normal path", False, "BL", remove(False), None))
+            ("pin site _remove_contained: normal path", False, "BR", remove(False), None))
 
 
 def self_test():

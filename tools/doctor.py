@@ -466,9 +466,9 @@ def _close_vectors(base):
                 os.close(root_fd)
         return call
 
-    return (("doctor site assert_open_journal: finally while an exception unwinds", True, "AL",
+    return (("doctor site assert_open_journal: finally while an exception unwinds", True, "AR",
              open_journal(True), lambda e: e is sent),
-            ("doctor site assert_open_journal: normal path", False, "BL", open_journal(False), None))
+            ("doctor site assert_open_journal: normal path", False, "BR", open_journal(False), None))
 
 
 def self_test():

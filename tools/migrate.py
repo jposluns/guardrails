@@ -766,9 +766,9 @@ def _close_vectors(base):
                 ns["_open_root_or_none"], ns["_classify_journal"] = real_open, real_classify
         return call
 
-    return (("migrate site do_status: finally while an exception unwinds", True, "AL", status(True),
+    return (("migrate site do_status: finally while an exception unwinds", True, "AR", status(True),
              lambda e: e is sent),
-            ("migrate site do_status: normal path", False, "BL", status(False), None))
+            ("migrate site do_status: normal path", False, "BR", status(False), None))
 
 
 def self_test():
@@ -1275,10 +1275,11 @@ def self_test():
         #     loops (_open_parent / _open_dir_contained / ensure_journal_dirs) close several opened dir fds in
         #     a `finally`. A raw os.close there, when one close raised (EINTR/EIO), abandoned the REMAINING
         #     sibling fds (a leak) and let a raw OSError escape the finally. The guarded close
-        #     (_journal._close_fd_quietly) confirms-and-continues so the walk COMPLETES and no sibling leaks.
-        #     Inject a first-close-raises-without-releasing into a DEEP _open_parent walk (>=2 intermediate
-        #     dirs => >=2 opened fds): post-fix _open_parent returns and the process fd count is unchanged;
-        #     pre-fix the first raise aborts the loop, the second fd leaks, and the raw OSError escapes.
+        #     (_journal._close_fd_quietly) swallows and continues so the walk COMPLETES and no sibling leaks.
+        #     Inject the close(2) shape (P1, #378: the number is RELEASED, then the close raises) into a
+        #     DEEP _open_parent walk (>=2 intermediate dirs => >=2 opened fds): post-fix _open_parent
+        #     returns and the process fd count is unchanged; pre-fix the first raise aborts the loop, the
+        #     second fd leaks, and the raw OSError escapes.
         wroot = tmp / "walkclose" / "root"; (wroot / "a" / "b").mkdir(parents=True)
         (wroot / "a" / "b" / "dataA").write_bytes(b"x")
         wroot_fd = os.open(str(wroot), os.O_RDONLY | os.O_DIRECTORY)
@@ -1288,7 +1289,8 @@ def self_test():
         def _w_boom_close(fd):
             _w_state["n"] += 1
             if _w_state["n"] == 1:
-                raise OSError(5, "EIO (self-test injected, fd left open)")   # raise WITHOUT releasing
+                _w_real_close(fd)                                            # released first (close(2))
+                raise OSError(5, "EIO (self-test injected, after release)")
             return _w_real_close(fd)
 
         def _fdcount():

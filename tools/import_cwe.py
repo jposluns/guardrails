@@ -323,32 +323,13 @@ def mapped_cwe_ids(root):
 
 
 def _close_fd_propagating(fd):
-    """Close a descriptor on a FAIL-CLOSED path: the close error PROPAGATES, but a raising close never
-    leaves the descriptor itself retained. On a raise, fstat CONFIRMS the descriptor is gone (EBADF means it
-    was already released); only when it is genuinely STILL open is it closed once more (fstat has just proven
-    it valid, so this is not a blind double-close), and a failure of that close is surfaced to stderr. The
-    ORIGINAL close error re-raises either way. Inlined from opf/tools/_journal._close_fd_propagating (the
-    same body) so this tool keeps working without opf/tools present (copied, mutated, or shipped alone)."""
-    try:
-        os.close(fd)
-        return
-    except OSError as exc:
-        first = exc
-    try:
-        os.fstat(fd)
-    except OSError:
-        raise first                                       # confirmed gone: still propagate the close error
-    try:
-        os.close(fd)                                      # genuinely still open (fstat proved it valid): release it
-    except OSError as exc2:
-        # The diagnostic itself must never replace the original error; a broken
-        # stderr is swallowed so the original close error below still propagates fail-closed.
-        try:
-            print("warning: fail-closed close of fd {} failed to release it ({} / {}); fail-surfaced"
-                  .format(fd, first, exc2), file=sys.stderr)
-        except OSError:
-            pass
-    raise first
+    """Close a descriptor on a FAIL-CLOSED path: the close error PROPAGATES. Single close (P1, #378):
+    exactly ONE os.close; if it raises, the number counts as released (close(2) on Linux releases it early,
+    even when the close then reports EINTR or EIO, and a retry can close another thread's reused
+    descriptor: man 2 close), so it is never probed or closed again, and the ORIGINAL close error
+    propagates unchanged. Inlined from opf/tools/_journal._close_fd_propagating (the same body) so this
+    tool keeps working without opf/tools present (copied, mutated, or shipped alone)."""
+    os.close(fd)
 
 
 def render(staging_dir, output, *, mapped_ids=None, expected_member=EXPECTED_MEMBER,
@@ -684,6 +665,16 @@ def self_test():
         (_stage / PROVENANCE_NAME).write_text(json.dumps(_prov), encoding="utf-8")
     finally:
         shutil.rmtree(_stage, ignore_errors=True)
+    # #378 P1: the V1 / V2 close vectors for this tool's _close_fd_propagating copy, through the harness the
+    # other inlined-helper tools share (tools/_close_selftest.py): one close, the released number never
+    # touched again, each vector red under RECLOSE (the pre-P1 body) by REUSE alone.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import _close_selftest
+    _close_failures, _close_runs = _close_selftest._st_close_check(
+        globals(), _close_selftest._st_helper_vectors(globals()))
+    if _close_failures:
+        raise SystemExit("SELF-TEST FAIL: #378 close vectors: {}".format("; ".join(_close_failures)))
+    print("  ok: {} #378 close-vector runs".format(_close_runs))
     print("SELF-TEST: PASS")
 
 

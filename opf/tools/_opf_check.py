@@ -534,28 +534,17 @@ def _close_fd_quietly(fd):
     (or an exception is already in flight) by the time these closes run, so a cleanup-close irregularity is
     never itself the store's verdict (fail-closed teardown; S1-F1 / S4-F3).
 
-    A raising close is swallowed but never lets a genuine descriptor leak pass CONCEALED (codex round-6;
-    no-concealed-failure): a close that raises does not by itself prove the fd is retained, since on Linux
-    close() releases the descriptor even on EINTR/EIO and EBADF means it was already gone. So on a raise we
-    CONFIRM the descriptor is actually gone (fstat); only when it is genuinely STILL open do we close it
-    once more (fstat has just proven the fd valid, so this is not a blind double-close) and, if even that
-    cannot release it, surface the leak to stderr rather than the old silent pass that could not tell
-    closed-then-errored from still-open."""
+    Single close (P1, #378): the descriptor is closed with exactly ONE os.close. If it raises, the number
+    counts as released and is never touched again: no fstat, no second close. close(2) on Linux "always
+    releases the file descriptor early in the close operation, freeing it for reuse", and retrying "is the
+    wrong thing to do, since this may cause a reused file descriptor from another thread to be closed"
+    (man 2 close, "Dealing with error returns from close()"); an fstat that finds the number open after a
+    failed close is looking at whatever reused it, so a probe-then-reclose recovery closed another owner's
+    descriptor. The error is swallowed silently. _journal._close_fd_quietly carries the same body."""
     try:
         os.close(fd)
-        return
-    except OSError as exc:
-        first = exc
-    try:
-        os.fstat(fd)
     except OSError:
-        return                                            # confirmed gone: the raise was benign teardown noise
-    try:
-        os.close(fd)                                      # genuinely still open (fstat proved it valid): release it
-        return
-    except OSError as exc2:
-        print("warning: cleanup close of fd {} failed to release it ({} / {}); fail-surfaced"
-              .format(fd, first, exc2), file=sys.stderr)
+        pass                                              # released either way (close(2)); never re-touched
 
 
 def _list_contained(root_fd, reldir):
@@ -4444,36 +4433,18 @@ def self_test():
         check("s1-listcontained-finally-close-guarded",
               _s1c_outcome == "returned" and _s1c_sub == ["child"] and _s1c_files == ["afile"])
 
-        # --- ROUND-6 codex: _close_fd_quietly must not CONCEAL a genuine descriptor leak. A close that
-        # raises WITHOUT releasing the fd (a "still open" close error) must be detected and the fd actually
-        # closed, not silently passed. Patch os.close so its FIRST call raises WITHOUT closing (fd stays
-        # open) and later calls really close; after _close_fd_quietly the fd must be GONE (fstat -> EBADF).
-        # Pre-fix (`except OSError: pass`) the single raising close left the fd open and fstat succeeded. --
-        _q_dir = base / "q-close"
-        _q_dir.mkdir()
-        _q_fd = os.open(str(_q_dir), os.O_RDONLY | os.O_DIRECTORY)
-        _q_real_close = os.close
-        _q_state = {"n": 0}
-
-        def _q_boom_close(fd):
-            _q_state["n"] += 1
-            if _q_state["n"] == 1:
-                raise OSError(5, "EIO (self-test injected, fd left open)")  # raise WITHOUT closing
-            return _q_real_close(fd)
-
-        try:
-            os.close = _q_boom_close
-            _close_fd_quietly(_q_fd)
-        finally:
-            os.close = _q_real_close
-        try:
-            os.fstat(_q_fd)
-            _q_still_open = True
-        except OSError:
-            _q_still_open = False
-        if _q_still_open:                                  # would leak under the old silent pass; close it now
-            _q_real_close(_q_fd)
-        check("r6-close-fd-quietly-no-silent-leak", _q_still_open is False)
+        # --- P1 (#378): _close_fd_quietly closes ONCE and never touches the number again. close(2) on
+        # Linux releases the number even when the close then reports EINTR or EIO, and another thread may
+        # reuse it at once, so the old fstat-then-reclose recovery (round 6) could close that thread's
+        # descriptor. The shared _journal harness injects exactly that: a real close, an unrelated
+        # descriptor put on the freed number (inline, and from a real second thread), then the error.
+        # Green: the reuser still owns its number (REUSE), the helper made exactly one close and no fstat
+        # of the number afterwards (PROBE), and the error is swallowed. Each vector is red under RECLOSE
+        # (the old body put back) by REUSE alone and under an fstat-only probe by PROBE alone. ----------
+        _q_failures, _q_runs = _journal._st_close_check(globals(), _journal._st_helper_vectors(globals()))
+        for _q_failure in _q_failures:
+            print("  close vector: {}".format(_q_failure), file=sys.stderr)
+        check("p1-close-fd-quietly-single-close", not _q_failures and _q_runs == 8)
 
         # --- S4-F3: validate_store's `finally` block closes its store / product-root descriptors OUTSIDE
         # the B6 barrier, so a close that raises during teardown (EINTR / EIO / an invalid fd) must be
