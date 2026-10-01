@@ -2918,23 +2918,29 @@ def _git_archive_fixture_isolated(base):
     return revision, gzip.compress(raw, mtime=0)
 
 
+# The production resolver, captured once at import. The self-test restores
+# exactly this function, never whatever _lookup holds when it is entered: a
+# run that left its stub bound must not have that stub restored as production.
+_PRODUCTION_LOOKUP = _lookup
+
+
 def _resolver_stub_bound(function):
     # A resolver worker reads _lookup only when it runs. One that outlives
     # settle_resolvers' bound can run after its case has unwound the fixture
     # patch, so the patch alone cannot keep it off live name resolution.
     # Bind a lookup that never resolves beneath every case's patch for the
-    # whole self-test. Restore the production _lookup only once no resolver
+    # whole self-test. Restore _PRODUCTION_LOOKUP only once no resolver
     # worker is alive. A worker that cannot be joined fails the run closed
-    # (exit 2) and leaves the stub bound for the life of the process.
+    # (exit 2 unless it already failed) and leaves the stub bound until a
+    # later run settles.
     def never_resolves(host):
         raise ObserveError(CANNOT_EVALUATE, "dns", "self-test lookup never resolves")
 
     @functools.wraps(function)
     def bound(*args, **kwargs):
         global _lookup
-        production = _lookup
         _lookup = never_resolves
-        joined = False
+        settled = False
         try:
             rc = function(*args, **kwargs)
         finally:
@@ -2942,11 +2948,11 @@ def _resolver_stub_bound(function):
             for thread in threading.enumerate():
                 if thread.name == "opf-adopt-resolver":
                     thread.join(max(0.0, end - time.monotonic()))
-            joined = not any(thread.name == "opf-adopt-resolver" and thread.is_alive()
-                             for thread in threading.enumerate())
-            if joined:
-                _lookup = production
-        if not joined:
+            settled = not any(thread.name == "opf-adopt-resolver" and thread.is_alive()
+                              for thread in threading.enumerate())
+            if settled:
+                _lookup = _PRODUCTION_LOOKUP
+        if not settled:
             print("resolver worker outlived the self-test; _lookup stays stubbed",
                   file=sys.stderr)
             return rc or 2
@@ -3342,27 +3348,23 @@ def self_test(vectors_only=False):
     add("TG-11/oversize-compressed", CANNOT_EVALUATE, "archive-cap",
         archive_cap=len(baseline_archive) + 64,
         archive=baseline_archive + b"x" * 65, absent="archive")
+    # Each timing row names the deadline guard its mutation removes and the
+    # number of fetches it refuses. Both feed only the diagnostic relabel in
+    # timing_status. The resolver wait and the TLS handshake are armed from
+    # the connection deadline, so those rows name "connect". A load-delayed
+    # connection deadline that stops their mutant earlier, at _fetch, also
+    # names "connect" and keeps main's INVALID.
     add("TG-11/slow-drip", CANNOT_EVALUATE, "request-deadline",
         mode="slow", response=reply(b"x" * 200), fetch_bound=1.00,
-        fired=[("request",)])
+        guarded="request", refusals=1)
     add("TG-11/read-inactivity", CANNOT_EVALUATE, "inactivity",
-        mode="stall", fetch_bound=0.50, fired=[("inactivity", "_receive")])
-    # No guard attribution. run_case joins every resolver worker before a run
-    # starts (or fails the suite closed), so the mutant's first worker takes
-    # the free slot and blocks in the fixture recv, whose peer stays open
-    # until the gather returns. Its result.get() has no timeout, so that fetch
-    # lasts at least the recv's 1.0 s timeout, above the 0.50 bound.
+        mode="stall", fetch_bound=0.50, guarded="inactivity", refusals=1)
     add("TG-11/stalled-resolver", CANNOT_EVALUATE, "resolver-deadline",
-        stalled_resolver=True, fetch_bound=0.50)
-    # Without the connect deadline, a scheduling delay before the fetch can
-    # clamp the request deadline to the gather deadline, and that guard can
-    # refuse the mutant inside the 0.50 bound. Name the connect guard where
-    # the unmutated run records it for both fetches: the timeout _fetch arms
-    # for _connect.
+        stalled_resolver=True, fetch_bound=0.50, guarded="connect", refusals=2)
     add("TG-11/connect-timeout", CANNOT_EVALUATE, "connect-deadline",
-        connect_stall=True, fetch_bound=0.50, fired=[("connect", "_fetch")] * 2)
+        connect_stall=True, fetch_bound=0.50, guarded="connect", refusals=2)
     add("TG-11/tls-timeout", CANNOT_EVALUATE, "tls-deadline",
-        mode="tls-stall", fetch_bound=0.50, fired=[("connect", "_tls")] * 2)
+        mode="tls-stall", fetch_bound=0.50, guarded="connect", refusals=2)
     add("TG-12/observer-backstop", CANNOT_EVALUATE, "backstop", exception=True)
     add("TG-12/public-wrapper-backstop", CANNOT_EVALUATE, "wrapper",
         wrapper_exception=True)
@@ -3486,6 +3488,65 @@ def self_test(vectors_only=False):
     add("TG-15/no-product-write", mutation="write", archive=hostile_names,
         public_wrapper=True)
 
+    deadline_guards = ("connect", "request", "gather", "inactivity")
+
+    def timing_status(passed, mutant_passed, config, guards, mutant_guards):
+        # Main's outcome first: VALID exactly when the unmutated run passed
+        # main's checks and main's checks detected the mutant. The only
+        # change is INVALID to CANNOT-EVALUATE, and only when the unmutated
+        # run passed, the mutant was not detected, both runs recorded the
+        # row's number of refusals, and every mutant refusal names a
+        # recognized deadline guard other than the row's. So this returns
+        # VALID exactly when main does; the relabel is a label, never a pass.
+        # The attribution is diagnostic. It records the last left() armed
+        # before a socket timeout or a resolver wait expired, not the timeout
+        # actually installed, so it never decides detection or the
+        # unmutated run's pass; a misattribution can only move an INVALID
+        # row to CANNOT-EVALUATE, which still fails.
+        status = VALID if passed and not mutant_passed else INVALID
+        if (status == INVALID and passed and mutant_passed
+                and "guarded" in config
+                and len(guards) == len(mutant_guards) == config["refusals"]
+                and all(guard in deadline_guards and guard != config["guarded"]
+                        for guard in mutant_guards)):
+            return CANNOT_EVALUATE
+        return status
+
+    def timing_status_vector():
+        # Every combination of the two run results with refusal records of
+        # up to two entries drawn from the guards and two exception classes.
+        names = deadline_guards + ("OSError", "SSLError")
+        records = [()] + [(a,) for a in names] + [(a, b) for a in names for b in names]
+        changed = 0
+        for guarded in deadline_guards:
+            for refusals in (1, 2):
+                config = {"guarded": guarded, "refusals": refusals}
+                for passed in (False, True):
+                    for mutant_passed in (False, True):
+                        main = VALID if passed and not mutant_passed else INVALID
+                        for guards in records:
+                            for mutant_guards in records:
+                                status = timing_status(passed, mutant_passed, config,
+                                                       list(guards), list(mutant_guards))
+                                if status != main:
+                                    changed += 1
+                                    if (main != INVALID or status != CANNOT_EVALUATE
+                                            or not passed or not mutant_passed):
+                                        return False
+        unmutated = ["inactivity"]
+        return (changed > 0
+                and timing_status(True, True, {"guarded": "request", "refusals": 1},
+                                  unmutated, ["inactivity"]) == CANNOT_EVALUATE
+                and timing_status(True, True, {"guarded": "request", "refusals": 1},
+                                  unmutated, ["request"]) == INVALID
+                and timing_status(True, True, {"guarded": "request", "refusals": 1},
+                                  unmutated, ["OSError"]) == INVALID
+                and timing_status(True, True, {"guarded": "request", "refusals": 1},
+                                  unmutated, ["inactivity"] * 2) == INVALID
+                and timing_status(True, True, {}, unmutated, ["inactivity"]) == INVALID
+                and timing_status(True, False, {"guarded": "request", "refusals": 1},
+                                  unmutated, ["inactivity"]) == VALID)
+
     def settle_resolvers(seconds):
         # A resolver worker takes _RESOLVER_SLOT only when it runs, so the
         # slot alone cannot show that a started worker has finished: one that
@@ -3565,33 +3626,36 @@ def self_test(vectors_only=False):
             sock.connect(("127.0.0.1", port))
 
         class TrackedDeadline(original_deadline):
-            # Name the bound behind each expiry. A deadline clamped to its
-            # parent inherits the parent's name; a socket timeout armed by
-            # left(INACTIVITY_SECONDS) belongs to the inactivity cap, not the
-            # deadline. Any other cap keeps the deadline's name.
+            # Diagnostic only. Name the bound behind each expiry: a deadline
+            # clamped to its parent inherits the parent's name, and a left()
+            # whose INACTIVITY_SECONDS cap binds arms the inactivity cap.
             def __init__(self, seconds, parent=None):
                 super().__init__(seconds, parent)
                 self.guard = (parent.guard if parent is not None and self.end == parent.end
                               else deadline_names.get(seconds, "other"))
 
             def left(self, maximum=None):
-                site = sys._getframe(1).f_code.co_name
                 try:
                     remaining = super().left(maximum)
                 except ObserveError as exc:
-                    expired[:] = [exc, self.guard, site]
+                    expired[:] = [exc, self.guard]
                     raise
                 capped = (maximum is not None and maximum == module.INACTIVITY_SECONDS
                           and remaining == maximum)
-                armed[:] = ["inactivity" if capped else self.guard, site]
+                armed[:] = ["inactivity" if capped else self.guard]
                 return remaining
 
         def attribute(exc):
+            # A socket timeout or an expired resolver wait is credited to the
+            # last left() armed in this fetch, which need not be the timeout
+            # in force. Anything else is recorded by exception class.
             if expired and expired[0] is exc:
-                return tuple(expired[1:])
-            if isinstance(exc, socket.timeout) and armed:
-                return tuple(armed)
-            return (type(exc).__name__,)
+                return expired[1]
+            if armed and (isinstance(exc, socket.timeout) or (
+                    isinstance(exc, ObserveError)
+                    and exc.detail == "resolver deadline expired")):
+                return armed[0]
+            return type(exc).__name__
 
         def timed_fetch(fetch, url, cap, deadline, context):
             del armed[:], expired[:]
@@ -3942,49 +4006,9 @@ def self_test(vectors_only=False):
                 passed = (passed and elapsed < 1.60 and bool(fetch_durations)
                           and all(duration < config["fetch_bound"]
                                   for duration in fetch_durations))
-            fired = True
-            if "fired" in config:
-                # Name the guard behind each refused fetch: under host load a
-                # different guard can refuse a mutant inside every time bound,
-                # so a mutant whose guard differs is detected.
-                # Trade-off: load can also stop the unmutated run by another
-                # guard inside every bound (slow-drip's 0.15 s inactivity cap
-                # against its 0.04 s drip; tls-timeout's connect deadline
-                # expiring before _tls). That run cannot evaluate its mutant:
-                # the row reports CANNOT-EVALUATE, never a pass and never
-                # retried. This holds only when the record has the expected
-                # shape: the same number of refused fetches, each naming a
-                # recognized deadline guard and a call site. Any other record
-                # (an exception class such as ("OSError",), a different fetch
-                # count, an unrecognized name) is a defect, and the unmutated
-                # run fails as INVALID, as it does for any other failed check.
-                # Main's source, without attribution, passed such a run.
-                # Residuals: _resolve converts queue.Empty into a fresh
-                # ObserveError, attributed only as ("ObserveError",); non-timing
-                # CANNOT-EVALUATE rows (wrong-hostname and others) run with 10x
-                # deadlines and are judged by verdict, without attribution.
-                fired = len(fetch_guards) == len(config["fired"]) and all(
-                    guard[:len(want)] == want
-                    for guard, want in zip(fetch_guards, config["fired"])
-                )
-                other_guard = not fired and len(fetch_guards) == len(config["fired"]) and all(
-                    len(guard) == 2
-                    and guard[0] in ("connect", "request", "gather", "inactivity")
-                    for guard in fetch_guards
-                )
-                if mutated:
-                    # Each mutation removes the guard its row expects, and in
-                    # these fixtures no other code names that guard at that
-                    # site, so no mutant can record the expected attribution:
-                    # mutation_detected is true by construction for these
-                    # rows. Their evidence rests on the unmutated run naming
-                    # the expected guard, plus each bound.
-                    passed = passed and fired
-                elif not fired and not other_guard:
-                    passed = False
             if identifier.startswith("TG-05/"):
                 passed = passed and fetch_calls == [release_url, ANCHOR_URL]
-            return passed, status, elapsed, fetch_guards, fired
+            return passed, status, elapsed, fetch_guards
         finally:
             if resolver_sockets is not None:
                 resolver_sockets[1].close()
@@ -3996,6 +4020,12 @@ def self_test(vectors_only=False):
             server.close()
             settle_resolvers(2.0)
 
+    # The relabel may change only main's INVALID, and only to CANNOT-EVALUATE.
+    if not timing_status_vector():
+        print("timing-status vector failed: the relabel departed from main's outcome",
+              file=sys.stderr)
+        return 1
+    relabeled = []
     try:
         # Missing timer support is a setup cannot-evaluate, before any row.
         watchdog_preconditions()
@@ -4038,7 +4068,7 @@ def self_test(vectors_only=False):
 
             # Establish an actual positive TLS/quarantine fixture before negatives.
             positive = ("positive/local-tls-quarantine", VALID, "archive", {})
-            passed, status, elapsed, _, _ = run_case(base, contexts, positive, False)
+            passed, status, elapsed, _ = run_case(base, contexts, positive, False)
             executed.append({
                 "id": positive[0], "expected": VALID, "observed": status,
                 "test_status": VALID if passed else INVALID,
@@ -4052,8 +4082,8 @@ def self_test(vectors_only=False):
             guard_rows = _guard_self_test() + _ownership_self_test() + _cancellation_self_test()
             executed.extend(guard_rows)
             for case in cases:
-                passed, status, elapsed, guards, fired = run_case(base, contexts, case, False)
-                mutant_passed, mutant_status, mutant_elapsed, mutant_guards, _ = run_case(
+                passed, status, elapsed, guards = run_case(base, contexts, case, False)
+                mutant_passed, mutant_status, mutant_elapsed, mutant_guards = run_case(
                     base, contexts, case, True,
                 )
                 executed.append({
@@ -4064,21 +4094,21 @@ def self_test(vectors_only=False):
                     "mutant_observed": mutant_status,
                     "mutant_test_status": VALID if mutant_passed else INVALID,
                     "mutation_detected": not mutant_passed,
-                    "test_status": (CANNOT_EVALUATE if passed and not fired else
-                                    VALID if passed and not mutant_passed else INVALID),
+                    "test_status": timing_status(passed, mutant_passed, case[3],
+                                                 guards, mutant_guards),
                     "elapsed_seconds": elapsed,
                     "mutant_elapsed_seconds": mutant_elapsed,
                 })
-                if "fetch_bound" in case[3]:
-                    executed[-1]["fired"] = [list(guard) for guard in guards]
-                    executed[-1]["mutant_fired"] = [list(guard) for guard in mutant_guards]
-                if not fired:
-                    executed[-1]["expected_fired"] = [list(want) for want in case[3]["fired"]]
+                if "guarded" in case[3]:
+                    # Diagnostic: the guard behind each refused fetch.
+                    executed[-1]["guarded_deadline"] = case[3]["guarded"]
+                    executed[-1]["guards_fired"] = guards
+                    executed[-1]["mutant_guards_fired"] = mutant_guards
+                if executed[-1]["test_status"] == CANNOT_EVALUATE:
+                    relabeled.append(case[0])
                     executed[-1]["detail"] = (
-                        "the unmutated run recorded {} where {} was expected".format(
-                            executed[-1]["fired"], executed[-1]["expected_fired"])
-                        + ("; a different deadline guard fired, so the row cannot"
-                           " evaluate its mutant" if passed else ""))
+                        "a different deadline guard stopped the mutant inside the"
+                        " bound; the row cannot evaluate its mutant")
     except Exception as exc:
         executed.append({
             "id": "fixture/setup-or-teardown",
@@ -4095,13 +4125,14 @@ def self_test(vectors_only=False):
                     + [case[0] for case in cases])
     if [row["id"] for row in executed] != expected_ids:
         return 1
-    if any(row["test_status"] not in (VALID, CANNOT_EVALUATE) for row in executed):
+    if any(row["test_status"] != VALID and row["id"] not in relabeled for row in executed):
         return 1
-    if any(row["test_status"] == CANNOT_EVALUATE for row in executed):
-        # As for fixture setup, a row that cannot evaluate fails with exit 2.
-        # Only this observer's own standalone run exits 2: run_all_checks.sh,
-        # the nested registration run and _opf_adopt.py's vectors-only call
-        # report it as an ordinary failure (exit 1), never as a pass.
+    if relabeled:
+        # INVALID is ruled out above. As for fixture setup, a row that
+        # cannot evaluate its mutant exits 2. Only this standalone run
+        # distinguishes 2: run_all_checks.sh records a failed gate and exits
+        # 1, and _opf_adopt.py's vectors-only check requires 0, so both
+        # report it as an ordinary failure, never as a pass.
         return 2
     if not vectors_only:
         try:
