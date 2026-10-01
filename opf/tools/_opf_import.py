@@ -915,8 +915,30 @@ def _worklog_ids(store_root_fd, machine_rel, roster=None, registered_vendors=fro
     registered custom worklog kinds are outside this build's manifest surface (validate_worklog's built-in
     kind vocabulary is the accepted set here), so a promoted entry using a custom registered kind fails closed
     to CANNOT-EVALUATE rather than being wrongly accepted."""
-    rel = "{}/worklog.toml".format(machine_rel)
-    data = _read_toml(store_root_fd, rel)
+    import _opf_worklog
+    try:
+        manifest = _opf_worklog.read_manifest_at(store_root_fd, machine_rel)
+        rel = _opf_worklog.source_relpath(machine_rel, manifest)
+        data = _opf_worklog.load_worklog_at(store_root_fd, machine_rel, required=False)
+    except _opf_worklog.ManifestShapeError as exc:
+        raise _cannot("{}: the store manifest is absent; the storage layout cannot be determined "
+                      "(spec 9)".format(exc.relpath)) from exc
+    except _opf_worklog.ManifestValidationError as exc:
+        base = exc.manifest.get("opf") if isinstance(exc.manifest, dict) else None
+        layout = base.get("layout") if isinstance(base, dict) else None
+        if isinstance(exc.manifest, dict) and layout != "inline":
+            raise _cannot("{}: storage layout {!r} is unsupported; U7's inline active-store readers stage only "
+                          "an `inline`-layout store (spec 9), so a non-inline layout is fail-closed (never a "
+                          "partial inline read that would miss per-record ids or admit a phantom target)".format(
+                              exc.relpath, layout)) from exc
+        raise _cannot("store manifest is not VALID ({}: {})".format(
+            exc.status, exc)) from exc
+    except _opf_store.StoreError as exc:
+        raise _cannot(str(exc))
+    except _journal.JournalError as exc:
+        raise _cannot("cannot read {} ({})".format(rel, exc))
+    except ValueError as exc:
+        raise _cannot("cannot parse {} ({})".format(rel, exc))
     if data is None:
         return []
     wv = _opf_release.validate_worklog(data, registered_vendors=registered_vendors)
@@ -5464,30 +5486,36 @@ imp._build_publication_ops = arm
 result = imp._apply_import(Path(sys.argv[2]), sys.argv[3], now=now)   # the retained engine
 raise SystemExit(result.verdict)
 """
-    cp = subprocess.run([sys.executable, "-I", "-B", "-c", child,
-                         str(Path(__file__).resolve().parent), str(root), run, mirror, now.isoformat()],
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-    require("D5-killed-after-view", cp.returncode == 137
-            and (root / mirror).read_bytes() != before_mirror)
-    journal_root = root / IMPORT_JOURNAL_REL
-    rfd = _opf_store._open_store_root_fd(root, False)
-    jfd = _journal.open_journal_root_fd(rfd, IMPORT_JOURNAL_REL)
     try:
-        txns = _journal._journal_txn_dirs(jfd, journal_root)
-        require("D5-crash-journal-enumeration", len(txns) == 1)
-        require("D5-crash-open", _journal.classify_state(jfd, txns[0]) == "open")
-        require("D5-claim-recovers-dead-owner", _claim_apply_lock(journal_root, jfd, rfd) == "acquired")
-        check("D5-crash-recovery-restores", snapshot(root / ".working") == before
-              and _journal.classify_state(jfd, txns[0]) == "rolled-back")
-        check("D5-crash-recovery-idempotent",
-              _recover_open_txns(jfd, journal_root, rfd) == {txns[0].name: "terminal"})
-        _journal.release_lock(journal_root)
-    finally:
-        os.close(jfd)
-        os.close(rfd)
-    retry = apply_import(root, run, now=now)
-    check("D5-retry-after-crash", retry.verdict == CLEAN and retry.promoted
-          and _preview_render_reproducible(root) == (True, False))
+        cp = _opf_emit.run_status_owned([sys.executable, "-I", "-B", "-c", child,
+                             str(Path(__file__).resolve().parent), str(root), run, mirror, now.isoformat()],
+                            fixture_id="D5-killed-after-view", expected_returncode=137, process_fixture=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=150)
+    except (RuntimeError, subprocess.SubprocessError, OSError, ValueError) as exc:
+        print("D5-killed-after-view", str(exc))
+        check("D5-killed-after-view", False)
+    else:
+        require("D5-killed-after-view", cp.returncode == 0
+                and (root / mirror).read_bytes() != before_mirror)
+        journal_root = root / IMPORT_JOURNAL_REL
+        rfd = _opf_store._open_store_root_fd(root, False)
+        jfd = _journal.open_journal_root_fd(rfd, IMPORT_JOURNAL_REL)
+        try:
+            txns = _journal._journal_txn_dirs(jfd, journal_root)
+            require("D5-crash-journal-enumeration", len(txns) == 1)
+            require("D5-crash-open", _journal.classify_state(jfd, txns[0]) == "open")
+            require("D5-claim-recovers-dead-owner", _claim_apply_lock(journal_root, jfd, rfd) == "acquired")
+            check("D5-crash-recovery-restores", snapshot(root / ".working") == before
+                  and _journal.classify_state(jfd, txns[0]) == "rolled-back")
+            check("D5-crash-recovery-idempotent",
+                  _recover_open_txns(jfd, journal_root, rfd) == {txns[0].name: "terminal"})
+            _journal.release_lock(journal_root)
+        finally:
+            os.close(jfd)
+            os.close(rfd)
+        retry = apply_import(root, run, now=now)
+        check("D5-retry-after-crash", retry.verdict == CLEAN and retry.promoted
+              and _preview_render_reproducible(root) == (True, False))
 
     allowed = frozenset({mirror})
     unmanaged_ops = [{"op": "write", "path": p} for p in (
@@ -6868,9 +6896,13 @@ def self_test_isolated():
         # dispatcher through opf.py (the CLI round-trip lives in opf.py's own opf-cli self-test leg).
         opf_py = str(Path(__file__).resolve().parent / "opf.py")
         root4, machine4 = build_store(sources={"a.txt": src})
-        cp_nomode = subprocess.run([sys.executable, "-I", "-B", opf_py, "import", "--root", str(root4)],
-                                   capture_output=True)
-        check("3-verb-no-mode-exits-2", cp_nomode.returncode == 2)
+        try:
+            cp_nomode = _opf_emit.run_status_owned([sys.executable, "-I", "-B", opf_py, "import", "--root", str(root4)],
+                                       fixture_id="3-verb-no-mode", expected_returncode=2, process_fixture=True, capture_output=True)
+            check("3-verb-no-mode-exits-2", cp_nomode.returncode == 0)
+        except (RuntimeError, subprocess.SubprocessError, OSError, ValueError) as exc:
+            print("3-verb-no-mode-exits-2", str(exc))
+            check("3-verb-no-mode-exits-2", False)
         check("3-verb-no-mode-stages-nothing", not (machine4.parent / "imports").exists())
         # Stage a real run over root4 through the retained engine, then `--apply` it WITHOUT a review: the
         # retired public apply_import refuses -> exit 2, and the store machine tree is byte-unchanged (nothing
@@ -6880,10 +6912,15 @@ def self_test_isolated():
         plan4 = plan_import(root4, ["a.txt"], now=NOW, run_nonce="verb-apply-pin")
         check("3-apply-plan-staged", plan4.verdict == 0 and bool(plan4.run_id))
         machine4_before = snapshot(machine4)
-        cp_apply = subprocess.run([sys.executable, "-I", "-B", opf_py, "import", "--apply",
-                                   plan4.run_id or "imp-00000000T000000Z-0000000000000000",
-                                   "--root", str(root4)], capture_output=True)
-        check("3-apply-unreviewed-exits-2", cp_apply.returncode == 2)
+        try:
+            cp_apply = _opf_emit.run_status_owned([sys.executable, "-I", "-B", opf_py, "import", "--apply",
+                                       plan4.run_id or "imp-00000000T000000Z-0000000000000000",
+                                       "--root", str(root4)], fixture_id="3-apply-unreviewed",
+                                       expected_returncode=2, process_fixture=True, capture_output=True)
+            check("3-apply-unreviewed-exits-2", cp_apply.returncode == 0)
+        except (RuntimeError, subprocess.SubprocessError, OSError, ValueError) as exc:
+            print("3-apply-unreviewed-exits-2", str(exc))
+            check("3-apply-unreviewed-exits-2", False)
         check("3-apply-unreviewed-mutates-nothing", snapshot(machine4) == machine4_before)
 
         # 4: R6 active collision: a fully-valid active index already carries the id next_id will mint (BI-1
