@@ -3541,9 +3541,13 @@ def self_test(vectors_only=False):
         label = identifier + (" (mutant)" if mutated else "")
         # No earlier run's resolver worker may reach this case. Each place a
         # leaked resolver slot is found is recorded and fails this run. A
-        # worker still alive here (inherited) was left by an earlier run,
-        # whose row it already failed. Each place a worker this run started
-        # outlives the join is recorded as a straggler and fails this run.
+        # worker still alive here (inherited) was left by an earlier run. One
+        # left by a run of this function already failed that run's row as a
+        # straggler. One left by the guard rows, which run between the
+        # positive row and the cases and not through this function, is
+        # charged to no row: a run it blocks names "an unrecorded run". Each
+        # place a worker this run started outlives the join is recorded as a
+        # straggler and fails this run.
         # A slot not back within main's bound is recorded in retained and
         # fails this run. unmet names each check a blocked run failed.
         inherited, leaked = settle_resolvers(2.0)
@@ -3661,6 +3665,10 @@ def self_test(vectors_only=False):
                 fetch_durations.append(time.monotonic() - started)
 
         def tracked_fetch(url, cap, deadline, context):
+            if config.get("anchor_first") and url != ANCHOR_URL:
+                # Resolver vectors only: the anchor is fetched before this
+                # fetch is recorded, against main's order.
+                tracked_fetch(ANCHOR_URL, cap, deadline, context)
             fetch_calls.append(url)
             if config.get("exception"):
                 raise RuntimeError("synthetic observer exception")
@@ -3969,9 +3977,11 @@ def self_test(vectors_only=False):
                 # A worker that outlives the bound finds the never-resolving
                 # stub (_resolver_stub_bound), never the production resolver.
                 if resolver_sockets is not None:
-                    # Close both ends before the wait, as main's teardown did,
-                    # so the bound covers main's worker path: a lookup still
-                    # reading its end meets an error there, not end of file.
+                    # Close both ends before the wait, in main's order, as
+                    # main's teardown did. A lookup still reading its end
+                    # then sees an error or end of file; on either path it
+                    # returns and its worker releases the slot, so the bound
+                    # below covers both.
                     resolver_sockets[1].close()
                     resolver_sockets[0].close()
                     # Main's bound: once the fixture lookup is released, the
@@ -4219,9 +4229,9 @@ def self_test(vectors_only=False):
     # with blocked runs as the mutant.
     VECTOR_NAMES = ("resolver-vector/straggler", "resolver-vector/blocked",
                     "resolver-vector/blocked-effect", "resolver-vector/blocked-residue",
-                    "resolver-vector/blocked-order", "resolver-vector/blocked-timing",
-                    "resolver-vector/blocked-mutant", "resolver-vector/retained-slot",
-                    "resolver-vector/cleanup")
+                    "resolver-vector/blocked-connect", "resolver-vector/blocked-fetch-order",
+                    "resolver-vector/blocked-timing", "resolver-vector/blocked-mutant",
+                    "resolver-vector/retained-slot", "resolver-vector/cleanup")
     detected = (False, "fixture: detected", 0.0, [], [], [], [], [], [])
     evaluated = (True, "fixture: evaluated", 0.0, [], [], [], [], [], [])
 
@@ -4273,7 +4283,10 @@ def self_test(vectors_only=False):
                     (VECTOR_NAMES[3], dict(skip_cleanup=True), ["quarantine residue"]),
                     (VECTOR_NAMES[4], dict(before_connect=True, connect_before_resolve=True),
                      ["connected before the refusal"]),
-                    (VECTOR_NAMES[5], dict(fetch_bound=0.50, delay_before_resolve=0.60),
+                    # redirect applies main's fetch-order check to this run.
+                    (VECTOR_NAMES[5], dict(redirect=True, anchor_first=True),
+                     ["fetch order"]),
+                    (VECTOR_NAMES[6], dict(fetch_bound=0.50, delay_before_resolve=0.60),
                      ["timing bound"])):
                 failures = []
                 case = (name.replace("resolver-vector/", "vector/"), VALID, "archive", config)
@@ -4309,7 +4322,7 @@ def self_test(vectors_only=False):
                     failures.append("a blocked mutant run that "
                                     + ("passed" if run[0] else "failed a check")
                                     + " was not a CANNOT-EVALUATE non-detection")
-            results.append((VECTOR_NAMES[6], failures))
+            results.append((VECTOR_NAMES[7], failures))
         finally:
             gate.set()
 
@@ -4332,7 +4345,7 @@ def self_test(vectors_only=False):
                 failures.append("the retained slot did not fail its row INVALID")
             if record_row(case, run[:7] + ([],) + run[8:], detected)["test_status"] != VALID:
                 failures.append("the row fails without its retained slot")
-            results.append((VECTOR_NAMES[7], failures))
+            results.append((VECTOR_NAMES[8], failures))
         finally:
             gate.set()
 
@@ -4344,8 +4357,8 @@ def self_test(vectors_only=False):
         results = []
         lookup_before = module._lookup
         slot_before = module._RESOLVER_SLOT
-        for vector, names in ((straggler_vectors, VECTOR_NAMES[:7]),
-                              (retained_vector, VECTOR_NAMES[7:8])):
+        for vector, names in ((straggler_vectors, VECTOR_NAMES[:8]),
+                              (retained_vector, VECTOR_NAMES[8:9])):
             try:
                 vector(base, contexts, results)
             except Exception as exc:
@@ -4361,7 +4374,7 @@ def self_test(vectors_only=False):
             failures.append("the vectors left the resolver slot held")
         else:
             _RESOLVER_SLOT.release()
-        results.append((VECTOR_NAMES[8], failures))
+        results.append((VECTOR_NAMES[9], failures))
         return results
 
     try:
@@ -4462,7 +4475,11 @@ def self_test(vectors_only=False):
     #   met the same raise on main; here it fails the row INVALID: exit 1.
     # - In any other run, a straggler or a leaked slot fails its row INVALID:
     #   exit 1. Main had no such check there, so its exit depended on whether
-    #   a later run was disturbed.
+    #   a later run was disturbed. The 2.0 s joins before and after each run
+    #   also wait out a worker that main's next run would have met: here a
+    #   worker that ends within them disturbs no run and fails no row, so in
+    #   that window this branch can be more lenient than main, exiting 0
+    #   where main could have failed the next run's row.
     # - A positive run with a straggler, a leaked slot or a retained slot
     #   fails its row INVALID and every later row still runs: exit 1. Main
     #   had no such check there.
