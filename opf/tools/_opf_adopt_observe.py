@@ -3348,31 +3348,30 @@ def self_test(vectors_only=False):
     add("TG-11/oversize-compressed", CANNOT_EVALUATE, "archive-cap",
         archive_cap=len(baseline_archive) + 64,
         archive=baseline_archive + b"x" * 65, absent="archive")
-    # Each timing row names the deadline guard its mutation removes and the
-    # number of fetches it refuses. Both feed only the diagnostic relabel in
-    # timing_status. The resolver wait and the TLS handshake are armed from
-    # the connection deadline, so those rows name "connect". A load-delayed
-    # connection deadline that stops their mutant earlier, at _fetch, also
-    # names "connect" and keeps main's INVALID. The relabel also needs every
-    # unmutated refusal to name the row's guard: a guard that never fired
-    # unmutated cannot explain an undetected mutant.
+    # Each timing row names the deadline guard its mutation removes. The name
+    # is printed beside the diagnostic guard lists for triage only and never
+    # decides a status. The resolver wait and the TLS handshake are armed
+    # from the connection deadline, so those rows name "connect". Unmutated,
+    # stalled-resolver's second fetch meets the slot the stalled worker still
+    # holds, so its record is [connect, ObserveError] by design.
+    #
+    # Residual (TG-11 load flake): a host stall can let a different deadline
+    # guard stop a timing row's mutant inside the row's bound. Main's checks
+    # then miss the mutant and the row is INVALID, exit 1. That fails closed:
+    # no status separates a load flake from a deadline regression, because
+    # the attribution records the last deadline queried, not the timeout
+    # that fired. guards_fired and mutant_guards_fired exist to triage it.
     add("TG-11/slow-drip", CANNOT_EVALUATE, "request-deadline",
         mode="slow", response=reply(b"x" * 200), fetch_bound=1.00,
-        guarded="request", refusals=1)
+        guarded="request")
     add("TG-11/read-inactivity", CANNOT_EVALUATE, "inactivity",
-        mode="stall", fetch_bound=0.50, guarded="inactivity", refusals=1)
-    # Never relabelled. Unmutated, the second fetch meets the slot the stalled
-    # worker still holds, so the run records [connect, ObserveError] by
-    # design. The mutant's unbounded wait ends only when the stalled lookup
-    # does, after its 1.0 second socket timeout, so no load can bring that
-    # mutant inside the 0.50 bound: an undetected mutant here is a defect.
+        mode="stall", fetch_bound=0.50, guarded="inactivity")
     add("TG-11/stalled-resolver", CANNOT_EVALUATE, "resolver-deadline",
-        stalled_resolver=True, fetch_bound=0.50, guarded="connect", refusals=2,
-        relabel=False)
+        stalled_resolver=True, fetch_bound=0.50, guarded="connect")
     add("TG-11/connect-timeout", CANNOT_EVALUATE, "connect-deadline",
-        connect_stall=True, fetch_bound=0.50, guarded="connect", refusals=2)
+        connect_stall=True, fetch_bound=0.50, guarded="connect")
     add("TG-11/tls-timeout", CANNOT_EVALUATE, "tls-deadline",
-        mode="tls-stall", fetch_bound=0.50, guarded="connect", refusals=2)
+        mode="tls-stall", fetch_bound=0.50, guarded="connect")
     add("TG-12/observer-backstop", CANNOT_EVALUATE, "backstop", exception=True)
     add("TG-12/public-wrapper-backstop", CANNOT_EVALUATE, "wrapper",
         wrapper_exception=True)
@@ -3496,95 +3495,6 @@ def self_test(vectors_only=False):
     add("TG-15/no-product-write", mutation="write", archive=hostile_names,
         public_wrapper=True)
 
-    def timing_status(passed, mutant_passed, config, guards, mutant_guards):
-        # Main's outcome first: VALID exactly when the unmutated run passed
-        # main's checks and main's checks detected the mutant. The only
-        # change is INVALID to CANNOT-EVALUATE, and only when the unmutated
-        # run passed, the mutant was not detected, the row permits it, both
-        # runs recorded the row's number of refusals, every unmutated refusal
-        # names the row's guard, and every mutant refusal names a recognized
-        # deadline guard other than the row's. So this returns VALID exactly
-        # when main does; the relabel is a label, never a pass.
-        # The attribution is diagnostic. It records the last left() armed
-        # before a socket timeout or a resolver wait expired, not the timeout
-        # actually installed, so it never decides detection or the
-        # unmutated run's pass; a misattribution can only move an INVALID
-        # row to CANNOT-EVALUATE, which still fails.
-        status = VALID if passed and not mutant_passed else INVALID
-        if (status == INVALID and passed and mutant_passed
-                and "guarded" in config and config.get("relabel", True)
-                and len(guards) == config["refusals"]
-                and len(mutant_guards) == config["refusals"]
-                and all(guard == config["guarded"] for guard in guards)
-                and all(guard in ("connect", "request", "gather", "inactivity")
-                        and guard != config["guarded"] for guard in mutant_guards)):
-            return CANNOT_EVALUATE
-        return status
-
-    def expected_timing_status(passed, mutant_passed, config, guards, mutant_guards):
-        # The relabel rule restated apart from timing_status, as the oracle
-        # for its vector: main's INVALID becomes CANNOT-EVALUATE only for a
-        # permitting row whose unmutated run passed with exactly its refusal
-        # count, each naming its guard, and whose undetected mutant recorded
-        # the same count, each naming another recognized deadline guard.
-        if not passed:
-            return INVALID
-        if not mutant_passed:
-            return VALID
-        row = config.get("guarded")
-        if row is None or config.get("relabel") is False:
-            return INVALID
-        if guards != [row] * config["refusals"]:
-            return INVALID
-        others = {"connect", "request", "gather", "inactivity"} - {row}
-        if len(mutant_guards) != config["refusals"] or not others.issuperset(mutant_guards):
-            return INVALID
-        return CANNOT_EVALUATE
-
-    def timing_status_vector(status_function):
-        # Compare status_function with the oracle, outcome for outcome, over
-        # every combination of the two run results, the row configuration
-        # and refusal records of up to two entries drawn from the guards,
-        # two unrecognized names and three exception classes. Return the
-        # number of combinations whose outcome is not main's, or None at the
-        # first disagreement with the oracle.
-        names = ("connect", "request", "gather", "inactivity", "other",
-                 "connect-inactivity", "ObserveError", "OSError", "SSLError")
-        records = [[]] + [[a] for a in names] + [[a, b] for a in names for b in names]
-        configs = [{}] + [
-            dict({"guarded": guarded, "refusals": refusals}, **relabel)
-            for guarded in ("connect", "request", "gather", "inactivity")
-            for refusals in (1, 2)
-            for relabel in ({}, {"relabel": True}, {"relabel": False})
-        ]
-        changed = 0
-        for config in configs:
-            for passed in (False, True):
-                for mutant_passed in (False, True):
-                    for guards in records:
-                        for mutant_guards in records:
-                            arguments = (passed, mutant_passed, config,
-                                         list(guards), list(mutant_guards))
-                            status = status_function(*arguments)
-                            if status != expected_timing_status(*arguments):
-                                return None
-                            changed += status != (
-                                VALID if passed and not mutant_passed else INVALID)
-        return changed
-
-    # Each mutant weakens one condition of the relabel; the vector must
-    # reject every one of them.
-    timing_status_mutants = (
-        ('len(guards) == config["refusals"]', "True"),
-        ('len(mutant_guards) == config["refusals"]', "True"),
-        ('guard != config["guarded"]', "True"),
-        ('all(guard == config["guarded"] for guard in guards)', "True"),
-        ("status == INVALID and passed and mutant_passed",
-         "status == INVALID and mutant_passed"),
-        ("VALID if passed and not mutant_passed", "VALID if not mutant_passed"),
-        ('config.get("relabel", True)', "True"),
-    )
-
     def settle_resolvers(seconds):
         # A resolver worker takes _RESOLVER_SLOT only when it runs, so the
         # slot alone cannot show that a started worker has finished: one that
@@ -3671,12 +3581,10 @@ def self_test(vectors_only=False):
             sock.connect(("127.0.0.1", port))
 
         class TrackedDeadline(original_deadline):
-            # Diagnostic only. Name the bound behind each expiry: a deadline
-            # clamped to its parent inherits the parent's name, and a left()
-            # whose INACTIVITY_SECONDS cap binds arms the inactivity cap.
-            # Production caps only reads under the request deadline, so a
-            # binding cap on the connection deadline is not that guard and
-            # is named apart from it.
+            # Diagnostic only; nothing here reaches a status or exit code.
+            # Name the deadline each left() queries: a deadline clamped to its
+            # parent inherits the parent's name, and a left() whose
+            # INACTIVITY_SECONDS cap binds is named "inactivity".
             def __init__(self, seconds, parent=None):
                 super().__init__(seconds, parent)
                 self.guard = (parent.guard if parent is not None and self.end == parent.end
@@ -3690,14 +3598,15 @@ def self_test(vectors_only=False):
                     raise
                 capped = (maximum is not None and maximum == module.INACTIVITY_SECONDS
                           and remaining == maximum)
-                armed[:] = [("connect-inactivity" if self.guard == "connect" else "inactivity")
-                            if capped else self.guard]
+                armed[:] = ["inactivity" if capped else self.guard]
                 return remaining
 
         def attribute(exc):
-            # A socket timeout or an expired resolver wait is credited to the
-            # last left() armed in this fetch, which need not be the timeout
-            # in force. Anything else is recorded by exception class.
+            # Diagnostic: the last deadline queried before each refusal, not
+            # proof of which timeout fired. A socket timeout or an expired
+            # resolver wait is credited to the last left() in this fetch,
+            # which need not be the timeout in force. Anything else is
+            # recorded by exception class.
             if expired and expired[0] is exc:
                 return expired[1]
             if armed and (isinstance(exc, socket.timeout) or (
@@ -4069,19 +3978,11 @@ def self_test(vectors_only=False):
             server.close()
             if not settle_resolvers(2.0):
                 leaks.append("teardown")
-        return passed and not leaks, status, elapsed, fetch_guards, leaks
+        # passed is main's verdict on this run, leaks the resolver slots found
+        # leaked. The caller fails the row on a leak, but a leak never counts
+        # as the mutant's detection.
+        return passed, status, elapsed, fetch_guards, leaks
 
-    # timing_status must match its oracle everywhere and relabel somewhere,
-    # and the vector must reject every weakened relabel.
-    if not timing_status_vector(timing_status):
-        print("timing-status vector failed: timing_status departed from its oracle",
-              file=sys.stderr)
-        return 1
-    for old, new in timing_status_mutants:
-        if timing_status_vector(source_mutant(timing_status, old, new)) is not None:
-            print("timing-status vector accepted a mutant:", old, file=sys.stderr)
-            return 1
-    relabeled = []
     try:
         # Missing timer support is a setup cannot-evaluate, before any row.
         watchdog_preconditions()
@@ -4125,6 +4026,7 @@ def self_test(vectors_only=False):
             # Establish an actual positive TLS/quarantine fixture before negatives.
             positive = ("positive/local-tls-quarantine", VALID, "archive", {})
             passed, status, elapsed, _, leaks = run_case(base, contexts, positive, False)
+            passed = passed and not leaks
             executed.append({
                 "id": positive[0], "expected": VALID, "observed": status,
                 "test_status": VALID if passed else INVALID,
@@ -4151,30 +4053,30 @@ def self_test(vectors_only=False):
                     "mutant_observed": mutant_status,
                     "mutant_test_status": VALID if mutant_passed else INVALID,
                     "mutation_detected": not mutant_passed,
-                    "test_status": timing_status(passed, mutant_passed, case[3],
-                                                 guards, mutant_guards),
+                    "test_status": VALID if passed and not mutant_passed else INVALID,
                     "elapsed_seconds": elapsed,
                     "mutant_elapsed_seconds": mutant_elapsed,
                 })
                 if "guarded" in case[3]:
-                    # Diagnostic: the guard behind each refused fetch.
+                    # Diagnostic only, written after the status and never
+                    # read back: the last deadline queried before each
+                    # refusal, not proof of which timeout fired. It triages a
+                    # TG-11 load flake and cannot excuse one.
                     executed[-1]["guarded_deadline"] = case[3]["guarded"]
                     executed[-1]["guards_fired"] = guards
                     executed[-1]["mutant_guards_fired"] = mutant_guards
+                    executed[-1]["guards_fired_note"] = (
+                        "diagnostic: the last deadline queried before each"
+                        " refusal, not proof of which timeout fired")
                 if leaks or mutant_leaks:
-                    # A leaked slot fails the row in either run. It is never
-                    # counted as detecting the mutant.
+                    # A leaked slot fails the row in either run, as main
+                    # would by its INVALID. mutation_detected stays main's
+                    # verdict on the mutant run: a leak is not a detection.
                     executed[-1]["test_status"] = INVALID
                     executed[-1]["resolver_slot_leaked"] = leaks
                     executed[-1]["mutant_resolver_slot_leaked"] = mutant_leaks
                     executed[-1]["detail"] = (
                         "resolver slot held with no live resolver worker")
-                if executed[-1]["test_status"] == CANNOT_EVALUATE:
-                    relabeled.append(case[0])
-                    executed[-1]["detail"] = (
-                        "the mutant's recorded refusals name a different deadline"
-                        " guard; the row cannot evaluate its mutant (attribution"
-                        " is diagnostic)")
     except Exception as exc:
         executed.append({
             "id": "fixture/setup-or-teardown",
@@ -4192,15 +4094,8 @@ def self_test(vectors_only=False):
                     + [case[0] for case in cases])
     if [row["id"] for row in executed] != expected_ids:
         return 1
-    if any(row["test_status"] != VALID and row["id"] not in relabeled for row in executed):
+    if any(row["test_status"] != VALID for row in executed):
         return 1
-    if relabeled:
-        # INVALID is ruled out above. As for fixture setup, a row that
-        # cannot evaluate its mutant exits 2. Only this standalone run
-        # distinguishes 2: run_all_checks.sh records a failed gate and exits
-        # 1, and _opf_adopt.py's vectors-only check requires 0, so both
-        # report it as an ordinary failure, never as a pass.
-        return 2
     if not vectors_only:
         try:
             _runner_registration_test(expected_ids)
