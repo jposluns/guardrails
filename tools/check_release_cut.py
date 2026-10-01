@@ -1208,15 +1208,24 @@ def _close_harness_in_step(journal, copy):
 #      elements; and a chained assignment, a = b = v, which binds one object to every target, so its keyed
 #      targets join each other whatever v is (a call such as os.open(p, 0), a name, a display), and each also
 #      takes v as a single assignment of it would;
-#   2. a tuple or list assignment whose right side is a display of the same length binds each target to its
-#      element exactly as a plain assignment of that element would (rule 1, or rules 3, 6 and 7): fd, a = a,
-#      None joins fd and a, a swap a, b = b, a joins a and b, and fds, other = [a], None joins []fds and a. There
-#      is no move rule: a source handed on keeps its alias class after the move, in every branch and after
+#   2. a tuple or list assignment whose right side is a tuple or list display of the same length, with no starred
+#      element on either side, binds each target to its element exactly as a plain assignment of that element would
+#      (rule 1, or rules 3, 6 and 7, or this rule again for a nested target tuple or list): fd, a = a, None joins
+#      fd and a, a swap a, b = b, a joins a and b, (a, b), c = (fd, x), None joins a and fd, and fds, other = [a],
+#      None joins []fds and a. Every other unpacking assignment (from a set or dict display, a starred target or
+#      element, a length mismatch, or a right side that is no display: a name, an attribute, an element or a call)
+#      joins every key it binds (each target, each key of a nested target tuple or list, and a starred target's
+#      element key) to every key its right side can yield: the element keys that side supplies as a container
+#      expression (rule 4: a display's elements, a dict display's keys and values, or the element key of the
+#      container it names, wrappers removed, just as a loop over it joins, rule 5), and the element keys of the
+#      container each starred element of a display names; so a, = {fd}, a, = {fd: None}, *a, b = fd, x, a, b, c =
+#      *fds, None and a, b = pair all join (conservative: a target is joined to every element, not only its own).
+#      There is no move rule: a source handed on keeps its alias class after the move, in every branch and after
 #      every join, so a later close of it pairs with every close of the value it handed on (conservative: it
-#      reports more, never less). The P1 ownership-first idiom is therefore reported on purpose: fd, a = a,
-#      None; os.close(fd) under a cleanup `if a is not None: os.close(a)`, and prev, cur = cur, nxt;
-#      os.close(prev) under a cleanup of cur, are TRY (or AFTER) hits, and each tree site of the idiom is a
-#      recorded false positive in the dispositions below, with its reason;
+#      reports more, never less). The P1 ownership-first idiom is therefore reported on purpose: fd, a = a, None;
+#      os.close(fd) under a cleanup `if a is not None: os.close(a)`, and prev, cur = cur, nxt; os.close(prev) under
+#      a cleanup of cur, are TRY (or AFTER) hits, and each tree site of the idiom is a recorded false positive in
+#      the dispositions below, with its reason;
 #   3. a container's element key joins each element of a tuple, list or set display, and each key and each
 #      value of a dict display ({a: x} and {k: a} alike), bound to it or appended, inserted or added into it; a
 #      value stored into it by subscript (c[i] = a; the index i is not joined); and the element keys a
@@ -1248,14 +1257,17 @@ def _close_harness_in_step(journal, copy):
 # statement's exit in the ATTR shape, and a re-binding by a for or with target, a match capture, an assignment
 # expression (:=), del or import, which no shape counts; an element closed by index (fds[i] is one key per
 # container, and a nested container shares the outer element key only by subscript); a container appended or
-# inserted into another as one element; a tuple unpacked from anything but a display (a, b = pair), or a nested
-# target tuple, in an assignment or a loop; a starred element or target ([*c]; a dict display's **d joins d
-# itself, not d's elements); a conditional expression (c if x else d); an alias made by an assignment
-# expression, a match capture or a with target over anything but a key or a rule-6 wrapper; a comprehension or a
-# container returned by any call other than the rule-4 wrappers; and descriptors held by objects the sweep does
-# not know wrap one (sockets, subprocess pipes, selectors). The flow-insensitive join is also the sweep's main
-# source of false positives: one name re-bound to unrelated descriptors in turn (sequential self-test legs, a
-# walk's prev, cur = cur, nxt) is one class, so each such tree site is disposed below.
+# inserted into another as one element; a nested or starred target in a loop (for (a, b), c in x; for a, *b in
+# x), and a re-binding by a nested or starred target element in an assignment ((a, b), c = ...; a, *b = ...);
+# a starred element of any display but an unpacking's right side itself ([*c] bound, appended, iterated, or
+# nested inside that right side; and a dict display's **d joins d itself, not d's elements, in an unpacking
+# too); a conditional expression (c if x else d); an alias made by an assignment expression, a match capture or
+# a with target over anything but a key or a rule-6 wrapper; a comprehension or a container returned by any
+# call other than the rule-4 wrappers, whether bound, iterated or unpacked (a, b = helper(fd) joins neither to
+# fd); and descriptors held by objects the sweep does not know wrap one (sockets, subprocess pipes, selectors).
+# The flow-insensitive join is also the sweep's main source of false positives: one name re-bound to unrelated
+# descriptors in turn (sequential self-test legs, a walk's prev, cur = cur, nxt) is one class, so each such
+# tree site is disposed below.
 _CLOSE_SWEEP_DIRS = ("tools", "opf/tools")
 
 
@@ -1408,6 +1420,39 @@ def _cs_aliases(fn):
                 if kw.arg and _cs_key(kw.value):
                     union(target + "." + kw.arg, _cs_key(kw.value))
 
+    def leaves(target):
+        """The keys an unpacking target binds: a keyed element, each key of a nested tuple or list, and the
+        element key of a starred one (*rest is a list of what it takes)."""
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return [k for t in target.elts for k in leaves(t)]
+        if isinstance(target, ast.Starred):
+            return ["[]" + k.lstrip("[]") for k in leaves(target.value)]
+        return [_cs_key(target)] if _cs_key(target) else []
+
+    def yields(node):
+        """Every key unpacking `node` can hand a target: the element keys it supplies as a container expression
+        (rule 4: a display's elements, a dict display's keys and values, the element key of a named or wrapped
+        container), and the element keys of the container each starred element of a display names."""
+        starred = [e.value for e in getattr(node, "elts", ()) if isinstance(e, ast.Starred)]
+        return contents(node) + [k for e in starred for k in contents(e)]
+
+    def assign(target, value):
+        """Rules 1 and 2 for one target of an assignment of `value`."""
+        if isinstance(target, (ast.Tuple, ast.List)):
+            parts = getattr(value, "elts", [])
+            if isinstance(value, (ast.Tuple, ast.List)) and len(target.elts) == len(parts) \
+                    and not any(isinstance(e, ast.Starred) for e in target.elts + parts):
+                for t, v in zip(target.elts, parts):   # rule 2: each element as a plain assignment
+                    assign(t, v)
+                return
+            for key in leaves(target):                # anything else: each target takes all the value yields
+                for element in yields(value):
+                    union(key, element)
+        elif _cs_key(target) and _cs_key(value):
+            union(_cs_key(target), _cs_key(value))
+        elif _cs_key(target):
+            bind(_cs_key(target), value)
+
     for node in _cs_walk(fn.body):
         if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)) and node.value is not None:
             value = node.value
@@ -1416,17 +1461,7 @@ def _cs_aliases(fn):
             for other in chained[1:]:
                 union(chained[0], other)          # rule 1: a = b = v binds one object to every target
             for target in targets:
-                pairs = [(target, value)]
-                if isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)) \
-                        and len(target.elts) == len(value.elts):
-                    pairs = list(zip(target.elts, value.elts))   # rule 2: each element as a plain assignment
-                for t, v in pairs:
-                    if not _cs_key(t):
-                        continue
-                    if _cs_key(v):
-                        union(_cs_key(t), _cs_key(v))
-                    else:
-                        bind(_cs_key(t), v)
+                assign(target, value)
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
                 and node.func.attr in ("append", "extend", "insert", "add", "update") and _cs_key(node.func.value):
             box = "[]" + _cs_key(node.func.value).lstrip("[]")
@@ -1813,7 +1848,23 @@ _CLOSE_SWEEP_SHAPES = (
      "        with fh as g:\n            g.read()\n    finally:\n        os.close(a)\n", ["TRY"]),
     ("chained assignment from a call", "def f(p):\n    a = b = os.open(p, 0)\n    try:\n        os.close(a)\n"
      "    finally:\n        os.close(b)\n", ["TRY"]),
+    ("unpacking a set display", "def f(fd):\n    a, = {fd}\n    try:\n        os.close(a)\n    finally:\n"
+     "        os.close(fd)\n", ["TRY"]),
+    ("unpacking a dict display", "def f(fd):\n    a, = {fd: None}\n    try:\n        os.close(a)\n    finally:\n"
+     "        os.close(fd)\n", ["TRY"]),
+    ("unpacking into a starred target", "def f(fd, x):\n    *a, b = fd, x\n    try:\n        for y in a:\n"
+     "            os.close(y)\n    finally:\n        os.close(fd)\n", ["TRY"]),
+    ("unpacking with a length mismatch", "def f(fd, x):\n    fds = [fd, x]\n    a, b, c = *fds, None\n    try:\n"
+     "        os.close(a)\n    finally:\n        os.close(fd)\n", ["TRY"]),
+    ("unpacking from a call", "def f(fd):\n    fds = [fd]\n    a, = list(fds)\n    try:\n        os.close(a)\n"
+     "    finally:\n        os.close(fd)\n", ["TRY"]),
+    ("unpacking from a name", "def f(fd):\n    pair = fd, None\n    a, b = pair\n    try:\n        os.close(a)\n"
+     "    finally:\n        os.close(fd)\n", ["TRY"]),
+    ("unpacking into a nested target", "def f(fd, x):\n    (a, b), c = (fd, x), None\n    try:\n"
+     "        os.close(a)\n    finally:\n        os.close(fd)\n", ["TRY"]),
 )
+_CS_UNPACK = ("unpacking a set display", "unpacking a dict display", "unpacking into a starred target",
+              "unpacking with a length mismatch", "unpacking from a call", "unpacking from a name")
 _CS_LOOP_ELSE = ("for else after a swallowed close", "while else after a swallowed close", "for else re-binds",
                  "while else re-binds")
 
@@ -1917,12 +1968,12 @@ _CLOSE_SWEEP_REVERTS = (
      ("close in a match case, re-bound after the match", "robustness corpus: match")),
     ("sweep-try-star-after", "if _cs_is_try(stmt) and any(", "if isinstance(stmt, ast.Try) and any(",
      ("try-star swallowed close, closed later",)),
-    ("sweep-tuple-elements", "pairs = list(zip(target.elts, value.elts))   # rule 2", "pairs = []  #",
+    ("sweep-tuple-elements", "for t, v in zip(target.elts, parts):   # rule 2", "for t, v in ():  #",
      ("ownership transfer", "tuple assignment keeping its source", "fan-out tuple from a cleared source",
       "transfer from a source with an earlier alias", "ownership-first idiom from an earlier alias",
       "move re-binds its source to another descriptor", "container display in a tuple assignment",
       "move in one branch of an if, closed after the join",
-      "move in an if branch, its new alias closed after the join")),
+      "move in an if branch, its new alias closed after the join", "unpacking into a nested target")),
     ("sweep-wrapped-key", "or not _cs_key(node.args[0]):", "or not isinstance(node.args[0], ast.Name):",
      ("fdopen of an attribute", "fdopen of a container element")),
     ("sweep-wrapper-aliases", "return find(k) in {find(c) for c in closed}", "return k in closed",
@@ -1931,7 +1982,7 @@ _CLOSE_SWEEP_REVERTS = (
     ("sweep-with-rebind", "if isinstance(stmt, (ast.With, ast.AsyncWith)):", "if False:",
      ("with exit, then re-bound", "with exit in a try body, then a move, finally closes the source")),
     ("sweep-dict-keys", "for e in node.keys + node.values if _cs_key(e)]", "for e in node.values if _cs_key(e)]",
-     ("dict display key iterated by keys()", "dict display key iterated by items()")),
+     ("dict display key iterated by keys()", "dict display key iterated by items()", "unpacking a dict display")),
     ("sweep-loop-target-tuple", 'for target in [node.target] + list(getattr(node.target, "elts", [])):',
      "for target in [node.target]:", ("dict display key iterated by items()",)),
     ("sweep-with-object-exit", "return k if k and find(k) in {find(a) for a, b in wraps if closing(b)} else None",
@@ -1948,6 +1999,21 @@ _CLOSE_SWEEP_REVERTS = (
      ("fdopen object of an alias closed", "fdopen object closed, then a move", "with exit over an alias of a wrapper")),
     ("sweep-chained-targets", "union(chained[0], other)          # rule 1", "pass  #",
      ("chained assignment from a call",)),
+    ("sweep-unpack-fallback", "for key in leaves(target):                # anything else",
+     "for key in ():  #", _CS_UNPACK),
+    ("sweep-unpack-nested", "                    assign(t, v)\n", "                    _cs_key(t) and assign(t, v)\n",
+     ("unpacking into a nested target",)),
+    ("sweep-unpack-starred-exact", "and not any(isinstance(e, ast.Starred) for e in target.elts + parts):",
+     "and True:", ("unpacking into a starred target",)),
+    ("sweep-unpack-starred-target", 'return ["[]" + k.lstrip("[]") for k in leaves(target.value)]', "return []",
+     ("unpacking into a starred target",)),
+    ("sweep-unpack-starred-value", "return contents(node) + [k for e in starred for k in contents(e)]",
+     "return contents(node)", ("unpacking with a length mismatch",)),
+    ("sweep-unpack-non-display", "return contents(node) + [k for e in starred for k in contents(e)]",
+     "return elements(node) + [k for e in starred for k in contents(e)]",
+     ("unpacking from a call", "unpacking from a name")),
+    ("sweep-set-elements", "if isinstance(node, (ast.Tuple, ast.List, ast.Set)):",
+     "if isinstance(node, (ast.Tuple, ast.List)):", ("unpacking a set display",)),
 )
 
 
