@@ -2951,6 +2951,7 @@ def self_test(vectors_only=False):
     original_context = ssl.create_default_context
     original_fetch = _fetch
     original_tls = _tls
+    original_deadline = _Deadline
     original_remove = _QuarantineOwner.remove
     public_ip = "93.184.216.34"
     commit = "a" * 40
@@ -3304,15 +3305,16 @@ def self_test(vectors_only=False):
         archive_cap=len(baseline_archive) + 64,
         archive=baseline_archive + b"x" * 65, absent="archive")
     add("TG-11/slow-drip", CANNOT_EVALUATE, "request-deadline",
-        mode="slow", response=reply(b"x" * 200), fetch_bound=1.00)
+        mode="slow", response=reply(b"x" * 200), fetch_bound=1.00,
+        fired=[("request",)])
     add("TG-11/read-inactivity", CANNOT_EVALUATE, "inactivity",
-        mode="stall", fetch_bound=0.50)
+        mode="stall", fetch_bound=0.50, fired=[("inactivity", "_receive")])
     add("TG-11/stalled-resolver", CANNOT_EVALUATE, "resolver-deadline",
         stalled_resolver=True, fetch_bound=0.50)
     add("TG-11/connect-timeout", CANNOT_EVALUATE, "connect-deadline",
         connect_stall=True, fetch_bound=0.50)
     add("TG-11/tls-timeout", CANNOT_EVALUATE, "tls-deadline",
-        mode="tls-stall", fetch_bound=0.50)
+        mode="tls-stall", fetch_bound=0.50, fired=[("connect", "_tls")] * 2)
     add("TG-12/observer-backstop", CANNOT_EVALUATE, "backstop", exception=True)
     add("TG-12/public-wrapper-backstop", CANNOT_EVALUATE, "wrapper",
         wrapper_exception=True)
@@ -3461,6 +3463,10 @@ def self_test(vectors_only=False):
         connect_calls = []
         fetch_calls = []
         fetch_durations = []
+        fetch_guards = []
+        deadline_names = {}
+        armed = []
+        expired = []
         short_takes = []
         environments = []
         resolver_sockets = None
@@ -3491,15 +3497,49 @@ def self_test(vectors_only=False):
             port = backlog.getsockname()[1] if backlog is not None else server.port
             sock.connect(("127.0.0.1", port))
 
+        class TrackedDeadline(original_deadline):
+            # Name the bound behind each expiry. A deadline clamped to its
+            # parent inherits the parent's name; a socket timeout armed by
+            # left(maximum) belongs to the inactivity cap, not the deadline.
+            def __init__(self, seconds, parent=None):
+                super().__init__(seconds, parent)
+                self.guard = (parent.guard if parent is not None and self.end == parent.end
+                              else deadline_names.get(seconds, "other"))
+
+            def left(self, maximum=None):
+                site = sys._getframe(1).f_code.co_name
+                try:
+                    remaining = super().left(maximum)
+                except ObserveError as exc:
+                    expired[:] = [exc, self.guard, site]
+                    raise
+                capped = maximum is not None and remaining == maximum
+                armed[:] = ["inactivity" if capped else self.guard, site]
+                return remaining
+
+        def attribute(exc):
+            if expired and expired[0] is exc:
+                return tuple(expired[1:])
+            if isinstance(exc, socket.timeout) and armed:
+                return tuple(armed)
+            return (type(exc).__name__,)
+
+        def timed_fetch(fetch, url, cap, deadline, context):
+            del armed[:], expired[:]
+            started = time.monotonic()
+            try:
+                return fetch(url, cap, deadline, context)
+            except BaseException as exc:
+                fetch_guards.append(attribute(exc))
+                raise
+            finally:
+                fetch_durations.append(time.monotonic() - started)
+
         def tracked_fetch(url, cap, deadline, context):
             fetch_calls.append(url)
             if config.get("exception"):
                 raise RuntimeError("synthetic observer exception")
-            started = time.monotonic()
-            try:
-                return original_fetch(url, cap, deadline, context)
-            finally:
-                fetch_durations.append(time.monotonic() - started)
+            return timed_fetch(original_fetch, url, cap, deadline, context)
 
         def no_containment():
             raise OSError("synthetic missing containment primitive")
@@ -3573,6 +3613,14 @@ def self_test(vectors_only=False):
                 patch(module, "INACTIVITY_SECONDS", 0.15 * scale)
                 patch(module, "REQUEST_SECONDS", 0.80 * scale)
                 patch(module, "GATHER_SECONDS", 1.60 * scale)
+                if timing:
+                    deadline_names.update({
+                        module.CONNECT_SECONDS: "connect", module.REQUEST_SECONDS: "request",
+                        module.GATHER_SECONDS: "gather",
+                    })
+                    if len(deadline_names) != 3:
+                        raise AssertionError("timing deadlines must be distinct")
+                    patch(module, "_Deadline", TrackedDeadline)
                 patch(module, "_lookup", lookup)
                 patch(module, "_connect", connect)
                 patch(module, "_peer", lambda sock: (
@@ -3656,11 +3704,7 @@ def self_test(vectors_only=False):
 
                         def mutated_fetch(url, cap, deadline, context):
                             fetch_calls.append(url)
-                            started = time.monotonic()
-                            try:
-                                return fetch_mutant(url, cap, deadline, context)
-                            finally:
-                                fetch_durations.append(time.monotonic() - started)
+                            return timed_fetch(fetch_mutant, url, cap, deadline, context)
                         patch(module, "_fetch", mutated_fetch)
                     elif mutation == "inactivity":
                         patch(_Wire, "_receive", source_mutant(
@@ -3822,9 +3866,16 @@ def self_test(vectors_only=False):
                 passed = (passed and elapsed < 1.60 and bool(fetch_durations)
                           and all(duration < config["fetch_bound"]
                                   for duration in fetch_durations))
+            if "fired" in config:
+                # Name the guard behind each refused fetch: under host load a
+                # different guard can refuse a mutant inside every time bound.
+                passed = passed and len(fetch_guards) == len(config["fired"]) and all(
+                    guard[:len(want)] == want
+                    for guard, want in zip(fetch_guards, config["fired"])
+                )
             if identifier.startswith("TG-05/"):
                 passed = passed and fetch_calls == [release_url, ANCHOR_URL]
-            return passed, status, elapsed
+            return passed, status, elapsed, fetch_guards
         finally:
             if resolver_sockets is not None:
                 resolver_sockets[1].close()
@@ -3880,7 +3931,7 @@ def self_test(vectors_only=False):
 
             # Establish an actual positive TLS/quarantine fixture before negatives.
             positive = ("positive/local-tls-quarantine", VALID, "archive", {})
-            passed, status, elapsed = run_case(base, contexts, positive, False)
+            passed, status, elapsed, _ = run_case(base, contexts, positive, False)
             executed.append({
                 "id": positive[0], "expected": VALID, "observed": status,
                 "test_status": VALID if passed else INVALID,
@@ -3894,8 +3945,8 @@ def self_test(vectors_only=False):
             guard_rows = _guard_self_test() + _ownership_self_test() + _cancellation_self_test()
             executed.extend(guard_rows)
             for case in cases:
-                passed, status, elapsed = run_case(base, contexts, case, False)
-                mutant_passed, mutant_status, mutant_elapsed = run_case(
+                passed, status, elapsed, guards = run_case(base, contexts, case, False)
+                mutant_passed, mutant_status, mutant_elapsed, mutant_guards = run_case(
                     base, contexts, case, True,
                 )
                 executed.append({
@@ -3910,6 +3961,9 @@ def self_test(vectors_only=False):
                     "elapsed_seconds": elapsed,
                     "mutant_elapsed_seconds": mutant_elapsed,
                 })
+                if "fetch_bound" in case[3]:
+                    executed[-1]["fired"] = [list(guard) for guard in guards]
+                    executed[-1]["mutant_fired"] = [list(guard) for guard in mutant_guards]
     except Exception as exc:
         executed.append({
             "id": "fixture/setup-or-teardown",
