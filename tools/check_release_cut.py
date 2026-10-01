@@ -382,7 +382,12 @@ def working_blob(root, path):
                          dir_fd=directory)
         except FileNotFoundError:
             return None
-        with os.fdopen(fd, "rb") as stream:
+        try:
+            stream = os.fdopen(fd, "rb")
+        except BaseException:
+            _close_fd_yielding(fd)                 # fdopen refused (a directory) before owning fd
+            raise
+        with stream:
             require(stat.S_ISREG(os.fstat(stream.fileno()).st_mode),
                     path + ": working input is not a regular file")
             return stream.read()
@@ -1065,12 +1070,14 @@ def check(case_id, condition):
 
 
 def _close_vectors(base):
-    """#378: the vectors for this tool's _close_fd_yielding copy and its site, working_blob's directory
-    close. A close that fails while an exception unwinds lets that exception through as the same object;
-    one that fails on the normal path raises; neither leaves a descriptor open. Returns (failures, runs)."""
+    """#378: the vectors for this tool's _close_fd_yielding copy and its two sites in working_blob, the
+    directory close and the close of a final component that os.fdopen refuses (a directory). A close that
+    fails while an exception unwinds lets that exception through as the same object; one that fails on the
+    normal path raises; neither leaves a descriptor open. Returns (failures, runs)."""
     import _close_selftest
     base.mkdir()
     (base / "blob").write_bytes(b"blob")
+    (base / "adir").mkdir()
     ns = globals()
     sent = _close_selftest._StSentinel("in flight at working_blob")
 
@@ -1097,11 +1104,35 @@ def _close_vectors(base):
                 os.fdopen, ns["require"] = real_fdopen, real_require
         return call
 
+    def directory_blob(fault):
+        real_fdopen = os.fdopen
+
+        def fdopen_spy(fd, *args, **kwargs):
+            fault.arm(fd)                         # the final component, a directory fdopen refuses
+            return real_fdopen(fd, *args, **kwargs)
+        os.fdopen = fdopen_spy
+        try:
+            working_blob(str(base), "adir")
+        finally:
+            os.fdopen = real_fdopen
+
     vectors = (("check_release_cut site working_blob: finally while an exception unwinds", True, "AL",
                 blob(True), lambda e: e is sent),
-               ("check_release_cut site working_blob: normal path", False, "BL", blob(False), None)
+               ("check_release_cut site working_blob: normal path", False, "BL", blob(False), None),
+               ("check_release_cut site working_blob: except handler when fdopen refuses a directory",
+                True, "AL", directory_blob, lambda e: type(e) is IsADirectoryError)
                ) + _close_selftest._st_helper_vectors(ns)
     return _close_selftest._st_close_check(ns, vectors)
+
+
+def _close_harness_in_step(journal, copy):
+    """#378: tools/_close_selftest.py is a copy of the close-vector harness at the end of
+    opf/tools/_journal.py; from class _StSentinel through _st_helper_vectors (where the copy ends and
+    _journal goes on to its own site vectors) the two must stay byte-identical."""
+    start, stop = "\nclass _StSentinel(", "\n\n\ndef _st_site_vectors("
+    require(journal.count(start) == journal.count(stop) == copy.count(start) == 1,
+            "close harness: _journal.py or _close_selftest.py lost its harness anchors")
+    return copy[copy.index(start):] == journal[journal.index(start):journal.index(stop)] + "\n"
 
 
 def self_test(red_on_revert):
@@ -1178,6 +1209,13 @@ def _self_test_isolated(red_on_revert):
             print("FAIL " + failure, file=sys.stderr)
         check("close-vectors", not close_failures)
         print("PASS close-vectors runs=" + str(close_runs))
+        journal = (script.parents[1] / "opf" / "tools" / "_journal.py").read_text(encoding="utf-8")
+        copy = (script.parent / "_close_selftest.py").read_text(encoding="utf-8")
+        check("close-harness-in-step", _close_harness_in_step(journal, copy))
+        require(copy.count("raise self.err") == 1, "close harness: drift flip anchor is not unique")
+        check("close-harness-drift-red",
+              not _close_harness_in_step(journal, copy.replace("raise self.err", "return None")))
+        print("PASS close-harness-in-step")
         if red_on_revert:
             source = script.read_text(encoding="utf-8")
             marker = "# SELF-TEST:" + " mutation targets are restricted to the production prefix above."
