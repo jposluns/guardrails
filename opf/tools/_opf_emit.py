@@ -3466,19 +3466,32 @@ def _st_guardian_close_reuse():
     opened = []
 
     def second_open_fails(path, flags):
-        """The setup-failure leg's descriptor opens with the second one failing (EMFILE)."""
+        """The setup-failure leg's descriptor opens with the second one failing (EMFILE); each one opened is
+        recorded with its (st_dev, st_ino), taken while this leg still owns the number."""
         if opened:
             raise OSError(errno.EMFILE, "self-test injected open failure")
-        opened.append(os.open(path, flags))
-        return opened[-1]
+        fd = os.open(path, flags)
+        try:
+            st = os.fstat(fd)
+        except BaseException:
+            os.close(fd)
+            raise
+        opened.append((fd, (st.st_dev, st.st_ino)))
+        return fd
     got = _st_guardian_setup_failure(drive, SetupFailed, recorded, _journal, second_open_fails)
     if len(got) != 1 or "opening descriptor 2 of 4" not in got[0] or "injected open failure" not in got[0]:
         failures.append("guardian-close-reuse setup failure with its second open failing: expected that "
                         "named failure alone, got {}".format(got or "green"))
-    for fd in opened:
+    for fd, ident in opened:
+        # The leg should have released fd. Its number may since belong to another thread's open, so it is
+        # "left open", and closed here, only while fstat still shows the file this leg opened; a number now
+        # naming another file is never closed (#378 P1). Every open of os.devnull shares one identity, so a
+        # reuser that also opened os.devnull is not told apart.
         try:
-            os.fstat(fd)
+            st = os.fstat(fd)
         except OSError:
+            continue
+        if (st.st_dev, st.st_ino) != ident:
             continue
         os.close(fd)
         failures.append("guardian-close-reuse setup failure with its second open failing: the descriptor "

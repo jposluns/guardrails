@@ -3378,7 +3378,7 @@ def _scan_env_defeats_wrapper(expr, func_node, module_consts, depth):
     return False
 
 
-def _maintenance_pin_scan(root, allow_missing_files=False):
+def _maintenance_pin_scan(root, allow_missing_files=False, planted_entries=()):
     """The sorted findings of the repo-wide F-367 tripwire scan under <root>: [] means every
     launch under _SCAN_DIRS this scan can resolve to a maintenance-triggering git run is
     effectively pinned or covered, every launch form it CANNOT resolve is justified for
@@ -3386,11 +3386,12 @@ def _maintenance_pin_scan(root, allow_missing_files=False):
     are loud findings, never silent passes. Stale allowlist enforcement covers unused entries
     for scanned files AND entries whose file is missing (deleted or renamed);
     allow_missing_files=True relaxes ONLY the latter, for planted synthetic trees that do not
-    carry the real allowlisted files. The real-tree green leg runs strict."""
+    carry the real allowlisted files. The real-tree green leg runs strict. planted_entries adds
+    allowlist entries for a planted contract tree only."""
     findings = []
     allowed = dict()
     pinned = dict()
-    for entry in _SCAN_ALLOWED_UNPINNED:
+    for entry in _SCAN_ALLOWED_UNPINNED + tuple(planted_entries):
         rel, qualname, kinds = entry[:3]
         allowed[(rel, qualname)] = frozenset(kinds)
         if "dynamic" in kinds:
@@ -3652,7 +3653,8 @@ def _maintenance_pin_scan(root, allow_missing_files=False):
     return sorted(findings)
 
 
-# Each entry: (case id, planted files as (relative path, source) pairs, expectation). An
+# Each entry: (case id, planted files as (relative path, source) pairs, expectation), and
+# optionally a fourth field, allowlist entries planted beside _SCAN_ALLOWED_UNPINNED. An
 # expectation of None demands a CLEAN scan (a harmless form review showed being wrongly
 # flagged, or a protected form the round-3 parser fixes stopped rejecting); a string demands at
 # least one finding containing it (an evasion form round-2 or round-3 review showed being
@@ -3798,6 +3800,14 @@ _SCAN_CONTRACT_CASES = (
          "def _recover_close_vectors(source, ns):",
          "    return compile(source, 'pin.py', 'exec')", ""))),),
      "no matching"),
+    # A dynamic entry with no fifth field (its site count) is itself a finding, even when the
+    # function it justifies holds exactly one site.
+    ("dynamic-pin-missing-count",
+     (("tools/planted.py", "\n".join((
+         "def _seed(source, ns):",
+         "    exec(compile(source, 'planted.py', 'exec'), ns)", ""))),),
+     "dynamic entry without its dynamic-site count",
+     (("tools/planted.py", "_seed", ("dynamic",), "planted: an exec with no pinned count"),)),
     # Round-3 forms: git's LAST-VALUE-WINS config semantics, dynamic launcher access, and the
     # launch keywords, environments, and mutations round-3 review showed silently accepted
     # (each red without the round-3 parser and tripwire changes).
@@ -4445,14 +4455,15 @@ def _scan_contract_failures(base):
     passing value; a failing case reports its planted tree's actual findings, loudly, never a
     silent pass."""
     failures = []
-    for case_id, files, expect in _SCAN_CONTRACT_CASES:
+    for case_id, files, expect, *planted in _SCAN_CONTRACT_CASES:
         root = base / case_id
         (root / "tools").mkdir(parents=True)
         (root / "opf" / "tools").mkdir(parents=True)
         for rel, source in files:
             (root / rel).write_text(source, encoding="utf-8")
         got = _maintenance_pin_scan(root,
-                                    allow_missing_files=(case_id != "stale-missing"))
+                                    allow_missing_files=(case_id != "stale-missing"),
+                                    planted_entries=planted[0] if planted else ())
         if expect is None:
             if got:
                 failures.append("%s: expected a clean scan, got %r" % (case_id, got))
