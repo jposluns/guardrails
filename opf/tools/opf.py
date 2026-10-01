@@ -11992,7 +11992,7 @@ def _cmd_adopt(rest):
 
     The parser is the house fail-closed idiom: an unknown subcommand or token, an empty or
     option-looking or duplicate value -> exit 2. Every residual escape fails closed to exit 2 (never a
-    false 0 or an uncaught exit-1), the same class-width backstop render/doctor/import carry."""
+    false 0 or an uncaught exit-1), the same class-width backstop render and doctor carry."""
     subcommands = ("plan", "approve", "apply", "complete", "reconcile", "status")
     deferred = ("approve", "apply", "complete", "reconcile")
     if not rest:
