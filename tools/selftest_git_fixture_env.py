@@ -2023,6 +2023,11 @@ _SCAN_GIT_HEAD_NAMES = ("git", "GIT", "_GIT", "GIT_BIN")
 # unknown head, no visible argv, **-expanded keywords, executable= override), "git" (a
 # git-headed launch whose argv past the option region stays unresolved), "git-triggering" (a
 # RESOLVED maintenance-triggering git launch without effective pins - the red-leg probe only).
+# An entry that covers "dynamic" carries a fifth field, the exact number of dynamic sites (exec,
+# eval, and the dynamic launcher accesses) its justification audits in that function, stated per
+# entry; the scan counts that function's dynamic sites and reports a finding when the count
+# differs, so a planted extra exec in an allowlisted function is loud rather than absorbed by a
+# function-wide justification (a count above the sites left is a stale pin, reported the same way).
 _SCAN_ALLOWED_UNPINNED = (
     ("tools/selftest_git_fixture_env.py", "_auto_maintenance_children", ("git-triggering",),
      "the F-367 probe's own traced commit: the green leg passes the pinned fixture env and the"
@@ -2167,55 +2172,69 @@ _SCAN_ALLOWED_UNPINNED = (
     # heads are sys.executable commands, never git).
     ("tools/selftest_git_fixture_env.py", "_system_pin_checks", ("dynamic",),
      "exec of an AST-built PATH-removal mutant of the lifecycle helper's own source, for the"
-     " wrapper red leg"),
+     " wrapper red leg",
+     1),
     ("tools/selftest_git_fixture_env.py", "_manifest_extra_setup_failures", ("dynamic",),
      "exec of one registry-derived fixture-setup expression against a stubbed _git, proving"
-     " the setup guard refuses a failed git"),
+     " the setup guard refuses a failed git",
+     1),
     ("opf/tools/check_opf_init_observe.py", "load_candidate", ("dynamic",),
-     "exec-based loader for the copied candidate module under test"),
+     "exec-based loader for the copied candidate module under test",
+     1),
     ("opf/tools/check_opf_init_observe.py", "shared_tests.candidate", ("dynamic",),
-     "exec-based builder for the shared-capture candidate module under test"),
+     "exec-based builder for the shared-capture candidate module under test",
+     1),
     ("opf/tools/check_opf_init_observe.py", "shared_tests.policy", ("dynamic",),
-     "exec-based builder for the policy candidate module under test"),
+     "exec-based builder for the policy candidate module under test",
+     1),
     ("opf/tools/_opf_ingest_apply.py", "_load_revert_candidate", ("dynamic",),
-     "exec-based loader compiling a revert candidate's source into a fresh module"),
+     "exec-based loader compiling a revert candidate's source into a fresh module",
+     1),
     ("opf/tools/check_opf_init_p0.py", "red_on_revert", ("dynamic",),
-     "exec of the production module's source with one guard reverted (red-leg mutant)"),
+     "exec of the production module's source with one guard reverted (red-leg mutant)",
+     1),
     ("opf/tools/_opf_adopt_observe.py", "_cancellation_self_test", ("dynamic",),
      "exec of text mutants of this module's own function and class sources (and of"
      " _opf_adopt.gather_release) with descriptor-cleanup, restore, lock, rollback, TLS, or"
      " resolver-publication sites reverted (red-leg mutants); the exec only defines the"
-     " mutant function or class"),
+     " mutant function or class",
+     2),
     ("opf/tools/_opf_adopt_observe.py", "self_test.source_mutant", ("dynamic",),
      "exec of this module's own function source with exactly one guard site replaced"
-     " (red-leg mutant); the exec only defines the mutant function"),
+     " (red-leg mutant); the exec only defines the mutant function",
+     1),
     ("opf/tools/_opf_emit.py", "_fixture_main", ("dynamic",),
      "exec-based definition of one assertion fixture inside the isolated fixture CHILD:"
      " the body arrives as the `-c` text of an explicit [sys.executable, -I, -B, -c, ...]"
      " argv and is compiled into a single _opf_fixture function (the exec only defines"
      " it; the call is the next statement); every body is a string spelled beside its"
      " run_status_owned call in this repo's tools, and the audited bodies drive imported"
-     " repo modules and CLI cases in-process, spelling no process launch of their own"),
+     " repo modules and CLI cases in-process, spelling no process launch of their own",
+     1),
     ("opf/tools/_opf_manifest_regressions.py", "_validator_namespace", ("dynamic",),
      "exec-based builder of the manifest-validator namespace: the compiled AST is"
      " inspect.getsource(_opf_store) (or a reviewed AST mutant of it) filtered to its"
      " FunctionDef nodes only, so the exec only defines the validator functions over"
      " dict(vars(_opf_store)); a launch the tracked source spells is scanned at its own"
-     " source location, and the census red-leg mutants alter finding emission only"),
+     " source location, and the census red-leg mutants alter finding emission only",
+     1),
     ("opf/tools/opf.py", "_watchdog_completion_case", ("dynamic",),
      "exec of _FixtureProcess._finish_close rebuilt from _opf_emit's own AST with exactly"
      " one pinned QA38/QA39/QA40/QA41/QA51 mutation inserted (red-leg mutants); each exec"
      " only defines the mutant member (for QA51, a one-member class) into dict(vars(emit))"
-     " for the behavioural matrix to drive in-process"),
+     " for the behavioural matrix to drive in-process",
+     5),
     ("opf/tools/opf.py", "_watchdog_completion_case.displaced_outward", ("dynamic",),
      "exec of the two disclosed leg-11 QA37 vector sources (string literals in this"
      " self-test); the exec only defines each vector's mutant function, whose body calls"
      " the planted wait/abandon_unfinished stubs and _cleanup_boundary, never a process"
-     " launch"),
+     " launch",
+     1),
     ("opf/tools/check_opf_record.py", "flip_t70", ("dynamic",),
      "exec of _opf_oplock._acquire_body's own source with the fix-15 head's pre-unwind"
      " removal tagging restored at its failure handler (red-leg mutant); the exec only"
-     " defines the mutant function"),
+     " defines the mutant function",
+     1),
     # #378 close-vector revert builders: each exec compiles inspect.getsource of this tool's own
     # tracked function (or, for check_release_cut's sweep reverts, this tool's own tracked file)
     # with one literal replacement spelled beside it; no replacement text spells a launch, and
@@ -2223,30 +2242,41 @@ _SCAN_ALLOWED_UNPINNED = (
     ("opf/tools/_opf_emit.py", "_st_guardian_close_reuse", ("dynamic",),
      "exec of _FixtureProcess._guardian's own source with its ownership-first subject_fd close"
      " put back as the close-then-rebind body (red-leg mutant); the exec only defines the"
-     " mutant function, which the vector drives with fork, waitid and _exit stubbed"),
+     " mutant function, which the vector drives with fork, waitid and _exit stubbed",
+     1),
     ("opf/tools/check_opf_import.py", "_self_test_close_reuse.revert", ("dynamic",),
      "exec of _physical_home's or _spelled_route's own source with one ownership-first close"
      " put back as the close-then-rebind body (red-leg mutant); the exec only defines the"
-     " mutant function"),
+     " mutant function",
+     1),
     ("opf/tools/check_opf_prompt_pack.py", "_close_vectors", ("dynamic",),
      "exec of _read_regular's own source with its closefd=False fdopen put back as the pre-fix"
-     " fdopen ownership (red-leg mutant); the exec only defines the mutant function"),
+     " fdopen ownership (red-leg mutant); the exec only defines the mutant function",
+     1),
     ("tools/check_footer.py", "_close_vectors", ("dynamic",),
      "exec of _read_regular_page's own source with its closefd=False fdopen put back as the"
-     " pre-fix fdopen ownership (red-leg mutant); the exec only defines the mutant function"),
+     " pre-fix fdopen ownership (red-leg mutant); the exec only defines the mutant function",
+     1),
     ("tools/check_release_cut.py", "_close_vectors", ("dynamic",),
      "exec of working_blob's own source with its closefd=False fdopen put back as the pre-fix"
-     " fdopen ownership (red-leg mutant); the exec only defines the mutant function"),
+     " fdopen ownership (red-leg mutant); the exec only defines the mutant function",
+     1),
     ("tools/check_release_cut.py", "_self_test_isolated", ("dynamic",),
      "exec of this tool's own source with one _CLOSE_SWEEP_REVERTS literal applied to the"
      " sweep code (red-leg mutant) under a non-__main__ __name__, so main() never runs; the"
      " module body only binds imports, constants and definitions and puts opf/tools on"
      " sys.path, and the self-test then calls the mutant's _close_sweep_shapes_red, an AST"
-     " sweep over synthetic shapes"),
+     " sweep over synthetic shapes",
+     1),
+    ("opf/tools/_opf_init_substrate.py", "_t_s23_plan_close_reuse", ("dynamic",),
+     "exec of begin_operation's own source with its ownership-first plan_fd close put back as"
+     " the close-then-rebind body (red-leg mutant); the exec only defines the mutant function",
+     1),
     ("tools/pin.py", "_recover_close_vectors", ("dynamic",),
      "exec of do_recover's own source with its four ownership-first root_fd closes and its"
      " owned-number handler guard put back as the pre-fix bodies (red-leg mutant); the exec"
-     " only defines the mutant function"),
+     " only defines the mutant function",
+     1),
 )
 
 
@@ -3359,9 +3389,20 @@ def _maintenance_pin_scan(root, allow_missing_files=False):
     carry the real allowlisted files. The real-tree green leg runs strict."""
     findings = []
     allowed = dict()
-    for rel, qualname, kinds, _justification in _SCAN_ALLOWED_UNPINNED:
+    pinned = dict()
+    for entry in _SCAN_ALLOWED_UNPINNED:
+        rel, qualname, kinds = entry[:3]
         allowed[(rel, qualname)] = frozenset(kinds)
+        if "dynamic" in kinds:
+            # One rule for every dynamic entry: it pins its exact dynamic-site count.
+            if len(entry) == 5 and type(entry[4]) is int and entry[4] >= 1:
+                pinned[(rel, qualname)] = entry[4]
+            else:
+                findings.append("%s %s: _SCAN_ALLOWED_UNPINNED dynamic entry without its"
+                                " dynamic-site count (a fifth field, an int >= 1)"
+                                % (rel, qualname))
     used, scanned, scanned_bases = set(), set(), []
+    dynamic_sites = dict()
 
     def absorbed(key, kind):
         # A justification covers ONLY the launch kinds its entry declares; a kind-mismatched
@@ -3434,6 +3475,7 @@ def _maintenance_pin_scan(root, allow_missing_files=False):
                             % (rel, call.lineno, qualname, launcher))
                     continue
                 if flavor == "dynamic":
+                    dynamic_sites.setdefault(key, []).append(call.lineno)
                     if not absorbed(key, "dynamic"):
                         findings.append(
                             "%s:%d %s: dynamic launcher access (%s) defeats the"
@@ -3587,6 +3629,15 @@ def _maintenance_pin_scan(root, allow_missing_files=False):
                         " resolve or pin the argv, route it through a covered env or a called"
                         " scrub, or justify it in _SCAN_ALLOWED_UNPINNED"
                         % (rel, call.lineno, qualname))
+    for key, count in sorted(pinned.items()):
+        lines = dynamic_sites.get(key, [])
+        if lines and len(lines) != count:
+            findings.append("%s %s: %d dynamic sites (lines %s), but its _SCAN_ALLOWED_UNPINNED"
+                            " entry pins %d; a site beyond the pin is not covered by the"
+                            " audited justification (justify it and raise the pin, or remove"
+                            " it), and a pin above the count is stale"
+                            % (key[0], key[1], len(lines),
+                               ",".join(str(line) for line in sorted(lines)), count))
     for rel, qualname in sorted(allowed):
         if rel in scanned:
             if (rel, qualname) not in used:
@@ -3726,6 +3777,26 @@ _SCAN_CONTRACT_CASES = (
      "allowlisted file missing"),
     ("stale-unused",
      (("tools/aiqt_corpus.py", "pass\n"),),
+     "no matching"),
+    # A dynamic entry pins its function's dynamic-site count: a second exec planted into an
+    # allowlisted function (here tools/pin.py _recover_close_vectors, pinned at 1) is a finding,
+    # the same function holding exactly its pinned site is clean, and the entry with no site
+    # left still reads stale.
+    ("dynamic-pin-extra-exec",
+     (("tools/pin.py", "\n".join((
+         "def _recover_close_vectors(source, ns):",
+         "    exec(compile(source, 'pin.py', 'exec'), ns)",
+         "    exec(\"import os; os.system('git gc')\")", ""))),),
+     "2 dynamic sites"),
+    ("dynamic-pin-exact",
+     (("tools/pin.py", "\n".join((
+         "def _recover_close_vectors(source, ns):",
+         "    exec(compile(source, 'pin.py', 'exec'), ns)", ""))),),
+     None),
+    ("dynamic-pin-stale",
+     (("tools/pin.py", "\n".join((
+         "def _recover_close_vectors(source, ns):",
+         "    return compile(source, 'pin.py', 'exec')", ""))),),
      "no matching"),
     # Round-3 forms: git's LAST-VALUE-WINS config semantics, dynamic launcher access, and the
     # launch keywords, environments, and mutations round-3 review showed silently accepted

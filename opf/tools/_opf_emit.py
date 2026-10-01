@@ -3299,15 +3299,19 @@ def _bounded_child_result(data, wstatus):
     return data.decode("utf-8", "replace")
 
 
-def _st_guardian_setup_failure(drive, setup_failed, recorded, journal):
+def _st_guardian_setup_failure(drive, setup_failed, recorded, journal, open_fd=None):
     """#378: the guardian close vector with its first send raising. Its result must be this vector's named
     red (NOFIRE, the guardian never ran, and WRONG naming SetupFailed) with no LEAK; every resource the setup
     created must be closed through its own object; and descriptors opened afterwards, which take the
     numbers those resources released, must still be the same files after gc.collect(), so no surviving
-    object closes a reused number later. Returns the failures."""
+    object closes a reused number later. Each of those descriptors is owned by an ExitStack the moment it
+    is opened, so an open that fails (`open_fd`, os.open unless a leg injects one) closes the ones already
+    opened and is this check's own named failure, never an escaping exception. Returns the failures."""
+    import contextlib
     import errno
     import gc
     import os
+    opener = os.open if open_fd is None else open_fd
     created = []
 
     def failing_send(sock):
@@ -3323,8 +3327,23 @@ def _st_guardian_setup_failure(drive, setup_failed, recorded, journal):
                                     for r in created):
         failures.append("guardian-close-reuse setup failure: expected its 3 resources each closed through "
                         "its object, got {}".format(created))
-    fresh = [os.open(os.devnull, os.O_RDONLY) for _ in range(4)]
-    try:
+
+    def release(fd):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    with contextlib.ExitStack() as owned:
+        fresh = []
+        try:
+            for _ in range(4):
+                fd = opener(os.devnull, os.O_RDONLY)
+                owned.callback(release, fd)               # owned the moment it is opened
+                fresh.append(fd)
+        except OSError as exc:
+            failures.append("guardian-close-reuse setup failure: opening descriptor {} of 4 after the leg "
+                            "failed: {!r}".format(len(fresh) + 1, exc))
+            return failures
         ident = [(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in fresh]
         del created[:]
         gc.collect()
@@ -3337,12 +3356,6 @@ def _st_guardian_setup_failure(drive, setup_failed, recorded, journal):
         if after != ident:
             failures.append("guardian-close-reuse setup failure: a descriptor opened afterwards was closed or "
                             "replaced after gc.collect() ({} became {})".format(ident, after))
-    finally:
-        for fd in fresh:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
     return failures
 
 
@@ -3357,10 +3370,13 @@ def _st_guardian_close_reuse():
     it exists, so a failing setup step is this vector's own named red (SetupFailed), each resource is closed
     once through its object before the harness reads its descriptor table, and nothing is left for the
     harness to close by number while a traceback keeps the object, whose collection would later close a
-    reused number in another lane. A setup-failure leg (the first send raising) checks exactly that.
+    reused number in another lane. A setup-failure leg (the first send raising) checks exactly that, and
+    again with the second of the descriptors it opens afterwards failing to open: that is its named failure,
+    with the descriptor opened first closed.
     The harness is loaded from its sibling FILE by explicit path, as _load_byte_canon_authority loads its
     authority, so this runs under `python3 -I` too. Returns the failures."""
     import contextlib
+    import errno
     import gc
     import importlib.util
     import inspect
@@ -3447,6 +3463,26 @@ def _st_guardian_close_reuse():
         if got:
             failures.append("guardian-close-reuse (watch={}): expected green, got {}".format(watch, got))
     failures += _st_guardian_setup_failure(drive, SetupFailed, recorded, _journal)
+    opened = []
+
+    def second_open_fails(path, flags):
+        """The setup-failure leg's descriptor opens with the second one failing (EMFILE)."""
+        if opened:
+            raise OSError(errno.EMFILE, "self-test injected open failure")
+        opened.append(os.open(path, flags))
+        return opened[-1]
+    got = _st_guardian_setup_failure(drive, SetupFailed, recorded, _journal, second_open_fails)
+    if len(got) != 1 or "opening descriptor 2 of 4" not in got[0] or "injected open failure" not in got[0]:
+        failures.append("guardian-close-reuse setup failure with its second open failing: expected that "
+                        "named failure alone, got {}".format(got or "green"))
+    for fd in opened:
+        try:
+            os.fstat(fd)
+        except OSError:
+            continue
+        os.close(fd)
+        failures.append("guardian-close-reuse setup failure with its second open failing: the descriptor "
+                        "opened first was left open")
     source = textwrap.dedent(inspect.getsource(_FixtureProcess._guardian))
     new = ("fd, subject_fd = subject_fd, None         # ownership first: a failed close is never\n"
            "            os.close(fd)                              # closed again by the cleanup (P1, #378)\n")
