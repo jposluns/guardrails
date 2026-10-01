@@ -243,10 +243,11 @@ def _main_tests(tree):
 def _stores(statements):
     """Return (node, name, attribute) for each store to or delete of an attribute or subscript in `statements`
     (top-level ones), at module scope or in a class body (an assignment, augmented or annotated assignment,
-    del, or for, with or comprehension target), whose target is spelled from a name. Following the target's
-    attributes, subscripts and calls inward, `name` is the name it starts from and `attribute` the first
-    attribute taken of that name, or None when there is none: `sys.modules[__name__].self_test` is through
-    sys and modules, and `__builtins__["len"]` is through __builtins__ and None."""
+    del, or for, with or comprehension target). Following the target's attributes, subscripts and calls
+    inward, `name` is the name it starts from, or None when it starts from any other expression (a list,
+    tuple, conditional expression or walrus, say), and `attribute` the first attribute taken of where it
+    starts, or None when there is none: `sys.modules[__name__].self_test` is through sys and modules,
+    `__builtins__["len"]` is through __builtins__ and None, and `[sys][0].exit` is through None and exit."""
     import ast
     found = []
     for statement in statements:
@@ -258,8 +259,7 @@ def _stores(statements):
                 if isinstance(part, ast.Attribute):
                     attribute = part.attr
                 part = part.func if isinstance(part, ast.Call) else part.value
-            if isinstance(part, ast.Name):
-                found.append((node, part.id, attribute))
+            found.append((node, part.id if isinstance(part, ast.Name) else None, attribute))
     return found
 
 
@@ -307,6 +307,16 @@ def _namespace_store(statements):
     return min(found, key=lambda store: (store[0].lineno, store[0].col_offset), default=None)
 
 
+def _self_test_or_expression_store(statements):
+    """Return (node, name) for the first store or delete, by position, in `statements` (top-level ones), at
+    module scope or in a class body, whose target (_stores) starts from the name self_test
+    (`self_test.__code__ = ...`, `self_test.__new__ = ...`; `name` is "self_test") or from an expression rather
+    than a name (`[sys][0].exit = print`, `(s := sys).exit = print`; `name` is None), or None when there is
+    none. The rule is conservative: such a store is counted whatever it reaches."""
+    found = [(node, name) for node, name, _attribute in _stores(statements) if name in (None, "self_test")]
+    return min(found, key=lambda store: (store[0].lineno, store[0].col_offset), default=None)
+
+
 def _unconditional_binding(statements):
     """Return the last of `statements` (top-level ones) that binds self_test UNCONDITIONALLY, or None: a def,
     async def or class named self_test, an import or from-import binding it (a star import counts), or an
@@ -346,9 +356,10 @@ def _self_test_entry_gap(tree):
     module-scope binding of sys (and each sys a `global` anywhere names) is a plain `import sys`, it binds
     `__builtins__` nowhere at module scope (counted as `__name__` is), no statement before the block changes
     sys through the name sys (_sys_change: a store to, delete of or augmented assignment to any
-    `sys.<attribute>`, a store or delete through `sys.modules` or `sys.__dict__`, or an argv change), and none
-    stores to or deletes through `builtins`, `__builtins__` or `__main__` (_namespace_store); otherwise it
-    names the first rule broken."""
+    `sys.<attribute>`, a store or delete through `sys.modules` or `sys.__dict__`, or an argv change), none
+    stores to or deletes through `builtins`, `__builtins__` or `__main__` (_namespace_store), and none stores
+    to or deletes through the name self_test or through a target that starts from an expression rather than
+    a name (_self_test_or_expression_store); otherwise it names the first rule broken."""
     import ast
 
     def bindings_of(name, imported=False):
@@ -415,8 +426,8 @@ def _self_test_entry_gap(tree):
             return True, "its self_test (line {}) returns None (a bare `return` or `return None`, line {}): " \
                          "that path exits 0 whatever the suite found".format(binding.lineno, min(empty))
         if not returns:
-            return True, "its self_test (line {}) has no `return <value>` in its own body: the call returns " \
-                         "None, so the run exits 0 whatever the suite found".format(binding.lineno)
+            return True, "its self_test (line {}) lacks the required return shape: no `return <expression>` " \
+                         "in its own scope".format(binding.lineno)
     stars = [node.lineno for node in _module_scope(tree) if isinstance(node, ast.ImportFrom)
              and any(alias.name == "*" for alias in node.names)]
     if stars:
@@ -445,6 +456,13 @@ def _self_test_entry_gap(tree):
     if store is not None:
         return True, "it stores through `{}` (line {}) before its `__main__` block, so a builtin or a global " \
                      "the entry uses may not be the one it names".format(store[1], store[0].lineno)
+    store = _self_test_or_expression_store(tree.body[:-1])
+    if store is not None and store[1] == "self_test":
+        return True, "it stores to or deletes through `self_test` (line {}) before its `__main__` block, so " \
+                     "the self_test the entry calls may not be the one it binds".format(store[0].lineno)
+    if store is not None:
+        return True, "it stores to or deletes through an expression, not a name (line {}), before its " \
+                     "`__main__` block; the guard does not follow such a target".format(store[0].lineno)
     return True, None
 
 
@@ -470,12 +488,13 @@ def _self_test_entry_gaps(directory, required=()):
     `return None` in its own body, no module-scope star import, no module-scope binding of `__name__` or
     `__builtins__`, no module-scope binding of sys but a plain `import sys`, no statement before the block
     changing sys through the name sys (a store to, delete of or augmented assignment to any `sys.<attribute>`,
-    a store or delete through `sys.modules` or `sys.__dict__`, or an argv change), and none storing to or
-    deleting through `builtins`, `__builtins__` or `__main__` (_self_test_entry_gap gives the rules and each
-    reason). It is a gap too when a *.py
-    entry is not a regular file or cannot be read or parsed, when a `required` name is not found binding
-    self_test, and when no module binds it at all. The listing is os.listdir, so a missing or unreadable
-    directory is a gap, not an empty scan; it is not recursive, so _vendor/ is not scanned.
+    a store or delete through `sys.modules` or `sys.__dict__`, or an argv change), none storing to or
+    deleting through `builtins`, `__builtins__` or `__main__`, and none storing to or deleting through the
+    name self_test or through a target that starts from an expression rather than a name
+    (_self_test_entry_gap gives the rules and each reason). It is a gap too when a *.py entry is not a
+    regular file or cannot be read or parsed, when a `required` name is not found binding self_test, and when
+    no module binds it at all. The listing is os.listdir, so a missing or unreadable directory is a gap, not
+    an empty scan; it is not recursive, so _vendor/ is not scanned.
 
     Guarantee. The guard checks the static shape of the self_test binding and of the entry, and nothing else.
     The forms it catches are exactly these. self_test has exactly one binding at module scope, counted by name
@@ -498,42 +517,52 @@ def _self_test_entry_gaps(directory, required=()):
     `sys.__dict__["exit"] = print`), calls any attribute of sys.argv (`sys.argv.<name>(...)`) outside the
     read-only _ARGV_READERS (count, index, copy, __len__, __getitem__, __contains__, __iter__), or stores to or
     deletes anything through the name builtins, `__builtins__` or `__main__` (`builtins.len = None`,
-    `__builtins__["len"] = None`, `__main__.self_test = int`). A store through a name is one whose target,
-    followed back through its attributes, subscripts and calls, is spelled from that name (_stores). Those
-    rules read a comprehension or generator expression as they read a for statement: an attribute or subscript
-    target (`[None for sys.exit in [print]]`, `[None for sys.argv[1:] in [[]]]`) is a store, a walrus in one
-    binds the enclosing scope (`[(__name__ := "x") for _ in "x"]`), and only a plain name target is the
+    `__builtins__["len"] = None`, `__main__.self_test = int`), or stores to or deletes anything through the
+    name self_test itself (`self_test.__code__ = ...`, `self_test.__defaults__ = ...`, a class self_test's
+    `self_test.__new__ = ...`, `del self_test.__kwdefaults__`). A store through a name is one whose target,
+    followed back through its attributes, subscripts and calls, is spelled from that name (_stores). A store
+    or delete before the entry whose target, so followed, starts from anything other than a plain name is a
+    gap whatever it reaches (`[sys][0].exit = print`, `(sys,)[0].modules[__name__].self_test = int`,
+    `(sys if sys else None).argv[1:] = []`, `(s := sys).exit = print`): the guard does not follow such a
+    target, so it counts every one, a harmless one included. Those rules read a comprehension or generator
+    expression as they read a for statement: an attribute or subscript target
+    (`[None for sys.exit in [print]]`, `[None for sys.argv[1:] in [[]]]`) is a store, a walrus in one binds
+    the enclosing scope (`[(__name__ := "x") for _ in "x"]`), and only a plain name target is the
     comprehension's own and not counted. When the binding is a def it is a plain function: not async; its own
     body, not a nested function, lambda or class, yields nothing and holds at least one `return <expression>`
     and no bare `return` or `return None`; its decorators are not inspected.
 
     Residual. Everything else that changes, at run time, what a name the entry uses means (sys, sys.argv,
     sys.exit, self_test, `__name__`, a builtin, or the module namespace) is outside the guard. The families:
-    reflective stores (setattr or getattr then a store, `globals()["self_test"] = int`, `globals().update(...)`,
-    `vars(...)`, a namespace's `__dict__` reached other than through sys, builtins, `__builtins__` or
-    `__main__`, and a store through any attribute of sys other than argv, modules and __dict__, which the guard
-    does not count: `sys.path[:] = saved` is one); dynamic binding (a module `__getattr__`, importlib or
-    `__import__`, a binding made where the guard does not look); exec, eval and compile; aliasing
-    (`import sys as s` then `s.exit = print`, `import builtins as b` then `b.len = None`, `import __main__ as m`
-    then `m.self_test = int`, `from sys import argv`, `argv = sys.argv`, `modules = sys.modules`, a method
-    taken from sys.argv and called later); and calls into other code that runs before the entry (a function, a
-    decorator, a method, one on an attribute of sys other than argv included, `sys.stdout.close()` say, or
-    another module's import-time code). Nor does it catch a statement that ends the run before the entry or
-    never returns (a top-level sys.exit or os._exit, including one under a `__main__` test it does not count,
-    such as one in a function body or one reached through a held value; _opf_adopt_observe's sys.path setup
-    holds its comparison in a name, so its `if` is not counted), exit subversion after the call (an atexit
-    hook, os._exit, a SystemExit handler, a stateful self_test), or a self_test whose returned value is a
-    succeeding exit status at run time. That status rule is platform- and version-dependent. Measured on
-    CPython 3.14.4 on Linux x86_64, `sys.exit(value)` exited 0 for None, 0, False, an int subclass's 512, 256,
-    -256, 2**31, 2**32, 2**32 + 256, 2**63 - 256 and -2**63; it exited 255 for 2**63, 2**64, 2**100,
-    -2**63 - 256 and -2**64, and 1 for True, 0.0 and [] (the last two printed). Read from those measurements,
-    there it exits 0 exactly when value is None or an int (bool and int subclasses included) that is 0
-    modulo 256 and fits a signed 64-bit integer; an int outside that range exits 255, and any value that is
-    neither None nor an int prints itself and exits 1, the other falsy values ([], "", 0.0, 0j) included. An
-    imported, assigned or class self_test is not inspected beyond being bound (it may be a callable returning
-    0, `self_test = int` say), and a def'd self_test is inspected only for the shapes above (one that falls off
-    its end on some path, or returns an expression that is 0 at run time, exits 0 there). A binding made
-    dynamically is not recognized, so such a module is not an exposer unless it also binds statically.
+    reflective stores (setattr or getattr then a store, `setattr(self_test, "__code__", ...)`,
+    `globals()["self_test"] = int`, `globals().update(...)`, `vars(...)`, a namespace's `__dict__` reached
+    other than through sys, builtins, `__builtins__` or `__main__`, and a store through any attribute of sys
+    other than argv, modules and __dict__, which the guard does not count: `sys.path[:] = saved` is one);
+    dynamic binding (a module `__getattr__`, importlib or `__import__`, a binding made where the guard does not
+    look); exec, eval and compile; aliasing (`import sys as s` then `s.exit = print`, `(s := sys)` then a later
+    `s.exit = print`, `import builtins as b` then `b.len = None`, `import __main__ as m` then
+    `m.self_test = int`, `run = self_test` then `run.__code__ = ...`, `from sys import argv`, `argv = sys.argv`,
+    `modules = sys.modules`, a method taken from sys.argv and called later); and calls into other code that
+    runs before the entry (a function, a decorator, a method, one on an attribute of sys other than argv
+    included, `sys.stdout.close()` say, a store spelled from a name through a call, `holder()[0].exit = print`
+    say, which the guard counts as through that name, or another module's import-time code). Nor does it
+    catch a statement that ends the run before the entry or never returns (a top-level sys.exit or os._exit,
+    including one under a `__main__` test it does not count, such as one in a function body or one reached
+    through a held value). For example, _opf_adopt_observe's sys.path setup holds its `__name__` comparison in
+    a name, so its `if` is not counted as a `__main__` test. Nor does it catch exit subversion after the call
+    (an atexit hook, os._exit, a SystemExit handler, a stateful self_test).
+
+    The guard does not check what self_test returns, or how sys.exit treats that value. How sys.exit treats a
+    value is platform- and version-dependent, and no rule for it is stated here. Examples, measured on
+    CPython 3.14.4 on Linux x86_64 (examples only, not a rule): `sys.exit(value)` exited 0 for None, 0,
+    False, an int subclass's 512, 256, -256, 2**31, 2**32, 2**32 + 256, 2**63 - 256, -2**63, and the tuples
+    (), (None,), (0,) and (256,); it exited 255 for 2**63, 2**64, 2**100, -2**63 - 256 and -2**64; and it
+    exited 1 for 1, True, (1,), 0.0, [], "", 0j and (0, 0), printing the value first for the last five ("" as
+    an empty line). An imported, assigned or class self_test is not inspected beyond being bound (it may be a
+    callable returning 0, `self_test = int` say), and a def'd self_test is inspected only for the shapes above
+    (one that falls off its end on some path, or returns a value sys.exit treats as success, is not caught). A
+    binding made dynamically is not recognized, so such a module is not an exposer unless it also binds
+    statically.
 
     Run with --self-test, a module that passes and stays outside the residual calls whatever self_test is
     bound to and exits with its result: if self_test is unbound there (a try body that raises before binding
@@ -639,12 +668,14 @@ _ENTRY_GENERATOR = "is a generator"
 _ENTRY_TWO_TESTS = "exactly one is allowed"
 _ENTRY_ARGV = "changes `sys.argv`"
 _ENTRY_REBOUND = "bindings at module scope"
-_ENTRY_NO_RETURN = "has no `return <value>`"
+_ENTRY_NO_RETURN = "no `return <expression>` in its own scope"
 _ENTRY_RETURNS_NONE = "returns None (a bare"
 _ENTRY_NAME = "binds `__name__` at module scope"
 _ENTRY_SYS = "binds `sys` other than by `import sys`"
 _ENTRY_STAR = "a star import may bind `__name__`, `sys` or `self_test`"
 _ENTRY_BUILTINS = "binds `__builtins__` at module scope"
+_ENTRY_SELF_TEST_STORE = "stores to or deletes through `self_test`"
+_ENTRY_EXPRESSION_STORE = "through an expression, not a name"
 _ENTRY_FIXTURES = (
     ("canonical.py", _ENTRY_HEAD + "def main(argv):\n    return 2\n\n\n" + _ENTRY_MAIN
      + "    sys.exit(main(sys.argv[1:]))\n", True, None),
@@ -797,6 +828,26 @@ _ENTRY_FIXTURES = (
      "stores through `sys.__dict__`"),
     ("sys_path_restore.py", _ENTRY_HEAD + "saved = list(sys.path)\nsys.path[:] = saved\n\n\n" + _ENTRY_MAIN, True,
      None),
+    ("self_test_code.py", _ENTRY_HEAD + "self_test.__code__ = (lambda: 0).__code__\n\n\n" + _ENTRY_MAIN, True,
+     _ENTRY_SELF_TEST_STORE),
+    ("self_test_defaults.py", _ENTRY_HEAD + "class Patch:\n    self_test.__defaults__ = ()\n\n\n" + _ENTRY_MAIN,
+     True, _ENTRY_SELF_TEST_STORE),
+    ("self_test_del.py", _ENTRY_HEAD + "del self_test.__kwdefaults__\n\n\n" + _ENTRY_MAIN, True,
+     _ENTRY_SELF_TEST_STORE),
+    ("self_test_new.py", "import sys\n\n\nclass self_test:\n    pass\n\n\nself_test.__new__ = lambda cls: 0\n\n\n"
+     + _ENTRY_MAIN, True, _ENTRY_SELF_TEST_STORE),
+    ("expression_list.py", _ENTRY_HEAD + "[sys][0].exit = print\n\n\n" + _ENTRY_MAIN, True,
+     _ENTRY_EXPRESSION_STORE),
+    ("expression_tuple.py", _ENTRY_HEAD + "(sys,)[0].modules[__name__].self_test = int\n\n\n" + _ENTRY_MAIN, True,
+     _ENTRY_EXPRESSION_STORE),
+    ("expression_ifexp.py", _ENTRY_HEAD + "(sys if sys else None).argv[1:] = []\n\n\n" + _ENTRY_MAIN, True,
+     _ENTRY_EXPRESSION_STORE),
+    ("expression_walrus.py", _ENTRY_HEAD + "(s := sys).exit = print\n\n\n" + _ENTRY_MAIN, True,
+     _ENTRY_EXPRESSION_STORE),
+    ("expression_comp.py", _ENTRY_HEAD + "[None for [sys][0].exit in [print]]\n\n\n" + _ENTRY_MAIN, True,
+     _ENTRY_EXPRESSION_STORE),
+    ("name_root_store.py", _ENTRY_HEAD + 'rows = {}\nrows[len(rows)] = 0\nrows.copy()["x"] = 1\n\n\n'
+     + _ENTRY_MAIN, True, None),
 )
 
 
