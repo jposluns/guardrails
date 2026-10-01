@@ -46,7 +46,6 @@ from _opf_adopt import (  # noqa: E402
     VALID, INVALID, CANNOT_EVALUATE, _DIGEST_RE, _is_contained_filepath,
 )
 from _semver import _parse as _parse_version  # noqa: E402
-import _journal  # noqa: E402  retained-close-safe descriptor release
 
 PACK_FORMAT = "opf.prompt-pack/v1"
 MANIFEST_NAME = "pack.toml"
@@ -83,12 +82,15 @@ def compute_digest(version, members):
 def _close_fd_exc_safe(fd):
     """_opf_store._close_fd_exc_safe without the store import: a failing close never replaces an
     exception in flight in the CALLING frame, and still propagates fail-closed when none is, including
-    under an exception a caller is merely handling."""
+    under an exception a caller is merely handling. One os.close either way (P1): a raising close has
+    released the number (close(2)), which is never probed or closed again."""
     tb = sys.exc_info()[2]
-    if tb is None or tb.tb_frame is not sys._getframe(1):
-        _journal._close_fd_propagating(fd)
-    else:
-        _journal._close_fd_quietly(fd)
+    in_flight = tb is not None and tb.tb_frame is sys._getframe(1)
+    try:
+        os.close(fd)
+    except OSError:
+        if not in_flight:
+            raise
 
 
 def _read_regular(path, limit, what):

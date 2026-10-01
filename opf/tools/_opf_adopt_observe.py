@@ -720,7 +720,9 @@ class _UnwindingStack(contextlib.ExitStack):
     close() (#378's calling-frame test) is handed to every exit callback, so a
     _close_fd_on_exit close stays quiet and that exception keeps propagating.
     On the normal path, or under an exception a caller is merely handling, none
-    is passed and a close error still fails closed (#377 fix 2).
+    is passed and a close error still fails closed (#377 fix 2). Each callback
+    closes its descriptor once (P1): a raising close has released the number
+    (close(2)), so nothing here probes or closes it again.
     """
 
     def close(self):

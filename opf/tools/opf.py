@@ -2696,11 +2696,10 @@ def _adopt_read_inputs(path):
             try:
                 _opf_store._close_fd_exc_safe(pfd)
             except OSError:
-                # A failing parent close must not leak the just-opened worksheet fd (round-5 defect 2)
-                # or the parent fd itself (round 7: both closes run through the journal engine's
-                # confirm-then-release guards, so a close that raises with its number retained still
-                # releases it, never via a blind double close); the propagating error still fails the
-                # read closed below.
+                # A failing parent close must not leak the just-opened worksheet fd (round-5 defect 2).
+                # The parent close is a single close (P1: a raising close has released its number,
+                # close(2), so it is never probed or closed again); the propagating error still fails
+                # the read closed below.
                 if fd is not None:
                     _opf_adopt_apply._journal._close_fd_quietly(fd)
                 raise
@@ -4205,17 +4204,16 @@ def _cli_self_test():
 
 
 def _retained_close_offpath_self_test():
-    """F-RETAINED-CLOSE-OFFPATH (part B): the K9a round-7 retained-close class, swept over every
-    descriptor-closing helper family OFF the adopt status/plan paths K9a hardened. Each family's fixture
-    call runs clean to count the os.close calls made from opf/tools code (an ExitStack callback is
-    attributed to the code that registered it; _journal's own bare closes are part A's), then once per
-    position N in each of two modes with the N-th such close raising: "retained" raises OSError(EIO)
-    BEFORE releasing the descriptor (the codex model), "released" releases it and then raises
-    OSError(EINTR). Whatever the call then returns or
-    raises, every descriptor it opened (os.open / os.dup / os.pipe) must be closed afterwards: a bare
-    os.close leaks the number it failed to release (and a raising first close in a two-close finally
-    skips the second), while _journal._close_fd_propagating / _close_fd_quietly fstat-confirm the number
-    and release it. Returns 0 clean, 1 on a failing check, 2 on a harness error."""
+    """F-RETAINED-CLOSE-OFFPATH (part B), under P1: swept over every descriptor-closing helper family OFF
+    the adopt status/plan paths K9a hardened. Each family's fixture call runs clean to count the os.close
+    calls made from opf/tools code (an ExitStack callback is attributed to the code that registered it;
+    _journal's own bare closes are part A's), then once per position N with the N-th such close releasing
+    its descriptor and then raising OSError(EINTR), the only mode: on Linux a close that raises has
+    released the number (man 2 close), so no mode models a close that keeps it. Whatever the call then
+    returns or raises, every descriptor it opened (os.open / os.dup / os.pipe) must be closed afterwards:
+    what this still catches is a raising close that skips or masks a sibling close (a raising first close
+    in a two-close finally that skips the second). Returns 0 clean, 1 on a failing check, 2 on a harness
+    error."""
     import contextlib
     import errno
     import gzip
@@ -4242,13 +4240,13 @@ def _retained_close_offpath_self_test():
             return False
         # _journal's own remaining bare closes (_read_at, _recreate_file, the path-based lock reader, the
         # _fsync_* helpers) are hardened by part A of this fix and are not injection points here; the two
-        # confirm-then-release helpers every part-B site now routes through are.
+        # _journal close helpers some part-B sites route through are.
         return (os.path.basename(frame.f_code.co_filename) != "_journal.py"
                 or frame.f_code.co_name in ("_close_fd_propagating", "_close_fd_quietly"))
 
     def sweep(call):
-        """(positions, survivors) of `call` under the injection at every close position, in both modes."""
-        state = types.SimpleNamespace(opened=[], seen=0, target=None, mode=None, fired=False)
+        """(positions, survivors) of `call` under the injection at every close position."""
+        state = types.SimpleNamespace(opened=[], seen=0, target=None, fired=False)
 
         def _open(*args, **kwargs):
             fd = real_open(*args, **kwargs)
@@ -4270,14 +4268,12 @@ def _retained_close_offpath_self_test():
                 state.seen += 1
                 if state.seen - 1 == state.target:
                     state.fired = True
-                    if state.mode == "retained":
-                        raise OSError(errno.EIO, "injected retained-close failure")   # NOT released
                     real_close(fd)
                     raise OSError(errno.EINTR, "injected released-close failure")
             real_close(fd)
 
-        def run(target, mode):
-            state.opened, state.seen, state.target, state.mode, state.fired = [], 0, target, mode, False
+        def run(target):
+            state.opened, state.seen, state.target, state.fired = [], 0, target, False
             os.open, os.dup, os.pipe, os.close = _open, _dup, _pipe, _close
             os.supports_dir_fd.add(_open)     # _containment.probe keys off os.open's dir_fd support
             try:
@@ -4303,12 +4299,12 @@ def _retained_close_offpath_self_test():
                     pass
             return left
 
-        run(None, None)                       # warm any one-time probe so every counted run is identical
-        survivors = [("clean", fd) for fd in run(None, None)]
+        run(None)                             # warm any one-time probe so every counted run is identical
+        survivors = [("clean", fd) for fd in run(None)]
         positions = state.seen
-        for mode in ("retained", "released"):
+        for mode in ("released",):
             for target in range(positions):
-                left = run(target, mode)
+                left = run(target)
                 if not state.fired:
                     survivors.append((mode, target, "injection did not fire"))
                 survivors.extend((mode, target, fd) for fd in left)
@@ -4318,7 +4314,7 @@ def _retained_close_offpath_self_test():
         positions, survivors = sweep(call)
         ran.append(name)
         ok = positions > 0 and not survivors
-        print("  {} {}: {} close positions x 2 modes; surviving descriptors: {!r} (first six)".format(
+        print("  {} {}: {} close positions, released mode; surviving descriptors: {!r} (first six)".format(
             "PASS" if ok else "FAIL", name, positions, survivors[:6]))
         if not ok:
             failures.append(name)
@@ -4587,32 +4583,75 @@ def _retained_close_offpath_self_test():
 
 
 def _close_exc_safe_vectors_self_test():
-    """#377 fix 2: the in-flight-exception close vectors. Each vector drives one call site with the close
-    it names raising EIO WITHOUT releasing the descriptor, and grades one property on its own assertion:
+    """#377 fix 2, under P1 (one close): the in-flight-exception close vectors. Each vector drives one call
+    site with the close it names releasing its descriptor and then raising (EINTR, and separately EIO, as
+    close(2) does on Linux), and grades one property on its own assertion:
       body    the body's exception is in flight at the close: that SAME exception object must propagate;
       normal  nothing is in flight: the injected close error must propagate (fail-closed);
       caller  the normal vector run from inside a CALLER's `except` block: the close error must still
               propagate, since the caller's handled exception is not in flight at the close.
-    Every vector also requires that no descriptor it opened survives. Three flips then re-run every vector
-    and must turn exactly their own vectors red, each by that vector's own assertion: MASK (every close
-    helper always propagating) the body vectors; SWALLOW (always quiet) the normal and caller vectors; and
-    CALLER-FRAME (#377 fix 1's any-exception test in place of the calling-frame test, in both helpers,
-    the ExitStack callback and the descriptor stack's close) the caller vectors. Returns 0 clean, 1 on a
-    failing check, 2 on a harness error."""
+    Every vector also requires that no descriptor it opened survives. V1, deterministic reuse: where the
+    injected close is one of #377's own helpers, the fault also dup2s an unrelated file onto the freed
+    number before it raises, and two more assertions hold: REUSE, that descriptor is still open with its
+    own (st_dev, st_ino); PROBE, the number sees no further os.close and no os.fstat. A site whose
+    injected close is _journal's own helper (_JOURNAL_ROUTED) gets the release-then-raise without the
+    reuse, since _journal's P1 bodies are #378's. Four flips then re-run every vector and must turn
+    exactly their own vectors red, each by that vector's own assertion: MASK (every close helper always
+    propagating) the body vectors; SWALLOW (always quiet) the normal and caller vectors; CALLER-FRAME
+    (#377 fix 1's any-exception test in place of the calling-frame test, in both helpers, the ExitStack
+    callback and the descriptor stack's close) the caller vectors; and RECLOSE (the pre-P1
+    fstat-then-reclose recovery put back in #377's helpers) every V1 vector, by REUSE (PROBE may fail
+    with it; nothing else may). V2 then drives each #377 helper, the descriptor stack and
+    _opf_check._close_fd_quietly with a real second thread that takes the freed number before the close
+    raises: that thread must still own it, and RECLOSE must turn each V2 vector red the same way.
+    Returns 0 clean, 1 on a failing check, 2 on a harness error."""
     import contextlib
     import errno
+    import functools
     import io
     import shutil
     import tempfile
+    import threading
     import types
     from unittest import mock
     import check_opf_prompt_pack
     import _opf_adopt_observe
     journal = _opf_store._journal
     real_open, real_dup, real_close, real_fstat, real_read = os.open, os.dup, os.close, os.fstat, os.read
-    propagating, quietly = journal._close_fd_propagating, journal._close_fd_quietly
     ANY = object()
-    state = types.SimpleNamespace(opened=[], target=None, injected=None)
+    state = types.SimpleNamespace(opened=[], target=None, injected=None, err=errno.EIO, reuse=False,
+                                  number=None, closes=0, probes=0, unrelated=None, want=None)
+
+    def propagating(fd):
+        """A P1 propagating close (the MASK and CALLER-FRAME stand-in): one os.close, its error raised."""
+        os.close(fd)
+
+    def quietly(fd):
+        """A P1 quiet close (the SWALLOW and CALLER-FRAME stand-in): one os.close, its error swallowed."""
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+    def reclose(fd, quiet):
+        """RECLOSE: the pre-P1 confirm-then-reclose recovery, inlined so the flip outlives #378's _journal."""
+        try:
+            os.close(fd)
+            return
+        except OSError as exc:
+            first = exc
+        try:
+            os.fstat(fd)
+        except OSError:
+            if quiet:
+                return
+            raise first
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        if not quiet:
+            raise first
+
+    def reclose_exc_safe(fd):
+        tb = sys.exc_info()[2]
+        reclose(fd, tb is not None and tb.tb_frame is sys._getframe(1))
 
     class _Body(BaseException):
         """The body's in-flight exception; a BaseException, so no site handler maps it."""
@@ -4621,7 +4660,7 @@ def _close_exc_safe_vectors_self_test():
         """The exception a CALLER is handling while it calls the site normally."""
 
     def arm(fd=ANY):
-        """Make the next close (of `fd`, when given) raise without releasing the descriptor."""
+        """Make the next close (of `fd`, when given) release the descriptor and then raise."""
         state.target = fd
 
     def _open(*args, **kwargs):
@@ -4635,17 +4674,48 @@ def _close_exc_safe_vectors_self_test():
         return new
 
     def _close(fd):
+        if state.number is not None and fd == state.number:
+            state.closes += 1                 # a second close of the injected number (PROBE)
         if state.target is ANY or (state.target is not None and state.target == fd):
             state.target = None
-            state.injected = OSError(errno.EIO, "injected retained-close failure")   # NOT released
+            real_close(fd)                    # RELEASED first, as close(2) does on Linux
+            state.injected = OSError(state.err, "injected released-close failure")
+            if state.reuse:
+                os.dup2(state.unrelated, fd)  # V1: an unrelated file takes the freed number
+                state.number = fd
             raise state.injected
         real_close(fd)
 
-    def run(call):
-        """(the exception `call` raised, or None; the descriptors it opened that are still open)."""
+    def _fstat(fd, *args, **kwargs):
+        if state.number is not None and fd == state.number:
+            state.probes += 1                 # an fstat probe of the injected number (PROBE)
+        return real_fstat(fd, *args, **kwargs)
+
+    def p1_fails():
+        """The REUSE and PROBE failures of the run just made; releases the reused number."""
+        fails = []
+        if state.number is None:
+            return fails
+        if state.closes or state.probes:
+            fails.append("probe: the injected number saw {} more close(s) and {} fstat(s)".format(
+                state.closes, state.probes))
+        try:
+            now = real_fstat(state.number)
+        except OSError:
+            fails.append("reuse: the unrelated descriptor on the reused number was closed")
+        else:
+            if (now.st_dev, now.st_ino) != (state.want.st_dev, state.want.st_ino):
+                fails.append("reuse: the reused number no longer holds the unrelated file")
+            real_close(state.number)
+        return fails
+
+    def run(call, reuse=False, err=errno.EIO):
+        """(the exception `call` raised, or None; the descriptors it opened that are still open; its REUSE
+        and PROBE failures)."""
         state.opened, state.target, state.injected = [], None, None
+        state.reuse, state.err, state.number, state.closes, state.probes = reuse, err, None, 0, 0
         got = None
-        os.open, os.dup, os.close = _open, _dup, _close
+        os.open, os.dup, os.close, os.fstat = _open, _dup, _close, _fstat
         os.supports_dir_fd.add(_open)         # _containment.probe keys off os.open's dir_fd support
         try:
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -4654,10 +4724,12 @@ def _close_exc_safe_vectors_self_test():
             got = exc
         finally:
             os.supports_dir_fd.discard(_open)
-            os.open, os.dup, os.close = real_open, real_dup, real_close
+            os.open, os.dup, os.close, os.fstat = real_open, real_dup, real_close, real_fstat
             state.target = None
         left = []
         for fd in sorted(set(state.opened)):
+            if fd == state.number:            # graded by REUSE, never as a survivor
+                continue
             try:
                 real_fstat(fd)
             except OSError:
@@ -4666,7 +4738,7 @@ def _close_exc_safe_vectors_self_test():
         for fd in left:                       # a failing vector leaks; release so the suite stays clean
             with contextlib.suppress(OSError):
                 real_close(fd)
-        return got, left
+        return got, left, p1_fails()
 
     def raiser(body, result=None):
         """A stand-in that arms the next close, then raises the body exception or returns `result`."""
@@ -4826,7 +4898,7 @@ def _close_exc_safe_vectors_self_test():
 
     def c_observe(body):
         def call():
-            with first_call(os, "fstat", body, real_fstat):
+            with first_call(os, "fstat", body, _fstat):
                 _opf_observe._worktree_open_succeeds(tmp / "lease")
         return call
 
@@ -4887,7 +4959,7 @@ def _close_exc_safe_vectors_self_test():
                     arm()
                 elif len(calls) == 2 and body is not None:
                     raise body
-                return real_fstat(fd, *args, **kwargs)
+                return _fstat(fd, *args, **kwargs)
             try:
                 with mock.patch.object(os, "fstat", fstat):
                     _init_same_root(tmp, root)
@@ -4935,7 +5007,7 @@ def _close_exc_safe_vectors_self_test():
             exc = exc.__cause__ if exc.__cause__ is not None else exc.__context__
         return seen
 
-    def vector(kind, case):
+    def vector(kind, case, reuse, err):
         """The failure messages of one vector run (empty: green), each prefixed by the assertion it broke."""
         body = _Body("vector-original") if kind == "body" else None
         call = case(body)
@@ -4947,7 +5019,7 @@ def _close_exc_safe_vectors_self_test():
                     raise _CallerHandled("an exception the caller is handling")
                 except _CallerHandled:
                     inner()
-        got, left = run(call)
+        got, left, p1 = run(call, reuse, err)
         fails = []
         if state.injected is None:
             fails.append("injection: the close injection never fired")
@@ -4958,7 +5030,7 @@ def _close_exc_safe_vectors_self_test():
             fails.append("{}: the close error was not raised (got {!r})".format(kind, got))
         if left:
             fails.append("descriptors: {} survived".format(left))
-        return fails
+        return fails + p1
 
     def fix1_close(fd):
         """#377 fix 1's test: ANY exception in sys.exc_info() counts as in flight."""
@@ -4966,6 +5038,101 @@ def _close_exc_safe_vectors_self_test():
             quietly(fd)
         else:
             propagating(fd)
+
+    def graded(fails, wanted, flip):
+        """A vector is green when nothing is wanted; else red by the wanted assertion, and RECLOSE may also
+        break PROBE, since the old body probes the number before it closes it again."""
+        if wanted is None:
+            return not fails
+        allowed = (wanted, "probe") if flip == "RECLOSE" else (wanted,)
+        return (any(f.startswith(wanted + ":") for f in fails)
+                and all(f.split(":", 1)[0] in allowed for f in fails))
+
+    def stack_close(fd):
+        stack = _opf_adopt_observe._UnwindingStack()
+        stack.push(functools.partial(_opf_store._close_fd_on_exit, fd))
+        stack.close()
+
+    # V2's helpers, each called through its module so a flip applies: (name, call, propagates on raise).
+    v2_helpers = (
+        ("_opf_store._close_fd_exc_safe", lambda fd: _opf_store._close_fd_exc_safe(fd), True),
+        ("_opf_store._close_fd_on_exit", lambda fd: _opf_store._close_fd_on_exit(fd, None, None, None), True),
+        ("check_opf_prompt_pack._close_fd_exc_safe",
+         lambda fd: check_opf_prompt_pack._close_fd_exc_safe(fd), True),
+        ("_opf_adopt_observe._UnwindingStack.close", stack_close, True),
+        ("_opf_check._close_fd_quietly", lambda fd: _opf_check._close_fd_quietly(fd), False),
+    )
+
+    def second_thread(helper, propagates, err):
+        """One V2 run (modelled on T-f8-2): the fault releases the number and sets an Event; a second thread
+        opens a file on that number (forced with dup2 when its open lands elsewhere) and replies; only then
+        does the close raise. Returns the failure messages (empty: green)."""
+        fd = real_open(str(tmp / "lease"), os.O_RDONLY)
+        released, replied = threading.Event(), threading.Event()
+        seen = types.SimpleNamespace(injected=None, closes=0, probes=0, want=None, error=None)
+
+        def take():
+            if not released.wait(10):
+                return
+            try:
+                new = real_open(str(tmp / "big"), os.O_RDONLY)
+                if new != fd:
+                    os.dup2(new, fd)
+                    real_close(new)
+                seen.want = real_fstat(fd)
+            except OSError as exc:
+                seen.error = exc
+            finally:
+                replied.set()
+
+        def close(n):
+            if n == fd:
+                if seen.injected is not None:
+                    seen.closes += 1
+                else:
+                    real_close(n)
+                    seen.injected = OSError(err, "injected released-close failure; a second thread took it")
+                    released.set()
+                    replied.wait(10)
+                    raise seen.injected
+            real_close(n)
+
+        def fstat(n, *args, **kwargs):
+            if n == fd and seen.injected is not None:
+                seen.probes += 1
+            return real_fstat(n, *args, **kwargs)
+
+        thread = threading.Thread(target=take, name="opf-close-v2-reuse", daemon=True)
+        thread.start()
+        got = None
+        os.close, os.fstat = close, fstat
+        try:
+            helper(fd)
+        except OSError as exc:
+            got = exc
+        finally:
+            os.close, os.fstat = real_close, real_fstat
+            released.set()                    # never leave the thread waiting
+            thread.join(10)
+        if seen.injected is None or seen.want is None:
+            with contextlib.suppress(OSError):
+                real_close(fd)
+            return ["injection: the second thread never took the number ({!r})".format(seen.error)]
+        fails = []
+        if got is not (seen.injected if propagates else None):
+            fails.append("rule: the helper's error rule broke (got {!r})".format(got))
+        if seen.closes or seen.probes:
+            fails.append("probe: the released number saw {} more close(s) and {} fstat(s)".format(
+                seen.closes, seen.probes))
+        try:
+            now = real_fstat(fd)
+        except OSError:
+            fails.append("reuse: the second thread's descriptor was closed")
+        else:
+            if (now.st_dev, now.st_ino) != (seen.want.st_dev, seen.want.st_ino):
+                fails.append("reuse: the second thread's number no longer holds its file")
+            real_close(fd)
+        return fails
 
     flips = (
         (None, ()),
@@ -4981,10 +5148,19 @@ def _close_exc_safe_vectors_self_test():
                           (_opf_store, "_close_fd_on_exit", lambda fd, *exc: fix1_close(fd)),
                           (_opf_adopt_observe._UnwindingStack, "close",
                            lambda stack: stack.__exit__(*sys.exc_info())))),
+        ("RECLOSE", ((_opf_store, "_close_fd_exc_safe", reclose_exc_safe),
+                     (check_opf_prompt_pack, "_close_fd_exc_safe", reclose_exc_safe),
+                     (_opf_store, "_close_fd_on_exit",
+                      lambda fd, exc_type, exc, tb: reclose(fd, exc is not None)),
+                     (_opf_check, "_close_fd_quietly", lambda fd: reclose(fd, True)))),
     )
     # The one assertion each flip must break, per vector kind; every other vector must stay green.
     reds = {None: {}, "MASK": {"body": "body"}, "SWALLOW": {"normal": "normal", "caller": "caller"},
             "CALLER-FRAME": {"caller": "caller"}}
+    # RECLOSE breaks REUSE (PROBE may break with it) on every V1 vector, and leaves the _JOURNAL_ROUTED
+    # vectors green: their injected close is _journal's own helper, whose P1 body is #378's.
+    reds["RECLOSE"] = dict(body="reuse", normal="reuse", caller="reuse")
+    _JOURNAL_ROUTED = frozenset(("_opf_adopt_observe._open_directory except",))
     failures = []
     checks = 0
     try:
@@ -4992,26 +5168,47 @@ def _close_exc_safe_vectors_self_test():
             (tmp / sub).mkdir()
         (tmp / "lease").write_bytes(b"payload")
         (tmp / "big").write_bytes(b"x" * 64)
+        (tmp / "unrelated").write_bytes(b"unrelated")
+        state.unrelated = real_open(str(tmp / "unrelated"), os.O_RDONLY)
+        state.want = real_fstat(state.unrelated)
         for flip, patches in flips:
             with contextlib.ExitStack() as patched:
                 for obj, name, value in patches:
                     patched.enter_context(mock.patch.object(obj, name, value))
                 for site, case, has_normal in cases:
+                    reuse = site not in _JOURNAL_ROUTED
                     for kind in ("body", "normal", "caller") if has_normal else ("body",):
-                        fails = vector(kind, case)
-                        wanted = reds[flip].get(kind)
-                        ok = (not fails if wanted is None
-                              else bool(fails) and all(f.startswith(wanted + ":") for f in fails))
+                        for err in (errno.EINTR, errno.EIO):
+                            fails = vector(kind, case, reuse, err)
+                            wanted = None if flip == "RECLOSE" and not reuse else reds[flip].get(kind)
+                            ok = graded(fails, wanted, flip)
+                            checks += 1
+                            if not ok:
+                                failures.append(
+                                    (flip or "unflipped", kind, errno.errorcode[err], site, fails))
+                            print("  {} {} {} {} [{}]: {}".format(
+                                "PASS" if ok else "FAIL", flip or "unflipped", kind, errno.errorcode[err],
+                                site, "; ".join(fails) if fails else "green"))
+        for flip in (None, "RECLOSE"):
+            with contextlib.ExitStack() as patched:
+                for obj, name, value in dict(flips)[flip]:
+                    patched.enter_context(mock.patch.object(obj, name, value))
+                for name, helper, propagates in v2_helpers:
+                    for err in (errno.EINTR, errno.EIO):
+                        fails = second_thread(helper, propagates, err)
+                        ok = graded(fails, "reuse" if flip else None, flip)
                         checks += 1
                         if not ok:
-                            failures.append((flip or "unflipped", kind, site, fails))
-                        print("  {} {} {} [{}]: {}".format(
-                            "PASS" if ok else "FAIL", flip or "unflipped", kind, site,
+                            failures.append((flip or "unflipped", "V2", errno.errorcode[err], name, fails))
+                        print("  {} {} V2 {} [{}]: {}".format(
+                            "PASS" if ok else "FAIL", flip or "unflipped", errno.errorcode[err], name,
                             "; ".join(fails) if fails else "green"))
     except Exception as exc:  # noqa: BLE001  a fixture that cannot be built is a harness error, never a pass
         print("opf close exc-safe vectors self-test: harness error ({!r})".format(exc), file=sys.stderr)
         return EXIT_MALFORMED
     finally:
+        if state.unrelated is not None:
+            real_close(state.unrelated)
         shutil.rmtree(str(tmp), ignore_errors=True)
     if failures:
         print("opf close exc-safe vectors self-test: FAIL (failing {} of {} checks): {!r}".format(
