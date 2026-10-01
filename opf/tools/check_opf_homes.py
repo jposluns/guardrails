@@ -2359,6 +2359,16 @@ def _gitignore_reconciliation_self_test(check):
 
 
 def self_test():
+    """Run the vectors behind main()'s cannot-evaluate backstop, so the canonical `--self-test` entry maps an
+    escaping read or parse error to exit 2 exactly as `main(["--self-test"])` does."""
+    try:
+        return _self_test_vectors()
+    except (OSError, UnicodeError, ValueError, AttributeError) as exc:
+        print("check_opf_homes: cannot evaluate: {}".format(exc), file=sys.stderr)
+        return 2
+
+
+def _self_test_vectors():
     import _opf_adopt as adopt
     import _opf_check as doctor
     import _opf_init as init
@@ -2623,4 +2633,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
     sys.exit(main())

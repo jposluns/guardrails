@@ -1717,3 +1717,10 @@ def self_test():
     expected = suite.countTestCases()
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     return 0 if result.wasSuccessful() and result.testsRun == expected else 1
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
+    print("usage: _opf_adopt_plan.py --self-test (the verb is `opf adopt plan`)", file=sys.stderr)
+    sys.exit(2)
