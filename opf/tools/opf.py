@@ -13100,6 +13100,7 @@ def _cli_self_test():
                     # Abbreviated prefixes, unambiguous and ambiguous, alone and joined.
                     ["--rev", _RID], ["--ro", store], ["--sc"], ["--pl"], ["--ap", _RID], ["--rev=" + _RID],
                     ["--ro=" + store], ["--ro="], ["--r", _RID], ["--in=x"], ["--sh=x"], ["--show-reviews"],
+                    ["--ac"], ["--ac=tester"],
                     # The former argparse review-aid forms.
                     ["--review", "-1", "--show-review"], ["--review", _RID, "--show-review", "--root="],
                     ["--review", _RID, "--review", _RID], ["--review", _RID, "--root", "-old"],
@@ -13900,8 +13901,9 @@ def _cli_self_test():
               "errors fail closed; render --check forwards to the U4 engine; doctor resolves + validates a "
               "store, NOT-ADOPTED -> 0 (2 with --require-store) and a garbage store -> 2; "
               "the retired import verb (spec 14.1) prints exactly its retirement pointer at exit 2 for every "
-              "argument list tried (none, --help, each former flag alone, valued, joined or abbreviated, "
-              "the former review-aid forms, two modes, an unknown flag, --), over a NOT-ADOPTED root and "
+              "argument list tried (none, --help, each former flag alone, with a separate value, joined and "
+              "with an empty joined value, unambiguous and ambiguous prefixes, the former review-aid forms, "
+              "two modes, an unknown flag, --), over a NOT-ADOPTED root and "
               "over an adopted store, mutating nothing (the verb's runtime behaviour, which the runtime "
               "probe observes over those representative lists only, recording no call through the module "
               "attributes it patches to its probed filesystem read, write and remove, process-spawn or "
