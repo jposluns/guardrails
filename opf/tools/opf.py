@@ -11833,12 +11833,19 @@ def _cmd_import(rest):
     REQUESTED operation, so its refusal is a cannot-evaluate, never the NOT-APPLICABLE exit 0 that
     doctor/render/upgrade report on a non-adopter root).
 
-    The CLI self-test checks this two ways. A structural check (_import_body_findings) covers every
-    argument list: after this docstring the body is exactly the one print of the pointer to stderr and
-    the one return of EXIT_MALFORMED, with no reference to `rest` and no other call, so no argument list
-    can reach a read, a parse or a write. A runtime probe covers only a representative set of argument
-    lists: while each runs, no call at all is made to a probed filesystem, process-spawn or stdin
-    function."""
+    The CLI self-test checks this two ways. A structural check proves the source as parsed: after this
+    docstring the body is exactly the one print of the pointer to stderr and the one return of
+    EXIT_MALFORMED, with no reference to `rest` and no other call; no binding form it models, in any
+    expression evaluated at module scope, rebinds print, _cmd_import, sys, IMPORT_RETIRED or
+    EXIT_MALFORMED (both _import_body_findings); and the live `_cmd_import.__code__` is exactly the
+    code compiled from that parsed definition (_import_code_findings). Within that bound no argument
+    list can reach a read, a parse or a write. The check does NOT catch reflective or dynamic changes:
+    stores through globals() or vars() (globals().update included), setattr on the module object
+    (through sys.modules included), reassigning builtins.print, sys.stderr or another sys attribute,
+    exec or eval of a string, and another module patching this one are DISCLOSED residual classes, not
+    enforced. A runtime probe covers only a representative set of argument lists: while each runs, a
+    call to any probed filesystem read or write, process-spawn or stdin function is recorded and
+    refused, and the row fails."""
     # `rest` is deliberately never read: every argument list meets the pointer.
     print("opf import: {}".format(IMPORT_RETIRED), file=sys.stderr)
     return EXIT_MALFORMED
@@ -11858,7 +11865,14 @@ def _import_body_findings(source):
     than that print and its str.format; and that the names the body uses keep their plain meaning at
     module level (`sys` bound only by `import sys`, EXIT_MALFORMED only to the literal 2,
     IMPORT_RETIRED only to a string literal, `print` and `_cmd_import` not rebound, no `global` of
-    any of them, no star import). It reads no file."""
+    any of them, no star import). The binding scan walks every expression evaluated at module scope,
+    the decorators, argument defaults, annotations, class bases and class keywords of a def or class
+    included; inside a lambda or a comprehension any store to a watched name counts (a walrus there,
+    a comprehension's loop target or a walrus in a lambda body alike), an over-approximation. It
+    models exactly the binding forms its walk enumerates and NO MORE: reflective or dynamic stores
+    (globals() / vars() stores, setattr on the module, builtins or sys attribute reassignment,
+    exec / eval, another module patching this one) are the DISCLOSED residual classes in
+    _cmd_import's docstring, not enforced here. It reads no file."""
     import ast
 
     try:
@@ -11873,7 +11887,11 @@ def _import_body_findings(source):
     fn = defs[0]
 
     # Module-level bindings of the watched names. A nested function or class body is its own scope, but
-    # its name binds here; comprehensions and lambdas bind nothing here.
+    # its name binds here, and its decorators, argument defaults, annotations, bases and keywords are
+    # evaluated here. A walrus inside a comprehension binds here too, and a lambda's defaults are
+    # evaluated here; inside a lambda or comprehension every store to a watched name counts
+    # (over-approximation: a comprehension's own loop target or a walrus in a lambda body is flagged
+    # although it binds only in that inner scope).
     bindings = {name: [] for name in ("_cmd_import", "print", "sys", "EXIT_MALFORMED", "IMPORT_RETIRED")}
     scoped = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
     own_scope = (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
@@ -11883,8 +11901,24 @@ def _import_body_findings(source):
         if isinstance(node, scoped):
             if node.name in bindings:
                 bindings[node.name].append(node)
+            pending.extend(node.decorator_list)
+            if isinstance(node, ast.ClassDef):
+                pending.extend(node.bases)
+                pending.extend(node.keywords)
+            else:
+                a = node.args
+                pending.extend(a.defaults)
+                pending.extend(d for d in a.kw_defaults if d is not None)
+                params = a.posonlyargs + a.args + a.kwonlyargs + [a.vararg, a.kwarg]
+                pending.extend(p.annotation for p in params if p is not None and p.annotation is not None)
+                if node.returns is not None:
+                    pending.append(node.returns)
+            pending.extend(getattr(node, "type_params", ()))
             continue
         if isinstance(node, own_scope):
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Name) and sub.id in bindings and not isinstance(sub.ctx, ast.Load):
+                    bindings[sub.id].append(sub)
             continue
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
@@ -11954,6 +11988,65 @@ def _import_body_findings(source):
     if [ast.dump(n) for n in body] != [ast.dump(n) for n in want]:
         findings.append("_cmd_import's body after its docstring is not exactly: {}".format(
             " ; ".join(_IMPORT_BODY.splitlines())))
+    return findings
+
+
+def _import_code_findings(source, func, filename):
+    """The live-code tie for the retired import verb: compile the `_cmd_import` definition parsed from
+    the module source text `source` on its own, under `filename` and at its own line numbers, with the
+    source's __future__ flags only, and require the function `func` (the live _cmd_import in the CLI
+    self-test) to carry exactly that code: equal co_code, co_consts (compared by type and repr, nested
+    code objects recursively under these same fields), co_names, co_varnames, co_freevars, co_cellvars,
+    argument counts, co_flags, co_firstlineno, co_name, co_filename and co_exceptiontable, and no
+    argument defaults. Returns a list of findings, empty when they match. Matching names alone never
+    passes: a swapped `__code__` that differs in any of these fields is a finding. It reads no file."""
+    import __future__
+    import ast
+    import types
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError as exc:
+        return ["the source does not parse ({})".format(exc)]
+    defs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_cmd_import"]
+    if len(defs) != 1:
+        return ["the module defines _cmd_import {} times at module level (want once)".format(len(defs))]
+    flags = 0
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+            for alias in node.names:
+                flags |= getattr(getattr(__future__, alias.name, None), "compiler_flag", 0)
+    try:
+        module_code = compile(ast.Module(body=defs, type_ignores=[]), filename, "exec", flags=flags,
+                              dont_inherit=True)
+    except (SyntaxError, ValueError) as exc:
+        return ["the parsed _cmd_import does not compile ({})".format(exc)]
+    want = [c for c in module_code.co_consts if isinstance(c, types.CodeType) and c.co_name == "_cmd_import"]
+    live = getattr(func, "__code__", None)
+    if len(want) != 1 or not isinstance(live, types.CodeType):
+        return ["the live _cmd_import has no code object to compare with the parsed definition"]
+    fields = ("co_code", "co_names", "co_varnames", "co_freevars", "co_cellvars", "co_argcount",
+              "co_posonlyargcount", "co_kwonlyargcount", "co_flags", "co_firstlineno", "co_name",
+              "co_filename", "co_exceptiontable")
+
+    def shape(const):
+        if isinstance(const, types.CodeType):
+            return ("code",) + tuple(getattr(const, f, None) for f in fields) + (
+                tuple(shape(c) for c in const.co_consts),)
+        if isinstance(const, tuple):
+            return ("tuple", tuple(shape(c) for c in const))
+        if isinstance(const, frozenset):
+            return ("frozenset", tuple(sorted(repr(shape(c)) for c in const)))
+        return (type(const).__name__, repr(const))
+
+    findings = []
+    for f in fields:
+        if getattr(live, f, None) != getattr(want[0], f, None):
+            findings.append("the live _cmd_import's {} differs from the parsed definition's".format(f))
+    if shape(live.co_consts) != shape(want[0].co_consts):
+        findings.append("the live _cmd_import's co_consts differ from the parsed definition's")
+    if getattr(func, "__defaults__", None) is not None or getattr(func, "__kwdefaults__", None) is not None:
+        findings.append("the live _cmd_import carries argument defaults the parsed definition lacks")
     return findings
 
 
@@ -12574,25 +12667,39 @@ def _cli_self_test():
             missing named files; two modes; an unknown flag, a positional token and `--`. The pointer
             names adoption and the prompt pack in words and no command.
 
-            The no-read claim is checked two ways. The STRUCTURAL check (_import_body_findings over this
-            file, total over argument lists) requires _cmd_import's body after its docstring to be exactly
-            the one print of the pointer to stderr and the one return of EXIT_MALFORMED, with no reference
-            to `rest` and no other call, and that the live _cmd_import is that definition; planted reads
-            (a listing of an `--apply` root or of the cwd, io.FileIO reads, a shell `cat`, a read of the
-            `--ingest-options` file, a rebound `_cmd_import` or `print`) are each asserted flagged. The
-            RUNTIME probe (representative only) runs every argument list above inside one probe context
-            that records, and refuses, ANY call to the open, stat, listing, walk, access, readlink, cwd,
-            os.path existence and type, pathlib.Path read and query, process-spawn (subprocess.Popen,
-            os.system, os.popen, os.spawn*, os.posix_spawn*, os.exec*, os.fork) and stdin-read functions
-            while the verb runs, whatever path the call names; a row passes only if no such call is made.
-            The fixture tree is byte-unchanged. Flip: routing `import` to the fail-closed KNOWN_VERBS
-            branch, restoring any argument check ahead of the pointer, or adding any read, spawn or other
+            The no-read claim is checked two ways. The STRUCTURAL check proves the source as parsed:
+            _import_body_findings over this file requires _cmd_import's body after its docstring to be
+            exactly the one print of the pointer to stderr and the one return of EXIT_MALFORMED, with no
+            reference to `rest` and no other call, and no modeled binding of print, _cmd_import, sys,
+            IMPORT_RETIRED or EXIT_MALFORMED in any expression evaluated at module scope;
+            _import_code_findings requires the live `_cmd_import.__code__` to equal the code compiled
+            from that parsed definition (co_code, co_consts recursively, names, argument counts, flags,
+            first line, filename). Planted reads and writes in the body (a listing of an `--apply` root
+            or of the cwd, io.FileIO reads, a shell `cat`, a read of the `--ingest-options` file, an
+            os.mkdir of an argument), planted rebindings (a rebound `_cmd_import`, `print` or
+            EXIT_MALFORMED, and a walrus binding in a comprehension, generator expression, lambda,
+            argument default, keyword default, decorator, class base or class keyword) and a swapped
+            `__code__` with the same argument count and names are each asserted flagged. It does NOT
+            catch reflective or dynamic changes (globals() / vars() stores, setattr on the module,
+            builtins.print or sys.stderr reassignment, exec / eval, another module patching this one);
+            those are disclosed in _cmd_import's docstring, not enforced. The RUNTIME probe
+            (representative only) runs every argument list above inside one probe context that records,
+            and refuses, ANY call to the open, stat, listing, walk, access, readlink, cwd, os.path
+            existence and type, pathlib.Path read, query and write, filesystem write and remove (os.mkdir,
+            makedirs, mkfifo, mknod, unlink, remove, removedirs, rename, renames, replace, rmdir, symlink,
+            link, utime, chmod, chown, lchown, truncate, ftruncate), process-spawn
+            (subprocess.Popen, os.system, os.popen, os.spawn*, os.posix_spawn*, os.exec*, os.fork) and
+            stdin-read functions while the verb runs, whatever path the call names; a row passes only if
+            no such call is made, and every probe is first asserted to record and refuse a call. The
+            fixture tree is byte-unchanged. Flip: routing `import` to the fail-closed KNOWN_VERBS branch,
+            restoring any argument check ahead of the pointer, or adding any read, write, spawn or other
             statement to _cmd_import turns rows red."""
             import ast
             import builtins as builtins_mod
             import pathlib
             import re
             import subprocess
+            import types
             from unittest import mock
 
             refusal = IMPORT_RETIRED
@@ -12652,15 +12759,29 @@ def _cli_self_test():
                 return EXIT_MALFORMED
             for finding in _import_body_findings(own_source):
                 failures.append("import structural check: {}".format(finding))
-            code = _cmd_import.__code__
-            live_names = frozenset(("print", "format", "IMPORT_RETIRED", "sys", "stderr", "EXIT_MALFORMED"))
-            if (code.co_argcount != 1 or code.co_posonlyargcount or code.co_kwonlyargcount
-                    or code.co_varnames != ("rest",) or frozenset(code.co_names) != live_names
-                    or os.path.realpath(code.co_filename) != os.path.realpath(__file__)):
-                failures.append("import structural check: the live _cmd_import is not the checked "
-                                "definition (names {!r}, file {!r})".format(code.co_names, code.co_filename))
-            # The structural check flags each planted read (inserted ahead of the print) and each rebinding
-            # (appended to the module); the unchanged source is clean, as asserted just above.
+            # The live-code tie: the live code object is exactly the one the parsed definition compiles to.
+            for finding in _import_code_findings(own_source, _cmd_import, __file__):
+                failures.append("import structural check: {}".format(finding))
+            # A `__code__` swap keeping the argument count, varnames, names and filename (the former,
+            # metadata-only tie accepted it) is flagged: this replacement parses its arguments.
+            swap_src = ("def _cmd_import(rest):\n"
+                        "    if rest == ['--x']:\n"
+                        "        return 0\n"
+                        "    print('opf import: {}'.format(IMPORT_RETIRED), file=sys.stderr)\n"
+                        "    return EXIT_MALFORMED\n")
+            swap_code = [c for c in compile(swap_src, __file__, "exec", dont_inherit=True).co_consts
+                         if isinstance(c, types.CodeType)][0]
+            live_code = _cmd_import.__code__
+            if (swap_code.co_varnames != live_code.co_varnames
+                    or frozenset(swap_code.co_names) != frozenset(live_code.co_names)
+                    or swap_code.co_argcount != live_code.co_argcount):
+                failures.append("import structural check: the planted __code__ swap does not keep the live "
+                                "names and argument count (harness)")
+            if not _import_code_findings(own_source, types.FunctionType(swap_code, {}), __file__):
+                failures.append("import structural check: a __code__ swap with matching names was not "
+                                "flagged")
+            # The structural check flags each planted read or write (inserted ahead of the print) and each
+            # rebinding (appended to the module); the unchanged source is clean, as asserted just above.
             fn_node = [n for n in ast.parse(own_source).body
                        if isinstance(n, ast.FunctionDef) and n.name == "_cmd_import"][0]
             lines = own_source.splitlines(keepends=True)
@@ -12673,6 +12794,7 @@ def _cli_self_test():
                 "__import__('subprocess').run('cat .working/toml/manifest.toml', shell=True)",
                 "open(rest[rest.index('--ingest-options') + 1]).read() if '--ingest-options' in rest "
                 "else None",
+                "os.mkdir(rest[0]) if rest else None",
                 "rest = list(rest)",
                 "pass",
             )
@@ -12680,6 +12802,17 @@ def _cli_self_test():
                 "_cmd_import = lambda rest: open(rest[0]).read()",
                 "print = lambda *a, **k: open(a[0]).read()",
                 "EXIT_MALFORMED = 3",
+                # A walrus in an expression evaluated at module scope (the round-7 reproductions first).
+                "[(print := w) for _ in [0]]",
+                "def _z(x=(print := w)): pass",
+                "def _z(*, k=(sys := w)): pass",
+                "@(print := w)\ndef _z(): pass",
+                "class _Z((print := w)): pass",
+                "class _Z(metaclass=(EXIT_MALFORMED := w)): pass",
+                "_z = lambda x=(IMPORT_RETIRED := w): x",
+                "_z = lambda: (print := w)",
+                "(0 for _ in [(_cmd_import := w)])",
+                "{k: (print := w) for k in [0]}",
             )
             mutants = [(t, "".join(lines[:at] + ["    " + t + "\n"] + lines[at:])) for t in planted_body]
             mutants += [(t, own_source + "\n" + t + "\n") for t in planted_tail]
@@ -12781,9 +12914,12 @@ def _cli_self_test():
                 vectors += [[], ["--plan", "--dispositions", path("not-toml.toml")]]
 
                 # The RUNTIME probe, representative only: every list above runs inside ONE probe context.
-                # While main() runs a list, any call to a probed function is recorded and refused (so a
-                # planted read, spawn or write is never performed), whatever path or descriptor it names;
-                # outside a run the probes call straight through. stdin is a probe too.
+                # While main() runs a list, a call to any function in `targets` below (and any stdin
+                # read) is recorded and refused before it acts, whatever path or descriptor it names, so
+                # a planted call to one of them is never performed; outside a run the probes call
+                # straight through. A route not in `targets` is NOT refused: a write or read through an
+                # already-open file object or descriptor (os.write included), a socket, ctypes, or a
+                # call through the posix / _io modules directly.
                 def probe(label, real):
                     def wrapped(*args, **kwargs):
                         if not live:
@@ -12830,11 +12966,17 @@ def _cli_self_test():
                     "access", "readlink", "getcwd", "chdir", "system", "popen", "fork", "forkpty",
                     "posix_spawn", "posix_spawnp", "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv",
                     "spawnve", "spawnvp", "spawnvpe", "execl", "execle", "execlp", "execlpe", "execv",
-                    "execve", "execvp", "execvpe") if hasattr(os, n)]
+                    "execve", "execvp", "execvpe",
+                    # the filesystem write and remove functions (builtins / io open in any mode is above)
+                    "mkdir", "makedirs", "mkfifo", "mknod", "unlink", "remove", "removedirs", "rename",
+                    "renames", "replace", "rmdir", "symlink", "link", "utime", "chmod", "chown", "lchown",
+                    "truncate", "ftruncate") if hasattr(os, n)]
                 targets += [(os.path, n) for n in ("exists", "lexists", "isfile", "isdir", "islink",
                                                    "getsize")]
-                targets += [(pathlib.Path, n) for n in ("open", "read_text", "read_bytes", "exists",
-                                                        "iterdir", "stat", "is_file", "is_dir")]
+                targets += [(pathlib.Path, n) for n in (
+                    "open", "read_text", "read_bytes", "exists", "iterdir", "stat", "is_file", "is_dir",
+                    "write_text", "write_bytes", "touch", "mkdir", "unlink", "rmdir", "rename", "replace",
+                    "symlink_to", "hardlink_to", "chmod") if hasattr(pathlib.Path, n)]
                 real_stdin = sys.stdin
                 sys.stdin = ProbeStdin("accept\n")
                 try:
@@ -12842,6 +12984,26 @@ def _cli_self_test():
                         for owner, attr in targets:
                             label = getattr(owner, "__name__", repr(owner)) + "." + attr
                             stack.enter_context(mock.patch.object(owner, attr, probe(label, getattr(owner, attr))))
+                        # Every probe records and refuses a call while live (it never reaches the real
+                        # function), so the list above is exactly what the probe refuses.
+                        for owner, attr in targets:
+                            del calls[:]
+                            live.append(True)
+                            try:
+                                getattr(owner, attr)(path("probe-target"))
+                                performed = True
+                            except PermissionError:
+                                performed = False
+                            except BaseException as exc:  # noqa: BLE001  any other escape is a failure
+                                performed = exc
+                            finally:
+                                del live[:]
+                            if performed is not False or len(calls) != 1:
+                                failures.append("the import probe on {}.{} did not record and refuse a "
+                                                "call ({!r}, {} recorded)".format(
+                                                    getattr(owner, "__name__", owner), attr, performed,
+                                                    len(calls)))
+                        del calls[:]
                         for argv in vectors:
                             refused(argv)
                     consumed = sys.stdin.tell() != 0
@@ -13513,10 +13675,14 @@ def _cli_self_test():
               "the retired import verb (spec 14.1) prints exactly its retirement pointer at exit 2 for every "
               "argument list tried (none, --help, each former flag alone, valued, joined or abbreviated, "
               "the former review-aid forms, two modes, an unknown flag, --), over a NOT-ADOPTED root and "
-              "over an adopted store, mutating nothing; a structural check of _cmd_import's body (exactly "
-              "the pointer print and the exit-2 return, no use of its arguments, no other call) covers every "
-              "argument list, and a runtime probe over those representative lists only records no call "
-              "at all to its probed filesystem, process-spawn or stdin functions; "
+              "over an adopted store, mutating nothing; a structural check proves _cmd_import's source as "
+              "parsed (its body exactly the pointer print and the exit-2 return, no use of its arguments, "
+              "no other call, no modeled module-scope rebinding of the names it uses) and ties the live "
+              "code object to it exactly, but does not catch reflective or dynamic changes (globals() "
+              "stores, setattr on the module, builtins or sys.stderr reassignment, exec/eval, another "
+              "module patching this one); a runtime probe over those representative lists only records "
+              "no call at all to its probed filesystem read, write and remove, process-spawn or stdin "
+              "functions; "
               "adopt (K9a) wires the read-only plan/status subcommands onto the "
               "adoption planner -- bare/malformed usage and the deferred approve/apply/complete/reconcile "
               "fail closed to exit 2, status -> 0 no-run or verified run / 1 open-transaction or invalid-"
