@@ -2252,18 +2252,26 @@ def _cmd_import(rest):
     RETIRED (spec 14.1), its engine removed: every mode refuses with IMPORT_RETIRED at exit 2, on every
     root, before the clock, any input file or any write, and BEFORE any mode-specific argv validation, so a
     missing or extra companion flag or a run-id outside the former grammar meets the retirement pointer,
-    never a usage error for a mode this build refuses. Only the token parser (an unknown flag, a duplicate,
-    an empty or missing value) and the exactly-one-mode rule precede it: a bare `opf import` or two modes is
-    a usage error (exit 2) without the pointer. The parser is the house fail-closed idiom, matching
-    _cmd_render's --root loop. The root is never resolved, so an unresolved / NOT-ADOPTED root refuses the
-    same way (D7: import is a REQUESTED operation, so its refusal is a cannot-evaluate, never the
-    NOT-APPLICABLE exit 0 that doctor/render/upgrade report on a non-adopter root)."""
+    never a usage error for a mode this build refuses. The parser still accepts the former modes' companion
+    flags, so every former form meets the pointer: the root-ingest planner's `--dispositions FILE`,
+    `--ingest-options FILE` and repeatable `--include GLOB`, and the review aids `--show-review` and
+    `--diff-review OLD_RUN` (each named file is never read). Only the token parser (an unknown flag, a
+    duplicate, an empty or missing value) and the exactly-one-mode rule precede it: a bare `opf import` or
+    two modes is a usage error (exit 2) without the pointer. The parser is the house fail-closed idiom,
+    matching _cmd_render's --root loop. The root is never resolved, so an unresolved / NOT-ADOPTED root
+    refuses the same way (D7: import is a REQUESTED operation, so its refusal is a cannot-evaluate, never
+    the NOT-APPLICABLE exit 0 that doctor/render/upgrade report on a non-adopter root)."""
     root = None
     mode = None
     set_file = None
     actor = None
     decisions_file = None
     interactive = False
+    dispositions_file = None      # the former root-ingest --plan companions, accepted to meet the pointer
+    ingest_options_file = None
+    include = []                  # repeatable, as it was
+    show_review = False           # the former review aids, likewise
+    diff_review = None
 
     def _need_value(flag, idx):
         if idx + 1 >= len(rest):
@@ -2333,6 +2341,42 @@ def _cmd_import(rest):
                 return EXIT_MALFORMED
             interactive = True
             i += 1
+        elif tok == "--dispositions":
+            if dispositions_file is not None:
+                print("opf import: --dispositions given more than once", file=sys.stderr)
+                return EXIT_MALFORMED
+            dispositions_file = _need_value(tok, i)
+            if dispositions_file is None:
+                return EXIT_MALFORMED
+            i += 2
+        elif tok == "--ingest-options":
+            if ingest_options_file is not None:
+                print("opf import: --ingest-options given more than once", file=sys.stderr)
+                return EXIT_MALFORMED
+            ingest_options_file = _need_value(tok, i)
+            if ingest_options_file is None:
+                return EXIT_MALFORMED
+            i += 2
+        elif tok == "--include":
+            val = _need_value(tok, i)
+            if val is None:
+                return EXIT_MALFORMED
+            include.append(val)
+            i += 2
+        elif tok == "--show-review":
+            if show_review:
+                print("opf import: --show-review given more than once", file=sys.stderr)
+                return EXIT_MALFORMED
+            show_review = True
+            i += 1
+        elif tok == "--diff-review":
+            if diff_review is not None:
+                print("opf import: --diff-review given more than once", file=sys.stderr)
+                return EXIT_MALFORMED
+            diff_review = _need_value(tok, i)
+            if diff_review is None:
+                return EXIT_MALFORMED
+            i += 2
         else:
             print("opf import: unrecognized argument {!r}".format(tok), file=sys.stderr)
             return EXIT_MALFORMED
@@ -2969,11 +3013,13 @@ def _cli_self_test():
             --interactive) and --apply each exit 2 with IMPORT_RETIRED over both roots and write nothing; a
             malformed or missing --set / --decisions file meets the same refusal (no input file is read), and
             so does a mode-specific argv violation (a missing or extra companion flag, a run-id outside the
-            former grammar). Only a token-parser usage error (a flag missing its value, an unknown flag,
-            the retired --show-review) and the exactly-one-mode rule exit 2 before it, without the refusal
-            text. The pointer names adoption and the prompt pack in words and no command. Flip: routing
-            `import` to the fail-closed KNOWN_VERBS branch, or restoring a mode-specific check or an input
-            reader ahead of the refusal, turns rows red."""
+            former grammar) and every former companion flag (the root-ingest --dispositions,
+            --ingest-options and repeatable --include; the review aids --show-review and --diff-review).
+            Only a token-parser usage error (a flag missing its value, a duplicate, an unknown flag) and the
+            exactly-one-mode rule exit 2 before it, without the refusal text. The pointer names adoption and
+            the prompt pack in words and no command. Flip: routing `import` to the fail-closed KNOWN_VERBS
+            branch, restoring a mode-specific check or an input reader ahead of the refusal, or dropping a
+            former companion flag from the token parser, turns rows red."""
             import re
 
             refusal = IMPORT_RETIRED
@@ -3101,6 +3147,29 @@ def _cli_self_test():
                          "--apply outside the run-id grammar"),
                 ):
                     refused(argv, what)
+                # Every former companion flag parses and meets the refusal, its named file never read (spec
+                # 14.1): the root-ingest planner's --dispositions / --ingest-options / repeatable --include,
+                # and the review aids --show-review / --diff-review, alone or combined.
+                for argv, what in (
+                        (["import", "--plan", "--dispositions", path("not-toml.toml"), "--root", store],
+                         "--plan --dispositions (a malformed worksheet)"),
+                        (["import", "--plan", "--dispositions", path("missing.toml"), "--root", not_adopted],
+                         "--plan --dispositions (a missing worksheet, not adopted)"),
+                        (["import", "--plan", "--ingest-options", path("not-toml.toml"), "--root", store],
+                         "--plan --ingest-options"),
+                        (["import", "--plan", "--include", "*.md", "--include", "docs/*", "--root", store],
+                         "--plan with a repeated --include"),
+                        (["import", "--plan", "--dispositions", path("not-toml.toml"), "--ingest-options",
+                          path("missing.toml"), "--include", "*", "--root", store],
+                         "--plan with every root-ingest companion"),
+                        (["import", "--show-review", "--review", _RID, "--root", store],
+                         "--review --show-review"),
+                        (["import", "--review", _RID, "--diff-review", _RID, "--root", not_adopted],
+                         "--review --diff-review (not adopted)"),
+                        (["import", "--review", _RID, "--show-review", "--diff-review", _RID, "--root", store],
+                         "--review with both review aids"),
+                ):
+                    refused(argv, what)
                 if tree_snapshot(ibase) != before:
                     failures.append("a refused import mode changed the fixture tree")
                 # Only the token parser and the exactly-one-mode rule precede the refusal.
@@ -3109,10 +3178,20 @@ def _cli_self_test():
                 usage(["import", "--root", store], "give exactly one mode", "with no mode")
                 usage(["import", "--scan", "--plan", "--set", path("set.toml")], "give exactly one mode",
                       "with two modes")
-                usage(["import", "--show-review", "--review", _RID, "--root", store], "unrecognized argument",
-                      "--show-review (the retired review aid)")
-                usage(["import", "--plan", "--dispositions", path("not-toml.toml"), "--root", store],
-                      "unrecognized argument", "--dispositions (the retired root-ingest planner)")
+                usage(["import", "--plan", "--dispositions", "--root", store], "requires a non-empty argument",
+                      "--plan with a valueless --dispositions")
+                usage(["import", "--review", _RID, "--diff-review"], "requires an argument",
+                      "--review with a trailing valueless --diff-review")
+                usage(["import", "--plan", "--include", "", "--root", store], "requires a non-empty argument",
+                      "--plan with an empty --include")
+                usage(["import", "--plan", "--dispositions", path("set.toml"), "--dispositions",
+                       path("set.toml")], "--dispositions given more than once", "--plan with two --dispositions")
+                usage(["import", "--review", _RID, "--show-review", "--show-review"],
+                      "--show-review given more than once", "--review with two --show-review")
+                usage(["import", "--show-review", "--root", store], "give exactly one mode",
+                      "--show-review with no mode")
+                usage(["import", "--plan", "--no-such-flag", "--root", store], "unrecognized argument",
+                      "--plan with an unknown flag")
                 # The pointer is to adoption and the prompt pack in words, naming no command (spec 14.1).
                 if not ("adoption (OPF spec 14.1)" in refusal and "prompt pack" in refusal
                         and not re.search(r"`|\bopf [a-z]", refusal)):

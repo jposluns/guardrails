@@ -3553,6 +3553,42 @@ def self_test():
         check("c3-crafted-view-name-graded",
               _c3r is not None and any("C-CONTAINMENT" in f and "unregistered" in f and ".working/x" in f
                                        for f in _c3r.findings))
+        # R9-1 (ported from the retired ingest gate's f91 cross-run, checker leg only): a recognized view's
+        # store-scope spec destination is a managed LEAF matched by equality, never a managed subtree. A
+        # DIRECTORY at `.working/TODO.md` is recursed as a view-target ancestor, so the child it hides is an
+        # unregistered C-CONTAINMENT finding named under C-CONTAINMENT's own attribution (not merely the
+        # whole-store exit, which the wrong-type read of the destination already pins at CANNOT-EVALUATE).
+        # Flip: skipping a subdirectory that equals a view target (`full in view_targets` beside the
+        # skipped roots) silently prunes the child and turns the C-CONTAINMENT leg PASS.
+        _f91v = {"TODO.md": {"kind": "composed", "sources": ["backlog_item", "block"],
+                             "target": ".working/TODO.md"}}
+        _f91d = clean_machine()
+        _f91d["manifest.toml"] = base_manifest(views=_f91v)
+        _f91dr = run(_f91d, working={"TODO.md/inner.md": "hidden\n"})
+        check("f91-dir-at-view-dest-cannot-evaluate",
+              _f91dr is not None and exit_code(_f91dr) == 2)
+        check("f91-dir-at-view-dest-child-named",
+              _f91dr is not None and _f91dr.checks.get("C-CONTAINMENT") == "FINDING"
+              and any(".working/TODO.md/inner.md" in m and "unregistered" in m
+                      for m in _f91dr.by_check.get("C-CONTAINMENT", [])))
+        # Companion: a REGULAR FILE at the same destination is the managed view output, excluded from
+        # C-CONTAINMENT (no finding names it), and with the golden rendered the store is VALID.
+        _f91f = clean_machine()
+        _f91f["manifest.toml"] = base_manifest(views=_f91v)
+        _f91f_root = build(_f91f, clean_product())
+        _f91f_res = resolve_store(_f91f_root)
+        _f91f_fd = _open_store_root_fd(_f91f_res.store_root, _f91f_res.pointer_source != "default")
+        try:
+            _f91f_text = {n: t for n, _s, _d, t in _opf_views.plan_views(
+                _f91f_fd, _f91f_res.machine_rel)}.get("TODO.md")
+        finally:
+            os.close(_f91f_fd)
+        (_f91f_root / ".working" / "TODO.md").write_text(_f91f_text or "", encoding="utf-8")
+        _f91fr = validate_store(resolve_store(_f91f_root), observations=clean_prior())
+        check("f91-regular-file-at-view-dest-excluded",
+              _f91f_text is not None and _f91fr.status == VALID
+              and _f91fr.checks.get("C-CONTAINMENT") == "PASS"
+              and not any(".working/TODO.md" in m for m in _f91fr.by_check.get("C-CONTAINMENT", [])))
         # round-14 C5: a partial import substantiated only by a WELL-FORMED run (carrying plan.toml). A
         # run-id-named dir WITHOUT plan.toml does not substantiate, so a stray is graded, not triaged.
         _c5 = clean_machine()
