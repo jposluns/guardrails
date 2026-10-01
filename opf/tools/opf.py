@@ -11831,9 +11831,11 @@ def _cmd_import(rest):
     never a usage error for a mode this build refuses. The parser still accepts the former modes' companion
     flags, so every former form meets the pointer: the root-ingest planner's `--dispositions FILE`,
     `--ingest-options FILE` and repeatable `--include GLOB`, and the review aids `--show-review` and
-    `--diff-review OLD_RUN` (each named file is never read). Only the token parser (an unknown flag, a
-    duplicate, an empty or missing value) and the exactly-one-mode rule precede it: a bare `opf import` or
-    two modes is a usage error (exit 2) without the pointer. The parser is the house fail-closed idiom,
+    `--diff-review OLD_RUN` (each named file is never read). Every valued flag also takes the joined
+    `--flag=value` spelling, split into the separate form so its value meets the same validation. Only the
+    token parser (an unknown flag, a duplicate, an empty or missing value) and the exactly-one-mode rule
+    precede it: a bare `opf import` or two modes is a usage error (exit 2) without the pointer. The parser
+    is the house fail-closed idiom,
     matching _cmd_render's --root loop. The root is never resolved, so an unresolved / NOT-ADOPTED root
     refuses the same way (D7: import is a REQUESTED operation, so its refusal is a cannot-evaluate, never
     the NOT-APPLICABLE exit 0 that doctor/render/upgrade report on a non-adopter root)."""
@@ -11848,6 +11850,17 @@ def _cmd_import(rest):
     include = []                  # repeatable, as it was
     show_review = False           # the former review aids, likewise
     diff_review = None
+
+    # A joined `--flag=value` for a valued flag splits into `--flag value`, so an empty value is the usual
+    # usage error. Any other `=`-joined token, `--x=y` or a valueless flag such as `--show-review=x`, is
+    # left whole and stays unrecognized.
+    valued = ("--review", "--apply", "--root", "--set", "--actor", "--decisions", "--dispositions",
+              "--ingest-options", "--include", "--diff-review")
+    tokens = []
+    for tok in rest:
+        name, eq, val = tok.partition("=")
+        tokens += [name, val] if eq and name in valued else [tok]
+    rest = tokens
 
     def _need_value(flag, idx):
         if idx + 1 >= len(rest):
@@ -12590,8 +12603,9 @@ def _cli_self_test():
             malformed or missing --set / --decisions file meets the same refusal (no input file is read), and
             so does a mode-specific argv violation (a missing or extra companion flag, a run-id outside the
             former grammar) and every former companion flag (the root-ingest --dispositions,
-            --ingest-options and repeatable --include; the review aids --show-review and --diff-review).
-            Only a token-parser usage error (a flag missing its value, a duplicate, an unknown flag) and the
+            --ingest-options and repeatable --include; the review aids --show-review and --diff-review), in
+            the separate and the joined `--flag=value` spellings alike. Only a token-parser usage error (a
+            flag missing its value, an empty joined value, a duplicate, an unknown flag) and the
             exactly-one-mode rule exit 2 before it, without the refusal text. The pointer names adoption and
             the prompt pack in words and no command. Flip: routing `import` to the fail-closed KNOWN_VERBS
             branch, restoring a mode-specific check or an input reader ahead of the refusal, or dropping a
@@ -12746,6 +12760,26 @@ def _cli_self_test():
                          "--review with both review aids"),
                 ):
                     refused(argv, what)
+                # The joined `--flag=value` spelling of every valued former flag meets the same refusal.
+                for argv, what in (
+                        (["import", "--review=" + _RID, "--show-review", "--root=" + store],
+                         "--review=R --show-review --root=DIR"),
+                        (["import", "--apply=" + _RID, "--root=" + not_adopted], "--apply=R (not adopted)"),
+                        (["import", "--scan", "--set=" + path("set.toml"), "--root", store],
+                         "--scan --set=FILE"),
+                        (["import", "--review", _RID, "--actor=tester",
+                          "--decisions=" + path("not-json.json"), "--root", store],
+                         "--review --actor=NAME --decisions=FILE"),
+                        (["import", "--plan", "--dispositions=" + path("not-toml.toml"), "--root", store],
+                         "--plan --dispositions=FILE"),
+                        (["import", "--plan", "--ingest-options=" + path("missing.toml"), "--root", store],
+                         "--plan --ingest-options=FILE"),
+                        (["import", "--plan", "--include=*.md", "--include", "a=b", "--root", store],
+                         "--plan --include=GLOB"),
+                        (["import", "--review", _RID, "--diff-review=" + _RID, "--root", store],
+                         "--review --diff-review=OLD_RUN"),
+                ):
+                    refused(argv, what)
                 if tree_snapshot(ibase) != before:
                     failures.append("a refused import mode changed the fixture tree")
                 # Only the token parser and the exactly-one-mode rule precede the refusal.
@@ -12768,6 +12802,16 @@ def _cli_self_test():
                       "--show-review with no mode")
                 usage(["import", "--plan", "--no-such-flag", "--root", store], "unrecognized argument",
                       "--plan with an unknown flag")
+                usage(["import", "--plan", "--x=y", "--root", store], "unrecognized argument",
+                      "--plan with an unknown joined flag")
+                usage(["import", "--review", _RID, "--show-review=x"], "unrecognized argument",
+                      "--review with a joined value on the valueless --show-review")
+                usage(["import", "--apply", _RID, "--root="], "requires a non-empty argument",
+                      "--apply with an empty --root=")
+                usage(["import", "--review=", "--root", store], "requires a non-empty argument",
+                      "an empty --review=")
+                usage(["import", "--plan", "--root=" + store, "--root=" + store],
+                      "--root given more than once", "--plan with two --root=")
                 # The pointer is to adoption and the prompt pack in words, naming no command (spec 14.1).
                 if not ("adoption (OPF spec 14.1)" in refusal and "prompt pack" in refusal
                         and not re.search(r"`|\bopf [a-z]", refusal)):

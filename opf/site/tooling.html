@@ -50,7 +50,7 @@
 <div class="wrap pagehead">
   <p class="eyebrow">Reference tooling</p>
   <h1>Reference tooling</h1>
-  <p class="lead">OPFiles names nine command verbs: <code>init</code>, <code>import</code>, <code>doctor</code>, <code>render</code>, <code>migrate</code>, <code>sync</code>, <code>upgrade</code>, <code>absorb</code>, and <code>record</code>. The reference CLI implements seven; <code>migrate</code> and <code>sync</code> are planned and currently exit 2 (not yet implemented).</p>
+  <p class="lead">OPFiles names nine command verbs: <code>init</code>, <code>import</code>, <code>doctor</code>, <code>render</code>, <code>migrate</code>, <code>sync</code>, <code>upgrade</code>, <code>absorb</code>, and <code>record</code>. The reference CLI implements six. The ordinary <code>import</code> modes are retired and refuse with exit 2; <code>migrate</code> and <code>sync</code> are planned and currently exit 2 (not yet implemented).</p>
 </div>
 
 <section>
@@ -88,7 +88,7 @@
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 14v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/><path d="M12 4v9"/><path d="m8 9 4 4 4-4"/></svg></span>
         <h3><code>opf import</code></h3>
-        <p>Scans, plans, captures attributed reviews of legacy content, and promotes a reviewed import with <code>--apply</code>.</p>      </div>
+        <p>Retired modes: <code>--scan</code>, <code>--plan</code>, <code>--review</code>, and <code>--apply</code> refuse with exit 2 and write nothing. Clean-start adoption is the intake; post-adoption import will use the approved prompt pack (spec 14.1).</p>      </div>
       <div class="benefit">
         <span class="benefit-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h9l3 3v15H6z"/><path d="M9 10h6M9 14h6M9 18h4"/></svg></span>
         <h3><code>opf absorb</code></h3>

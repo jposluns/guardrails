@@ -108,8 +108,9 @@
       what it does at source today, except where marked Planned.</p>
     <p><code>doctor</code> distinguishes <b style="color:var(--ink)">0</b> clean,
       <b style="color:var(--ink)">1</b> a finding, and <b style="color:var(--ink)">2</b> cannot-evaluate.
-      <code>render --check</code> uses exit 1 for drift; <code>render --write</code> and
-      <code>import</code> can also exit 1 on a finding. Mutating commands can also exit 2 on a refusal
+      <code>render --check</code> uses exit 1 for drift; <code>render --write</code> can also exit 1
+      on a finding. The retired <code>import</code> modes always exit 2. Mutating commands can also
+      exit 2 on a refusal
       or an unsuccessful operation: <code>render --write</code> requires passing source-integrity
       checks, with no internal or unattributed faults; otherwise it exits 2 and writes nothing.
       <code>upgrade</code> exits 2 when its doctor result is not VALID; after a schema rewrite,
@@ -185,34 +186,23 @@
     <p class="refchips"><code>opf doctor</code> <code>opf doctor --root .</code></p>
 
     <h3 id="cmd-import"><code>opf import</code></h3>
-    <p><b style="color:var(--ink)">Purpose.</b> Bring an existing project's operational content into the
-      store through a staged, reviewed, attributed flow, rather than a silent absorb.</p>
-    <p><b style="color:var(--ink)">How it works.</b> Exactly one of four modes runs, and each requires an
-      already-initialized store (an unresolved root is a cannot-evaluate that asks you to run
-      <code>opf init</code> first). The modes chain in order:</p>
-    <ul class="clean">
-      <li><b style="color:var(--ink)"><code>--scan --set FILE</code></b>: reads a declared set of sources
-        and prints a canonical inventory to stdout; zero writes.</li>
-      <li><b style="color:var(--ink)"><code>--plan --set FILE</code></b>: stages a candidate run under
-        <code>.working/imports/&lt;run-id&gt;/</code> and prints the run id and the report path, leaving
-        the originals in place; no live-store write.</li>
-      <li><b style="color:var(--ink)"><code>--review &lt;run-id&gt; --actor NAME</code></b> with
-        <code>--decisions FILE</code> or <code>--interactive</code>: captures an attributed decision on
-        every fragment and writes the acceptance record; no live-store write (a non-TTY
-        <code>--interactive</code> is refused).</li>
-      <li><b style="color:var(--ink)"><code>--apply &lt;run-id&gt;</code></b>: promotes an accepted,
-        reviewed run into the live store through a journaled, verified cutover.</li>
-    </ul>
-    <p><b style="color:var(--ink)">Result.</b> An inventory, a staged run id and report, an acceptance
-      record, or a promoted store, one per mode; everything not confidently mapped is quarantined rather
-      than dropped, and the originals stay in place until an <code>--apply</code> promotes a fully
-      reviewed run. An import that promotes quarantined <code>legacy_fragment</code> records can succeed,
-      but afterwards doctor reports cannot-evaluate, <code>opf render --write</code> refuses, and
-      <code>opf upgrade</code> exits 2 without offering the change, because the baseline validator does
-      not validate those records' content schemas. Module-tier records have the same effect. If an
-      upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before failing at render,
-      leaving the changes in place for recovery.</p>
-    <p class="refchips"><code>opf import --scan --set sources.toml</code> <code>opf import --plan --set sources.toml</code> <code>opf import --review R --actor "you" --decisions d.toml</code> <code>opf import --apply R</code></p>
+    <p><b style="color:var(--ink)">Status.</b> The ordinary import modes are retired. The reference CLI's
+      former <code>--scan</code>, <code>--plan</code>, <code>--review</code>, and <code>--apply</code>
+      modes now refuse with exit 2 and write nothing.</p>
+    <p><b style="color:var(--ink)">Purpose.</b> In the standard, <code>opf import</code> is only the
+      post-adoption import activity. Clean-start adoption is the intake for an existing project: it
+      preserves and retires the old operational files, establishes the new store and enforcement, and
+      imports nothing (spec section 14). Post-adoption import will use the approved, versioned prompt
+      pack (spec section 14.1); the reference CLI does not implement it yet.</p>
+    <p><b style="color:var(--ink)">How it works.</b> Each former mode refuses with a pointer, in words,
+      to clean-start adoption and the prompt pack. The refusal comes before the root is resolved and
+      before any named file is read, so it is the same on an adopted store and on a directory that has
+      not adopted OPFiles, and the former companion flags meet the same refusal. Only a malformed command
+      line (an unknown flag, a flag missing its value, a repeated flag, or no mode or two modes) is a
+      usage error instead, also exit 2.</p>
+    <p><b style="color:var(--ink)">Result.</b> Exit 2 and no change, whatever the mode: nothing is
+      staged under <code>.working/imports/</code>, and nothing is promoted into the store.</p>
+    <p class="refchips"><code>opf import --apply R</code> <span>refused, exit 2</span></p>
 
     <h3 id="cmd-upgrade"><code>opf upgrade</code></h3>
     <p><b style="color:var(--ink)">Purpose.</b> Apply the in-place base-schema upgrade from spec 1.0.0

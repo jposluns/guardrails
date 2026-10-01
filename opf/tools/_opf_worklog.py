@@ -110,11 +110,6 @@ def read_manifest_model_at(root_fd, machine_rel, *, supported_profiles=None):
     return model
 
 
-def read_manifest_at(root_fd, machine_rel, *, supported_profiles=None):
-    return read_manifest_model_at(
-        root_fd, machine_rel, supported_profiles=supported_profiles).data
-
-
 def _valid_wl_ref(value):
     """Return (positive number, suffix or None), or None. WL-only extension."""
     if not isinstance(value, str):

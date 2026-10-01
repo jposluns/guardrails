@@ -1336,6 +1336,63 @@ def _archived_rotatable(rec):
     return rec.state in spec.terminal and rec.qual is None
 
 
+def _staged_run_roots(homes):
+    """The staging roots whose runs substantiate a partial import: the imports tree, plus the typed
+    import and ingest homes in a homes-2 store."""
+    roots = (IMPORTS_REL,)
+    if homes >= 2:
+        roots += tuple(_opf_store.STAGING_REL + "/" + kind for kind in ("import", "ingest"))
+    return roots
+
+
+# The run subdirectories that hold staged `{schema, record}` indexes (`<type>.index.toml`, `worklog.toml`).
+_STAGED_ID_SUBDIRS = ("candidate", "fragments")
+
+
+def _staged_ids(root_fd, homes, rep):
+    """The ids staged under every run in the staging roots, for the C-ID-SPACE uniqueness union (spec 11:
+    uniqueness spans active, archive, and staging). Read only, through the contained no-follow readers: each
+    `<run>/candidate|fragments/<type>.index.toml` or `worklog.toml` must be a closed `{schema, record}`
+    index at the supported schema whose rows are tables carrying a well-formed id. Nothing is validated
+    beyond what uniqueness needs. An unreadable listing or file, an exotic entry, and any malformed staged
+    index are CANNOT-EVALUATE naming the input, never skipped, so a staged id cannot drop out of the union."""
+    ids = []
+    for staging_rel in _staged_run_roots(homes):
+        runs, _files = _list_dir(root_fd, staging_rel, rep)
+        for run in runs or ():
+            for sub in _STAGED_ID_SUBDIRS:
+                sub_rel = _rel(staging_rel, run, sub)
+                _subs, names = _list_dir(root_fd, sub_rel, rep)
+                for entry in names or ():
+                    if not (entry.endswith(INDEX_SUFFIX) or entry == WORKLOG_NAME):
+                        continue
+                    where = _safe_display(_rel(sub_rel, entry))
+                    data, st = _read_toml(root_fd, _rel(sub_rel, entry), rep)
+                    if st != "ok":
+                        continue        # an error is already CANNOT-EVALUATE; an absent file stages nothing
+                    extra = set(data) - INDEX_TOP_KEYS
+                    sch = data.get("schema")
+                    records = data.get("record")
+                    if extra:
+                        rep.cant("{}: staged index carries unknown top-level key(s): {} (fail-closed)".format(
+                            where, ", ".join(_sorted_key_names(extra))))
+                    elif type(sch) is not int or sch != SUPPORTED_SCHEMA:
+                        rep.cant("{}: staged index schema {} is not the supported version {} "
+                                 "(fail-closed)".format(where, _safe_display(sch), SUPPORTED_SCHEMA))
+                    elif not isinstance(records, list):
+                        rep.cant("{}: staged index [[record]] is missing or not an array of tables "
+                                 "(fail-closed)".format(where))
+                    else:
+                        for i, row in enumerate(records):
+                            rid = row.get("id") if isinstance(row, dict) else None
+                            if _valid_id_shape(rid) is None:
+                                rep.cant("{}#{}: staged record is not a table carrying a well-formed id "
+                                         "(fail-closed)".format(where, i + 1))
+                            else:
+                                ids.append(rid)
+    return ids
+
+
 def _has_active_import_run(root_fd, machine_rel, rep, homes=1):
     """Substantiate partial imports by a named staged run carrying plan.toml.
 
@@ -1345,10 +1402,7 @@ def _has_active_import_run(root_fd, machine_rel, rep, homes=1):
     substantiate partial imports until their plan readers are registered. Listing errors are
     cannot-evaluate. machine_rel is retained for call-site symmetry.
     """
-    roots = (IMPORTS_REL,)
-    if homes >= 2:
-        roots += tuple(_opf_store.STAGING_REL + "/" + kind for kind in ("import", "ingest"))
-    for imports_rel in roots:
+    for imports_rel in _staged_run_roots(homes):
         subdirs, _files = _list_dir(root_fd, imports_rel, rep)
         for d in subdirs or ():
             if not _is_import_run_id(d):
@@ -2757,10 +2811,15 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     committed_ids += ["WL-{}".format(n) for n in active_worklog]
     for _year, wl_map in archive_worklogs.items():
         committed_ids += ["WL-{}".format(n) for n in wl_map]
-    # Uniqueness spans active + archive. The C-STAGING enumeration of ids staged under imports/<run-id>/
-    # retired with the import engine: nothing stages ids there, and containment grades any leftover run
-    # interior as unregistered.
-    for f in check_unique_ids(committed_ids):
+    # Uniqueness spans active + archive + staging (spec 11). At steady state containment grades any leftover
+    # run interior as unregistered, but under a SUBSTANTIATED partial it only triages it, so the staged ids
+    # are enumerated here and join the union; without this a staged id duplicating a committed one would
+    # validate clean. ids-within-counters stays scoped to the committed store: a staged id is pending
+    # promotion and may sit above the committed high-water.
+    staged_ids = []
+    if import_status == "partial" and _has_active_import_run(root_fd, machine_rel, rep, homes):
+        staged_ids = _staged_ids(root_fd, homes, rep)
+    for f in check_unique_ids(committed_ids + staged_ids):
         rep.finding("C-ID-SPACE: {}".format(f))
     for f in check_ids_within_counters(committed_ids, high):
         rep.finding("C-ID-SPACE: {}".format(f))
@@ -3809,6 +3868,29 @@ def self_test():
         partial = run(pm, working={"junk.md": "x", "imports/{}/plan.toml".format(RUNID): "schema = 1"})
         check("partial-import-triage-not-finding",
               partial.status == VALID and any("junk.md" in t for t in partial.triage))
+        # Staged ids join the C-ID-SPACE uniqueness union under a substantiated partial (spec 11: uniqueness
+        # across active, archive, and staging). Containment only triages the run interior there, so a
+        # staged BI-1 duplicating committed BI-1 is caught by the staged-id enumeration alone; without
+        # _staged_ids this store validates VALID. The companion stages a fresh id and stays VALID, and a
+        # staged row with no id is CANNOT-EVALUATE, never skipped.
+        def staged(rows):
+            sp = clean_machine()
+            sp["manifest.toml"] = base_manifest()
+            sp["manifest.toml"]["opf"]["import_status"] = "partial"
+            return run(sp, working={"imports/{}/plan.toml".format(RUNID): "schema = 1",
+                                    "imports/{}/candidate/backlog_item.index.toml".format(RUNID): idx(rows)})
+        stdup = staged([bi(1, "open")])
+        check("staged-duplicate-id-invalid", stdup is not None and stdup.status == INVALID)
+        check("staged-duplicate-id-named",
+              stdup is not None
+              and any(f.startswith("C-ID-SPACE: duplicate id 'BI-1'") for f in stdup.findings)
+              and stdup.checks.get("C-ID-SPACE") == "FINDING")
+        stnew = staged([bi(3, "open")])
+        check("staged-fresh-id-valid", stnew is not None and stnew.status == VALID)
+        stbad = staged([{"type": "backlog_item"}])
+        check("staged-malformed-row-cant",
+              stbad is not None and stbad.status == CANNOT_EVALUATE
+              and stbad.checks.get("C-ID-SPACE") == "CANNOT-EVALUATE")
         # codex-2: a STALE partial with no active run does not launder; the stray path grades as a finding
         # and the unsubstantiated declaration is itself flagged -> INVALID.
         stale = clean_machine()
