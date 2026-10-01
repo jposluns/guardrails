@@ -64,7 +64,8 @@ write-gate invocation (VC-4, deferred), so WRITE mode FAILS CLOSED today and wri
 `opf render --write` CLI verb returns exit 2, failing closed at the dispatcher BEFORE the root is resolved.
 A direct-engine write (a `render(...)` call in write mode) is refused exit 2 ONLY once the root RESOLVES as
 an adopter; a non-adopter root returns NOT APPLICABLE (0) FIRST, because non-adopter resolution PRECEDES the
-write refusal. The module `__main__` defaults its command line to `--check`, so it never enters write mode.
+write refusal. The module `__main__` defaults its command line to `--check`, so it never enters write mode;
+exactly `--self-test` runs `self_test()` instead.
 The `opf render` CLI requires exactly one of `--check | --write` (no default): `--check` (read-only drift
 detection) is IMPLEMENTED and keeps working, while `--write` stays fail-closed until VC-4 composes the gate.
 This is a refusal pending the real composition, never a fabricated gate.
@@ -4291,6 +4292,10 @@ def _entry(wid, kind, summary):
 
 if __name__ == "__main__":
     _argv = sys.argv[1:]
+    # Exactly `--self-test` runs this module's self-test (the same entry the other self_test modules carry);
+    # the render parser has no such flag, so no render command line is taken over.
+    if _argv == ["--self-test"]:
+        sys.exit(self_test())
     # Until render COMPOSES the U6 store-integrity write-gate (VC-4), this module entry runs CHECK-only
     # (drift detection, never a write): a write requires that composition, so default the command line to
     # --check. validate_store itself EXISTS (U6); it is render's write-gate composition that is deferred. A

@@ -132,28 +132,173 @@ def _bootstrap():
         return EXIT_MALFORMED
     return EXIT_OK
 
-def _self_test_entry_gaps(directory):
-    """Names of the *.py modules directly in `directory` that define a top-level self_test but carry no
-    top-level `if __name__ == "__main__"` block (F-SELFTEST-NO-MAIN): run as `python3 <module> --self-test`
-    such a module exits 0 having run nothing, a false green. A module that cannot be read or parsed is
-    named too, so the probe fails closed. Non-recursive: _vendor/ is not scanned."""
-    import ast
-    gaps = []
-    for path in sorted(Path(directory).glob("*.py")):
-        try:
-            tree = ast.parse(path.read_bytes(), str(path))
-        except (OSError, SyntaxError, ValueError):
-            gaps.append(path.name)
-            continue
-        defines = any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "self_test"
-                      for node in tree.body)
-        entry = any(isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
-                    and isinstance(node.test.left, ast.Name) and node.test.left.id == "__name__"
-                    and any(isinstance(c, ast.Constant) and c.value == "__main__" for c in node.test.comparators)
-                    for node in tree.body)
-        if defines and not entry:
-            gaps.append(path.name)
-    return gaps
+# The F-SELFTEST-NO-MAIN probe child, run by _self_test_entry_gaps in a fresh `python3 -I -B -c` per module
+# and phase, so nothing it imports or patches reaches this process. Its argv is (phase, path); it writes one
+# JSON report to a duplicate of its original stdout and discards the module's own stdout.
+#   expose: import the module as a sibling does (its directory first on sys.path) and report whether it binds
+#           a callable `self_test`, by any binding (def, assignment, import, inside a try or an if).
+#   entry:  run the module's source as `__main__` with sys.argv = [path, "--self-test"] and the sys.path of
+#           `python3 -I -B <module> --self-test`, except that before every top-level statement after the first
+#           a bound self_test is replaced by a recording sentinel returning 1 (the name is rebound and, for a
+#           plain function, its code is swapped, so a reference captured earlier records too). The real suite
+#           never runs; the report carries the sentinel's call count and the exit status.
+_ENTRY_PROBE = r"""
+import ast, builtins, importlib.util, json, os, sys, types
+phase, path = sys.argv[1], sys.argv[2]
+out = os.dup(1)
+os.dup2(os.open(os.devnull, os.O_WRONLY), 1)
+report = {}
+def finish():
+    data = json.dumps(report).encode("utf-8")
+    while data:
+        data = data[os.write(out, data):]
+    os._exit(0)
+if phase == "expose":
+    sys.path.insert(0, os.path.dirname(path))
+    try:
+        stem = os.path.basename(path)[:-3]
+        spec = importlib.util.spec_from_file_location(stem, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[stem] = module
+        spec.loader.exec_module(module)
+    except BaseException as exc:
+        report["error"] = "importing it raised " + type(exc).__name__
+    else:
+        report["exposes"] = callable(getattr(module, "self_test", None))
+    finish()
+calls = []
+def record():
+    calls.append(None)
+    return 1
+builtins.__opf_entry_probe_record__ = record
+scope = {}
+exec("def sentinel(*args, **kwargs):\n    return __opf_entry_probe_record__()\n", scope)
+sentinel = scope["sentinel"]
+module = types.ModuleType("__main__")
+module.__file__ = path
+namespace = module.__dict__
+def arm():
+    target = namespace.get("self_test")
+    if target is sentinel or not callable(target):
+        return
+    if type(target) is types.FunctionType and not target.__code__.co_freevars:
+        target.__code__ = sentinel.__code__
+    namespace["self_test"] = sentinel
+namespace["__opf_entry_probe_arm__"] = arm
+try:
+    with open(path, "rb") as handle:
+        tree = ast.parse(handle.read(), path)
+    body = tree.body[:1]
+    for statement in tree.body[1:]:
+        if not (isinstance(statement, ast.ImportFrom) and statement.module == "__future__"):
+            call = ast.Call(ast.Name("__opf_entry_probe_arm__", ast.Load()), [], [])
+            body.append(ast.copy_location(ast.Expr(call), statement))
+        body.append(statement)
+    tree.body = body
+    code = compile(ast.fix_missing_locations(tree), path, "exec", dont_inherit=True)
+except BaseException as exc:
+    report["error"] = "it cannot be read or parsed ({})".format(type(exc).__name__)
+    finish()
+sys.modules["__main__"] = module
+sys.argv[:] = [path, "--self-test"]
+try:
+    exec(code, namespace)
+except SystemExit as exc:
+    status = 0 if exc.code is None else exc.code & 0xFF if isinstance(exc.code, int) else 1
+except BaseException as exc:
+    report["error"] = "running it as `--self-test` raised " + type(exc).__name__
+    finish()
+else:
+    status = 0
+report.update(calls=len(calls), status=status)
+finish()
+"""
+
+
+def _self_test_entry_gaps(directory, required=()):
+    """Probe the F-SELFTEST-NO-MAIN class by BEHAVIOUR. Returns (gaps, exposers): `gaps` maps a name to why it
+    fails, `exposers` is the set of *.py names directly in `directory` that bind a callable self_test. Each such
+    module is run as `python3 -I -B <module> --self-test` with self_test replaced by a recording sentinel that
+    returns 1 (see _ENTRY_PROBE); it is a gap unless the sentinel was called and the exit status is non-zero,
+    so a `!=` guard, a `pass` body, a main() that ignores the flag, and an entry that drops the result are all
+    named, whatever their syntax. A module that cannot be imported, read or parsed, a *.py entry that is not a
+    regular file, and a probe that cannot run or report are gaps too, as is each `required` name the scan did
+    not find binding self_test. The listing is os.listdir, so a missing or unreadable directory is a gap rather
+    than an empty scan. Non-recursive: _vendor/ is not scanned. Residual: a module that binds and calls self_test
+    within one top-level statement, or calls a closure or non-function self_test it captured before the swap,
+    runs its real suite (bounded by the probe's 120 s timeout); it is still named a gap, never passed."""
+    import subprocess
+    import tempfile
+    gaps, exposers = {}, set()
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError as exc:
+        return {str(directory): "the directory cannot be listed ({})".format(type(exc).__name__)}, exposers
+    with tempfile.TemporaryDirectory(prefix="opf-entry-probe-cwd-") as cwd:
+        def probe(phase, path):
+            try:
+                child = subprocess.run([sys.executable, "-I", "-B", "-c", _ENTRY_PROBE, phase, path], cwd=cwd,
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                       stderr=subprocess.DEVNULL, timeout=120)
+                report = json.loads(child.stdout.decode("utf-8"))
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                return {"error": "the probe could not run or report ({})".format(type(exc).__name__)}
+            return report if type(report) is dict else {"error": "the probe reported {!r}".format(report)}
+        for name in names:
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(str(directory), name)
+            try:
+                regular = stat.S_ISREG(os.lstat(path).st_mode)
+            except OSError as exc:
+                gaps[name] = "it cannot be examined ({})".format(type(exc).__name__)
+                continue
+            if not regular:
+                gaps[name] = "it is not a regular file"
+                continue
+            found = probe("expose", path)
+            if "error" in found or type(found.get("exposes")) is not bool:
+                gaps[name] = found.get("error", "the expose probe reported {!r}".format(found))
+                continue
+            if not found["exposes"]:
+                continue
+            exposers.add(name)
+            ran = probe("entry", path)
+            calls, status = ran.get("calls"), ran.get("status")
+            if "error" in ran or type(calls) is not int or type(status) is not int:
+                gaps[name] = ran.get("error", "the entry probe reported {!r}".format(ran))
+            elif not calls:
+                gaps[name] = "`--self-test` never calls self_test (exit {})".format(status)
+            elif status == 0:
+                gaps[name] = "`--self-test` exits 0 although self_test returned 1"
+    for name in required:
+        if name not in exposers and name not in gaps:
+            gaps[name] = "expected to bind self_test, but the scan did not find it"
+    return gaps, exposers
+
+
+# Synthetic modules for the probe's own flips. Each name in _ENTRY_PROBE_RED must be named and no other: beside
+# these files, directory.py is a directory, absent.py a required name that does not exist (with_entry.py and
+# via_main.py are required too, so the floor does not over-reject), and absent/ a directory that is not there.
+_ENTRY_PROBE_FIXTURES = {
+    "with_entry.py": ('def self_test():\n    return 0\n\n\n'
+                      'if __name__ == "__main__":\n    raise SystemExit(self_test())\n'),
+    "via_main.py": ('import sys\n\n\ndef self_test():\n    return 0\n\n\ndef main(argv):\n'
+                    '    if argv == ["--self-test"]:\n        return self_test()\n    return 2\n\n\n'
+                    'if __name__ == "__main__":\n    sys.exit(main(sys.argv[1:]))\n'),
+    "plain.py": 'if __name__ == "__main__":\n    raise SystemExit(0)\n',
+    "no_entry.py": "def self_test():\n    return 0\n",
+    "not_equal.py": 'def self_test():\n    return 0\n\n\nif __name__ != "__main__":\n    self_test()\n',
+    "pass_body.py": 'def self_test():\n    return 0\n\n\nif __name__ == "__main__":\n    pass\n',
+    "ignores_flag.py": ('import sys\n\n\ndef self_test():\n    return 0\n\n\ndef main():\n    return 0\n\n\n'
+                        'if __name__ == "__main__":\n    sys.exit(main())\n'),
+    "drops_result.py": ('def self_test():\n    return 0\n\n\nif __name__ == "__main__":\n'
+                        '    self_test()\n    raise SystemExit(0)\n'),
+    "assigned.py": "try:\n    from _no_such_module import self_test\nexcept ImportError:\n    self_test = lambda: 0\n",
+    "unparseable.py": "def self_test(:\n    return 0\n",
+}
+_ENTRY_PROBE_RED = frozenset({"no_entry.py", "not_equal.py", "pass_body.py", "ignores_flag.py", "drops_result.py",
+                              "assigned.py", "unparseable.py", "directory.py", "absent.py", "absent/"})
 
 
 def _aggregator_self_test():
@@ -162,19 +307,31 @@ def _aggregator_self_test():
     admitted as clean because a bool or float compares equal to an allowed int (False == 0, True == 1,
     0.0 == 0). Returns 0 clean, 1 on a failure. Registered below so `opf.py --self-test` exercises it;
     the store legs did not, letting a helper returning False produce an aggregate exit 0. It also holds
-    the F-SELFTEST-NO-MAIN class empty: every module beside this one that defines a top-level self_test
-    has a direct `--self-test` entry, and a synthetic no-entry module proves the probe goes red."""
+    the F-SELFTEST-NO-MAIN class empty by behaviour (_self_test_entry_gaps): every module in this directory
+    that binds a callable self_test must call it, and fail, when run with exactly `--self-test`; the scan
+    must find every module whose self_test is registered below; and the synthetic modules prove each red
+    case (no entry, `!=`, a `pass` body, a main() that ignores the flag, a dropped result, a self_test bound
+    by assignment in a try, an unparseable module, a non-file entry, a missing required module, and a
+    directory that cannot be listed) is named."""
     import tempfile
-    gaps = _self_test_entry_gaps(Path(__file__).resolve().parent)
+    if _bootstrap() != EXIT_OK:
+        return EXIT_MALFORMED
+    required = sorted({fn.__module__ + ".py" for _label, fn in _self_tests()
+                       if getattr(fn, "__name__", None) == "self_test"})
+    gaps, exposers = _self_test_entry_gaps(Path(__file__).resolve().parent, required)
     with tempfile.TemporaryDirectory(prefix="opf-entry-probe-") as tmp:
-        Path(tmp, "no_entry.py").write_text("def self_test():\n    return 0\n", encoding="utf-8")
-        Path(tmp, "with_entry.py").write_text(
-            'def self_test():\n    return 0\n\n\nif __name__ == "__main__":\n    raise SystemExit(self_test())\n',
-            encoding="utf-8")
-        probe_flips = _self_test_entry_gaps(tmp) == ["no_entry.py"]
-    if gaps or not probe_flips:
-        print("opf aggregator self-test: FAIL (self_test without a __main__ entry: {}; synthetic probe {})".format(
-            ", ".join(gaps) or "none", "fired" if probe_flips else "DID NOT FIRE"), file=sys.stderr)
+        for name, text in _ENTRY_PROBE_FIXTURES.items():
+            Path(tmp, name).write_text(text, encoding="utf-8")
+        Path(tmp, "directory.py").mkdir()
+        fired = set(_self_test_entry_gaps(tmp, ("with_entry.py", "via_main.py", "absent.py"))[0])
+        if _self_test_entry_gaps(Path(tmp, "absent"))[0]:
+            fired.add("absent/")
+    missed, over = sorted(_ENTRY_PROBE_RED - fired), sorted(fired - _ENTRY_PROBE_RED)
+    if gaps or missed or over:
+        print("opf aggregator self-test: FAIL (self_test modules without a working `--self-test` entry: {}; "
+              "synthetic probe cases not named: {}; named wrongly: {})".format(
+                  "; ".join("{} ({})".format(k, v) for k, v in sorted(gaps.items())) or "none",
+                  ", ".join(missed) or "none", ", ".join(over) or "none"), file=sys.stderr)
         return EXIT_FINDING
     ok = True
     # A helper returning False (bool, == 0) must NOT aggregate to clean.
@@ -193,8 +350,8 @@ def _aggregator_self_test():
         print("opf aggregator self-test: FAIL (fail-closed vocabulary check admitted a bad return)",
               file=sys.stderr)
         return EXIT_FINDING
-    print("opf aggregator self-test: PASS (fail-closed on non-int / out-of-range helper returns; "
-          "every self_test module has a __main__ entry)")
+    print("opf aggregator self-test: PASS (fail-closed on non-int / out-of-range helper returns; each of the "
+          "{} self_test modules calls it on exactly --self-test and propagates a failure)".format(len(exposers)))
     return EXIT_OK
 
 
