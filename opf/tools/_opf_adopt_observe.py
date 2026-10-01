@@ -3532,6 +3532,7 @@ def self_test(vectors_only=False):
     straggler_runs = dict()
     STRAGGLER = "resolver straggler: a resolver worker this row started outlived its 2.0 s join"
     BLOCKED = "not evaluated: refused the resolver while a straggler was alive, started by "
+    RETAINED = "resolver slot not back within 1.0 s of the fixture lookup's release"
 
     def run_case(base, contexts, case, mutated):
         identifier, expected, mutation, config = case
@@ -3541,10 +3542,13 @@ def self_test(vectors_only=False):
         # worker still alive here (inherited) was left by an earlier run,
         # whose row it already failed. Each place a worker this run started
         # outlives the join is recorded as a straggler and fails this run.
+        # A slot not back within main's bound is recorded in retained and
+        # fails this run.
         inherited, leaked = settle_resolvers(2.0)
         leaks = ["before"] if leaked else []
         stragglers = []
         blocked = []
+        retained = []
         product = base / secrets.token_hex(8)
         product.mkdir(mode=0o700)
         (product / "product-marker").write_bytes(b"unchanged\n")
@@ -3936,6 +3940,15 @@ def self_test(vectors_only=False):
                 # stub (_resolver_stub_bound), never the production resolver.
                 if resolver_sockets is not None:
                     resolver_sockets[1].close()
+                    # Main's bound: once the fixture lookup is released, the
+                    # slot must be back within 1.0 s, or this run fails. A
+                    # blocked run started no resolver worker, so a slot held
+                    # then belongs to the straggler that blocked it.
+                    if not blocked:
+                        if _RESOLVER_SLOT.acquire(timeout=1.0):
+                            _RESOLVER_SLOT.release()
+                        else:
+                            retained.append("after")
                 alive, leaked = settle_resolvers(2.0)
                 if leaked:
                     leaks.append("after")
@@ -3944,15 +3957,16 @@ def self_test(vectors_only=False):
                     for thread in alive - inherited:
                         straggler_runs.setdefault(thread, label)
 
-            passed = (
-                status == expected
-                and not violations
+            # What the run recorded, judged even for a blocked run.
+            recorded = (
+                not violations
                 and not short_takes
                 and snapshot(product) == before
                 and sys.path == path_before
                 and environment_restored
                 and not server.errors
             )
+            passed = status == expected and recorded
             if status in (INVALID, CANNOT_EVALUATE):
                 passed = passed and (
                     type(observation) is dict
@@ -4030,10 +4044,16 @@ def self_test(vectors_only=False):
         # passed is main's verdict on this run, leaks the resolver slots found
         # leaked, stragglers where a worker this run started outlived the
         # join, blocked the runs whose live straggler refused this run the
-        # resolver (empty if it was evaluated). The caller fails the row on a
-        # leak or a straggler and records a blocked run as not evaluated;
-        # neither counts as the mutant's detection.
-        return passed, status, elapsed, fetch_guards, leaks, stragglers, blocked
+        # resolver (empty if it was evaluated), retained where the slot was
+        # not back within main's bound. A blocked run was not evaluated, so
+        # its passed is only whether it recorded no effect before the block.
+        # The caller fails the row on a leak, a straggler or a retained slot
+        # and records a blocked run as not evaluated; none of them counts as
+        # the mutant's detection.
+        if blocked:
+            passed = recorded
+        return (passed, status, elapsed, fetch_guards, leaks, stragglers, blocked,
+                retained)
 
     def add_detail(row, text):
         # Append, so a row keeps any detail it already has.
@@ -4085,9 +4105,10 @@ def self_test(vectors_only=False):
                 raise AssertionError("resolver worker alive before any case")
             # Establish an actual positive TLS/quarantine fixture before negatives.
             positive = ("positive/local-tls-quarantine", VALID, "archive", {})
-            passed, status, elapsed, _, leaks, stragglers, blocked = run_case(
+            passed, status, elapsed, _, leaks, stragglers, blocked, retained = run_case(
                 base, contexts, positive, False)
-            passed = passed and not leaks and not stragglers and not blocked
+            passed = (passed and not leaks and not stragglers and not blocked
+                      and not retained)
             executed.append({
                 "id": positive[0], "expected": VALID, "observed": status,
                 "test_status": VALID if passed else INVALID,
@@ -4095,6 +4116,9 @@ def self_test(vectors_only=False):
             })
             if leaks:
                 executed[-1]["resolver_slot_leaked"] = leaks
+            if retained:
+                executed[-1]["resolver_slot_retained"] = retained
+                add_detail(executed[-1], RETAINED)
             if stragglers:
                 executed[-1]["resolver_straggler"] = stragglers
                 add_detail(executed[-1], STRAGGLER)
@@ -4107,10 +4131,10 @@ def self_test(vectors_only=False):
             executed.extend(guard_rows)
             for case in cases:
                 (passed, status, elapsed, guards, leaks, stragglers,
-                 blocked) = run_case(base, contexts, case, False)
+                 blocked, retained) = run_case(base, contexts, case, False)
                 (mutant_passed, mutant_status, mutant_elapsed, mutant_guards,
-                 mutant_leaks, mutant_stragglers,
-                 mutant_blocked) = run_case(base, contexts, case, True)
+                 mutant_leaks, mutant_stragglers, mutant_blocked,
+                 mutant_retained) = run_case(base, contexts, case, True)
                 executed.append({
                     "id": case[0],
                     "guard": case[2],
@@ -4137,11 +4161,13 @@ def self_test(vectors_only=False):
                 if blocked or mutant_blocked:
                     # A blocked run was not evaluated: the row is
                     # CANNOT-EVALUATE unless a run that was evaluated failed
-                    # (INVALID beats CANNOT-EVALUATE). A blocked mutant run is
-                    # not a detection. A leak or straggler below still fails
-                    # the row INVALID.
-                    failed = ((not blocked and not passed)
-                              or (not mutant_blocked and mutant_passed))
+                    # or the blocked unmutated run recorded an effect before
+                    # the block (INVALID beats CANNOT-EVALUATE). Main counts
+                    # a mutant run's effect as a detection, and a blocked
+                    # mutant run is not a detection, so its effect is not
+                    # read. A leak, straggler or retained slot below still
+                    # fails the row INVALID.
+                    failed = not passed or (not mutant_blocked and mutant_passed)
                     executed[-1]["test_status"] = INVALID if failed else CANNOT_EVALUATE
                     if mutant_blocked:
                         executed[-1]["mutant_test_status"] = CANNOT_EVALUATE
@@ -4150,6 +4176,8 @@ def self_test(vectors_only=False):
                     executed[-1]["mutant_resolver_blocked_by"] = mutant_blocked
                     add_detail(executed[-1], BLOCKED + ", ".join(
                         sorted(set(blocked + mutant_blocked))))
+                    if blocked and not passed:
+                        add_detail(executed[-1], "the blocked run recorded an effect before the block")
                 if leaks or mutant_leaks:
                     # A leaked slot fails the row in either run, as main
                     # would by its INVALID. mutation_detected stays main's
@@ -4167,6 +4195,13 @@ def self_test(vectors_only=False):
                     executed[-1]["resolver_straggler"] = stragglers
                     executed[-1]["mutant_resolver_straggler"] = mutant_stragglers
                     add_detail(executed[-1], STRAGGLER)
+                if retained or mutant_retained:
+                    # Main's teardown bound, kept on this row: INVALID, and
+                    # not a detection, as for a leak.
+                    executed[-1]["test_status"] = INVALID
+                    executed[-1]["resolver_slot_retained"] = retained
+                    executed[-1]["mutant_resolver_slot_retained"] = mutant_retained
+                    add_detail(executed[-1], RETAINED)
     except Exception as exc:
         executed.append({
             "id": "fixture/setup-or-teardown",
@@ -4175,9 +4210,23 @@ def self_test(vectors_only=False):
         })
         SELF_TEST_ROSTER = tuple(executed)
         print(json.dumps({"opf_adopt_observe_tests": executed}, sort_keys=True))
-        # INVALID beats CANNOT-EVALUATE: a row that already failed keeps exit 1.
-        return 1 if any(row["test_status"] == INVALID for row in executed) else 2
+        return 2
 
+    # Every exit-code departure from main; all concern resolver workers:
+    # - A stalled-resolver run whose slot is not back within 1.0 s of the
+    #   fixture release fails its row INVALID (retained): exit 1. Main's
+    #   teardown raised there, lost that row and every later row, and
+    #   exited 2. A leaked slot, or a straggler holding the slot, in that run
+    #   met the same raise on main; here it fails the row INVALID: exit 1.
+    # - In any other run, a straggler or a leaked slot fails its row INVALID:
+    #   exit 1. Main had no such check there, so its exit depended on whether
+    #   a later run was disturbed.
+    # - A blocked run makes its row CANNOT-EVALUATE or INVALID: exit 1. Main
+    #   evaluated that run beside the live worker.
+    # - A resolver worker alive before the first case is a setup
+    #   CANNOT-EVALUATE: exit 2. Main had no such check.
+    # - _resolver_stub_bound turns exit 0 into 2 when a resolver worker
+    #   outlives the self-test. Main had no such check.
     SELF_TEST_ROSTER = tuple(executed)
     print(json.dumps({"opf_adopt_observe_tests": executed}, sort_keys=True))
     expected_ids = ([positive[0]] + [row["id"] for row in guard_rows]
