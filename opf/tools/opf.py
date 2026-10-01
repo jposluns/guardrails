@@ -11837,8 +11837,10 @@ def _cmd_import(rest):
     token is malformed when missing, empty or starting with `-` (`--root -old` is a usage error). A joined
     value on a valueless flag (`--show-review=x`) stays an unrecognized argument. An unambiguous prefix of
     a former flag (`--rev` for --review, `--ro` for --root), alone or joined, is taken as that flag, as the
-    former argparse review aid took it, and a repeated former flag other than a mode is accepted (the verb
-    refuses anyway, so no value is kept). Only the token parser (an unknown flag, an ambiguous prefix, a
+    former argparse review aid took it, but only in option position: a token consumed as a separate value
+    is never expanded, and a usage message names the flag as typed, with its expansion when that differs
+    (`--rev (--review) requires an argument`). A repeated former flag other than a mode is accepted (the
+    verb refuses anyway, so no value is kept). Only the token parser (an unknown flag, an ambiguous prefix, a
     missing or empty value, a separate value starting with `-`) and the exactly-one-mode rule, which a
     repeated mode also breaks, precede it: a bare `opf import` or two modes is a usage error (exit 2)
     without the pointer. The root is never resolved, so an unresolved / NOT-ADOPTED root refuses the same
@@ -11861,60 +11863,51 @@ def _cmd_import(rest):
             return []
         return sorted(f for f in former if f.startswith(name))
 
-    # An unambiguous prefix is expanded to its flag, and a joined `--flag=value` for a valued flag splits
-    # into `--flag value` with the value's index kept in `joined`, so the value is taken verbatim (even
-    # one starting with `-`) and only an empty one is the usual usage error. Any other `=`-joined token,
-    # `--x=y` or a valueless flag such as `--show-review=x`, is left whole and stays unrecognized; an
-    # ambiguous prefix is left whole too, and the loop names its candidates.
-    tokens = []
-    joined = set()
-    for tok in rest:
-        name, eq, val = tok.partition("=")
-        hits = _prefixed(name)
-        flag = hits[0] if len(hits) == 1 else None
-        if flag in valued and eq:
-            joined.add(len(tokens) + 1)
-            tokens += [flag, val]
-        elif flag is not None and not eq:
-            tokens.append(flag)
-        else:
-            tokens.append(tok)
-    rest = tokens
+    def _value_error(shown, val):
+        print("opf import: {} requires a non-empty argument, not {!r}".format(shown, val), file=sys.stderr)
+        return EXIT_MALFORMED
 
-    def _need_value(flag, idx):
-        if idx + 1 >= len(rest):
-            print("opf import: {} requires an argument".format(flag), file=sys.stderr)
-            return None
-        val = rest[idx + 1]
-        if val == "" or (idx + 1 not in joined and val.startswith("-")):
-            print("opf import: {} requires a non-empty argument, not {!r}".format(flag, val),
-                  file=sys.stderr)
-            return None
-        return val
-
+    # One pass over the tokens as typed. Only a token in option position is matched against the former
+    # flags, so a token consumed as a separate value is never expanded and a usage message quotes it as
+    # typed. An unambiguous prefix counts as its flag, and every message names the flag as the user spelled
+    # it, with its expansion when that differs (`--rev (--review)`). A joined `--flag=value` on a valued flag
+    # takes the value verbatim (even one starting with `-`), and only an empty one is the usual usage error.
+    # Any other `=`-joined token, `--x=y` or a valueless flag such as `--show-review=x`, stays unrecognized;
+    # an ambiguous prefix, alone or joined, is a usage error naming its candidates.
     i = 0
     while i < len(rest):
         tok = rest[i]
-        if tok in modes:
-            if mode is not None:
-                print("opf import: give exactly one mode (--scan / --plan / --review / --apply)",
-                      file=sys.stderr)
-                return EXIT_MALFORMED
-            mode = tok[2:]
-        if tok in valued:
-            if _need_value(tok, i) is None:
-                return EXIT_MALFORMED
-            i += 2
-        elif tok in valueless:
-            i += 1
-        else:
-            hits = _prefixed(tok.partition("=")[0])
+        name, eq, val = tok.partition("=")
+        hits = _prefixed(name)
+        flag = hits[0] if len(hits) == 1 else None
+        if flag is None or (eq and flag not in valued):
             if len(hits) > 1:
                 print("opf import: ambiguous option {!r} could match {}".format(tok, ", ".join(hits)),
                       file=sys.stderr)
             else:
                 print("opf import: unrecognized argument {!r}".format(tok), file=sys.stderr)
             return EXIT_MALFORMED
+        shown = name if name == flag else "{} ({})".format(name, flag)
+        if flag in modes:
+            if mode is not None:
+                print("opf import: give exactly one mode (--scan / --plan / --review / --apply)",
+                      file=sys.stderr)
+                return EXIT_MALFORMED
+            mode = flag[2:]
+        if flag in valueless:
+            i += 1
+        elif eq:
+            if val == "":
+                return _value_error(shown, val)
+            i += 1
+        elif i + 1 >= len(rest):
+            print("opf import: {} requires an argument".format(shown), file=sys.stderr)
+            return EXIT_MALFORMED
+        else:
+            val = rest[i + 1]
+            if val == "" or val.startswith("-"):
+                return _value_error(shown, val)
+            i += 2
 
     if mode is None:
         print("opf import: give exactly one mode (--scan / --plan / --review / --apply)", file=sys.stderr)
@@ -12580,6 +12573,14 @@ def _cli_self_test():
                     failures.append("import {}: rc={!r} (expected the usage error {!r} at exit 2, before the "
                                     "refusal)".format(what, rc, needle))
 
+            def usage_text(argv, text, what):
+                # The whole output must be exactly this usage line: the flag as typed, never an expansion
+                # of a token the user gave as a value.
+                rc, out = run_cli(argv)
+                if rc != EXIT_MALFORMED or out != text:
+                    failures.append("import {}: rc={!r} out={!r} (expected exactly {!r} at exit 2)".format(
+                        what, rc, out, text))
+
             def tree_snapshot(rootdir):
                 snap = {}
                 for dirpath, dirs, files in os.walk(rootdir):
@@ -12814,6 +12815,18 @@ def _cli_self_test():
                       "--review R --show-review with an empty --root=")
                 usage(["import", "--review", _RID, "--show-review", "--root", "-old"],
                       "requires a non-empty argument", "--review R --show-review with a separate --root -old")
+                # A prefix is expanded only in option position, and a usage message names the flag as typed:
+                # the separate value `--sc` stays `--sc`, and `--rev` is quoted with its expansion. Flip:
+                # expanding every token before the parse names `--scan`, and naming only the expansion
+                # drops `--rev`.
+                usage_text(["import", "--plan", "--set", "--sc"],
+                           "opf import: --set requires a non-empty argument, not '--sc'\n",
+                           "--plan --set with the separate value --sc")
+                usage_text(["import", "--rev"], "opf import: --rev (--review) requires an argument\n",
+                           "a trailing --rev")
+                usage_text(["import", "--plan", "--ro="],
+                           "opf import: --ro (--root) requires a non-empty argument, not ''\n",
+                           "--plan with an empty joined --ro=")
                 # The pointer is to adoption and the prompt pack in words, naming no command (spec 14.1).
                 if not ("adoption (OPF spec 14.1)" in refusal and "prompt pack" in refusal
                         and not re.search(r"`|\bopf [a-z]", refusal)):

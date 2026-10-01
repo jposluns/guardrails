@@ -3949,6 +3949,28 @@ def self_test():
                 else:
                     check("staged-ids-file-{}-read".format(root_kind.replace("/", "-")),
                           sids == ["BI-1"] and not srep.cannot)
+        # A staged index listed as a regular file but absent at read (the tree changed under the walk) is
+        # CANNOT-EVALUATE naming it, never an empty contribution. The contained reader is patched to report
+        # that one index absent, as a removal between the listing and the read would. Flip: treating the
+        # absent read as a skip validates this store VALID, since no staged id joins the union.
+        gone = "imports/{}/candidate/backlog_item.index.toml".format(RUNID)
+        real_reader = _read_toml_contained
+
+        def vanishing_reader(fd, relpath):
+            if relpath.endswith(gone):
+                return None
+            return real_reader(fd, relpath)
+
+        globals()["_read_toml_contained"] = vanishing_reader
+        try:
+            stgone = staged([bi(1, "open")])
+        finally:
+            globals()["_read_toml_contained"] = real_reader
+        check("staged-index-absent-at-read-cant",
+              stgone is not None and stgone.status == CANNOT_EVALUATE
+              and stgone.checks.get("C-ID-SPACE") == "CANNOT-EVALUATE"
+              and any(gone in m and "listed but is absent at read" in m
+                      for m in stgone.by_check.get("C-ID-SPACE", [])))
         # codex-2: a STALE partial with no active run does not launder; the stray path grades as a finding
         # and the unsubstantiated declaration is itself flagged -> INVALID.
         stale = clean_machine()
