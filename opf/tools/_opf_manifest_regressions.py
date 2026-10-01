@@ -29,7 +29,7 @@ def _finding_sites(source, check):
     Dynamic dispatch, imported emitters, reflection and deliberate AST spoofing
     remain outside this static census; changes to those require manual review.
     """
-    tree = ast.parse(source)
+    tree = ast.parse(source, optimize=0)
     functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
     names, pending = set(), ["validate_manifest"]
     while pending:
@@ -137,7 +137,9 @@ def _finding_sites(source, check):
 def _census_regressions(source, check):
     for mutation in ("non-table-major", "missing-continue", "accumulator-rebind",
                      "pre-guard-reassignment", "caught-append-argument"):
-        tree = ast.parse(source)
+        # optimize=0 keeps docstrings under -OO, so the fixed body indices
+        # below and the unparsed mutant do not follow the interpreter level.
+        tree = ast.parse(source, optimize=0)
         functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
         helper = functions["_validate_supported_profile"]
         if mutation == "non-table-major":
@@ -150,16 +152,16 @@ def _census_regressions(source, check):
         elif mutation == "pre-guard-reassignment":
             helper.body[1] = ast.parse(
                 'where, prof = "[profiles.{}]".format(_safe_display(name)), '
-                'prof.get("requirements", prof)').body[0]
+                'prof.get("requirements", prof)', optimize=0).body[0]
         else:
             guard = next(node for node in ast.walk(helper)
                          if isinstance(node, ast.If)
                          and ast.unparse(node.test) == "spec_tuple is None")
             if mutation == "accumulator-rebind":
-                guard.body.insert(0, ast.parse("findings = []").body[0])
+                guard.body.insert(0, ast.parse("findings = []", optimize=0).body[0])
             else:
                 emission = guard.body[0]
-                emission.value.args[0] = ast.parse("1 / 0", mode="eval").body
+                emission.value.args[0] = ast.parse("1 / 0", mode="eval", optimize=0).body
                 guard.body = [ast.Try(body=[emission],
                                      handlers=[ast.ExceptHandler(
                                          type=ast.Name(id="ZeroDivisionError", ctx=ast.Load()),
@@ -191,7 +193,7 @@ def _census_regressions(source, check):
     check("F2g-census-rejects-extend", failures == ["F2g-census-recognized-emissions"])
 
     # Remove a genuine emission without changing the supported syntax.
-    tree = ast.parse(source)
+    tree = ast.parse(source, optimize=0)
     function = next(n for n in tree.body
                     if isinstance(n, ast.FunctionDef) and n.name == "_validate_top_level")
     emission = function.body[1].body[0]
@@ -201,7 +203,7 @@ def _census_regressions(source, check):
     _finding_sites(ast.unparse(tree), lambda name, ok: failures.append(name) if not ok else None)
     check("F2g-census-rejects-shrink", failures == ["F2g-census-site-count-72"])
 
-    tree = ast.parse(source)
+    tree = ast.parse(source, optimize=0)
     helper = next(n for n in tree.body
                   if isinstance(n, ast.FunctionDef) and n.name == "_validate_supported_profile")
     # Reachable for a supported profile missing base_compat; same wording as the
@@ -209,7 +211,7 @@ def _census_regressions(source, check):
     helper.body.insert(3, ast.parse("""
 if not isinstance(prof.get("base_compat"), str):
     findings.append("{} is not a table".format(where))
-""").body[0])
+""", optimize=0).body[0])
     failures = []
     _finding_sites(ast.unparse(tree), lambda name, ok: failures.append(name) if not ok else None)
     check("F2h-census-rejects-reachable-same-wording",
@@ -238,13 +240,15 @@ if not isinstance(prof.get("base_compat"), str):
           failures == ["F2j-census-emission-only-lines"])
 
 def _validator_namespace(source, transform=None):
-    tree = ast.parse(source)
+    tree = ast.parse(source, optimize=0)
     # Execute function definitions only, using the actual module's imports and constants.
     tree.body = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
     if transform is not None:
         tree = transform.visit(tree)
     namespace = dict(vars(_opf_store))
-    exec(compile(ast.fix_missing_locations(tree), "<manifest-census>", "exec"), namespace)
+    # Level 0, like the parse: the namespace must not follow -O/-OO either.
+    exec(compile(ast.fix_missing_locations(tree), "<manifest-census>", "exec",
+                 optimize=0), namespace)
     return namespace
 
 
