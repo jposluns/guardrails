@@ -2178,6 +2178,10 @@ _SCAN_ALLOWED_UNPINNED = (
     ("opf/tools/_opf_adopt_observe.py", "self_test.source_mutant", ("dynamic",),
      "exec of this module's own function source with exactly one guard site replaced"
      " (red-leg mutant); the exec only defines the mutant function"),
+    ("opf/tools/check_opf_record.py", "flip_t70", ("dynamic",),
+     "exec of _opf_oplock._acquire_body's own source with the fix-15 head's pre-unwind"
+     " removal tagging restored at its failure handler (red-leg mutant); the exec only"
+     " defines the mutant function"),
 )
 
 

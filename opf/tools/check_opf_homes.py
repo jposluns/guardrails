@@ -94,9 +94,10 @@ _CONTRACT = {
         _D('The reserved children archive/, imported/, staging/, and journals/ are store-tree control area, neither machine-store records nor adopter content; they relocate with the machine store.'),
         'In homes 2, OPF MUST NOT write state outside .working/ except the operation-lock and coupled-init substrate in the git common directory, and MUST NOT write any under .aiqt/.',
         'The record archive MUST remain inside the discovered machine store, and the example name toml MUST NOT be hardcoded.',
-        _D('The closed kind vocabulary is import, ingest, adoption, layout, preview.'),
+        _D('The closed kind vocabulary is import, ingest, adoption, layout, preview, record.'),
         _D('Import and ingest run IDs use imp-<YYYYMMDD>T<HHMMSS>Z-<hash16>; adoption uses adopt- with that suffix.'),
         _D('Layout and preview reserve layout- and preview- with the same suffix.'),
+        _D('Record reserves record- with the same suffix; it is a journal-only kind that names just its journal home, journals/record/, never a staging or imported home.'),
         _D('Here hash16 is 16 lowercase hexadecimal characters; constructors check lexical shape, not calendar validity or filesystem safety.'),
         'File operands MUST use canonical contained relative paths: no empty, dot, or parent components, absolute/drive/backslash forms, control characters, or line separators.',
         'Homes-2 init and upgrade MUST render this managed block into .working/.gitignore from the topology constants; the reference tooling provides the renderer and drift gate but installs no block: gitignore # >>> opf-managed >>> /journals/ /staging/ # <<< opf-managed <<< Durable imported/ and archive/ evidence MUST stay tracked.',
@@ -405,7 +406,7 @@ _CONTRACT = {
         'The expected delta MUST be derived from the request, the prior bytes of each rewritten file, the claimed IDs, the clock value, and the schema rules, never from the planned rows themselves.',
         '5. The in-repo store contract (section 5.7): the planned destinations MUST be clean, including ignored files, and the single-writer lease MUST be held across publication, render, and the final doctor.',
         '6. Every rewritten file MUST be published in one crash-durable journaled transaction, so an interruption leaves the store exactly at its prestate or exactly at its poststate once reconciled.',
-        _D('The reference tooling keeps that journal under .aiqt/record/journal at homes 1.'),
+        _D('The reference tooling keeps that journal under .aiqt/record/journal at homes 1 and under .working/journals/record/journal at homes 2.'),
         _D('7. The declared views are rendered.'),
         'Then a full doctor MUST report VALID; a failure leaves the change for review with recovery advice scoped to the planned paths.',
         "One exception applies to a status change: doctor compares it with the prior committed snapshot, and doctor's history comparison sees only the prior snapshot's type and status, which identify neither the transitioning actor nor the pre-proposal state; doctor validates proposed_from but does not use it as rejection evidence, so doctor MAY grade that change cannot-evaluate until the change is committed.",
@@ -416,7 +417,7 @@ _CONTRACT = {
         'The verb MUST exit 0 when the change is recorded and the store is doctor-VALID (or carries only the pending cannot-evaluate of item 7), and 2 on every refusal or cannot-evaluate.',
         'Import MUST preserve that operation sequence, including the one allocation seam, independent model delta check, cleanliness gate, lease and reconcile-first recovery.',
         _D('Its atomic operands are the imported counter rows first, the touched <type>.imported.index.toml and worklog.imported.toml files, and the evidence bundle: the exact original at .working/imported/import/<run-id>/originals/<source-path> and inventory.toml in the retained opf.evidence.inventory/v1 format (section 4.2).'),
-        _D('The journal remains .aiqt/record/journal at homes 1.'),
+        _D('The journal remains .aiqt/record/journal at homes 1 and .working/journals/record/journal at homes 2.'),
         'It MUST NOT rewrite clean records or clean counters.',
         'Import MUST refuse with exit 2 on a non-importer actor, absent or invalid provenance, a clean-series record operand, an imported-to-clean link, a historical timestamp later than the run clock, an unknown missingness reason, or a type not enabled and supported by the writer.',
         "It MUST also refuse without an adoption receipt, outside that plan's approved migrate-source scope, or when any section 14.1 bound item, the source bytes against the plan digest (archived under section 14.2 or frozen live), the tool release identity, or the prompt-pack version and digest included, no longer matches the approved plan.",
@@ -664,6 +665,7 @@ _CONTRACT = {
         "Import and adoption provenance, including originals under imported/ and retired files under archive/, MUST stay inside the adopter's own repositories.",
         _D('In homes 2, .aiqt/ is AIQT-owned material, not an OPF state home; OPF operates without it.'),
         'Only homes migration MAY read explicitly inventoried OPF artefacts from former .aiqt/ locations, without touching unrelated AIQT material.',
+        _D('A no-follow existence probe of a former .aiqt/ location, used only to refuse an operation, is not a read of that material.'),
         'Experimental fields MUST ride registered x-<vendor> tables only, within the limits of section 8.7.',
         _D("The base standard's required schema vocabulary names no adopter, operator, or profile by definition; a conforming store's own data legitimately may (an operator via actor.id, a profile via a [profiles.<name>] table the adopter chose)."),
         _D("AIQT appears in the standard's title and brand as trademark and authorship attribution (the standard is authored and maintained by its lead maintainer), which is attribution rather than a requirement dependency; AIQT is also one profile, [profiles.aiqt], cited only as the reference enforcement suite and a consumer."),
@@ -727,7 +729,7 @@ def contract_findings(text):
     for name in store.STORE_TREE_CONTROL_DIRS:
         if name + "/" not in layout:
             findings.append("spec 4.2 missing control home: " + name)
-    for kind in store.STAGING_KINDS:
+    for kind in store.JOURNAL_KINDS:
         if "`{}`".format(kind) not in layout:
             findings.append("spec 4.2 missing kind: " + kind)
     blocks = re.findall(r"^```gitignore\n(.*?)^```$", layout, re.MULTILINE | re.DOTALL)
@@ -1445,6 +1447,12 @@ def boundary_self_test():
             add(".working/staging/unknown/run/file")
             check("unknown-kind-always-finding", lambda: any("invalid staging kind" in s
                                                            for s in containment(True, manifest2).findings))
+            # The journal-only record kind (spec 4.2): a record staging run is NOT admitted by the
+            # homes-2 walk, exactly as any unknown kind (option ii, adding record to STAGING_KINDS,
+            # turns this red).
+            add(".working/staging/record/run/file")
+            check("record-staging-kind-invalid", lambda: any("invalid staging kind 'record'" in s
+                                                            for s in containment(True, manifest2).findings))
             reset()
             directories.add(".working/journals")
             del listed[:]
@@ -2947,6 +2955,34 @@ def self_test():
         for function in (store.stage_run, store.evidence_run, store.txn_record):
             check("kind-refusal-{}-{!r}".format(function.__name__, bad),
                   lambda: refuses(lambda: function(bad, "imp" + suffix)))
+    # The journal-only record kind (spec 4.2): journal_root, txn_record and allocation_record admit it;
+    # stage_run, evidence_run and evidence_inventory keep refusing it, so record never gains a staging
+    # or imported home. The paired mutations are exercised in place: dropping record from JOURNAL_KINDS
+    # turns the constructors red, and widening STAGING_KINDS with record (option ii) turns the
+    # staging refusals red.
+    from unittest.mock import patch as _patch
+    record_run = "record" + suffix
+    check("journal-kinds", lambda: store.JOURNAL_KINDS == store.STAGING_KINDS + ("record",))
+    check("journal-record", lambda: store.journal_root("record") == ".working/journals/record/journal")
+    check("transaction-record", lambda: store.txn_record("record", record_run) ==
+          ".working/journals/record/runs/{}/transaction.toml".format(record_run))
+    check("allocation-record", lambda: store.allocation_record("record", record_run) ==
+          ".working/journals/record/allocations/{}.toml".format(record_run))
+    for bad in (None, [], "", "imp" + suffix, "adopt" + suffix, record_run.upper(), record_run + "/x",
+                "record" + suffix.replace("Z", "X")):
+        for function in (store.txn_record, store.allocation_record):
+            check("run-refusal-{}-record-{!r}".format(function.__name__, bad),
+                  lambda function=function, bad=bad: refuses(lambda: function("record", bad)))
+    check("kind-record-no-staging", lambda: refuses(lambda: store.stage_run("record", record_run)))
+    check("kind-record-no-evidence", lambda: refuses(lambda: store.evidence_run("record", record_run)))
+    check("kind-record-no-inventory", lambda: refuses(lambda: store.evidence_inventory("record", record_run)))
+    with _patch.object(store, "JOURNAL_KINDS", store.STAGING_KINDS):
+        check("journal-record-flip-dropped-kind", lambda: refuses(lambda: store.journal_root("record"))
+              and refuses(lambda: store.txn_record("record", record_run))
+              and refuses(lambda: store.allocation_record("record", record_run)))
+    with _patch.object(store, "STAGING_KINDS", store.STAGING_KINDS + ("record",)):
+        check("staging-record-flip-option-ii", lambda: not refuses(lambda: store.stage_run("record", record_run))
+              and not refuses(lambda: store.evidence_run("record", record_run)))
     run = "adopt" + suffix
     for path in ("notes/a.md", "adoption/a.md", "space name.txt", "\u00e9.txt"):
         check("move-" + path, lambda: store.moved_dest(path) == ".working/archive/moved/" + path)
@@ -3019,6 +3055,10 @@ def self_test():
           and "Until homes 2 is activated, legacy import state still" in source)
     text = SPEC.read_text(encoding="utf-8")
     check("spec-contract", lambda: not contract_findings(text))
+    # The journal-only record kind is spec-pinned through the kind loop: deleting `record` from the
+    # section 4.2 vocabulary sentence turns the gate red with the kind's own finding.
+    check("spec-kind-record", lambda: "spec 4.2 missing kind: record" in
+          contract_findings(text.replace("`preview`, `record`", "`preview`", 1)))
     # Each operative section independently discriminates: removing it must fail the drift gate.
     for section, body in _sections(text).items():
         if section in _CONTRACT:
