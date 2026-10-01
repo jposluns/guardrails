@@ -3299,18 +3299,23 @@ def _bounded_child_result(data, wstatus):
     return data.decode("utf-8", "replace")
 
 
-def _st_guardian_setup_failure(drive, setup_failed, recorded, journal, open_fd=None):
+def _st_guardian_setup_failure(drive, setup_failed, recorded, journal, open_fd=None, private=None):
     """#378: the guardian close vector with its first send raising. Its result must be this vector's named
     red (NOFIRE, the guardian never ran, and WRONG naming SetupFailed) with no LEAK; every resource the setup
     created must be closed through its own object; and descriptors opened afterwards, which take the
     numbers those resources released, must still be the same files after gc.collect(), so no surviving
-    object closes a reused number later. Each of those descriptors is owned by an ExitStack the moment it
-    is opened, so an open that fails (`open_fd`, os.open unless a leg injects one) closes the ones already
-    opened and is this check's own named failure, never an escaping exception. Returns the failures."""
+    object closes a reused number later. Each of those descriptors opens a file this check creates in a
+    private directory (`private`, a fresh temporary directory unless a leg passes one it keeps until it has
+    checked the numbers), so its (st_dev, st_ino), recorded at open, is unique to this check while the
+    directory exists and no other lane's open of a reused number (of /dev/null or any other file) compares
+    equal. Each is owned by an ExitStack the moment it is opened, so an open that fails (`open_fd`, os.open
+    unless a leg injects one) closes the ones already opened and is this check's own named failure, never an
+    escaping exception. Returns the failures."""
     import contextlib
     import errno
     import gc
     import os
+    import tempfile
     opener = os.open if open_fd is None else open_fd
     created = []
 
@@ -3334,17 +3339,22 @@ def _st_guardian_setup_failure(drive, setup_failed, recorded, journal, open_fd=N
         except OSError:
             pass
     with contextlib.ExitStack() as owned:
+        if private is None:                               # removed after every descriptor is released
+            private = owned.enter_context(tempfile.TemporaryDirectory(prefix="opf-emit-setup-"))
         fresh = []
+        ident = []
         try:
-            for _ in range(4):
-                fd = opener(os.devnull, os.O_RDONLY)
+            for index in range(4):
+                fd = opener(os.path.join(private, "fresh-{}".format(index)), os.O_RDONLY | os.O_CREAT | os.O_EXCL,
+                            0o600)
                 owned.callback(release, fd)               # owned the moment it is opened
+                st = os.fstat(fd)
                 fresh.append(fd)
+                ident.append((st.st_dev, st.st_ino))      # this check's own file, recorded at open
         except OSError as exc:
             failures.append("guardian-close-reuse setup failure: opening descriptor {} of 4 after the leg "
                             "failed: {!r}".format(len(fresh) + 1, exc))
             return failures
-        ident = [(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in fresh]
         del created[:]
         gc.collect()
         after = []
@@ -3372,7 +3382,10 @@ def _st_guardian_close_reuse():
     harness to close by number while a traceback keeps the object, whose collection would later close a
     reused number in another lane. A setup-failure leg (the first send raising) checks exactly that, and
     again with the second of the descriptors it opens afterwards failing to open: that is its named failure,
-    with the descriptor opened first closed.
+    with the descriptor opened first closed. Every descriptor that leg owns opens a file it creates in a
+    private directory, so a number it expected released is closed only while fstat shows that file's
+    identity: an identity leg shows a number another lane reopened onto /dev/null is never closed and is no
+    failure, and a genuine leak is still reported and closed.
     The harness is loaded from its sibling FILE by explicit path, as _load_byte_canon_authority loads its
     authority, so this runs under `python3 -I` too. Returns the failures."""
     import contextlib
@@ -3465,12 +3478,12 @@ def _st_guardian_close_reuse():
     failures += _st_guardian_setup_failure(drive, SetupFailed, recorded, _journal)
     opened = []
 
-    def second_open_fails(path, flags):
+    def second_open_fails(path, flags, mode):
         """The setup-failure leg's descriptor opens with the second one failing (EMFILE); each one opened is
         recorded with its (st_dev, st_ino), taken while this leg still owns the number."""
         if opened:
             raise OSError(errno.EMFILE, "self-test injected open failure")
-        fd = os.open(path, flags)
+        fd = os.open(path, flags, mode)
         try:
             st = os.fstat(fd)
         except BaseException:
@@ -3478,24 +3491,75 @@ def _st_guardian_close_reuse():
             raise
         opened.append((fd, (st.st_dev, st.st_ino)))
         return fd
-    got = _st_guardian_setup_failure(drive, SetupFailed, recorded, _journal, second_open_fails)
-    if len(got) != 1 or "opening descriptor 2 of 4" not in got[0] or "injected open failure" not in got[0]:
-        failures.append("guardian-close-reuse setup failure with its second open failing: expected that "
-                        "named failure alone, got {}".format(got or "green"))
-    for fd, ident in opened:
-        # The leg should have released fd. Its number may since belong to another thread's open, so it is
-        # "left open", and closed here, only while fstat still shows the file this leg opened; a number now
-        # naming another file is never closed (#378 P1). Every open of os.devnull shares one identity, so a
-        # reuser that also opened os.devnull is not told apart.
+
+    def close_if_left_open(fd, ident):
+        """A number this leg expected released is "left open", and closed here, only while fstat still shows
+        ident, a file this leg created in its private directory, which no other lane opens and whose inode
+        stays taken while the directory exists. The number may since belong to another thread's open, so a
+        number naming any other file (another lane's /dev/null included) is never closed (#378 P1). Returns
+        whether it closed fd."""
         try:
             st = os.fstat(fd)
         except OSError:
-            continue
+            return False
         if (st.st_dev, st.st_ino) != ident:
-            continue
+            return False
         os.close(fd)
-        failures.append("guardian-close-reuse setup failure with its second open failing: the descriptor "
-                        "opened first was left open")
+        return True
+
+    def own_file(name):
+        """A descriptor on a new file in the private directory, with its (st_dev, st_ino) taken at open."""
+        fd = os.open(os.path.join(private, name), os.O_RDONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            st = os.fstat(fd)
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd, (st.st_dev, st.st_ino)
+
+    def identity(fd):
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            return None
+        return st.st_dev, st.st_ino
+    with tempfile.TemporaryDirectory(prefix="opf-emit-setup-") as private:   # kept until every number is checked
+        got = _st_guardian_setup_failure(drive, SetupFailed, recorded, _journal, second_open_fails, private)
+        if len(got) != 1 or "opening descriptor 2 of 4" not in got[0] or "injected open failure" not in got[0]:
+            failures.append("guardian-close-reuse setup failure with its second open failing: expected that "
+                            "named failure alone, got {}".format(got or "green"))
+        for fd, ident in opened:
+            if close_if_left_open(fd, ident):
+                failures.append("guardian-close-reuse setup failure with its second open failing: the "
+                                "descriptor opened first was left open")
+        # Another lane opening /dev/null onto the released number: dup2 puts a /dev/null descriptor onto a
+        # number this leg still owns, so the number is never free for a real lane to take meanwhile. It must
+        # not be closed and must not be reported.
+        null = os.open(os.devnull, os.O_RDONLY)
+        try:
+            reused, ident = own_file("reused")
+            try:
+                os.dup2(null, reused)
+            except BaseException:
+                os.close(reused)
+                raise
+            if close_if_left_open(reused, ident):
+                failures.append("guardian-close-reuse identity check: closed a number another lane reopened "
+                                "onto /dev/null")
+            else:
+                if identity(reused) != identity(null):
+                    failures.append("guardian-close-reuse identity check: the number reopened onto /dev/null "
+                                    "no longer names /dev/null")
+                os.close(reused)
+        finally:
+            os.close(null)
+        # A genuine leak: a number still naming this leg's own file is reported and closed.
+        leaked, ident = own_file("leaked")
+        if not close_if_left_open(leaked, ident) or identity(leaked) == ident:
+            failures.append("guardian-close-reuse identity check: a descriptor left open on this leg's own "
+                            "file was not reported and closed")
+            if identity(leaked) == ident:
+                os.close(leaked)
     source = textwrap.dedent(inspect.getsource(_FixtureProcess._guardian))
     new = ("fd, subject_fd = subject_fd, None         # ownership first: a failed close is never\n"
            "            os.close(fd)                              # closed again by the cleanup (P1, #378)\n")
