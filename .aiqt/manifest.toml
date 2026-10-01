@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "46a2c1a27732658444b6e88baa32987e8f5eac632f366df1357c6dd7e1ea8e4c"
+tree-sha256 = "db90e8e72f0cdefc1b69e0ef889bc774db5b51fc4fe522537c0073d6d2e11175"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -101,8 +101,8 @@ sha256 = "2ec7728abc86392c978ee5a5069ad1bd3cf52b55170367c3bbccd0316f5458d2"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
-bytes = 2264
-sha256 = "7547b67888c8b0696df3908cb9d518104c59dfcf194118bb935a6d153a99604d"
+bytes = 4212
+sha256 = "8312aa75ab85571b594261fcd6e1a1bea2b3a6949d944df125dfbfce944d5617"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -1566,8 +1566,8 @@ sha256 = "27b27ca584b3f43f111051d861e316ae6f78a64373dcd2cb2197c6da241a7126"
 
 [[sources]]
 path = ".claude/worker-pack.md"
-bytes = 2154
-sha256 = "971ca94e1d6cba72f11425d20274cca93e58b83fea4d066ea4909177dedc7b76"
+bytes = 4094
+sha256 = "a407b42b74137df0a16d6f962b012f21765bd5450817c4852dcea6e87f5709e5"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/00-project-integrity.mdc"
@@ -2231,8 +2231,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 41232
-sha256 = "81348c7cdd7499fbbb17cc57aec843aa3a75656cad0e946d83189ac3b5abb862"
+bytes = 41371
+sha256 = "4dead0b94224c9c27171d457e371411b1051a1bb3acd056bf6f58a7a0868da7f"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2531,8 +2531,8 @@ sha256 = "573ac6cad9a676efed6bc35cf92914cde0907ca62e6960c78783e90fe505281e"
 
 [[sources]]
 path = "opf/spec/OPF-SPEC.md"
-bytes = 146670
-sha256 = "c2415c223e1cc20c2ee3c3af18fadb68cb7727440babe507966a94d7de272d9a"
+bytes = 147150
+sha256 = "11b55aa6d679b4da04428e6c3c68364517ce136d7448ef269f0a0e2632dcb9ba"
 
 [[sources]]
 path = "opf/tools/_byte_canon.py"
@@ -2591,18 +2591,18 @@ sha256 = "b9a2b208abc3fd7d566ab94510a7eb14d663f09da6153e243bee4ef0f4433a72"
 
 [[sources]]
 path = "opf/tools/_opf_changelog.py"
-bytes = 80482
-sha256 = "a46820ca0b072c9e64ae3c79754656c5fce9e266b9167b050f262ef9b4fde57a"
+bytes = 78995
+sha256 = "c17b03be042c3104afe7e1c77b2b17217b65602037e20a4a7bab02b6720d98c6"
 
 [[sources]]
 path = "opf/tools/_opf_check.py"
-bytes = 309880
-sha256 = "48c40b40aa06ba7f1cad20df4e62fe5adb74e267988f87c562185a67e01e58ad"
+bytes = 308725
+sha256 = "6dfb63573fd36f9832813522be3a51c28f1e2d2d6c09ef4dac185ff0afb03a9e"
 
 [[sources]]
 path = "opf/tools/_opf_emit.py"
-bytes = 115971
-sha256 = "c387889a168bb300e4fddac8388284de691004cdff0e7e2710cc4a8499ee45de"
+bytes = 245174
+sha256 = "2500fadcee1948275454e0e339ba92a21bfe9d27e1b09d10e7ac60d399493128"
 
 [[sources]]
 path = "opf/tools/_opf_fuzz.py"
@@ -2611,8 +2611,8 @@ sha256 = "dd229907acfa6f2273ba35259bcc0198713563fb3238fd453e2c804333188817"
 
 [[sources]]
 path = "opf/tools/_opf_import.py"
-bytes = 633077
-sha256 = "3563f41d6cef65de93f9732b7a5e1d6f9b6690802f90266feaf1d3b9dec91f27"
+bytes = 635589
+sha256 = "a7e8a1106aaf2513c15894a56470c03834fef275c46c95992ca61063d9bb3c60"
 
 [[sources]]
 path = "opf/tools/_opf_importers.py"
@@ -2621,8 +2621,8 @@ sha256 = "102971467db4b42932709a7e6e62eb197f849e3b1664928764fe18bf50e80e33"
 
 [[sources]]
 path = "opf/tools/_opf_ingest.py"
-bytes = 317657
-sha256 = "b76a0f5e6b5e536807e3573128ade70a27f5f9facf91e2d235cc36dfe151ea0e"
+bytes = 318535
+sha256 = "ffcff248b87bd4d553bfb7b7f47eec1e6fb683a6ac13530fcbcdb90c096265a3"
 
 [[sources]]
 path = "opf/tools/_opf_ingest_apply.py"
@@ -2665,6 +2665,11 @@ bytes = 17989
 sha256 = "168a80992ba11a3c572f0b526ce44e03713c61c5d53d437409be92d45de11f24"
 
 [[sources]]
+path = "opf/tools/_opf_manifest_regressions.py"
+bytes = 23247
+sha256 = "d0d7fbfcbe5bb7db52ca74fb1d7a9d985e305d02b45187e32c9513f4ff89f6da"
+
+[[sources]]
 path = "opf/tools/_opf_observe.py"
 bytes = 81709
 sha256 = "d0f75079111ca1531da650fbf0ed86cbe8a690652090bfd8fc0f2da687e386ef"
@@ -2696,13 +2701,23 @@ sha256 = "8630c4480f494120a15c9557645a0a383394bbfcc7d5a50352c4fa58c0b1cb26"
 
 [[sources]]
 path = "opf/tools/_opf_store.py"
-bytes = 196616
-sha256 = "637a9378bedb2a2f81576eeccfaf191fddb69a301f675677f4f563dc021823f4"
+bytes = 192089
+sha256 = "ef9b4f3e0ada6ac6995ccda4860070f400fe73b443ea1e8e67a34b6ba81adee6"
 
 [[sources]]
 path = "opf/tools/_opf_views.py"
-bytes = 284559
-sha256 = "d7f989594fa55308a5ddf8831fe4999f035d282cea073e7d3aa146dd3ba35e1a"
+bytes = 284463
+sha256 = "d5380199bcbb231e33008b8a73d51a9100e1c7820ff85c2c0046b2b4aa52f106"
+
+[[sources]]
+path = "opf/tools/_opf_worklog.py"
+bytes = 24344
+sha256 = "68276e344b754657c6f8c12beb3ffc3cfdd48565c1ea05d5f2a9e538ba18f945"
+
+[[sources]]
+path = "opf/tools/_opf_worklog_regressions.py"
+bytes = 62299
+sha256 = "aef36b67ac5b5e2859731819e3b474b72ca84937b8874a37ed423c473cefb864"
 
 [[sources]]
 path = "opf/tools/_opf_write_guard.py"
@@ -2871,8 +2886,8 @@ sha256 = "c8d74d534524f5ee33bb1443f52f9954a67507d4cfa664414a86a84e17ab2809"
 
 [[sources]]
 path = "opf/tools/check_opf_homes.py"
-bytes = 274337
-sha256 = "277b8ab4b7d31b71a5bf4d670268621babf2cf99e96e44dc24ecc449c26930de"
+bytes = 276486
+sha256 = "2341c2d4a2a8f6e013a6cd5c8b9fd04e42326ec26688e76f7cba365505e9597c"
 
 [[sources]]
 path = "opf/tools/check_opf_import.py"
@@ -2926,8 +2941,8 @@ sha256 = "22d329559594488e6b9fc93b11caf3efcd78b9828db39cc30b51e4298e0c6d38"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 285726
-sha256 = "8c8657f3d56582baf53124de16bbdc8d9636c2a95a6172735db6313c0da5e07e"
+bytes = 765875
+sha256 = "817d9e73ebc62d8379412d26dc1396c8199dfaf6dfe01f160a110ff5fc92aef0"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
@@ -3596,8 +3611,8 @@ sha256 = "13c527d0d7999c696bf34fcf649c804e8856f11c6880c3cfde3bdee630d582fe"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 264710
-sha256 = "c847a20f61c5721417759c906bc84441a9e2ccf9634ce578d6020064e63a4880"
+bytes = 267569
+sha256 = "e244a2eeee909fa908062c89d60fee2b68113b6b2a805d586931f4bc3f5db258"
 
 [[sources]]
 path = "tools/selftest_opf_render.py"
@@ -4416,7 +4431,7 @@ sha256 = "27b27ca584b3f43f111051d861e316ae6f78a64373dcd2cb2197c6da241a7126"
 artifact-id = "worker-pack:.claude/worker-pack.md"
 path = ".claude/worker-pack.md"
 kind = "file"
-sha256 = "971ca94e1d6cba72f11425d20274cca93e58b83fea4d066ea4909177dedc7b76"
+sha256 = "a407b42b74137df0a16d6f962b012f21765bd5450817c4852dcea6e87f5709e5"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/00-project-integrity.mdc"

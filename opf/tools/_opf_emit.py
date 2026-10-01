@@ -62,6 +62,7 @@ resident model, and this bounds that output rather than the structure.
 
 The live leg is folded into `opf/tools/opf.py --self-test` (build plan section 3); this module is a library
 consumed by U7 (import) and `opf init`, with no live/standalone mode beyond the self-test.
+The self-tests require Linux fork/waitid, readable procfs and child-subreaper support.
 
 Exit convention (matches the repo's gates): 0 clean, 1 a self-test finding, 2 misuse.
 """
@@ -587,11 +588,2487 @@ def _rejects(document):
         return True
 
 
-def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
+class ChildStatusUnavailable(RuntimeError):
+    """Cannot-evaluate: no observed wait status; never a successful fixture."""
+
+
+class FixtureIncomplete(RuntimeError):
+    """The requested fixture did not deliver its bound completion record."""
+
+
+def _fixture_wait(pid, flags):
+    """Keep ECHILD distinct; subprocess's wait/poll may synthesize a zero."""
+    import os
+    try:
+        return os.waitpid(pid, flags)
+    except OSError as exc:
+        raise ChildStatusUnavailable("cannot collect fixture status: " + str(exc)) from exc
+
+
+def _fixture_signal(pid, signum, pidfd=None, *, group=True):
+    """The sole numeric signal boundary. ECHILD never licenses a signal.
+
+    pidfds pin individual targets. Group members are addressed one by one
+    through verified per-member pidfds, never a numeric killpg (QA21 codex
+    F3), and the members go BEFORE the leader: the census excludes the
+    leader, whose own signal follows below, so no member is stranded by its
+    leader dying mid-census (fix 2y, codex F2); concurrent foreign waiters
+    remain outside this trusted test contract.
+    """
+    import os
+    import signal
+
+    def owned():
+        try:
+            os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            return False
+        return True
+
+    if not owned():
+        return False
+    if group and os.getpgid(pid) == pid:
+        # Never a numeric os.killpg (QA21 codex F3: a freed pgid can name an
+        # unrelated group): the members are signalled through their own
+        # pidfds, each re-verified against /proc after its open. `pid` is
+        # owned-unreaped (above) and this process is an ancestor of every
+        # tree member, so both anchor the census.
+        _fixture_kill_group_members(pid, signum, {os.getpid(), pid}, leader=pid)
+    if not owned():  # a hook/foreign reaper may have run during the member kills
+        return False
+    try:
+        if pidfd is not None:
+            signal.pidfd_send_signal(pidfd, signum)
+        else:
+            os.kill(pid, signum)
+    except ProcessLookupError:
+        pass
+    return True
+
+
+def _fixture_pidfd(pid):
+    import errno
+    import os
+    import signal
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        return None
+    try:
+        return os.pidfd_open(pid)
+    except OSError as exc:
+        if exc.errno in (errno.ENOSYS, errno.EINVAL, errno.ESRCH):
+            return None
+        raise
+
+
+def _fixture_subreaper():
+    """Refuse before launching a subject without Linux subreaper support."""
+    import ctypes
+    import sys
+    if sys.platform != "linux":
+        raise ChildStatusUnavailable("fixture trees require Linux child subreaping")
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+        raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER")
+    value = ctypes.c_int()
+    if libc.prctl(37, ctypes.byref(value), 0, 0, 0) != 0 or value.value != 1:
+        raise ChildStatusUnavailable("cannot confirm child subreaping")
+
+
+def _fixture_pdeathsig():
+    """Arm PR_SET_PDEATHSIG(SIGKILL) in the subject: partial extra coverage for the
+    documented wedged-guardian residual (a guardian killed while wedged can no longer
+    drain its tree; the kernel then kills the subject when its parent dies). Descendants
+    the subject forks do NOT inherit the flag, and where prctl is unavailable this fails
+    closed to that documented residual: the drain/census stays the authoritative cleanup."""
+    import ctypes
+    import signal
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(1, int(signal.SIGKILL), 0, 0, 0)  # PR_SET_PDEATHSIG
+    except (OSError, AttributeError):
+        pass
+
+
+def _fixture_check_parent(expected):
+    """Immediately after arming pdeathsig, prove the parent is still the expected
+    guardian: pdeathsig is not retroactive, so a subject first scheduled after its
+    guardian already died would arm too late and run orphaned (QA18 codex F3). A
+    reparented subject refuses HERE, before any user code, so an orphan can never
+    run its callable; the refusal lands on fd 2 / exit 125 like any subject error."""
+    import os
+    if os.getppid() != expected:
+        raise ChildStatusUnavailable(
+            "subject orphaned before supervision: guardian {} is gone".format(expected))
+
+
+def _fixture_close_all_except(keep):
+    """First act of a new guardian: close EVERY inherited descriptor not in {0,1,2} | keep.
+    The /proc/self/fd scan is the only authoritative census of the open-descriptor
+    namespace (the layer already requires Linux; os.close_range is absent from this
+    interpreter build). A failed census is a startup REFUSAL (recorded, exit 125),
+    never a partial sweep: a soft-RLIMIT_NOFILE bound does not enumerate descriptors
+    already open above it, so sweeping up to it would silently preserve them (QA18
+    codex F4). There is no parent-side registry to publish to or go stale: an
+    undeclared caller descriptor is closed here unconditionally, so a subject using
+    one fails loudly (EBADF), never a sometimes-working leak, and a sibling call's
+    endpoints (constructed or still under construction) never survive into an
+    unrelated guardian."""
+    import os
+    kept = {0, 1, 2}
+    kept.update(int(fd) for fd in keep)
+    try:
+        fds = sorted(int(name) for name in os.listdir("/proc/self/fd"))
+    except (OSError, ValueError) as exc:
+        raise ChildStatusUnavailable(
+            "authoritative descriptor census unavailable: " + str(exc)) from exc
+    for fd in fds:
+        if fd not in kept:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def _fixture_enable_gc():
+    """Last subject-side setup step: the guardian runs with gc disabled (the forked
+    heap is the caller's, and a collection could close descriptor numbers the guardian
+    legitimately reuses), but the SUBJECT runs arbitrary test code, and inheriting a
+    disabled collector would leak reference cycles for the callable's whole life (QA18
+    gemini F3). Re-enable it just before the callable runs."""
+    import gc
+    gc.enable()
+
+
+def _fixture_send_subject(peer, subject, subject_fd):
+    """Deliver the subject receipt on the control socket: no subject RUNS USER CODE
+    without a delivered receipt of it (the acknowledgment that releases the subject is
+    written only after this send returns). The one-byte-plus-cmsg send on an empty
+    socketpair cannot block, and the receipt stays buffered for the caller even if the
+    guardian is later SIGKILLed. The guardian treats a send failure as fatal (recorded,
+    subject drained, exit 125). Without a pidfd only the pid is sent and escalation
+    stays guardian-only: a bare pid cannot exclude the reaped-before-freeze recycling
+    window."""
+    import socket
+    payload = str(subject).encode("ascii")
+    if subject_fd is not None:
+        socket.send_fds(peer, [payload], [subject_fd])
+    else:
+        peer.send(payload)
+
+
+def _fixture_ack_subject(fd):
+    """Release the subject, strictly AFTER the receipt send returned: an acknowledged
+    subject is always addressable through its delivered receipt (QA18 codex F2). A
+    subject that already died is tolerated (its wait status is authoritative), and the
+    write end closes either way, so a guardian that dies before acknowledging always
+    hands the blocked subject an EOF."""
+    import os
+    try:
+        os.write(fd, b"A")
+    except OSError:
+        pass  # the subject is already gone: supervision reads its status
+    finally:
+        os.close(fd)
+
+
+def _fixture_await_ack(fd):
+    """Block the subject until the guardian acknowledges ownership. Until this byte
+    arrives the subject runs no user code and cannot create descendants, so a guardian
+    wedged before the receipt send strands at most one blocked, pdeathsig-covered
+    process with no tree (QA18 codex F2). EOF -- every write end died with the
+    guardian -- is a refusal: an unowned subject never runs its callable."""
+    import os
+    try:
+        if os.read(fd, 1) != b"A":
+            raise ChildStatusUnavailable(
+                "guardian gone before ownership acknowledgment: subject refuses to run")
+    finally:
+        os.close(fd)
+
+
+# Sentinel for a /proc entry that EXISTS but cannot be read: never proof of
+# exit, never silently equated with an exited process (fix 2z, codex BLOCKER 2
+# / gemini F2). Callers account such entries against any "tree" claim.
+_FIXTURE_UNREADABLE = object()
+
+
+def _fixture_stat_fields(target):
+    """Read the post-comm fields of /proc/<target>/stat, through os.open and
+    os.read with the descriptor close routed as a _cleanup_boundary step
+    (fix 8, QA29 codex BLOCKER 1 / claude MINOR 1: Path.read_bytes hid a
+    standard-library context manager whose INTERNAL close ran outside every
+    boundary, so a read-born cancellation could be displaced before this
+    function's handler saw it; module-owned cleanup only ever runs through
+    the boundary, maintainer ruling PD-335). Returns the fields; None ONLY
+    for an ABSENT entry (FileNotFoundError/ProcessLookupError: the process
+    exited or raced away mid-read -- the only OSErrors that read as exited,
+    fix 2z codex BLOCKER 2 / gemini F2); or _FIXTURE_UNREADABLE for an entry
+    that exists but cannot be read (e.g. EACCES/EIO), which is never proof
+    of exit. TimeoutError/InterruptedError are OSError subclasses carrying
+    deadline/cancellation semantics and PROPAGATE (fix 2y, codex F3);
+    non-I/O failures (a parse defect) propagate too."""
+    import os
+    fd = None
+    pending = None
+    stat = b""
+
+    def close_stat_fd():
+        if fd is not None:
+            os.close(fd)
+
+    try:
+        try:
+            fd = os.open("/proc/" + str(target) + "/stat",
+                         os.O_RDONLY | os.O_CLOEXEC)
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                stat += chunk
+        except BaseException as exc:
+            # Capture the exception already propagating into the close
+            # below (fix 8, QA29 codex BLOCKER 1): a read-born
+            # cancellation must stay the outward exception even when the
+            # descriptor close itself fails.
+            pending = exc
+            raise
+        finally:
+            _cleanup_boundary(pending, close_stat_fd,
+                              "stat descriptor close")
+    except OSError as exc:
+        if isinstance(exc, (TimeoutError, InterruptedError)):
+            raise
+        if isinstance(exc, (FileNotFoundError, ProcessLookupError)):
+            return None
+        return _FIXTURE_UNREADABLE
+    return stat.rsplit(b")", 1)[1].split()
+
+
+def _fixture_group_pinned(group, guardian_pid):
+    """License addressing a dead leader's group MEMBERS (each through its own
+    verified pidfd, never a numeric kill): True only when a CURRENT member of the
+    group is parented by the caller's own guardian while that guardian provably
+    cannot reap (confirmed stopped, or an unreaped zombie). The guardian is the
+    tree's subreaper, so every orphaned same-group descendant is its child, and
+    a member found under a stopped-or-zombie parent stays unreaped -- live or
+    zombie, it holds the pgid -- for the rest of the kill sequence. A guardian
+    that is running (its stop unconfirmed), gone from /proc, UNREADABLE in
+    /proc (its state unconfirmable, fix 2z), or childless in the group
+    licenses nothing: the group may have emptied and its pgid been recycled
+    by an unrelated process group (QA20 claude F1). An unreadable candidate
+    entry can never positively match, so it never licenses either; refusing
+    the pin only downgrades toward the disclosed subject-only kill, never
+    toward a claimed tree."""
+    import os
+    import time
+
+    deadline = time.monotonic() + _FIXTURE_CLEANUP_GRACE
+    while True:
+        fields = _fixture_stat_fields(guardian_pid)
+        if fields is None or fields is _FIXTURE_UNREADABLE:
+            return False
+        if fields[0] in (b"T", b"Z"):
+            break
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.005)
+    try:
+        entries = os.listdir("/proc")
+    except OSError as exc:
+        # Narrowed (fix 2y, codex F3): a cancelled census must refuse by
+        # propagation, never read as "not pinned".
+        if isinstance(exc, (TimeoutError, InterruptedError)):
+            raise
+        return False
+    for name in entries:
+        if not name.isdecimal():
+            continue
+        fields = _fixture_stat_fields(name)
+        if (fields is not None and fields is not _FIXTURE_UNREADABLE
+                and int(fields[1]) == guardian_pid
+                and int(fields[2]) == group):
+            return True
+    return False
+
+
+def _fixture_kill_group_members(group, signum, anchors, leader=None):
+    """Signal every verified CURRENT member of process group `group`, each
+    through its own pidfd -- NEVER a numeric os.killpg (QA21 codex F3: once a
+    group's leader is reaped, and SIGSTOP delivery to a ZOMBIE leader cannot
+    prevent its parent reaping it, the numeric pgid is free for reuse, so a
+    numeric group kill can address an unrelated process group). A member is
+    signalled only when, with its pidfd ALREADY HELD, /proc still shows the
+    group AND a live parent chain reaching one of `anchors` (pids the caller
+    proved unreaped: an unreaped owned guardian, or the calling process
+    itself -- never a bare numeric pid, fix 2y codex F1). That order makes
+    recycling harmless: a live process the held pidfd references is exactly
+    the process /proc describes, so a pid recycled after the census either
+    fails the re-check (a foreign process is never parented under an anchor)
+    or has exited and ESRCHes on the held pidfd -- no signal can reach a
+    foreign process. `leader` -- the group leader the caller addresses
+    through its own ALREADY-HELD pidfd -- is excluded here and signalled by
+    the caller strictly AFTER the members, so no member is stranded by its
+    leader dying mid-census (fix 2y, codex F2). Exited (zombie) members hold
+    their pgid but take no signal and are no longer addressable members;
+    members that cannot be verified are SKIPPED, never guessed at, and a
+    /proc entry that EXISTS but cannot be READ is never proof of exit: it is
+    accounted too, so no caller can claim a killed tree past it (fix 2z,
+    codex BLOCKER 2 / gemini F2) -- but it is accounted SEPARATELY, as a
+    POSSIBLE member, because its group membership was never established
+    (round 24, claude F1: reading an unreadable foreign entry as a group
+    "member" overstates what the census observed).
+    TimeoutError/InterruptedError (deadline/cancellation semantics) and
+    non-I/O failures always PROPAGATE (fix 2y, codex F3). Returns
+    (delivered, skipped, unverifiable): the pids signalled; every pid
+    VERIFIED as a live group member but not signalled (no pidfd, unanchored,
+    or a non-exit send failure), with skipped None when the /proc census
+    itself was unreadable (membership unknown); and every /proc entry that
+    exists but could not be read (before or after its pidfd pinned it) --
+    possible members, never established ones. Callers account all three and
+    never claim the tree was killed past this census. Hosts without pidfd
+    address no members (the degraded-escalation disclosures cover them)."""
+    import os
+    import signal
+    anchors = {int(anchor) for anchor in anchors}
+
+    def anchored(member):
+        # Follow the CURRENT parent chain (each hop is kernel-truthful for a
+        # live process); only a chain reaching an anchor verifies. A hop that
+        # disappears or cannot be read mid-walk refuses: skipping is always
+        # the safe outcome.
+        hop, depth = member, 0
+        while depth < 128:
+            if hop in anchors:
+                return True
+            fields = _fixture_stat_fields(hop)
+            if fields is None or fields is _FIXTURE_UNREADABLE:
+                return False
+            parent = int(fields[1])
+            if parent <= 1:
+                return False
+            hop, depth = parent, depth + 1
+        return False
+
+    delivered, skipped, unverifiable = [], [], []
+    try:
+        entries = os.listdir("/proc")
+    except OSError as exc:
+        if isinstance(exc, (TimeoutError, InterruptedError)):
+            raise
+        return delivered, None, unverifiable
+    for name in entries:
+        if not name.isdecimal():
+            continue
+        member = int(name)
+        if leader is not None and member == int(leader):
+            continue  # the caller signals the leader LAST, via its held pidfd
+        fields = _fixture_stat_fields(member)
+        if fields is _FIXTURE_UNREADABLE:
+            # The entry EXISTS but cannot be read: it may be a live member,
+            # and an unreadable record is never proof of exit. Account it as
+            # a POSSIBLE member -- its membership was never established
+            # (round 24, claude F1) -- so no caller may claim the tree past
+            # this census (fix 2z, codex BLOCKER 2 / gemini F2).
+            unverifiable.append(member)
+            continue
+        if fields is None or int(fields[2]) != group or fields[0] == b"Z":
+            continue
+        fd = _fixture_pidfd(member)
+        if fd is None:
+            skipped.append(member)  # a live member this host cannot address
+            continue
+        pending = None
+
+        def close_fd(fd=fd):
+            os.close(fd)
+
+        try:
+            fields = _fixture_stat_fields(member)  # re-verify AFTER the pidfd pinned it
+            if fields is _FIXTURE_UNREADABLE:
+                unverifiable.append(member)  # unverifiable entry: never read as exited
+                continue
+            if fields is None or int(fields[2]) != group or fields[0] == b"Z":
+                continue  # exited or left the group: no longer a member
+            if not anchored(member):
+                skipped.append(member)  # live in the group, ownership unverified
+                continue
+            try:
+                signal.pidfd_send_signal(fd, signum)
+            except (ProcessLookupError, OSError) as exc:
+                if isinstance(exc, (TimeoutError, InterruptedError)):
+                    raise
+                if not isinstance(exc, ProcessLookupError):
+                    skipped.append(member)  # verified member, delivery failed
+                continue
+            delivered.append(member)
+        except BaseException as exc:
+            # Capture the exception already propagating into the close
+            # below (fix 7, QA28 codex BLOCKER 2): a member-send
+            # cancellation must stay the outward exception even when the
+            # per-member pidfd close itself fails.
+            pending = exc
+            raise
+        finally:
+            _cleanup_boundary(pending, close_fd, "member pidfd close")
+    return delivered, skipped, unverifiable
+
+
+def _fixture_verify_group_kill(group):
+    """OBSERVATION, never delivery, licenses the "tree" claim (fix 2z,
+    premise change; narrowed by the maintainer ruling
+    PD-335-TREE-CLAIM-STALL): after the member kills and the leader kill,
+    while the frozen guardian still pins the group, poll /proc within the
+    cleanup grace until TWO CONSECUTIVE censuses each see NO live,
+    signalable member of `group` and no unreadable candidate entry -- only
+    that observation returns ("tree", []), and it means exactly that
+    observation, never a proof that the whole tree died: a member can fork
+    and exit between reads, so a continuously forking chain, or pid
+    wraparound placing a child below the readdir cursor, can evade even two
+    back-to-back clean censuses (a single clean census is weaker still: a
+    survivor missing from one snapshot can appear in the next). Callers
+    word every "tree" disclosure as an observation with this residual,
+    never as proof. Zombies are dead, not signalable: an unreaped member
+    holds the pgid but cannot run or fork. A member still live when the
+    bound expires (e.g. one forked between the kill census's snapshot and
+    its kills, fix 2z claude F1) is NAMED in
+    ("partial", (members, unverifiable)); an entry that exists but cannot
+    be read might be such a member, so it prevents the claim too, named as
+    unverifiable -- a possible member, never an established one (round 24,
+    claude F1); an unreadable /proc census is ("partial", None): membership
+    unknown. Reads only: no pidfd is opened and no signal is sent here, so
+    the no-census contract of the guardian-dead paths is untouched.
+    TimeoutError/InterruptedError propagate (fix 2y, codex F3)."""
+    import os
+    import time
+    deadline = time.monotonic() + _FIXTURE_CLEANUP_GRACE
+    clean = 0
+    while True:
+        survivors, unverifiable = [], []
+        try:
+            entries = os.listdir("/proc")
+        except OSError as exc:
+            if isinstance(exc, (TimeoutError, InterruptedError)):
+                raise
+            return ("partial", None)
+        for name in entries:
+            if not name.isdecimal():
+                continue
+            fields = _fixture_stat_fields(name)
+            if fields is _FIXTURE_UNREADABLE:
+                unverifiable.append(int(name))
+                continue
+            if fields is None or fields[0] == b"Z":
+                continue
+            if int(fields[2]) == group:
+                survivors.append(int(name))
+        if not survivors and not unverifiable:
+            clean += 1
+            if clean >= 2:
+                return ("tree", [])
+            continue  # the second census runs back to back, never accepted alone
+        clean = 0
+        if time.monotonic() >= deadline:
+            return ("partial",
+                    (sorted(set(survivors)), sorted(set(unverifiable))))
+        time.sleep(0.005)
+
+
+# Fix 6 (QA27 codex BLOCKER 1/2; premise change): pending-cancellation
+# priority is ONE shared boundary, never a per-site idiom. Fix 7 (QA28
+# codex BLOCKER 1/2, claude MINOR 1, gemini MAJOR 1) made the scope
+# COMPUTED. Fix 8 (QA29 codex BLOCKER 1/2, claude MAJOR 1 / MINOR 1/2,
+# gemini BLOCKER / MAJOR; maintainer ruling PD-335, narrow and
+# disclose) scopes the guarantee to what this module OWNS and widens it
+# to the whole close lifecycle: every MODULE-OWNED cleanup reachable
+# from the lifecycle entry points -- _FixtureProcess.close,
+# _finish_close, _interrupt_collect, _escalate and
+# _address_failed_subject -- runs through _cleanup_boundary below, and
+# an AST structural leg in `opf.py --self-test` (census-exception)
+# COMPUTES that closure from the module source each run and FAILS
+# CLOSED on what it cannot resolve: a call edge that is not in-module
+# code, a builtin, a declared stdlib module, or one of the leg's
+# DISCLOSED external-object primitives is a cannot-evaluate FAILURE,
+# never a silent pass -- aliased calls, attribute calls and function
+# references passed as arguments, boundary steps included, are resolved
+# and traversed or turn the leg red (fix 8, QA29 codex BLOCKER 2 /
+# claude MAJOR 1). DISCLOSED RESIDUAL (PD-335): the guarantee covers
+# cleanup this module OWNS; cleanup that runs INSIDE the standard
+# library or other external code -- a stdlib helper's internal context
+# manager (the Path.read_bytes class, QA29 codex BLOCKER 1), socket and
+# file close internals, threading lock release -- is disclosed, never
+# an enforced property, which is why the module's own /proc reads go
+# through os.open/os.read with the descriptor close as a boundary step.
+# A cancellation raised BY a cleanup step becomes the pending
+# cancellation for every later step in that cleanup sequence (QA28
+# codex BLOCKER 1). KeyboardInterrupt joins TimeoutError and
+# InterruptedError in the pending set, and the tiers are harmonized
+# (QA28 claude MINOR 3; QA29 gemini MAJOR: the direct guardian
+# backstop's cancellation tier is one explicit _PENDING_CANCELLATIONS
+# guard): at the boundary AND at the recording/retry tier, a cleanup a
+# cancellation interrupted records nothing, whichever of the three
+# cancellation types it was. Fix 9 (QA30 codex BLOCKER 1/2, claude
+# MINOR 1/2/3) makes the CAPTURE shape sound and the disclosure exact:
+# a handler that captures its exception for a deferred re-raise routes
+# every later cleanup through the boundary with the captured object
+# pending, and every later path re-raises THAT captured object -- the
+# structural leg walks the code that follows the capture and fails
+# closed on any unprotected call, on a raise of any other name, and on
+# a path that could complete without the re-raise; a disclosed method
+# NAME counts only for a receiver PROVEN external (a builtin-typed
+# value or an object built by a call into an imported module), never
+# for one that could be module-owned; and every module /proc read,
+# the guardian-side census included, goes through os.open/os.read with
+# the descriptor close as a boundary step.
+_PENDING_CANCELLATIONS = (TimeoutError, InterruptedError, KeyboardInterrupt)
+
+
+def _chain_ids(exc):
+    """ids of every exception reachable from exc over __cause__ and
+    __context__ edges, exc included, cycle-guarded."""
+    seen, frontier = set(), [exc]
+    while frontier:
+        node = frontier.pop()
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        frontier.append(node.__cause__)
+        frontier.append(node.__context__)
+    return seen
+
+
+def _attach_beneath(pending, suppressed, site):
+    """Keep `suppressed` reachable beneath `pending` WITHOUT rewriting
+    pending's own pre-existing chain (QA26 claude MINOR 1): first drop
+    suppressed's implicit back-edge to pending (set when it was raised
+    inside the caller's finally), so the outward chain stays acyclic;
+    then attach the suppressed EXCEPTION OBJECT as pending.__cause__ when
+    that slot is free, else append it at the tail of pending's
+    cause/context chain (QA27 codex: the object and its own chain stay
+    reachable, never just a repr). REACHABILITY, never display, is the
+    contract (QA28 claude MINOR 2): the tail walk follows __cause__-then-
+    __context__ edges and ignores __suppress_context__, so beneath a
+    `raise ... from None` edge the attached object is reachable
+    programmatically but not rendered in the traceback. Only when no
+    attachment slot can be taken safely -- the two chains already share a
+    node (sharing is not itself a cycle, but attaching under a shared
+    structure could create one, so the refusal is deliberately
+    CONSERVATIVE), or a cycle occupies the tail slots -- fall back to a
+    note naming the site and the suppressed failure, computed inside the
+    same protection. Every diagnostic here, repr included, runs inside
+    the caller's protection (_cleanup_boundary), so a raising __repr__ or
+    hostile chain attribute can never displace the cancellation (QA27
+    codex BLOCKER 2)."""
+    tail, seen = suppressed, set()
+    while tail is not None and id(tail) not in seen:
+        seen.add(id(tail))
+        if tail.__context__ is pending:
+            tail.__context__ = None
+            break
+        tail = tail.__context__
+    pending_chain = _chain_ids(pending)
+    if id(suppressed) in pending_chain:
+        return  # already reachable beneath the pending cancellation
+    if not (pending_chain & _chain_ids(suppressed)):
+        if pending.__cause__ is None:
+            keep = pending.__suppress_context__
+            pending.__cause__ = suppressed
+            pending.__suppress_context__ = keep
+            return
+        tail, seen = pending, set()
+        while id(tail) not in seen:
+            seen.add(id(tail))
+            below = (tail.__cause__ if tail.__cause__ is not None
+                     else tail.__context__)
+            if below is None:
+                break
+            tail = below
+        if tail.__cause__ is None and tail.__context__ is None:
+            tail.__context__ = suppressed
+            return
+    try:
+        detail = repr(suppressed)
+    except BaseException:
+        detail = "<unrepresentable " + type(suppressed).__name__ + ">"
+    pending.add_note(site + " failure kept beneath this pending "
+                     "cancellation: " + detail)
+
+
+def _cleanup_boundary(pending, step, site):
+    """The ONE exception boundary every escalation-path cleanup step runs
+    through (fix 6: QA25, QA26 and QA27 each closed one more hand-coded
+    site; fix 7: the census-exception structural leg computes the
+    escalation call-graph closure from the module source each run, so
+    the routed scope is mechanical, never hand-named). `pending` is the exception
+    already propagating into the caller's finally (None when the caller
+    completed normally); `step` is the cleanup callable; `site` names the
+    step for diagnostics. Contract, exactly: a step that returns changes
+    nothing; a step failure with NO pending cancellation
+    (_PENDING_CANCELLATIONS) propagates unchanged, behaviour-identical to
+    the hand-coded sites this replaces; a step failure WITH a pending
+    cancellation never displaces it -- the cancellation is re-raised as
+    the outward exception, its pre-existing __cause__/__context__ chain
+    intact, the step's failure kept reachable beneath it by
+    _attach_beneath (cause slot, else chain tail, else, only when no
+    acyclic attachment exists, a note), and the whole attachment, every
+    walk and repr included, runs inside this boundary's own protection,
+    so a hostile exception degrades the attachment, never the outward
+    exception (QA27 codex BLOCKER 2). The re-raise happens OUTSIDE the
+    handler that caught the step's failure, so CPython leaves the
+    cancellation's __context__ untouched (QA26 claude MINOR 1).
+    Attachment is BEST-EFFORT, and that means exactly this (QA28 gemini):
+    a failure raised inside the attachment machinery itself -- a hostile
+    chain attribute, a MemoryError under pressure, even an asynchronous
+    KeyboardInterrupt landing there -- is caught and DISCARDED, the
+    attachment may then be partial or absent, and a cancellation born
+    inside the attachment is deliberately LOST; the ALREADY-PENDING
+    cancellation is still re-raised, because letting an attachment fault
+    displace it is the exact failure class this boundary exists to
+    close."""
+    try:
+        return step()
+    except BaseException as cleanup_exc:
+        if not isinstance(pending, _PENDING_CANCELLATIONS):
+            raise
+        suppressed = cleanup_exc
+    try:
+        _attach_beneath(pending, suppressed, site)
+    except BaseException:
+        # Attachment is best-effort by contract (QA28 gemini): ANY
+        # failure inside the attachment machinery -- MemoryError, a
+        # hostile chain attribute, an asynchronous KeyboardInterrupt
+        # landing here -- is discarded and never displaces the pending
+        # cancellation; a cancellation born inside the attachment is
+        # deliberately lost.
+        pass
+    raise pending
+
+
+def _fixture_escalate_subject(subject, subject_fd, *, guardian_pid=None):
+    """Kill a receipt-identified subject, addressing OWNERSHIP-VERIFIED
+    targets only, each through its own pidfd -- NEVER a numeric group kill,
+    and NEVER a member census anchored on the subject's bare NUMERIC pid
+    (fix 2y, codex F1: only unreapability pins a pid or pgid number against
+    reuse). Freeze first: SIGSTOP through the subject's ALREADY-HELD pidfd
+    is identity-safe and stops a live leader before any kill, so it cannot
+    fork or reap mid-sequence; the freeze runs INSIDE the exception-safe
+    kill protection (round 24, codex boundary), so a raising freeze -- a
+    re-raised cancellation or a non-OSError delivery fault -- never skips
+    the held-pidfd SIGKILL. Member addressing is licensed ONLY by
+    guardian ownership: `guardian_pid` -- the caller's own unreaped child,
+    certified frozen -- is the tree's subreaper, so every orphaned
+    same-group descendant is its child and every live member's CURRENT
+    parent chain reaches it; _fixture_group_pinned confirms the guardian
+    stopped-or-zombie and still parenting a group member, and
+    _fixture_kill_group_members then verifies each member against that
+    single guardian anchor AFTER its pidfd is held. Members die BEFORE the
+    leader (the census excludes the leader; its held-pidfd SIGKILL runs
+    last, fix 2y codex F2), and the subject SIGKILL is EXCEPTION-SAFE (fix
+    2z, codex BLOCKER 3): a raising census never strands the frozen leader,
+    and the census exception still propagates after the kill -- through the
+    shared _cleanup_boundary (fix 6, QA27 codex BLOCKER 1), so a
+    cancellation already propagating (a TimeoutError raised at the freeze)
+    stays the outward exception even when that SIGKILL itself fails, the
+    kill failure -- any failing send but ProcessLookupError, which proves
+    the leader already exited and is no failure to keep -- re-raised into
+    the boundary and kept reachable beneath it (fix 14, QA35 codex MAJOR:
+    the EPERM-class faults the send can raise were recorded in the
+    survivor flag only and dropped from that chain); the member census's
+    per-pidfd
+    close routes through the same boundary (fix 7, QA28 codex BLOCKER 2),
+    so a member-send cancellation crossing that close stays outward even
+    when the close itself fails. The "tree"
+    outcome rests on OBSERVATION, never on the kill sends alone (fix 2z,
+    premise change; maintainer ruling PD-335-TREE-CLAIM-STALL): while the
+    guardian stays frozen, a bounded verification census
+    (_fixture_verify_group_kill) must observe NO live, signalable group
+    member in TWO CONSECUTIVE clean censuses -- and even that outcome is an
+    observation, never a proof (a continuously forking chain or pid
+    wraparound can evade it; every disclosure says so). A member still live
+    at the bound (e.g. forked past the kill snapshot), an unreadable entry
+    (a possible member, accounted apart from established members, round 24
+    claude F1), or a leader SIGKILL failing with anything but
+    ProcessLookupError (fix 2z, gemini F1) downgrades the outcome to
+    "partial", naming what remains where it is known, never "tree". With NO
+    guardian ownership (guardian_pid absent -- the guardian
+    is dead -- or the census unpinned) NO census runs at all: no new pidfds
+    are opened and ONLY the subject is signalled through its already-held
+    pidfd; its descendants are the documented orphan-escape residual (D2),
+    which the caller DISCLOSES as unaddressed (pdeathsig and the ack-EOF
+    gate are the partial coverage) and never reports as a killed tree.
+    Returns ("tree", []) ONLY when the guardian-anchored census addressed
+    every OBSERVED member (a census can only address members it observed)
+    AND the verification census observed none left alive in two
+    consecutive clean passes (an observation, never a proof),
+    ("partial", (member-pids, unverifiable-pids) or None) when members were
+    skipped, observed surviving or unkillable, entries were unverifiable
+    (possible members), or the census or its verification was unreadable
+    (None: membership unknown), or ("subject-only", None)."""
+    import signal
+    outcome = ("subject-only", None)
+    leader_kill_failed = False
+    pending = None
+
+    def kill_leader():
+        # The held-pidfd subject SIGKILL runs even if the freeze or the
+        # census raised (fix 2z, codex BLOCKER 3); the earlier exception
+        # still propagates, after the kill, through _cleanup_boundary.
+        nonlocal leader_kill_failed
+        try:
+            signal.pidfd_send_signal(subject_fd, signal.SIGKILL)
+        except (ProcessLookupError, OSError) as exc:
+            if isinstance(exc, (TimeoutError, InterruptedError)):
+                raise
+            if not isinstance(exc, ProcessLookupError):
+                # A leader this escalation could NOT kill is a
+                # survivor; ProcessLookupError alone proves the leader
+                # already exited. THIS line only sets the survivor
+                # flag. What the flag does happens BELOW, after the
+                # kill finally, where the enclosing
+                # _fixture_escalate_subject computes its return
+                # value: a would-be "tree" claim becomes a
+                # partial naming the subject, a payload-carrying
+                # "partial" adds the subject, and the no-guardian
+                # ("subject-only", None) and ("partial", None)
+                # outcomes stay unnamed (fix 2z, gemini F1; scoped
+                # fix 16, QA37 codex MINOR; reworded fix 17, QA38
+                # gemini; enclosing function named fix 18, QA39
+                # gemini).
+                leader_kill_failed = True
+                if isinstance(pending, _PENDING_CANCELLATIONS):
+                    # THIS branch runs only with a cancellation
+                    # already pending (fix 14, QA35 codex MAJOR): the
+                    # survivor flag alone would drop this kill failure
+                    # from the cancellation's chain -- the docstring
+                    # promises it stays reachable beneath it -- so
+                    # re-raise the failure into the boundary, which
+                    # attaches it beneath the pending cancellation and
+                    # re-raises the cancellation itself. With nothing
+                    # pending, or an ordinary failure pending, this
+                    # branch is NOT taken: kill_leader returns with
+                    # only the flag set, the flag stays the whole
+                    # record of this kill failure, and naming the
+                    # survivor is the outcome handling BELOW -- which
+                    # an ordinary pending failure that re-raises past
+                    # it never reaches, leaving NO outcome (fix 15,
+                    # QA36 codex/claude MINOR; reworded fix 17, QA38
+                    # gemini).
+                    raise
+
+    try:
+        # The freeze runs INSIDE the kill protection (round 24, codex
+        # boundary): an exception here -- a re-raised cancellation, or a
+        # non-OSError delivery fault -- must still reach the finally's
+        # held-pidfd SIGKILL, never leave the subject frozen and unkilled.
+        try:
+            signal.pidfd_send_signal(subject_fd, signal.SIGSTOP)
+        except (ProcessLookupError, OSError) as exc:
+            # Narrowed (QA21 gemini F2): TimeoutError/InterruptedError are
+            # OSError subclasses carrying deadline/cancellation semantics,
+            # never swallowed.
+            if isinstance(exc, (TimeoutError, InterruptedError)):
+                raise
+        if guardian_pid is not None and _fixture_group_pinned(subject, guardian_pid):
+            delivered, skipped, unverifiable = _fixture_kill_group_members(
+                subject, signal.SIGKILL, {guardian_pid}, leader=subject)
+            if skipped is None:
+                outcome = ("partial", None)
+            elif skipped or unverifiable:
+                outcome = ("partial", (sorted(skipped), sorted(unverifiable)))
+            else:
+                outcome = ("tree", [])
+    except BaseException as exc:
+        # Capture the exception already propagating into the kill finally:
+        # a pending cancellation must stay the outward exception even when
+        # the held-pidfd SIGKILL itself fails (fix 6, QA27 codex BLOCKER 1).
+        pending = exc
+        raise
+    finally:
+        _cleanup_boundary(pending, kill_leader, "held-pidfd subject SIGKILL")
+    if outcome[0] == "tree":
+        # The kill sends alone never license the claim (fix 2z): observe the
+        # group to quiescence while the guardian stays frozen.
+        outcome = (("partial", ([int(subject)], [])) if leader_kill_failed
+                   else _fixture_verify_group_kill(subject))
+    elif (leader_kill_failed and outcome[0] == "partial"
+            and outcome[1] is not None):
+        members, unverifiable = outcome[1]
+        outcome = ("partial",
+                   (sorted({*members, int(subject)}), unverifiable))
+    return outcome
+
+
+def _fixture_children():
+    """Census by PPID; task/children can transiently omit adopted children.
+    The per-entry stat read goes through os.open/os.read with the descriptor
+    close as a _cleanup_boundary step (fix 9, QA30 claude MINOR 2: this
+    guardian-side census still read /proc via Path.read_bytes, so the fix-8
+    header claim that the module's own /proc reads never hide a stdlib
+    context manager was not literally true of the module; it now is).
+    Exception behaviour is unchanged: an entry that disappears mid-read
+    (FileNotFoundError/ProcessLookupError) is skipped, every other failure
+    propagates so the caller refuses."""
+    import os
+    owner = os.getpid()
+    pids = []
+    fd = None
+    pending = None
+
+    def close_stat_fd():
+        if fd is not None:
+            os.close(fd)
+
+    with os.scandir("/proc") as entries:
+        for entry in entries:
+            if not entry.name.isdecimal():
+                continue
+            stat = b""
+            fd = None
+            pending = None
+            try:
+                try:
+                    fd = os.open(entry.path + "/stat",
+                                 os.O_RDONLY | os.O_CLOEXEC)
+                    while True:
+                        chunk = os.read(fd, 65536)
+                        if not chunk:
+                            break
+                        stat += chunk
+                except BaseException as exc:
+                    # Capture the exception already propagating into the
+                    # close below: a read-born cancellation must stay the
+                    # outward exception even when the descriptor close
+                    # itself fails (fix 9, the _fixture_stat_fields shape).
+                    pending = exc
+                    raise
+                finally:
+                    _cleanup_boundary(pending, close_stat_fd,
+                                      "stat descriptor close")
+            except (FileNotFoundError, ProcessLookupError):
+                continue  # an unrelated process disappeared during enumeration
+            # comm is parenthesized and may contain spaces and ')' characters.
+            fields = stat.rsplit(b")", 1)[1].split()
+            if int(fields[1]) == owner:
+                pids.append(int(entry.name))
+    return pids
+
+
+# Cleanup has its own minimum grace after execution expires. While execution
+# time remains, use that remaining budget instead if it is larger. This is a
+# polling bound, not a guarantee that blocking kernel operations will return.
+_FIXTURE_CLEANUP_GRACE = 5.0
+
+
+def _fixture_cleanup_deadline(execution_deadline=None):
+    import time
+    floor = time.monotonic() + _FIXTURE_CLEANUP_GRACE
+    return floor if execution_deadline is None else max(floor, execution_deadline)
+
+
+def _fixture_drain(subject, subject_fd=None, *, deadline=None):
+    """Dedicated single-threaded subreaper: every child belongs to this fixture.
+
+    Kill groups BEFORE reaping leaders, then collect adopted descendants, including
+    nested guardians and descendants in other sessions. Only kernel ECHILD proves
+    completion. /proc read failures refuse; an empty snapshot is retried, never
+    treated as completion or an immediate contradiction. The caller supplies one
+    cleanup deadline, shared by normal and failure paths; absent one, the named
+    minimum grace applies. Expiry yields cannot-evaluate, never success. Syscalls still
+    require kernel progress. Subjects attacking their guardian are outside this
+    trusted harness's contract.
+    """
+    import os
+    import signal
+    import time
+    status = None
+    if deadline is None:
+        deadline = _fixture_cleanup_deadline()
+    # Cancel the owned subject immediately, even while a census is empty. The
+    # ownership check makes this safe on a retry after the subject was reaped.
+    _fixture_signal(subject, signal.SIGKILL, subject_fd)
+    while True:
+        try:
+            os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            return status
+        if time.monotonic() >= deadline:
+            raise ChildStatusUnavailable("descendant cleanup deadline: ECHILD not observed")
+        pids = _fixture_children()
+        for pid in pids:
+            fd = subject_fd if pid == subject else _fixture_pidfd(pid)
+            try:
+                if not _fixture_signal(pid, signal.SIGKILL, fd):
+                    raise ChildStatusUnavailable("lost descendant ownership")
+                waited, raw = os.waitpid(pid, os.WNOHANG)
+                if waited == 0:
+                    continue
+                if waited != pid:
+                    raise ChildStatusUnavailable("unexpected descendant wait PID")
+                if pid == subject:
+                    status = raw
+            finally:
+                if fd is not None and fd != subject_fd:
+                    os.close(fd)
+        time.sleep(0.005)
+
+
+# array is required: socket.send_fds/recv_fds cold-import it inside their own
+# bodies, so importing socket alone does not load it (QA19 F4).
+_FIXTURE_GUARDIAN_MODULES = (
+    "array", "ctypes", "errno", "gc", "json", "pathlib", "resource", "select",
+    "signal", "socket", "time", "traceback")
+
+
+def _fixture_preload():
+    """Import, in the caller and BEFORE any fork, every module the guardian tree's
+    function-local imports touch. Only the launcher thread survives into the guardian,
+    so a cold post-fork import could block forever on an import or module lock some
+    OTHER caller thread held at fork time; preloading makes every guardian-side import
+    a lock-free sys.modules hit. The remaining documented restriction is thunk-side
+    only: a subject callable must not depend on reacquiring locks (including a cold
+    import's module lock) that caller threads hold at call time (QA18 codex F5)."""
+    import importlib
+    for name in _FIXTURE_GUARDIAN_MODULES:
+        importlib.import_module(name)
+
+
+def _fixture_mask_available():
+    """The masked ownership/collection design (fix 2w) requires per-thread
+    signal masking; without it construction fails CLOSED (an unmasked
+    close()/poll() sequence is never run)."""
+    import signal
+    return hasattr(signal, "pthread_sigmask")
+
+
+def _fixture_mask_cancellation():
+    """Block the cancellation signals (SIGINT, SIGTERM) on the calling thread
+    for one ownership/collection sequence. The kernel keeps a signal raised
+    while every thread blocks it pending and delivers it only at the caller's
+    SIG_SETMASK restore, so the sequence always completes (or refuses loudly)
+    BEFORE the cancellation lands; the interpreter then raises the
+    KeyboardInterrupt at the restore's own bytecode boundary -- INSIDE the
+    caller's finally (QA21 claude F4) -- so close()/poll() raise the interrupt
+    themselves, with any in-flight refusal preserved as the interrupt's
+    context. Callers capture the prior mask by QUERY before their try and
+    call this as the try's FIRST statement, so an exception during the
+    installation itself still restores exactly (QA21 claude F3 / codex F1 /
+    gemini F1: the block syscall can land and the interpreter raise before
+    the return value reaches the caller). Outside this guarantee (the
+    retained BaseException funnels and the subject-side protections are the
+    backstop): a signal whose interpreter-level flag tripped before the mask
+    landed, a PROCESS-directed signal delivered to a CALLER-created thread
+    that leaves the pair unblocked (the layer's own launcher is created with
+    the pair blocked, so single-threaded callers are airtight, QA21 claude
+    F1), non-signal asynchronous exceptions, and other signals with raising
+    handlers."""
+    import signal
+    return signal.pthread_sigmask(
+        signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+
+
+def _fixture_abort_launch(fixture):
+    """Construction failed or was cancelled mid-launch (the object never reached its
+    caller): tell the parked launcher to never fork -- the cancelled flag is read
+    before any fork -- and release every construction resource. A launcher already
+    past that check remains the owner of its own fork (_launch collects abandoned
+    launches), so nothing here can dispose state a live guardian still uses."""
+    with fixture._launch_lock:
+        fixture._cancelled = True
+    fixture._go.set()
+    for resource in (fixture.control, fixture.peer, getattr(fixture, "report", None)):
+        if resource is not None:
+            try:
+                resource.close()
+            except OSError:
+                pass
+
+
+class _FixtureProcess:
+    """Shared fork/exec tree owner. No caller signal state is borrowed.
+
+    The caller owns a guardian; the guardian alone launches/owns the subject tree.
+    The subject is a CALLABLE given at construction and runs only in the subject
+    process: start() is parent-only and never returns in a child, so subject-side
+    control flow can never fall into caller cleanup. READY/GO separates startup
+    (no subject exists, so killing the guardian is safe) from supervision
+    (control-channel EOF requests tree cleanup). The guardian records status only
+    AFTER tree cleanup reaches ECHILD. Its subreaper flag is private; the caller's
+    SIGCHLD, masks, timers and subreaper flag stay untouched.
+
+    Descriptor contract (allowlist, no registry): the guardian's first act is to
+    close every inherited descriptor except stdio, its own control peer and
+    receipt, and the caller-declared keep_fds, so the guardian and its subject see
+    ONLY stdio plus declared descriptors. An undeclared caller fd is a loud
+    deterministic refusal (EBADF in the subject), never a sometimes-working leak,
+    and a sibling call's endpoints -- constructed or still under construction --
+    can never survive into an unrelated guardian.
+
+    Launch ownership: the guardian is forked on a private launcher thread that
+    exists from CONSTRUCTION, parked until start() releases it, so start() and
+    close() only flip events: no caller-side bytecode boundary -- including the
+    inside of threading.Thread.start -- can lose a fork or leave a thread that
+    close() cannot decide about. CPython raises asynchronous signal exceptions
+    (e.g. a real SIGINT's KeyboardInterrupt) only in the MAIN thread, so the
+    launcher always records its fork; close() never joins the launcher, it waits
+    on the launcher's completion event and decides by the recorded ownership. A
+    cancellation at ANY caller-side point therefore either prevents the fork
+    (the cancelled flag is read before forking), reaps the guardian to ECHILD,
+    or -- if the launch never completes inside the bounded budget -- refuses
+    loudly and ABANDONS the launch to the launcher, which then collects its own
+    fork; construction resources are never disposed while the launcher can still
+    use them. A failed construction (e.g. thread exhaustion) aborts the launch,
+    releases every resource, and surfaces the original error. Cancellation
+    masking (fix 2w/2x): close() runs its ENTIRE ownership decision, transfer,
+    collection and cleanup sequence -- and poll() its collection-to-recording
+    step -- with SIGINT and SIGTERM masked on the calling thread
+    (pthread_sigmask), and the LAUNCHER is created with the same pair blocked
+    (a thread inherits its creator's mask; the guardian undoes exactly that
+    block so the subject sees the caller's original mask), so with a
+    single-threaded caller EVERY thread blocks the pair during the sequence
+    and even a PROCESS-directed cancellation -- the real Ctrl-C delivery
+    shape, which the kernel may hand to ANY thread with it unblocked -- stays
+    kernel-pending (QA19 F2, QA20, QA21 claude F1). The prior mask is
+    captured by QUERY before the restoring try and the block is the try's
+    FIRST statement, restored exactly in the finally (QA21 claude F3): a
+    cancellation landing before the block installs disposes NOTHING, not
+    even the thread's signal state, and close() can simply run again. The
+    pending cancellation is delivered AT the restore, inside close()/poll()'s
+    own finally (QA21 claude F4): close() then raises the KeyboardInterrupt
+    itself, with any in-flight refusal preserved on the exception chain
+    (callers walk __context__). The deferral is BOUNDED (QA21 gemini F3, an
+    accepted trade-off: guaranteed ownership and cleanup over immediate
+    termination): every masked wait carries its own deadline, so a pending
+    cancellation -- including a job supervisor's SIGTERM -- is delayed at
+    most the bounded cleanup budget (worst case about two grace periods plus
+    the escalation grace), never indefinitely. A host without pthread_sigmask
+    REFUSES construction (fail closed, never an unmasked run). Residuals, covered by
+    the retained BaseException funnels (and the subject-side ack EOF and
+    pdeathsig) as backstops: a signal whose interpreter-level flag tripped
+    before the mask landed; a PROCESS-directed signal delivered to a
+    CALLER-created thread that leaves the pair unblocked, which the
+    interpreter then raises inside the masked sequence (the layer cannot
+    mask threads it does not own); and non-signal asynchronous exceptions,
+    which no mask can stop. The funnels leave the same owner: an
+    unrecorded launch is abandoned to the launcher UNDER THE LAUNCH LOCK, a
+    recorded one keeps close(), which finishes collecting before re-raising;
+    one landing inside the collection kills the tree and bounded-reaps the
+    guardian before propagating.
+
+    Locks: only the launcher thread survives into the guardian, whose
+    dependencies are preloaded at construction, so guardian-side imports take no
+    locks. Documented thunk restriction: a subject callable must not depend on
+    reacquiring a lock (including a cold import's module lock) that a caller
+    thread held at call time; such a thunk deadlocks in the child and is
+    collected as a loud TIMEOUT, never silently.
+
+    Escalation: after forking the subject the guardian delivers a (pid, pidfd)
+    receipt on the control socket and only THEN releases the subject through an
+    acknowledgment pipe: no subject runs user code or creates descendants
+    without a delivered receipt, and a subject whose guardian dies before the
+    acknowledgment (EOF), or whose parent is no longer the expected guardian
+    when pdeathsig is armed, refuses to run at all. close() collects the
+    buffered receipt before closing that socket. A guardian that cannot be
+    collected within the bounded cleanup budget is frozen (SIGSTOP via its
+    pidfd, so a live guardian's pid/pgid cannot be recycled), then the
+    receipt-identified subject's tree is SIGKILLed under GUARDIAN OWNERSHIP
+    (fix 2y): while the frozen guardian lives it is the tree's subreaper, so
+    every observed member is verified through its OWN pidfd against /proc
+    -- group membership AND a CURRENT parent chain reaching the guardian
+    anchor,
+    re-checked AFTER the pidfd is opened -- NEVER a numeric killpg and NEVER
+    a census anchored on the subject's bare numeric pid (QA20 claude F1,
+    QA21 codex F3, fix 2y codex F1: only unreapability pins a pid or pgid
+    NUMBER against reuse; neither a held pidfd nor SIGSTOP delivery does).
+    Members die BEFORE the leader (the census excludes the leader; its
+    held-pidfd SIGKILL runs last), so no member is stranded by its leader's
+    death, and every observed member the census could not address is
+    accounted (fix 2y codex F2; a member no census observed -- the
+    disclosed fork-race and pid-wraparound residual -- can be neither
+    addressed nor accounted, per the ruling PD-335-TREE-CLAIM-STALL). The
+    "tree" claim then rests on OBSERVATION, never on the kill sends alone
+    (fix 2z; maintainer ruling PD-335-TREE-CLAIM-STALL):
+    while the guardian stays frozen, a bounded verification census must
+    observe NO live, signalable group member in TWO CONSECUTIVE clean
+    passes -- an observation, never a proof (a continuously forking chain
+    or pid wraparound can evade it); a member still live at the bound (e.g.
+    forked past the kill snapshot), an unreadable /proc entry (never proof
+    of exit; a possible member, accounted apart from established members),
+    or a leader SIGKILL failing with anything but ProcessLookupError
+    downgrades the outcome to
+    the named partial accounting. Then the guardian itself is SIGKILLed. On ANY guardian
+    failure, escalated or not -- including a failure FIRST collected by
+    poll(), which kills the subject AT COLLECTION TIME and records the
+    failure for close() to prove and re-raise (QA19 F1), an UNRESOLVED
+    collection (guardian reaped, status never validated, no failure
+    recorded: treated as a failure of close()'s own, QA20 codex F1), and a
+    LOST-OWNERSHIP collection (the guardian disappeared without this
+    close()'s reap, fix 2y claude Finding 2) -- a receipt-identified subject
+    is killed and its disappearance proven on its pidfd or refused loudly;
+    on every one of those guardian-DEAD paths the kill is SUBJECT-ONLY: the
+    dead guardian owns no orphans, so NO member census runs, NO new pidfds
+    are opened, and only the already-held subject pidfd is signalled (fix
+    2y, D2).
+
+    Refusal wording, class-wide (each names ONLY the steps actually taken,
+    QA19 F3 / QA20 claude F3 / fix 2y codex F2):
+
+      kill state ran               refusal names
+      ---------------------------  ------------------------------------------
+      no receipt                   subject cleanup INCOMPLETE
+      pid-only receipt (no pidfd)  subject cleanup UNVERIFIED (escalated,
+                                   poll-collected and lost-ownership paths)
+      subject-only (guardian dead  subject exit proven on its pidfd;
+      or census unpinned)          descendants, if any, UNADDRESSED
+                                   (orphan-escape residual,
+                                   pdeathsig-backed)
+      "partial" census (skipped    the unaddressed members and the
+      or unreadable membership)    unverifiable entries (possible members),
+                                   by pid, or "unknown (census unreadable)"
+      "tree" (guardian-anchored    "subject tree killed: every observed
+      census, every OBSERVED       member addressed, none observed in two
+      member addressed, then a     consecutive clean censuses" -- the ONLY
+      bounded verification         state that ever claims a killed tree,
+      census OBSERVED no live      and even it is worded as an observation
+      member, twice                with its residual (a forking chain or
+      consecutively)               pid wraparound can evade the censuses),
+                                   never a proof
+
+    Documented residuals: descendants that leave the subject's group/session
+    survive a WEDGED-guardian escalation (only the subreaper census can find
+    them; the honest-guardian drain still covers them), and ALL descendants
+    of a subject whose guardian is DEAD survive the subject-only
+    kill (no process owns the orphans after the subreaper guardian's death,
+    so a census there could only trust recyclable numbers and unverifiable
+    reparented chains; fix 2y, D2) -- both disclosed in the refusal, never
+    claimed killed. The subject arms PR_SET_PDEATHSIG(SIGKILL) as partial
+    extra coverage, failing closed to these residuals where unavailable.
+    Hosts without pidfd degrade escalation to guardian-only with the same
+    residuals.
+
+    Parent-side fork callbacks and uninterruptible kernel waits remain unbounded.
+    """
+    def __init__(self, deadline, keep_fds=(), subject=None):
+        import signal
+        import socket
+        import tempfile
+        import threading
+        if not _fixture_mask_available():
+            # Fail CLOSED (fix 2w): without pthread_sigmask the ownership and
+            # cleanup sequences would run unmasked and a cancellation could
+            # land between their steps. Documented residual: such hosts cannot
+            # run fixtures at all.
+            raise ChildStatusUnavailable(
+                "cannot mask cancellation signals (signal.pthread_sigmask "
+                "unavailable): refusing fixture launch")
+        self.deadline = deadline
+        self.pid = self.pidfd = self.status = None
+        self.subject_pid = self.subject_pidfd = None
+        self.armed = self.collected = self.timed_out = False
+        # Separate explicit states (QA20 codex F1): `collected` says only that
+        # the GUARDIAN was reaped; `unresolved` marks an armed collection whose
+        # receipt was never validated with no failure recorded (close() still
+        # treats it as a failure); `cleaned` says the collected guardian's
+        # subject-cleanup obligation was discharged (validated clean status,
+        # or kill plus disappearance proof). `_subject_kill` records the one
+        # receipt kill's accounting state: "tree" (guardian-anchored census,
+        # every OBSERVED member addressed, none observed in two consecutive
+        # clean verification censuses -- an observation, never a proof),
+        # "partial"
+        # (census ran; the (members, unverifiable-entries) it could not
+        # address are in `_subject_skipped`, None when the census was
+        # unreadable), or "subject-only" (no guardian ownership: the
+        # held-pidfd subject kill only, descendants disclosed, fix 2y).
+        self.unresolved = False
+        self.cleaned = False
+        self._subject_kill = None
+        self._subject_skipped = None
+        # keep_fds: descriptors the guardian and its subject still need (e.g.
+        # run_bounded's pipe). Everything else inherited is closed in the guardian.
+        self.keep_fds = tuple(keep_fds)
+        self.subject = subject
+        self._launcher = None
+        self._launch_error = None
+        # The recorded guardian failure, set at COLLECTION time by whichever
+        # collector reads the failed report first (QA19 F1); close() re-raises
+        # it after addressing the receipt-identified subject.
+        self._failure = None
+        self._launch_lock = threading.Lock()
+        self._go = threading.Event()          # start()/close() release the launcher
+        self._launched = threading.Event()    # set by the launcher on every path
+        self._cancelled = self._abandoned = False
+        # Guardian dependencies are imported HERE, pre-fork, so every
+        # guardian-side function-local import is a lock-free sys.modules hit.
+        _fixture_preload()
+        self.control, self.peer = socket.socketpair()  # non-inheritable across exec
+        try:
+            self.report = tempfile.TemporaryFile()
+            # The launcher exists from construction, parked until released:
+            # start() only sets an event, so no caller-side bytecode boundary
+            # sits between creating the launcher and owning what it forks. It
+            # is STARTED with {SIGINT, SIGTERM} blocked -- a thread inherits
+            # its creator's mask -- so the layer never adds a thread the
+            # kernel could pick for a PROCESS-directed cancellation (QA21
+            # claude F1): with a single-threaded caller, every thread then
+            # blocks the pair inside close()/poll() and a real Ctrl-C stays
+            # kernel-pending until the restore. The guardian undoes exactly
+            # this block (`_launch_masked`), so the subject still sees the
+            # caller's original mask.
+            prior = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+            self._launch_masked = {signal.SIGINT, signal.SIGTERM} - prior
+            try:
+                _fixture_mask_cancellation()
+                launcher = threading.Thread(
+                    target=self._launch, name="opf-fixture-launcher", daemon=True)
+                launcher.start()
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, prior)
+            self._launcher = launcher
+        except BaseException:
+            _fixture_abort_launch(self)
+            raise
+
+    def start(self):
+        try:
+            return self._start()
+        except BaseException:
+            self.close()
+            raise
+
+    def _launch(self):
+        """Launcher-thread body: parked from construction, released by start() (fork)
+        or close() (refuse). Runs only on the private launcher thread, where CPython
+        never raises asynchronous signal exceptions, so no bytecode boundary here can
+        lose the fork result between the fork and its store -- by interpreter
+        construction, not by statement packing. A launch close() gave up on is
+        collected HERE: the launcher is then the fork's last owner."""
+        try:
+            self._go.wait()
+            with self._launch_lock:
+                cancelled = self._cancelled
+            if cancelled:
+                raise ChildStatusUnavailable("fixture launch cancelled before fork")
+            self._launch_fork()
+        except BaseException as exc:  # parent-side only; surfaced by _start
+            self._launch_error = exc
+        finally:
+            with self._launch_lock:
+                self._launched.set()
+                abandoned = self._abandoned
+        if abandoned:
+            self._collect_abandoned()
+
+    def _launch_fork(self):
+        import os
+        pid = os.fork()
+        if pid == 0:
+            self._guardian()  # never returns: every guardian path ends in os._exit
+        self.pid = pid
+        self.pidfd = _fixture_pidfd(pid)
+
+    def _collect_abandoned(self):
+        """close() already refused with ownership-unknown and disposed nothing: kill
+        and reap any guardian this launch produced (it is pre-GO, so no subject can
+        exist), then release the construction resources close() left untouched."""
+        import os
+        import signal
+        try:
+            if self.pid is not None and not self.collected:
+                _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
+                os.waitpid(self.pid, 0)
+                self.collected = True
+        except OSError:
+            pass
+        finally:
+            for resource in (self.control, self.peer, self.report):
+                try:
+                    resource.close()
+                except OSError:
+                    pass
+            for name in ("pidfd", "subject_pidfd"):
+                fd = getattr(self, name)
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                    setattr(self, name, None)
+
+    def _start(self):
+        import os
+        import select
+        import signal
+        import sys
+        import time
+        if sys.platform != "linux" or not all(
+                hasattr(os, name) for name in ("fork", "waitid", "WNOWAIT", "P_ALL")):
+            raise ChildStatusUnavailable("Linux fork/waitid/subreaping required")
+        if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+            raise ChildStatusUnavailable("unowned SIGCHLD disposition")
+        if not callable(self.subject):
+            raise ChildStatusUnavailable("fixture subject must be a callable")
+        # Release the launcher parked since construction. Bounded wait: a fork
+        # wedged in the kernel or an at-fork hook is a cannot-evaluate; close()
+        # re-checks the same completion event before deciding.
+        self._go.set()
+        if not self._launched.wait(max(self.deadline - time.monotonic(),
+                                       _FIXTURE_CLEANUP_GRACE)):
+            raise TimeoutError("fixture launch deadline")
+        if self._launch_error is not None:
+            raise self._launch_error
+        pid = self.pid
+        self.peer.close()
+        self.control.setblocking(False)
+        poller = select.poll()
+        poller.register(self.control, select.POLLIN | select.POLLHUP | select.POLLERR)
+        while time.monotonic() < self.deadline:
+            if poller.poll(5):
+                if os.read(self.control.fileno(), 1) != b"R":
+                    waited, raw = _fixture_wait(self.pid, 0)
+                    if waited != self.pid:
+                        raise ChildStatusUnavailable("unexpected startup wait PID")
+                    self.collected = True
+                    self._read_report(raw)
+                    raise ChildStatusUnavailable("guardian failed before READY")
+                if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+                    raise ChildStatusUnavailable("SIGCHLD changed during launch")
+                self.armed = True
+                os.write(self.control.fileno(), b"G")
+                return pid
+        self.timed_out = True
+        raise TimeoutError("fixture startup deadline")
+
+    def _guardian(self):
+        """Guardian process body (the forked child's only thread); never returns."""
+        import gc
+        import json
+        import os
+        import signal
+        import time
+        subject = subject_fd = cleanup_deadline = None
+        stage = "startup"
+        try:
+            # The launcher forked this guardian with the cancellation signals
+            # blocked (a construction-time inheritance, see __init__): undo
+            # exactly that block, so the guardian tree -- and the SUBJECT it
+            # forks -- sees the caller's original SIGINT/SIGTERM disposition.
+            # Guardian cleanup itself is driven by pidfd SIGSTOP/SIGKILL,
+            # which no mask stops.
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, self._launch_masked)
+            # The forked heap is the caller's: a collection here could run
+            # caller-object finalizers whose fd closes would hit numbers this
+            # guardian legitimately reuses after the sweep below. Keep collection
+            # off for the guardian's short life.
+            gc.disable()
+            # The whole descriptor contract, applied unconditionally: only stdio,
+            # this call's peer + receipt, and the caller-declared keep_fds survive
+            # into the guardian and its subject.
+            _fixture_close_all_except(
+                set((self.peer.fileno(), self.report.fileno(), *self.keep_fds)))
+            os.setpgid(0, 0)  # no group signal can ever address the caller's group
+            _fixture_subreaper()
+            os.write(self.peer.fileno(), b"R")
+            if os.read(self.peer.fileno(), 1) != b"G":
+                os._exit(0)  # cancelled before GO: no subject exists
+            guardian = os.getpid()
+            ack_r, ack_w = os.pipe()
+            subject = os.fork()
+            if subject == 0:
+                try:
+                    self.peer.close()
+                    self.report.close()
+                    os.close(ack_w)
+                    _fixture_pdeathsig()
+                    _fixture_check_parent(guardian)
+                    os.setsid()  # before any subject code, and before any exec
+                    _fixture_await_ack(ack_r)
+                    _fixture_enable_gc()
+                    self.subject()
+                    os._exit(0)
+                except BaseException:
+                    # This is the subject, not the guardian: its report is
+                    # already closed. Preserve the bootstrap cause on fd 2.
+                    import traceback
+                    try:
+                        with os.fdopen(os.dup(2), "w") as diagnostic:
+                            traceback.print_exc(file=diagnostic)
+                    finally:
+                        os._exit(125)
+            os.close(ack_r)
+            stage = "subject-receipt"
+            subject_fd = _fixture_pidfd(subject)
+            _fixture_send_subject(self.peer, subject, subject_fd)
+            _fixture_ack_subject(ack_w)
+            self.peer.setblocking(False)
+            timed_out = False
+            stage = "supervision"
+            while True:
+                ended = os.waitid(os.P_PID, subject, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                # Deadline expiry is authoritative BEFORE accepting
+                # completion: the clock is sampled AFTER waitid, so only a
+                # pre-expiry sample proves the exit preceded the deadline.
+                # An exit first observed after expiry is recorded as a
+                # timeout, whatever order the processes were scheduled in.
+                # Cleanup below keeps its own separate budget.
+                if time.monotonic() >= self.deadline:
+                    timed_out = True
+                    break
+                if ended is not None:
+                    break
+                try:
+                    if not os.read(self.peer.fileno(), 1):
+                        break
+                    raise ChildStatusUnavailable("unexpected guardian control byte")
+                except BlockingIOError:
+                    pass
+                time.sleep(0.005)
+            stage = "drain"
+            cleanup_deadline = _fixture_cleanup_deadline(self.deadline)
+            status = _fixture_drain(subject, subject_fd, deadline=cleanup_deadline)
+            subject = None
+            if subject_fd is not None:
+                os.close(subject_fd)
+                subject_fd = None
+            if status is None:
+                raise ChildStatusUnavailable("subject status unavailable")
+            stage = "receipt"
+            self.report.write(json.dumps([status, timed_out]).encode("ascii"))
+            self.report.flush()
+            os._exit(0)
+        except BaseException as exc:
+            def detail(error):
+                try:
+                    message = str(error)[:512]
+                except BaseException:
+                    message = "<exception message unavailable>"
+                try:
+                    number = getattr(error, "errno", None)
+                except BaseException:
+                    number = None
+                return {"type": type(error).__name__[:128],
+                        "errno": number if type(number) is int else None, "message": message}
+
+            failure = {"stage": stage, "error": detail(exc), "cleanup": "pending"}
+
+            def record_failure():
+                try:
+                    self.report.seek(0)
+                    self.report.truncate()
+                    self.report.write(json.dumps(failure).encode("ascii"))
+                    self.report.flush()
+                except BaseException:
+                    # A broken report channel cannot certify anything. The
+                    # caller still reports the raw nonzero guardian status.
+                    pass
+
+            record_failure()  # preserve the cause even if cleanup cannot finish
+            try:
+                if subject is not None:
+                    if cleanup_deadline is None:
+                        cleanup_deadline = _fixture_cleanup_deadline(self.deadline)
+                    _fixture_drain(subject, subject_fd, deadline=cleanup_deadline)
+                failure["cleanup"] = "ECHILD" if subject is not None else "no subject"
+            except BaseException as cleanup_exc:
+                failure["cleanup"] = detail(cleanup_exc)
+            finally:
+                record_failure()
+                try:
+                    if subject_fd is not None:
+                        os.close(subject_fd)
+                finally:
+                    os._exit(125)
+
+    def poll(self):
+        import os
+        import signal
+        if self.collected:
+            return self.status
+        # The whole collection-to-failure-recording step runs MASKED (fix 2w):
+        # a cancellation can no longer land between reaping the guardian and
+        # recording the outcome (QA20 codex F1 second gap); it stays pending
+        # and is delivered AT the restore below, inside this finally. The
+        # prior mask is captured by QUERY before the try and the block is the
+        # try's FIRST statement (QA21 claude F3 / codex F1 / gemini F1), so
+        # an exception raised during the installation itself still reaches
+        # the restoring finally and the caller's mask can never leak blocked.
+        # `unresolved` is written BEFORE `collected` (QA21 claude F2): an
+        # asynchronous exception between the two writes leaves close() OWNING
+        # the collection -- its own reap then refuses loudly ("guardian
+        # ownership lost") -- never the half-recorded silent state (collected
+        # recorded, unresolved lost, no failure) the pre-fix order allowed. A
+        # synchronous failure in the window still leaves `unresolved` set,
+        # which close() treats as a failure of its own.
+        prior = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        try:
+            _fixture_mask_cancellation()
+            waited, raw = _fixture_wait(self.pid, os.WNOHANG)
+            if waited == 0:
+                return None
+            if waited != self.pid:
+                raise ChildStatusUnavailable("unexpected guardian wait PID")
+            if self.armed:
+                self.unresolved = True
+            self.collected = True
+            try:
+                self._read_report(raw)
+            except ChildStatusUnavailable:
+                # Address the receipt-identified subject AT COLLECTION time.
+                # The guardian is DEAD here, so the kill is SUBJECT-ONLY
+                # through the held receipt pidfd (fix 2y, D2: no ownership
+                # licenses a member census after guardian death); close()
+                # still runs the disappearance proof and re-raises the
+                # recorded failure.
+                self._address_failed_subject()
+                raise
+            return self.status
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, prior)
+
+    def _record_failure(self, failure):
+        """Record a supervision failure at COLLECTION time, whichever collector
+        observed it first: close() must address the receipt-identified subject
+        and re-raise the recorded failure even when poll() or start() was the
+        collector that read the failed report (QA19 F1). A recorded failure
+        is a RESOLVED collection; the subject-cleanup obligation it creates is
+        tracked by `cleaned`, never by `unresolved`."""
+        self._failure = failure
+        self.unresolved = False
+        return failure
+
+    def _read_report(self, raw):
+        import json
+        import os
+        termination = "raw wait status={}, exitcode={}".format(raw, os.waitstatus_to_exitcode(raw))
+        self.report.seek(0)
+        payload = self.report.read(8193)
+        if not os.WIFEXITED(raw) or os.WEXITSTATUS(raw) != 0:
+            receipt = payload[:8192].decode("ascii", errors="backslashreplace")
+            raise self._record_failure(ChildStatusUnavailable(
+                "fixture guardian failed: {}; receipt={}".format(termination, receipt or "<missing>")))
+        try:
+            if len(payload) > 8192:
+                raise ValueError("oversized receipt")
+            result = json.loads(payload)
+        except (ValueError, UnicodeError) as exc:
+            raise self._record_failure(ChildStatusUnavailable(
+                "missing tree-cleanup receipt; " + termination)) from exc
+        if (not isinstance(result, list) or len(result) != 2
+                or type(result[0]) is not int or type(result[1]) is not bool):
+            raise self._record_failure(ChildStatusUnavailable(
+                "malformed tree-cleanup receipt; " + termination))
+        self.status, self.timed_out = result
+        self.unresolved = False
+
+    def _recv_subject(self):
+        """Collect the buffered subject receipt, if any. It must be read BEFORE the
+        control socket is closed: closing that socket is what requests tree cleanup,
+        and the receipt stays buffered in it even after the guardian's death."""
+        import os
+        import select
+        import socket
+        if not self.armed or self.subject_pid is not None:
+            return
+        try:
+            # select.poll, never select.select: a control socket at or above
+            # FD_SETSIZE (1024) must still deliver its buffered receipt
+            # instead of a swallowed ValueError silently losing the subject
+            # (fix 2z, claude F2 / gemini F4).
+            poller = select.poll()
+            poller.register(self.control, select.POLLIN)
+            if poller.poll(500):
+                msg, fds, _flags, _addr = socket.recv_fds(self.control, 32, 1)
+                if msg:
+                    self.subject_pid = int(msg)
+                if fds:
+                    self.subject_pidfd = fds[0]
+                    for extra in fds[1:]:
+                        os.close(extra)
+        except (OSError, ValueError) as exc:
+            # Narrowed (QA21 gemini F2): TimeoutError/InterruptedError are
+            # OSError subclasses carrying deadline/cancellation semantics a
+            # receipt read must never swallow; only genuine I/O or parse
+            # failures degrade to the documented no-receipt path.
+            if isinstance(exc, (TimeoutError, InterruptedError)):
+                raise
+
+    def _address_failed_subject(self):
+        """Kill the receipt-identified subject of a FAILED, UNRESOLVED or
+        LOST-OWNERSHIP guardian. The guardian is DEAD on every path here, so
+        no process owns the tree's orphans: the kill is SUBJECT-ONLY -- one
+        SIGSTOP+SIGKILL through the already-held subject pidfd
+        (identity-safe), NO member census, NO new pidfds (fix 2y, codex
+        F1/F2 under D2: after guardian death a census could only trust
+        recyclable numbers and reparented chains it cannot verify).
+        Descendants -- same-group or not: no census runs at all -- are the
+        documented orphan-escape residual (pdeathsig-backed); callers
+        DISCLOSE them as unaddressed and never report a killed tree here.
+        Idempotent -- the kill is sent once, whichever collector gets here
+        first. Callers still prove the
+        subject's disappearance on its pidfd before re-raising."""
+        self._recv_subject()
+        if self.subject_pidfd is not None and self._subject_kill is None:
+            outcome = _fixture_escalate_subject(self.subject_pid, self.subject_pidfd)
+            if outcome is not None:
+                self._subject_kill, self._subject_skipped = outcome
+
+    def _escalate(self):
+        """Freeze first, then kill: SIGSTOP the guardian via its pidfd (a
+        frozen guardian exists unreaped and cannot reap, so the members it
+        subreaper-owns stay anchored for the census), kill the
+        receipt-identified subject's tree under that guardian ownership
+        (verified per-member pidfds, members before the leader, never a
+        numeric killpg, and the "tree" claim licensed only by the bounded
+        post-kill verification census's two consecutive clean passes -- an
+        observation, never a proof -- fix 2z / round 24), then SIGKILL the guardian
+        itself; the caller's bounded reap loop collects it and close() then
+        proves the subject's exit. A freeze that FAILED (guardian gone)
+        licenses NO census at all: the kill degrades to subject-only through
+        the held receipt pidfd (fix 2y, D2). Exception safety (fix 2z, codex
+        BLOCKER 3; round 24): both freezes run INSIDE the kill protection,
+        so a raising freeze never skips a kill; the guardian SIGKILL runs
+        even if the freeze or the subject cleanup raises -- and if the
+        ownership-checked kill helper itself fails, the guardian is still
+        SIGKILLed directly through its held, identity-safe pidfd, where a
+        cancellation propagates with the helper's failure chained as its
+        context (round 24, codex BLOCKER 2), and ONE shared exception
+        boundary (_cleanup_boundary, fix 6) spans that whole cleanup,
+        direct backstop included -- and a cancellation the kill helper
+        ITSELF raises becomes the pending cancellation for the direct
+        backstop (fix 7, QA28 codex BLOCKER 1), so a backstop failure
+        attaches beneath it, never over it: a cancellation ALREADY propagating into
+        it stays the OUTWARD exception, never displaced, its own
+        pre-existing chain kept intact, and every later failure -- helper
+        or backstop, ordinary or cancellation -- is kept REACHABLE beneath
+        it (fix 14, QA35 codex MAJOR: an ordinary backstop delivery fault
+        was discarded outright; only a backstop ProcessLookupError stays
+        unrecorded, proving the guardian already exited): attached as its
+        __cause__ when that slot is free, else
+        appended at the tail of its existing cause/context chain, else
+        (only when no acyclic attachment exists) named in a note, with
+        every diagnostic computed inside the boundary's protection so a
+        raising __repr__ never escapes over it (QA25/QA26 codex; QA27
+        codex BLOCKER 1/2 closed the site class at the boundary) -- and an
+        ordinary census
+        failure that escaped the escalation helper records the kill that
+        DID run ("partial", members unknown; the helper's own protection
+        ran the held-pidfd SIGKILL, whose delivery is only ever worded as
+        attempted), so any later refusal names exactly what ran, while a
+        failure BEFORE the subject cleanup records nothing: the cleanup
+        never ran and the retry still owns it. The original exception still
+        propagates. Cancellation semantics record nothing: the interrupt
+        owner re-sends the idempotent receipt kill -- and the recording
+        tier is harmonized with the boundary's pending set (fix 7, QA28
+        claude MINOR 3): TimeoutError, InterruptedError and
+        KeyboardInterrupt all record nothing."""
+        import signal
+        frozen = False
+        pending = None
+
+        def kill_guardian():
+            # The guardian SIGKILL is exception-safe (fix 2z, codex
+            # BLOCKER 3): a raising subject cleanup never strands a frozen
+            # guardian; _cleanup_boundary spans this WHOLE step, direct
+            # backstop included (QA26 codex; fix 6).
+            try:
+                _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
+            except BaseException as helper_exc:
+                # Even the ownership-checked helper failing (e.g. the
+                # same census fault reaching its own group census) must
+                # not strand the frozen guardian: its held pidfd is
+                # identity-safe, SIGKILL it directly, then let the
+                # failure propagate. The backstop is a LATER cleanup
+                # step, so it runs through its own boundary (fix 7, QA28
+                # codex BLOCKER 1): a cancellation the helper ITSELF
+                # raised is pending for the backstop and can never be
+                # replaced by a backstop failure; with an ordinary
+                # helper failure nothing is pending at this boundary, so
+                # a backstop cancellation propagates over it, carrying
+                # it as its __context__ (round 24, codex BLOCKER 2), and
+                # the OUTER boundary still keeps a cancellation already
+                # propagating into the finally outward (QA26 codex).
+                def direct_backstop():
+                    if self.pidfd is None:
+                        return
+                    try:
+                        signal.pidfd_send_signal(self.pidfd,
+                                                 signal.SIGKILL)
+                    except BaseException as exc:
+                        # ONE explicit cancellation tier (fix 8, QA29
+                        # gemini MAJOR): TimeoutError, InterruptedError
+                        # and KeyboardInterrupt propagate identically
+                        # from the backstop send, into the boundary
+                        # that runs this step.
+                        if isinstance(exc, _PENDING_CANCELLATIONS):
+                            raise
+                        if not isinstance(exc, OSError):
+                            raise
+                        if (not isinstance(exc, ProcessLookupError)
+                                and (isinstance(helper_exc,
+                                                _PENDING_CANCELLATIONS)
+                                     or isinstance(
+                                         pending,
+                                         _PENDING_CANCELLATIONS))):
+                            # fix 14 (QA35 codex MAJOR): with a
+                            # cancellation pending -- the helper's own,
+                            # pending at THIS boundary, or one already
+                            # propagating into the enclosing finally --
+                            # a discarded delivery fault would vanish
+                            # from that cancellation's chain; re-raise
+                            # it so a boundary keeps it reachable
+                            # beneath the outward cancellation. A
+                            # ProcessLookupError is no failure to keep:
+                            # it proves the guardian already exited.
+                            raise
+                        # An ordinary delivery failure is out of moves:
+                        # the helper's own failure propagates below.
+
+                _cleanup_boundary(
+                    helper_exc if isinstance(helper_exc,
+                                             _PENDING_CANCELLATIONS)
+                    else None,
+                    direct_backstop, "direct guardian SIGKILL backstop")
+                raise
+
+        try:
+            # The freeze runs INSIDE the guardian-kill protection (round 24,
+            # codex boundary): an exception here must still reach the
+            # finally's guardian SIGKILL -- and it records NOTHING, because
+            # the subject cleanup never ran and the retry still owns it.
+            if self.pidfd is not None:
+                try:
+                    signal.pidfd_send_signal(self.pidfd, signal.SIGSTOP)
+                    frozen = True  # delivered: the guardian exists unreaped
+                except (ProcessLookupError, OSError) as exc:
+                    # Narrowed (QA21 gemini F2): deadline/cancellation
+                    # semantics propagate; an exited guardian is collected
+                    # by the reap loop.
+                    if isinstance(exc, (TimeoutError, InterruptedError)):
+                        raise
+            if self.subject_pidfd is not None and self._subject_kill is None:
+                try:
+                    outcome = _fixture_escalate_subject(
+                        self.subject_pid, self.subject_pidfd,
+                        guardian_pid=self.pid if frozen else None)
+                except (TimeoutError, InterruptedError, KeyboardInterrupt):
+                    # Harmonized with the boundary's pending set (fix 7,
+                    # QA28 claude MINOR 3): every cancellation type
+                    # records nothing -- the interrupt owner re-sends
+                    # the idempotent receipt kill.
+                    raise
+                except BaseException:
+                    # The failure escaped the escalation helper, whose freeze
+                    # and census both run inside the subject-SIGKILL
+                    # protection (round 24), so the held-pidfd kill DID run:
+                    # record it -- census incomplete, members unknown -- so
+                    # the refusal names exactly what ran (fix 2z, codex
+                    # BLOCKER 3).
+                    self._subject_kill, self._subject_skipped = "partial", None
+                    raise
+                if outcome is not None:
+                    self._subject_kill, self._subject_skipped = outcome
+        except BaseException as exc:
+            # Capture the exception ALREADY propagating into the
+            # guardian-kill finally: a pending cancellation must stay the
+            # outward exception even when the cleanup below fails (QA25
+            # codex; fix 6 routes the whole step through the one shared
+            # boundary).
+            pending = exc
+            raise
+        finally:
+            _cleanup_boundary(pending, kill_guardian,
+                              "guardian-kill cleanup")
+
+    def _abandon_unfinished_launch(self):
+        """Decide, under the launch lock, who owns an unfinished launch: if the
+        launcher has not recorded its result yet, ABANDON the launch to it (the
+        launcher is then the fork's last owner and collects its own fork,
+        QA19 F2) and report True; a result recorded in the meantime keeps this
+        close() the owner."""
+        with self._launch_lock:
+            if self._launched.is_set():
+                return False
+            self._abandoned = True
+            return True
+
+    def close(self):
+        import signal
+        # DESIGN (fix 2w/2x): the ENTIRE ownership decision and transfer, and
+        # the whole collection and cleanup sequence (receipt kill,
+        # disappearance proof, re-raise preparation), run with the
+        # cancellation signals masked on this thread: an asynchronous
+        # cancellation can no longer land BETWEEN guarded regions (QA20). The
+        # EXACT prior mask is captured by QUERY before the try and the block
+        # itself is the try's FIRST statement (QA21 claude F3 / codex F1 /
+        # gemini F1), so an exception raised during the installation still
+        # restores: a cancellation landing before the block genuinely
+        # disposes NOTHING -- not even this thread's signal state -- and this
+        # close() can simply run again. A cancellation raised inside the
+        # sequence stays kernel-pending and is delivered AT the restore below
+        # -- i.e. inside this finally (QA21 claude F4) -- so close() then
+        # raises the KeyboardInterrupt itself, with any in-flight refusal
+        # preserved on the exception chain (callers walk __context__). The
+        # BaseException funnels inside remain the backstop for a signal whose
+        # interpreter-level flag tripped before the mask landed, for a
+        # PROCESS-directed signal surfaced through a caller-created unblocked
+        # thread, and for non-signal asynchronous exceptions, which no mask
+        # can stop.
+        prior = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        pending = None
+
+        def restore_sigmask():
+            signal.pthread_sigmask(signal.SIG_SETMASK, prior)
+
+        try:
+            _fixture_mask_cancellation()
+            self._close_masked()
+        except BaseException as exc:
+            # Capture the exception already propagating into the restore
+            # (fix 8): the mask restore is module-owned cleanup, routed
+            # through the shared boundary, so the KeyboardInterrupt a
+            # masked cancellation delivers AT the restore lands inside
+            # the boundary -- a cancellation already outward stays
+            # outward, and a normal completion still raises the
+            # delivered interrupt itself, exactly as before.
+            pending = exc
+            raise
+        finally:
+            _cleanup_boundary(pending, restore_sigmask,
+                              "cancellation mask restore")
+
+    def _close_masked(self):
+        # Coordinated launch lifecycle FIRST, before any resource is disposed. The
+        # launcher is never joined (its OS thread state is not what decides); its
+        # completion event is set on every executed path, and the cancelled flag
+        # is read before any fork, so a cancellation here either prevents a fork
+        # that has not happened yet or finds its result recorded below. If the
+        # event never fires, the launch is ABANDONED to the launcher, which then
+        # collects (or never creates) its own fork; nothing is disposed on that
+        # path, because the launcher and its guardian can still use it all. An
+        # exception raised INSIDE this coordination -- normally impossible for a
+        # masked cancellation, but reachable by a pre-mask interpreter flag or a
+        # non-signal asynchronous exception -- must leave the same owner
+        # (QA19 F2): the launcher for an unrecorded launch (abandoned under the
+        # launch lock before re-raising), or this close(), which finishes
+        # collecting before re-raising.
+        def release_launcher():
+            self._go.set()
+
+        def abandon_unfinished():
+            return self._abandon_unfinished_launch()
+
+        def interrupt_collect():
+            self._interrupt_collect()
+
+        try:
+            self._close_coordinated()
+        except ChildStatusUnavailable:
+            raise
+        except BaseException as exc:
+            # Backstop for an exception landing on a coordination boundary the
+            # inner guards do not cover (a pre-mask interpreter flag, under the
+            # masked design): never escape without an owner. Every step here
+            # is module-owned cleanup and routes through the shared boundary
+            # (fix 8), so a failing release, abandonment decision or
+            # interrupt collection never displaces the cancellation it
+            # serves.
+            if self._launcher is not None:
+                _cleanup_boundary(
+                    exc if isinstance(exc, _PENDING_CANCELLATIONS)
+                    else None,
+                    release_launcher, "parked launcher release")
+                if self._abandoned or _cleanup_boundary(
+                        exc if isinstance(exc, _PENDING_CANCELLATIONS)
+                        else None,
+                        abandon_unfinished, "unfinished-launch abandonment"):
+                    raise
+            _cleanup_boundary(
+                exc if isinstance(exc, _PENDING_CANCELLATIONS) else None,
+                interrupt_collect, "interrupt-owner collection")
+            raise
+
+    def _close_coordinated(self):
+        def abandon_unfinished():
+            return self._abandon_unfinished_launch()
+
+        def make_refusal():
+            return ChildStatusUnavailable(
+                "fixture launch did not complete: guardian ownership unknown")
+
+        def finish_close():
+            self._finish_close()
+
+        if self._launcher is not None:
+            with self._launch_lock:
+                self._cancelled = True
+                abandoned = self._abandoned
+            interrupted = None
+            if not abandoned:
+                launched = False
+
+                def release_launcher():
+                    self._go.set()
+
+                try:
+                    self._go.set()
+                    launched = self._launched.wait(2 * _FIXTURE_CLEANUP_GRACE)
+                except BaseException as exc:  # noqa: BLE001 - ownership survives cancellation
+                    # A cancellation in the gap before the release must never
+                    # leave the launcher parked: release it (idempotent,
+                    # through the shared boundary, fix 8, so a release fault
+                    # never displaces the cancellation), then decide ownership
+                    # below exactly as on a timeout. EVERY cleanup that runs
+                    # after this capture routes through the shared boundary
+                    # with the captured exception pending, and every later
+                    # path re-raises the captured object itself (fix 9, QA30
+                    # codex BLOCKER 1: the abandonment decision ran outside
+                    # the boundary, so an abandonment fault displaced the
+                    # captured cancellation).
+                    _cleanup_boundary(
+                        exc if isinstance(exc, _PENDING_CANCELLATIONS)
+                        else None,
+                        release_launcher, "parked launcher release")
+                    interrupted = exc
+                if not launched and _cleanup_boundary(
+                        interrupted, abandon_unfinished,
+                        "unfinished-launch abandonment"):
+                    abandoned = True
+            if abandoned:
+                # The refusal is constructed through the boundary too: a
+                # raising constructor while the captured cancellation is
+                # pending must never displace it (best-effort: such a fault
+                # costs the refusal detail, never the cancellation).
+                refusal = _cleanup_boundary(
+                    interrupted, make_refusal, "abandonment refusal")
+                if interrupted is not None:
+                    raise interrupted from refusal
+                raise refusal
+            self._launcher = None
+            if interrupted is not None:
+                # The fork result IS recorded: this close() stays the owner.
+                # Finish the bounded collection first -- through the shared
+                # boundary (fix 9, QA30 codex BLOCKER 1), so a collection
+                # failure never displaces a captured cancellation -- then
+                # re-raise the captured object, with any collection failure
+                # chained beneath it (never replacing it). A captured
+                # NON-cancellation stays reachable as the collection
+                # failure's context; the outward-priority guarantee itself
+                # is scoped to cancellations (PD-335), and a cancellation
+                # BORN in the collection now wins over a captured
+                # non-cancellation, per the fix-7 premise.
+                try:
+                    raise interrupted
+                finally:
+                    _cleanup_boundary(interrupted, finish_close,
+                                      "owner collection finish")
+        self._finish_close()
+
+    def _interrupt_collect(self):
+        """Last-resort owner for a cancellation landing INSIDE the collection
+        itself (the receipt read, the bounded reap wait, or the exit proof):
+        read the receipt if it is still pending, kill the whole tree NOW
+        (freeze, receipt kill, guardian SIGKILL), and bounded-reap the
+        guardian, so the re-raised cancellation never strands a live,
+        owner-less guardian or subject. A guardian already collected can still
+        owe its subject cleanup (`collected` and `cleaned` are SEPARATE
+        states, QA20 codex F1): the subject-only receipt kill runs here too
+        (the collected guardian is dead: no census, fix 2y, D2). The
+        cancellation is what propagates; a second cancellation landing here is
+        outside the guarantee."""
+        import os
+        import time
+        if self.pid is None:
+            return
+        if self.collected:
+            if not self.cleaned:
+                self._address_failed_subject()
+            return
+        self._recv_subject()
+        self._escalate()
+        deadline = time.monotonic() + _FIXTURE_CLEANUP_GRACE
+        while time.monotonic() < deadline:
+            try:
+                waited, _raw = os.waitpid(self.pid, os.WNOHANG)
+            except OSError as exc:
+                # Narrowed (fix 8): deadline/cancellation semantics
+                # propagate; only a genuine reap failure ends this
+                # bounded wait.
+                if isinstance(exc, (TimeoutError, InterruptedError)):
+                    raise
+                return
+            if waited == self.pid:
+                self.collected = True
+                return
+            time.sleep(0.005)
+
+    def _escalation_refusal(self, failure):
+        """Annotate an escalated refusal with ONLY what the escalation
+        actually did (QA19 F3), accounting every observed member (fix 2y,
+        codex F2; a member no census observed -- the disclosed fork-race
+        and pid-wraparound residual -- can be neither addressed nor
+        accounted, per the ruling PD-335-TREE-CLAIM-STALL):
+        "subject tree killed" is claimed ONLY when the guardian-anchored
+        census addressed every OBSERVED member (a census can only address
+        members it observed) AND the bounded post-kill verification
+        census then OBSERVED no live, signalable member left in two
+        consecutive clean passes (fix 2z: the claim rests on observation,
+        never on the kill sends alone; the maintainer ruling
+        PD-335-TREE-CLAIM-STALL words even that claim as an observation with
+        its residual, never a proof); a census with skipped or unknown
+        members names them, and unverifiable entries -- possible members,
+        never established ones (round 24, claude F1) -- are named apart; a
+        subject-only kill (no guardian ownership) disclosed its unaddressed
+        descendants (the orphan-escape residual, pdeathsig-backed, D2). A
+        census kill recorded by a PRIOR interrupted close ("tree"/"partial")
+        is disclosed with the same accounting, claiming the pidfd exit proof
+        only when this close actually ran it (fix 2z, claude F4). The freeze
+        needs the guardian's pidfd, and the subject kill with its exit proof
+        needs the receipt's subject pidfd, so a pid-only receipt
+        (pidfd-absent host) is a guardian-only escalation whose subject
+        cleanup is UNVERIFIED, and a missing receipt is INCOMPLETE cleanup
+        -- never a claimed kill this close() could not address (QA18 codex
+        F2)."""
+        frozen = ("guardian frozen" if self.pidfd is not None
+                  else "guardian not frozen: no pidfd")
+        if self._subject_kill == "tree":
+            # The ONLY state that claims a killed tree: the guardian-anchored
+            # census addressed EVERY observed member and the bounded
+            # verification census then OBSERVED no live member in two
+            # consecutive clean passes (fix 2y, fix 2z, maintainer ruling
+            # PD-335-TREE-CLAIM-STALL) -- and the claim is worded as that
+            # observation with its residual, never as proof.
+            raise ChildStatusUnavailable(
+                str(failure) + "; after bounded-close escalation ({}, subject "
+                "tree killed: every observed member addressed, none observed "
+                "in two consecutive clean censuses -- an observation, not a "
+                "proof: a continuously forking chain or pid wraparound can "
+                "evade it -- guardian SIGKILL)".format(frozen)) from failure
+        if self._subject_kill == "partial":
+            if self._subject_skipped is None:
+                accounting = "members unknown (census unreadable)"
+            else:
+                members, unverifiable = self._subject_skipped
+                parts = []
+                if members:
+                    parts.append("members {} unaddressed".format(sorted(members)))
+                if unverifiable:
+                    # Never "members": their membership was never established
+                    # (round 24, claude F1).
+                    parts.append("entries unverifiable (possible members): "
+                                 "{}".format(sorted(unverifiable)))
+                accounting = ", ".join(parts) if parts else "members unknown"
+            proof = ("subject exit proven on its pidfd"
+                     if self.subject_pidfd is not None
+                     else "subject SIGKILL attempted through its held pidfd, "
+                     "exit not re-proven by this close")
+            raise ChildStatusUnavailable(
+                str(failure) + "; after bounded-close escalation ({}, {}, "
+                "group census incomplete: {}, guardian "
+                "SIGKILL)".format(frozen, proof, accounting)) from failure
+        if self.subject_pidfd is not None:
+            raise ChildStatusUnavailable(
+                str(failure) + "; after bounded-close escalation ({}, subject "
+                "exit proven on its pidfd, group kill skipped: no guardian "
+                "ownership, descendants, if any, unaddressed "
+                "(orphan-escape residual, pdeathsig-backed), guardian "
+                "SIGKILL)".format(frozen)) from failure
+        if self.subject_pid is not None:
+            raise ChildStatusUnavailable(
+                str(failure) + "; after bounded-close guardian-only escalation "
+                "WITHOUT a subject pidfd ({}, guardian SIGKILL): subject "
+                "cleanup unverified".format(frozen)) from failure
+        raise ChildStatusUnavailable(
+            str(failure) + "; after bounded-close escalation WITHOUT a subject "
+            "receipt ({}, guardian SIGKILL): subject cleanup "
+            "incomplete".format(frozen)) from failure
+
+    def _unverified_refusal(self, failure):
+        """A pid-only receipt (pidfd-absent host) leaves a failed guardian's
+        subject cleanup UNVERIFIABLE on the un-escalated path too (QA20 claude
+        F3): no pidfd can prove the subject's exit and no pin can license a
+        group kill, so the re-raise names the degradation instead of restating
+        the bare failure. The subject-side protections (ack EOF, pdeathsig)
+        remain the documented residual coverage."""
+        raise ChildStatusUnavailable(
+            str(failure) + "; guardian failure WITHOUT a subject pidfd "
+            "(group kill skipped: not ownership-pinned): subject cleanup "
+            "unverified") from failure
+
+    def _ownership_lost_refusal(self):
+        """Build the LOST-OWNERSHIP refusal (fix 2y, claude Finding 2): the
+        guardian disappeared without this close()'s reap (a prior collection
+        was interrupted mid-record, or a foreign reaper ran), so the guardian
+        is DEAD and its status is gone. The held receipt still identifies the
+        subject: kill it SUBJECT-ONLY through its already-held pidfd and
+        prove its disappearance the same way, or refuse naming exactly what
+        could not run. Descendants -- in ANY group: no census can run
+        without an owning guardian -- are the documented orphan-escape
+        residual (pdeathsig-backed, D2), disclosed, never claimed killed.
+        Returns the refusal for the caller to raise from the reap's
+        ChildProcessError."""
+        import select
+        if self.subject_pidfd is None:
+            if self.subject_pid is not None:
+                return ChildStatusUnavailable(
+                    "guardian ownership lost; no subject pidfd held: subject "
+                    "cleanup unverified")
+            return ChildStatusUnavailable(
+                "guardian ownership lost; no subject receipt: subject "
+                "cleanup incomplete")
+        self._address_failed_subject()
+        poller = select.poll()
+        poller.register(self.subject_pidfd, select.POLLIN)
+        if not poller.poll(int(_FIXTURE_CLEANUP_GRACE * 1000)):
+            return ChildStatusUnavailable(
+                "guardian ownership lost; subject SIGKILL attempted through "
+                "its held pidfd, exit not confirmed: pid {} may "
+                "survive".format(self.subject_pid))
+        self.cleaned = True
+        return ChildStatusUnavailable(
+            "guardian ownership lost; receipt subject killed on its held "
+            "pidfd and exit proven (subject-only: no guardian ownership); "
+            "descendants, if any, unaddressed (orphan-escape "
+            "residual, pdeathsig-backed)")
+
+    def _finish_close(self):
+        import os
+        import select
+        import signal
+        import time
+        pending = None
+
+        def close_guardian_pidfd():
+            fd = self.pidfd
+            if fd is not None:
+                os.close(fd)
+                self.pidfd = None
+
+        def close_subject_pidfd():
+            fd = self.subject_pidfd
+            if fd is not None:
+                os.close(fd)
+                self.subject_pidfd = None
+
+        def close_report():
+            self.report.close()
+
+        def close_tail():
+            # Subject pidfd, then the report channel: a failure in the
+            # subject close never skips the report close, and a
+            # cancellation BORN in the subject close is pending for it
+            # (the fix 7 rule, extended to this sequence by fix 8).
+            try:
+                close_subject_pidfd()
+            except BaseException as tail_exc:
+                _cleanup_boundary(
+                    tail_exc if isinstance(tail_exc,
+                                           _PENDING_CANCELLATIONS)
+                    else pending,
+                    close_report, "report channel close")
+                raise
+            _cleanup_boundary(pending, close_report,
+                              "report channel close")
+
+        def close_owned_handles():
+            # Guardian pidfd first, then the tail: every owned handle is
+            # disposed even when an earlier close fails.
+            try:
+                close_guardian_pidfd()
+            except BaseException as head_exc:
+                _cleanup_boundary(
+                    head_exc if isinstance(head_exc,
+                                           _PENDING_CANCELLATIONS)
+                    else pending,
+                    close_tail, "subject pidfd and report close")
+                raise
+            _cleanup_boundary(pending, close_tail,
+                              "subject pidfd and report close")
+
+        def interrupt_collect():
+            self._interrupt_collect()
+
+        try:
+            escalated = False
+            try:
+                # Read the buffered subject receipt BEFORE closing the control socket;
+                # closing it is what requests tree cleanup (EOF), and cancellation
+                # addresses this guardian and its receipt, never a stale PID.
+                self._recv_subject()
+                self.control.close()
+                self.peer.close()
+                if self.pid is not None and not self.collected:
+                    if not self.armed:
+                        _fixture_signal(self.pid, signal.SIGKILL, self.pidfd)
+                    # A cancelled call no longer needs the subject's execution time:
+                    # wait within a bounded cleanup budget (twice the grace, so an
+                    # honest guardian's own grace-bounded drain fits), then escalate
+                    # rather than blocking for the remaining execution budget. An
+                    # escalated collection is recorded on the cannot-evaluate channel
+                    # below; it is never read as success.
+                    deadline = time.monotonic() + 2 * _FIXTURE_CLEANUP_GRACE
+                    while True:
+                        try:
+                            waited, raw = os.waitpid(self.pid, os.WNOHANG)
+                        except ChildProcessError as exc:
+                            self.collected = True
+                            raise self._ownership_lost_refusal() from exc
+                        if waited != 0:
+                            break
+                        if time.monotonic() >= deadline:
+                            if escalated:
+                                raise ChildStatusUnavailable(
+                                    "guardian cleanup deadline: not collected after escalation")
+                            escalated = True
+                            self._escalate()
+                            deadline = time.monotonic() + _FIXTURE_CLEANUP_GRACE
+                        time.sleep(0.005)
+                    self.collected = True
+                    if waited != self.pid:
+                        raise ChildStatusUnavailable("unexpected guardian cleanup PID")
+                    if self.armed:
+                        self.unresolved = True
+                        try:
+                            self._read_report(raw)
+                        except ChildStatusUnavailable:
+                            pass  # recorded by _read_report; addressed below
+                # HOISTED out of the not-collected gate (QA19 F1): the subject
+                # kill and exit proof run on ANY guardian failure, including one
+                # FIRST collected by poll() -- the layer's primary collection
+                # path, which killed the subject pin-first at collection time
+                # and recorded the failure for this close(). An armed guardian
+                # collected WITHOUT a validated status or recorded failure is
+                # UNRESOLVED (QA20 codex F1): the subject's fate is unknown, so
+                # close() treats it as a failure of its own. A startup failure
+                # start() already surfaced (never armed) has no subject and
+                # nothing to re-raise.
+                failure = self._failure if self.armed else None
+                if failure is None and self.unresolved:
+                    failure = self._record_failure(ChildStatusUnavailable(
+                        "fixture guardian collected without validated status: "
+                        "supervision unresolved"))
+                if (escalated or failure is not None) and self.subject_pidfd is not None:
+                    if failure is not None and not escalated:
+                        self._address_failed_subject()
+                    # A pidfd polls readable on exit even for a non-child (init
+                    # reaps the orphan): prove the subject disappeared, or refuse
+                    # loudly, never silence.
+                    poller = select.poll()
+                    poller.register(self.subject_pidfd, select.POLLIN)
+                    if not poller.poll(int(_FIXTURE_CLEANUP_GRACE * 1000)):
+                        raise ChildStatusUnavailable(
+                            ("escalation" if escalated else "guardian failure")
+                            + " could not confirm subject exit: pid {} may "
+                            "survive".format(self.subject_pid))
+                self.cleaned = True
+                if failure is not None:
+                    if not escalated:
+                        if (self.subject_pidfd is None and self.subject_pid is not None
+                                and self._subject_kill is None):
+                            self._unverified_refusal(failure)
+                        if self._subject_kill == "subject-only":
+                            # The un-escalated failure paths run with a DEAD
+                            # guardian, so the receipt kill was SUBJECT-ONLY
+                            # (fix 2y, D2): disclose the residual, never a
+                            # killed tree.
+                            raise ChildStatusUnavailable(
+                                str(failure) + "; subject exit proven on its "
+                                "pidfd (subject-only kill through the held "
+                                "receipt pidfd: the guardian is dead, no "
+                                "ownership licenses a member census); "
+                                "descendants, if any, unaddressed "
+                                "(orphan-escape residual, "
+                                "pdeathsig-backed)") from failure
+                        if self._subject_kill is not None:
+                            # A PRIOR interrupted close()'s ESCALATION already
+                            # ran the guardian-anchored census kill
+                            # ("tree"/"partial"): disclose THAT accounting,
+                            # never a subject-only proof this close did not
+                            # run (fix 2z, claude F4).
+                            self._escalation_refusal(failure)
+                        raise failure
+                    self._escalation_refusal(failure)
+            except ChildStatusUnavailable:
+                raise
+            except BaseException as exc:
+                # The interrupt owner is module-owned cleanup too
+                # (fix 8): routed through the boundary, a collection
+                # failure can never displace the cancellation it serves.
+                _cleanup_boundary(
+                    exc if isinstance(exc, _PENDING_CANCELLATIONS)
+                    else None,
+                    interrupt_collect, "interrupt-owner collection")
+                raise
+        except BaseException as exc:
+            # Capture the exception already propagating into the
+            # descriptor close below (fix 8, QA29 gemini BLOCKER): these
+            # closes ran in a bare finally OUTSIDE any boundary, so an
+            # os.close failure could displace a cancellation raised
+            # anywhere in this collection.
+            pending = exc
+            raise
+        finally:
+            _cleanup_boundary(pending, close_owned_handles,
+                              "held descriptor and report close")
+
+
+def _run_fixture_process(argv, *, timeout=120, cwd=None, env=None):
+    """Capture output and raw subject status through the shared tree owner."""
+    import math
+    import os
+    import signal
+    import subprocess
+    import tempfile
+    import time
+    if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        raise ChildStatusUnavailable("unowned SIGCHLD disposition")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise ValueError("fixture timeout must be finite and positive")
+    timeout = float(timeout)
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("fixture timeout must be finite and positive")
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        def exec_subject():
+            # Subject process only (start() is parent-only): rewire stdio onto the
+            # kept capture files, then the argv program replaces this image.
+            # setsid and PR_SET_PDEATHSIG already happened in the subject wrapper.
+            try:
+                os.dup2(out.fileno(), 1)
+                os.dup2(err.fileno(), 2)
+                if cwd is not None:
+                    os.chdir(cwd)
+                os.execvpe(argv[0], argv, os.environ if env is None else env)
+            except BaseException:
+                import traceback
+                traceback.print_exc()
+                os._exit(127)
+
+        child = _FixtureProcess(time.monotonic() + timeout,
+                                keep_fds=(out.fileno(), err.fileno()),
+                                subject=exec_subject)
+        try:
+            child.start()
+            while True:
+                status = child.poll()
+                # Deadline expiry is authoritative BEFORE accepting completion:
+                # the clock is sampled AFTER the poll, so only a pre-expiry
+                # sample proves collection preceded the deadline. A completion
+                # first observed after expiry is a timeout, whatever order the
+                # guardian and this collector were scheduled in.
+                overdue = time.monotonic() >= child.deadline
+                if status is None:
+                    if overdue:
+                        raise subprocess.TimeoutExpired(argv, timeout)
+                    time.sleep(0.005)
+                    continue
+                if child.timed_out or overdue:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                break
+        except TimeoutError as exc:
+            raise subprocess.TimeoutExpired(argv, timeout) from exc
+        finally:
+            child.close()
+        out.seek(0)
+        err.seek(0)
+        return subprocess.CompletedProcess(argv, os.waitstatus_to_exitcode(child.status),
+                                           out.read(), err.read())
+
+
+def _fixture_main(nonce, fixture_id, argv, expected, process_fixture):
+    """Emit only after the requested fixture and its expected-outcome assertion finish."""
+    import json
+    import sys
+    if process_fixture:
+        # Crash subjects and Git setup cannot emit Python completion records.
+        # Their supervisor asserts the raw outcome before attesting completion.
+        result = _run_fixture_process(argv)
+        sys.stdout.buffer.write(result.stdout)
+        sys.stderr.buffer.write(result.stderr)
+        rc = result.returncode
+    else:
+        if argv[:3] != [sys.executable, "-I", "-B"] or len(argv) < 4:
+            raise ValueError("fixture requires an explicit isolated Python command")
+        if argv[3] != "-c" or len(argv) < 5:
+            raise ValueError("assertion fixtures require a returning Python body")
+        sys.argv = ["-c", *argv[5:]]
+        namespace = {"__name__": "__opf_fixture__"}
+        body = "def _opf_fixture():\n" + "".join(
+            "    " + line + "\n" for line in argv[4].splitlines())
+        exec(compile(body, "<opf-fixture>", "exec"), namespace)
+        rc = namespace["_opf_fixture"]()  # SystemExit (even zero) is a failure
+    if type(rc) is not int or rc != expected:
+        raise AssertionError("fixture {!r}: expected exit {}, observed {!r}".format(
+            fixture_id, expected, rc))
+    sys.stdout.flush()
+    sys.stdout.buffer.write(("\nOPF-FIXTURE " + json.dumps([nonce, fixture_id]) + "\n").encode())
+    sys.stdout.buffer.flush()
+
+
+def run_status_owned(argv, *, fixture_id, expected_returncode=0, process_fixture=False,
+                     timeout=120, cwd=None, env=None, capture_output=False, text=False,
+                     stdout=None, stderr=None, check=False):
+    """Success requires a fresh (nonce, fixture) completion record AND observed exit zero.
+
+    Assertion bodies must return an integer; SystemExit never attests completion.
+    process_fixture=True is the explicit raw CLI/crash path.
+    expected_returncode describes the subject, not the supervisor: an expected CLI
+    refusal or deliberate crash is asserted inside the fixture, whose own exit must be
+    zero. Returned stdout excludes the protocol trailer. Missing/mismatched records are
+    failures; unavailable status is a distinct cannot-evaluate even with a valid record.
+    Records bind trusted fixtures to launches; they do not authenticate malicious code
+    that can read its argv and deliberately forge the record.
+    """
+    import json
+    import secrets
+    import subprocess
+    import sys
+    from pathlib import Path
+    if not isinstance(fixture_id, str) or not fixture_id:
+        raise ValueError("fixture_id must be nonempty")
+    if type(expected_returncode) is not int:
+        raise ValueError("expected_returncode must be an integer")
+    if stdout not in (None, subprocess.PIPE) or stderr not in (None, subprocess.PIPE):
+        raise ValueError("fixture output must be captured")
+    nonce = secrets.token_hex(32)
+    code = ("import sys, json; sys.path.insert(0, " + repr(str(Path(__file__).resolve().parent))
+            + "); from _opf_emit import _fixture_main; "
+            + "_fixture_main(*json.loads(sys.argv[1]))")
+    command = [sys.executable, "-I", "-B", "-c", code,
+               json.dumps([nonce, fixture_id, list(argv), expected_returncode, process_fixture])]
+    result = _run_fixture_process(command, timeout=timeout, cwd=cwd, env=env)
+    trailer = ("\nOPF-FIXTURE " + json.dumps([nonce, fixture_id]) + "\n").encode()
+    if not result.stdout.endswith(trailer):
+        raise FixtureIncomplete("missing/mismatched completion for " + fixture_id
+                                + ": " + result.stderr.decode("utf-8", "replace"))
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(result.returncode, command, result.stdout, result.stderr)
+    result.stdout = result.stdout[:-len(trailer)]
+    if text:
+        result.stdout = result.stdout.decode("utf-8")
+        result.stderr = result.stderr.decode("utf-8")
+    return result
+
+
+def _fixture_child_reaped(pid):
+    """Assert collection without signalling; the owning tree helper handles cleanup."""
+    import os
+    try:
+        waited, _ = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        return True
+    except OSError as exc:
+        raise ChildStatusUnavailable("cannot evaluate fixture reap: " + str(exc)) from exc
+    if waited not in (0, pid):
+        raise ChildStatusUnavailable("unexpected cleanup fixture PID")
+    return False
+
+
+def _bounded_setup_error(exc):
+    """Retain the error type and bounded guardian receipt on the sentinel channel."""
+    return "SETUP-ERROR:" + type(exc).__name__ + ":" + str(exc)[:8192]
+
+
+def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024, keep_fds=()):
     """Run `thunk` (a zero-arg callable returning a short str) in a bounded CHILD PROCESS and return that
     str, or a sentinel: 'TIMEOUT' (wall-clock bound tripped), 'OOM' (address-space bound tripped),
-    'CHILD-DIED', 'ERROR:<Type>' (the thunk raised), or 'SETUP-ERROR:<Type>' (the child could NOT install
-    its bounds, or fork is unavailable or failed: a cannot-evaluate, never a normal result). Several
+    'CHILD-DIED', 'ERROR:<Type>' (the thunk raised), or 'SETUP-ERROR:<Type>[:detail]' (the child could NOT install
+    its bounds, fork failed, or child ownership is unprovable: a cannot-evaluate, never a normal result). Several
     adversarial vectors drive an engine over a declared 10**9 high-water/span or a deeply-shared DAG; run
     IN-PROCESS a regression that reverted the bounded counting or an identity short-circuit would HANG or
     OOM the whole self-test before it could report. This watchdog turns such a regression into a
@@ -600,24 +3077,47 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
     verdict token, so a check whose bounds could not be installed FAILS closed rather than reading a
     possibly-unbounded run as a clean pass (no-concealed-failure).
 
-    Test-harness only: the three OPF self-tests (_opf_check, _opf_release, _opf_emit) share THIS one
-    implementation so the fork/timer/pipe hardening lives in a single place and cannot diverge again; the
-    production validators fork nothing.
+    Test-harness only: OPF self-tests, including the FIFO refusal probes, share this
+    implementation. Timer setup happens only in the child; the parent's timers,
+    handlers, masks and pending signals are never borrowed. Production validators fork nothing.
+
+    Descriptor contract (fd allowlist): the thunk sees ONLY stdio, this call's result pipe and the
+    caller-declared keep_fds -- the guardian closes every other inherited descriptor before the thunk
+    can run. A thunk relying on an undeclared caller descriptor fails loudly and deterministically
+    (typically ERROR:OSError from EBADF), never a sometimes-working leak; keep_fds is the sanctioned
+    path for a pre-opened descriptor the thunk needs (see _FixtureProcess). A guardian that cannot
+    obtain an authoritative /proc/self/fd census REFUSES startup (a SETUP-ERROR sentinel), never
+    sweeps partially. Lock contract: the fork runs on a private launcher thread, so the thunk must
+    not depend on reacquiring locks (including cold-import module locks) held by caller threads at
+    call time; only the launcher thread survives into the child, and such a thunk deadlocks there
+    and is collected as a loud TIMEOUT (guardian dependencies themselves are preloaded pre-fork).
 
     Hardening: (fork-less) a host without os.fork returns SETUP-ERROR WITHOUT running the thunk, never the
     thunk's own result run unbounded. (child) the child resets SIGALRM to SIG_DFL AND UNBLOCKS it in its
     signal mask, so neither an inherited SIG_IGN disposition nor an inherited BLOCKED mask can defeat the
-    watchdog and leave the parent blocked in os.read() with no deadline; it then installs BOTH bounds or,
-    on any failure, writes a SETUP-ERROR token and exits WITHOUT running the thunk unbounded. (parent) the
-    read fd is closed and the child is reaped in an ENCLOSING finally, so a parent-side exception during the
-    pipe read cannot skip waitpid and orphan the child; both pipe fds are closed on a fork failure."""
+    child timer; it then installs BOTH bounds or writes SETUP-ERROR without running the thunk.
+    Independently, a parent-owned monotonic deadline starts BEFORE fork and covers child startup,
+    nonblocking pipe collection and exit. On expiry the parent kills the child's process group and
+    reaps the child, returning TIMEOUT even if bytes were buffered. Exceptions also kill and reap an owned child;
+    neither path relies on the child reaching its timer setup. Both pipe fds close on fork failure.
+
+    Tree ownership, cancellation and portability limits are those of _FixtureProcess.
+    A guardian owns every descendant; the caller never signals a captured subject PID.
+    """
     import os
     import signal
+    import select
+    import time
+    import math
     if not hasattr(os, "fork"):
         # A bound could NOT be installed on a fork-less host: a cannot-evaluate. Return the SETUP-ERROR
         # sentinel WITHOUT invoking the thunk (never run it unbounded); the caller fails closed because the
         # sentinel is never equal to an expected verdict token.
         return "SETUP-ERROR:NoFork"
+    if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        return "SETUP-ERROR:ChildOwnership"
+    if not all(hasattr(os, name) for name in ("waitid", "P_PID", "WNOWAIT")):
+        return "SETUP-ERROR:NoWaitid"
     import resource
     # Reject an UNBOUNDED or INVALID control BEFORE forking/running the thunk (codex round-6): a
     # timeout_s <= 0 installs setitimer(0, 0) which DISARMS the timer (no wall-clock bound at all), and a
@@ -631,6 +3131,14 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
     if (isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float))
             or timeout_s != timeout_s or timeout_s == float("inf") or timeout_s <= 0):
         return "SETUP-ERROR:BadTimeout"
+    # Conversion and deadline arithmetic must precede pipe allocation, including huge integers.
+    try:
+        timeout_s = float(timeout_s)
+        deadline = time.monotonic() + timeout_s
+    except (OverflowError, ValueError):
+        return "SETUP-ERROR:BadTimeout"
+    if not math.isfinite(timeout_s) or not math.isfinite(deadline):
+        return "SETUP-ERROR:BadTimeout"
     # RLIM_INFINITY is the "no cap" sentinel; its integer representation is platform-dependent (it is -1
     # on Linux, a large positive on others), so reject it by identity AND by the <= 0 / >= positive-sentinel
     # bounds, rather than assuming one sign. Either way an unbounded or non-positive address-space control
@@ -640,21 +3148,14 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
             or mem_bytes <= 0 or mem_bytes == _rlim_inf
             or (_rlim_inf > 0 and mem_bytes >= _rlim_inf)):
         return "SETUP-ERROR:BadMemBound"
-    rfd, wfd = os.pipe()
     try:
-        pid = os.fork()
-    except OSError as exc:                               # fork failed: close BOTH pipe fds, no leak
-        os.close(rfd)
-        os.close(wfd)
-        return "SETUP-ERROR:" + type(exc).__name__
-    if pid == 0:                                         # child: bounded, writes one short token, never returns
+        rfd, wfd = os.pipe()
+    except OSError as exc:
+        return _bounded_setup_error(exc)
+    def bounded_subject():                               # subject: bounded, writes one short token, never returns
         os.close(rfd)
         try:
-            # The child must not inherit an ambient SIG_IGN/custom SIGALRM disposition NOR a BLOCKED SIGALRM
-            # mask: either would keep the timer's SIGALRM from terminating the child and leave the parent
-            # blocked in os.read() with no deadline. Reset the disposition to SIG_DFL and UNBLOCK SIGALRM in
-            # the mask BEFORE arming the timer, then install BOTH bounds or, on any failure, write a
-            # SETUP-ERROR token and exit WITHOUT running the thunk unbounded.
+            # Keep the child timer as an independent bound, with a deliverable disposition and mask.
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
             if hasattr(signal, "pthread_sigmask"):
                 signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
@@ -678,31 +3179,98 @@ def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024):
         except OSError:
             pass
         os._exit(0)
-    # parent
+
+    child = None
+    try:
+        child = _FixtureProcess(deadline, keep_fds=(rfd, wfd, *keep_fds),
+                                subject=bounded_subject)
+        child.start()
+    except BaseException as exc:
+        try:
+            if child is not None:
+                child.close()
+        finally:
+            try:
+                os.close(rfd)
+            finally:
+                os.close(wfd)
+        if not isinstance(exc, Exception):
+            raise
+        if isinstance(exc, TimeoutError):
+            return "TIMEOUT"
+        return _bounded_setup_error(exc)
+    # parent: never borrow a timer, handler, signal mask or pending notification.
     data = b""
     wstatus = None
+    timed_out = False
+    failures = []
     try:
-        # Close the parent's WRITE end INSIDE the enclosing try, as the FIRST step, so that if this close
-        # raises (OSError EIO) the finally still closes rfd AND reaps the child, rather than leaking the read
-        # fd and orphaning the child as a close ahead of the try/finally did (codex round-8 finding 7). It
-        # must still precede the read loop: while the parent holds wfd open, os.read(rfd) would never see EOF
-        # after the child exits and would block forever.
         os.close(wfd)
+        os.set_blocking(rfd, False)
+        poller = select.poll()
+        poller.register(rfd, select.POLLIN | select.POLLHUP | select.POLLERR)
+        eof = False
         while True:
-            chunk = os.read(rfd, 200)
-            if not chunk:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
                 break
-            data += chunk
+            # EOF depends on every writer: a concurrent helper fork can inherit our
+            # writer before the caller closes it. Only this call's guardian
+            # receipt certifies that its tree has stopped writing; never wait
+            # for a sibling's inherited descriptor to close before polling it.
+            wstatus = child.poll()
+            if wstatus is not None:
+                # Deadline expiry is authoritative over the collected receipt:
+                # the clock is sampled after the poll (see _run_fixture_process).
+                timed_out = child.timed_out or time.monotonic() >= deadline
+                if not eof:
+                    # The receipt follows ECHILD, so the complete (at most 200
+                    # byte) payload is already buffered. Drain without waiting
+                    # for EOF, including when status wins the first poll.
+                    try:
+                        data = (data + os.read(rfd, 200))[:200]
+                    except BlockingIOError:
+                        pass
+                break
+            ready = poller.poll(max(1, math.ceil(min(remaining, 0.01) * 1000)))
+            if ready:
+                try:
+                    chunk = os.read(rfd, 200)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    eof = True
+                    poller.unregister(rfd)
+                else:
+                    data = (data + chunk)[:200]
+    except ChildStatusUnavailable as exc:
+        failures.append(_bounded_setup_error(exc))
     finally:
-        # Close the read fd AND reap the child even when the read loop raises, so a parent-side exception
-        # during the pipe read cannot skip waitpid and orphan the child. The child always arms its own
-        # SIGALRM timer (or exits at once on a setup failure), so this waitpid is bounded and cannot block
-        # indefinitely.
         try:
             os.close(rfd)
         finally:
-            _wpid, wstatus = os.waitpid(pid, 0)
-    return _bounded_child_result(data, wstatus)
+            try:
+                child.close()
+            except ChildStatusUnavailable as exc:
+                # close() re-raises a recorded failure the poll above already
+                # reported (QA19 F1) AFTER addressing the receipt-identified
+                # subject, possibly ANNOTATED (subject-only kill disclosure,
+                # pid-only receipt): report each refusal once, keeping the
+                # annotated form when one extends the other.
+                sentinel = _bounded_setup_error(exc)
+                for index, previous in enumerate(failures):
+                    if sentinel.startswith(previous):
+                        failures[index] = sentinel
+                        break
+                    if previous.startswith(sentinel):
+                        break
+                else:
+                    failures.append(sentinel)
+    if failures:
+        return "; ".join(failures)
+    wstatus = child.status
+    return "TIMEOUT" if timed_out else _bounded_child_result(data, wstatus)
 
 
 def _bounded_child_result(data, wstatus):
@@ -1008,26 +3576,16 @@ def self_test():
     import resource as _res6
     import time as _time6
 
-    def _reap_bounded(pid, timeout_s=5.0):
-        """Reap `pid`, but BOUNDED so a wedged fixture child can never hang the whole self-test runner
-        (codex round-8 finding 3(c)): poll waitpid(WNOHANG) until the child is reaped or the deadline
-        passes; on timeout SIGKILL it and reap for real, returning that terminal status. A correctly-behaving
-        fixture child (it self-signals SIGALRM under SIG_DFL with SIGALRM UNBLOCKED) dies at once, so the
-        poll returns immediately; the bound exists only so a build/ambient that ever left the child parked
-        surfaces as a reported failure (a non-SIGALRM status) instead of an unbounded parent waitpid."""
-        deadline = _time6.monotonic() + timeout_s
-        while True:
-            wpid, wstatus = _os6.waitpid(pid, _os6.WNOHANG)
-            if wpid == pid:
-                return wstatus
-            if _time6.monotonic() >= deadline:
-                try:
-                    _os6.kill(pid, _sig6.SIGKILL)
-                except OSError:
-                    pass
-                _wpid, wstatus = _os6.waitpid(pid, 0)      # blocking reap AFTER SIGKILL: bounded (the kill lands)
-                return wstatus
-            _time6.sleep(0.005)
+    def _reap_bounded(child):
+        """Observe a real subject status; the shared helper owns timeout and cleanup."""
+        try:
+            while child.poll() is None:
+                if _time6.monotonic() >= child.deadline:
+                    break
+                _time6.sleep(0.005)
+        finally:
+            child.close()
+        return child.status
     # (4) an UNBOUNDED or INVALID control must yield a distinct SETUP-ERROR sentinel WITHOUT running the
     # thunk: timeout_s <= 0 disarms the timer (setitimer(0,0)) and mem_bytes == RLIM_INFINITY / <= 0
     # installs no address-space cap, yet pre-fix the thunk still ran and its result ("RAN") was returned as
@@ -1057,52 +3615,31 @@ def self_test():
         # wait-status (a child that raises SIGALRM on itself under SIG_DFL) and pair it with a leftover
         # token. Pre-fix (bytes checked first) this returned the token; post-fix the signal wins -> TIMEOUT.
         #
-        # DISCRIMINATION for finding 3: run this fixture with SIGALRM BLOCKED in the parent, the exact hostile
-        # ambient the child must survive. The child resets SIG_DFL and UNBLOCKS SIGALRM in ITS OWN process, so
-        # it still dies by SIGALRM here; reverting the child's unblock (or signal.pause -> the nonexistent
-        # os.pause) leaves the self-signal pending-and-blocked so the child parks and _reap_bounded times out
-        # to a SIGKILL, flipping the status-first-setup assertion red even under a DEFAULT ambient. The parent
-        # mask is restored in the finally, so the self-test leaves the ambient SIGALRM mask unchanged.
-        _blocked_prev = None
-        if hasattr(_sig6, "pthread_sigmask"):
-            _blocked_prev = _sig6.pthread_sigmask(_sig6.SIG_BLOCK, {_sig6.SIGALRM})
-        try:
-            _pid5 = _os6.fork()
-            if _pid5 == 0:
-                # child (its OWN process): reset SIGALRM to SIG_DFL AND UNBLOCK it in THIS child's mask before
-                # self-signalling. An INHERITED blocked SIGALRM (the ambient this fixture deliberately sets,
-                # and the hostile ambient the whole self-test may run under, finding 3) would otherwise leave
-                # the self-sent SIGALRM pending-and-blocked, so the child would never die and would PARK in
-                # signal.pause() forever, hanging the parent's reap. Unblocked under SIG_DFL the self-signal
-                # terminates the child at once, so signal.pause() (the correct call; os.pause does not exist,
-                # finding 3(a)) is unreachable and is only a belt-and-braces park. A setup failure exits
-                # cleanly rather than escaping into the parent runner.
-                try:
-                    _sig6.signal(_sig6.SIGALRM, _sig6.SIG_DFL)
-                    if hasattr(_sig6, "pthread_sigmask"):
-                        _sig6.pthread_sigmask(_sig6.SIG_UNBLOCK, {_sig6.SIGALRM})
-                    _os6.kill(_os6.getpid(), _sig6.SIGALRM)
-                    _sig6.pause()
-                except BaseException:                      # noqa: BLE001 (child boundary: never unwind into the parent)
-                    pass
-                _os6._exit(0)                              # unreachable under SIG_DFL+unblocked; a clean exit otherwise
-            _wst5 = _reap_bounded(_pid5)
-        finally:
-            if _blocked_prev is not None:
-                _sig6.pthread_sigmask(_sig6.SIG_SETMASK, _blocked_prev)  # restore the ambient mask
-        if not (_os6.WIFSIGNALED(_wst5) and _os6.WTERMSIG(_wst5) == _sig6.SIGALRM):
-            failures.append("run_bounded/status-first-setup: the fixture child was not SIGALRM-signaled "
-                            "under a blocked-SIGALRM parent (the child must unblock SIGALRM in its own "
-                            "process and use signal.pause; finding 3)")
-        elif _bounded_child_result(b"LEFTOVER-TOKEN", _wst5) != "TIMEOUT":
-            failures.append("run_bounded/status-first: a token-then-SIGALRM child returned the buffered "
-                            "token instead of TIMEOUT (termination status not inspected first)")
+        # The blocked-mask stimulus belongs to an owned process, never this
+        # self-test's caller (which may have a live timer or pending SIGALRM).
+        def _blocked_status_case():
+            _sig6.pthread_sigmask(_sig6.SIG_BLOCK, {_sig6.SIGALRM})
+
+            def _alarm_subject():
+                _sig6.signal(_sig6.SIGALRM, _sig6.SIG_DFL)
+                _sig6.pthread_sigmask(_sig6.SIG_UNBLOCK, {_sig6.SIGALRM})
+                _sig6.raise_signal(_sig6.SIGALRM)
+                _sig6.pause()
+
+            _case5 = _FixtureProcess(_time6.monotonic() + 5, subject=_alarm_subject)
+            _case5.start()
+            _wst5 = _reap_bounded(_case5)
+            if not (_os6.WIFSIGNALED(_wst5) and _os6.WTERMSIG(_wst5) == _sig6.SIGALRM):
+                return "NOT-SIGALRM"
+            return "STATUS:" + _bounded_child_result(b"LEFTOVER-TOKEN", _wst5)
+
+        if run_bounded(_blocked_status_case, timeout_s=15) != "STATUS:TIMEOUT":
+            failures.append("run_bounded/status-first: blocked-mask child did not report SIGALRM")
         # regression: a child that exited NORMALLY with bytes returns those bytes (the fix does not swallow
         # a legitimate result).
-        _pid5b = _os6.fork()
-        if _pid5b == 0:
-            _os6._exit(0)
-        _, _wst5b = _os6.waitpid(_pid5b, 0)
+        _case5b = _FixtureProcess(_time6.monotonic() + 5, subject=lambda: None)
+        _case5b.start()
+        _wst5b = _reap_bounded(_case5b)
         if _bounded_child_result(b"TOKEN", _wst5b) != "TOKEN":
             failures.append("run_bounded/status-first-normal: a normal-exit child with bytes did not "
                             "return its token")
@@ -1112,10 +3649,9 @@ def self_test():
         # normal exit is an abnormal death. Build a real exit-7 wait-status and pair it with a leftover token;
         # post-fix _bounded_child_result requires WIFEXITED+status 0 and returns CHILD-DIED, pre-fix (only the
         # signal case was checked) it returned the buffered token.
-        _pid7 = _os6.fork()
-        if _pid7 == 0:
-            _os6._exit(7)
-        _, _wst7 = _os6.waitpid(_pid7, 0)
+        _case7 = _FixtureProcess(_time6.monotonic() + 5, subject=lambda: _os6._exit(7))
+        _case7.start()
+        _wst7 = _reap_bounded(_case7)
         if not (_os6.WIFEXITED(_wst7) and _os6.WEXITSTATUS(_wst7) == 7):
             failures.append("run_bounded/nonzero-exit-setup: the fixture child did not exit 7")
         elif _bounded_child_result(b"TOKEN", _wst7) != "CHILD-DIED":
@@ -1214,19 +3750,7 @@ def self_test():
                             "rfd cleanup (read fd leaked; finding 7)")
         _pid7c = _cap7.get("pid")
         if _pid7c is not None:
-            _reaped7 = False
-            try:
-                _os6.waitpid(_pid7c, _os6.WNOHANG)         # ECHILD iff run_bounded already reaped it
-                # NOT raised: the child was NOT reaped by run_bounded; clean it up so the self-test leaks none
-                try:
-                    _os6.kill(_pid7c, _sig6.SIGKILL)
-                    _os6.waitpid(_pid7c, 0)
-                except OSError:
-                    pass
-            except ChildProcessError:
-                _reaped7 = True
-            except OSError:
-                _reaped7 = True
+            _reaped7 = _fixture_child_reaped(_pid7c)
             if not _reaped7:
                 failures.append("run_bounded/wfd-close-raise-unreaped-child: a raising parent wfd close "
                                 "skipped the child reap (zombie left; finding 7)")

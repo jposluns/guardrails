@@ -96,6 +96,8 @@ STORE_ROOT_CONTROL_DIRS = (".git", ".aiqt")
 # SUPPORTED_HOMES is the highest homes generation this tooling activates; homes 2 activates with the
 # migration, so until then every store, whatever it declares, keeps its legacy grading (generation 1).
 SUPPORTED_HOMES = 1
+# Worklog 2 remains test-only until schema, doctor, and release support land.
+SUPPORTED_WORKLOG = 1
 EVIDENCE_INVENTORY_FORMAT = "opf.evidence.inventory/v1"  # spec 4.2
 IMPORTED_DIRNAME = "imported"
 ARCHIVE_DIRNAME_STORE = "archive"       # distinct from the machine-store record archive
@@ -205,7 +207,7 @@ RESERVED_EXCLUDED_TYPES = {
 # Section shapes (closed keysets; see the ambiguity note in the module docstring).
 OPF_KEYS = frozenset({"standard", "spec_version", "layout", "posture", "import_status"})
 # Recognized-but-OPTIONAL [opf] keys: absent homes means legacy generation 1; required-ness waits for L4.
-OPF_OPTIONAL_KEYS = frozenset({"homes"})
+OPF_OPTIONAL_KEYS = frozenset({"homes", "worklog"})
 STORE_KEYS = frozenset({"sync_target"})
 PROFILE_KEYS = frozenset({"version", "base_compat", "posture_floor", "required_modules",
                           "extension_namespace"})
@@ -479,52 +481,6 @@ def plan_homes_gitignore(existing, approved_rewrite=None, reviewed_existing=None
         "reviewed bytes as reviewed_existing, on explicit approval, or reconcile the file by hand")
 
 
-def snapshot_caller_alarm():
-    """Snapshot the caller's SIGALRM timing state for a hermetic FIFO-probe watchdog, the SINGLE source of
-    truth the opf-side watchdogs are meant to route through (round-15 F1: one body to diverge in rather than
-    one per site). A call site that hand-rolls its own save/restore instead is caught only best-effort by the
-    behavioural watchdog tests; a structural call-site guard is tracked separately. Captures the caller's
-    ITIMER_REAL value and repeating interval, a monotonic baseline for the elapsed-aware restore, and whether
-    a SIGALRM was already PENDING on entry.
-    Returns an opaque tuple to hand to restore_caller_alarm() in the watchdog's finally. Call it BEFORE the
-    probe installs its own handler / unblocks / arms its timer (so the pending reading is the caller's, not
-    the probe's)."""
-    import signal as _signal
-    import time as _time
-    _prev_value, _prev_interval = _signal.getitimer(_signal.ITIMER_REAL)
-    _was_pending = (hasattr(_signal, "sigpending")
-                    and _signal.SIGALRM in _signal.sigpending())
-    return (_prev_value, _prev_interval, _time.monotonic(), _was_pending)
-
-
-def restore_caller_alarm(prev_value, prev_interval, t0, was_pending):
-    """Restore the caller's SIGALRM timing state a FIFO-probe watchdog borrowed, the SINGLE elapsed-aware
-    save/restore every opf-side watchdog is meant to share (round-15 F1: one body to diverge in rather than one
-    per site, guarding the watchdog-timer class the round-13 fix closed once; a hand-rolled call-site restore
-    is caught only best-effort by the behavioural watchdog tests). Two moves:
-      (1) ITIMER_REAL is re-armed ELAPSED-AWARE: the caller's remaining value MINUS the wall time the
-          watchdog held it (interval preserved), so running the watchdog neither PAUSES nor EXTENDS a
-          caller deadline. A deadline that would have expired during the probe clamps to a tiny positive so
-          it still FIRES rather than being silently dropped, never re-armed to its full original value.
-      (2) a SIGALRM the caller had PENDING on entry is RE-POSTED (round-15 F2): the probe's SIG_IGN discards
-          any inherited pending alarm so it cannot fire the watchdog spuriously, which would otherwise
-          DESTROY a blocked+pending ambient SIGALRM the caller still owns; re-posting it here leaves the
-          caller's pending state unchanged, matching the ambient-preserving contract the watchdog docstrings
-          promise. Re-posting happens after the mask is restored (caller blocked => it re-pends; caller
-          unblocked => it delivers at once, as it would have).
-    Call it AFTER restoring the caller's SIGALRM disposition and signal mask, in the watchdog's finally.
-    The pending arguments come from snapshot_caller_alarm(); a test may pass an explicit (value, interval,
-    t0, was_pending) to exercise the elapsed-aware restore directly."""
-    import signal as _signal
-    import time as _time
-    import os as _os
-    if prev_value > 0.0:
-        _rem = prev_value - (_time.monotonic() - t0)
-        _signal.setitimer(_signal.ITIMER_REAL, _rem if _rem > 0.0 else 1e-6, prev_interval)
-    if was_pending:
-        _os.kill(_os.getpid(), _signal.SIGALRM)
-
-
 class StoreError(Exception):
     """A store-side read or resolution cannot be completed (unreadable, unparseable, a refused symlink).
     Callers map it to a CANNOT-EVALUATE outcome: fail-closed, never a silent empty store."""
@@ -634,14 +590,16 @@ def _open_store_root_fd(store_root, pointer):
     return _open_root_fd(store_root)
 
 
-def _read_toml_contained(root_fd, relpath):
+def _read_toml_contained(root_fd, relpath, *, with_raw=False):
     """Read and parse a contained TOML file beneath root_fd, no-follow. Returns the parsed dict, or None
-    when the file (or a parent) is absent. StoreError (a cannot-evaluate) on an unreadable file, a
+    when the file (or a parent) is absent. with_raw=True returns (original_bytes, parsed_dict) on
+    presence, preserving the same read safeguards. StoreError (a cannot-evaluate) on an unreadable file, a
     refused symlink, or a TOML/parse error: an unreadable input is a failure, never an empty pass."""
     data = _read_store_bytes_contained(root_fd, relpath)
     if data is None:
         return None
-    return _parse_store_toml(relpath, data)
+    parsed = _parse_store_toml(relpath, data)
+    return (data, parsed) if with_raw else parsed
 
 
 def _read_store_bytes_contained(root_fd, relpath):
@@ -1457,6 +1415,15 @@ def validate_manifest(data, supported_profiles=None):
                                   ["[opf].standard is absent or is not {!r} (not identifiably a "
                                    "opf store)".format(STANDARD_TOKEN)])
 
+    # Refuse activation before any production validator can interpret generation-2
+    # entries using the generation-1 schema/release rules. No schema activation here.
+    if "worklog" in base:
+        import _opf_worklog
+        try:
+            _opf_worklog.generation(data)
+        except _opf_worklog.WorklogError as exc:
+            return ManifestValidation(CANNOT_EVALUATE, [str(exc)])
+
     findings = []
     _validate_top_level(data, findings)
     spec_tuple = _validate_base(base, findings)
@@ -1543,24 +1510,30 @@ def _validate_base(base, findings):
         spec_tuple = _parse(sv) if isinstance(sv, str) else None
         if spec_tuple is None:
             findings.append("[opf].spec_version {} is not a bare SemVer".format(_safe_display(sv)))
-        elif spec_tuple < _parse(SUPPORTED_SPEC_VERSION):
+        elif spec_tuple < _parse(SUPPORTED_SPEC_VERSION) or (
+                spec_tuple > _parse(SUPPORTED_SPEC_VERSION)
+                and not (sv == HOMES2_SPEC_VERSION and base.get("homes") == 2)):
             # A store declaring an OLDER base spec_version than this tooling implements is fail-closed with
             # its OWN named, remedy-carrying finding, rather than cascading into the confusing C-ROSTER /
             # missing-type findings a newer roster would otherwise raise against the older store (spec 9.x).
-            findings.append("[opf].spec_version {} is older than the {} this tooling implements; "
+            # A store declaring a NEWER base spec_version is fail-closed at validation the same way: older
+            # tooling MUST refuse a 1.3.0 (or any above-supported) declaration rather than certify it
+            # under legacy checks (spec 9.2). The one exception is the exact reserved homes-2 declaration
+            # pair, spec_version 2.0.0 with homes = 2 (spec 4.2): homes_generation() gates its activation
+            # on SUPPORTED_HOMES. Both mismatch findings share this ONE emission site:
+            # the census in _opf_manifest_regressions pins the validator's reviewed emission-site set, and
+            # a message selected above a shared censused append keeps each wording reviewable without
+            # widening that set.
+            if spec_tuple < _parse(SUPPORTED_SPEC_VERSION):
+                mismatch = ("[opf].spec_version {} is older than the {} this tooling implements; "
                             "run the store schema upgrade (`opf upgrade`) to migrate this store to {} "
                             "(spec 9.x; fail-closed)".format(
                                 _safe_display(sv), SUPPORTED_SPEC_VERSION, SUPPORTED_SPEC_VERSION))
-        elif spec_tuple > _parse(SUPPORTED_SPEC_VERSION) and not (
-                sv == HOMES2_SPEC_VERSION and base.get("homes") == 2):
-            # A store declaring a NEWER base spec_version than this tooling implements is fail-closed at
-            # validation: older tooling MUST refuse a 1.3.0 (or any above-supported) declaration rather
-            # than certify it under legacy checks (spec 9.2). The one exception is the exact reserved
-            # homes-2 declaration pair, spec_version 2.0.0 with homes = 2 (spec 4.2): homes_generation()
-            # gates its activation on SUPPORTED_HOMES.
-            findings.append("[opf].spec_version {} is above the {} this tooling implements; "
+            else:
+                mismatch = ("[opf].spec_version {} is above the {} this tooling implements; "
                             "upgrade the tooling before operating on this store "
                             "(spec 9.2; fail-closed)".format(_safe_display(sv), SUPPORTED_SPEC_VERSION))
+            findings.append(mismatch)
     # Each closed-vocabulary field is type-checked BEFORE its membership test (MAJOR 3), so a wrong-typed
     # value (e.g. posture as a list) is a fail-closed finding here rather than an unhashable-value crash
     # in a later rank/membership test.
@@ -2469,6 +2442,7 @@ def self_test():
         # cwd via subprocess cwd=base instead, resolves the relative name there, and prints its status and
         # resolved store root for the parent to compare. This exercises os.path.abspath's cwd anchoring (the
         # MAJOR 2 relative-root path) exactly as before, but with no mutation of this process's cwd.
+        from _opf_emit import run_status_owned
         import subprocess
         import json
         # test-hermeticity: launch the child ISOLATED (-I ignores PYTHON* env like PYTHONHOME/PYTHONPATH and
@@ -2481,16 +2455,22 @@ def self_test():
             "sys.path.insert(0, sys.argv[1])\n"
             "import _opf_store as S\n"
             "r = S.resolve_store(sys.argv[2])\n"
-            "sys.stdout.write(json.dumps([r.status, None if r.store_root is None else str(r.store_root)]))\n")
-        _child = subprocess.run(
-            [sys.executable, "-I", "-B", "-c", _child_src,
-             str(Path(__file__).resolve().parent), rel_prod.name],
-            cwd=str(base), capture_output=True, text=True)
-        _rel_status, _rel_store = (json.loads(_child.stdout)
-                                   if _child.returncode == 0 and _child.stdout else (None, None))
-        check("relative-root-resolves", _rel_status == RESOLVED)
-        check("relative-root-matches-abs",
-              _rel_store is not None and _rel_store == str(abs_res.store_root))
+            "sys.stdout.write(json.dumps([r.status, None if r.store_root is None else str(r.store_root)]))\n"
+            "return 0\n")
+        try:
+            _child = run_status_owned(
+                [sys.executable, "-I", "-B", "-c", _child_src,
+                 str(Path(__file__).resolve().parent), rel_prod.name],
+                fixture_id="relative-root-resolves", cwd=str(base), capture_output=True, text=True)
+            _rel_status, _rel_store = (json.loads(_child.stdout)
+                                       if _child.returncode == 0 and _child.stdout else (None, None))
+            check("relative-root-resolves", _rel_status == RESOLVED)
+            check("relative-root-matches-abs",
+                  _rel_store is not None and _rel_store == str(abs_res.store_root))
+        except (RuntimeError, subprocess.SubprocessError, OSError, ValueError) as exc:
+            print("relative-root-resolves", str(exc))
+            check("relative-root-resolves", False)
+            check("relative-root-matches-abs", False)
 
         # ITEM C (ambient-cwd crash): a RELATIVE product root reaches os.path.abspath, whose os.getcwd()
         # raises when the process cwd is deleted or unreadable. resolve_store must MAP that to
@@ -2597,61 +2577,25 @@ def self_test():
         # TimeoutError into a JournalError, so a genuine writer-less-FIFO hang would read as a refusal and the
         # check would pass while blocking. A distinct non-OSError marker propagates out of the reader instead,
         # so a hang is a check FAILURE, never a silent slow pass (self-test-discrimination).
-        import signal as _signal
+        from _opf_emit import run_bounded
 
-        class _HangMarker(Exception):
-            pass
-
-        import time as _time
-
-        def _refused_no_hang(thunk):
-            """True when thunk() fails closed with a JournalError inside a 20s alarm; False when it HANGS (the
-            marker fires) so a writer-less-FIFO blocking-open regression is a check failure, not a hung suite.
-            Test-hermeticity: snapshot the caller's SIGALRM disposition and signal mask, and snapshot its
-            ITIMER_REAL + pending state through the SHARED snapshot_caller_alarm helper; RESTORE all of them
-            in the finally (disposition and mask directly, the timer + any pending SIGALRM through the shared
-            restore_caller_alarm helper: the timer elapsed-aware with its interval, a caller deadline already
-            passed re-armed to fire at once never silently dropped, and a caller SIGALRM that was pending
-            re-posted). SIGALRM is UNBLOCKED for the probe so the watchdog fires even if the caller had it
-            blocked, then the exact caller mask is restored, so this probe never cancels a caller's running
-            timer, unblocks its SIGALRM, nor destroys its pending alarm."""
-            _prev = _signal.getsignal(_signal.SIGALRM)           # capture WITHOUT installing yet (F2)
-            _have_mask = hasattr(_signal, "pthread_sigmask")
-            _prev_mask = _signal.pthread_sigmask(_signal.SIG_BLOCK, []) if _have_mask else None
-            _alarm_snap = snapshot_caller_alarm()                # ITIMER value/interval + pending (shared helper)
-            # F2 (round-10, class-width): the SIGALRM UNBLOCK and the timer ARM live INSIDE the try, so the
-            # finally restores the caller's mask, disposition, and timer even if a signal fires during setup.
-            # An ambient SIGALRM that is BLOCKED and already PENDING (the timer fired while blocked) would
-            # otherwise be delivered the instant SIGALRM is unblocked and, with the unblock OUTSIDE the
-            # try/finally, would raise _HangMarker out of the probe uncaught AND leave the caller's mask
-            # corrupted (SIGALRM unblocked). Any inherited pending SIGALRM is first DISCARDED under SIG_IGN
-            # (POSIX: setting SIG_IGN discards a pending signal whether or not it is blocked) so it cannot
-            # fire the marker handler spuriously and read as a false hang; the shared restore_caller_alarm
-            # RE-POSTS it on exit (round-15 F2) so the caller's pending alarm is preserved, not destroyed.
-            try:
-                _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)  # discard any inherited pending SIGALRM
-                _signal.signal(_signal.SIGALRM, lambda *a: (_ for _ in ()).throw(_HangMarker()))
-                if _have_mask:
-                    _signal.pthread_sigmask(_signal.SIG_UNBLOCK, {_signal.SIGALRM})
-                # The bound is a hang guard, not a latency claim: correct code refuses in microseconds,
-                # but QA round 3 measured armed windows up to 73 ms under pinned-CPU scheduling
-                # contention (24 busy siblings confined to one CPU), and the bound-is-generous
-                # disposition requires at least 50x the measured worst; 2.0 s gave only 27x. 20 s
-                # keeps the margin above 270x and costs time only when a hang regression exists.
-                _signal.setitimer(_signal.ITIMER_REAL, 20.0)
+        def _refused_no_hang(thunk, keep_fds=()):
+            """Run the refusal probe in a child; never borrow caller signal state. A
+            pre-opened descriptor the probe relies on must be DECLARED via keep_fds
+            (the run_bounded fd allowlist: subjects see only stdio plus declared
+            descriptors), so an undeclared dirfd is a loud EBADF, never a leak."""
+            def probe():
                 try:
                     thunk()
-                    return False
                 except _journal.JournalError:
-                    return True
-                except _HangMarker:
-                    return False
-            finally:
-                _signal.setitimer(_signal.ITIMER_REAL, 0)
-                _signal.signal(_signal.SIGALRM, _prev)
-                if _have_mask:
-                    _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)
-                restore_caller_alarm(*_alarm_snap)        # shared elapsed-aware timer + pending restore
+                    return "REFUSED"
+                return "ACCEPTED"
+            # The bound is a hang guard, not a latency claim: correct code refuses in microseconds, but
+            # PR #363 measured the in-process armed window at up to 73 ms under pinned-CPU contention
+            # (24 busy siblings on one CPU), where 2 s gave only 27x against the required 50x; this probe
+            # also pays a child start-up, so the bound is 20 s (above 270x on that measurement), costing
+            # time only when a hang regression exists.
+            return run_bounded(probe, timeout_s=20, keep_fds=keep_fds) == "REFUSED"
 
         # M2: _read_contained does not hang on a writer-less FIFO (the raced regular-file->FIFO swap); it
         # returns a fail-closed JournalError at once. The non-OSError marker makes a blocking regression a
@@ -2662,7 +2606,7 @@ def self_test():
         _rfd = os.open(str(_fd_dir), os.O_RDONLY | os.O_DIRECTORY)
         try:
             check("m2-fifo-no-hang-refused",
-                  _refused_no_hang(lambda: _journal._read_contained(_rfd, "f")))
+                  _refused_no_hang(lambda: _journal._read_contained(_rfd, "f"), keep_fds=(_rfd,)))
         finally:
             os.close(_rfd)
 
@@ -2674,7 +2618,7 @@ def self_test():
         _rf_jr = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             check("new2-read-frames-fifo-no-hang",
-                  _refused_no_hang(lambda: _journal.read_frames(_rf_jr, _rf_dir)))
+                  _refused_no_hang(lambda: _journal.read_frames(_rf_jr, _rf_dir), keep_fds=(_rf_jr,)))
         finally:
             os.close(_rf_jr)
         _rl_dir = base / "n2-read-lock-owner"; _rl_dir.mkdir()
@@ -2684,7 +2628,8 @@ def self_test():
         os.mkfifo(str(_ra_dir / "f"))
         _rafd = os.open(str(_ra_dir), os.O_RDONLY | os.O_DIRECTORY)
         try:
-            check("new2-read-at-fifo-no-hang", _refused_no_hang(lambda: _journal._read_at(_rafd, "f", "f")))
+            check("new2-read-at-fifo-no-hang",
+                  _refused_no_hang(lambda: _journal._read_at(_rafd, "f", "f"), keep_fds=(_rafd,)))
         finally:
             os.close(_rafd)
 
