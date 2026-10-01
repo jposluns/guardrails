@@ -1196,80 +1196,64 @@ def _close_harness_in_step(journal, copy):
 # Blocks are found from each statement's own fields (every list of statements, a handler's or a match case's
 # body included), so every compound statement kind is walked, and a nested function, lambda or class is never
 # entered (each function and method is swept on its own). A close is a call whose callee name contains "close"
-# (os.close, every _close_* helper) of its first argument, an argument-less x.close() of x, and the exit of a
-# with statement over os.fdopen(k), open(k) or socket.fromfd(k) when k (a name, an attribute chain or an element
-# key) is an alias of a key a close call in the function passes as its first argument, unless the call passes
-# closefd=False (that object never closes the descriptor). A re-binding is an =, augmented or annotated
-# assignment to the key, alone or as an element of a target tuple.
-# The alias grammar, in full. Keys are a name, an attribute chain (self.fd) and a container's element key ([]c);
-# two keys are aliases only when these rules join them, transitively and flow-insensitively over the function,
-# except that a moved source is a new key after its move, within the move's region (rule 2):
-#   1. a plain re-binding, a = b or a = self.b (an augmented c += d too), which also joins the two keys' element
-#      keys, so a container bound to a second name (saved = fds) shares its elements;
+# (os.close, every _close_* helper; not closerange or closed) of its first argument, an argument-less,
+# keyword-less x.close() of x, and the exit of a with statement over an item rule 6 counts (below). A re-binding
+# is an =, augmented or annotated assignment to the key, alone or as an element of a target tuple.
+# The alias grammar, in full. Keys are a name, an attribute chain (self.fd) and a container's element key ([]c,
+# one per container, whatever the index or dict key). Two keys are aliases only when these rules join them,
+# transitively and flow-insensitively over the whole function: statement order, branches and joins play no
+# part, so every alias a name is given anywhere in the function holds at every use of it:
+#   1. a plain re-binding, a = b or a = self.b (an augmented c += d, and an annotated a: T = b, too), which also
+#      joins the two keys' element keys, so a container bound to a second name (saved = fds) shares its
+#      elements;
 #   2. a tuple or list assignment whose right side is a display of the same length binds each target to its
-#      element, each source taking its value from before the statement and each target its key after it. A
-#      target the right side reads, anywhere in it, that is not re-bound to itself is MOVED (fd, a = a, None; a
-#      swap a, b = b, a; fds, a = [a], None): from the end of that statement to the end of its REGION, every
-#      use of it, and of an attribute chain under it, is a new key that only its new value and later rules
-#      join. The region is the innermost block enclosing the move that runs on only some of the paths through
-#      its statement (an if or elif body or else, a for or while body or else, a match case, a try's handler
-#      or else block); a try body, a finally and a with body are not such blocks, and a move with no such block
-#      around it holds to the end of the function. After its region the source is the key it was before the
-#      move again, so a move in one branch of an if does not clear the source after the if (a later close of
-#      it pairs with a close of the value it had before the move: the conservative join). When moves cleared
-#      more than one prefix of a key, the latest of them before the use wins (old, a.fd = a.fd, None; then
-#      saved, a = a, None: a later a.fd is under a's new key, not a.fd's). An element that is
-#      a moved name is handed on: the targets it fills join each other (b, c, a = a, a, None), and join the
-#      name as it was before the move only when a rule-1 re-binding outside a tuple on an EARLIER line made it
-#      an alias (d = a, then fd, a = a, None joins fd and d); otherwise the move is an ownership transfer, not
-#      an alias. Every other element binds its target as a plain assignment of it would under rules 1, 3, 6
-#      and 7 (fds, other = [a], None joins []fds and a, and in fds, a = [a], None []fds joins a as it was before
-#      the move). So a cleared source never aliases the value it handed on: after a = self.fd; fd, a = a, None,
-#      a later `if a is not None: os.close(a)` is a new key (the ownership-first idiom), while a source
-#      re-bound to itself (b, a = a, a) keeps its value;
-#   3. a container's element key joins each element of a tuple, list, set or dict display bound to it, or
-#      appended, inserted or added into it, or a value stored into it by subscript; and the element keys a
+#      element exactly as a plain assignment of that element would (rule 1, or rules 3, 6 and 7): fd, a = a,
+#      None joins fd and a, a swap a, b = b, a joins a and b, and fds, other = [a], None joins []fds and a. There
+#      is no move rule: a source handed on keeps its alias class after the move, in every branch and after
+#      every join, so a later close of it pairs with every close of the value it handed on (conservative: it
+#      reports more, never less). The P1 ownership-first idiom is therefore reported on purpose: fd, a = a,
+#      None; os.close(fd) under a cleanup `if a is not None: os.close(a)`, and prev, cur = cur, nxt;
+#      os.close(prev) under a cleanup of cur, are TRY (or AFTER) hits, and each tree site of the idiom is a
+#      recorded false positive in the dispositions below, with its reason;
+#   3. a container's element key joins each element of a tuple, list or set display, and each key and each
+#      value of a dict display ({a: x} and {k: a} alike), bound to it or appended, inserted or added into it; a
+#      value stored into it by subscript (c[i] = a; the index i is not joined); and the element keys a
 #      container expression (rule 4) supplies when that expression is bound to it, or extended or updated
 #      into it;
 #   4. a container expression has its wrappers removed first (c.values(), c.items(), c.keys(), c.copy(),
 #      reversed(c), list(c), tuple(c), sorted(c), set(c), nested), and what is left is classified: a + b
 #      concatenation and an or / and expression (each operand classified the same way), a display, or a
-#      named container;
-#   5. a loop variable joins the elements of the container expression (rule 4) it iterates;
+#      named container. A dict's keys and values share its one element key, so iterating c.keys(), c.values()
+#      or c.items() reads both;
+#   5. a loop's target key, and each key in a loop's target tuple (for fd, _ in c.items()), joins the elements
+#      of the container expression (rule 4) it iterates, a comprehension's too;
 #   6. a file object os.fdopen(k), open(k) or socket.fromfd(k) wraps k in (k a name, an attribute chain or an
-#      element key), bound to a name (alone or as a tuple element) or as a with target, and the target of
-#      `with k as f`, join k when k is an alias of a key a close call in the function passes as its first
-#      argument, unless the call passes closefd=False; so the object's close, and the with statement's exit,
-#      count against every alias of k;
+#      element key), bound to a key (alone or as a tuple element) or as a with target, and the target of
+#      `with k as f` (k a key), join k once k is an alias of a key a close call in the function passes as its
+#      first argument; a call passing closefd=False wraps nothing (that object never closes the descriptor). A
+#      with statement's exit closes k when its item is such a wrapper of k and k is such an alias, and closes
+#      its context key when that key is in the class of a key this rule joined (fh = os.fdopen(a); with fh as
+#      g: ... closes a); so the object's close, and the with statement's exit, count against every alias of k;
 #   7. a keyword capture: ns = SimpleNamespace(pidfd=fd) makes ns.pidfd an alias of fd.
 # Residual, plainly: any alias form outside that grammar is not followed, and a double close through it passes
-# the sweep unseen. The known gaps it leaves: a moved name's earlier alias through anything but a rule-1
-# re-binding outside a tuple on an earlier line (a container, a loop variable, a keyword capture, a tuple
-# element), because keys other than a moved source are not renewed per binding, and joining those merges
-# ownership transfers (tried at this tree, it reports 2 false TRY hits in check_opf_import's _spelled_route,
-# where `prev, cur = cur, nfd` runs in a loop with nfd re-bound each pass); an element target, which is never
-# moved (a swap through c[i]); the order of statements beyond the following rule and the move rule (a
-# two-statement transfer `fd = x; x = None` is still reported, as only a tuple move clears its source; within
-# its region a move clears its source for every later position in the function's text whether or not the path
-# there runs it: a move in a try body holds in that try's handlers and finally, though an exception raised in
-# the body before the move reaches them with the source not yet moved, so a close of an alias of the source
-# above the move (b = a; os.close(b); fd, a = a, None) is not paired with the source's close in that finally
-# (a close of the source itself there is still reported, as REBIND, since the move re-binds it); a use above a
-# move in a loop body is read as the value before the move even on the next iteration; a statement after a
-# return, raise or os._exit still counts as following, a loop's else follows its body even past a break, a
-# loop's next iteration does not follow, and a try's finally is not a following statement of its body); a
-# close inside a lambda, which is never swept; a repeated
-# close with no try between (os.close(a); os.close(a)), which no shape pairs; a close made through a callee
-# whose name lacks "close" or through a function passed as a value; a second close in another function (a
-# caller's cleanup, or another method outside the ATTR shape); a with statement's exit in the ATTR shape, and a
-# re-binding by a for or with target, a match capture, an assignment expression (:=), del or import, which no
-# shape counts; an element closed by index (fds[i] is one key per container, and a nested container shares the
-# outer element key only by subscript); a container appended or inserted into another as one element; a tuple
-# unpacked from anything but a display (a, b = pair), or a nested target tuple; a starred element or target
-# ([*c]); a conditional expression (c if x else d); an alias made by an assignment expression, a match capture
-# or a with target over anything but a key or a rule-6 wrapper; a comprehension or a container returned by any
-# call other than the rule-4 wrappers; and descriptors held by objects the sweep does not know wrap one
-# (sockets, subprocess pipes, selectors).
+# the sweep unseen. The known gaps it leaves: an element target, which joins only the container's one element
+# key (a swap through c[i]); the order of statements beyond the following rule (a statement after a return,
+# raise or os._exit still counts as following, a loop's else follows its body even past a break, a loop's next
+# iteration does not follow, and a try's finally is not a following statement of its body); a close inside a
+# lambda, which is never swept; a repeated close with no try between (os.close(a); os.close(a)), which no shape
+# pairs; a close made through a callee whose name lacks "close" or through a function passed as a value; a
+# second close in another function (a caller's cleanup, or another method outside the ATTR shape); a with
+# statement's exit in the ATTR shape, and a re-binding by a for or with target, a match capture, an assignment
+# expression (:=), del or import, which no shape counts; an element closed by index (fds[i] is one key per
+# container, and a nested container shares the outer element key only by subscript); a container appended or
+# inserted into another as one element; a tuple unpacked from anything but a display (a, b = pair), or a nested
+# target tuple, in an assignment or a loop; a starred element or target ([*c]; a dict display's **d joins d
+# itself, not d's elements); a conditional expression (c if x else d); an alias made by an assignment
+# expression, a match capture or a with target over anything but a key or a rule-6 wrapper; a comprehension or a
+# container returned by any call other than the rule-4 wrappers; and descriptors held by objects the sweep does
+# not know wrap one (sockets, subprocess pipes, selectors). The flow-insensitive join is also the sweep's main
+# source of false positives: one name re-bound to unrelated descriptors in turn (sequential self-test legs, a
+# walk's prev, cur = cur, nxt) is one class, so each such tree site is disposed below.
 _CLOSE_SWEEP_DIRS = ("tools", "opf/tools")
 
 
@@ -1354,23 +1338,6 @@ def _cs_blocks(node):
                     yield field, block
 
 
-def _cs_regions(nodes, limit=None):
-    """Each statement under `nodes` (never inside a nested function or class) with the end of the innermost
-    block enclosing it that runs on only some of the paths through its statement: an if's body or else, a
-    loop's body or else, a match case, and a try's handler or else block. None when no such block encloses
-    it: a try body, a finally and a with body run on every path that reaches their statement, so they are
-    not one."""
-    import ast
-    for stmt in nodes:
-        yield stmt, limit
-        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue
-        for field, block in _cs_blocks(stmt):
-            every = field == "finalbody" or field == "body" and (_cs_is_try(stmt)
-                                                                 or isinstance(stmt, (ast.With, ast.AsyncWith)))
-            yield from _cs_regions(block, limit if every else (block[-1].end_lineno, block[-1].end_col_offset))
-
-
 def _cs_container(node):
     """`node` with every container wrapper removed: c.values(), c.items(), c.keys(), c.copy(), reversed(c),
     list(c), tuple(c), sorted(c) and set(c), however nested."""
@@ -1386,14 +1353,10 @@ def _cs_container(node):
             return node
 
 
-def _cs_at(node):
-    return node.lineno, node.col_offset
-
-
 def _cs_aliases(fn):
-    """The function's alias classes, by union-find over every alias the sweep follows, as (same, held):
-    same(node, key, other_node, other_key) tests two keys used at those nodes, and held(node, key) whether a
-    key wrapped at `node` is an alias of a key some close call closes (rule 6)."""
+    """The function's alias classes, by union-find over every alias the sweep follows, flow-insensitively, as
+    (same, held): same(key, other_key) tests two keys, and held(item) is the key a with item's exit closes
+    (rule 6), or None."""
     import ast
     parent = {}
 
@@ -1410,56 +1373,11 @@ def _cs_aliases(fn):
             if not a.startswith("[]") and not b.startswith("[]"):
                 union("[]" + a, "[]" + b)         # two names for one container share its elements
 
-    def displays(node):
-        """Each (targets, values) pair of a tuple or list assignment from a display of the same length."""
-        if isinstance(node, ast.Assign) and isinstance(node.value, (ast.Tuple, ast.List)):
-            for target in node.targets:
-                if isinstance(target, (ast.Tuple, ast.List)) and len(target.elts) == len(node.value.elts):
-                    yield target, node.value
-
-    def cleared(target, value):
-        """The sources a display assignment moves: each target its right side reads, unless it is re-bound to
-        itself (b, a = a, a keeps a)."""
-        read = {_cs_key(n) for n in ast.walk(value)} - {None}
-        return {_cs_key(t) for t, v in zip(target.elts, value.elts)
-                if _cs_key(t) in read and _cs_key(t) != _cs_key(v) and not _cs_key(t).startswith("[]")}
-
-    # Rule 2: each moved source is a new key from its move's end to the end of its region (_cs_regions), the
-    # innermost block enclosing the move that runs on only some paths; after that block's join it is the
-    # key it was before the move again.
-    limits = {id(stmt): limit for stmt, limit in _cs_regions(fn.body)}
-    moved = {}
-    for node in _cs_walk(fn.body):
-        for target, value in displays(node):
-            for source in cleared(target, value):
-                moved.setdefault(source, []).append(((node.end_lineno, node.end_col_offset), limits.get(id(node))))
-
-    def version(k, at):
-        """`k` as used at position `at`: a key, or an attribute chain under one, that a move cleared on an
-        earlier position within the move's region is that move's new key; when moves cleared more than one
-        prefix of `k` (a.fd, then a), the latest of them wins, so a name moved after its attribute renews
-        the whole chain."""
-        if not k or k.startswith("[]"):
-            return k and "[]" + version(k[2:], at)
-        parts = k.split(".")
-        latest = None
-        for n in range(1, len(parts) + 1):
-            prefix = ".".join(parts[:n])
-            ends = [end for end, limit in moved.get(prefix, ()) if end <= at and (limit is None or at <= limit)]
-            if ends and (latest is None or max(ends) >= latest[0]):
-                latest = max(ends), prefix
-        if latest is None:
-            return k
-        return "{}@{}:{}".format(latest[1], *latest[0]) + k[len(latest[1]):]
-
-    def key(node, at=None):
-        return version(_cs_key(node), at or _cs_at(node))
-
     def elements(node):
         if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
-            return [key(e) for e in node.elts if key(e)]
+            return [_cs_key(e) for e in node.elts if _cs_key(e)]
         if isinstance(node, ast.Dict):
-            return [key(e) for e in node.values if key(e)]
+            return [_cs_key(e) for e in node.keys + node.values if _cs_key(e)]   # {a: x} and {k: a} alike
         return []
 
     def contents(node):
@@ -1472,7 +1390,7 @@ def _cs_aliases(fn):
             return contents(bare.left) + contents(bare.right)
         if isinstance(bare, ast.BoolOp):
             return [k for operand in bare.values for k in contents(operand)]
-        named = key(bare)
+        named = _cs_key(bare)
         return elements(bare) + (["[]" + named.lstrip("[]")] if named else [])
 
     wraps = []                                    # rule 6's candidates, joined once their key is a closed one
@@ -1482,72 +1400,48 @@ def _cs_aliases(fn):
         for element in contents(value):           # a display, list(c), c.copy(), c or {}, a + b
             union("[]" + target.lstrip("[]"), element)
         if _cs_wrapped(value) is not None:
-            wraps.append((target, key(_cs_wrapped(value))))
+            wraps.append((target, _cs_key(_cs_wrapped(value))))
         if isinstance(value, ast.Call):
             for kw in value.keywords:
-                if kw.arg and key(kw.value):
-                    union(target + "." + kw.arg, key(kw.value))
-
-    moves, plain = [], []
+                if kw.arg and _cs_key(kw.value):
+                    union(target + "." + kw.arg, _cs_key(kw.value))
 
     for node in _cs_walk(fn.body):
         if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)) and node.value is not None:
-            value, bound = node.value, (node.end_lineno, node.end_col_offset)
+            value = node.value
             for target in (node.targets if isinstance(node, ast.Assign) else [node.target]):
+                pairs = [(target, value)]
                 if isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)) \
                         and len(target.elts) == len(value.elts):
-                    # The right side is evaluated before any binding, so each source is the key it was
-                    # until this statement and each target the key it is after it (a moved source's new
-                    # key); a moved value is handed on (fd, x = x, None), not shared with its old name.
-                    gone, fans = cleared(target, value), {}
-                    for t, v in zip(target.elts, value.elts):
-                        if not key(t, bound):
-                            continue
-                        if _cs_key(v) in gone:
-                            if _cs_key(t) != _cs_key(v):
-                                fans.setdefault(key(v), []).append(key(t, bound))
-                        elif key(v):
-                            union(key(t, bound), key(v))
-                        else:
-                            bind(key(t, bound), v)    # each other element binds as a plain assignment does
-                    moves += [(source, targets, node.lineno) for source, targets in fans.items()]
-                    continue
-                if not key(target, bound):
-                    continue
-                if key(value):
-                    union(key(target, bound), key(value))
-                    plain.append((key(target, bound), key(value), node.lineno))
-                else:
-                    bind(key(target, bound), value)
+                    pairs = list(zip(target.elts, value.elts))   # rule 2: each element as a plain assignment
+                for t, v in pairs:
+                    if not _cs_key(t):
+                        continue
+                    if _cs_key(v):
+                        union(_cs_key(t), _cs_key(v))
+                    else:
+                        bind(_cs_key(t), v)
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
-                and node.func.attr in ("append", "extend", "insert", "add", "update") and key(node.func.value):
-            box = "[]" + key(node.func.value).lstrip("[]")
+                and node.func.attr in ("append", "extend", "insert", "add", "update") and _cs_key(node.func.value):
+            box = "[]" + _cs_key(node.func.value).lstrip("[]")
             for arg in node.args[1:] if node.func.attr == "insert" else node.args:
                 if node.func.attr in ("extend", "update"):
                     items = contents(arg)             # the elements of another container, not its name
                 else:
-                    items = [key(arg)] if key(arg) else elements(arg)
+                    items = [_cs_key(arg)] if _cs_key(arg) else elements(arg)
                 for element in items:
                     union(box, element)
         elif isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
                 inner = _cs_wrapped(item.context_expr)
-                source = key(item.context_expr) or (inner is not None and key(inner))
-                if item.optional_vars is not None and key(item.optional_vars) and source:
-                    wraps.append((key(item.optional_vars), source))
-        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)) and key(node.target):
-            for element in contents(node.iter):
-                union(key(node.target), element)
-    # A moved value goes to every target it fills (b, c, a = a, a, None): those targets are aliases of each
-    # other, and of a name a plain re-binding on an EARLIER line made an alias of the source (d = a above the
-    # move), so they then join the source's class as it was before the move; the cleared source itself is a
-    # new key from the move on, so a later cleanup of it (if a is not None: os.close(a)) joins none of them.
-    for source, targets, line in moves:
-        for target in targets[1:]:
-            union(targets[0], target)               # destinations that receive one value share it
-        if any(source in (k, v) and k != v and at < line for k, v, at in plain):
-            union(targets[0], source)               # the source's earlier plain alias holds the value too
-    closed = [version(_cs_close_arg(n), _cs_at(n)) for n in _cs_walk(fn.body) if _cs_close_arg(n) and n.args]
+                source = _cs_key(item.context_expr) or (inner is not None and _cs_key(inner))
+                if item.optional_vars is not None and _cs_key(item.optional_vars) and source:
+                    wraps.append((_cs_key(item.optional_vars), source))
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            for target in [node.target] + list(getattr(node.target, "elts", [])):   # for fd, _ in c.items()
+                for element in contents(node.iter) if _cs_key(target) else ():
+                    union(_cs_key(target), element)
+    closed = [_cs_close_arg(n) for n in _cs_walk(fn.body) if _cs_close_arg(n) and n.args]
 
     def closing(k):
         """Whether `k` is an alias of a key some close call in the function closes."""
@@ -1558,23 +1452,29 @@ def _cs_aliases(fn):
         joined = [(a, b) for a, b in wraps if find(a) != find(b) and closing(b)]
         for a, b in joined:
             union(a, b)
-    return (lambda n, a, m, b: find(version(a, _cs_at(n))) == find(version(b, _cs_at(m))),
-            lambda node, k: closing(version(k, _cs_at(node))))
+
+    def held(item):
+        """The key a with item's exit closes: the key its rule-6 wrapper wraps, when that is an alias of a
+        closed key; or its context key, when that is in the class of a key rule 6 joined (fh = os.fdopen(a);
+        with fh as g); else None."""
+        inner = _cs_wrapped(item.context_expr)
+        if inner is not None:
+            return _cs_key(inner) if closing(_cs_key(inner)) else None
+        k = _cs_key(item.context_expr)
+        return k if k and find(k) in {find(a) for a, b in wraps if closing(b)} else None
+    return (lambda a, b: find(a) == find(b)), held
 
 
 def _cs_closes(nodes, held=None):
-    """Each close under `nodes` with the key it closes; a with statement's exit counts when `held` says the key
-    its wrapper wraps is a closed descriptor."""
+    """Each close under `nodes` with the key it closes; a with statement's exit counts for each item `held`
+    names the key of (rule 6)."""
     import ast
     found = []
     for node in _cs_walk(nodes):
         if _cs_close_arg(node):
             found.append((node, _cs_close_arg(node)))
         elif held and isinstance(node, (ast.With, ast.AsyncWith)):
-            for item in node.items:
-                inner = _cs_wrapped(item.context_expr)
-                if inner is not None and held(node, _cs_key(inner)):
-                    found.append((node, _cs_key(inner)))
+            found += [(node, held(item)) for item in node.items if held(item)]
     return found
 
 
@@ -1616,7 +1516,7 @@ def _cs_function(rel, fn):
             pairs += [(c, k, _cs_closes(node.finalbody, held))
                       for c, k in _cs_closes(handled + list(node.orelse), held)]
             rows += [(rel, c.lineno, fn.name, "TRY", k, o) for c, k, later in pairs for a, o in later
-                     if same(c, k, a, o)]
+                     if same(k, o)]
     for stmt, following in _cs_sequence(fn.body):
         if isinstance(stmt, ast.Expr) and _cs_close_arg(stmt.value) \
                 and any(_cs_rebinds(after, _cs_close_arg(stmt.value)) for after in following):
@@ -1626,7 +1526,7 @@ def _cs_function(rel, fn):
                      if c is stmt and any(_cs_rebinds(after, k) for after in following)]
         if _cs_is_try(stmt) and any(not (h.body and isinstance(h.body[-1], ast.Raise)) for h in stmt.handlers):
             rows += [(rel, c.lineno, fn.name, "AFTER", k, o) for c, k in _cs_closes(stmt.body, held)
-                     for a, o in _cs_closes(following, held) if same(c, k, a, o)]
+                     for a, o in _cs_closes(following, held) if same(k, o)]
     return rows
 
 
@@ -1671,6 +1571,8 @@ def _close_sweep(root):
 # that only off-path part C, merging after #378, carries.
 _CS_LEGS = ("false positive: sequential self-test legs; each later binding is a fresh {}, and no try closes "
             "the old one again")
+_CS_P1 = ("false positive, the P1 ownership-first idiom, reported on purpose (rule 2 keeps a moved source in its "
+          "alias class): {}")
 _CLOSE_SWEEP_DISPOSITIONS = (
     ("opf/tools/_opf_oplock.py", "propagating", "AFTER", "fd", "fd", 1,
      "part C: false positive, part C's _st_reclose_yielding, the deliberate RECLOSE body its T-p2 flip runs; the "
@@ -1754,19 +1656,46 @@ _CLOSE_SWEEP_DISPOSITIONS = (
     ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "guardian_fd", "", 6, _CS_LEGS.format("pidfd")),
     ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "leader_fd", "", 1, _CS_LEGS.format("pidfd")),
     ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "subject_fd", "", 1, _CS_LEGS.format("pidfd")),
+    ("opf/tools/_opf_emit.py", "_guardian", "TRY", "fd", "subject_fd", 1,
+     _CS_P1.format("fd, subject_fd = subject_fd, None runs before os.close(fd), so the handler's `if subject_fd "
+                   "is not None: os.close(subject_fd)` never reaches the closed number")),
+    ("opf/tools/_opf_init_observe.py", "graft_snapshot", "TRY", "prev", "fd", 1,
+     _CS_P1.format("prev, fd = fd, next_fd runs before os.close(prev), so the finally closes next_fd, never prev")),
+    ("opf/tools/_opf_init_substrate.py", "begin_operation", "TRY", "closing", "open_fd", 1,
+     _CS_P1.format("closing, plan_fd = plan_fd, None runs before the close of closing, so the unwind loop over "
+                   "(plan_fd, op_fd, ops_fd) skips plan_fd, and the body never closes op_fd or ops_fd")),
+    ("opf/tools/check_opf_import.py", "_physical_home", "TRY", "prev", "cur", 1,
+     _CS_P1.format("prev, cur = cur, parent runs before os.close(prev), so the finally closes parent, never prev")),
+    ("opf/tools/check_opf_import.py", "visit_ancestors", "TRY", "prev", "ancestor", 1,
+     _CS_P1.format("prev, ancestor = ancestor, parent runs before os.close(prev), so the finally closes parent, "
+                   "never prev")),
+    ("opf/tools/check_opf_import.py", "_spelled_route", "TRY", "prev", "cur", 2,
+     _CS_P1.format("each prev, cur = cur, nfd runs before os.close(prev), so the finally closes nfd, never prev")),
+    ("tools/check_crosswalk.py", "_open_archive_dir", "TRY", "prev", "fd", 1,
+     _CS_P1.format("prev, fd = fd, nxt runs before the close of prev, so the handler closes nxt, never prev")),
+    ("tools/check_release_cut.py", "working_blob", "TRY", "parent", "directory", 1,
+     _CS_P1.format("parent, directory = directory, child runs before the close of parent, so the finally closes "
+                   "child, never parent")),
+    ("tools/pin.py", "do_recover", "TRY", "fd", "root_fd", 4,
+     _CS_P1.format("each fd, root_fd = root_fd, None runs before os.close(fd), so the handler's `if root_fd is "
+                   "not None` guard never reaches the closed number")),
+    ("tools/pin.py", "do_recover", "AFTER", "fd", "root_fd", 4,
+     _CS_P1.format("each fd, root_fd = root_fd, None; os.close(fd) is followed by a return in its block, so the "
+                   "close of root_fd after the try never runs after it")),
 ) + tuple(("opf/tools/_opf_init_substrate.py", name, "REBIND", "sub", "", 1,
            "false positive: a self-test step; sub is re-bound to a fresh substrate, the old one never closed again")
           for name in ("_t_s1_sibling_home", "_t_s2_capability_gate", "_t_s13_midread_containment",
                        "_t_s16_staging_sweep", "_t_s20_distinct_nested_homes"))
 
-# Synthetic shapes the sweep must find (or, for the ownership transfers and closefd=False, must not): each is
-# (label, source, expected shapes).
+# Synthetic shapes the sweep must find (or, for closefd=False, must not): each is (label, source, expected
+# shapes). The ownership transfers (the P1 ownership-first idiom) are required hits, deliberately conservative:
+# rule 2 keeps a moved source in its alias class, so the sweep reports them.
 _CLOSE_SWEEP_SHAPES = (
     ("tuple loop alias (begin_operation)", "def f(a, b):\n    try:\n        os.close(a)\n        a = None\n"
      "    except BaseException:\n        for x in (a, b):\n            if x is not None:\n                os.close(x)\n"
      "        raise\n", ["REBIND", "TRY"]),
     ("ownership transfer", "def f(a):\n    try:\n        fd, a = a, None\n        os.close(fd)\n    finally:\n"
-     "        if a is not None:\n            os.close(a)\n", []),
+     "        if a is not None:\n            os.close(a)\n", ["TRY"]),            # deliberately conservative
     ("plain re-binding alias", "def f(a):\n    b = a\n    try:\n        os.close(b)\n    finally:\n"
      "        os.close(a)\n", ["TRY"]),
     ("list captured by append", "def f(a):\n    fds = []\n    fds.append(a)\n    try:\n        os.close(a)\n"
@@ -1818,7 +1747,7 @@ _CLOSE_SWEEP_SHAPES = (
      "        raise\n    else:\n        fd = None\n", ["REBIND"]),
     ("ownership-first idiom from an earlier alias", "def f(self):\n    a = self.fd\n    try:\n"
      "        fd, a = a, None\n        os.close(fd)\n    finally:\n        if a is not None:\n"
-     "            os.close(a)\n", []),
+     "            os.close(a)\n", ["TRY"]),            # deliberately conservative
     ("move re-binds its source to another descriptor", "def f(a, b):\n    fd, a = a, b\n    try:\n"
      "        os.close(b)\n    finally:\n        os.close(a)\n", ["TRY"]),
     ("container display in a tuple assignment", "def f(a):\n    fds, other = [a], None\n    try:\n"
@@ -1844,7 +1773,7 @@ _CLOSE_SWEEP_SHAPES = (
      "        os.close(fd)\n", ["TRY"]),
     ("move in one branch of an if, closed after the join", "def f(a, c):\n    try:\n        if not c:\n"
      "            os.close(a)\n        else:\n            fd, a = a, None\n            os.close(fd)\n"
-     "    finally:\n        if a is not None:\n            os.close(a)\n", ["TRY"]),
+     "    finally:\n        if a is not None:\n            os.close(a)\n", ["TRY", "TRY"]),
     ("for else after a swallowed close", "def f(fd, xs):\n    for x in xs:\n        try:\n"
      "            os.close(fd)\n        except OSError:\n            pass\n    else:\n        os.close(fd)\n",
      ["AFTER"]),
@@ -1855,6 +1784,23 @@ _CLOSE_SWEEP_SHAPES = (
      "        fd = None\n", ["REBIND"]),
     ("while else re-binds", "def f(fd, c):\n    while c:\n        os.close(fd)\n    else:\n"
      "        fd = None\n", ["REBIND"]),
+    ("with exit in a try body, then a move, finally closes the source", "def f(a):\n    try:\n"
+     "        with os.fdopen(a) as fh:\n            fh.read()\n        fd, a = a, None\n    finally:\n"
+     "        os.close(a)\n", ["REBIND", "TRY"]),
+    ("close result assigned, then a move", "def f(a):\n    try:\n        r = os.close(a)\n"
+     "        fd, a = a, None\n    finally:\n        os.close(a)\n", ["TRY"]),
+    ("close as an if test, then a move", "def f(a):\n    try:\n        if not _close_fd(a):\n            pass\n"
+     "        fd, a = a, None\n    finally:\n        os.close(a)\n", ["TRY"]),
+    ("fdopen object closed, then a move", "def f(a):\n    try:\n        fh = os.fdopen(a)\n        fh.close()\n"
+     "        fd, a = a, None\n    finally:\n        os.close(a)\n", ["TRY"]),
+    ("move in an if branch, its new alias closed after the join", "def f(a, b, c):\n    if c:\n"
+     "        old, a = a, b\n    try:\n        os.close(b)\n    finally:\n        os.close(a)\n", ["TRY"]),
+    ("dict display key iterated by keys()", "def f(a):\n    fds = {a: None}\n    try:\n        os.close(a)\n"
+     "    finally:\n        for fd in fds.keys():\n            os.close(fd)\n", ["TRY"]),
+    ("dict display key iterated by items()", "def f(a):\n    fds = {a: 1}\n    try:\n        os.close(a)\n"
+     "    finally:\n        for fd, _ in fds.items():\n            os.close(fd)\n", ["TRY"]),
+    ("with exit over an alias of a wrapper", "def f(a):\n    fh = os.fdopen(a)\n    try:\n"
+     "        with fh as g:\n            g.read()\n    finally:\n        os.close(a)\n", ["TRY"]),
 )
 _CS_LOOP_ELSE = ("for else after a swallowed close", "while else after a swallowed close", "for else re-binds",
                  "while else re-binds")
@@ -1892,14 +1838,23 @@ _CLOSE_SWEEP_CORPUS = (
      "        os.close(fd)\n"),
     ("comprehension", "def f(fds):\n    [os.close(fd) for fd in fds if fd]\n    {fd: os.close(fd) for fd in fds}\n"
      "    list(os.close(fd) for fd in fds)\n    fds = None\n"),
-)
+    ("nested async function", "def f(fd):\n    async def inner():\n        os.close(fd)\n        fd2 = fd\n"
+     "    try:\n        inner()\n    finally:\n        os.close(fd)\n"),
+    ("global", "def f(fd):\n    global G\n    G = fd\n    os.close(G)\n"),
+    ("nonlocal", "def f(fd):\n    def g():\n        nonlocal fd\n        os.close(fd)\n        fd = None\n"
+     "    g()\n"),
+    ("del", "def f(fd, fds):\n    os.close(fd)\n    del fd, fds[0]\n"),
+    ("assert", "def f(fd):\n    assert fd >= 0, fd\n    os.close(fd)\n"),
+    ("import", "def f(fd):\n    import os\n    from os import close as c\n    c(fd)\n    os.close(fd)\n"),
+    ("raise", "def f(fd):\n    try:\n        os.close(fd)\n    except OSError as exc:\n"
+     "        raise ValueError(fd) from exc\n    raise\n"),
+    ("annotation only", "def f(self, fd, fds):\n    x: int\n    self.y: int\n    fds[0]: int\n    os.close(fd)\n"),
+) + ((("type alias", "def f(fd):\n    type Fds = list[int]\n    os.close(fd)\n"),)
+     if sys.version_info >= (3, 12) else ())        # a type alias statement parses from Python 3.12 on
 
 # Each fix to the sweep's alias and pairing rules, put back by the self-test under --red-on-revert: (name, the
 # fixed text, its pre-fix text, the shapes that must then be the only ones red).
 _CLOSE_SWEEP_REVERTS = (
-    ("sweep-tuple-source",
-     'if _cs_key(t) in read and _cs_key(t) != _cs_key(v) and not _cs_key(t).startswith("[]")}',
-     'if _cs_key(t) in read and not _cs_key(t).startswith("[]")}', ("tuple assignment keeping its source",)),
     ("sweep-container-elements",
      'union("[]" + a, "[]" + b)         # two names for one container share its elements', "pass",
      ("container bound to a second name", "+= of another container")),
@@ -1911,11 +1866,6 @@ _CLOSE_SWEEP_REVERTS = (
      ("+ concatenation of another container", "concatenation inside a list() wrapper")),
     ("sweep-unwrap-first", "if isinstance(bare, ast.BinOp) and isinstance(bare.op, ast.Add):",
      "if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):", ("concatenation inside a list() wrapper",)),
-    ("sweep-fan-out", "union(targets[0], target)               # destinations that receive one value share it",
-     "pass", ("fan-out tuple from a cleared source",)),
-    ("sweep-fan-out-earlier-alias",
-     "union(targets[0], source)               # the source's earlier plain alias holds the value too", "pass",
-     ("transfer from a source with an earlier alias",)),
     ("sweep-copy-elements", "for element in contents(value):           # a display",
      "for element in elements(value):           #",
      ("list() copy of another container", "+ concatenation of another container",
@@ -1945,24 +1895,25 @@ _CLOSE_SWEEP_REVERTS = (
      ("close in a match case, re-bound after the match", "robustness corpus: match")),
     ("sweep-try-star-after", "if _cs_is_try(stmt) and any(", "if isinstance(stmt, ast.Try) and any(",
      ("try-star swallowed close, closed later",)),
-    ("sweep-tuple-display", "bind(key(t, bound), v)    # each other element binds as a plain assignment does",
-     "pass", ("container display in a tuple assignment",)),
+    ("sweep-tuple-elements", "pairs = list(zip(target.elts, value.elts))   # rule 2", "pairs = []  #",
+     ("ownership transfer", "tuple assignment keeping its source", "fan-out tuple from a cleared source",
+      "transfer from a source with an earlier alias", "ownership-first idiom from an earlier alias",
+      "move re-binds its source to another descriptor", "container display in a tuple assignment",
+      "move in one branch of an if, closed after the join",
+      "move in an if branch, its new alias closed after the join")),
     ("sweep-wrapped-key", "or not _cs_key(node.args[0]):", "or not isinstance(node.args[0], ast.Name):",
      ("fdopen of an attribute", "fdopen of a container element")),
     ("sweep-wrapper-aliases", "return find(k) in {find(c) for c in closed}", "return k in closed",
      ("fdopen of a container element", "with exit over an alias of the closed descriptor",
       "fdopen object of an alias closed")),
     ("sweep-with-rebind", "if isinstance(stmt, (ast.With, ast.AsyncWith)):", "if False:",
-     ("with exit, then re-bound",)),
-    ("sweep-move-clears-source",
-     "ends = [end for end, limit in moved.get(prefix, ()) if end <= at and (limit is None or at <= limit)]",
-     "ends = []", ("ownership-first idiom from an earlier alias",)),
-    ("sweep-move-in-its-region", "if end <= at and (limit is None or at <= limit)]", "if end <= at]",
-     ("move in one branch of an if, closed after the join",)),
-    ("sweep-latest-prefix-move", "if ends and (latest is None or max(ends) >= latest[0]):", "if ends:",
-     ("enclosing name moved after its attribute",)),
-    ("sweep-target-after-move", "union(key(t, bound), key(v))", "union(key(t), key(v))",
-     ("move re-binds its source to another descriptor",)),
+     ("with exit, then re-bound", "with exit in a try body, then a move, finally closes the source")),
+    ("sweep-dict-keys", "for e in node.keys + node.values if _cs_key(e)]", "for e in node.values if _cs_key(e)]",
+     ("dict display key iterated by keys()", "dict display key iterated by items()")),
+    ("sweep-loop-target-tuple", 'for target in [node.target] + list(getattr(node.target, "elts", [])):',
+     "for target in [node.target]:", ("dict display key iterated by items()",)),
+    ("sweep-with-object-exit", "return k if k and find(k) in {find(a) for a, b in wraps if closing(b)} else None",
+     "return None", ("with exit over an alias of a wrapper",)),
 )
 
 

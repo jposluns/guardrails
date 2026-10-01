@@ -3973,53 +3973,107 @@ def self_test():
                             "token instead of CHILD-DIED (a successful exit was not required)")
 
         # (9) the parent must CLOSE the pipe read fd (rfd) after reaping, or every run_bounded call leaks a
-        # descriptor. Capture the rfd os.pipe hands out, run one bounded call, and confirm the parent's rfd
-        # is CLOSED afterward (fstat -> EBADF). Removing the parent os.close(rfd) leaves it open, which this
-        # detects (and then closes so the self-test itself leaks nothing).
+        # descriptor. Capture the rfd os.pipe hands out, run one bounded call, and confirm the parent released
+        # it. Removing the parent os.close(rfd) leaves it open, which this detects (and then closes so the
+        # self-test itself leaks nothing). #378 P1: the leg probes and closes by number only what it can show
+        # is still its own. The captured pipe's (st_dev, st_ino) is recorded the moment os.pipe returns, while
+        # the call still holds it (a pipe's inode is its own while an end is open, so no other lane's open
+        # compares equal), and every close of that number the leg's close stub sees in this process marks it
+        # released in a ledger. The number counts as left open only when no close released it AND fstat still
+        # returns the identity recorded at its open, and only then is it closed. Each leg runs twice: with the
+        # parent's close releasing the number, and with another lane's file put on it instead (dup2 of the
+        # leg's own "other-lane" pipe end onto the number at that close, so it is never free for a real lane
+        # meanwhile); after that run the number must still name the other-lane pipe (nothing closed it again,
+        # the leg's check included), and only then does the leg close it, its own descriptor.
         _pipe_real6 = _os6.pipe
-        _cap6 = {}
+        _close_real6 = _os6.close
 
-        def _cap_pipe6():
-            _r, _w = _pipe_real6()
-            _cap6["rfd"] = _r
-            return _r, _w
-
-        try:
-            _os6.pipe = _cap_pipe6
-            _leak_res = run_bounded(lambda: "LEAKCHK")
-        finally:
-            _os6.pipe = _pipe_real6
-        _rfd6 = _cap6.get("rfd")
-        _leaked6 = False
-        if _rfd6 is not None:
+        def _st_ident6(fd):
             try:
-                _os6.fstat(_rfd6)
-                _leaked6 = True                            # still open: the parent close was removed
+                _st = _os6.fstat(fd)
             except OSError:
-                _leaked6 = False
+                return None
+            return _st.st_dev, _st.st_ino
+
+        def _cap_pipe_into(cap):
+            """An os.pipe stand-in recording the rfd it hands out with its identity, taken while still held."""
+            def _cap_pipe():
+                _r, _w = _pipe_real6()
+                try:
+                    _st = _os6.fstat(_r)
+                except BaseException:
+                    _close_real6(_r)                       # never released yet: still this leg's own pipe
+                    _close_real6(_w)
+                    raise
+                cap.update(rfd=_r, wfd=_w, ident=(_st.st_dev, _st.st_ino), released=False)
+                return _r, _w
+            return _cap_pipe
+
+        def _cap_release6(cap, fd, real_close):
+            """The ledger: this process's first close of the captured rfd releases it, or under cap["reuse"]
+            puts the other-lane pipe on its number instead. Returns whether it handled fd."""
+            if _os6.getpid() != cap["owner"] or fd != cap.get("rfd") or cap.get("released") is not False:
+                return False                               # a forked child's close, or not the captured number
+            cap["released"] = True
+            if cap["reuse"]:
+                _os6.dup2(_oth_r6, fd)                     # the number goes straight to another lane's file
+            else:
+                real_close(fd)
+            return True
+
+        def _cap_left_open6(cap):
+            """Whether the captured rfd is left open: no close released it and fstat still shows its identity."""
+            return cap.get("released") is False and _st_ident6(cap["rfd"]) == cap["ident"]
+
+        def _cap_reuse_kept6(cap, label):
+            """After a reuse run the captured number must still name the other-lane pipe; the leg then closes it,
+            its own descriptor. Returns the failures."""
+            if cap.get("rfd") is None or _st_ident6(cap["rfd"]) != _oth6:
+                return ["run_bounded/{}-reused-number: a number another lane reused was closed or replaced "
+                        "({})".format(label, cap.get("rfd"))]
+            _close_real6(cap["rfd"])
+            return []
+        _oth_r6, _oth_w6 = _pipe_real6()                   # the other-lane file: this leg's own pipe
+        _oth6 = _st_ident6(_oth_r6)
+        _cap6 = dict()
+
+        def _cap_close6(fd):
+            if not _cap_release6(_cap6, fd, _close_real6):
+                _close_real6(fd)
+        for _reuse6 in (False, True):
+            _tag6 = "-reused" if _reuse6 else ""
+            _cap6.clear()
+            _cap6.update(reuse=_reuse6, owner=_os6.getpid())
+            try:
+                _os6.pipe = _cap_pipe_into(_cap6)
+                _os6.close = _cap_close6
+                _leak_res = run_bounded(lambda: "LEAKCHK")
+            finally:
+                _os6.pipe = _pipe_real6
+                _os6.close = _close_real6
+            _leaked6 = _cap_left_open6(_cap6)
             if _leaked6:
-                _pipe_real6 and _os6.close(_rfd6)          # close the leak the test just detected
-        if _leak_res != "LEAKCHK":
-            failures.append("run_bounded/leak-check-setup: the capture run did not return its token")
-        if _leaked6:
-            failures.append("run_bounded/parent-rfd-leak: the parent did not close the pipe read fd "
-                            "(a descriptor leaks per call)")
+                _close_real6(_cap6["rfd"])                 # still this leg's own pipe: close the leak it detected
+            if _leak_res != "LEAKCHK":
+                failures.append("run_bounded/leak-check-setup{}: the capture run did not return its "
+                                "token".format(_tag6))
+            if _leaked6:
+                failures.append("run_bounded/parent-rfd-leak{}: the parent did not close the pipe read fd "
+                                "(a descriptor leaks per call)".format(_tag6))
+            elif _reuse6:
+                failures += _cap_reuse_kept6(_cap6, "parent-rfd")
 
         # (finding 7) the parent's wfd close was moved INSIDE the read/cleanup try/finally, so a wfd close that
         # RAISES (OSError EIO) still runs the finally that closes rfd AND reaps the child, rather than leaking
         # the read fd and orphaning the child as a close ahead of the try did. Fault-inject a wfd close that
         # really releases the fd then raises (a hostile teardown close), capturing the pipe fds and the child
-        # pid. Post-fix: rfd is closed and the child is reaped (waitpid -> ECHILD). Pre-fix: run_bounded
-        # skipped both, so rfd stayed open and the child was left unreaped.
-        _pipe_real7 = _os6.pipe
+        # pid. Post-fix: rfd is released and the child is reaped (waitpid -> ECHILD). Pre-fix: run_bounded
+        # skipped both, so rfd stayed open and the child was left unreaped. The rfd is judged as in (9): by the
+        # ledger and the identity recorded at the pipe's open, twice, the second run putting the other-lane
+        # pipe on the rfd's number at its close.
         _close_real7 = _os6.close
         _fork_real7 = _os6.fork
-        _cap7 = {}
-
-        def _cap_pipe7():
-            _r, _w = _pipe_real7()
-            _cap7["rfd"], _cap7["wfd"] = _r, _w
-            return _r, _w
+        _cap7 = dict()
 
         def _cap_fork7():
             _p = _fork_real7()
@@ -4028,46 +4082,43 @@ def self_test():
             return _p
 
         def _boom_close7(fd):
-            if fd == _cap7.get("wfd") and not _cap7.get("wfd_closed"):
+            if fd == _cap7.get("wfd") and not _cap7.get("wfd_closed") and _os6.getpid() == _cap7["owner"]:
                 _cap7["wfd_closed"] = True
                 try:
                     _close_real7(fd)                       # really release the wfd (no leak) ...
                 except OSError:
                     pass
                 raise OSError(5, "EIO (self-test injected wfd close)")   # ... then raise, as a hostile close would
-            return _close_real7(fd)
-
-        try:
-            _os6.pipe = _cap_pipe7
-            _os6.fork = _cap_fork7
-            _os6.close = _boom_close7
+            if not _cap_release6(_cap7, fd, _close_real7):
+                return _close_real7(fd)
+        for _reuse7 in (False, True):
+            _tag7 = "-reused" if _reuse7 else ""
+            _cap7.clear()
+            _cap7.update(reuse=_reuse7, owner=_os6.getpid())
             try:
-                run_bounded(lambda: "WFDCHK")              # the wfd close raises; the finally must still run
-            except OSError:
-                pass                                       # a propagated teardown OSError is acceptable; cleanup is what matters
-        finally:
-            _os6.pipe = _pipe_real7
-            _os6.fork = _fork_real7
-            _os6.close = _close_real7
-        _rfd7 = _cap7.get("rfd")
-        _rfd7_open = False
-        if _rfd7 is not None:
-            try:
-                _os6.fstat(_rfd7)
-                _rfd7_open = True                          # still open: the finally's rfd close was skipped
-            except OSError:
-                _rfd7_open = False
-            if _rfd7_open:
-                _os6.close(_rfd7)                          # close the leak the test just detected
-        if _rfd7_open:
-            failures.append("run_bounded/wfd-close-raise-rfd-leak: a raising parent wfd close skipped the "
-                            "rfd cleanup (read fd leaked; finding 7)")
-        _pid7c = _cap7.get("pid")
-        if _pid7c is not None:
-            _reaped7 = _fixture_child_reaped(_pid7c)
-            if not _reaped7:
-                failures.append("run_bounded/wfd-close-raise-unreaped-child: a raising parent wfd close "
-                                "skipped the child reap (zombie left; finding 7)")
+                _os6.pipe = _cap_pipe_into(_cap7)
+                _os6.fork = _cap_fork7
+                _os6.close = _boom_close7
+                try:
+                    run_bounded(lambda: "WFDCHK")          # the wfd close raises; the finally must still run
+                except OSError:
+                    pass                                   # a propagated teardown OSError is acceptable; cleanup is what matters
+            finally:
+                _os6.pipe = _pipe_real6
+                _os6.fork = _fork_real7
+                _os6.close = _close_real7
+            if _cap7.get("rfd") is not None and _cap_left_open6(_cap7):
+                _close_real7(_cap7["rfd"])                 # still this leg's own pipe: close the leak it detected
+                failures.append("run_bounded/wfd-close-raise-rfd-leak{}: a raising parent wfd close skipped the "
+                                "rfd cleanup (read fd leaked; finding 7)".format(_tag7))
+            elif _reuse7:
+                failures += _cap_reuse_kept6(_cap7, "wfd-close-raise-rfd")
+            _pid7c = _cap7.get("pid")
+            if _pid7c is not None and not _fixture_child_reaped(_pid7c):
+                failures.append("run_bounded/wfd-close-raise-unreaped-child{}: a raising parent wfd close "
+                                "skipped the child reap (zombie left; finding 7)".format(_tag7))
+        _close_real6(_oth_r6)
+        _close_real6(_oth_w6)
 
     # _model_equal type-strictness pins: the exact-type clause is the sole carrier of the strictness that
     # makes the round-trip proof meaningful rather than merely plausible. A mutant dropping that clause
