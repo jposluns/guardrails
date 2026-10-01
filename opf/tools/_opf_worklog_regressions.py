@@ -15,18 +15,20 @@ archive intake retains its fixed legacy shape and has no manifest contract.
 import contextlib
 import os
 import stat
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import _journal
-import _opf_absorb
-import _opf_changelog
-import _opf_check
-import _opf_store
-import _opf_views
-import _opf_worklog as wl
-import _opf_write_guard
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _journal          # noqa: E402
+import _opf_absorb       # noqa: E402
+import _opf_changelog    # noqa: E402
+import _opf_check        # noqa: E402
+import _opf_store        # noqa: E402
+import _opf_views        # noqa: E402
+import _opf_worklog as wl  # noqa: E402
+import _opf_write_guard  # noqa: E402
 
 M = "m"
 LEGACY = "m/worklog.toml"
@@ -1193,3 +1195,10 @@ def self_test():
     if not failures:
         print("OPF-WORKLOG REGRESSION: PASS ({} boundary assertions)".format(len(checks)))
     return int(bool(failures))
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
+    print("usage: _opf_worklog_regressions.py --self-test (also run by _opf_worklog.py --self-test)", file=sys.stderr)
+    sys.exit(2)
