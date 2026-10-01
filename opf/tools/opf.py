@@ -11833,10 +11833,12 @@ def _cmd_import(rest):
     REQUESTED operation, so its refusal is a cannot-evaluate, never the NOT-APPLICABLE exit 0 that
     doctor/render/upgrade report on a non-adopter root).
 
-    The CLI self-test checks this two ways. A structural check proves this function's source as parsed:
-    after this docstring the body is exactly the one print of the pointer to stderr and the one return
-    of EXIT_MALFORMED, with no reference to `rest` and no other call; no binding form it models, in any
-    expression evaluated at module scope, rebinds print, _cmd_import, sys, IMPORT_RETIRED,
+    The CLI self-test checks this two ways. A structural check proves this function's source as parsed
+    from the file's bytes, decoded as the interpreter decodes them (a coding declaration other than
+    utf-8 on line 1 or 2 is itself a finding): after this docstring the body is exactly the one print
+    of the pointer to stderr and the one return of EXIT_MALFORMED, with no reference to `rest` and no
+    other call; no binding form it models, in any expression evaluated at module scope, rebinds print,
+    _cmd_import, sys, IMPORT_RETIRED,
     EXIT_MALFORMED or __builtins__ (both _import_body_findings); the live `_cmd_import.__code__` is
     exactly the code compiled from that parsed definition (_import_code_findings); and the live
     function resolves names through this module's own namespace and the interpreter's real builtins
@@ -11853,8 +11855,10 @@ def _cmd_import(rest):
     (through sys.modules included), reassigning builtins.print, sys.stderr or another sys attribute,
     exec or eval of a string, and another module patching this one are DISCLOSED residual classes, not
     enforced. A runtime probe covers only a representative set of argument lists: while each runs, a
-    call to any probed filesystem read or write, process-spawn or stdin function is recorded and
-    refused, and the row fails."""
+    call to any probed filesystem read or write, process-spawn or stdin function through a module
+    attribute the probe patches is recorded and refused, and the row fails; a route it does not patch
+    (a call through the posix or _io modules directly, an already-open file object or descriptor, a
+    socket, ctypes) is outside the probe."""
     # `rest` is deliberately never read: every argument list meets the pointer.
     print("opf import: {}".format(IMPORT_RETIRED), file=sys.stderr)
     return EXIT_MALFORMED
@@ -11863,7 +11867,9 @@ def _cmd_import(rest):
 def _parse_unoptimized(source):
     """ast.parse(source) unoptimized on every supported Python (3.11+): optimize=0 where ast.parse has
     that parameter (3.13+), plain ast.parse before, which is equivalent because before 3.13 ast.parse
-    never runs the AST optimizer, so it strips no docstring even under python -O or -OO."""
+    never runs the AST optimizer, so it strips no docstring even under python -O or -OO. A bytes
+    `source` is decoded as the interpreter decodes a source file, honouring a PEP 263 coding
+    declaration on line 1 or 2."""
     import ast
 
     if sys.version_info >= (3, 13):
@@ -11877,9 +11883,14 @@ _IMPORT_BODY = ('print("opf import: {}".format(IMPORT_RETIRED), file=sys.stderr)
 
 
 def _import_body_findings(source):
-    """The structural no-read check for the retired import verb over the module source text `source`
-    (opf.py itself in the CLI self-test). Returns a list of findings, empty when clean. It parses the
-    source and requires that the module defines `_cmd_import` once, undecorated, taking only `rest`;
+    """The structural no-read check for the retired import verb over the module source `source` (the
+    BYTES of opf.py itself in the CLI self-test; a str is parsed as given). Returns a list of findings,
+    empty when clean. Bytes are parsed as the interpreter decodes the file, honouring a PEP 263 coding
+    declaration, so the checked text is the text the interpreter runs; and any coding declaration other
+    than utf-8 on line 1 or 2 is itself a finding (an absent one means utf-8), so a declaration that
+    decodes a comment into a statement (raw_unicode_escape turns a backslash-u000a escape into a
+    newline) is flagged both ways. It parses the source and requires that the module defines
+    `_cmd_import` once, undecorated, taking only `rest`;
     that its body after the docstring is exactly _IMPORT_BODY (one print of the pointer to sys.stderr,
     one return of EXIT_MALFORMED) with no other statement, no reference to `rest` and no call other
     than that print and its str.format; and that the names the body uses keep their plain meaning at
@@ -11897,16 +11908,35 @@ def _import_body_findings(source):
     _cmd_import's docstring, not enforced here. The source is parsed unoptimized (no AST optimizer), so the
     docstring the body check skips survives under python -O and -OO. It reads no file."""
     import ast
+    import codecs
+    import re
 
+    # A coding declaration other than utf-8 on line 1 or 2. Lines are split both at b"\n" (the
+    # tokenizer's split) and by bytes.splitlines, and every `coding[:=]` on such a line holding a `#`
+    # counts, an over-approximation of the tokenizer's first-match rule.
+    findings = []
+    raw = source if isinstance(source, bytes) else source.encode("utf-8", "surrogatepass")
+    for lineno, line in list(enumerate(raw.split(b"\n")[:2], 1)) + list(enumerate(raw.splitlines()[:2], 1)):
+        if b"#" not in line:
+            continue
+        for m in re.finditer(rb"coding[:=][ \t]*([-\w.]*)", line):
+            try:
+                name = codecs.lookup(m.group(1).decode("ascii")).name
+            except (LookupError, UnicodeDecodeError):
+                name = None
+            finding = ("line {} carries a coding declaration other than utf-8 ({!r}), so the interpreter "
+                       "decodes the file differently".format(lineno, m.group(1).decode("latin-1")))
+            if name != "utf-8" and finding not in findings:
+                findings.append(finding)
     try:
         tree = _parse_unoptimized(source)
-    except SyntaxError as exc:
-        return ["the source does not parse ({})".format(exc)]
-    findings = []
+    except (SyntaxError, ValueError) as exc:
+        return findings + ["the source does not parse ({})".format(exc)]
     defs = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
             and n.name == "_cmd_import"]
     if len(defs) != 1:
-        return ["the module defines _cmd_import {} times at module level (want once)".format(len(defs))]
+        return findings + ["the module defines _cmd_import {} times at module level (want once)".format(
+            len(defs))]
     fn = defs[0]
 
     # Module-level bindings of the watched names. A nested function or class body is its own scope, but
@@ -12026,7 +12056,8 @@ def _import_body_findings(source):
 
 def _import_code_findings(source, func, filename):
     """The live-code tie for the retired import verb: compile the `_cmd_import` definition parsed from
-    the module source text `source` (parsed unoptimized) on its own, under `filename` and at its own
+    the module source `source` (parsed unoptimized; bytes are decoded as the interpreter decodes the
+    file, honouring its coding declaration) on its own, under `filename` and at its own
     line numbers, with the source's __future__ flags only and at the interpreter's own optimization
     level (sys.flags.optimize, so under python -O or -OO both sides drop the same docstring), and
     require the function `func` (the live _cmd_import in the CLI self-test) to carry exactly that
@@ -12041,7 +12072,7 @@ def _import_code_findings(source, func, filename):
 
     try:
         tree = _parse_unoptimized(source)
-    except SyntaxError as exc:
+    except (SyntaxError, ValueError) as exc:
         return ["the source does not parse ({})".format(exc)]
     defs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_cmd_import"]
     if len(defs) != 1:
@@ -12129,7 +12160,7 @@ def _adopt_exit(status):
     """Map a planning-layer status (an _opf_adopt_plan.AdoptResult or _opf_adopt.AdoptValidation carries
     the _opf_store VALID / INVALID / CANNOT-EVALUATE vocabulary) to the CLI 0/1/2 exit contract,
     fail-closed: a status outside the vocabulary (a first-party contract violation) is exit 2, never a
-    false clean (the _import_exit idiom)."""
+    false clean."""
     if status == _opf_store.VALID:
         return EXIT_OK
     if status == _opf_store.INVALID:
@@ -12141,8 +12172,8 @@ def _adopt_read_inputs(path):
     """Read the `--inputs` adoption planning worksheet (a TOML file) for `opf adopt plan`, fail-closed.
     The worksheet is CALLER input, not a store artefact, so it may live outside the store and is read
     directly; a missing, unreadable, or malformed worksheet is a ValueError (the caller maps it to a
-    cannot-evaluate exit 2, never a silent nothing-to-do), mirroring `_import_read_set`'s read-boundary
-    discipline. Shape: `schema = 1`, `product`, `expected_observation_digest`, a `bindings` table, and
+    cannot-evaluate exit 2, never a silent nothing-to-do): an input it cannot read or parse refuses.
+    Shape: `schema = 1`, `product`, `expected_observation_digest`, a `bindings` table, and
     the optional `sources` / `targets` (arrays of relative path strings) and `decisions` / `ops` (arrays
     of tables). This reader validates STRUCTURE only, as a closed keyset; the planner and the schema
     layer own the SEMANTICS (_opf_adopt_plan.plan: the digest grammar and inventory binding, the exact
@@ -12726,7 +12757,9 @@ def _cli_self_test():
             names adoption and the prompt pack in words and no command.
 
             The no-read claim is checked two ways. The STRUCTURAL check proves _cmd_import's source as
-            parsed: _import_body_findings over this file requires _cmd_import's body after its docstring
+            parsed: _import_body_findings over this file's BYTES (read in binary and parsed as the
+            interpreter decodes them, so a coding declaration is honoured, and any declaration other than
+            utf-8 on line 1 or 2 is itself a finding) requires _cmd_import's body after its docstring
             to be exactly the one print of the pointer to stderr and the one return of EXIT_MALFORMED,
             with no reference to `rest` and no other call, and no modeled binding of print, _cmd_import,
             sys, IMPORT_RETIRED, EXIT_MALFORMED or __builtins__ in any expression evaluated at module
@@ -12743,7 +12776,10 @@ def _cli_self_test():
             generator expression, lambda, argument default, keyword default, decorator, class base or
             class keyword, and a `__builtins__` binding ahead of the def: a dict, a copy of the builtins
             with print replaced, an `import ... as __builtins__`; sys, IMPORT_RETIRED or EXIT_MALFORMED
-            bound under a condition, in a try or past the def), a swapped `__code__` with the same
+            bound under a condition, in a try or past the def; a raw_unicode_escape coding declaration
+            on line 2 hiding a print or an IMPORT_RETIRED binding after the def behind a comment opening
+            with a backslash-u000a escape, flagged both by the bytes parse and as a declaration), a
+            non-utf-8 declaration alone, a swapped `__code__` with the same
             argument count and names, the live code rebuilt over a scratch module holding each of those
             `__builtins__` values, and a function over a copy of this module's globals are each asserted
             flagged. The structural check parses unoptimized and compiles at the interpreter's level, so
@@ -12752,16 +12788,20 @@ def _cli_self_test():
             builtins.print or sys.stderr reassignment, exec / eval, another module patching this one);
             those are disclosed in _cmd_import's docstring, not enforced. The RUNTIME probe
             (representative only) runs every argument list above inside one probe context that records,
-            and refuses, ANY call to the open, stat, listing, walk, access, readlink, cwd, os.path
+            and refuses, a call through the module attributes it patches (builtins, io, os, os.path,
+            subprocess, pathlib.Path) to the open, stat, listing, walk, access, readlink, cwd, os.path
             existence and type, pathlib.Path read, query and write, filesystem write and remove (os.mkdir,
             makedirs, mkfifo, mknod, unlink, remove, removedirs, rename, renames, replace, rmdir, symlink,
             link, utime, chmod, chown, lchown, truncate, ftruncate), process-spawn
             (subprocess.Popen, os.system, os.popen, os.spawn*, os.posix_spawn*, os.exec*, os.fork) and
-            stdin-read functions while the verb runs, whatever path the call names; a row passes only if
-            no such call is made, and every probe is first asserted to record and refuse a call. The
-            fixture tree is byte-unchanged. Flip: routing `import` to the fail-closed KNOWN_VERBS branch,
-            restoring any argument check ahead of the pointer, or adding any read, write, spawn or other
-            statement to _cmd_import turns rows red."""
+            stdin-read functions while the verb runs, whatever path or descriptor the call names. A route
+            it does not patch is NOT refused: a read or write through an already-open file object or
+            descriptor (os.write included), a socket, ctypes, or a call through the posix or _io modules
+            directly (os.listdir is posix.listdir, and only the os attribute is patched). A row passes
+            only if no probed call is made, and every probe is first asserted to record and refuse a
+            call. The fixture tree is byte-unchanged. Flip: routing `import` to the fail-closed
+            KNOWN_VERBS branch, restoring any argument check ahead of the pointer, or adding any read,
+            write, spawn or other statement to _cmd_import turns rows red."""
             import ast
             import builtins as builtins_mod
             import pathlib
@@ -12830,14 +12870,22 @@ def _cli_self_test():
                 return snap
 
             # The STRUCTURAL check, total over argument lists: _cmd_import's body is exactly the print and
-            # the return, and the live function is the checked one.
+            # the return, and the live function is the checked one. The source is read as BYTES and those
+            # bytes are parsed, so a coding declaration is honoured as the interpreter honours it and the
+            # checked text is the text that runs (a utf-8 text read would check other text); the mutants
+            # below are built over its utf-8 text.
             try:
-                with open(__file__, encoding="utf-8") as fh:
+                with open(__file__, "rb") as fh:
                     own_source = fh.read()
             except OSError as exc:
                 print("opf cli self-test: harness error: could not read {} for the import structural "
                       "check ({})".format(__file__, exc), file=sys.stderr)
                 return EXIT_MALFORMED
+            try:
+                own_text = own_source.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                failures.append("import structural check: {} is not utf-8 ({})".format(__file__, exc))
+                own_text = own_source.decode("utf-8", "replace")
             for finding in _import_body_findings(own_source):
                 failures.append("import structural check: {}".format(finding))
             # The live-code tie: the live code object is exactly the one the parsed definition compiles to.
@@ -12867,9 +12915,9 @@ def _cli_self_test():
                                 "flagged")
             # The structural check flags each planted read or write (inserted ahead of the print) and each
             # rebinding (appended to the module); the unchanged source is clean, as asserted just above.
-            fn_node = [n for n in ast.parse(own_source).body
+            fn_node = [n for n in ast.parse(own_text).body
                        if isinstance(n, ast.FunctionDef) and n.name == "_cmd_import"][0]
-            lines = own_source.splitlines(keepends=True)
+            lines = own_text.splitlines(keepends=True)
             at = fn_node.body[1].lineno - 1
             planted_body = (
                 'os.listdir(rest[rest.index("--root") + 1]) if "--apply" in rest and "--root" in rest '
@@ -12900,7 +12948,7 @@ def _cli_self_test():
                 "{k: (print := w) for k in [0]}",
             )
             mutants = [(t, "".join(lines[:at] + ["    " + t + "\n"] + lines[at:])) for t in planted_body]
-            mutants += [(t, own_source + "\n" + t + "\n") for t in planted_tail]
+            mutants += [(t, own_text + "\n" + t + "\n") for t in planted_tail]
             # A `__builtins__` binding ahead of the def changes what print resolves to inside _cmd_import
             # without binding print (the round-8 reproductions: a dict, a builtins copy, an import).
             planted_head = (
@@ -12913,11 +12961,35 @@ def _cli_self_test():
             for text, mutant in mutants:
                 if not _import_body_findings(mutant):
                     failures.append("import structural check: a planted {!r} was not flagged".format(text))
+            # A coding declaration hides a binding from a check over utf-8 text: under raw_unicode_escape a
+            # backslash-u000a escape in a comment is a newline to the interpreter, so the rest of that line
+            # is a statement (the round-10 reproduction; this file carries no such escape, so the mutant
+            # decodes as intended, and the escape is built from chr(92)). Each mutant, as bytes, must be
+            # flagged both ways: the bytes parse sees the hidden binding, and the declaration is itself a
+            # finding.
+            cookie = "# -*- coding: raw_unicode_escape -*-\n"
+            for hidden, want in (("print = (lambda *a, **k: None)", "print is rebound"),
+                                 ('IMPORT_RETIRED = "x"', "IMPORT_RETIRED is not bound exactly once")):
+                mutant = "".join(lines[:1] + [cookie] + lines[1:fn_node.end_lineno]
+                                 + ["#" + chr(92) + "u000a" + hidden + "\n"] + lines[fn_node.end_lineno:])
+                got = _import_body_findings(mutant.encode("utf-8"))
+                if not (any(want in f for f in got) and any("coding declaration" in f for f in got)):
+                    failures.append("import structural check: a raw_unicode_escape declaration hiding {!r} "
+                                    "after the def was not flagged both ways ({!r})".format(hidden, got))
+            # A declaration other than utf-8 is a finding on its own (it hides nothing here); a utf-8 one
+            # on line 2 is clean.
+            for decl, flagged in (("# -*- coding: latin-1 -*-", True),
+                                  ("# vim: set fileencoding=cp1252 :", True),
+                                  ("# -*- coding: utf-8 -*-", False)):
+                got = _import_body_findings("".join(lines[:1] + [decl + "\n"] + lines[1:]).encode("utf-8"))
+                if any("coding declaration" in f for f in got) != flagged or (not flagged and got):
+                    failures.append("import structural check: a line-2 {!r} gave {!r} (want {})".format(
+                        decl, got, "a coding finding" if flagged else "none"))
 
             # A watched binding moved under a sys.argv or environment condition, into a try, or past the def
             # keeps its count and literal but can be unbound when the body runs: each is flagged.
             def nest(name, head, tail):
-                s = [s for s in ast.parse(own_source).body if isinstance(s, (ast.Assign, ast.Import))
+                s = [s for s in ast.parse(own_text).body if isinstance(s, (ast.Assign, ast.Import))
                      and name in [getattr(t, "id", None) for t in getattr(s, "targets", ())]
                      + [a.name for a in getattr(s, "names", ())]][0]
                 a, z = s.lineno - 1, s.end_lineno
@@ -13064,12 +13136,13 @@ def _cli_self_test():
                 vectors += [[], ["--plan", "--dispositions", path("not-toml.toml")]]
 
                 # The RUNTIME probe, representative only: every list above runs inside ONE probe context.
-                # While main() runs a list, a call to any function in `targets` below (and any stdin
-                # read) is recorded and refused before it acts, whatever path or descriptor it names, so
-                # a planted call to one of them is never performed; outside a run the probes call
-                # straight through. A route not in `targets` is NOT refused: a write or read through an
-                # already-open file object or descriptor (os.write included), a socket, ctypes, or a
-                # call through the posix / _io modules directly.
+                # While main() runs a list, a call through any module attribute in `targets` below (and
+                # any stdin read) is recorded and refused before it acts, whatever path or descriptor it
+                # names, so a planted call through one of them is never performed; outside a run the
+                # probes call straight through. A route not in `targets` is NOT refused: a write or read
+                # through an already-open file object or descriptor (os.write included), a socket,
+                # ctypes, or a call through the posix or _io modules directly (os.listdir is
+                # posix.listdir, and only the os attribute is patched).
                 def probe(label, real):
                     def wrapped(*args, **kwargs):
                         if not live:
@@ -13826,7 +13899,9 @@ def _cli_self_test():
               "argument list tried (none, --help, each former flag alone, valued, joined or abbreviated, "
               "the former review-aid forms, two modes, an unknown flag, --), over a NOT-ADOPTED root and "
               "over an adopted store, mutating nothing; a structural check proves _cmd_import's source as "
-              "parsed (its body exactly the pointer print and the exit-2 return, no use of its arguments, "
+              "parsed from the file's bytes as the interpreter decodes them, a coding declaration other "
+              "than utf-8 being a finding (its body exactly the pointer print and the exit-2 return, no "
+              "use of its arguments, "
               "no other call, no modeled module-scope binding of the names it uses or of __builtins__, "
               "each constant it uses bound unconditionally ahead of it), "
               "ties the live code object to it exactly and the live function to this module's globals "
@@ -13836,8 +13911,10 @@ def _cli_self_test():
               "catch reflective or dynamic changes (globals() "
               "stores, setattr on the module, builtins or sys.stderr reassignment, exec/eval, another "
               "module patching this one); a runtime probe over those representative lists only records "
-              "no call at all to its probed filesystem read, write and remove, process-spawn or stdin "
-              "functions; "
+              "no call through the module attributes it patches to its probed filesystem read, write and "
+              "remove, process-spawn or stdin functions, and a route it does not patch (a call through "
+              "the posix or _io modules directly, an already-open file object or descriptor, a socket, "
+              "ctypes) is outside it; "
               "adopt (K9a) wires the read-only plan/status subcommands onto the "
               "adoption planner -- bare/malformed usage and the deferred approve/apply/complete/reconcile "
               "fail closed to exit 2, status -> 0 no-run or verified run / 1 open-transaction or invalid-"
