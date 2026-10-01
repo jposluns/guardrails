@@ -36,9 +36,8 @@ tooling spec_version is a byte no-op when doctor-VALID and exits 2 otherwise; a 
 NOT APPLICABLE and exits 0. `import`'s former
 modes, `opf import [--root DIR] (--scan --set FILE | --plan --set FILE | --review <run-id> --actor NAME
 (--decisions FILE | --interactive) | --apply <run-id>)`, are RETIRED (spec 14.1) and their engine is
-removed: the verb refuses each mode on every root, a NOT-ADOPTED one included, at exit 2 with a pointer to
-adoption and the prompt pack, before reading any input file or writing anything (only its argv usage checks
-precede it).
+removed: the verb refuses every argument list on every root, a NOT-ADOPTED one included, at exit 2 with a
+pointer to adoption and the prompt pack, parsing no argument, reading no input file and writing nothing.
 
 `init` HAS landed: `opf init [--root DIR]` creates validated store sources, a pointer, and a starter
 `CHANGELOG.md` when none exists, without git writes or rendering.
@@ -11822,96 +11821,18 @@ IMPORT_RETIRED = (
 
 
 def _cmd_import(rest):
-    """`opf import [--root DIR] (--scan --set FILE | --plan --set FILE | --review <run-id> --actor NAME
-    (--decisions FILE | --interactive) | --apply <run-id>)`: the retired store import verb.
+    """`opf import ...`: the retired store import verb. Its former modes were `opf import [--root DIR]
+    (--scan --set FILE | --plan --set FILE | --review <run-id> --actor NAME (--decisions FILE |
+    --interactive) | --apply <run-id>)`, with the root-ingest planner's companions and the review aids.
 
-    RETIRED (spec 14.1), its engine removed: every mode refuses with IMPORT_RETIRED at exit 2, on every
-    root, before the clock, any input file or any write, and BEFORE any mode-specific argv validation, so a
-    missing or extra companion flag or a run-id outside the former grammar meets the retirement pointer,
-    never a usage error for a mode this build refuses. The parser still accepts the former modes' companion
-    flags, so every former form meets the pointer: the root-ingest planner's `--dispositions FILE`,
-    `--ingest-options FILE` and repeatable `--include GLOB`, and the review aids `--show-review` and
-    `--diff-review OLD_RUN` (each named file is never read). Every valued flag also takes the joined
-    `--flag=value` spelling, whose value is taken verbatim, as the former argparse review aid took it: it
-    is malformed only when empty, so `--root=-old` or `--root=--scan` meets the pointer. A separate value
-    token is malformed when missing, empty or starting with `-` (`--root -old` is a usage error). A joined
-    value on a valueless flag (`--show-review=x`) stays an unrecognized argument. An unambiguous prefix of
-    a former flag (`--rev` for --review, `--ro` for --root), alone or joined, is taken as that flag, as the
-    former argparse review aid took it, but only in option position: a token consumed as a separate value
-    is never expanded, and a usage message names the flag as typed, with its expansion when that differs
-    (`--rev (--review) requires an argument`). A repeated former flag other than a mode is accepted (the
-    verb refuses anyway, so no value is kept). Only the token parser (an unknown flag, an ambiguous prefix, a
-    missing or empty value, a separate value starting with `-`) and the exactly-one-mode rule, which a
-    repeated mode also breaks, precede it: a bare `opf import` or two modes is a usage error (exit 2)
-    without the pointer. The root is never resolved, so an unresolved / NOT-ADOPTED root refuses the same
-    way (D7: import is a REQUESTED operation, so its refusal is a cannot-evaluate, never the NOT-APPLICABLE
-    exit 0 that doctor/render/upgrade report on a non-adopter root)."""
-    mode = None
-    # Every flag the verb accepted before its retirement: the four modes, their companions, the
-    # root-ingest planner's companions and the review aids.
-    modes = ("--scan", "--plan", "--review", "--apply")
-    valued = ("--review", "--apply", "--root", "--set", "--actor", "--decisions", "--dispositions",
-              "--ingest-options", "--include", "--diff-review")
-    valueless = ("--scan", "--plan", "--interactive", "--show-review")
-    former = valued + valueless
-
-    def _prefixed(name):
-        # The former flags `name` abbreviates: itself alone on an exact match, else every flag it prefixes.
-        if name in former:
-            return [name]
-        if not name.startswith("--") or len(name) <= 2:
-            return []
-        return sorted(f for f in former if f.startswith(name))
-
-    def _value_error(shown, val):
-        print("opf import: {} requires a non-empty argument, not {!r}".format(shown, val), file=sys.stderr)
-        return EXIT_MALFORMED
-
-    # One pass over the tokens as typed. Only a token in option position is matched against the former
-    # flags, so a token consumed as a separate value is never expanded and a usage message quotes it as
-    # typed. An unambiguous prefix counts as its flag, and every message names the flag as the user spelled
-    # it, with its expansion when that differs (`--rev (--review)`). A joined `--flag=value` on a valued flag
-    # takes the value verbatim (even one starting with `-`), and only an empty one is the usual usage error.
-    # Any other `=`-joined token, `--x=y` or a valueless flag such as `--show-review=x`, stays unrecognized;
-    # an ambiguous prefix, alone or joined, is a usage error naming its candidates.
-    i = 0
-    while i < len(rest):
-        tok = rest[i]
-        name, eq, val = tok.partition("=")
-        hits = _prefixed(name)
-        flag = hits[0] if len(hits) == 1 else None
-        if flag is None or (eq and flag not in valued):
-            if len(hits) > 1:
-                print("opf import: ambiguous option {!r} could match {}".format(tok, ", ".join(hits)),
-                      file=sys.stderr)
-            else:
-                print("opf import: unrecognized argument {!r}".format(tok), file=sys.stderr)
-            return EXIT_MALFORMED
-        shown = name if name == flag else "{} ({})".format(name, flag)
-        if flag in modes:
-            if mode is not None:
-                print("opf import: give exactly one mode (--scan / --plan / --review / --apply)",
-                      file=sys.stderr)
-                return EXIT_MALFORMED
-            mode = flag[2:]
-        if flag in valueless:
-            i += 1
-        elif eq:
-            if val == "":
-                return _value_error(shown, val)
-            i += 1
-        elif i + 1 >= len(rest):
-            print("opf import: {} requires an argument".format(shown), file=sys.stderr)
-            return EXIT_MALFORMED
-        else:
-            val = rest[i + 1]
-            if val == "" or val.startswith("-"):
-                return _value_error(shown, val)
-            i += 2
-
-    if mode is None:
-        print("opf import: give exactly one mode (--scan / --plan / --review / --apply)", file=sys.stderr)
-        return EXIT_MALFORMED
+    RETIRED (spec 14.1), its engine removed: the verb prints IMPORT_RETIRED and exits 2 for EVERY argument
+    list, whether none, `--help`, any former form (spelled in full, by prefix, joined or repeated) or any
+    other token. No argument is parsed or validated, so no former form can meet a usage error instead of
+    the pointer. Nothing reads the clock, stdin, a named file or the store, and nothing is written. The
+    root is never resolved, so an unresolved / NOT-ADOPTED root refuses the same way (D7: import is a
+    REQUESTED operation, so its refusal is a cannot-evaluate, never the NOT-APPLICABLE exit 0 that
+    doctor/render/upgrade report on a non-adopter root)."""
+    # `rest` is deliberately never read: every argument list meets the pointer.
     print("opf import: {}".format(IMPORT_RETIRED), file=sys.stderr)
     return EXIT_MALFORMED
 
@@ -12069,7 +11990,7 @@ def _cmd_adopt(rest):
           `plan`, a NOT-ADOPTED root is fine: adoption is the verb that PRECEDES a store, so neither
           subcommand requires store resolution (unlike import D7).
 
-    The parser is the house fail-closed idiom (_cmd_import): an unknown subcommand or token, an empty or
+    The parser is the house fail-closed idiom: an unknown subcommand or token, an empty or
     option-looking or duplicate value -> exit 2. Every residual escape fails closed to exit 2 (never a
     false 0 or an uncaught exit-1), the same class-width backstop render/doctor/import carry."""
     subcommands = ("plan", "approve", "apply", "complete", "reconcile", "status")
@@ -12365,31 +12286,16 @@ def _cli_self_test():
         expect(["absorb", "--covers", ""], EXIT_MALFORMED)       # empty covers refused
         expect(["absorb", "--bogus"], EXIT_MALFORMED)            # unknown arg
 
-        # import verb ROUTING (OPF-IMPORT-VERB), judged on exit code only. These cases fail closed BEFORE
-        # any store resolution, so they need no store on disk. A bare `import`, a token-parser error and a
-        # duplicate mode are usage errors (exit 2); a well-parsed retired mode, whatever its companion
-        # flags, meets the verb's retirement refusal (also exit 2; the refusal/usage split and the pointer
-        # text are asserted in _import_leg below, the wiring discriminator).
-        _VALID_RID = "imp-20260101T000000Z-0123456789abcdef"   # syntactically valid; names no staged run
-        expect(["import"], EXIT_MALFORMED)                       # bare: exactly one mode required
-        expect(["import", "--root", "."], EXIT_MALFORMED)        # --root but no mode
-        expect(["import", "--set", "s.toml"], EXIT_MALFORMED)    # --set but no mode
-        expect(["import", "--scan", "--plan", "--set", "s.toml"], EXIT_MALFORMED)  # two modes
-        expect(["import", "--scan"], EXIT_MALFORMED)             # retired --scan: the refusal
-        expect(["import", "--plan"], EXIT_MALFORMED)             # retired --plan: the refusal
-        expect(["import", "--scan", "--set"], EXIT_MALFORMED)    # --set needs a value
-        expect(["import", "--scan", "--set", "s.toml", "--actor", "x"], EXIT_MALFORMED)  # retired --scan: the refusal
-        expect(["import", "--review"], EXIT_MALFORMED)           # --review needs a <run-id>
-        expect(["import", "--review", _VALID_RID], EXIT_MALFORMED)   # retired --review: the refusal
-        expect(["import", "--review", _VALID_RID, "--actor", "x"], EXIT_MALFORMED)  # retired --review: the refusal
-        expect(["import", "--review", _VALID_RID, "--actor", "x", "--decisions", "d.json",
-                "--interactive"], EXIT_MALFORMED)                # retired --review: the refusal
-        expect(["import", "--review", _VALID_RID, "--actor", "", "--interactive"], EXIT_MALFORMED)  # empty actor
-        expect(["import", "--review", "not-a-run-id", "--actor", "x", "--interactive"], EXIT_MALFORMED)  # the refusal
-        expect(["import", "--apply", _VALID_RID, "--actor", "x"], EXIT_MALFORMED)   # retired --apply: the refusal
-        expect(["import", "--apply", "not-a-run-id"], EXIT_MALFORMED)   # retired --apply: the refusal
-        expect(["import", "--bogus", "--scan", "--set", "s.toml"], EXIT_MALFORMED)  # unknown arg
-        expect(["import", "--root"], EXIT_MALFORMED)             # --root needs a value
+        # import verb ROUTING (OPF-IMPORT-VERB), judged on exit code only. The retired verb parses no
+        # argument, so every argument list, a bare `import` included, meets its retirement pointer at exit 2
+        # before any store resolution and needs no store on disk (the exact pointer text, the no-read and
+        # no-write rows are asserted in _import_leg below, the wiring discriminator).
+        _VALID_RID = "imp-20260101T000000Z-0123456789abcdef"   # the former run-id grammar; names no staged run
+        expect(["import"], EXIT_MALFORMED)                       # bare
+        expect(["import", "--help"], EXIT_MALFORMED)             # help is the pointer too
+        expect(["import", "--scan", "--set", "s.toml"], EXIT_MALFORMED)   # a former --scan form
+        expect(["import", "--review", _VALID_RID, "--actor", "x", "--interactive"], EXIT_MALFORMED)
+        expect(["import", "--bogus"], EXIT_MALFORMED)            # an unknown flag
 
         # record verb ROUTING (OPF-RECORD), judged on exit code only. These grammar cases fail closed in the
         # parser BEFORE any store resolution, so they need no store on disk; the recorded 0 / refusal 2
@@ -12535,51 +12441,48 @@ def _cli_self_test():
             return None
 
         def _import_leg():
-            """Drive the retired import modes (spec 14.1) over a VALID synthetic store and a NOT-ADOPTED root,
-            judged on exit codes, the refusal text AND observable side effects. Returns None on success or
-            EXIT_MALFORMED on a harness (fixture I/O) error. Vectors: --scan, --plan, --review (batch and
-            --interactive) and --apply each exit 2 with IMPORT_RETIRED over both roots and write nothing; a
-            malformed or missing --set / --decisions file meets the same refusal (no input file is read), and
-            so does a mode-specific argv violation (a missing or extra companion flag, a run-id outside the
-            former grammar) and every former companion flag (the root-ingest --dispositions,
-            --ingest-options and repeatable --include; the review aids --show-review and --diff-review), in
-            the separate and the joined `--flag=value` spellings alike (a joined value taken verbatim, a
-            leading `-` included), by an unambiguous prefix as well, and with a non-mode former flag
-            repeated. Only a token-parser usage error (a flag missing its value, an empty joined value, a
-            separate value starting with `-`, an ambiguous prefix, an unknown flag) and the exactly-one-mode
-            rule, a repeated mode included, exit 2 before it, without the refusal text. The pointer names adoption and
-            the prompt pack in words and no command. Flip: routing `import` to the fail-closed KNOWN_VERBS
-            branch, restoring a mode-specific check or an input reader ahead of the refusal, or dropping a
-            former companion flag from the token parser, turns rows red."""
+            """Drive the retired import verb (spec 14.1), judged on the exact output, the exit code AND
+            observable side effects. Returns None on success or EXIT_MALFORMED on a harness (fixture I/O)
+            error. The verb parses no argument, so every argument list prints exactly the retirement
+            pointer (IMPORT_RETIRED) on stderr, nothing on stdout, and exits 2. Vectors: no arguments,
+            `--help` / `-h`, each of the 14 former flags alone, with a separate value, with a joined value
+            and with an empty joined value; abbreviated and ambiguous prefixes, alone and joined; the
+            former argparse review-aid forms (`--review -1 --show-review`, an empty `--root=`, a repeated
+            `--review`, a separate value starting with `-`, the `--s` / `--d` abbreviations); the former
+            full forms of every mode over an adopted store and a NOT-ADOPTED root, with malformed or
+            missing named files; two modes; an unknown flag, a positional token and `--`. Over the
+            temporary fixture no filesystem call names a path under it (or a relative path, or a
+            descriptor), stdin is left unread, and the tree is byte-unchanged. The pointer names adoption
+            and the prompt pack in words and no command. Flip: routing `import` to the fail-closed
+            KNOWN_VERBS branch, restoring any argument check (a usage error for a bare `import`, a missing
+            value, a prefix or two modes) ahead of the pointer, or a read of the root or a named file,
+            turns rows red."""
+            import builtins as builtins_mod
             import re
+            from unittest import mock
 
             refusal = IMPORT_RETIRED
+            pointer = "opf import: {}\n".format(refusal)
             _RID = "imp-20260101T000000Z-0123456789abcdef"   # the former run-id grammar; names no run
+            former_valued = ("--review", "--apply", "--root", "--set", "--actor", "--decisions",
+                             "--dispositions", "--ingest-options", "--include", "--diff-review")
+            former_valueless = ("--scan", "--plan", "--interactive", "--show-review")
 
             def run_cli(argv):
-                buf = io.StringIO()
-                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                     rc = main(argv)
-                return rc, buf.getvalue()
+                return rc, out.getvalue(), err.getvalue()
 
-            def refused(argv, what):
-                rc, out = run_cli(argv)
-                if rc != EXIT_MALFORMED or refusal not in out:
-                    failures.append("import {}: rc={!r} (expected 2 + the retirement refusal)".format(what, rc))
-
-            def usage(argv, needle, what):
-                rc, out = run_cli(argv)
-                if rc != EXIT_MALFORMED or refusal in out or needle not in out:
-                    failures.append("import {}: rc={!r} (expected the usage error {!r} at exit 2, before the "
-                                    "refusal)".format(what, rc, needle))
-
-            def usage_text(argv, text, what):
-                # The whole output must be exactly this usage line: the flag as typed, never an expansion
-                # of a token the user gave as a value.
-                rc, out = run_cli(argv)
-                if rc != EXIT_MALFORMED or out != text:
-                    failures.append("import {}: rc={!r} out={!r} (expected exactly {!r} at exit 2)".format(
-                        what, rc, out, text))
+            def refused(argv):
+                try:
+                    rc, out, err = run_cli(["import"] + argv)
+                except BaseException as exc:            # an escape is itself a failure, never a pass
+                    failures.append("import {!r} raised {!r}".format(argv, exc))
+                    return
+                if rc != EXIT_MALFORMED or out != "" or err != pointer:
+                    failures.append("import {!r}: rc={!r} stdout={!r} stderr={!r} (expected exactly the "
+                                    "retirement pointer on stderr at exit 2)".format(argv, rc, out, err))
 
             def tree_snapshot(rootdir):
                 snap = {}
@@ -12620,12 +12523,8 @@ def _cli_self_test():
                         fh.write("first source body\n")
                     inputs = {
                         "set.toml": 'schema = 1\nsource = ["a.txt"]\n',
-                        "set-schema-true.toml": 'schema = true\nsource = ["a.txt"]\n',
-                        "set-schema-float.toml": 'schema = 1.0\nsource = ["a.txt"]\n',
-                        "set-badprop.toml": 'schema = 1\nsource = ["a.txt"]\nproposal = [5, 7]\n',
                         "not-toml.toml": "option = [\n",
                         "decisions.json": json.dumps({"schema": 1, "run_id": _RID, "decisions": []}),
-                        "dec-schema-true.json": json.dumps({"schema": True, "run_id": _RID, "decisions": []}),
                         "not-json.json": "{",
                     }
                     for name, body in inputs.items():
@@ -12642,191 +12541,97 @@ def _cli_self_test():
                     return os.path.join(ibase, name)
 
                 before = tree_snapshot(ibase)
-                # Every retired mode refuses over the adopted store and over a NOT-ADOPTED root.
-                for label, top in (("store", store), ("not adopted", not_adopted)):
-                    refused(["import", "--scan", "--set", path("set.toml"), "--root", top],
-                            "--scan ({})".format(label))
-                    refused(["import", "--plan", "--set", path("set.toml"), "--root", top],
-                            "--plan ({})".format(label))
-                    refused(["import", "--review", _RID, "--actor", "tester", "--decisions",
-                             path("decisions.json"), "--root", top], "--review ({})".format(label))
-                    real_stdin = sys.stdin
-                    sys.stdin = io.StringIO("accept\n")
-                    try:
-                        refused(["import", "--review", _RID, "--actor", "tester", "--interactive", "--root", top],
-                                "--review --interactive ({})".format(label))
-                        consumed = sys.stdin.read() != "accept\n"
-                    finally:
-                        sys.stdin = real_stdin
-                    if consumed:
-                        failures.append("a refused import --review --interactive read stdin ({})".format(label))
-                    refused(["import", "--apply", _RID, "--root", top], "--apply ({})".format(label))
-                # No input file is read: a malformed or missing --set / --decisions file meets the refusal,
-                # never a reader error.
-                for name in ("set-schema-true.toml", "set-schema-float.toml", "set-badprop.toml",
-                             "not-toml.toml", "missing.toml"):
-                    refused(["import", "--scan", "--set", path(name), "--root", store], "--scan --set " + name)
-                    refused(["import", "--plan", "--set", path(name), "--root", store], "--plan --set " + name)
-                for name in ("dec-schema-true.json", "not-json.json", "missing.json"):
-                    refused(["import", "--review", _RID, "--actor", "tester", "--decisions", path(name),
-                             "--root", store], "--review --decisions " + name)
-                # A mode-specific argv violation meets the refusal: the former mode-combination rules and
-                # the run-id grammar check are retired with the modes.
-                for argv, what in (
-                        (["import", "--scan", "--root", store], "--scan without --set"),
-                        (["import", "--plan", "--root", store], "--plan without --set"),
-                        (["import", "--scan", "--set", path("set.toml"), "--actor", "x", "--root", store],
-                         "--scan with --actor"),
-                        (["import", "--review", _RID, "--root", store], "--review without --actor"),
-                        (["import", "--review", _RID, "--actor", "tester", "--decisions", path("decisions.json"),
-                          "--interactive", "--root", store], "--review with both --decisions/--interactive"),
-                        (["import", "--apply", _RID, "--set", path("set.toml"), "--root", store],
-                         "--apply with --set"),
-                        (["import", "--apply", "not-a-run-id", "--root", store],
-                         "--apply outside the run-id grammar"),
-                ):
-                    refused(argv, what)
-                # Every former companion flag parses and meets the refusal, its named file never read (spec
-                # 14.1): the root-ingest planner's --dispositions / --ingest-options / repeatable --include,
-                # and the review aids --show-review / --diff-review, alone or combined.
-                for argv, what in (
-                        (["import", "--plan", "--dispositions", path("not-toml.toml"), "--root", store],
-                         "--plan --dispositions (a malformed worksheet)"),
-                        (["import", "--plan", "--dispositions", path("missing.toml"), "--root", not_adopted],
-                         "--plan --dispositions (a missing worksheet, not adopted)"),
-                        (["import", "--plan", "--ingest-options", path("not-toml.toml"), "--root", store],
-                         "--plan --ingest-options"),
-                        (["import", "--plan", "--include", "*.md", "--include", "docs/*", "--root", store],
-                         "--plan with a repeated --include"),
-                        (["import", "--plan", "--dispositions", path("not-toml.toml"), "--ingest-options",
-                          path("missing.toml"), "--include", "*", "--root", store],
-                         "--plan with every root-ingest companion"),
-                        (["import", "--show-review", "--review", _RID, "--root", store],
-                         "--review --show-review"),
-                        (["import", "--review", _RID, "--diff-review", _RID, "--root", not_adopted],
-                         "--review --diff-review (not adopted)"),
-                        (["import", "--review", _RID, "--show-review", "--diff-review", _RID, "--root", store],
-                         "--review with both review aids"),
-                ):
-                    refused(argv, what)
-                # The joined `--flag=value` spelling of every valued former flag meets the same refusal.
-                for argv, what in (
-                        (["import", "--review=" + _RID, "--show-review", "--root=" + store],
-                         "--review=R --show-review --root=DIR"),
-                        (["import", "--apply=" + _RID, "--root=" + not_adopted], "--apply=R (not adopted)"),
-                        (["import", "--scan", "--set=" + path("set.toml"), "--root", store],
-                         "--scan --set=FILE"),
-                        (["import", "--review", _RID, "--actor=tester",
-                          "--decisions=" + path("not-json.json"), "--root", store],
-                         "--review --actor=NAME --decisions=FILE"),
-                        (["import", "--plan", "--dispositions=" + path("not-toml.toml"), "--root", store],
-                         "--plan --dispositions=FILE"),
-                        (["import", "--plan", "--ingest-options=" + path("missing.toml"), "--root", store],
-                         "--plan --ingest-options=FILE"),
-                        (["import", "--plan", "--include=*.md", "--include", "a=b", "--root", store],
-                         "--plan --include=GLOB"),
-                        (["import", "--review", _RID, "--diff-review=" + _RID, "--root", store],
-                         "--review --diff-review=OLD_RUN"),
-                ):
-                    refused(argv, what)
-                # A joined value is taken verbatim, as the former argparse review aid took it: one starting
-                # with `-`, even one spelling a mode, is that flag's value and meets the refusal.
-                for argv, what in (
-                        (["import", "--review", _RID, "--show-review", "--root=-old"],
-                         "--review R --show-review --root=-old"),
-                        (["import", "--review", _RID, "--show-review", "--root=--scan"],
-                         "--review R --show-review --root=--scan"),
-                        (["import", "--review=-x", "--show-review"], "--review=-x --show-review"),
-                        (["import", "--diff-review=--old", "--review", _RID], "--diff-review=--old --review R"),
-                        (["import", "--review", _RID, "--show-review", "--ro=-old"],
-                         "--review R --show-review --ro=-old"),
-                ):
-                    refused(argv, what)
-                # An unambiguous prefix of a former flag, alone or joined, is that flag, as the former
-                # argparse review aid took it; a repeated former flag other than a mode meets the refusal
-                # rather than a duplicate usage error.
-                for argv, what in (
-                        (["import", "--rev", _RID, "--show-review", "--root", store],
-                         "--rev R --show-review --root DIR"),
-                        (["import", "--review", _RID, "--show", "--ro", not_adopted],
-                         "--review R --show --ro DIR (not adopted)"),
-                        (["import", "--rev=" + _RID, "--diff=" + _RID, "--ro=" + store],
-                         "--rev=R --diff=OLD --ro=DIR"),
-                        (["import", "--sc", "--se", path("set.toml"), "--ro", store], "--sc --se FILE"),
-                        (["import", "--pl", "--disp", path("not-toml.toml"), "--ing", path("missing.toml"),
-                          "--inc", "*", "--root", store], "--pl --disp --ing --inc"),
-                        (["import", "--ap", _RID, "--ac", "x", "--root", store], "--ap R --ac NAME"),
-                        (["import", "--review", _RID, "--act", "x", "--dec", path("not-json.json"), "--int",
-                          "--root", store], "--review --act --dec --int"),
-                        (["import", "--plan", "--dispositions", path("set.toml"), "--dispositions",
-                          path("set.toml"), "--root", store], "--plan with two --dispositions"),
-                        (["import", "--review", _RID, "--show-review", "--show-review", "--root", store],
-                         "--review with two --show-review"),
-                        (["import", "--plan", "--root=" + store, "--root=" + store], "--plan with two --root="),
-                        (["import", "--rev", _RID, "--show-review", "--ro", store, "--root", not_adopted,
-                          "--diff-review", _RID, "--diff", _RID, "--actor", "a", "--act", "b", "--interactive",
-                          "--interactive"], "--review with every review-side flag repeated"),
-                ):
-                    refused(argv, what)
+                # A representative set of argument lists, store-free and over the fixture alike.
+                vectors = [[], ["--help"], ["-h"]]
+                for flag in former_valued + former_valueless:
+                    vectors += [[flag], [flag, "x"], [flag + "=x"], [flag + "="]]
+                vectors += [
+                    # Abbreviated prefixes, unambiguous and ambiguous, alone and joined.
+                    ["--rev", _RID], ["--ro", store], ["--sc"], ["--pl"], ["--ap", _RID], ["--rev=" + _RID],
+                    ["--ro=" + store], ["--ro="], ["--r", _RID], ["--in=x"], ["--sh=x"], ["--show-reviews"],
+                    # The former argparse review-aid forms.
+                    ["--review", "-1", "--show-review"], ["--review", _RID, "--show-review", "--root="],
+                    ["--review", _RID, "--review", _RID], ["--review", _RID, "--root", "-old"],
+                    ["--review", _RID, "--s"], ["--review", _RID, "--d", _RID],
+                    ["--review=-x", "--show-review"],
+                    ["--review", _RID, "--show-review", "--root=--scan"],
+                    ["--diff-review=--old", "--review", _RID],
+                    ["--review", _RID, "--show-review", "--show-review"], ["--rev", _RID, "--review", _RID],
+                    # Two modes, a repeated mode, and a valueless flag given a value.
+                    ["--scan", "--plan"], ["--scan", "--scan"], ["--show-review=x"],
+                    # An unknown flag, an unknown joined flag, a positional token, an empty token, and `--`.
+                    ["--bogus"], ["--x=y"], ["frobnicate"], [""], ["--"], ["--", "--scan"],
+                    ["--plan", "--", "--root", store],
+                ]
+                # Every former mode in its full form, over the adopted store and a NOT-ADOPTED root, with
+                # well-formed, malformed and missing named files alike.
+                for top in (store, not_adopted):
+                    vectors += [
+                        ["--scan", "--set", path("set.toml"), "--root", top],
+                        ["--plan", "--set", path("not-toml.toml"), "--root", top],
+                        ["--plan", "--dispositions", path("missing.toml"), "--ingest-options",
+                         path("not-toml.toml"), "--include", "*.md", "--include", "docs/*", "--root", top],
+                        ["--review", _RID, "--actor", "tester", "--decisions", path("decisions.json"),
+                         "--root", top],
+                        ["--review", _RID, "--actor", "tester", "--decisions", path("not-json.json"),
+                         "--show-review", "--diff-review", _RID, "--root", top],
+                        ["--review", _RID, "--actor", "tester", "--interactive", "--root", top],
+                        ["--apply", _RID, "--root", top],
+                        ["--apply", "not-a-run-id", "--set", path("missing.json"), "--root=" + top],
+                    ]
+                for argv in vectors:
+                    refused(argv)
+
+                # No file is created or read under the temporary fixture: every filesystem call is
+                # recorded while the verb runs, and one naming a path under the fixture, a relative path
+                # (the default root is the cwd) or a descriptor is a read; stdin stays unread; the tree is
+                # byte-unchanged over every vector above and below.
+                touched = []
+                # Resolved before the probes are installed: the probes compare strings only, never
+                # calling the filesystem functions they wrap.
+                bases = {os.path.abspath(ibase), os.path.realpath(ibase)}
+
+                def probe(fn):
+                    def wrapped(target, *args, **kwargs):
+                        if isinstance(target, int):
+                            touched.append((fn.__name__, target))
+                        else:
+                            try:
+                                name = os.fsdecode(os.fspath(target))
+                            except TypeError:
+                                name = None
+                            if name is not None:
+                                norm = os.path.normpath(name)
+                                if not os.path.isabs(name) or any(
+                                        norm == b or norm.startswith(b + os.sep) for b in bases):
+                                    touched.append((fn.__name__, name))
+                        return fn(target, *args, **kwargs)
+                    return wrapped
+
+                real_stdin = sys.stdin
+                sys.stdin = io.StringIO("accept\n")
+                try:
+                    with contextlib.ExitStack() as stack:
+                        for owner, attr in ((builtins_mod, "open"), (io, "open"), (os, "open"),
+                                            (os, "stat"), (os, "lstat"), (os, "scandir"),
+                                            (os, "listdir"), (os, "access"), (os, "readlink")):
+                            stack.enter_context(mock.patch.object(owner, attr, probe(getattr(owner, attr))))
+                        for top in (store, not_adopted):
+                            refused(["--review", _RID, "--actor", "tester", "--interactive", "--root", top])
+                            refused(["--scan", "--set", path("set.toml"), "--root", top])
+                            refused(["--review", _RID, "--decisions", path("decisions.json"), "--root=" + top])
+                        refused([])
+                        refused(["--plan", "--dispositions", path("not-toml.toml")])
+                    consumed = sys.stdin.read() != "accept\n"
+                finally:
+                    sys.stdin = real_stdin
+                if touched:
+                    failures.append("a refused import touched the filesystem under the fixture or by a "
+                                    "relative path or descriptor: {!r}".format(touched))
+                if consumed:
+                    failures.append("a refused import read stdin")
                 if tree_snapshot(ibase) != before:
-                    failures.append("a refused import mode changed the fixture tree")
-                # Only the token parser and the exactly-one-mode rule precede the refusal.
-                usage(["import", "--scan", "--set", "--root", store], "requires a non-empty argument",
-                      "--scan with a valueless --set")
-                usage(["import", "--root", store], "give exactly one mode", "with no mode")
-                usage(["import", "--scan", "--plan", "--set", path("set.toml")], "give exactly one mode",
-                      "with two modes")
-                usage(["import", "--plan", "--dispositions", "--root", store], "requires a non-empty argument",
-                      "--plan with a valueless --dispositions")
-                usage(["import", "--review", _RID, "--diff-review"], "requires an argument",
-                      "--review with a trailing valueless --diff-review")
-                usage(["import", "--plan", "--include", "", "--root", store], "requires a non-empty argument",
-                      "--plan with an empty --include")
-                usage(["import", "--scan", "--scan", "--set", path("set.toml")], "give exactly one mode",
-                      "with a repeated mode")
-                usage(["import", "--rev", _RID, "--review", _RID, "--show-review"], "give exactly one mode",
-                      "with a repeated mode spelled by prefix")
-                usage(["import", "--review", _RID, "--d", _RID, "--root", store],
-                      "ambiguous option '--d' could match --decisions, --diff-review, --dispositions",
-                      "--review with the ambiguous prefix --d")
-                usage(["import", "--r", _RID, "--show-review"], "ambiguous option '--r'",
-                      "the ambiguous prefix --r")
-                usage(["import", "--plan", "--in=x", "--root", store], "ambiguous option '--in=x'",
-                      "--plan with the ambiguous joined prefix --in=")
-                usage(["import", "--review", _RID, "--sh=x"], "unrecognized argument",
-                      "--review with a joined value on a prefix of the valueless --show-review")
-                usage(["import", "--review", _RID, "--show-reviews"], "unrecognized argument",
-                      "--review with a flag a former flag only prefixes")
-                usage(["import", "--plan", "--", "--root", store], "unrecognized argument",
-                      "--plan with a bare --")
-                usage(["import", "--show-review", "--root", store], "give exactly one mode",
-                      "--show-review with no mode")
-                usage(["import", "--plan", "--no-such-flag", "--root", store], "unrecognized argument",
-                      "--plan with an unknown flag")
-                usage(["import", "--plan", "--x=y", "--root", store], "unrecognized argument",
-                      "--plan with an unknown joined flag")
-                usage(["import", "--review", _RID, "--show-review=x"], "unrecognized argument",
-                      "--review with a joined value on the valueless --show-review")
-                usage(["import", "--apply", _RID, "--root="], "requires a non-empty argument",
-                      "--apply with an empty --root=")
-                usage(["import", "--review=", "--root", store], "requires a non-empty argument",
-                      "an empty --review=")
-                usage(["import", "--review", _RID, "--show-review", "--root="], "requires a non-empty argument",
-                      "--review R --show-review with an empty --root=")
-                usage(["import", "--review", _RID, "--show-review", "--root", "-old"],
-                      "requires a non-empty argument", "--review R --show-review with a separate --root -old")
-                # A prefix is expanded only in option position, and a usage message names the flag as typed:
-                # the separate value `--sc` stays `--sc`, and `--rev` is quoted with its expansion. Flip:
-                # expanding every token before the parse names `--scan`, and naming only the expansion
-                # drops `--rev`.
-                usage_text(["import", "--plan", "--set", "--sc"],
-                           "opf import: --set requires a non-empty argument, not '--sc'\n",
-                           "--plan --set with the separate value --sc")
-                usage_text(["import", "--rev"], "opf import: --rev (--review) requires an argument\n",
-                           "a trailing --rev")
-                usage_text(["import", "--plan", "--ro="],
-                           "opf import: --ro (--root) requires a non-empty argument, not ''\n",
-                           "--plan with an empty joined --ro=")
+                    failures.append("a refused import changed the fixture tree")
                 # The pointer is to adoption and the prompt pack in words, naming no command (spec 14.1).
                 if not ("adoption (OPF spec 14.1)" in refusal and "prompt pack" in refusal
                         and not re.search(r"`|\bopf [a-z]", refusal)):
@@ -13483,15 +13288,14 @@ def _cli_self_test():
             for f in failures:
                 print("opf cli self-test: FAIL: {}".format(f), file=sys.stderr)
             return EXIT_FINDING
-        print("opf cli self-test: PASS (verb routing: unknown/unwired verbs and render/doctor/import usage "
+        print("opf cli self-test: PASS (verb routing: unknown/unwired verbs and render/doctor usage "
               "errors fail closed; render --check forwards to the U4 engine; doctor resolves + validates a "
               "store, NOT-ADOPTED -> 0 (2 with --require-store) and a garbage store -> 2; "
-              "import surfaces the retired --scan / --plan / --review / --apply refusal (spec 14.1) at exit 2 "
-              "over a NOT-ADOPTED root and over an adopted store, each mutating nothing, before any input "
-              "file is read AND before any mode-specific argv validation (a malformed or missing --set / "
-              "--decisions file, a missing or extra companion flag, and a run-id outside the former grammar "
-              "each meet the refusal; only a token-parser usage error or the exactly-one-mode rule precedes "
-              "it); "
+              "the retired import verb (spec 14.1) prints exactly its retirement pointer at exit 2 for every "
+              "argument list tried (none, --help, each former flag alone, valued, joined or abbreviated, "
+              "the former review-aid forms, two modes, an unknown flag, --), parsing no argument, over a "
+              "NOT-ADOPTED root and over an adopted store, reading no file under the fixture or stdin and "
+              "mutating nothing; "
               "adopt (K9a) wires the read-only plan/status subcommands onto the "
               "adoption planner -- bare/malformed usage and the deferred approve/apply/complete/reconcile "
               "fail closed to exit 2, status -> 0 no-run or verified run / 1 open-transaction or invalid-"

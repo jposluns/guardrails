@@ -188,19 +188,18 @@
     <h3 id="cmd-import"><code>opf import</code></h3>
     <p><b style="color:var(--ink)">Status.</b> The ordinary import modes are retired. The reference CLI's
       former <code>--scan</code>, <code>--plan</code>, <code>--review</code>, and <code>--apply</code>
-      modes now refuse with exit 2 and write nothing.</p>
+      modes now refuse with exit 2 and write nothing, as does every other <code>opf import</code>
+      command line.</p>
     <p><b style="color:var(--ink)">Purpose.</b> In the standard, <code>opf import</code> is only the
       post-adoption import activity. Clean-start adoption is the intake for an existing project: it
       preserves and retires the old operational files, establishes the new store and enforcement, and
       imports nothing (spec section 14). Post-adoption import will use the approved, versioned prompt
       pack (spec section 14.1); the reference CLI does not implement it yet.</p>
-    <p><b style="color:var(--ink)">How it works.</b> Each former mode refuses with a pointer, in words,
-      to clean-start adoption and the prompt pack. The refusal comes before the root is resolved and
-      before any named file is read, so it is the same on an adopted store and on a directory that has
-      not adopted OPFiles, and the former companion flags meet the same refusal, spelled in full or by
-      an unambiguous prefix and repeated or not. Only a malformed command line (an unknown flag, an
-      ambiguous prefix, a flag missing its value, or no mode or two modes) is a usage error instead,
-      also exit 2.</p>
+    <p><b style="color:var(--ink)">How it works.</b> The command refuses with a pointer, in words, to
+      clean-start adoption and the prompt pack. It reads none of its arguments, so every command line
+      gets the same refusal: no arguments, <code>--help</code>, any former mode or companion flag
+      however it is spelled, and an unknown flag alike. It resolves no root and reads no named file, so
+      the refusal is the same on an adopted store and on a directory that has not adopted OPFiles.</p>
     <p><b style="color:var(--ink)">Result.</b> Exit 2 and no change, whatever the mode: nothing is
       staged under <code>.working/imports/</code>, and nothing is promoted into the store.</p>
     <p class="refchips"><code>opf import --apply R</code> <span>refused, exit 2</span></p>
