@@ -132,12 +132,50 @@ def _bootstrap():
         return EXIT_MALFORMED
     return EXIT_OK
 
+def _self_test_entry_gaps(directory):
+    """Names of the *.py modules directly in `directory` that define a top-level self_test but carry no
+    top-level `if __name__ == "__main__"` block (F-SELFTEST-NO-MAIN): run as `python3 <module> --self-test`
+    such a module exits 0 having run nothing, a false green. A module that cannot be read or parsed is
+    named too, so the probe fails closed. Non-recursive: _vendor/ is not scanned."""
+    import ast
+    gaps = []
+    for path in sorted(Path(directory).glob("*.py")):
+        try:
+            tree = ast.parse(path.read_bytes(), str(path))
+        except (OSError, SyntaxError, ValueError):
+            gaps.append(path.name)
+            continue
+        defines = any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "self_test"
+                      for node in tree.body)
+        entry = any(isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
+                    and isinstance(node.test.left, ast.Name) and node.test.left.id == "__name__"
+                    and any(isinstance(c, ast.Constant) and c.value == "__main__" for c in node.test.comparators)
+                    for node in tree.body)
+        if defines and not entry:
+            gaps.append(path.name)
+    return gaps
+
+
 def _aggregator_self_test():
     """Guard the aggregator's fail-closed return-vocabulary check (MAJOR 3). A helper returning a value
     OUTSIDE the {0,1,2} int vocabulary must fail the aggregate CLOSED (a non-zero worst), never be
     admitted as clean because a bool or float compares equal to an allowed int (False == 0, True == 1,
     0.0 == 0). Returns 0 clean, 1 on a failure. Registered below so `opf.py --self-test` exercises it;
-    the store legs did not, letting a helper returning False produce an aggregate exit 0."""
+    the store legs did not, letting a helper returning False produce an aggregate exit 0. It also holds
+    the F-SELFTEST-NO-MAIN class empty: every module beside this one that defines a top-level self_test
+    has a direct `--self-test` entry, and a synthetic no-entry module proves the probe goes red."""
+    import tempfile
+    gaps = _self_test_entry_gaps(Path(__file__).resolve().parent)
+    with tempfile.TemporaryDirectory(prefix="opf-entry-probe-") as tmp:
+        Path(tmp, "no_entry.py").write_text("def self_test():\n    return 0\n", encoding="utf-8")
+        Path(tmp, "with_entry.py").write_text(
+            'def self_test():\n    return 0\n\n\nif __name__ == "__main__":\n    raise SystemExit(self_test())\n',
+            encoding="utf-8")
+        probe_flips = _self_test_entry_gaps(tmp) == ["no_entry.py"]
+    if gaps or not probe_flips:
+        print("opf aggregator self-test: FAIL (self_test without a __main__ entry: {}; synthetic probe {})".format(
+            ", ".join(gaps) or "none", "fired" if probe_flips else "DID NOT FIRE"), file=sys.stderr)
+        return EXIT_FINDING
     ok = True
     # A helper returning False (bool, == 0) must NOT aggregate to clean.
     if run_self_tests((("synthetic-false", lambda: False),)) == EXIT_OK:
@@ -155,7 +193,8 @@ def _aggregator_self_test():
         print("opf aggregator self-test: FAIL (fail-closed vocabulary check admitted a bad return)",
               file=sys.stderr)
         return EXIT_FINDING
-    print("opf aggregator self-test: PASS (fail-closed on non-int / out-of-range helper returns)")
+    print("opf aggregator self-test: PASS (fail-closed on non-int / out-of-range helper returns; "
+          "every self_test module has a __main__ entry)")
     return EXIT_OK
 
 
