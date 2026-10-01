@@ -2918,6 +2918,44 @@ def _git_archive_fixture_isolated(base):
     return revision, gzip.compress(raw, mtime=0)
 
 
+def _resolver_stub_bound(function):
+    # A resolver worker reads _lookup only when it runs. One that outlives
+    # settle_resolvers' bound can run after its case has unwound the fixture
+    # patch, so the patch alone cannot keep it off live name resolution.
+    # Bind a lookup that never resolves beneath every case's patch for the
+    # whole self-test. Restore the production _lookup only once no resolver
+    # worker is alive. A worker that cannot be joined fails the run closed
+    # (exit 2) and leaves the stub bound for the life of the process.
+    def never_resolves(host):
+        raise ObserveError(CANNOT_EVALUATE, "dns", "self-test lookup never resolves")
+
+    @functools.wraps(function)
+    def bound(*args, **kwargs):
+        global _lookup
+        production = _lookup
+        _lookup = never_resolves
+        joined = False
+        try:
+            rc = function(*args, **kwargs)
+        finally:
+            end = time.monotonic() + 2.0
+            for thread in threading.enumerate():
+                if thread.name == "opf-adopt-resolver":
+                    thread.join(max(0.0, end - time.monotonic()))
+            joined = not any(thread.name == "opf-adopt-resolver" and thread.is_alive()
+                             for thread in threading.enumerate())
+            if joined:
+                _lookup = production
+        if not joined:
+            print("resolver worker outlived the self-test; _lookup stays stubbed",
+                  file=sys.stderr)
+            return rc or 2
+        return rc
+
+    return bound
+
+
+@_resolver_stub_bound
 def self_test(vectors_only=False):
     """Local fixtures only; report executed rows and require mutation sensitivity.
 
@@ -3832,8 +3870,9 @@ def self_test(vectors_only=False):
                 elapsed = time.monotonic() - started
                 environment_restored = dict(os.environ) == environment_before
                 # Release a stalled fixture lookup, then join this run's
-                # resolver workers while the fixture _lookup is still patched,
-                # so a late worker never reaches the production resolver.
+                # resolver workers while the fixture _lookup is still patched.
+                # A worker that outlives the bound finds the never-resolving
+                # stub (_resolver_stub_bound), never the production resolver.
                 if resolver_sockets is not None:
                     resolver_sockets[1].close()
                 settle_resolvers(2.0)
