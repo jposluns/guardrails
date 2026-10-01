@@ -531,6 +531,7 @@ opf/tools/_opf_init_operation.py text eol=lf
 opf/tools/_opf_init_p0.py text eol=lf
 opf/tools/_opf_init_substrate.py text eol=lf
 opf/tools/_opf_journal.py text eol=lf
+opf/tools/_opf_manifest_regressions.py text eol=lf
 opf/tools/_opf_observe.py text eol=lf
 opf/tools/_opf_oplock.py text eol=lf
 opf/tools/_opf_pack_manifest.py text eol=lf
@@ -539,6 +540,8 @@ opf/tools/_opf_release.py text eol=lf
 opf/tools/_opf_schema.py text eol=lf
 opf/tools/_opf_store.py text eol=lf
 opf/tools/_opf_views.py text eol=lf
+opf/tools/_opf_worklog.py text eol=lf
+opf/tools/_opf_worklog_regressions.py text eol=lf
 opf/tools/_opf_write_guard.py text eol=lf
 opf/tools/_semver.py text eol=lf
 opf/tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json binary

@@ -432,6 +432,11 @@ _CONTRACT = {
     ),
     "9": (
         _D(".working/toml/manifest.toml is the store's control document and discovery marker."),
+        _D('The optional [opf].worklog key selects the active worklog storage generation, independently of [opf].homes and layout.'),
+        _D('Omission and integer 1 select the legacy worklog.toml ledger.'),
+        _D('This build supports only generation 1: integer 2 is reserved and refused before source selection; booleans, other types, and other integers are invalid.'),
+        _D('Archive buckets retain their legacy worklog.toml shape.'),
+        _D('Recognizing this key does not activate generation-2 writers or migration.'),
         _D('Illustrative shape (the schema release that follows this specification is normative): toml # .working/toml/manifest.toml # OPFiles (AIQT Development Operational Standard) store manifest and discovery marker.'),
         _D('[opf] standard = "opf" # discovery token; exact value required spec_version = "1.3.0" # OPFiles base spec version this store conforms to layout = "inline" # storage layout: "inline" or "per-record" (was layout_profile) posture = "required" # "off", "warn", or "required" (section 11) import_status = "none" # "none", "partial", or "complete" [store] sync_target = "" # the store\'s dedicated sync target (section 5.7); empty under the # in-repo default, where the store rides the product repository [modules] # base-level optional capability modules (generic, not AIQT-specific) governance = true # the [profiles.aiqt] profile below requires these three enabled delivery_assurance = false operational_policy = true # (required by [profiles.aiqt].required_modules) concurrent_operation = true # (required by [profiles.aiqt].required_modules) # --- Profiles: additive requirement bundles, namespaced, ignored by base-only tooling --- [profiles.aiqt] version = "1.0.0" # AIQT profile version, independent of spec_version above base_compat = ">=1.0.0 <2.0.0" # base spec_versions this profile applies to posture_floor = "required" # effective posture = strictest(base.posture, this) required_modules = ["governance", "operational_policy", "concurrent_operation"] verification_floor = "triple-family" # AIQT reference-suite policy; base tools ignore this extension_namespace = "x-aiqt" # record-level namespace this profile owns (section 8.7) # A second adopter could later add, ignored by everyone who does not support it: # [profiles.acme] # version = "0.1.0" # base_compat = ">=1.0.0 <2.0.0" [types.backlog_item] namespace = "BI" # ...'),
         _D('one [types.<name>] table per enabled type; namespaces per section 8.1 [providers.local-directory] handler = "builtin" roles = ["create", "sync"] [providers.generic-git-remote] handler = "builtin" roles = ["sync"] # ...'),
@@ -1095,8 +1100,22 @@ def boundary_self_test():
                 raise AssertionError("doctor read a journal record")
             return None, "absent"
 
+        # Worklog intake reopens the manifest through the shared contained reader.
+        # Give that read the SAME filesystem observation as doctor's initial read;
+        # a real read through this fixture's fd 0 is a manifest fault, not a homes test.
+        def worklog_toml(fd, rel, *, with_raw=False):
+            data, _status = doctor_toml(fd, rel, None)
+            return (b"", data) if with_raw and data is not None else data
+
+        def worklog_stat(_fd, rel):
+            if rel != machine + "/worklog":
+                raise AssertionError("unexpected worklog shape probe: " + rel)
+            return None                         # no conflicting generation-2 directory
+
         del listed[:]
         with patch.object(doctor, "_list_contained", listing), patch.object(doctor, "_read_toml", doctor_toml), \
+                patch.object(store, "_read_toml_contained", side_effect=worklog_toml), \
+                patch.object(journal, "_lstat_contained", side_effect=worklog_stat), \
                 patch.object(doctor, "_read_bytes", read_bytes):
             report = doctor._Report()
             doctor._validate_opened_store(0, None, machine, None, {}, None, "default", True, report)
@@ -1259,15 +1278,28 @@ def boundary_self_test():
     def view_plan(model):
         view_manifest = dict(model, views=dict(VERSION=dict(kind="projection", sources=[],
                                                             target=".working/journals/file")))
-        with patch.object(views, "_read_raw_and_parsed", return_value=(b"", view_manifest)), \
-                patch.object(store, "validate_manifest", return_value=SimpleNamespace(status=store.VALID)), \
+        # plan_views now uses validated shared manifest intake. Keep this boundary
+        # fixture's deliberate empty source set, but supply the current reader and
+        # the validator's full result type, including profile scope. Manifest-fault
+        # coverage remains in the worklog entry-point regressions.
+        def view_toml(_fd, rel):
+            if rel != machine + "/manifest.toml":
+                raise AssertionError("unexpected view source read: " + rel)
+            return copy.deepcopy(view_manifest)
+
+        with patch.object(store, "_read_toml_contained", side_effect=view_toml), \
+                patch.object(store, "validate_manifest",
+                             return_value=store.ManifestValidation(store.VALID)), \
                 patch.object(views, "_resolve_view", return_value=("projection", [], lambda _src: "1.0.0\n")), \
                 patch.object(views, "_spec_destination", return_value=("store", ".working/journals/file")):
             return refusal(lambda: views.plan_views(-1, machine)) or ""
 
     with active():
         check("view-journal-destination-refused", lambda: "journal home" in view_plan(manifest2))
-        check("view-legacy-journal-destination-planned", lambda: "journal home" not in view_plan(manifest))
+        # Pair the legacy allowance with the same destination's homes-2 refusal:
+        # removing the destination guard must not make this allowance vacuously pass.
+        check("view-legacy-journal-destination-planned", lambda: view_plan(manifest) == ""
+              and "journal home" in view_plan(manifest2))
 
     import _opf_adopt_plan as planning
     import _opf_emit as emit
@@ -1287,7 +1319,7 @@ def boundary_self_test():
                 patch.object(store, "_read_pointer_target", return_value=None), \
                 patch.object(store, "resolve_store_fd",
                              return_value=(resolved, emit.emit_checked(model).encode())), \
-                patch.object(store, "validate_manifest", return_value=SimpleNamespace(status=store.VALID)), \
+                patch.object(store, "validate_manifest", return_value=store.ManifestValidation(store.VALID)), \
                 patch.object(store._journal, "_open_parent", side_effect=_Enumerated), \
                 patch.object(planning.os, "stat", side_effect=_Enumerated):
             try:
@@ -1353,7 +1385,7 @@ def boundary_self_test():
                 patch.object(store, "_read_pointer_target", return_value=None), \
                 patch.object(store, "resolve_store_fd",
                              return_value=(resolved, emit.emit_checked(model).encode())), \
-                patch.object(store, "validate_manifest", return_value=SimpleNamespace(status=store.VALID)), \
+                patch.object(store, "validate_manifest", return_value=store.ManifestValidation(store.VALID)), \
                 patch.object(store._journal, "_open_parent", side_effect=FileNotFoundError), \
                 patch.object(adopt, "validate_plan", wraps=adopt.validate_plan) as frozen:
             # Every planned creation needs observed absence, so the root-level ones are declared targets; the
