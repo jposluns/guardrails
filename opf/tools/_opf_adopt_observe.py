@@ -3508,17 +3508,16 @@ def self_test(vectors_only=False):
         # that case's lookups at once. Join every started worker within the
         # bound and return (alive, leaked). alive holds the workers that
         # outlived it: stragglers, charged by the caller to the run that
-        # started them. A straggler already recorded (straggler_runs) has
-        # outlived a full join and failed its own row, so it is tested for
-        # life without another wait: each later settle would otherwise pay
-        # the bound again for a worker known to outlive it. One that would
-        # have ended within such a wait now blocks the later run instead;
-        # its own row is INVALID either way, so the exit is unchanged. While
-        # one lives the slot is not judged. A slot still held once no worker
-        # is alive was leaked by code under test: leaked is True so the
-        # caller fails its case INVALID, and the slot is released so later
-        # cases are evaluated on their own.
-        alive = join_resolvers(seconds, straggler_runs)
+        # started them. While one lives the slot is not judged. A slot still
+        # held once no worker is alive was leaked by code under test: leaked
+        # is True so the caller fails its case INVALID, and the slot is
+        # released so later cases are evaluated on their own.
+        # Cost on a failing run: a straggler already recorded is joined
+        # again, so while a long-lived one lives each later run waits up to
+        # about three 2.0 s joins (one before it, two after it) and one that
+        # reaches the resolver is blocked. Such a run is slow; it still ends
+        # and fails closed.
+        alive = join_resolvers(seconds)
         if alive:
             return alive, False
         if not _RESOLVER_SLOT.acquire(blocking=False):
@@ -3527,11 +3526,10 @@ def self_test(vectors_only=False):
         _RESOLVER_SLOT.release()
         return alive, False
 
-    def join_resolvers(seconds, known=()):
-        # Joins every resolver worker not in known; returns every live one.
+    def join_resolvers(seconds):
         end = time.monotonic() + seconds
         for thread in threading.enumerate():
-            if thread.name == "opf-adopt-resolver" and thread not in known:
+            if thread.name == "opf-adopt-resolver":
                 thread.join(max(0.0, end - time.monotonic()))
         return set(thread for thread in threading.enumerate()
                    if thread.name == "opf-adopt-resolver" and thread.is_alive())
