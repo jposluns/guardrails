@@ -162,26 +162,26 @@ def _module_scope(tree, classes=False):
             stack += ast.iter_child_nodes(node)
 
 
-def _binds_self_test(node):
-    """Return how many times one module-scope node binds the name self_test (0 when it does not): once for a
-    def, async def or class so named, for each Name stored or deleted (an assignment, augmented, annotated,
-    for, with, walrus or del target, tuple targets included, or a type-alias name), for each alias of an
-    import or from-import that binds it (`import a as self_test, b as self_test` is two; a star import counts,
-    as it may), and for an except, match or match-rest name. A `global self_test` binds nothing by itself;
-    _self_test_entry_gap counts each self_test it names, found anywhere with ast.walk."""
+def _binds(node, name):
+    """Return how many times one module-scope node binds `name` (0 when it does not): once for a def, async
+    def or class so named, for each Name stored or deleted (an assignment, augmented, annotated, for, with,
+    walrus or del target, tuple targets included, or a type-alias name), for each alias of an import or
+    from-import that binds it (`import a as self_test, b as self_test` is two; a star import counts, as it
+    may), and for an except, match or match-rest name. A `global` binds nothing by itself; _self_test_entry_gap
+    counts each `name` a `global` names, found anywhere with ast.walk."""
     import ast
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        return int(node.name == "self_test")
+        return int(node.name == name)
     if isinstance(node, ast.Name):
-        return int(node.id == "self_test" and isinstance(node.ctx, (ast.Store, ast.Del)))
+        return int(node.id == name and isinstance(node.ctx, (ast.Store, ast.Del)))
     if isinstance(node, ast.Import):
-        return sum((alias.asname or alias.name.partition(".")[0]) == "self_test" for alias in node.names)
+        return sum((alias.asname or alias.name.partition(".")[0]) == name for alias in node.names)
     if isinstance(node, ast.ImportFrom):
-        return sum((alias.asname or alias.name) in ("self_test", "*") for alias in node.names)
+        return sum((alias.asname or alias.name) in (name, "*") for alias in node.names)
     if isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
-        return int(node.name == "self_test")
+        return int(node.name == name)
     if isinstance(node, ast.MatchMapping):
-        return int(node.rest == "self_test")
+        return int(node.rest == name)
     return 0
 
 
@@ -227,23 +227,28 @@ def _main_tests(tree):
     return sorted(tests, key=lambda test: test[0])
 
 
-def _argv_mutation(statements):
-    """Return the first node, by position, in `statements` (top-level ones), at module scope or in a class
-    body, that changes `sys.argv` spelled as that attribute of the name sys: a store or delete of `sys.argv`
-    itself (an assignment, augmented or annotated assignment, del, or for or with target) or of a subscript
-    or attribute of it, or a call of any attribute of it outside _ARGV_READERS; None when there is none."""
+def _sys_change(statements):
+    """Return (node, attribute) for the first node, by position, in `statements` (top-level ones), at module
+    scope or in a class body, that changes the sys module through the name sys: a store to, delete of or
+    augmented assignment to any attribute of it (`sys.<attribute>`, an assignment, augmented or annotated
+    assignment, del, or for or with target), a store or delete of a subscript or attribute of `sys.argv`, or a
+    call of any attribute of `sys.argv` outside _ARGV_READERS; `attribute` is the attribute of sys changed
+    (argv for the last two). None when there is none."""
     import ast
 
-    def is_argv(node):
-        return (isinstance(node, ast.Attribute) and node.attr == "argv" and isinstance(node.value, ast.Name)
-                and node.value.id == "sys")
+    def is_sys(node):
+        return isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "sys"
 
-    found = [node for statement in statements for node in _module_scope(statement, classes=True)
+    def is_argv(node):
+        return is_sys(node) and node.attr == "argv"
+
+    found = [(node, node.attr if is_sys(node) else "argv") for statement in statements
+             for node in _module_scope(statement, classes=True)
              if (isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.ctx, (ast.Store, ast.Del))
-                 and (is_argv(node) or is_argv(node.value)))
+                 and (is_sys(node) or is_argv(node.value)))
              or (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                  and node.func.attr not in _ARGV_READERS and is_argv(node.func.value))]
-    return min(found, key=lambda node: (node.lineno, node.col_offset), default=None)
+    return min(found, key=lambda change: (change[0].lineno, change[0].col_offset), default=None)
 
 
 def _unconditional_binding(statements):
@@ -258,34 +263,45 @@ def _unconditional_binding(statements):
         if isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try))):
             found = _unconditional_binding(node.body) or found
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom)):
-            found = node if _binds_self_test(node) else found
+            found = node if _binds(node, "self_test") else found
         elif isinstance(node, ast.Assign):
-            found = node if any(_binds_self_test(part) for target in node.targets
+            found = node if any(_binds(part, "self_test") for target in node.targets
                                 for part in ast.walk(target)) else found
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            found = node if _binds_self_test(node.target) else found
+            found = node if _binds(node.target, "self_test") else found
     return found
 
 
 def _self_test_entry_gap(tree):
     """Return (exposes, reason) for one parsed module. `exposes` is whether it binds self_test at module scope
-    by any form _binds_self_test names, or by a `global self_test` anywhere (a function can bind it so). An
-    exposing module's `reason` is None only when exactly one test of `__name__` against "__main__" runs at
-    import (_main_tests: an if, while, conditional expression, and/or, comprehension condition or match, at
-    module scope or in a class body, whose test mentions the name `__name__` and the string "__main__"), that
-    test is an `if` that is the module's last top-level statement, tests exactly _ENTRY_TEST and has no else,
-    the module imports sys at top level, the block's first statement is _ENTRY_STATEMENT, the block binds
+    by any form _binds counts, or by a `global self_test` anywhere (a function can bind it so). An exposing
+    module's `reason` is None only when exactly one test of `__name__` against "__main__" runs at import
+    (_main_tests: an if, while, conditional expression, and/or, comprehension condition or match, at module
+    scope or in a class body, whose test mentions the name `__name__` and the string "__main__"), that test is
+    an `if` that is the module's last top-level statement, tests exactly _ENTRY_TEST and has no else, the
+    module imports sys at top level, the block's first statement is _ENTRY_STATEMENT, the block binds
     self_test nowhere, the module has exactly one binding of self_test, counted by name occurrence (each
-    binding _binds_self_test counts in a module-scope node, so every alias of one import, and each self_test a
-    `global` anywhere names, is one), a statement before the block makes that binding unconditionally
+    binding _binds counts in a module-scope node, so every alias of one import, and each self_test a `global`
+    anywhere names, is one), a statement before the block makes that binding unconditionally
     (_unconditional_binding), when it is a def it is neither an async def nor one whose own body (not a nested
     function, lambda or class) yields, and that own body has at least one `return <expression>` and no bare
-    `return` or `return None`, and no statement before the block changes `sys.argv` (_argv_mutation);
-    otherwise it names the first rule broken."""
+    `return` or `return None`, the module binds `__name__` nowhere at module scope (counted the same way, the
+    block included), every module-scope binding of sys (and each sys a `global` anywhere names) is a plain
+    `import sys`, and no statement before the block changes sys through the name sys (_sys_change: a store to,
+    delete of or augmented assignment to any `sys.<attribute>`, or an argv change); otherwise it names the
+    first rule broken."""
     import ast
-    bindings = [node.lineno for node in _module_scope(tree) for _ in range(_binds_self_test(node))] + [
-        node.lineno for node in ast.walk(tree) if isinstance(node, ast.Global) for name in node.names
-        if name == "self_test"]
+
+    def bindings_of(name, imported=False):
+        # The line of each binding of `name` _binds counts at module scope and of each `global` naming it;
+        # with `imported`, an alias of a plain `import <name>` (no `as`) is not counted.
+        plain = lambda node: sum(alias.name == name and alias.asname is None for alias in node.names) if (
+            imported and isinstance(node, ast.Import)) else 0
+        return [node.lineno for node in _module_scope(tree) for _ in range(_binds(node, name) - plain(node))] + [
+            node.lineno for node in ast.walk(tree) if isinstance(node, ast.Global) for each in node.names
+            if each == name]
+
+    bindings = bindings_of("self_test")
     if not bindings:
         return False, None
     tests = _main_tests(tree)
@@ -315,7 +331,7 @@ def _self_test_entry_gap(tree):
             return True, "the canonical `--self-test` statement is not the first in its `__main__` block"
         return True, "its `__main__` block starts with `{}`, not the canonical `--self-test` statement".format(
             ast.unparse(block.body[0]).splitlines()[0][:60])
-    if any(_binds_self_test(node) for node in _module_scope(block)):
+    if any(_binds(node, "self_test") for node in _module_scope(block)):
         return True, "its `__main__` block (line {}) binds self_test".format(block.lineno)
     if len(bindings) > 1:
         return True, "self_test has {} bindings at module scope (lines {}); exactly one binding is allowed".format(
@@ -342,10 +358,18 @@ def _self_test_entry_gap(tree):
         if not returns:
             return True, "its self_test (line {}) has no `return <value>` in its own body: the call returns " \
                          "None, so the run exits 0 whatever the suite found".format(binding.lineno)
-    mutation = _argv_mutation(tree.body[:-1])
-    if mutation is not None:
-        return True, "it changes `sys.argv` (line {}) before its `__main__` block, so the entry may not see " \
-                     "`--self-test`".format(mutation.lineno)
+    renames = bindings_of("__name__")
+    if renames:
+        return True, "it binds `__name__` at module scope (line {}), so its `__main__` test no longer " \
+                     "tells a run from an import".format(min(renames))
+    rebinds = bindings_of("sys", imported=True)
+    if rebinds:
+        return True, "it binds `sys` other than by `import sys` (line {}), so the entry may not reach the sys " \
+                     "module".format(min(rebinds))
+    change = _sys_change(tree.body[:-1])
+    if change is not None:
+        return True, "it changes `sys.{}` (line {}) before its `__main__` block, so the entry may not see " \
+                     "`--self-test` or exit with self_test's result".format(change[1], change[0].lineno)
     return True, None
 
 
@@ -368,50 +392,61 @@ def _self_test_entry_gaps(directory, required=()):
     unconditionally by a statement before the block (a top-level def, class, import, from-import or
     assignment, or one in a top-level try body), the block itself binding it nowhere, a def'd self_test
     neither async nor a generator and with at least one `return <expression>` and no bare `return` or
-    `return None` in its own body, and no statement before the block changing `sys.argv` (_self_test_entry_gap
-    gives the rules and each reason). It is a gap too when a *.py
+    `return None` in its own body, no module-scope binding of `__name__`, no module-scope binding of sys but
+    a plain `import sys`, and no statement before the block changing sys through the name sys (a store to,
+    delete of or augmented assignment to any `sys.<attribute>`, or an argv change; _self_test_entry_gap gives
+    the rules and each reason). It is a gap too when a *.py
     entry is not a regular file or cannot be read or parsed, when a `required` name is not found binding
     self_test, and when no module binds it at all. The listing is os.listdir, so a missing or unreadable
     directory is a gap, not an empty scan; it is not recursive, so _vendor/ is not scanned.
 
-    Guarantee and residual. For a module it passes: self_test has exactly one binding at module scope, counted by
-    name occurrence (each alias of an import or from-import, each Name stored or deleted, each def, class, except
-    or match name, a star import, and each self_test a `global` anywhere names, is one), made unconditionally
-    before the single canonical entry; that entry is the module's last statement and the only test of `__name__`
-    against "__main__" that runs at import in a counted form (an if, while, conditional expression, and/or,
-    comprehension condition or match, at module scope or in a class body, whose test mentions the name `__name__`
-    and the string "__main__"); no statement before it, at module scope or in a class body, stores to or deletes
-    `sys.argv` or a subscript or attribute of it, or calls any attribute of it (`sys.argv.<name>(...)`) outside the
-    read-only _ARGV_READERS (count, index, copy, __len__, __getitem__, __contains__, __iter__); and when the
-    binding is a def it is a plain function (not async; its own body, not a nested function, lambda or class,
+    Guarantee and residual. The guard checks the static shape of the self_test binding and of the entry, and
+    nothing else. As a class, it does not catch any statement that changes what a name the entry uses means at
+    run time (sys, sys.argv, sys.exit, self_test, `__name__`, builtins, or the module namespace) through a form
+    it does not parse: a dynamic binding or store (globals(), vars(), a namespace's __dict__ such as
+    `sys.__dict__`, setattr on the module, a module __getattr__), an alias (`import sys as s` then
+    `s.exit = print`, `from sys import argv`, `argv = sys.argv`, a method taken from sys.argv and called later),
+    getattr or setattr, exec or eval, or a call into a function, a method (one on an attribute of sys other than
+    argv included, `sys.stdout.close()` say) or another module that runs before the entry. Nor does it catch a
+    statement that ends the run before the entry or never returns (a top-level sys.exit or os._exit, including
+    one under a `__main__` test it does not count, such as one in a function body or one reached through a held
+    value; _opf_adopt_observe's sys.path setup holds its comparison in a name, so its `if` is not counted), exit
+    subversion after the call (an atexit hook, os._exit, a SystemExit handler, a stateful self_test), or a
+    self_test whose returned value is a succeeding exit status at run time. `sys.exit(value)` exits 0 only when
+    value is None or an int (bool and int subclasses included) whose value is 0 modulo 256, the Linux exit
+    status: None, 0 and False, and also 256 or -256. Any other value exits non-zero, so the other falsy values
+    ([], "", 0.0, 0j) print themselves and exit 1. An imported, assigned or class self_test is not inspected
+    beyond being bound (it may be a callable returning 0, `self_test = int` say), and a def'd self_test is
+    inspected only for the shapes below (one that falls off its end on some path, or returns an expression that
+    is 0 at run time, exits 0 there). A binding made dynamically is not recognized, so such a module is not an
+    exposer unless it also binds statically.
+
+    The forms it DOES catch. self_test has exactly one binding at module scope, counted by name occurrence
+    (each alias of an import or from-import, each Name stored or deleted, each def, class, except or match
+    name, a star import, and each self_test a `global` anywhere names, is one), made unconditionally before the
+    entry (a star import counts as binding it, and a try-body binding counts even if an earlier statement there
+    raises), and the block binds it nowhere. The entry is the single canonical one: the module's last statement
+    and the only test of `__name__` against "__main__" that runs at import in a counted form (an if, while,
+    conditional expression, and/or, comprehension condition or match, at module scope or in a class body, whose
+    test mentions the name `__name__` and the string "__main__"). `__name__` is bound nowhere at module scope by
+    any of those forms (`__name__ = "helper"`, `from os import __name__`, `import os as __name__`,
+    `del __name__`, a `global __name__` anywhere; a class-body `__name__` is the class's own and is not
+    counted). sys is imported at top level, and every module-scope binding of it, and each sys a `global`
+    names, is a plain `import sys` (`sys = None` or `import os as sys` is a gap). No statement before the
+    entry, at module scope or in a class body, stores to, deletes or augments any attribute of sys spelled
+    `sys.<attribute>` (`sys.exit = print`, `sys.stdout = None`, `del sys.argv`), stores to or deletes a
+    subscript or attribute of `sys.argv`, or calls any attribute of it (`sys.argv.<name>(...)`) outside the
+    read-only _ARGV_READERS (count, index, copy, __len__, __getitem__, __contains__, __iter__). When the
+    binding is a def it is a plain function: not async; its own body, not a nested function, lambda or class,
     yields nothing and holds at least one `return <expression>` and no bare `return` or `return None`; its
-    decorators are not inspected). What it does not check: that an imported, assigned or class self_test is
-    callable or returns an int (it is not inspected beyond being bound; a star import counts as binding it, and a
-    try-body binding counts even if an earlier statement there raises); that a def'd self_test returns a value on
-    every path (one that falls off its end on some path returns None there) or that the value it returns is a
-    failing one when its suite fails (a returned expression can still be 0, None, False or another falsy value at
-    run time); a rebinding or deletion of `sys` or builtins, conditional or not, or of self_test by a dynamic
-    route; a change to sys.argv not spelled `sys.argv` at module scope or in a class body (through an alias such as
-    `from sys import argv`, `import sys as s` or `argv = sys.argv`, through a method taken from it and called
-    later, such as `push = sys.argv.append`, through getattr, setattr or vars, by passing it to a function such as
-    list.clear, or inside a function, a method or another module that runs before the entry); a `__main__` test
-    outside the counted forms (in a function or lambda body, or one that reaches `__name__` or "__main__"
-    indirectly, through a held value, globals() or a string built at run time; _opf_adopt_observe's sys.path setup
-    holds its comparison in a name, so its `if` is not counted); other code before the entry that exits or never
-    returns (a top-level sys.exit or os._exit, say); and exit subversion after the call (an atexit hook, os._exit,
-    a SystemExit handler, argv inspection, a stateful self_test). Those are code-review matters: the guard is for
-    an accidental missing or miswired entry. Run with --self-test, such a module, absent a rebound `sys` or
-    builtins, a dynamic rebinding of self_test, an unseen sys.argv change, an uncounted `__main__` test or other
-    code that exits first, and exit subversion, calls whatever self_test is bound to; if it is unbound there (a
-    raising try body, a star import that lacks it, a dynamic deletion) the run exits 1 with NameError, and a
-    non-callable exits 1 with TypeError. It does NOT hold that every residual shape runs the suite or exits
-    non-zero: a bound callable returning None, 0 or False exits 0 whatever it ran (`self_test = int`, say, or a
-    def'd self_test whose returned expression is falsy at run time, or that falls off its end on an unchecked
-    path), and a rebound `sys` or builtins, a dynamic rebinding of self_test, an unseen sys.argv change, an
-    uncounted `__main__` test or other code that exits first, or exit subversion can exit 0 without running the
-    suite. Nor is a binding made dynamically (globals(), setattr on the module, a module __getattr__) recognized;
-    such a module is not an exposer unless it also binds statically. The exact-form rule is conservative: a working
-    entry in any other form is a gap."""
+    decorators are not inspected.
+
+    Run with --self-test, a module that passes and stays outside that class calls whatever self_test is bound
+    to and exits with its result: if self_test is unbound there (a raising try body, a star import that lacks
+    it) the run exits 1 with NameError, and a non-callable exits 1 with TypeError. It does NOT hold that a
+    module in the class runs the suite or exits non-zero: it can exit 0 without running it. The residual is a
+    code-review matter: the guard is for an accidental missing or miswired entry. The exact-form rule is
+    conservative: a working entry in any other form is a gap."""
     import ast
     gaps, exposers = {}, set()
     try:
@@ -512,6 +547,8 @@ _ENTRY_ARGV = "changes `sys.argv`"
 _ENTRY_REBOUND = "bindings at module scope"
 _ENTRY_NO_RETURN = "has no `return <value>`"
 _ENTRY_RETURNS_NONE = "returns None (a bare"
+_ENTRY_NAME = "binds `__name__` at module scope"
+_ENTRY_SYS = "binds `sys` other than by `import sys`"
 _ENTRY_FIXTURES = (
     ("canonical.py", _ENTRY_HEAD + "def main(argv):\n    return 2\n\n\n" + _ENTRY_MAIN
      + "    sys.exit(main(sys.argv[1:]))\n", True, None),
@@ -618,6 +655,21 @@ _ENTRY_FIXTURES = (
      + _ENTRY_MAIN, True, _ENTRY_RETURNS_NONE),
     ("return_value.py", "import sys\n\n\ndef self_test():\n    failures = 0\n    if failures:\n        return 1\n"
      "    return failures\n\n\n" + _ENTRY_MAIN, True, None),
+    ("name_assign.py", _ENTRY_HEAD + '__name__ = "helper"\n\n\n' + _ENTRY_MAIN, True, _ENTRY_NAME),
+    ("name_from.py", _ENTRY_HEAD + "from os import __name__\n\n\n" + _ENTRY_MAIN, True, _ENTRY_NAME),
+    ("name_import.py", _ENTRY_HEAD + "import os as __name__\n\n\n" + _ENTRY_MAIN, True, _ENTRY_NAME),
+    ("name_global.py", _ENTRY_HEAD + "def rename():\n    global __name__\n    del __name__\n\n\n" + _ENTRY_MAIN,
+     True, _ENTRY_NAME),
+    ("name_class.py", _ENTRY_HEAD + 'class Helper:\n    __name__ = "helper"\n\n\n' + _ENTRY_MAIN, True, None),
+    ("sys_rebind.py", _ENTRY_HEAD + "sys = None\n\n\n" + _ENTRY_MAIN, True, _ENTRY_SYS),
+    ("sys_import_as.py", _ENTRY_HEAD + "import os as sys\n\n\n" + _ENTRY_MAIN, True, _ENTRY_SYS),
+    ("sys_reimport.py", _ENTRY_HEAD + "try:\n    import os, sys\nexcept ImportError:\n    pass\n"
+     'sys.path.insert(0, "lib")\n\n\n' + _ENTRY_MAIN, True, None),
+    ("sys_exit_print.py", _ENTRY_HEAD + "sys.exit = print\n\n\n" + _ENTRY_MAIN, True, "changes `sys.exit`"),
+    ("sys_stdout_none.py", _ENTRY_HEAD + "sys.stdout = None\n\n\n" + _ENTRY_MAIN, True, "changes `sys.stdout`"),
+    ("sys_del_attr.py", _ENTRY_HEAD + "class Quiet:\n    del sys.exit\n\n\n" + _ENTRY_MAIN, True,
+     "changes `sys.exit`"),
+    ("sys_augmented.py", _ENTRY_HEAD + 'sys.ps1 += "x"\n\n\n' + _ENTRY_MAIN, True, "changes `sys.ps1`"),
 )
 
 
