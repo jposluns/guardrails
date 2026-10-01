@@ -3867,19 +3867,30 @@ def _self_test_close_reuse(expect):
         return ns[fn.__name__]
 
     def one_shot(name, nth=1):
-        """Arm the descriptor the nth os.<name> call returns."""
+        """Arm the descriptor the nth os.<name> call returns, for os.dup or os.open; each is installed and
+        restored by a direct assignment (no dynamic attribute access on os, which the maintenance-pin scan
+        refuses)."""
+        if name not in ("dup", "open"):
+            raise AssertionError("one_shot: no direct install for os.{}".format(name))
+
+        def put(fn):
+            if name == "dup":
+                os.dup = fn
+            else:
+                os.open = fn
+
         def install(fault):
-            real, seen = getattr(os, name), []
+            real, seen = (os.dup if name == "dup" else os.open), []
 
             def spy(*args, **kwargs):
                 fd = real(*args, **kwargs)
                 seen.append(fd)
                 if len(seen) == nth:
-                    setattr(os, name, real)
+                    put(real)
                     fault.arm(fd)
                 return fd
-            setattr(os, name, spy)
-            return lambda: setattr(os, name, real)
+            put(spy)
+            return lambda: put(real)
         return install
 
     def gate_error(exc):

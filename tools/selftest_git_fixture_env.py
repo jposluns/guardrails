@@ -2216,6 +2216,37 @@ _SCAN_ALLOWED_UNPINNED = (
      "exec of _opf_oplock._acquire_body's own source with the fix-15 head's pre-unwind"
      " removal tagging restored at its failure handler (red-leg mutant); the exec only"
      " defines the mutant function"),
+    # #378 close-vector revert builders: each exec compiles inspect.getsource of this tool's own
+    # tracked function (or, for check_release_cut's sweep reverts, this tool's own tracked file)
+    # with one literal replacement spelled beside it; no replacement text spells a launch, and
+    # every launch the tracked source spells is scanned at its own source location.
+    ("opf/tools/_opf_emit.py", "_st_guardian_close_reuse", ("dynamic",),
+     "exec of _FixtureProcess._guardian's own source with its ownership-first subject_fd close"
+     " put back as the close-then-rebind body (red-leg mutant); the exec only defines the"
+     " mutant function, which the vector drives with fork, waitid and _exit stubbed"),
+    ("opf/tools/check_opf_import.py", "_self_test_close_reuse.revert", ("dynamic",),
+     "exec of _physical_home's or _spelled_route's own source with one ownership-first close"
+     " put back as the close-then-rebind body (red-leg mutant); the exec only defines the"
+     " mutant function"),
+    ("opf/tools/check_opf_prompt_pack.py", "_close_vectors", ("dynamic",),
+     "exec of _read_regular's own source with its closefd=False fdopen put back as the pre-fix"
+     " fdopen ownership (red-leg mutant); the exec only defines the mutant function"),
+    ("tools/check_footer.py", "_close_vectors", ("dynamic",),
+     "exec of _read_regular_page's own source with its closefd=False fdopen put back as the"
+     " pre-fix fdopen ownership (red-leg mutant); the exec only defines the mutant function"),
+    ("tools/check_release_cut.py", "_close_vectors", ("dynamic",),
+     "exec of working_blob's own source with its closefd=False fdopen put back as the pre-fix"
+     " fdopen ownership (red-leg mutant); the exec only defines the mutant function"),
+    ("tools/check_release_cut.py", "_self_test_isolated", ("dynamic",),
+     "exec of this tool's own source with one _CLOSE_SWEEP_REVERTS literal applied to the"
+     " sweep code (red-leg mutant) under a non-__main__ __name__, so main() never runs; the"
+     " module body only binds imports, constants and definitions and puts opf/tools on"
+     " sys.path, and the self-test then calls the mutant's _close_sweep_shapes_red, an AST"
+     " sweep over synthetic shapes"),
+    ("tools/pin.py", "_recover_close_vectors", ("dynamic",),
+     "exec of do_recover's own source with its four ownership-first root_fd closes and its"
+     " owned-number handler guard put back as the pre-fix bodies (red-leg mutant); the exec"
+     " only defines the mutant function"),
 )
 
 
