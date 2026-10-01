@@ -69,6 +69,8 @@ except ModuleNotFoundError:
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _git_fixture_env  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "opf" / "tools"))
+import _optlevel  # noqa: E402  level-0 parses for the mutants, shared with opf/tools
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
@@ -879,7 +881,8 @@ def _roster_checks():
     def add_local(command):
         # Keep the exact terminal summary last so each fixture reaches its own guard.
         summary = 'if [ "$failed" -ne 0 ]; then\n'
-        assert local_text.count(summary) == 1
+        if local_text.count(summary) != 1:  # explicit, not an assert: python -O strips asserts
+            raise AssertionError("the runner's terminal summary is not unique")
         return local_text.replace(summary, command + "\n" + summary, 1)
 
     def refusal():
@@ -1095,12 +1098,12 @@ def _system_pin_probe(base, lifecycle):
 def _system_pin_checks(base):
     import types
     # Level 0 parse and compile: the mutant must not follow -O/-OO.
-    tree = ast.parse(Path(_git_fixture_env.__file__).read_text(encoding="utf-8"), optimize=0)
+    tree = _optlevel.parse(Path(_git_fixture_env.__file__).read_text(encoding="utf-8"))
     assignments = [node for node in ast.walk(tree) if isinstance(node, ast.Assign)
                    and any(ast.unparse(t) == "os.environ['PATH']" for t in node.targets)]
     if len(assignments) != 1:
         raise ValueError("cannot uniquely mutate lifecycle PATH installation")
-    assignments[0].value = ast.parse('saved.get("PATH", os.defpath)', mode="eval", optimize=0).body
+    assignments[0].value = _optlevel.parse('saved.get("PATH", os.defpath)', mode="eval").body
     mutant = types.ModuleType("fixture_path_mutant")
     exec(compile(ast.fix_missing_locations(tree), "<path-removal-mutant>", "exec", optimize=0),
          mutant.__dict__)
@@ -1580,7 +1583,7 @@ def _opf_lifecycle_graph_checks():
     expected_denial = "named wrapper bypass"
     try:
         relative = "opf/tools/_opf_ingest_apply.py"
-        tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"), optimize=0)
+        tree = _optlevel.parse((ROOT / relative).read_text(encoding="utf-8"))
         module = Path(relative).stem
         entry = "self_test"
         delegates = _opf_lifecycle_delegates({module: tree})
@@ -1592,7 +1595,7 @@ def _opf_lifecycle_graph_checks():
                 node.name = "body_without_a_suffix"
             elif isinstance(node, ast.Name) and node.id == delegate:
                 node.id = "body_without_a_suffix"
-        renamed.body.append(ast.parse("def unrelated_isolated(): pass", optimize=0).body[0])
+        renamed.body.append(_optlevel.parse("def unrelated_isolated(): pass").body[0])
         expected_names = dict(delegates)
         expected_names[module, entry] = (module, "body_without_a_suffix")
         names = _opf_lifecycle_delegates({module: renamed})

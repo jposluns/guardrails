@@ -224,27 +224,35 @@ def _checks():
     sys.exit(0)
 
 
+def _expect(condition, message=None):
+    """A self-test verdict that python -O and -OO cannot strip, unlike an assert statement."""
+    if not condition:
+        if message is None:
+            raise AssertionError
+        raise AssertionError(message)
+
+
 def _self_test():
     # Git-free / source-free: exercise the matchers on in-memory text, including the comment-evasion cases.
-    assert _has_line("KEEP_SCHEMA = 1  # comment", "KEEP_SCHEMA = 1"), "exact line ignores comment"
-    assert not _has_line("KEEP_SCHEMA = 10\n", "KEEP_SCHEMA = 1"), "substring must NOT match a longer value"
-    assert _quoted_in_tuple('_RESERVED = (\n".opf.toml",\n".working/toml",\n)', "_RESERVED") == \
-        {".opf.toml", ".working/toml"}, "tuple membership"
-    assert ".x" not in _quoted_in_tuple('_RESERVED = (\n# ".x",\n".y",\n)', "_RESERVED"), \
-        "a commented-out literal must NOT count as a member"
-    assert _ordered_quoted_in_tuple('_INITIAL_VIEWS = (\n"A.md", "B.md",\n)', "_INITIAL_VIEWS") == \
-        ("A.md", "B.md"), "ordered view parse"
-    assert _value_of('DEFAULT_MACHINE_SUBDIR = "toml"  # c', "DEFAULT_MACHINE_SUBDIR") == "toml", "value"
-    assert _active_line_has('run x check_opf_init_contract.py', "check_opf_init_contract.py"), "active line"
-    assert not _active_line_matches('run check_opf_init_contract.py --self-test', r"\b_opf_init_contract\.py"), \
-        "validator boundary must NOT match inside the gate filename"
-    assert _active_line_matches('run "$here/_opf_init_contract.py" --self-test', r"\b_opf_init_contract\.py"), \
-        "validator boundary must match a real validator invocation"
-    assert not _active_line_has('# run check_opf_init_contract.py', "check_opf_init_contract.py"), \
-        "a commented registration is not active"
+    _expect(_has_line("KEEP_SCHEMA = 1  # comment", "KEEP_SCHEMA = 1"), "exact line ignores comment")
+    _expect(not _has_line("KEEP_SCHEMA = 10\n", "KEEP_SCHEMA = 1"), "substring must NOT match a longer value")
+    _expect(_quoted_in_tuple('_RESERVED = (\n".opf.toml",\n".working/toml",\n)', "_RESERVED") == \
+        {".opf.toml", ".working/toml"}, "tuple membership")
+    _expect(".x" not in _quoted_in_tuple('_RESERVED = (\n# ".x",\n".y",\n)', "_RESERVED"), \
+        "a commented-out literal must NOT count as a member")
+    _expect(_ordered_quoted_in_tuple('_INITIAL_VIEWS = (\n"A.md", "B.md",\n)', "_INITIAL_VIEWS") == \
+        ("A.md", "B.md"), "ordered view parse")
+    _expect(_value_of('DEFAULT_MACHINE_SUBDIR = "toml"  # c', "DEFAULT_MACHINE_SUBDIR") == "toml", "value")
+    _expect(_active_line_has('run x check_opf_init_contract.py', "check_opf_init_contract.py"), "active line")
+    _expect(not _active_line_matches('run check_opf_init_contract.py --self-test', r"\b_opf_init_contract\.py"), \
+        "validator boundary must NOT match inside the gate filename")
+    _expect(_active_line_matches('run "$here/_opf_init_contract.py" --self-test', r"\b_opf_init_contract\.py"), \
+        "validator boundary must match a real validator invocation")
+    _expect(not _active_line_has('# run check_opf_init_contract.py', "check_opf_init_contract.py"), \
+        "a commented registration is not active")
     labels = ["F{:02d}".format(n) for n in range(1, 31)]
-    assert labels[0] == "F01" and labels[-1] == "F30" and len(labels) == 30, "F-range"
-    assert ACTOR_LINE.count('"') == 8, "actor line shape"
+    _expect(labels[0] == "F01" and labels[-1] == "F30" and len(labels) == 30, "F-range")
+    _expect(ACTOR_LINE.count('"') == 8, "actor line shape")
     sys.stdout.write("PASS check_opf_init_contract self-test\n")
     sys.exit(0)
 

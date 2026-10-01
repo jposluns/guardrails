@@ -305,6 +305,7 @@ import _opf_oplock                  # noqa: E402
 import _opf_record as record        # noqa: E402
 import _opf_schema as schema        # noqa: E402
 import _opf_write_guard as guard    # noqa: E402
+import _optlevel                    # noqa: E402
 import opf                          # noqa: E402
 
 TOOLS = Path(__file__).resolve().parent
@@ -2325,23 +2326,10 @@ RESIDUAL_BY_HAND_MODULE = "by hand for a record the gate cannot accept"
 RESIDUAL_BY_HAND_GUARD = "manual intervention for a record the gate cannot accept"
 
 
-def source_docstring(path, name=None):
-    """The docstring of the top-level def or class `name` in the Python source at `path` (the module's
-    own when `name` is None), parsed from the file with optimize=0. python -OO strips docstrings and
-    leaves __doc__ None, so a check reading __doc__ would follow the interpreter level, not the source."""
-    import ast
-    with open(path, encoding="utf-8") as fh:
-        node = ast.parse(fh.read(), optimize=0)
-    if name is not None:
-        node = {n.name: n for n in node.body
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}[name]
-    return ast.get_docstring(node)
-
-
 def residual_texts():
     """(the module docstring, the record guard's docstring), whitespace-normalized."""
-    return (" ".join((source_docstring(record.__file__) or "").split()),
-            " ".join((source_docstring(record.__file__, "_reconcile_capability_journal") or "").split()))
+    return (" ".join((_optlevel.source_docstring(record.__file__) or "").split()),
+            " ".join((_optlevel.source_docstring(record.__file__, "_reconcile_capability_journal") or "").split()))
 
 
 def t34_residual_disclosed(fx):
@@ -2670,7 +2658,7 @@ FIX6_RETIRED = ("neither reclaims nor reconciles", "refuses this run with nothin
 def fix6_texts():
     """(the module docstring, the record guard's, the held plan's), whitespace-normalized."""
     module, guard = residual_texts()
-    return module, guard, " ".join((source_docstring(record.__file__, "_capability_recovery_plan") or "").split())
+    return module, guard, " ".join((_optlevel.source_docstring(record.__file__, "_capability_recovery_plan") or "").split())
 
 
 def t41_residuals_exact(fx):
@@ -2979,8 +2967,8 @@ def fix7_texts():
     """(the module docstring, the record guard's, acquire_operation's, _acquisition_removals'),
     whitespace-normalized."""
     module, guard = residual_texts()
-    return (module, guard, " ".join((source_docstring(_opf_oplock.__file__, "acquire_operation") or "").split()),
-            " ".join((source_docstring(record.__file__, "_acquisition_removals") or "").split()))
+    return (module, guard, " ".join((_optlevel.source_docstring(_opf_oplock.__file__, "acquire_operation") or "").split()),
+            " ".join((_optlevel.source_docstring(record.__file__, "_acquisition_removals") or "").split()))
 
 
 def t46_disclosures_exact(fx):
@@ -3406,7 +3394,7 @@ T54_FIX8 = "T46 each residual list names every case that leaves work for a later
 
 def header_text():
     """This gate's header (the module docstring), whitespace-normalized."""
-    return " ".join((source_docstring(__file__) or "").split())
+    return " ".join((_optlevel.source_docstring(__file__) or "").split())
 
 
 def t54_header_exact(fx):
@@ -3572,7 +3560,7 @@ T58_RETIRED = "or None when the acquisition cleared nothing"
 def t58_texts():
     """(the module docstring, the record guard's, _recover_capability_journal's), whitespace-normalized."""
     module, guard = residual_texts()
-    return module, guard, " ".join((source_docstring(record.__file__, "_recover_capability_journal") or "").split())
+    return module, guard, " ".join((_optlevel.source_docstring(record.__file__, "_recover_capability_journal") or "").split())
 
 
 def t58_released_holder_staging_reported(fx):
@@ -4676,7 +4664,12 @@ def self_test(red_on_revert=False):
     """Run the whole gate inside the OPF git lifecycle (_opf_oplock._st_with_git_lifecycle): caller
     HOME/XDG stay out of fixture reads, and its PATH git wrapper reasserts the system-config pins after a
     production helper strips every GIT_* variable (the operation capability's rev-parse does), so no git
-    call, fixture or production, in-process or in a killed child, reads the host's system configuration."""
+    call, fixture or production, in-process or in a killed child, reads the host's system configuration.
+    Its verdicts are assert statements (some carry fixture steps), so under -O or -OO it refuses with exit 2."""
+    refusal = _optlevel.assert_verdict_refusal("check_opf_record.py --self-test")
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return 2
     if shutil.which("git") is None:
         print("OPF-RECORD SELF-TEST ERROR: git is not on PATH (the fixtures need real commits); exit 2",
               file=sys.stderr)

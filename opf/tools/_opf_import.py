@@ -5788,6 +5788,7 @@ def _self_test_ingest_acceptance(check):
     from unittest.mock import patch
     import check_opf_import as gate
     import _opf_importers as importers
+    import _optlevel
     import opf as cli
 
     rid = "imp-20260909T120000Z-0000000000000000"
@@ -5950,7 +5951,7 @@ def _self_test_ingest_acceptance(check):
     # Flip: a statement placed above the docstring leaves the import verb undocumented (no docstring). The
     # docstring is parsed from the source: python -OO leaves __doc__ None whatever the source holds.
     with open(cli.__file__, encoding="utf-8") as fh:
-        cli_defs = {n.name: n for n in ast.parse(fh.read(), optimize=0).body if isinstance(n, ast.FunctionDef)}
+        cli_defs = {n.name: n for n in _optlevel.parse(fh.read()).body if isinstance(n, ast.FunctionDef)}
     check("accept-cli-import-doc", ast.get_docstring(cli_defs["_cmd_import"]) is not None)
     # Flip: a subset pass, an extra result, a bool-like value, and a duplicate registry must each refuse.
     for results, registry in (({}, ("a",)), ({"a": (True, "")}, ("a", "b")),

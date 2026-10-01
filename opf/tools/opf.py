@@ -659,6 +659,7 @@ def _watchdog_completion_case(mode):
     import threading
     from unittest.mock import patch
     import _opf_emit as emit
+    import _optlevel
 
     command = [sys.executable, "-I", "-B", "-c", "return 0"]
 
@@ -4741,10 +4742,10 @@ def _watchdog_completion_case(mode):
 
         leg11_interpreter_pinned(sys.version_info)
 
-        # optimize=0 keeps docstrings under -OO: members of this tree are
+        # A level-0 parse keeps docstrings under -OO: members of this tree are
         # indexed, spliced and recompiled below, so they must not follow
         # the interpreter's optimization level.
-        module_tree = ast.parse(inspect.getsource(emit), optimize=0)
+        module_tree = _optlevel.parse(inspect.getsource(emit))
         module_functions, module_methods, module_classes = {}, {}, {}
         for stmt in module_tree.body:
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -6149,7 +6150,7 @@ def _watchdog_completion_case(mode):
         # QA32 vector was verified ACCEPTED (red) by the fix-10
         # machinery at 7182a86e.
         def leg11_vector(source):
-            function = ast.parse(textwrap.dedent(source), optimize=0).body[0]
+            function = _optlevel.parse(textwrap.dedent(source)).body[0]
             capturing = next(node for node in function.body
                              if isinstance(node, try_nodes))
             return function, capturing
@@ -6267,11 +6268,11 @@ def _watchdog_completion_case(mode):
         # QA31 codex BLOCKER 2: a local rebinding shadows an imported
         # module name -- the receiver is NOT the module, and the
         # origin proof must FAIL it, never clear it as external.
-        shadowing = ast.parse(textwrap.dedent("""
+        shadowing = _optlevel.parse(textwrap.dedent("""
             def mutant(self):
                 os = _qa31_object
                 os.poll()
-            """), optimize=0).body[0]
+            """)).body[0]
         vector_kinds, vector_value_kind = local_value_kinds(shadowing)
         shadowed_call = next(
             node for node in ast.walk(shadowing)
@@ -6440,8 +6441,8 @@ def _watchdog_completion_case(mode):
         # accepted; the inverted conditional and a conditional
         # guarding a DIFFERENT name are rejected.
         def vector_pending_arg(source):
-            return ast.parse(
-                textwrap.dedent(source), optimize=0).body[0].value.args[0]
+            return _optlevel.parse(
+                textwrap.dedent(source)).body[0].value.args[0]
 
         boundary_pending_shape(vector_pending_arg("""
             _cleanup_boundary(
@@ -6819,17 +6820,17 @@ def _watchdog_completion_case(mode):
         # runs nothing and must be ACCEPTED -- while the same
         # spelling in an AnnAssign's VALUE executes at the statement
         # and stays rejected.
-        unevaluated = ast.parse(textwrap.dedent("""
+        unevaluated = _optlevel.parse(textwrap.dedent("""
             def step():
                 marker: step.__annotations__
-            """), optimize=0).body[0]
+            """)).body[0]
         assert not list(annotation_reads(unevaluated.body)), (
             "an unevaluated local annotation was scanned as a "
             "deferred-annotation READ (fix 16, QA37 codex MINOR)")
-        evaluated = ast.parse(textwrap.dedent("""
+        evaluated = _optlevel.parse(textwrap.dedent("""
             def step():
                 marker: object = step.__annotations__
-            """), optimize=0).body[0]
+            """)).body[0]
         assert [access.attr for access
                 in annotation_reads(evaluated.body)] \
             == ["__annotations__"], (
@@ -6844,18 +6845,18 @@ def _watchdog_completion_case(mode):
         # over-rejected though it runs nothing. Both scanners now
         # skip the annotation, and both still see the VALUE, which
         # executes at the statement.
-        unevaluated_call = ast.parse(textwrap.dedent("""
+        unevaluated_call = _optlevel.parse(textwrap.dedent("""
             def step():
                 marker: getattr(step, "__annotations__")
-            """), optimize=0).body[0]
+            """)).body[0]
         assert not list(direct_calls(unevaluated_call.body)), (
             "a call inside an unevaluated local annotation was "
             "scanned as an executing call (fix 17, QA38 "
             "codex/claude MINOR)")
-        evaluated_call = ast.parse(textwrap.dedent("""
+        evaluated_call = _optlevel.parse(textwrap.dedent("""
             def step():
                 marker: object = getattr(step, "__annotations__")
-            """), optimize=0).body[0]
+            """)).body[0]
         assert [call_target(call)[:2] for call
                 in direct_calls(evaluated_call.body)] \
             == [("name", "getattr")], (
@@ -8684,9 +8685,8 @@ def _watchdog_completion_case(mode):
             "the pinned QA38 mutation site (`pending = exc` inside "
             "_finish_close) is no longer unique (fix 17)",
             len(capture_assigns))
-        capture_assigns[0].value = ast.parse(
-            "exc if not self.armed else None", mode="eval",
-            optimize=0).body
+        capture_assigns[0].value = _optlevel.parse(
+            "exc if not self.armed else None", mode="eval").body
         mutant_namespace = dict(vars(emit))
         exec(compile(ast.fix_missing_locations(ast.Module(
                 body=[mutant_member], type_ignores=[])),
@@ -8772,8 +8772,8 @@ def _watchdog_completion_case(mode):
                 "the pinned QA39 capture's holding body is not "
                 "unique (fix 18)", len(holders))
             at = holders[0].body.index(capture_assigns[0])
-            holders[0].body[at + 1:at + 1] = ast.parse(
-                mutation_source, optimize=0).body
+            holders[0].body[at + 1:at + 1] = _optlevel.parse(
+                mutation_source).body
             mutant_namespace = dict(vars(emit))
             exec(compile(ast.fix_missing_locations(ast.Module(
                     body=[mutant_member], type_ignores=[])),
@@ -8838,11 +8838,11 @@ def _watchdog_completion_case(mode):
         )
         for (mutation_source, derived_states, firing_states,
              vector) in fix19_vectors:
-            probe_member = ast.parse(
+            probe_member = _optlevel.parse(
                 "def probe(self):\n" + "".join(
                     "    " + line + "\n"
                     for line in
-                    mutation_source.splitlines()), optimize=0).body[0]
+                    mutation_source.splitlines())).body[0]
             probe_overrides = derived_overrides(
                 "m:probe", probe_member)
             for derived_state in derived_states:
@@ -8873,8 +8873,8 @@ def _watchdog_completion_case(mode):
                 "the pinned QA40 capture's holding body is not "
                 "unique (fix 19)", len(holders))
             at = holders[0].body.index(capture_assigns[0])
-            holders[0].body[at + 1:at + 1] = ast.parse(
-                mutation_source, optimize=0).body
+            holders[0].body[at + 1:at + 1] = _optlevel.parse(
+                mutation_source).body
             mutant_overrides = derived_overrides(
                 "m:_FixtureProcess._finish_close", mutant_member)
             for firing_state in firing_states:
@@ -8968,11 +8968,11 @@ def _watchdog_completion_case(mode):
         )
         for (mutation_source, derived_states, firing_states,
              vector) in fix20_vectors:
-            probe_member = ast.parse(
+            probe_member = _optlevel.parse(
                 "def probe(self):\n" + "".join(
                     "    " + line + "\n"
                     for line in
-                    mutation_source.splitlines()), optimize=0).body[0]
+                    mutation_source.splitlines())).body[0]
             probe_overrides = derived_overrides(
                 "m:probe", probe_member)
             for derived_state in derived_states:
@@ -9004,8 +9004,8 @@ def _watchdog_completion_case(mode):
                 "the pinned QA41 capture's holding body is not "
                 "unique (fix 20)", len(holders))
             at = holders[0].body.index(capture_assigns[0])
-            holders[0].body[at + 1:at + 1] = ast.parse(
-                mutation_source, optimize=0).body
+            holders[0].body[at + 1:at + 1] = _optlevel.parse(
+                mutation_source).body
             mutant_overrides = derived_overrides(
                 "m:_FixtureProcess._finish_close", mutant_member)
             for firing_state in firing_states:
@@ -9947,14 +9947,14 @@ def _watchdog_completion_case(mode):
             "the pinned QA51 capture's holding body is not unique "
             "(fix 30)", len(holders))
         at = holders[0].body.index(capture_assigns[0])
-        holders[0].body[at + 1:at + 1] = ast.parse(
+        holders[0].body[at + 1:at + 1] = _optlevel.parse(
             "try:\n"
             "    if self.__qa51 == 7:\n"
             "        pending = None\n"
             "except AttributeError:\n"
             "    pass\n"
             "if self.__class__ is True:\n"
-            "    pending = None", optimize=0).body
+            "    pending = None").body
         mangled_state = dict(_FixtureProcess__qa51=7)
         mutant_overrides = derived_overrides(
             "m:_FixtureProcess._finish_close", mutant_member)
@@ -9965,8 +9965,8 @@ def _watchdog_completion_case(mode):
             "compiler mangles it (fix 30, QA51)", mutant_overrides)
         assert driven_state(dict([("__class__", True)]),
                             mutant_overrides), mutant_overrides
-        mutant_class = ast.parse(
-            "class _FixtureProcess:\n    pass", optimize=0).body[0]
+        mutant_class = _optlevel.parse(
+            "class _FixtureProcess:\n    pass").body[0]
         mutant_class.body = [mutant_member]
         mutant_namespace = dict(vars(emit))
         exec(compile(ast.fix_missing_locations(ast.Module(

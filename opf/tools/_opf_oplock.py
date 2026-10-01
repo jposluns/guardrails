@@ -467,6 +467,7 @@ import _opf_check          # noqa: E402
 import _opf_emit           # noqa: E402
 import _opf_init_contract  # noqa: E402
 import _opf_store          # noqa: E402
+import _optlevel           # noqa: E402
 
 # Fixed control names. This module creates in a control directory only the anchor and, while an
 # operation is active, the active record (the earlier draft's ops/<uuid>/phases tree is retired
@@ -5342,26 +5343,13 @@ def _t_c13_fifo_control_names(d, env):
     release_operation(cap)
 
 
-def _st_source_docstring(path, name=None):
-    """The docstring of the top-level def or class `name` in the Python source at `path` (the module's
-    own when `name` is None), parsed from the file with optimize=0. python -OO strips docstrings and
-    leaves __doc__ None, so a check reading __doc__ would follow the interpreter level, not the source."""
-    import ast
-    with open(path, encoding="utf-8") as fh:
-        node = ast.parse(fh.read(), optimize=0)
-    if name is not None:
-        node = {n.name: n for n in node.body
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}[name]
-    return ast.get_docstring(node)
-
-
 def _t_c8_c14_scope_out(d, env):
     """T-c8/T-c14: the nested-lock surface and the phases subtree are REMOVED (PR3 scope-out),
     and no cross-lock ordering claim survives in the module's public docstrings."""
     assert not hasattr(OpCapability, "acquire_journal_lock"), "nested journal lock is PR3"
     assert not hasattr(OpCapability, "acquire_index_lock"), "nested index lock is PR3"
     for name in (None, "OpCapability", "acquire_operation", "release_operation"):
-        text = _st_source_docstring(__file__, name) or ""
+        text = _optlevel.source_docstring(__file__, name) or ""
         assert "canonical lock order" not in text and "canonical order" not in text \
             and "repository -> journal -> index" not in text, "retired ordering claim survives"
     root = _st_git_store(d, "repo", env)
@@ -8295,7 +8283,7 @@ def _t_f8_5_setgid_contract(d, env):
         raise _StSkip("the fixture cannot set S_ISGID on its control directory")
     release_operation(acquire_operation(root, "op"))
     assert stat.S_IMODE(os.lstat(ctl).st_mode) == 0o2755, "an intact directory is left as it is"
-    text = " ".join(_st_source_docstring(__file__).split())
+    text = " ".join(_optlevel.source_docstring(__file__).split())
     assert "is accepted and preserved only as mkdir inherits it" not in text, \
         "the contract must not claim a restriction the validation does not enforce"
     assert "that REPAIR accepts and preserves a control directory's set-group-ID bit only as " \
@@ -9493,6 +9481,11 @@ def _t_i5_holder_identity_bound(d, env):
 
 
 def self_test():
+    # The tests judge with assert statements, which -O and -OO strip: refuse (exit 2), never a vacuous pass.
+    refusal = _optlevel.assert_verdict_refusal("_opf_oplock.py --self-test")
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return 2
     return _st_with_git_lifecycle(self_test_isolated)
 
 

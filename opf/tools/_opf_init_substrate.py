@@ -120,6 +120,7 @@ import _journal            # noqa: E402
 import _opf_init_contract  # noqa: E402
 import _opf_oplock         # noqa: E402
 import _opf_store          # noqa: E402
+import _optlevel           # noqa: E402
 
 # Fixed substrate names. The substrate home is a SIBLING of the lock's control directory under
 # the same control root; ops/ holds one directory per operation id, and each operation directory
@@ -2422,6 +2423,11 @@ def _t_s22_close_failure_unwind(d, env):
 
 
 def self_test():
+    # The tests judge with assert statements, which -O and -OO strip: refuse (exit 2), never a vacuous pass.
+    refusal = _optlevel.assert_verdict_refusal("_opf_init_substrate.py --self-test")
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return 2
     return _opf_oplock._st_with_git_lifecycle(self_test_isolated)
 
 

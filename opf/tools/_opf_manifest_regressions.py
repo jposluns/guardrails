@@ -13,6 +13,7 @@ import inspect
 
 import _opf_init
 import _opf_store
+import _optlevel
 
 
 MANIFEST_CALLERS = ("loader", "views", "plan_views",
@@ -29,7 +30,7 @@ def _finding_sites(source, check):
     Dynamic dispatch, imported emitters, reflection and deliberate AST spoofing
     remain outside this static census; changes to those require manual review.
     """
-    tree = ast.parse(source, optimize=0)
+    tree = _optlevel.parse(source)
     functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
     names, pending = set(), ["validate_manifest"]
     while pending:
@@ -137,9 +138,9 @@ def _finding_sites(source, check):
 def _census_regressions(source, check):
     for mutation in ("non-table-major", "missing-continue", "accumulator-rebind",
                      "pre-guard-reassignment", "caught-append-argument"):
-        # optimize=0 keeps docstrings under -OO, so the fixed body indices
+        # A level-0 parse keeps docstrings under -OO, so the fixed body indices
         # below and the unparsed mutant do not follow the interpreter level.
-        tree = ast.parse(source, optimize=0)
+        tree = _optlevel.parse(source)
         functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
         helper = functions["_validate_supported_profile"]
         if mutation == "non-table-major":
@@ -150,18 +151,18 @@ def _census_regressions(source, check):
                          and ast.unparse(node.test) == "prof_major is None")
             guard.body[-1] = ast.Pass()
         elif mutation == "pre-guard-reassignment":
-            helper.body[1] = ast.parse(
+            helper.body[1] = _optlevel.parse(
                 'where, prof = "[profiles.{}]".format(_safe_display(name)), '
-                'prof.get("requirements", prof)', optimize=0).body[0]
+                'prof.get("requirements", prof)').body[0]
         else:
             guard = next(node for node in ast.walk(helper)
                          if isinstance(node, ast.If)
                          and ast.unparse(node.test) == "spec_tuple is None")
             if mutation == "accumulator-rebind":
-                guard.body.insert(0, ast.parse("findings = []", optimize=0).body[0])
+                guard.body.insert(0, _optlevel.parse("findings = []").body[0])
             else:
                 emission = guard.body[0]
-                emission.value.args[0] = ast.parse("1 / 0", mode="eval", optimize=0).body
+                emission.value.args[0] = _optlevel.parse("1 / 0", mode="eval").body
                 guard.body = [ast.Try(body=[emission],
                                      handlers=[ast.ExceptHandler(
                                          type=ast.Name(id="ZeroDivisionError", ctx=ast.Load()),
@@ -193,25 +194,27 @@ def _census_regressions(source, check):
     check("F2g-census-rejects-extend", failures == ["F2g-census-recognized-emissions"])
 
     # Remove a genuine emission without changing the supported syntax.
-    tree = ast.parse(source, optimize=0)
+    tree = _optlevel.parse(source)
     function = next(n for n in tree.body
                     if isinstance(n, ast.FunctionDef) and n.name == "_validate_top_level")
     emission = function.body[1].body[0]
-    assert isinstance(emission, ast.Expr) and isinstance(emission.value, ast.Call)
+    # An explicit raise, not an assert: python -O would strip the guard and mutate the wrong statement.
+    if not (isinstance(emission, ast.Expr) and isinstance(emission.value, ast.Call)):
+        raise AssertionError("_validate_top_level's body[1] no longer opens with an emission call")
     function.body[1].body[0] = ast.Pass()
     failures = []
     _finding_sites(ast.unparse(tree), lambda name, ok: failures.append(name) if not ok else None)
     check("F2g-census-rejects-shrink", failures == ["F2g-census-site-count-72"])
 
-    tree = ast.parse(source, optimize=0)
+    tree = _optlevel.parse(source)
     helper = next(n for n in tree.body
                   if isinstance(n, ast.FunctionDef) and n.name == "_validate_supported_profile")
     # Reachable for a supported profile missing base_compat; same wording as the
     # unreachable defence must not exempt this different guarded structure.
-    helper.body.insert(3, ast.parse("""
+    helper.body.insert(3, _optlevel.parse("""
 if not isinstance(prof.get("base_compat"), str):
     findings.append("{} is not a table".format(where))
-""", optimize=0).body[0])
+""").body[0])
     failures = []
     _finding_sites(ast.unparse(tree), lambda name, ok: failures.append(name) if not ok else None)
     check("F2h-census-rejects-reachable-same-wording",
@@ -240,7 +243,7 @@ if not isinstance(prof.get("base_compat"), str):
           failures == ["F2j-census-emission-only-lines"])
 
 def _validator_namespace(source, transform=None):
-    tree = ast.parse(source, optimize=0)
+    tree = _optlevel.parse(source)
     # Execute function definitions only, using the actual module's imports and constants.
     tree.body = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
     if transform is not None:
