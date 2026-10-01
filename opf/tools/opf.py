@@ -184,13 +184,36 @@ def _binds_self_test(node):
     return False
 
 
+def _unconditional_binding(statements):
+    """Return the last of `statements` (top-level ones) that binds self_test UNCONDITIONALLY, or None: a def,
+    async def or class named self_test, an import or from-import binding it (a star import counts), or an
+    assignment, or annotated assignment with a value, storing it. A top-level try's body runs, so its statements
+    count (recursively); a binding only inside if, for, while, with, match, an except handler, a try's else or
+    finally, or a function does not."""
+    import ast
+    found = None
+    for node in statements:
+        if isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try))):
+            found = _unconditional_binding(node.body) or found
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom)):
+            found = node if _binds_self_test(node) else found
+        elif isinstance(node, ast.Assign):
+            found = node if any(_binds_self_test(part) for target in node.targets
+                                for part in ast.walk(target)) else found
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            found = node if _binds_self_test(node.target) else found
+    return found
+
+
 def _self_test_entry_gap(tree):
     """Return (exposes, reason) for one parsed module. `exposes` is whether it binds self_test at module scope
     by any form _binds_self_test names, or by a `global self_test` anywhere (a function can bind it so). An
     exposing module's `reason` is None only when it has exactly one `if` at module scope whose test compares
     `__name__` with "__main__", that `if` is the module's last top-level statement, tests exactly _ENTRY_TEST
-    and has no else, the module imports sys at top level, and the block's first statement is _ENTRY_STATEMENT;
-    otherwise it names the first rule broken."""
+    and has no else, the module imports sys at top level, the block's first statement is _ENTRY_STATEMENT, the
+    block binds self_test nowhere, a statement before it binds self_test unconditionally
+    (_unconditional_binding), and, when the last such binding is a def, it is neither an async def nor one
+    whose own body (not a nested function, lambda or class) yields; otherwise it names the first rule broken."""
     import ast
     scope = list(_module_scope(tree))
     if not (any(_binds_self_test(node) for node in scope) or any(
@@ -229,6 +252,19 @@ def _self_test_entry_gap(tree):
             return True, "the canonical `--self-test` statement is not the first in its `__main__` block"
         return True, "its `__main__` block starts with `{}`, not the canonical `--self-test` statement".format(
             ast.unparse(block.body[0]).splitlines()[0][:60])
+    if any(_binds_self_test(node) for node in _module_scope(block)):
+        return True, "its `__main__` block (line {}) binds self_test".format(block.lineno)
+    binding = _unconditional_binding(tree.body[:-1])
+    if binding is None:
+        return True, "self_test is bound only conditionally (inside a compound statement other than a try " \
+                     "body, or by a function's `global`), never unconditionally before its `__main__` block"
+    if isinstance(binding, ast.AsyncFunctionDef):
+        return True, "its self_test (line {}) is an `async def`: the call returns a coroutine, so the " \
+                     "suite never runs".format(binding.lineno)
+    if isinstance(binding, ast.FunctionDef) and any(isinstance(node, (ast.Yield, ast.YieldFrom)) for statement
+                                                    in binding.body for node in _module_scope(statement)):
+        return True, "its self_test (line {}) is a generator (its body yields): the call returns a " \
+                     "generator, so the suite never runs".format(binding.lineno)
     return True, None
 
 
@@ -243,20 +279,31 @@ def _self_test_entry_gaps(directory, required=()):
             ...  # any other argument handling the module has
 
     as its last top-level statement, with that operand order, sys imported at top level, the inner `if` holding
-    nothing else and no else, and no other `if` at module scope testing `__name__` against "__main__"
-    (_self_test_entry_gap gives the rules and each reason). It is a gap too when a *.py entry is not a regular
-    file or cannot be read or parsed, when a `required` name is not found binding self_test, and when no module
-    binds it at all. The listing is os.listdir, so a missing or unreadable directory is a gap, not an empty
-    scan; it is not recursive, so _vendor/ is not scanned.
+    nothing else and no else, no other `if` at module scope testing `__name__` against "__main__", a statement
+    before that block binding self_test unconditionally (a top-level def, class, import, from-import or
+    assignment, or one in a top-level try body), the block itself binding it nowhere, and a def'd self_test
+    neither async nor a generator (_self_test_entry_gap gives the rules and each reason). It is a gap too when
+    a *.py entry is not a regular file or cannot be read or parsed, when a `required` name is not found binding
+    self_test, and when no module binds it at all. The listing is os.listdir, so a missing or unreadable
+    directory is a gap, not an empty scan; it is not recursive, so _vendor/ is not scanned.
 
-    Residual. The guard checks the static form only and does not execute the module, so a module that subverts
-    its own exit after calling self_test (an atexit hook, os._exit, a SystemExit handler, argv inspection, a
-    stateful self_test) is not caught; nor is a binding made dynamically (globals(), setattr on the module, a
-    module __getattr__), nor a canonical-looking entry whose `sys`, `self_test` or builtins were rebound. Only
-    `if` tests are counted as `__main__` blocks: a `__name__` comparison held in a name (as _opf_adopt_observe's
-    sys.path setup does) or used in another expression is not. Those are code-review matters: the guard is for
-    an accidental missing or miswired entry. The exact-form rule is conservative: a working entry in any other
-    form is a gap."""
+    Guarantee and residual. For a module it passes: an unconditional self_test binding precedes the single canonical
+    entry, which is the module's last statement, and when the last such binding is a def it is a plain function (not
+    async, its own body yielding nothing; its decorators are not inspected). What it does not check: that an
+    imported, assigned or class self_test is callable or returns an int (it is not inspected beyond being bound; a
+    star import counts as binding it, and a try-body binding counts even if an earlier statement there raises); a
+    later rebinding or deletion of `sys`, `self_test` or builtins, conditional or not; and exit subversion after the
+    call (an atexit hook, os._exit, a SystemExit handler, argv inspection, a stateful self_test). Those are
+    code-review matters: the guard is for an accidental missing or miswired entry. Run with --self-test, such a
+    module, absent a rebound `sys` or builtins and exit subversion, calls whatever self_test is bound to; if it is
+    unbound there (a raising try body, a star import that lacks it, a deletion) the run exits 1 with NameError, and
+    a non-callable exits 1 with TypeError. It does NOT hold that every residual shape runs the suite or exits
+    non-zero: a bound callable returning None, 0 or False exits 0 whatever it ran (`self_test = int`, say), and a
+    rebound `sys` or builtins, a rebinding of self_test to such a callable, or exit subversion can exit 0 without
+    running the suite. Nor is a binding made dynamically (globals(), setattr on the module, a module __getattr__)
+    recognized; such a module is not an exposer unless it also binds statically. Only `if` tests are counted as
+    `__main__` blocks: a `__name__` comparison held in a name (as _opf_adopt_observe's sys.path setup does) or used
+    in another expression is not. The exact-form rule is conservative: a working entry in any other form is a gap."""
     import ast
     gaps, exposers = {}, set()
     try:
@@ -315,6 +362,7 @@ def _self_test_floor(registry, directory, exempt):
     A fault is an empty registry; an entry that is not exempt whose callable has no defining module file in
     `directory`, or is not that module's self_test; an exempt entry not defined in this file; and an exemption
     naming no registry entry."""
+    registry = tuple(registry)
     required, faults, labels = set(), [], set()
     if not registry:
         faults.append("the self-test registry is empty")
@@ -348,6 +396,9 @@ _ENTRY_BODY = '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_te
 _ENTRY_MAIN = 'if __name__ == "__main__":\n' + _ENTRY_BODY
 _ENTRY_NONE = 'no `if __name__ == "__main__":` block'
 _ENTRY_FIRST = "not the canonical `--self-test` statement"
+_ENTRY_BLOCK_BINDS = ") binds self_test"
+_ENTRY_CONDITIONAL = "bound only conditionally"
+_ENTRY_GENERATOR = "is a generator"
 _ENTRY_FIXTURES = (
     ("canonical.py", _ENTRY_HEAD + "def main(argv):\n    return 2\n\n\n" + _ENTRY_MAIN
      + "    sys.exit(main(sys.argv[1:]))\n", True, None),
@@ -394,6 +445,23 @@ _ENTRY_FIXTURES = (
     ("not_last.py", _ENTRY_HEAD + _ENTRY_MAIN + "\n\ndef later():\n    pass\n", True, "follows its"),
     ("no_sys.py", _ENTRY_HEAD.replace("import sys\n", "") + _ENTRY_MAIN, True, "does not `import sys`"),
     ("unparseable.py", "def self_test(:\n    return 0\n", False, "cannot be parsed"),
+    ("main_defines.py", "import sys\n\n\n" + _ENTRY_MAIN + "    def self_test():\n        return 0\n", True,
+     _ENTRY_BLOCK_BINDS),
+    ("main_rebinds.py", _ENTRY_HEAD + _ENTRY_MAIN + "    self_test = None\n", True, _ENTRY_BLOCK_BINDS),
+    ("platform_only.py", 'import sys\n\nif sys.platform == "win32":\n    def self_test():\n        return 0\n\n\n'
+     + _ENTRY_MAIN, True, _ENTRY_CONDITIONAL),
+    ("except_only.py", "import sys\n\ntry:\n    import _no_such_module\nexcept ImportError:\n"
+     "    def self_test():\n        return 0\n\n\n" + _ENTRY_MAIN, True, _ENTRY_CONDITIONAL),
+    ("async_def.py", _ENTRY_HEAD.replace("def self_test", "async def self_test") + _ENTRY_MAIN, True,
+     "is an `async def`"),
+    ("generator_def.py", _ENTRY_HEAD.replace("return 0", "yield 0") + _ENTRY_MAIN, True, _ENTRY_GENERATOR),
+    ("generator_from.py", "import sys\n\n\ndef self_test():\n    if sys:\n        yield from ()\n    return 0\n\n\n"
+     + _ENTRY_MAIN, True, _ENTRY_GENERATOR),
+    ("nested_generator.py", "import sys\n\n\ndef self_test():\n    def rows():\n        yield 0\n\n"
+     "    async def feed():\n        yield 0\n\n    class Rows:\n        pull = lambda: (yield)\n\n"
+     "    pull = lambda: (yield)\n    return sum(rows())\n\n\n" + _ENTRY_MAIN, True, None),
+    ("try_import.py", "import sys\n\ntry:\n    from _no_such_module import self_test\nexcept ImportError:\n"
+     "    pass\n\n\n" + _ENTRY_MAIN, True, None),
 )
 
 
@@ -439,6 +507,7 @@ def _self_test_floor_probe(registry, directory, elsewhere):
     external = next(label for label, _fn in registry if label not in _ENTRY_FLOOR_EXEMPT)
     cases = (
         ("empty registry", (), _ENTRY_FLOOR_EXEMPT, "the self-test registry is empty"),
+        ("empty iterator registry", iter(()), _ENTRY_FLOOR_EXEMPT, "the self-test registry is empty"),
         ("not a module's self_test", registry + (("synthetic-lambda", lambda: 0),), _ENTRY_FLOOR_EXEMPT,
          "synthetic-lambda: its callable is not"),
         ("exempt but external", registry, dict(_ENTRY_FLOOR_EXEMPT, **{external: "synthetic"}),
