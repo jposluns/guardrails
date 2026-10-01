@@ -401,7 +401,10 @@ def _self_test():
             import _opf_views
             import _opf_import
             import _opf_check
-            with patch.object(sys.modules[__name__], "load_worklog_at", wraps=load_worklog_at) as intake:
+            # The consumers import `_opf_worklog`; under a direct-script run this module is `__main__`, a
+            # distinct module object, so the spy must sit on the module they actually call through.
+            import _opf_worklog as consumed
+            with patch.object(consumed, "load_worklog_at", wraps=consumed.load_worklog_at) as intake:
                 check("view-intake", _opf_views._load_worklog(
                     fd, ".working/custom/worklog.toml", frozenset(), []) == (raw, [entry])
                       and intake.call_count == 1)
@@ -485,3 +488,10 @@ def _self_test():
         return 1
     print("OPF-WORKLOG SELF-TEST: PASS ({} loader, grammar, mint, and alias checks)".format(len(checks)))
     return 0
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
+    print("usage: _opf_worklog.py --self-test (a library module; no live mode)", file=sys.stderr)
+    sys.exit(2)

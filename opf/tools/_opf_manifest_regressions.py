@@ -377,7 +377,7 @@ def manifest_cases(check):
     add("archive-period", ("archive", "period"), "month")
     add("unmanaged-list", ("unmanaged", "paths"), "fixture")
     add("unmanaged-containment", ("unmanaged", "paths"), ["../escape"])
-    # Multi-finding preservation and layout-sensitive import diagnostics.
+    # Standard-identity findings under both layouts, and multi-finding preservation.
     add("identity-inline", ("opf", "standard"), "other")
     data = copy.deepcopy(valid)
     data["opf"].update(standard="other", layout="per-record")
