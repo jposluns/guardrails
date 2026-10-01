@@ -3508,11 +3508,17 @@ def self_test(vectors_only=False):
         # that case's lookups at once. Join every started worker within the
         # bound and return (alive, leaked). alive holds the workers that
         # outlived it: stragglers, charged by the caller to the run that
-        # started them. While one lives the slot is not judged. A slot still
-        # held once no worker is alive was leaked by code under test: leaked
-        # is True so the caller fails its case INVALID, and the slot is
-        # released so later cases are evaluated on their own.
-        alive = join_resolvers(seconds)
+        # started them. A straggler already recorded (straggler_runs) has
+        # outlived a full join and failed its own row, so it is tested for
+        # life without another wait: each later settle would otherwise pay
+        # the bound again for a worker known to outlive it. One that would
+        # have ended within such a wait now blocks the later run instead;
+        # its own row is INVALID either way, so the exit is unchanged. While
+        # one lives the slot is not judged. A slot still held once no worker
+        # is alive was leaked by code under test: leaked is True so the
+        # caller fails its case INVALID, and the slot is released so later
+        # cases are evaluated on their own.
+        alive = join_resolvers(seconds, straggler_runs)
         if alive:
             return alive, False
         if not _RESOLVER_SLOT.acquire(blocking=False):
@@ -3521,10 +3527,11 @@ def self_test(vectors_only=False):
         _RESOLVER_SLOT.release()
         return alive, False
 
-    def join_resolvers(seconds):
+    def join_resolvers(seconds, known=()):
+        # Joins every resolver worker not in known; returns every live one.
         end = time.monotonic() + seconds
         for thread in threading.enumerate():
-            if thread.name == "opf-adopt-resolver":
+            if thread.name == "opf-adopt-resolver" and thread not in known:
                 thread.join(max(0.0, end - time.monotonic()))
         return set(thread for thread in threading.enumerate()
                    if thread.name == "opf-adopt-resolver" and thread.is_alive())
@@ -4283,14 +4290,15 @@ def self_test(vectors_only=False):
     # is made by the vector, never by a race with a bound. Each vector's
     # mutant run is this synthetic detected run, so its row turns on one run
     # alone; the blocked-mutant vector instead pairs this synthetic evaluated
-    # run with blocked runs as the mutant, and the positive-held-slot vector
-    # judges the cancellation sweep's row.
+    # run with blocked runs as the mutant, and the positive-held-slot and
+    # sweep-leaked-slot vectors judge the cancellation sweep's row.
     VECTOR_NAMES = ("resolver-vector/straggler", "resolver-vector/blocked",
                     "resolver-vector/blocked-effect", "resolver-vector/blocked-residue",
                     "resolver-vector/blocked-connect", "resolver-vector/blocked-fetch-order",
                     "resolver-vector/blocked-timing", "resolver-vector/blocked-mutant",
                     "resolver-vector/retained-slot", "resolver-vector/leaked-slot",
-                    "resolver-vector/positive-held-slot", "resolver-vector/cleanup")
+                    "resolver-vector/positive-held-slot", "resolver-vector/sweep-leaked-slot",
+                    "resolver-vector/cleanup")
     detected = (False, "fixture: detected", 0.0, [], [], [], [], [], [])
     evaluated = (True, "fixture: evaluated", 0.0, [], [], [], [], [], [])
 
@@ -4479,6 +4487,36 @@ def self_test(vectors_only=False):
         finally:
             gate.set()
 
+    def sweep_leaked_vector(base, contexts, results):
+        # A slot held with no live resolver worker before the cancellation
+        # sweep is released, the sweep is run on the free slot, and its row
+        # is INVALID (resolver_slot_leaked ["before"]). The sweep here is a
+        # synthetic passing row, so the leak alone fails it.
+        if join_resolvers(2.0):
+            raise AssertionError("a resolver worker is alive before the leak")
+        if not _RESOLVER_SLOT.acquire(blocking=False):
+            raise AssertionError("the resolver slot is held before the leak")
+        swept = []
+
+        def sweep():
+            swept.append(_RESOLVER_SLOT.acquire(blocking=False))
+            if swept[0]:
+                _RESOLVER_SLOT.release()
+            return [{"id": _CANCELLATION_ROW, "test_status": VALID}]
+        failures = []
+        try:
+            rows = cancellation_rows(sweep)
+        finally:
+            if not _RESOLVER_SLOT.acquire(blocking=False):
+                failures.append("the leaked slot was not released")
+            _RESOLVER_SLOT.release()
+        if swept != [True]:
+            failures.append("the sweep was not run on the released slot")
+        if rows != [{"id": _CANCELLATION_ROW, "test_status": INVALID,
+                     "resolver_slot_leaked": ["before"], "detail": LEAKED}]:
+            failures.append("the leaked slot did not fail the sweep's row INVALID")
+        results.append((VECTOR_NAMES[11], failures))
+
     def resolver_vectors(base, contexts):
         # Returns (name, failures) per vector; a vector that raises reports
         # "cannot evaluate". Every vector releases its hold, then all workers
@@ -4490,7 +4528,8 @@ def self_test(vectors_only=False):
         for vector, names in ((straggler_vectors, VECTOR_NAMES[:8]),
                               (retained_vector, VECTOR_NAMES[8:9]),
                               (leaked_vector, VECTOR_NAMES[9:10]),
-                              (held_slot_vector, VECTOR_NAMES[10:11])):
+                              (held_slot_vector, VECTOR_NAMES[10:11]),
+                              (sweep_leaked_vector, VECTOR_NAMES[11:12])):
             try:
                 vector(base, contexts, results)
             except Exception as exc:
@@ -4506,7 +4545,7 @@ def self_test(vectors_only=False):
             failures.append("the vectors left the resolver slot held")
         else:
             _RESOLVER_SLOT.release()
-        results.append((VECTOR_NAMES[11], failures))
+        results.append((VECTOR_NAMES[12], failures))
         return results
 
     try:
@@ -4567,6 +4606,7 @@ def self_test(vectors_only=False):
             })
             if leaks:
                 executed[-1]["resolver_slot_leaked"] = leaks
+                add_detail(executed[-1], LEAKED)
             if retained:
                 executed[-1]["resolver_slot_retained"] = retained
                 add_detail(executed[-1], RETAINED)
