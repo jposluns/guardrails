@@ -1135,6 +1135,353 @@ def _close_harness_in_step(journal, copy):
     return copy == _CLOSE_HARNESS_PREAMBLE + journal[journal.index(start):journal.index(stop)] + "\n"
 
 
+# #378 P1, the alias-aware close sweep. Re-run it from the repository root with:
+#   cd tools && python3 -c 'import check_release_cut as c; print(*c._close_sweep(".."), sep="\n")'
+# Its rows are (path, line, function, shape, closed, other). The shapes: TRY, a close of an object inside a try
+# body (or an except handler) that a handler or finally of the same try (or that try's finally) closes again,
+# directly or through an alias; AFTER, the same close under a handler that does not re-raise, closed again later
+# in the enclosing block; REBIND, a close followed in the same block by a re-binding of the closed name or
+# attribute (close-then-rebind, in a loop or not), reported whether or not a cleanup reaches it; ATTR, a close of
+# self.<attr> then its re-binding while another method of the class closes the same attribute. A close is a call
+# whose callee name contains "close" (os.close, every _close_* helper) of its first argument, an argument-less
+# x.close() of x, and the exit of a with statement over os.fdopen(fd) or open(fd) of a closed descriptor.
+# Aliases followed: a plain re-binding (a = b, a = self.b), a tuple, list, set or dict display that captures the
+# variable (bound to a name, or appended, extended, inserted or added into one, or stored by subscript), a loop
+# variable over such a container (through reversed/list/tuple/sorted/set, .values/.items/.keys/.copy and
+# `x or {}`), a file object os.fdopen/open wraps a closed descriptor in, and a keyword capture
+# (ns = SimpleNamespace(pidfd=fd) makes ns.pidfd an alias of fd). A tuple assignment that clears its source in the
+# same statement (fd, x = x, None) is an ownership transfer, not an alias.
+# Residual, what it cannot follow: the order of statements (aliases are flow-insensitive, so a two-statement
+# transfer `fd = x; x = None` is still reported, and every hit needs a disposition); a close made through a callee
+# whose name lacks "close" or through a function passed as a value; a second close in another function (a caller's
+# cleanup, or another method, except the ATTR shape); an element closed by index (fds[i] is one key per
+# container); containers built by comprehension or returned from a call; and descriptors held by objects the sweep
+# does not know wrap one (sockets, subprocess pipes, selectors).
+_CLOSE_SWEEP_DIRS = ("tools", "opf/tools")
+
+
+def _cs_key(node):
+    """'x' for a name, 'self.x' for an attribute chain of names, '[]d' for an element of the container d."""
+    import ast
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _cs_key(node.value)
+        return base and base + "." + node.attr
+    if isinstance(node, ast.Subscript):
+        base = _cs_key(node.value)
+        return base and "[]" + base.lstrip("[]")
+    return None
+
+
+def _cs_close_arg(node):
+    """The key a close call closes, or None."""
+    import ast
+    if not isinstance(node, ast.Call):
+        return None
+    func = node.func
+    name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
+    if "close" not in name.lower() or name in ("closerange", "closed"):
+        return None
+    if node.args:
+        return _cs_key(node.args[0])
+    if isinstance(func, ast.Attribute) and not node.keywords:
+        return _cs_key(func.value)
+    return None
+
+
+def _cs_wrapped(node):
+    """The name of the descriptor os.fdopen(fd) / open(fd) / socket.fromfd(fd) wraps, or None."""
+    import ast
+    if not isinstance(node, ast.Call):
+        return None
+    func = node.func
+    name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
+    if name not in ("fdopen", "open", "fromfd") or not node.args or not isinstance(node.args[0], ast.Name):
+        return None
+    return node.args[0].id
+
+
+def _cs_walk(nodes):
+    """Every node under `nodes`, never entering a nested function, lambda or class."""
+    import ast
+    stack = list(nodes)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        yield node
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _cs_container(node):
+    import ast
+    while True:
+        if isinstance(node, ast.BoolOp):
+            node = node.values[0]
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr in ("values", "items", "keys", "copy"):
+            node = node.func.value
+        elif isinstance(node, ast.Call) and _cs_key(node.func) in ("reversed", "list", "tuple", "sorted", "set") \
+                and node.args:
+            node = node.args[0]
+        else:
+            return node
+
+
+def _cs_aliases(fn, fds):
+    """A same(a, b) test over the function's keys: union-find over every alias the sweep follows."""
+    import ast
+    parent = {}
+
+    def find(k):
+        parent.setdefault(k, k)
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    def union(a, b):
+        if a and b:
+            parent[find(a)] = find(b)
+
+    def elements(node):
+        if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+            return [_cs_key(e) for e in node.elts if _cs_key(e)]
+        if isinstance(node, ast.Dict):
+            return [_cs_key(e) for e in node.values if _cs_key(e)]
+        return []
+
+    for node in _cs_walk(fn.body):
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+            value = node.value
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target]):
+                if isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)) \
+                        and len(target.elts) == len(value.elts):
+                    rebound = {_cs_key(t) for t in target.elts}
+                    for t, v in zip(target.elts, value.elts):
+                        if _cs_key(v) and _cs_key(v) not in rebound:    # a transfer clears its source
+                            union(_cs_key(t), _cs_key(v))
+                    continue
+                key = _cs_key(target)
+                if key and _cs_key(value):
+                    union(key, _cs_key(value))
+                if key and _cs_wrapped(value) in fds:
+                    union(key, _cs_wrapped(value))
+                if key and isinstance(value, ast.Call):
+                    for kw in value.keywords:
+                        if kw.arg and _cs_key(kw.value):
+                            union(key + "." + kw.arg, _cs_key(kw.value))
+                for element in elements(value):
+                    union("[]" + (key or "").lstrip("[]"), element)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr in ("append", "extend", "insert", "add") and _cs_key(node.func.value):
+            for arg in node.args:
+                for element in ([_cs_key(arg)] if _cs_key(arg) else elements(arg)):
+                    union("[]" + _cs_key(node.func.value).lstrip("[]"), element)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                wrapped = _cs_key(item.context_expr) or _cs_wrapped(item.context_expr)
+                if item.optional_vars is not None and _cs_key(item.optional_vars) and wrapped in fds:
+                    union(_cs_key(item.optional_vars), wrapped)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)) and _cs_key(node.target):
+            iterable = _cs_container(node.iter)
+            for element in elements(iterable):
+                union(_cs_key(node.target), element)
+            if _cs_key(iterable):
+                union(_cs_key(node.target), "[]" + _cs_key(iterable).lstrip("[]"))
+    return lambda a, b: find(a) == find(b)
+
+
+def _cs_closes(nodes, fds=()):
+    """Each close under `nodes` with the key it closes."""
+    import ast
+    found = []
+    for node in _cs_walk(nodes):
+        if _cs_close_arg(node):
+            found.append((node, _cs_close_arg(node)))
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            found += [(node, _cs_wrapped(item.context_expr)) for item in node.items
+                      if _cs_wrapped(item.context_expr) in fds]
+    return found
+
+
+def _cs_rebinds(stmt, key):
+    import ast
+    for node in _cs_walk([stmt]):
+        if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target]):
+                if any(_cs_key(t) == key for t in [target] + list(getattr(target, "elts", []))):
+                    return True
+    return False
+
+
+def _cs_blocks(nodes):
+    """`nodes` itself (a function's own body), then every statement list (body, orelse, finalbody, handler
+    body) under it."""
+    yield nodes
+    for node in _cs_walk(nodes):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            if isinstance(block, list) and block:
+                yield block
+
+
+def _cs_function(rel, fn):
+    import ast
+    fds = {_cs_close_arg(n) for n in _cs_walk(fn.body) if _cs_close_arg(n) and n.args}
+    same = _cs_aliases(fn, fds)
+    rows = []
+    for node in _cs_walk(fn.body):
+        if isinstance(node, ast.Try) or type(node).__name__ == "TryStar":
+            cleanup = _cs_closes([s for h in node.handlers for s in h.body] + list(node.finalbody), fds)
+            pairs = [(c, k, cleanup) for c, k in _cs_closes(node.body, fds)]
+            pairs += [(c, k, _cs_closes(node.finalbody, fds))
+                      for h in node.handlers for c, k in _cs_closes(h.body, fds)]
+            rows += [(rel, c.lineno, fn.name, "TRY", k, o) for c, k, later in pairs for _a, o in later if same(k, o)]
+    for block in _cs_blocks(fn.body):
+        for i, stmt in enumerate(block):
+            if isinstance(stmt, ast.Expr) and _cs_close_arg(stmt.value) \
+                    and any(_cs_rebinds(after, _cs_close_arg(stmt.value)) for after in block[i + 1:]):
+                rows.append((rel, stmt.lineno, fn.name, "REBIND", _cs_close_arg(stmt.value), ""))
+            if isinstance(stmt, ast.Try) and any(not (h.body and isinstance(h.body[-1], ast.Raise))
+                                                 for h in stmt.handlers):
+                rows += [(rel, c.lineno, fn.name, "AFTER", k, o) for c, k in _cs_closes(stmt.body, fds)
+                         for _a, o in _cs_closes(block[i + 1:], fds) if same(k, o)]
+    return rows
+
+
+def _cs_class(rel, cls):
+    import ast
+    methods = [m for m in cls.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    closes = [(call, key) for m in methods for call, key in _cs_closes(m.body) if key.startswith("self.")]
+    rows = []
+    for m in methods:
+        for block in _cs_blocks(m.body):
+            for i, stmt in enumerate(block):
+                key = isinstance(stmt, ast.Expr) and _cs_close_arg(stmt.value)
+                if key and key.startswith("self.") and any(_cs_rebinds(a, key) for a in block[i + 1:]) \
+                        and any(k == key and c is not stmt.value for c, k in closes):
+                    rows.append((rel, stmt.lineno, "{}.{}".format(cls.name, m.name), "ATTR", key, ""))
+    return rows
+
+
+def _close_sweep_source(rel, text):
+    import ast
+    tree = ast.parse(text, rel)
+    rows = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            rows += _cs_class(rel, node)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            rows += _cs_function(rel, node)
+    return rows
+
+
+def _close_sweep(root):
+    """The sweep over tools/*.py and opf/tools/*.py (not _vendor) beneath `root`: sorted rows."""
+    rows = set()
+    for directory in _CLOSE_SWEEP_DIRS:
+        for path in sorted((Path(root) / directory).glob("*.py")):
+            rows.update(_close_sweep_source(path.relative_to(root).as_posix(), path.read_text(encoding="utf-8")))
+    return sorted(rows)
+
+
+# Every hit of the sweep at this commit, keyed (path, function, shape, closed, other) with its count, and its
+# disposition. A hit the table does not hold, or a held hit no longer found, fails the self-test, so a new
+# double-close shape needs a disposition here before it can land. A "part C" row may be absent: off-path part C,
+# merging after #378, fixes begin_operation (closing, plan_fd = plan_fd, None) and adds its own T-p2 RECLOSE flip.
+_CLOSE_SWEEP_DISPOSITIONS = (
+    ("opf/tools/_opf_init_substrate.py", "begin_operation", "REBIND", "plan_fd", "", 1, "part C: fixed there"),
+    ("opf/tools/_opf_init_substrate.py", "begin_operation", "TRY", "plan_fd", "open_fd", 1, "part C: fixed there"),
+    ("opf/tools/_opf_oplock.py", "propagating", "AFTER", "fd", "fd", 1,
+     "part C: false positive, part C's _st_reclose_yielding, the deliberate RECLOSE body its T-p2 flip runs"),
+    ("opf/tools/_journal.py", "body", "AFTER", "fd", "fd", 1,
+     "false positive: the harness's R flip (reclose), the deliberate pre-P1 body each R leg must turn red"),
+    ("tools/_close_selftest.py", "body", "AFTER", "fd", "fd", 1,
+     "false positive: the harness copy's R flip (reclose), byte-identical to _journal's"),
+    ("opf/tools/_opf_adopt_observe.py", "guarded", "TRY", "stack", "stack", 1,
+     "false positive: contextlib.ExitStack.close pops each callback before it runs it, so a repeat runs none twice"),
+    ("opf/tools/_opf_adopt_observe.py", "run_case", "TRY", "client", "client", 1,
+     "false positive: the client closed here is never appended to backlog_clients, which the cleanup loop closes"),
+    ("opf/tools/_opf_oplock.py", "_bind_repository_view", "REBIND", "fd", "", 1,
+     "false positive: _FdOwner.close removes the number from the owner before os.close, so its exit never repeats it"),
+    ("opf/tools/_opf_oplock.py", "_st_f8_4_body", "TRY", "dir_fd", "dir_fd", 1,
+     "false positive: _st_f8_4_interrupted_close(dir_fd) closes its own staging descriptor, never dir_fd"),
+    ("opf/tools/check_opf_import.py", "_RunDir.close", "ATTR", "self.cwd_fd", "", 1,
+     "false positive: every caller closes a _RunDir once, and __init__'s close raises before close() can run"),
+    ("opf/tools/check_opf_import.py", "close", "REBIND", "self.cwd_fd", "", 1,
+     "false positive: as the ATTR row, close() runs once per _RunDir"),
+    ("opf/tools/check_opf_import.py", "_check_staged_run", "REBIND", "store_fd", "", 2,
+     "false positive: a failed close in the handler propagates out of the function; nothing closes store_fd again"),
+    ("opf/tools/check_opf_prompt_pack.py", "_read_regular", "TRY", "fd", "fd", 1,
+     "false positive: fd = None is the with body's first statement, so the finally closes only an unwrapped fd"),
+    ("tools/check_footer.py", "_read_regular_page", "TRY", "fd", "fd", 1,
+     "false positive: fd = -1 is the with body's first statement, so the finally closes only an unwrapped fd"),
+    ("tools/gen_crosswalk.py", "_walk_components", "TRY", "prev", "fd", 1,
+     "false positive: fd is re-bound to nxt before prev is closed, so the handler closes nxt, never prev"),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "child", "", 1,
+     "false positive: a self-test leg; the name is re-bound to a new _FixtureProcess, the old one never closed again"),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "child.pidfd", "", 1,
+     "false positive: a self-test leg's hygiene close; no try in the function closes it again"),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "fd", "", 3,
+     "false positive: sequential self-test legs; each later binding is a fresh pidfd and no try closes it again"),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "guardian_fd", "", 4,
+     "false positive: sequential self-test legs; each later binding is a fresh pidfd and no try closes it again"),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "subject_fd", "", 1,
+     "false positive: sequential self-test legs; each later binding is a fresh pidfd and no try closes it again"),
+) + tuple(("opf/tools/_opf_init_substrate.py", name, "REBIND", "sub", "", 1,
+           "false positive: a self-test step; sub is re-bound to a fresh substrate, the old one never closed again")
+          for name in ("_t_s1_sibling_home", "_t_s2_capability_gate", "_t_s13_midread_containment",
+                       "_t_s16_staging_sweep", "_t_s20_distinct_nested_homes"))
+
+# Synthetic shapes the sweep must find (or, for the transfer, must not): each is (label, source, expected shapes).
+_CLOSE_SWEEP_SHAPES = (
+    ("tuple loop alias (begin_operation)", "def f(a, b):\n    try:\n        os.close(a)\n        a = None\n"
+     "    except BaseException:\n        for x in (a, b):\n            if x is not None:\n                os.close(x)\n"
+     "        raise\n", ["REBIND", "TRY"]),
+    ("ownership transfer", "def f(a):\n    try:\n        fd, a = a, None\n        os.close(fd)\n    finally:\n"
+     "        if a is not None:\n            os.close(a)\n", []),
+    ("plain re-binding alias", "def f(a):\n    b = a\n    try:\n        os.close(b)\n    finally:\n"
+     "        os.close(a)\n", ["TRY"]),
+    ("list captured by append", "def f(a):\n    fds = []\n    fds.append(a)\n    try:\n        os.close(a)\n"
+     "    finally:\n        for fd in reversed(fds):\n            os.close(fd)\n", ["TRY"]),
+    ("close-then-rebind loop", "def f(cur, names):\n    try:\n        for n in names:\n"
+     "            nxt = os.open(n, 0, dir_fd=cur)\n            os.close(cur)\n            cur = nxt\n    finally:\n"
+     "        os.close(cur)\n", ["REBIND", "TRY"]),
+    ("swallowed close, closed later", "def f(a):\n    try:\n        _close_fd_propagating(a)\n    except OSError:\n"
+     "        pass\n    _close_fd_quietly(a)\n", ["AFTER"]),
+    ("fdopen wraps the descriptor", "def f(fd):\n    try:\n        with os.fdopen(fd) as fh:\n"
+     "            fh.read()\n    finally:\n        os.close(fd)\n", ["TRY"]),
+    ("keyword capture", "def f(fd):\n    ns = SimpleNamespace(pidfd=fd)\n    try:\n        os.close(fd)\n"
+     "    finally:\n        os.close(ns.pidfd)\n", ["TRY"]),
+    ("attribute across methods", "class C:\n    def close(self):\n        os.close(self.fd)\n"
+     "        self.fd = None\n\n    def __del__(self):\n        if self.fd is not None:\n"
+     "            os.close(self.fd)\n", ["ATTR", "REBIND"]),
+)
+
+
+def _close_sweep_check(root):
+    """The sweep against its synthetic shapes and against this tree's recorded dispositions. Returns failures."""
+    import collections
+    failures = []
+    for label, source, shapes in _CLOSE_SWEEP_SHAPES:
+        got = sorted(row[3] for row in _close_sweep_source("<shape>", source))
+        if got != shapes:
+            failures.append("close sweep shape {}: expected {}, got {}".format(label, shapes, got))
+    hits = collections.Counter(row[:1] + row[2:] for row in _close_sweep(root))
+    recorded = {entry[:5]: entry for entry in _CLOSE_SWEEP_DISPOSITIONS}
+    for key, count in sorted(hits.items()):
+        if key not in recorded:
+            failures.append("close sweep: an unrecorded hit {} x{}".format(key, count))
+        elif count != recorded[key][5]:                   # a "part C" row, when present, keeps its count
+            failures.append("close sweep: {} found {} times, recorded {}".format(key, count, recorded[key][5]))
+    for key, entry in sorted(recorded.items()):
+        if key not in hits and not entry[6].startswith("part C"):
+            failures.append("close sweep: the recorded hit {} is no longer found; update its disposition".format(key))
+    return failures
+
+
 def self_test(red_on_revert):
     """Isolate fixture git calls, including in-process production helpers."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1219,6 +1566,11 @@ def _self_test_isolated(red_on_revert):
         check("close-harness-preamble-red", not _close_harness_in_step(
             journal, copy.replace("\nimport sys\n", "\nimport sys\nos.close = lambda fd: None\n")))
         print("PASS close-harness-in-step")
+        sweep_failures = _close_sweep_check(script.parents[1])
+        for failure in sweep_failures:
+            print("FAIL " + failure, file=sys.stderr)
+        check("close-sweep", not sweep_failures)
+        print("PASS close-sweep shapes={} recorded={}".format(len(_CLOSE_SWEEP_SHAPES), len(_CLOSE_SWEEP_DISPOSITIONS)))
         if red_on_revert:
             source = script.read_text(encoding="utf-8")
             marker = "# SELF-TEST:" + " mutation targets are restricted to the production prefix above."

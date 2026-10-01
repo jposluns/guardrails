@@ -26,8 +26,10 @@ class _StCloseFault:
     fired, or fired on a closed descriptor, proves nothing and is red (NOFIRE). The reuser is a pipe end
     put on the number with dup2, inline or, armed with thread=True, by a real second thread that takes
     the number while the close is still in progress and checks afterwards that it still owns it; settle()
-    reports each reuser that lost its number (REUSE). While `watch` is set, every later os.fstat,
-    os.close or fcntl.fcntl of a released number by the faulting thread is recorded in `probes` (PROBE)."""
+    reports each reuser that lost its number (REUSE). While `watch` is set, every later os.close of a
+    released number by the faulting thread, and every call that inspects it by number (_ST_WATCHED: os.stat
+    given the number itself, os.fstat, os.fstatvfs, os.lseek, os.get_inheritable, os.isatty, fcntl.fcntl,
+    fcntl.flock, fcntl.lockf, fcntl.ioctl), is recorded in `probes` (PROBE)."""
 
     def __init__(self, watch=True):
         import errno
@@ -40,8 +42,9 @@ class _StCloseFault:
         self.err = OSError(errno.EIO, "self-test injected close failure")
         self._close = os.close
         self._fstat = os.fstat
-        self._fcntl_module = _st_fcntl()
-        self._fcntl = self._fcntl_module and self._fcntl_module.fcntl
+        fcntl = _st_fcntl()
+        self._watched = [(module, name, getattr(module, name)) for module, names in ((os, _ST_WATCHED[0]),
+                         (fcntl, _ST_WATCHED[1])) if module for name in names if hasattr(module, name)]
         self._threading = threading
         self._released = set()
         self._faulting = None
@@ -119,15 +122,15 @@ class _StCloseFault:
                     self.lost.append((fd, "the second thread never took the number"))
         raise self.err
 
-    def _fake_fstat(self, fd, *args, **kwargs):
-        if fd in self._released and self.watch and self._threading.get_ident() == self._faulting:
-            self.probes.append(("fstat", fd))
-        return self._fstat(fd, *args, **kwargs)
-
-    def _fake_fcntl(self, fd, *args, **kwargs):
-        if fd in self._released and self.watch and self._threading.get_ident() == self._faulting:
-            self.probes.append(("fcntl", fd))
-        return self._fcntl(fd, *args, **kwargs)
+    def _watcher(self, name, real):
+        """The stand-in for one watched call: it records a released number it is given, then calls the real
+        one. Only an int is a number (os.stat of a path, or fcntl of a file object, is not one)."""
+        def watched(fd, *args, **kwargs):
+            if type(fd) is int and fd in self._released and self.watch \
+                    and self._threading.get_ident() == self._faulting:
+                self.probes.append((name, fd))
+            return real(fd, *args, **kwargs)
+        return watched
 
     def settle(self):
         """After the call: confirm each reuser still owns its number, then release it. Returns the losses."""
@@ -152,22 +155,43 @@ class _StCloseFault:
 
     def __enter__(self):
         os.close = self._fake_close
-        os.fstat = self._fake_fstat
-        if self._fcntl_module:
-            self._fcntl_module.fcntl = self._fake_fcntl
+        self._stand_ins = []
+        for module, name, real in self._watched:
+            watched = self._watcher(name, real)
+            setattr(module, name, watched)
+            for table in _st_supports(module):
+                if real in table:                         # a capability probe (os.stat in
+                    table.add(watched)                    # os.supports_dir_fd) still finds the call
+                    self._stand_ins.append((table, watched))
         return self
 
     def __exit__(self, *exc_info):
         os.close = self._close
-        os.fstat = self._fstat
-        if self._fcntl_module:
-            self._fcntl_module.fcntl = self._fcntl
+        for module, name, real in self._watched:
+            setattr(module, name, real)
+        for table, watched in self._stand_ins:
+            table.discard(watched)
         return False
+
+
+# The calls _StCloseFault watches, from os and from fcntl, each taking the descriptor number first. Not
+# watched: calls that use a number without inspecting it (read, write, dup, fsync, fchmod, ...), a number
+# passed as dir_fd= to a path call, and a number reached through a wrapping object (os.fdopen, socket).
+_ST_WATCHED = (("stat", "fstat", "fstatvfs", "lseek", "get_inheritable", "isatty"),
+               ("fcntl", "flock", "lockf", "ioctl"))
+
+
+def _st_supports(module):
+    """The capability sets of `module` (os.supports_dir_fd and its kin) a stand-in must join while active."""
+    tables = (getattr(module, name, None) for name in ("supports_dir_fd", "supports_fd",
+                                                        "supports_follow_symlinks", "supports_effective_ids"))
+    return [table for table in tables if isinstance(table, set)]
 
 
 def _st_fcntl():
     """The fcntl module, or None where it does not exist (it is POSIX-only): there nothing can call
-    fcntl.fcntl, so there is nothing to watch, and the fcntl probe flip (F) is not run."""
+    fcntl.fcntl, flock, lockf or ioctl, so there is nothing to watch there, and the fcntl probe flip (F)
+    is not run."""
     try:
         import fcntl
     except ImportError:
@@ -191,8 +215,9 @@ def _st_fd_table():
 def _st_close_run(call, masking, expect, watch=True):
     """Run one vector: call(fault) drives the site with the fault active. Returns its problems, each
     "TAG: detail": NOFIRE (the fault did not fire on an open descriptor), REUSE (the descriptor that took
-    the released number no longer owns it: the number was closed again), PROBE (the faulting thread
-    fstat'ed, fcntl'ed or closed the released number after the failed close; checked only while `watch`),
+    the released number no longer owns it: the number was closed again), PROBE (the faulting thread closed
+    the released number, or inspected it by a call _ST_WATCHED names, after the failed close; checked only
+    while `watch`),
     LEAK (a descriptor the call opened is still open), MASKED (the injected close error replaced the in-flight
     exception), SILENT (a normal-path failing close did not raise), WRONG (any other outcome). `masking` is
     True where an exception is in flight, False on a normal path whose close error must raise, and None on
@@ -339,9 +364,10 @@ def _st_close_check(ns, vectors):
 
 
 def _st_helper_vectors(ns):
-    """The helpers' own vectors, calling each close helper through `ns` so a flip applies: the four
-    _close_fd_yielding vectors, then for each helper `ns` defines, V1 (the released number reused inline,
-    once per errno, EINTR and EIO; red under R, P and F) and V2 (reused by a real second thread)."""
+    """The helpers' own vectors, calling each close helper through `ns` so a flip applies: the harness's
+    own watch check, the four _close_fd_yielding vectors, then for each helper `ns` defines, V1 (the
+    released number reused inline, once per errno, EINTR and EIO; red under R, P and F) and V2 (reused by a
+    real second thread)."""
     import errno
 
     def devnull(fault, **arm):
@@ -381,13 +407,52 @@ def _st_helper_vectors(ns):
             ns[name](devnull(fault, **arm))
         return call
 
-    vectors = ()
+    def watch(fault):
+        """The watch itself: each stand-in answers every capability probe as the real call does, and after a
+        failed close each watched call on the released number is recorded once, under its own name, and
+        os.stat of a path is not; the probes are then cleared and the close error raised, so a watch that
+        misses a call, records a path, or hides a call from os.supports_dir_fd is red by WRONG."""
+        for module, name, real in fault._watched:
+            for table in _st_supports(module):
+                if (getattr(module, name) in table) != (real in table):
+                    raise AssertionError("the stand-in for {} changes a capability probe".format(name))
+        fd = devnull(fault)
+        try:
+            os.close(fd)
+        except OSError as exc:
+            first = exc
+        else:
+            raise AssertionError("the armed close did not fail")
+        fcntl = _st_fcntl()
+        os.stat(os.devnull)
+        touches = (("stat", lambda: os.stat(fd)), ("fstat", lambda: os.fstat(fd)),
+                   ("fstatvfs", lambda: os.fstatvfs(fd)), ("lseek", lambda: os.lseek(fd, 0, os.SEEK_CUR)),
+                   ("get_inheritable", lambda: os.get_inheritable(fd)), ("isatty", lambda: os.isatty(fd)))
+        if fcntl:
+            touches += (("fcntl", lambda: fcntl.fcntl(fd, fcntl.F_GETFD)),
+                        ("flock", lambda: fcntl.flock(fd, fcntl.LOCK_UN)),
+                        ("lockf", lambda: fcntl.lockf(fd, fcntl.LOCK_UN)), ("ioctl", lambda: fcntl.ioctl(fd, 0)))
+        expected = []
+        for name, touch in touches:
+            if hasattr(fcntl if name in _ST_WATCHED[1] else os, name):
+                expected.append((name, fd))
+                try:
+                    touch()
+                except OSError:
+                    pass
+        seen, fault.probes[:] = list(fault.probes), []
+        if seen != expected:
+            raise AssertionError("the PROBE watch recorded {}, expected {}".format(seen, expected))
+        raise first
+
+    vectors = (("harness: the PROBE watch records every watched call on a released number", False, "", watch,
+                None),)
     if "_close_fd_yielding" in ns:
-        vectors = (("helper: finally while an exception unwinds", True, "AR", mask_finally,
-                    lambda e: e is sent),
-                   ("helper: except handler re-raising", True, "AR", mask_except, lambda e: e is sent),
-                   ("helper: normal path", False, "BR", normal, None),
-                   ("helper: normal path under a caller's except", False, "BCR", caller_except, None))
+        vectors += (("helper: finally while an exception unwinds", True, "AR", mask_finally,
+                     lambda e: e is sent),
+                    ("helper: except handler re-raising", True, "AR", mask_except, lambda e: e is sent),
+                    ("helper: normal path", False, "BR", normal, None),
+                    ("helper: normal path under a caller's except", False, "BCR", caller_except, None))
     for name, masking in (("_close_fd_propagating", False), ("_close_fd_quietly", None),
                           ("_close_fd_yielding", False)):
         if name not in ns:

@@ -3299,6 +3299,103 @@ def _bounded_child_result(data, wstatus):
     return data.decode("utf-8", "replace")
 
 
+def _st_guardian_close_reuse():
+    """#378 P1: _FixtureProcess._guardian takes ownership of the subject pidfd before closing it after the
+    drain. Driven in-process with every process seam stubbed (no fork, no signal mask, os._exit raising), the
+    close fails after releasing its number to a reuser (the shared _journal close harness): the guardian
+    records the failure at stage "drain" and exits 125, and its cleanup never closes the number again.
+    Green is no problem at all, with and without the PROBE watch; under the close-then-rebind body put back
+    (os.close(subject_fd), then subject_fd = None) it is red by REUSE alone, the cleanup closing the reuser.
+    The harness is loaded from its sibling FILE by explicit path, as _load_byte_canon_authority loads its
+    authority, so this runs under `python3 -I` too. Returns the failures."""
+    import gc
+    import importlib.util
+    import inspect
+    import json
+    import os
+    import signal
+    import socket
+    import tempfile
+    import textwrap
+    import time
+    import types
+    spec = importlib.util.spec_from_file_location("_opf_emit_close_harness",
+                                                  Path(__file__).resolve().parent / "_journal.py")
+    _journal = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(_journal)
+
+    class Exited(Exception):
+        def __init__(self, code):
+            super().__init__(code)
+            self.code = code
+
+    def drive(guardian):
+        def call(fault):
+            peer, other = socket.socketpair()
+            report = tempfile.TemporaryFile()
+            other.sendall(b"G")
+            child = types.SimpleNamespace(_launch_masked=set(), peer=peer, report=report, keep_fds=(),
+                                          subject=None, deadline=time.monotonic() + 3600)
+
+            def _exit(code):
+                raise Exited(code)
+            stubs = {"_fixture_close_all_except": lambda keep: None, "_fixture_subreaper": lambda: None,
+                     "_fixture_pidfd": lambda pid: fault.arm(os.open(os.devnull, os.O_RDONLY)),
+                     "_fixture_send_subject": lambda peer, subject, fd: None,
+                     "_fixture_ack_subject": os.close, "_fixture_cleanup_deadline": lambda deadline=None: deadline,
+                     "_fixture_drain": lambda subject, fd=None, deadline=None: 0}
+            calls = {(os, "setpgid"): lambda pid, pgrp: None, (os, "fork"): lambda: 1 << 22,
+                     (os, "waitid"): lambda *args: (), (os, "_exit"): _exit,
+                     (signal, "pthread_sigmask"): lambda how, mask: set()}   # the caller's mask is never touched
+            seams = guardian.__globals__                  # the reverted body runs in its own namespace
+            saved = {name: seams[name] for name in stubs}, {seam: getattr(*seam) for seam in calls}
+            enabled = gc.isenabled()
+            seams.update(stubs)
+            for (module, name), stub in calls.items():
+                setattr(module, name, stub)
+            try:
+                guardian(child)
+            except Exited as exc:
+                report.seek(0)
+                failure = json.loads(report.read().decode("ascii"))
+                if exc.code == 125 and failure["stage"] == "drain" \
+                        and failure["error"]["errno"] == fault.err.errno:
+                    raise _journal._StSentinel("recorded at drain")
+                raise
+            finally:
+                seams.update(saved[0])
+                for (module, name), real in saved[1].items():
+                    setattr(module, name, real)
+                if enabled:
+                    gc.enable()
+                peer.close()
+                other.close()
+                report.close()
+        return call
+
+    def recorded(exc):
+        return type(exc) is _journal._StSentinel
+
+    failures = []
+    for watch in (False, True):
+        got = _journal._st_close_run(drive(_FixtureProcess._guardian), True, recorded, watch)
+        if got:
+            failures.append("guardian-close-reuse (watch={}): expected green, got {}".format(watch, got))
+    source = textwrap.dedent(inspect.getsource(_FixtureProcess._guardian))
+    new = ("fd, subject_fd = subject_fd, None         # ownership first: a failed close is never\n"
+           "            os.close(fd)                              # closed again by the cleanup (P1, #378)\n")
+    if source.count(new) != 1:
+        return failures + ["guardian-close-reuse: revert target found {} times".format(source.count(new))]
+    ns = dict(globals())
+    exec(compile(source.replace(new, "os.close(subject_fd)\n            subject_fd = None\n"), __file__,
+                 "exec"), ns)
+    red = _journal._st_close_run(drive(ns["_guardian"]), True, recorded, False)
+    if [problem.split(":")[0] for problem in red] != ["REUSE"]:
+        failures.append("guardian-close-reuse under the close-then-rebind body: expected red by REUSE alone, "
+                        "got {}".format(red or "green"))
+    return failures
+
+
 def self_test():
     """Round-trip fuzz over adversarial bodies, canonical-form determinism, constrained-subset coverage
     (accepted and rejected), and byte-canon cleanliness verified against _byte_canon itself."""
@@ -4401,6 +4498,9 @@ def self_test():
     # emit_checked returns exactly what emit returns for a good document (no divergent second path).
     if emit_checked(coverage) != emit(coverage):
         failures.append("emit_checked/parity: emit_checked text differs from emit text")
+
+    # #378 P1: the guardian's subject-pidfd close, green, and red by REUSE alone under the pre-fix body.
+    failures.extend(_st_guardian_close_reuse())
 
     if failures:
         print("SELF-TEST FAIL:")
