@@ -4687,10 +4687,10 @@ def self_test(vectors_only=False):
     #   during the retained-slot wait or the settle_resolvers join that
     #   follows a run now counts in that run's checks (recorded evaluates
     #   the server errors, the product snapshot and sys.path after both
-    #   waits): on the normal run it fails the row INVALID, exit 1; on a
-    #   mutant run it counts as the mutation detected. Main evaluated them
-    #   right after the call, before either wait, so it missed changes
-    #   made during them.
+    #   waits): on the normal run it fails the row INVALID, exit 1; on an
+    #   evaluated mutant run it counts as the mutation detected; a blocked
+    #   mutant run is not a detection. Main evaluated them right after the
+    #   call, before either wait, so it missed changes made during them.
     SELF_TEST_ROSTER = tuple(executed)
     print(json.dumps({"opf_adopt_observe_tests": executed}, sort_keys=True))
     for name, failures in vector_results:
