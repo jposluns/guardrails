@@ -1205,7 +1205,9 @@ def _close_harness_in_step(journal, copy):
 # part, so every alias a name is given anywhere in the function holds at every use of it:
 #   1. a plain re-binding, a = b or a = self.b (an augmented c += d, and an annotated a: T = b, too), which also
 #      joins the two keys' element keys, so a container bound to a second name (saved = fds) shares its
-#      elements;
+#      elements; and a chained assignment, a = b = v, which binds one object to every target, so its keyed
+#      targets join each other whatever v is (a call such as os.open(p, 0), a name, a display), and each also
+#      takes v as a single assignment of it would;
 #   2. a tuple or list assignment whose right side is a display of the same length binds each target to its
 #      element exactly as a plain assignment of that element would (rule 1, or rules 3, 6 and 7): fd, a = a,
 #      None joins fd and a, a swap a, b = b, a joins a and b, and fds, other = [a], None joins []fds and a. There
@@ -1409,7 +1411,11 @@ def _cs_aliases(fn):
     for node in _cs_walk(fn.body):
         if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)) and node.value is not None:
             value = node.value
-            for target in (node.targets if isinstance(node, ast.Assign) else [node.target]):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            chained = [_cs_key(t) for t in targets if _cs_key(t)]
+            for other in chained[1:]:
+                union(chained[0], other)          # rule 1: a = b = v binds one object to every target
+            for target in targets:
                 pairs = [(target, value)]
                 if isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)) \
                         and len(target.elts) == len(value.elts):
@@ -1631,6 +1637,10 @@ _CLOSE_SWEEP_DISPOSITIONS = (
      "false positive: close_operation's InitSubstrateError is caught and run.sub cleared right after, and "
      "close_operation refuses a handle already closed, so its descriptors are never closed twice"),
     ("opf/tools/_opf_init_operation.py", "_physical_tests", "REBIND", "rfd", "", 1, _CS_LEGS.format("os.open")),
+    ("opf/tools/_opf_views.py", "_restore_preimages", "AFTER", "store_root_fd", "product_root_fd", 1,
+     "false positive: `store_root_fd = product_root_fd = None` joins the two names only through None (rule 1's "
+     "chained assignment); each is then bound to its own open (_open_store_root_fd, _open_root_fd), both held "
+     "together, and the finally closes each once"),
     ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "REBIND", "jr_fd", "", 3,
      _CS_LEGS.format("journal-root open (or None until one)")),
     ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "REBIND", "root_fd", "", 7,
@@ -1801,6 +1811,8 @@ _CLOSE_SWEEP_SHAPES = (
      "    finally:\n        for fd, _ in fds.items():\n            os.close(fd)\n", ["TRY"]),
     ("with exit over an alias of a wrapper", "def f(a):\n    fh = os.fdopen(a)\n    try:\n"
      "        with fh as g:\n            g.read()\n    finally:\n        os.close(a)\n", ["TRY"]),
+    ("chained assignment from a call", "def f(p):\n    a = b = os.open(p, 0)\n    try:\n        os.close(a)\n"
+     "    finally:\n        os.close(b)\n", ["TRY"]),
 )
 _CS_LOOP_ELSE = ("for else after a swallowed close", "while else after a swallowed close", "for else re-binds",
                  "while else re-binds")
@@ -1861,7 +1873,9 @@ _CLOSE_SWEEP_CORPUS = (
      if sys.version_info >= (3, 12) else ())        # a type alias statement parses from Python 3.12 on
 
 # Each fix to the sweep's alias and pairing rules, put back by the self-test under --red-on-revert: (name, the
-# fixed text, its pre-fix text, the shapes that must then be the only ones red).
+# fixed text, its pre-fix text, the shapes that must then be the only ones red). A leg may instead disable the
+# rule that catches a required shape (a close counted inside an assignment's value or an if test, the rule-6
+# binding of a wrapper to a key, the chained-assignment join), so that shape must then go missing.
 _CLOSE_SWEEP_REVERTS = (
     ("sweep-container-elements",
      'union("[]" + a, "[]" + b)         # two names for one container share its elements', "pass",
@@ -1922,6 +1936,18 @@ _CLOSE_SWEEP_REVERTS = (
      "for target in [node.target]:", ("dict display key iterated by items()",)),
     ("sweep-with-object-exit", "return k if k and find(k) in {find(a) for a, b in wraps if closing(b)} else None",
      "return None", ("with exit over an alias of a wrapper",)),
+    ("sweep-close-in-assignment", "        if _cs_close_arg(node):\n            found.append",
+     "        if _cs_close_arg(node) and not any(node in ast.walk(a.value) for a in _cs_walk(nodes)\n"
+     "                                           if isinstance(a, ast.Assign)):\n            found.append",
+     ("close result assigned, then a move",)),
+    ("sweep-close-in-if-test", "        if _cs_close_arg(node):\n            found.append",
+     "        if _cs_close_arg(node) and not any(node in ast.walk(a.test) for a in _cs_walk(nodes)\n"
+     "                                           if isinstance(a, ast.If)):\n            found.append",
+     ("close as an if test, then a move",)),
+    ("sweep-wrapper-binding", "wraps.append((target, _cs_key(_cs_wrapped(value))))", "pass",
+     ("fdopen object of an alias closed", "fdopen object closed, then a move", "with exit over an alias of a wrapper")),
+    ("sweep-chained-targets", "union(chained[0], other)          # rule 1", "pass  #",
+     ("chained assignment from a call",)),
 )
 
 

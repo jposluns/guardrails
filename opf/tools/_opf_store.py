@@ -2774,7 +2774,9 @@ def self_test():
         # the parent descriptor. Inject the failure at the REAL close (the number is still released, as
         # on Linux), then prove on the recorded descriptor that the parent is released afterwards, by the
         # ledger and the identity recorded at its open; the reuse run puts the other-lane file on the
-        # parent's number at its close.
+        # parent's number at its close, and on the FILE fd's number at the injected close (its first close
+        # only, as for the parent), so a second close of either number reaches the real close and closes the
+        # other-lane file, which the reused-number checks turn red.
         _r5_dir = base / "r5-close-leak"; _r5_dir.mkdir()
         (_r5_dir / "f").write_bytes(b"x = 1\n")
         _r5_root = os.open(str(_r5_dir), os.O_RDONLY | os.O_DIRECTORY)
@@ -2794,7 +2796,8 @@ def self_test():
                 if "pfd" in _r5_seen and fd != _r5_seen["pfd"] and "fired" not in _r5_seen and _r7_mine(_r5_seen):
                     # the first non-parent close after _open_parent returned is the FILE fd's close
                     _r5_seen["fired"] = True
-                    _r7_fire(fd, _r5_real_close, False)
+                    _r5_seen["ffd"] = fd
+                    _r7_fire(fd, _r5_real_close, _r5_reuse)
                 if fd == _r5_seen.get("pfd") and _r5_first:
                     _r7_let_close(fd, _r5_real_close, _r5_reuse)   # the parent, which the leg checks
                     return
@@ -2817,6 +2820,7 @@ def self_test():
             _r7_close_left(_r5_seen["opened"])        # a pre-fix run leaks it; closed so the suite stays clean
             if _r5_reuse:
                 check("r5-parent-reused-number-never-closed", _r7_reuse_kept(_r5_seen.get("pfd")))
+                check("r5-file-reused-number-never-closed", _r7_reuse_kept(_r5_seen.get("ffd")))
         os.close(_r5_root)
 
         # ROUND-6 defect (K9a fix 6): _open_working_dir_fd returned the freshly-opened `.working`
