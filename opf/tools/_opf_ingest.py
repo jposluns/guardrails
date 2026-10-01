@@ -498,6 +498,9 @@ def _managed_paths(resolution, manifest_data):
     # A malformed [unmanaged] entry is a located CANNOT-EVALUATE (a by-construction backstop: the manifest
     # validator `_opf_store._validate_unmanaged` normally rejects an escaping / non-string entry upstream, so
     # `detect` fails closed at init-first validation before reaching here; this mirrors the checker's cant).
+    if cls.worklog_errors:
+        raise _cannot("worklog generation cannot be evaluated, mirroring _opf_check "
+                      "C-CONTAINMENT: {}".format("; ".join(cls.worklog_errors)))
     if cls.malformed:
         raise _cannot("a declared [unmanaged] path entry cannot be evaluated, mirroring _opf_check "
                       "C-CONTAINMENT (spec 14.2): {}".format("; ".join(cls.malformed)))
@@ -1741,6 +1744,7 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
     import datetime
     import shutil
     import subprocess
+    from _opf_emit import run_status_owned
     import tomllib
     from contextlib import contextmanager
 
@@ -2081,13 +2085,20 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                 wp, op = root / "worksheet.toml", root / "options.toml"
                 wp.write_bytes(_worksheet_bytes(ws))
                 op.write_bytes(b"option = [\n" if malformed else _worksheet_bytes(options(ws)))
-                proc = subprocess.run(
-                    [sys.executable, "-I", "-B", str(Path(__file__).with_name("opf.py")),
-                     "import", "--root", str(root), "--plan", "--dispositions", str(wp),
-                     "--ingest-options", str(op), "--include", files[0]],
-                    capture_output=True, check=False)
-                check("cli-malformed" if malformed else "cli-refused", proc.returncode == 2
-                      and _opf_import.ORDINARY_IMPORT_RETIRED.encode("utf-8") in proc.stderr)
+                label = "cli-malformed" if malformed else "cli-refused"
+                try:
+                    proc = run_status_owned(
+                        [sys.executable, "-I", "-B", str(Path(__file__).with_name("opf.py")),
+                         "import", "--root", str(root), "--plan", "--dispositions", str(wp),
+                         "--ingest-options", str(op), "--include", files[0]],
+                        fixture_id=label, expected_returncode=2, process_fixture=True, capture_output=True)
+                    # run_status_owned asserts the subject's exit 2 inside the fixture (expected_returncode);
+                    # its own exit is the supervisor's, 0 on a verified completion.
+                    check(label, proc.returncode == 0
+                          and _opf_import.ORDINARY_IMPORT_RETIRED.encode("utf-8") in proc.stderr)
+                except (RuntimeError, subprocess.SubprocessError, OSError, ValueError) as exc:
+                    print(label, str(exc))
+                    check(label, False)
 
     def reconcile():
         for case, verdict in (("digest-drift", CANNOT_EVALUATE), ("omission", FINDING),
@@ -3492,13 +3503,14 @@ def _self_test_planner(check, build_store, build_relocated, snapshot, symlink_su
                         "a = c.check_staged_run({ingest!r})\nb = c.check_staged_run({core!r})\n"
                         "ok = (a['ingest-draft-loss-binding'][0] is False and 'not a regular file' in "
                         "a['ingest-draft-loss-binding'][1] and b['staged-run-structure'][0] is False and "
-                        "set(b) == set(c.EXPECTED_CHECKS))\nsys.exit(0 if ok else 3)\n").format(
+                        "set(b) == set(c.EXPECTED_CHECKS))\nreturn 0 if ok else 3\n").format(
                             tools=str(Path(__file__).resolve().parent), ingest=fifo_runs[0], core=fifo_runs[1])
                     try:
-                        _fifo = subprocess.run([sys.executable, "-I", "-B", "-c", probe], timeout=120,
+                        _fifo = run_status_owned([sys.executable, "-I", "-B", "-c", probe], timeout=120,
+                                               fixture_id="pr4b-disc-am2-fifo-nonblocking",
                                                capture_output=True)
                         _fifo_ok = _fifo.returncode == 0
-                    except subprocess.TimeoutExpired:
+                    except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
                         _fifo_ok = False
                     check("pr4b-disc-am2-fifo-nonblocking", _fifo_ok)
                 finally:
