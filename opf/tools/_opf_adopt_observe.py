@@ -3309,9 +3309,11 @@ def self_test(vectors_only=False):
         fired=[("request",)])
     add("TG-11/read-inactivity", CANNOT_EVALUATE, "inactivity",
         mode="stall", fetch_bound=0.50, fired=[("inactivity", "_receive")])
-    # No guard attribution: this mutant cannot meet the bound under any load.
-    # Its result.get() has no timeout, so it waits out the fixture recv's
-    # 1.0 s timeout, above the 0.50 bound; host delay only lengthens that.
+    # No guard attribution. run_case joins every resolver worker before a run
+    # starts (or fails the suite closed), so the mutant's first worker takes
+    # the free slot and blocks in the fixture recv, whose peer stays open
+    # until the gather returns. Its result.get() has no timeout, so that fetch
+    # lasts at least the recv's 1.0 s timeout, above the 0.50 bound.
     add("TG-11/stalled-resolver", CANNOT_EVALUATE, "resolver-deadline",
         stalled_resolver=True, fetch_bound=0.50)
     # Without the connect deadline, a scheduling delay before the fetch can
@@ -3446,8 +3448,27 @@ def self_test(vectors_only=False):
     add("TG-15/no-product-write", mutation="write", archive=hostile_names,
         public_wrapper=True)
 
+    def settle_resolvers(seconds):
+        # A resolver worker takes _RESOLVER_SLOT only when it runs, so the
+        # slot alone cannot show that a started worker has finished: one that
+        # has not run yet could take the slot during a later case and refuse
+        # that case's lookups at once. Join every started worker within the
+        # bound; one that outlives it fails the suite closed (exit 2).
+        end = time.monotonic() + seconds
+        for thread in threading.enumerate():
+            if thread.name == "opf-adopt-resolver":
+                thread.join(max(0.0, end - time.monotonic()))
+        if any(thread.name == "opf-adopt-resolver" and thread.is_alive()
+               for thread in threading.enumerate()):
+            raise AssertionError("resolver worker outlived its case")
+        if not _RESOLVER_SLOT.acquire(blocking=False):
+            raise AssertionError("resolver slot held with no resolver worker")
+        _RESOLVER_SLOT.release()
+
     def run_case(base, contexts, case, mutated):
         identifier, expected, mutation, config = case
+        # No earlier run's resolver worker may reach this case.
+        settle_resolvers(2.0)
         product = base / secrets.token_hex(8)
         product.mkdir(mode=0o700)
         (product / "product-marker").write_bytes(b"unchanged\n")
@@ -3508,7 +3529,8 @@ def self_test(vectors_only=False):
         class TrackedDeadline(original_deadline):
             # Name the bound behind each expiry. A deadline clamped to its
             # parent inherits the parent's name; a socket timeout armed by
-            # left(maximum) belongs to the inactivity cap, not the deadline.
+            # left(INACTIVITY_SECONDS) belongs to the inactivity cap, not the
+            # deadline. Any other cap keeps the deadline's name.
             def __init__(self, seconds, parent=None):
                 super().__init__(seconds, parent)
                 self.guard = (parent.guard if parent is not None and self.end == parent.end
@@ -3521,7 +3543,8 @@ def self_test(vectors_only=False):
                 except ObserveError as exc:
                     expired[:] = [exc, self.guard, site]
                     raise
-                capped = maximum is not None and remaining == maximum
+                capped = (maximum is not None and maximum == module.INACTIVITY_SECONDS
+                          and remaining == maximum)
                 armed[:] = ["inactivity" if capped else self.guard, site]
                 return remaining
 
@@ -3808,6 +3831,12 @@ def self_test(vectors_only=False):
                         status = "ESCAPED"
                 elapsed = time.monotonic() - started
                 environment_restored = dict(os.environ) == environment_before
+                # Release a stalled fixture lookup, then join this run's
+                # resolver workers while the fixture _lookup is still patched,
+                # so a late worker never reaches the production resolver.
+                if resolver_sockets is not None:
+                    resolver_sockets[1].close()
+                settle_resolvers(2.0)
 
             passed = (
                 status == expected
@@ -3883,10 +3912,14 @@ def self_test(vectors_only=False):
                 # guard inside every bound (slow-drip's 0.15 s inactivity cap
                 # against its 0.04 s drip; tls-timeout's connect deadline
                 # expiring before _tls). That run cannot evaluate its mutant:
-                # the row reports CANNOT-EVALUATE and the suite exits 2, a
-                # failure apart from INVALID, never a pass and never retried.
-                # Main's source, without attribution, passed such a run. An
-                # unmutated run that fails any other check stays INVALID.
+                # the row reports CANNOT-EVALUATE, never a pass and never
+                # retried. This holds only when the record has the expected
+                # shape: the same number of refused fetches, each naming a
+                # recognized deadline guard and a call site. Any other record
+                # (an exception class such as ("OSError",), a different fetch
+                # count, an unrecognized name) is a defect, and the unmutated
+                # run fails as INVALID, as it does for any other failed check.
+                # Main's source, without attribution, passed such a run.
                 # Residuals: _resolve converts queue.Empty into a fresh
                 # ObserveError, attributed only as ("ObserveError",); non-timing
                 # CANNOT-EVALUATE rows (wrong-hostname and others) run with 10x
@@ -3895,8 +3928,21 @@ def self_test(vectors_only=False):
                     guard[:len(want)] == want
                     for guard, want in zip(fetch_guards, config["fired"])
                 )
+                other_guard = not fired and len(fetch_guards) == len(config["fired"]) and all(
+                    len(guard) == 2
+                    and guard[0] in ("connect", "request", "gather", "inactivity")
+                    for guard in fetch_guards
+                )
                 if mutated:
+                    # Each mutation removes the guard its row expects, and in
+                    # these fixtures no other code names that guard at that
+                    # site, so no mutant can record the expected attribution:
+                    # mutation_detected is true by construction for these
+                    # rows. Their evidence rests on the unmutated run naming
+                    # the expected guard, plus each bound.
                     passed = passed and fired
+                elif not fired and not other_guard:
+                    passed = False
             if identifier.startswith("TG-05/"):
                 passed = passed and fetch_calls == [release_url, ANCHOR_URL]
             return passed, status, elapsed, fetch_guards, fired
@@ -3904,14 +3950,12 @@ def self_test(vectors_only=False):
             if resolver_sockets is not None:
                 resolver_sockets[1].close()
                 resolver_sockets[0].close()
-                if not _RESOLVER_SLOT.acquire(timeout=1.0):
-                    raise AssertionError("resolver fixture retained its slot")
-                _RESOLVER_SLOT.release()
             for client in backlog_clients:
                 client.close()
             if backlog is not None:
                 backlog.close()
             server.close()
+            settle_resolvers(2.0)
 
     try:
         # Missing timer support is a setup cannot-evaluate, before any row.
@@ -3989,10 +4033,13 @@ def self_test(vectors_only=False):
                 if "fetch_bound" in case[3]:
                     executed[-1]["fired"] = [list(guard) for guard in guards]
                     executed[-1]["mutant_fired"] = [list(guard) for guard in mutant_guards]
-                if passed and not fired:
+                if not fired:
+                    executed[-1]["expected_fired"] = [list(want) for want in case[3]["fired"]]
                     executed[-1]["detail"] = (
-                        "the guard under test did not fire in the unmutated run, so the row"
-                        " cannot evaluate its mutant; typically host scheduling delay")
+                        "the unmutated run recorded {} where {} was expected".format(
+                            executed[-1]["fired"], executed[-1]["expected_fired"])
+                        + ("; a different deadline guard fired, so the row cannot"
+                           " evaluate its mutant" if passed else ""))
     except Exception as exc:
         executed.append({
             "id": "fixture/setup-or-teardown",
@@ -4012,8 +4059,10 @@ def self_test(vectors_only=False):
     if any(row["test_status"] not in (VALID, CANNOT_EVALUATE) for row in executed):
         return 1
     if any(row["test_status"] == CANNOT_EVALUATE for row in executed):
-        # As for fixture setup, a row that cannot evaluate fails with exit 2,
-        # which the registered runner propagates apart from INVALID's exit 1.
+        # As for fixture setup, a row that cannot evaluate fails with exit 2.
+        # Only this observer's own standalone run exits 2: run_all_checks.sh,
+        # the nested registration run and _opf_adopt.py's vectors-only call
+        # report it as an ordinary failure (exit 1), never as a pass.
         return 2
     if not vectors_only:
         try:
