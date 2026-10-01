@@ -3658,8 +3658,10 @@ def self_test(vectors_only=False):
             sock.connect(("127.0.0.1", port))
 
         class TrackedDeadline(original_deadline):
-            # Replaces _Deadline in both runs of the five timing rows. Its
-            # bookkeeping names the deadline each left() queries: a deadline
+            # Replaces _Deadline in both runs of the five timing rows, and in
+            # the resolver-vector/blocked-timing run, whose config also sets
+            # fetch_bound and so takes the timing path too. Its bookkeeping
+            # names the deadline each left() queries: a deadline
             # clamped to its parent inherits the parent's name, and a left()
             # whose INACTIVITY_SECONDS cap binds is named "inactivity". It
             # never changes a deadline's end, nor what left() returns or
@@ -3802,8 +3804,10 @@ def self_test(vectors_only=False):
                 patch = lambda obj, name, value: stack.enter_context(
                     mock.patch.object(obj, name, value)
                 )
-                # Only the five TG-11 timing rows use short deadlines. Other
-                # rows and their mutants need headroom under host load.
+                # The five TG-11 timing rows, and the resolver-vector/blocked-
+                # timing run (its config sets fetch_bound too, so timing is
+                # True here as well), use short deadlines. Other rows and
+                # their mutants need headroom under host load.
                 timing = "fetch_bound" in config
                 scale = 1.0 if timing else 10.0
                 patch(module, "CONNECT_SECONDS", 0.20 * scale)
@@ -4679,6 +4683,12 @@ def self_test(vectors_only=False):
     #   outlives the self-test. Main had no such check.
     # - A resolver vector that fails exits 1, or 2 when every failure is a
     #   vector that could not evaluate. Main had no such vectors.
+    # - A fixture server error, a product-tree change or a sys.path change
+    #   during the retained-slot wait or the settle_resolvers join that
+    #   follows a run still fails that run's row INVALID (recorded evaluates
+    #   the server errors, the product snapshot and sys.path after both
+    #   waits): exit 1. Main evaluated them right after the call, before
+    #   either wait, so it missed changes made during them.
     SELF_TEST_ROSTER = tuple(executed)
     print(json.dumps({"opf_adopt_observe_tests": executed}, sort_keys=True))
     for name, failures in vector_results:
