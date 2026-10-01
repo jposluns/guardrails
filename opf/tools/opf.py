@@ -11832,15 +11832,18 @@ def _cmd_import(rest):
     flags, so every former form meets the pointer: the root-ingest planner's `--dispositions FILE`,
     `--ingest-options FILE` and repeatable `--include GLOB`, and the review aids `--show-review` and
     `--diff-review OLD_RUN` (each named file is never read). Every valued flag also takes the joined
-    `--flag=value` spelling, split into the separate form so its value meets the same validation. An
-    unambiguous prefix of a former flag (`--rev` for --review, `--ro` for --root), alone or joined, is taken
-    as that flag, as the former argparse review aid took it, and a repeated former flag other than a mode is
-    accepted (the verb refuses anyway, so no value is kept). Only the token parser (an unknown flag, an
-    ambiguous prefix, an empty or missing value) and the exactly-one-mode rule, which a repeated mode also
-    breaks, precede it: a bare `opf import` or two modes is a usage error (exit 2) without the pointer. The
-    root is never resolved, so an unresolved / NOT-ADOPTED root refuses the same way (D7: import is a
-    REQUESTED operation, so its refusal is a cannot-evaluate, never the NOT-APPLICABLE exit 0 that
-    doctor/render/upgrade report on a non-adopter root)."""
+    `--flag=value` spelling, whose value is taken verbatim, as the former argparse review aid took it: it
+    is malformed only when empty, so `--root=-old` or `--root=--scan` meets the pointer. A separate value
+    token is malformed when missing, empty or starting with `-` (`--root -old` is a usage error). A joined
+    value on a valueless flag (`--show-review=x`) stays an unrecognized argument. An unambiguous prefix of
+    a former flag (`--rev` for --review, `--ro` for --root), alone or joined, is taken as that flag, as the
+    former argparse review aid took it, and a repeated former flag other than a mode is accepted (the verb
+    refuses anyway, so no value is kept). Only the token parser (an unknown flag, an ambiguous prefix, a
+    missing or empty value, a separate value starting with `-`) and the exactly-one-mode rule, which a
+    repeated mode also breaks, precede it: a bare `opf import` or two modes is a usage error (exit 2)
+    without the pointer. The root is never resolved, so an unresolved / NOT-ADOPTED root refuses the same
+    way (D7: import is a REQUESTED operation, so its refusal is a cannot-evaluate, never the NOT-APPLICABLE
+    exit 0 that doctor/render/upgrade report on a non-adopter root)."""
     mode = None
     # Every flag the verb accepted before its retirement: the four modes, their companions, the
     # root-ingest planner's companions and the review aids.
@@ -11859,15 +11862,18 @@ def _cmd_import(rest):
         return sorted(f for f in former if f.startswith(name))
 
     # An unambiguous prefix is expanded to its flag, and a joined `--flag=value` for a valued flag splits
-    # into `--flag value`, so an empty value is the usual usage error. Any other `=`-joined token, `--x=y`
-    # or a valueless flag such as `--show-review=x`, is left whole and stays unrecognized; an ambiguous
-    # prefix is left whole too, and the loop names its candidates.
+    # into `--flag value` with the value's index kept in `joined`, so the value is taken verbatim (even
+    # one starting with `-`) and only an empty one is the usual usage error. Any other `=`-joined token,
+    # `--x=y` or a valueless flag such as `--show-review=x`, is left whole and stays unrecognized; an
+    # ambiguous prefix is left whole too, and the loop names its candidates.
     tokens = []
+    joined = set()
     for tok in rest:
         name, eq, val = tok.partition("=")
         hits = _prefixed(name)
         flag = hits[0] if len(hits) == 1 else None
         if flag in valued and eq:
+            joined.add(len(tokens) + 1)
             tokens += [flag, val]
         elif flag is not None and not eq:
             tokens.append(flag)
@@ -11880,7 +11886,7 @@ def _cmd_import(rest):
             print("opf import: {} requires an argument".format(flag), file=sys.stderr)
             return None
         val = rest[idx + 1]
-        if val == "" or val.startswith("-"):
+        if val == "" or (idx + 1 not in joined and val.startswith("-")):
             print("opf import: {} requires a non-empty argument, not {!r}".format(flag, val),
                   file=sys.stderr)
             return None
@@ -12544,9 +12550,10 @@ def _cli_self_test():
             so does a mode-specific argv violation (a missing or extra companion flag, a run-id outside the
             former grammar) and every former companion flag (the root-ingest --dispositions,
             --ingest-options and repeatable --include; the review aids --show-review and --diff-review), in
-            the separate and the joined `--flag=value` spellings alike, by an unambiguous prefix as well,
-            and with a non-mode former flag repeated. Only a token-parser usage error (a flag missing its
-            value, an empty joined value, an ambiguous prefix, an unknown flag) and the exactly-one-mode
+            the separate and the joined `--flag=value` spellings alike (a joined value taken verbatim, a
+            leading `-` included), by an unambiguous prefix as well, and with a non-mode former flag
+            repeated. Only a token-parser usage error (a flag missing its value, an empty joined value, a
+            separate value starting with `-`, an ambiguous prefix, an unknown flag) and the exactly-one-mode
             rule, a repeated mode included, exit 2 before it, without the refusal text. The pointer names adoption and
             the prompt pack in words and no command. Flip: routing `import` to the fail-closed KNOWN_VERBS
             branch, restoring a mode-specific check or an input reader ahead of the refusal, or dropping a
@@ -12721,6 +12728,19 @@ def _cli_self_test():
                          "--review --diff-review=OLD_RUN"),
                 ):
                     refused(argv, what)
+                # A joined value is taken verbatim, as the former argparse review aid took it: one starting
+                # with `-`, even one spelling a mode, is that flag's value and meets the refusal.
+                for argv, what in (
+                        (["import", "--review", _RID, "--show-review", "--root=-old"],
+                         "--review R --show-review --root=-old"),
+                        (["import", "--review", _RID, "--show-review", "--root=--scan"],
+                         "--review R --show-review --root=--scan"),
+                        (["import", "--review=-x", "--show-review"], "--review=-x --show-review"),
+                        (["import", "--diff-review=--old", "--review", _RID], "--diff-review=--old --review R"),
+                        (["import", "--review", _RID, "--show-review", "--ro=-old"],
+                         "--review R --show-review --ro=-old"),
+                ):
+                    refused(argv, what)
                 # An unambiguous prefix of a former flag, alone or joined, is that flag, as the former
                 # argparse review aid took it; a repeated former flag other than a mode meets the refusal
                 # rather than a duplicate usage error.
@@ -12790,6 +12810,10 @@ def _cli_self_test():
                       "--apply with an empty --root=")
                 usage(["import", "--review=", "--root", store], "requires a non-empty argument",
                       "an empty --review=")
+                usage(["import", "--review", _RID, "--show-review", "--root="], "requires a non-empty argument",
+                      "--review R --show-review with an empty --root=")
+                usage(["import", "--review", _RID, "--show-review", "--root", "-old"],
+                      "requires a non-empty argument", "--review R --show-review with a separate --root -old")
                 # The pointer is to adoption and the prompt pack in words, naming no command (spec 14.1).
                 if not ("adoption (OPF spec 14.1)" in refusal and "prompt pack" in refusal
                         and not re.search(r"`|\bopf [a-z]", refusal)):
