@@ -1270,7 +1270,7 @@ def _close_harness_in_step(journal, copy):
 # expression (c if x else d); an alias made by an assignment expression, a match capture or a with target over
 # anything but a key or a rule-6 wrapper; a comprehension or a container returned by any call other than the
 # rule-4 wrappers, whether bound, iterated or unpacked (a, b = helper(fd) joins neither to fd); a close in
-# module-level code or in a class body outside any method, which the sweep never visits and so never pairs;
+# module-level code or in a class body outside any method, which receives no close-pair analysis;
 # and descriptors held by objects the sweep does not know wrap one (sockets, subprocess pipes, selectors).
 # The flow-insensitive join is also the sweep's main source of false positives: one name re-bound to unrelated
 # descriptors in turn (sequential self-test legs, a walk's prev, cur = cur, nxt) is one class, so each such
