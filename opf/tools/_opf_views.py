@@ -4291,11 +4291,11 @@ def _entry(wid, kind, summary):
 
 
 if __name__ == "__main__":
-    _argv = sys.argv[1:]
     # Exactly `--self-test` runs this module's self-test (the same entry the other self_test modules carry);
     # the render parser has no such flag, so no render command line is taken over.
-    if _argv == ["--self-test"]:
+    if sys.argv[1:] == ["--self-test"]:
         sys.exit(self_test())
+    _argv = sys.argv[1:]
     # Until render COMPOSES the U6 store-integrity write-gate (VC-4), this module entry runs CHECK-only
     # (drift detection, never a write): a write requires that composition, so default the command line to
     # --check. validate_store itself EXISTS (U6); it is render's write-gate composition that is deferred. A

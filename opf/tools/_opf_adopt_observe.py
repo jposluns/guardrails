@@ -134,8 +134,12 @@ from urllib.parse import urlsplit
 # The standalone CLI needs the installed sibling directory under python -I.
 # No quarantine path is ever added. Preserve sibling imports' ambient path
 # edits so a lazy public gather call does not change its caller's sys.path.
-if __name__ == "__main__":
+# The test is held in a name, not a second `if __name__ == "__main__":` block:
+# opf.py allows a self_test module one, its canonical `--self-test` entry.
+_standalone = __name__ == "__main__"
+if _standalone:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+del _standalone
 _import_path = list(sys.path)
 try:
     import _opf_adopt as schema
@@ -2944,6 +2948,10 @@ def self_test(vectors_only=False):
     import shutil
     from unittest import mock
 
+    # Let the public lazy wrapper address this exact module in a standalone
+    # invocation, rather than importing a second copy of its test mutations
+    # (a no-op when it was imported under its own name).
+    sys.modules.setdefault("_opf_adopt_observe", sys.modules[__name__])
     global SELF_TEST_ROSTER
     SELF_TEST_ROSTER = ()
     executed = []
@@ -3942,13 +3950,12 @@ def self_test(vectors_only=False):
 
 def main():
     if sys.argv[1:] in (["--self-test"], ["--self-test", "--vectors-only"]):
-        # Let the public lazy wrapper address this exact module in a standalone
-        # invocation, rather than importing a second copy of its test mutations.
-        sys.modules.setdefault("_opf_adopt_observe", sys.modules[__name__])
         return self_test(vectors_only="--vectors-only" in sys.argv[1:])
     print("usage: _opf_adopt_observe.py --self-test", file=sys.stderr)
     return 2
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
     sys.exit(main())

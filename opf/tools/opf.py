@@ -132,173 +132,329 @@ def _bootstrap():
         return EXIT_MALFORMED
     return EXIT_OK
 
-# The F-SELFTEST-NO-MAIN probe child, run by _self_test_entry_gaps in a fresh `python3 -I -B -c` per module
-# and phase, so nothing it imports or patches reaches this process. Its argv is (phase, path); it writes one
-# JSON report to a duplicate of its original stdout and discards the module's own stdout.
-#   expose: import the module as a sibling does (its directory first on sys.path) and report whether it binds
-#           a callable `self_test`, by any binding (def, assignment, import, inside a try or an if).
-#   entry:  run the module's source as `__main__` with sys.argv = [path, "--self-test"] and the sys.path of
-#           `python3 -I -B <module> --self-test`, except that before every top-level statement after the first
-#           a bound self_test is replaced by a recording sentinel returning 1 (the name is rebound and, for a
-#           plain function, its code is swapped, so a reference captured earlier records too). The real suite
-#           never runs; the report carries the sentinel's call count and the exit status.
-_ENTRY_PROBE = r"""
-import ast, builtins, importlib.util, json, os, sys, types
-phase, path = sys.argv[1], sys.argv[2]
-out = os.dup(1)
-os.dup2(os.open(os.devnull, os.O_WRONLY), 1)
-report = {}
-def finish():
-    data = json.dumps(report).encode("utf-8")
-    while data:
-        data = data[os.write(out, data):]
-    os._exit(0)
-if phase == "expose":
-    sys.path.insert(0, os.path.dirname(path))
-    try:
-        stem = os.path.basename(path)[:-3]
-        spec = importlib.util.spec_from_file_location(stem, path)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[stem] = module
-        spec.loader.exec_module(module)
-    except BaseException as exc:
-        report["error"] = "importing it raised " + type(exc).__name__
-    else:
-        report["exposes"] = callable(getattr(module, "self_test", None))
-    finish()
-calls = []
-def record():
-    calls.append(None)
-    return 1
-builtins.__opf_entry_probe_record__ = record
-scope = {}
-exec("def sentinel(*args, **kwargs):\n    return __opf_entry_probe_record__()\n", scope)
-sentinel = scope["sentinel"]
-module = types.ModuleType("__main__")
-module.__file__ = path
-namespace = module.__dict__
-def arm():
-    target = namespace.get("self_test")
-    if target is sentinel or not callable(target):
-        return
-    if type(target) is types.FunctionType and not target.__code__.co_freevars:
-        target.__code__ = sentinel.__code__
-    namespace["self_test"] = sentinel
-namespace["__opf_entry_probe_arm__"] = arm
-try:
-    with open(path, "rb") as handle:
-        tree = ast.parse(handle.read(), path)
-    body = tree.body[:1]
-    for statement in tree.body[1:]:
-        if not (isinstance(statement, ast.ImportFrom) and statement.module == "__future__"):
-            call = ast.Call(ast.Name("__opf_entry_probe_arm__", ast.Load()), [], [])
-            body.append(ast.copy_location(ast.Expr(call), statement))
-        body.append(statement)
-    tree.body = body
-    code = compile(ast.fix_missing_locations(tree), path, "exec", dont_inherit=True)
-except BaseException as exc:
-    report["error"] = "it cannot be read or parsed ({})".format(type(exc).__name__)
-    finish()
-sys.modules["__main__"] = module
-sys.argv[:] = [path, "--self-test"]
-try:
-    exec(code, namespace)
-except SystemExit as exc:
-    status = 0 if exc.code is None else exc.code & 0xFF if isinstance(exc.code, int) else 1
-except BaseException as exc:
-    report["error"] = "running it as `--self-test` raised " + type(exc).__name__
-    finish()
-else:
-    status = 0
-report.update(calls=len(calls), status=status)
-finish()
-"""
+# F-SELFTEST-NO-MAIN: the one entry a module that binds self_test must carry, matched by AST structure (so
+# spacing, quoting, parentheses and comments do not matter). _ENTRY_TEST is the only accepted test of the entry
+# block (that operand order only); _ENTRY_STATEMENT must be that block's first statement, with nothing else in
+# its body and no else. Any argument handling a module has beyond exactly `--self-test` follows it.
+_ENTRY_TEST = '__name__ == "__main__"'
+_ENTRY_STATEMENT = 'if sys.argv[1:] == ["--self-test"]:\n    sys.exit(self_test())\n'
+
+
+def _module_scope(tree):
+    """Yield every node of a parsed module that runs in the module's own scope. Function, lambda and class
+    bodies and comprehension targets (their own scopes) are skipped; decorators, defaults, annotations, bases
+    and comprehension iterables, which the module scope evaluates, are kept."""
+    import ast
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            stack += node.decorator_list + [node.args] + ([node.returns] if node.returns else [])
+        elif isinstance(node, ast.ClassDef):
+            stack += node.decorator_list + node.bases + node.keywords
+        elif isinstance(node, ast.Lambda):
+            stack.append(node.args)
+        elif isinstance(node, ast.comprehension):
+            stack += [node.iter] + node.ifs
+        else:
+            stack += ast.iter_child_nodes(node)
+
+
+def _binds_self_test(node):
+    """Whether one module-scope node binds the name self_test: def, async def, class, an assignment, augmented,
+    annotated, for, with, walrus or del target (a Name stored or deleted, tuple targets included), import ...
+    as self_test, from ... import self_test, a star import (it may), a global statement, or an except, match
+    or type-alias name."""
+    import ast
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return node.name == "self_test"
+    if isinstance(node, ast.Name):
+        return node.id == "self_test" and isinstance(node.ctx, (ast.Store, ast.Del))
+    if isinstance(node, ast.Import):
+        return any((alias.asname or alias.name.partition(".")[0]) == "self_test" for alias in node.names)
+    if isinstance(node, ast.ImportFrom):
+        return any((alias.asname or alias.name) in ("self_test", "*") for alias in node.names)
+    if isinstance(node, ast.Global):
+        return "self_test" in node.names
+    if isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+        return node.name == "self_test"
+    if isinstance(node, ast.MatchMapping):
+        return node.rest == "self_test"
+    return False
+
+
+def _self_test_entry_gap(tree):
+    """Return (exposes, reason) for one parsed module. `exposes` is whether it binds self_test at module scope
+    by any form _binds_self_test names, or by a `global self_test` anywhere (a function can bind it so). An
+    exposing module's `reason` is None only when it has exactly one `if` at module scope whose test compares
+    `__name__` with "__main__", that `if` is the module's last top-level statement, tests exactly _ENTRY_TEST
+    and has no else, the module imports sys at top level, and the block's first statement is _ENTRY_STATEMENT;
+    otherwise it names the first rule broken."""
+    import ast
+    scope = list(_module_scope(tree))
+    if not (any(_binds_self_test(node) for node in scope) or any(
+            isinstance(node, ast.Global) and "self_test" in node.names for node in ast.walk(tree))):
+        return False, None
+
+    def names_main(compare):
+        operands = [compare.left] + compare.comparators
+        return (any(isinstance(op, ast.Name) and op.id == "__name__" for op in operands)
+                and any(isinstance(op, ast.Constant) and type(op.value) is str and op.value == "__main__"
+                        for op in operands))
+
+    blocks = sorted((node for node in scope if isinstance(node, ast.If) and any(
+        isinstance(part, ast.Compare) and names_main(part) for part in ast.walk(node.test))),
+        key=lambda node: node.lineno)
+    if not blocks:
+        return True, 'it has no `if __name__ == "__main__":` block'
+    if len(blocks) > 1:
+        return True, "{} `if` tests of `__name__` against \"__main__\" at module scope (lines {}); exactly one " \
+                     "is allowed".format(len(blocks), ", ".join(str(block.lineno) for block in blocks))
+    block = blocks[0]
+    if not any(node is block for node in tree.body):
+        return True, "its `__main__` block (line {}) is nested in another statement".format(block.lineno)
+    if ast.dump(block.test) != ast.dump(ast.parse(_ENTRY_TEST, mode="eval").body):
+        return True, "its `__main__` block (line {}) does not test exactly `{}`".format(block.lineno, _ENTRY_TEST)
+    if block.orelse:
+        return True, "its `__main__` block (line {}) has an else".format(block.lineno)
+    if tree.body[-1] is not block:
+        return True, "a top-level statement follows its `__main__` block (line {})".format(block.lineno)
+    if not any(isinstance(node, ast.Import) and any(alias.name == "sys" and alias.asname is None
+                                                    for alias in node.names) for node in tree.body):
+        return True, "it does not `import sys` at top level"
+    entry = ast.dump(ast.parse(_ENTRY_STATEMENT).body[0])
+    if ast.dump(block.body[0]) != entry:
+        if any(ast.dump(statement) == entry for statement in block.body[1:]):
+            return True, "the canonical `--self-test` statement is not the first in its `__main__` block"
+        return True, "its `__main__` block starts with `{}`, not the canonical `--self-test` statement".format(
+            ast.unparse(block.body[0]).splitlines()[0][:60])
+    return True, None
 
 
 def _self_test_entry_gaps(directory, required=()):
-    """Probe the F-SELFTEST-NO-MAIN class by BEHAVIOUR. Returns (gaps, exposers): `gaps` maps a name to why it
-    fails, `exposers` is the set of *.py names directly in `directory` that bind a callable self_test. Each such
-    module is run as `python3 -I -B <module> --self-test` with self_test replaced by a recording sentinel that
-    returns 1 (see _ENTRY_PROBE); it is a gap unless the sentinel was called and the exit status is non-zero,
-    so a `!=` guard, a `pass` body, a main() that ignores the flag, and an entry that drops the result are all
-    named, whatever their syntax. A module that cannot be imported, read or parsed, a *.py entry that is not a
-    regular file, and a probe that cannot run or report are gaps too, as is each `required` name the scan did
-    not find binding self_test. The listing is os.listdir, so a missing or unreadable directory is a gap rather
-    than an empty scan. Non-recursive: _vendor/ is not scanned. Residual: a module that binds and calls self_test
-    within one top-level statement, or calls a closure or non-function self_test it captured before the swap,
-    runs its real suite (bounded by the probe's 120 s timeout); it is still named a gap, never passed."""
-    import subprocess
-    import tempfile
+    """Check the F-SELFTEST-NO-MAIN class STATICALLY: no module code is executed. Returns (gaps, exposers):
+    `exposers` is the set of *.py names directly in `directory` that bind self_test at module scope, and `gaps`
+    maps a name to why it fails. Every exposer must carry the one canonical entry, exactly:
+
+        if __name__ == "__main__":
+            if sys.argv[1:] == ["--self-test"]:
+                sys.exit(self_test())
+            ...  # any other argument handling the module has
+
+    as its last top-level statement, with that operand order, sys imported at top level, the inner `if` holding
+    nothing else and no else, and no other `if` at module scope testing `__name__` against "__main__"
+    (_self_test_entry_gap gives the rules and each reason). It is a gap too when a *.py entry is not a regular
+    file or cannot be read or parsed, when a `required` name is not found binding self_test, and when no module
+    binds it at all. The listing is os.listdir, so a missing or unreadable directory is a gap, not an empty
+    scan; it is not recursive, so _vendor/ is not scanned.
+
+    Residual. The guard checks the static form only and does not execute the module, so a module that subverts
+    its own exit after calling self_test (an atexit hook, os._exit, a SystemExit handler, argv inspection, a
+    stateful self_test) is not caught; nor is a binding made dynamically (globals(), setattr on the module, a
+    module __getattr__), nor a canonical-looking entry whose `sys`, `self_test` or builtins were rebound. Only
+    `if` tests are counted as `__main__` blocks: a `__name__` comparison held in a name (as _opf_adopt_observe's
+    sys.path setup does) or used in another expression is not. Those are code-review matters: the guard is for
+    an accidental missing or miswired entry. The exact-form rule is conservative: a working entry in any other
+    form is a gap."""
+    import ast
     gaps, exposers = {}, set()
     try:
         names = sorted(os.listdir(directory))
     except OSError as exc:
         return {str(directory): "the directory cannot be listed ({})".format(type(exc).__name__)}, exposers
-    with tempfile.TemporaryDirectory(prefix="opf-entry-probe-cwd-") as cwd:
-        def probe(phase, path):
-            try:
-                child = subprocess.run([sys.executable, "-I", "-B", "-c", _ENTRY_PROBE, phase, path], cwd=cwd,
-                                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                       stderr=subprocess.DEVNULL, timeout=120)
-                report = json.loads(child.stdout.decode("utf-8"))
-            except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                return {"error": "the probe could not run or report ({})".format(type(exc).__name__)}
-            return report if type(report) is dict else {"error": "the probe reported {!r}".format(report)}
-        for name in names:
-            if not name.endswith(".py"):
-                continue
-            path = os.path.join(str(directory), name)
-            try:
-                regular = stat.S_ISREG(os.lstat(path).st_mode)
-            except OSError as exc:
-                gaps[name] = "it cannot be examined ({})".format(type(exc).__name__)
-                continue
-            if not regular:
-                gaps[name] = "it is not a regular file"
-                continue
-            found = probe("expose", path)
-            if "error" in found or type(found.get("exposes")) is not bool:
-                gaps[name] = found.get("error", "the expose probe reported {!r}".format(found))
-                continue
-            if not found["exposes"]:
-                continue
+    for name in names:
+        if not name.endswith(".py"):
+            continue
+        path = os.path.join(str(directory), name)
+        try:
+            regular = stat.S_ISREG(os.lstat(path).st_mode)
+        except OSError as exc:
+            gaps[name] = "it cannot be examined ({})".format(type(exc).__name__)
+            continue
+        if not regular:
+            gaps[name] = "it is not a regular file"
+            continue
+        try:
+            with open(path, "rb") as handle:
+                source = handle.read()
+        except OSError as exc:
+            gaps[name] = "it cannot be read ({})".format(type(exc).__name__)
+            continue
+        try:
+            exposes, reason = _self_test_entry_gap(ast.parse(source, path))
+        except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+            gaps[name] = "it cannot be parsed ({})".format(type(exc).__name__)
+            continue
+        if exposes:
             exposers.add(name)
-            ran = probe("entry", path)
-            calls, status = ran.get("calls"), ran.get("status")
-            if "error" in ran or type(calls) is not int or type(status) is not int:
-                gaps[name] = ran.get("error", "the entry probe reported {!r}".format(ran))
-            elif not calls:
-                gaps[name] = "`--self-test` never calls self_test (exit {})".format(status)
-            elif status == 0:
-                gaps[name] = "`--self-test` exits 0 although self_test returned 1"
+        if reason is not None:
+            gaps[name] = reason
     for name in required:
         if name not in exposers and name not in gaps:
             gaps[name] = "expected to bind self_test, but the scan did not find it"
+    if not exposers:
+        gaps.setdefault(str(directory), "no module in it binds self_test")
     return gaps, exposers
 
 
-# Synthetic modules for the probe's own flips. Each name in _ENTRY_PROBE_RED must be named and no other: beside
-# these files, directory.py is a directory, absent.py a required name that does not exist (with_entry.py and
-# via_main.py are required too, so the floor does not over-reject), and absent/ a directory that is not there.
-_ENTRY_PROBE_FIXTURES = {
-    "with_entry.py": ('def self_test():\n    return 0\n\n\n'
-                      'if __name__ == "__main__":\n    raise SystemExit(self_test())\n'),
-    "via_main.py": ('import sys\n\n\ndef self_test():\n    return 0\n\n\ndef main(argv):\n'
-                    '    if argv == ["--self-test"]:\n        return self_test()\n    return 2\n\n\n'
-                    'if __name__ == "__main__":\n    sys.exit(main(sys.argv[1:]))\n'),
-    "plain.py": 'if __name__ == "__main__":\n    raise SystemExit(0)\n',
-    "no_entry.py": "def self_test():\n    return 0\n",
-    "not_equal.py": 'def self_test():\n    return 0\n\n\nif __name__ != "__main__":\n    self_test()\n',
-    "pass_body.py": 'def self_test():\n    return 0\n\n\nif __name__ == "__main__":\n    pass\n',
-    "ignores_flag.py": ('import sys\n\n\ndef self_test():\n    return 0\n\n\ndef main():\n    return 0\n\n\n'
-                        'if __name__ == "__main__":\n    sys.exit(main())\n'),
-    "drops_result.py": ('def self_test():\n    return 0\n\n\nif __name__ == "__main__":\n'
-                        '    self_test()\n    raise SystemExit(0)\n'),
-    "assigned.py": "try:\n    from _no_such_module import self_test\nexcept ImportError:\n    self_test = lambda: 0\n",
-    "unparseable.py": "def self_test(:\n    return 0\n",
+# Registered self-tests that are not a module's own self_test. Each is a suite of this dispatcher itself,
+# defined in this file and run only through `opf.py --self-test`, which main() dispatches; opf.py binds no
+# self_test, so it is not an exposer and these have no module entry to check.
+_ENTRY_FLOOR_EXEMPT = {
+    "opf-watchdog-isolation": "the dispatcher's watchdog isolation suite (_watchdog_isolation_self_test)",
+    "opf-watchdog-regressions": "the dispatcher's watchdog regression suite (_watchdog_regression_self_test)",
+    "opf-aggregator": "this aggregator's own suite (_aggregator_self_test)",
+    "opf-cli": "the dispatcher's command-line suite (_cli_self_test)",
 }
-_ENTRY_PROBE_RED = frozenset({"no_entry.py", "not_equal.py", "pass_body.py", "ignores_flag.py", "drops_result.py",
-                              "assigned.py", "unparseable.py", "directory.py", "absent.py", "absent/"})
+
+
+def _self_test_floor(registry, directory, exempt):
+    """Derive the scan's required floor from the registry BY MODULE. Returns (required, faults): `required` is
+    the set of *.py names, directly in `directory`, whose module's self_test is a registry entry's callable.
+    A fault is an empty registry; an entry that is not exempt whose callable has no defining module file in
+    `directory`, or is not that module's self_test; an exempt entry not defined in this file; and an exemption
+    naming no registry entry."""
+    required, faults, labels = set(), [], set()
+    if not registry:
+        faults.append("the self-test registry is empty")
+    for label, fn in registry:
+        labels.add(label)
+        module = sys.modules.get(getattr(fn, "__module__", None))
+        if label in exempt:
+            if module is not sys.modules.get(__name__):
+                faults.append("{}: exempt, but not defined in opf.py".format(label))
+            continue
+        path = getattr(module, "__file__", None)
+        if not path:
+            faults.append("{}: its callable has no defining module file".format(label))
+        elif Path(path).resolve().parent != Path(directory).resolve():
+            faults.append("{}: its module {} is not in {}".format(label, path, directory))
+        elif getattr(module, "self_test", None) is not fn:
+            faults.append("{}: its callable is not {}.self_test".format(label, module.__name__))
+        else:
+            required.add(Path(path).name)
+    for label in sorted(set(exempt) - labels):
+        faults.append("{}: exempt, but no registry entry has that label".format(label))
+    return required, faults
+
+
+# Synthetic modules for the scan's own flips: (name, source, binds self_test, the reason it must be named for,
+# or None for a clean module). Beside these, directory.py is a directory, unreadable.py a mode-0 file (only
+# when not root), absent.py a required name that does not exist (canonical.py and canonical_import.py are
+# required too, so the floor does not over-reject), and absent/ and empty/ are a missing and an empty directory.
+_ENTRY_HEAD = 'import sys\n\n\ndef self_test():\n    return 0\n\n\n'
+_ENTRY_BODY = '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n'
+_ENTRY_MAIN = 'if __name__ == "__main__":\n' + _ENTRY_BODY
+_ENTRY_NONE = 'no `if __name__ == "__main__":` block'
+_ENTRY_FIRST = "not the canonical `--self-test` statement"
+_ENTRY_FIXTURES = (
+    ("canonical.py", _ENTRY_HEAD + "def main(argv):\n    return 2\n\n\n" + _ENTRY_MAIN
+     + "    sys.exit(main(sys.argv[1:]))\n", True, None),
+    ("canonical_import.py", "import sys\nfrom _no_such_module import self_test\n\n" + _ENTRY_MAIN, True, None),
+    ("canonical_spaced.py", _ENTRY_HEAD + "if (__name__ == '__main__'):  # entry\n    if sys.argv[1 :] == [\n"
+     "            '--self-test',]:\n        sys.exit(  self_test( ) )\n", True, None),
+    ("plain.py", 'if __name__ == "__main__":\n    raise SystemExit(0)\n', False, None),
+    ("local_only.py", "import holder\n\n\ndef helper():\n    self_test = 1\n    return self_test\n\n\n"
+     "class Holder:\n    self_test = 0\n\n\nholder.self_test = [self_test for self_test in ()]\n"
+     "print(lambda self_test: self_test)\n", False, None),
+    ("no_entry.py", "def self_test():\n    return 0\n", True, _ENTRY_NONE),
+    ("bind_async.py", "async def self_test():\n    return 0\n", True, _ENTRY_NONE),
+    ("bind_class.py", "class self_test:\n    pass\n", True, _ENTRY_NONE),
+    ("bind_assign.py", "self_test = lambda: 0\n", True, _ENTRY_NONE),
+    ("bind_tuple.py", "main, (self_test, *rest) = 1, (2, 3)\n", True, _ENTRY_NONE),
+    ("bind_annotated.py", "self_test: object\n", True, _ENTRY_NONE),
+    ("bind_import.py", "import _no_such_module as self_test\n", True, _ENTRY_NONE),
+    ("bind_from.py", "from _no_such_module import self_test\n", True, _ENTRY_NONE),
+    ("bind_star.py", "from _no_such_module import *\n", True, _ENTRY_NONE),
+    ("bind_try.py", "try:\n    import _no_such_module\nexcept ImportError:\n    def self_test():\n        return 0\n",
+     True, _ENTRY_NONE),
+    ("bind_with.py", "with open(__file__) as self_test:\n    pass\n", True, _ENTRY_NONE),
+    ("bind_for.py", "for self_test in ():\n    pass\n", True, _ENTRY_NONE),
+    ("bind_walrus.py", "if (self_test := len):\n    pass\n", True, _ENTRY_NONE),
+    ("bind_global.py", "def install():\n    global self_test\n    self_test = len\n", True, _ENTRY_NONE),
+    ("bind_del.py", "del self_test\n", True, _ENTRY_NONE),
+    ("not_equal.py", _ENTRY_HEAD + 'if __name__ != "__main__":\n' + _ENTRY_BODY, True, "does not test exactly"),
+    ("reversed.py", _ENTRY_HEAD + 'if "__main__" == __name__:\n' + _ENTRY_BODY, True, "does not test exactly"),
+    ("pass_body.py", _ENTRY_HEAD + 'if __name__ == "__main__":\n    pass\n', True, _ENTRY_FIRST),
+    ("via_main.py", _ENTRY_HEAD + 'def main():\n    return self_test()\n\n\nif __name__ == "__main__":\n'
+     "    sys.exit(main())\n", True, _ENTRY_FIRST),
+    ("drops_result.py", _ENTRY_HEAD + 'if __name__ == "__main__":\n    if sys.argv[1:] == ["--self-test"]:\n'
+     "        self_test()\n", True, _ENTRY_FIRST),
+    ("inner_else.py", _ENTRY_HEAD + _ENTRY_MAIN + "    else:\n        sys.exit(2)\n", True, _ENTRY_FIRST),
+    ("inner_extra.py", _ENTRY_HEAD + 'if __name__ == "__main__":\n    if sys.argv[1:] == ["--self-test"]:\n'
+     '        print("self-test")\n        sys.exit(self_test())\n', True, _ENTRY_FIRST),
+    ("not_first.py", _ENTRY_HEAD + 'if __name__ == "__main__":\n    print("entry")\n' + _ENTRY_BODY, True,
+     "is not the first"),
+    ("two_mains.py", _ENTRY_HEAD + 'if __name__ == "__main__":\n    pass\n' + _ENTRY_MAIN, True,
+     "exactly one is allowed"),
+    ("nested_main.py", _ENTRY_HEAD + "try:\n    " + _ENTRY_MAIN.replace("\n    ", "\n        ")
+     + "except ImportError:\n    pass\n", True, "is nested in another statement"),
+    ("main_else.py", _ENTRY_HEAD + _ENTRY_MAIN + "else:\n    pass\n", True, "has an else"),
+    ("not_last.py", _ENTRY_HEAD + _ENTRY_MAIN + "\n\ndef later():\n    pass\n", True, "follows its"),
+    ("no_sys.py", _ENTRY_HEAD.replace("import sys\n", "") + _ENTRY_MAIN, True, "does not `import sys`"),
+    ("unparseable.py", "def self_test(:\n    return 0\n", False, "cannot be parsed"),
+)
+
+
+def _self_test_entry_probe(tmp):
+    """Run the scan over the synthetic modules written into `tmp`. Returns a list of the discrepancies: a red
+    case not named, named for another reason, or a clean one named, and any exposure the scan got wrong."""
+    root = Path(tmp)
+    expected = {name: reason for name, _source, _binds, reason in _ENTRY_FIXTURES if reason is not None}
+    expected.update({"directory.py": "not a regular file", "absent.py": "the scan did not find it",
+                     "absent/": "cannot be listed", "empty/": "no module in it binds self_test"})
+    for name, source, _binds, _reason in _ENTRY_FIXTURES:
+        (root / name).write_text(source, encoding="utf-8")
+    (root / "directory.py").mkdir()
+    (root / "empty").mkdir()
+    if hasattr(os, "geteuid") and os.geteuid() != 0:   # chmod cannot make a file unreadable to root
+        (root / "unreadable.py").write_text(_ENTRY_HEAD + _ENTRY_MAIN, encoding="utf-8")
+        (root / "unreadable.py").chmod(0)
+        expected["unreadable.py"] = "cannot be read"
+    try:
+        named, exposers = _self_test_entry_gaps(root, ("canonical.py", "canonical_import.py", "absent.py"))
+    finally:
+        if (root / "unreadable.py").exists():
+            (root / "unreadable.py").chmod(0o600)
+    for label in ("absent/", "empty/"):
+        found = _self_test_entry_gaps(root / label.rstrip("/"))[0]
+        if found:
+            named[label] = "; ".join(found.values())
+    faults = ["{} not named".format(name) for name in sorted(set(expected) - set(named))]
+    faults += ["{} named wrongly ({})".format(name, named[name]) for name in sorted(set(named) - set(expected))]
+    faults += ["{} named for another reason ({})".format(name, named[name]) for name in sorted(expected)
+               if name in named and expected[name] not in named[name]]
+    binders = {name for name, _source, binds, _reason in _ENTRY_FIXTURES if binds}
+    faults += ["{} exposure misjudged".format(name) for name in sorted(binders ^ exposers)]
+    return faults
+
+
+def _self_test_floor_probe(registry, directory, elsewhere):
+    """Flip the registry floor: each synthetic registry must yield its fault, and every module the real
+    registry requires must be named when the scan runs over `elsewhere`, a directory that lacks them. Returns
+    a list of the discrepancies."""
+    misses = []
+    required = _self_test_floor(registry, directory, _ENTRY_FLOOR_EXEMPT)[0]
+    external = next(label for label, _fn in registry if label not in _ENTRY_FLOOR_EXEMPT)
+    cases = (
+        ("empty registry", (), _ENTRY_FLOOR_EXEMPT, "the self-test registry is empty"),
+        ("not a module's self_test", registry + (("synthetic-lambda", lambda: 0),), _ENTRY_FLOOR_EXEMPT,
+         "synthetic-lambda: its callable is not"),
+        ("exempt but external", registry, dict(_ENTRY_FLOOR_EXEMPT, **{external: "synthetic"}),
+         external + ": exempt, but not defined in"),
+        ("stale exemption", registry, dict(_ENTRY_FLOOR_EXEMPT, **{"synthetic-stale": "synthetic"}),
+         "synthetic-stale: exempt, but no registry entry"),
+    )
+    for label, table, exempt, want in cases:
+        if not any(want in fault for fault in _self_test_floor(table, directory, exempt)[1]):
+            misses.append("floor case {!r} not named".format(label))
+    gaps = _self_test_entry_gaps(elsewhere, required)[0]
+    lost = sorted(name for name in required if "the scan did not find it" not in gaps.get(name, ""))
+    if not required or lost:
+        misses.append("registry modules missing from the scan not named: {}".format(
+            ", ".join(lost) or "the registry requires none"))
+    return misses
 
 
 def _aggregator_self_test():
@@ -307,31 +463,25 @@ def _aggregator_self_test():
     admitted as clean because a bool or float compares equal to an allowed int (False == 0, True == 1,
     0.0 == 0). Returns 0 clean, 1 on a failure. Registered below so `opf.py --self-test` exercises it;
     the store legs did not, letting a helper returning False produce an aggregate exit 0. It also holds
-    the F-SELFTEST-NO-MAIN class empty by behaviour (_self_test_entry_gaps): every module in this directory
-    that binds a callable self_test must call it, and fail, when run with exactly `--self-test`; the scan
-    must find every module whose self_test is registered below; and the synthetic modules prove each red
-    case (no entry, `!=`, a `pass` body, a main() that ignores the flag, a dropped result, a self_test bound
-    by assignment in a try, an unparseable module, a non-file entry, a missing required module, and a
-    directory that cannot be listed) is named."""
+    the F-SELFTEST-NO-MAIN class empty by static form (_self_test_entry_gaps, which runs no module code): every
+    module in this directory that binds self_test must carry the canonical `--self-test` entry; the floor
+    (_self_test_floor) requires every module whose self_test is registered below and fails on an empty
+    registry, an empty scan, or a registered callable that is not its module's self_test and not exempt; and
+    the synthetic modules and registries prove each red case is named, for its reason, and no clean one is."""
     import tempfile
     if _bootstrap() != EXIT_OK:
         return EXIT_MALFORMED
-    required = sorted({fn.__module__ + ".py" for _label, fn in _self_tests()
-                       if getattr(fn, "__name__", None) == "self_test"})
-    gaps, exposers = _self_test_entry_gaps(Path(__file__).resolve().parent, required)
-    with tempfile.TemporaryDirectory(prefix="opf-entry-probe-") as tmp:
-        for name, text in _ENTRY_PROBE_FIXTURES.items():
-            Path(tmp, name).write_text(text, encoding="utf-8")
-        Path(tmp, "directory.py").mkdir()
-        fired = set(_self_test_entry_gaps(tmp, ("with_entry.py", "via_main.py", "absent.py"))[0])
-        if _self_test_entry_gaps(Path(tmp, "absent"))[0]:
-            fired.add("absent/")
-    missed, over = sorted(_ENTRY_PROBE_RED - fired), sorted(fired - _ENTRY_PROBE_RED)
-    if gaps or missed or over:
-        print("opf aggregator self-test: FAIL (self_test modules without a working `--self-test` entry: {}; "
-              "synthetic probe cases not named: {}; named wrongly: {})".format(
+    here = Path(__file__).resolve().parent
+    registry = _self_tests()
+    required, faults = _self_test_floor(registry, here, _ENTRY_FLOOR_EXEMPT)
+    gaps, exposers = _self_test_entry_gaps(here, required)
+    with tempfile.TemporaryDirectory(prefix="opf-entry-scan-") as tmp:
+        missed = _self_test_entry_probe(tmp) + _self_test_floor_probe(registry, here, tmp)
+    if gaps or faults or missed:
+        print("opf aggregator self-test: FAIL (self_test modules without the canonical `--self-test` entry: {}; "
+              "registry floor faults: {}; synthetic probe discrepancies: {})".format(
                   "; ".join("{} ({})".format(k, v) for k, v in sorted(gaps.items())) or "none",
-                  ", ".join(missed) or "none", ", ".join(over) or "none"), file=sys.stderr)
+                  "; ".join(faults) or "none", "; ".join(missed) or "none"), file=sys.stderr)
         return EXIT_FINDING
     ok = True
     # A helper returning False (bool, == 0) must NOT aggregate to clean.
@@ -351,7 +501,8 @@ def _aggregator_self_test():
               file=sys.stderr)
         return EXIT_FINDING
     print("opf aggregator self-test: PASS (fail-closed on non-int / out-of-range helper returns; each of the "
-          "{} self_test modules calls it on exactly --self-test and propagates a failure)".format(len(exposers)))
+          "{} self_test modules carries the canonical --self-test entry, {} of them required by the registry)".format(
+              len(exposers), len(required)))
     return EXIT_OK
 
 
