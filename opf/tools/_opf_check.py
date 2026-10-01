@@ -2130,6 +2130,25 @@ def classify_containment(manifest_data, machine_rel):
         control_roots=control_roots, evidence_roots=evidence_roots, homes=homes)
 
 
+# The legacy import staging area `<machine>/imports` (`.working/toml/imports` under the default layout): where
+# import runs staged before OPF-IMPORTS-RELOCATE moved them to the store-scope `.working/imports`. The retired
+# C-STAGING guard refused it so an old staging run surfaced for manual review and was never silently ignored;
+# the guard now lives in C-CONTAINMENT, independent of the [unmanaged] machinery.
+_LEGACY_IMPORTS_DIRNAME = "imports"
+
+
+def _legacy_import_staging(machine_rel):
+    """The legacy import staging path `<machine>/imports` and the review text its CANNOT-EVALUATE carries.
+    C-CONTAINMENT refuses both an entry of that name in the machine dir (a directory, empty or not, or a
+    file; a symlink or exotic entry already makes the machine-dir listing CANNOT-EVALUATE) and a surviving
+    [unmanaged] declaration of the path or of a path under it, so an old staging run is surfaced for review
+    by hand (no automatic migration) and an [unmanaged] declaration cannot launder it into a VALID store."""
+    review = ("a legacy import staging area (the import-run location before the relocation to {!r}; the "
+              "import engine is retired): review its content by hand, then remove or relocate it (no "
+              "automatic migration)").format(IMPORTS_REL)
+    return _rel(machine_rel, _LEGACY_IMPORTS_DIRNAME), review
+
+
 def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
     """C-CONTAINMENT: recursively walk `.working/`, matching every regular file against the managed set
     (the ledgers, the enabled non-ledger type indexes, per-record bodies, the archive tree, declared
@@ -2149,6 +2168,11 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
         rep.cant(msg)
     for msg in cls.colliding:
         rep.finding(msg)
+    legacy_rel, legacy_review = _legacy_import_staging(machine_rel)
+    for u in cls.valid_unmanaged:
+        if _under_any(u, (legacy_rel,)):
+            rep.cant("C-CONTAINMENT: [unmanaged] path {!r} declares {!r}, {}".format(
+                u, legacy_rel, legacy_review))
     mrel = machine_rel
     view_targets = cls.view_targets
     valid_unmanaged = cls.valid_unmanaged
@@ -2191,6 +2215,8 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
         subdirs, files = _list_dir(root_fd, reldir, rep)
         if subdirs is None and files is None:
             return
+        if reldir == mrel and _LEGACY_IMPORTS_DIRNAME in subdirs + files:
+            rep.cant("C-CONTAINMENT: {!r} is present and is {}".format(legacy_rel, legacy_review))
         if not subdirs and not files and reldir not in staged_roots + kind_roots \
                 and _under_any(reldir, staged_roots):
             # An EMPTY directory strictly under the imports interior has no file to flag, so it would
@@ -3782,30 +3808,69 @@ def self_test():
         check("imports-leftover-run-none-invalid",
               run(imp2, working={"imports/{}/plan.toml".format(RUNID0): "schema = 1"}).status == INVALID)
         # OPF-IMPORTS-RELOCATE, after the import engine's removal: a run at the OLD machine-subdir path
-        # `.working/toml/imports/` (a `machine`-dict fixture) is no staging location, only an unregistered
-        # directory under the machine store, so C-CONTAINMENT grades it as a finding at steady state
-        # (INVALID). The retired C-STAGING legacy-location CANNOT-EVALUATE no longer runs. Flip: a walk that
-        # recursed or skipped the old path would let the run validate.
+        # `.working/toml/imports/` (a `machine`-dict fixture) is a legacy import staging area. The retired
+        # C-STAGING legacy-location guard lives on in C-CONTAINMENT: the store is CANNOT-EVALUATE with a
+        # message naming the path for review by hand (the cant DOMINATES), so an old staging run is never
+        # silently ignored, and the walk still grades the path as unregistered. Flip: dropping the
+        # legacy-staging guard in _check_containment leaves only the finding (INVALID).
         LEGRUN = "imp-20260601T000000Z-0123456789abcdef"
+        LEGREL = ".working/toml/imports"
+
+        def legacy_named(res):
+            return res is not None and any(
+                "C-CONTAINMENT" in m and repr(LEGREL) in m and "legacy import staging area" in m
+                and "by hand" in m for m in res.by_check.get("C-CONTAINMENT", []) if m in res.cannot_evaluate)
+
         _lg = clean_machine()
         _lg["imports/{}/plan.toml".format(LEGRUN)] = "schema = 1"
         _lgr = run(_lg)
-        check("legacy-imports-check-invalid", _lgr is not None and _lgr.status == INVALID)
+        check("legacy-imports-check-cannot-eval",
+              _lgr is not None and _lgr.status == CANNOT_EVALUATE and legacy_named(_lgr))
         check("legacy-imports-check-named",
               _lgr is not None and any("C-CONTAINMENT" in f and "toml/imports" in f and "unregistered" in f
                                        for f in _lgr.findings)
               and "C-STAGING" not in _lgr.checks)
+        # declaring the OLD path under [unmanaged] does NOT launder it (restored from the retired C-STAGING
+        # vector): the guard is independent of the unmanaged-path machinery, so the store stays
+        # CANNOT-EVALUATE. Flip: without the guard the declaration covers the run and the store is VALID.
+        _lgu = clean_machine()
+        _lgu["manifest.toml"] = base_manifest()
+        _lgu["manifest.toml"]["unmanaged"] = dict(paths=[LEGREL])
+        _lgu["imports/{}/plan.toml".format(LEGRUN)] = "schema = 1"
+        _lgur = run(_lgu)
+        check("legacy-imports-unmanaged-not-launderable",
+              _lgur is not None and _lgur.status == CANNOT_EVALUATE and legacy_named(_lgur))
+        # the declaration alone, of the OLD path or of a path under it, is CANNOT-EVALUATE too, with nothing
+        # staged there. Flip: without the guard both validate VALID (the bare declaration covers nothing).
+        _lgd = []
+        for decl in (LEGREL, LEGREL + "/" + LEGRUN):
+            _d = clean_machine()
+            _d["manifest.toml"] = base_manifest()
+            _d["manifest.toml"]["unmanaged"] = dict(paths=[decl])
+            _lgd.append((decl, run(_d)))
+        check("legacy-imports-unmanaged-declaration-cannot-eval",
+              all(r is not None and r.status == CANNOT_EVALUATE and legacy_named(r)
+                  and any(repr(decl) in m for m in r.cannot_evaluate) for decl, r in _lgd))
+        # Companion: an UNRELATED [unmanaged] declaration still validates VALID, including a machine-dir file
+        # whose name merely begins with `imports` and a store-scope legacy file, so the guard matches the
+        # path and its subtree only. Flip: a guard that fired on any declaration, or on a bare string prefix,
+        # turns this red.
+        _lgo = clean_machine()
+        _lgo["manifest.toml"] = base_manifest()
+        _lgo["manifest.toml"]["unmanaged"] = dict(paths=[LEGREL + "-notes.md", ".working/legacy.md"])
+        _lgor = run(_lgo, working=dict([("toml/imports-notes.md", "notes\n"), ("legacy.md", "x\n")]))
+        check("legacy-imports-unrelated-unmanaged-valid",
+              _lgor is not None and _lgor.status == VALID and _lgor.checks.get("C-CONTAINMENT") == "PASS")
         # an OLD-path-only run does NOT substantiate import_status = "partial": the unsubstantiated-partial
-        # finding fires (imports is read at the NEW root, which is empty) and the old path stays a finding.
+        # finding fires (imports is read at the NEW root, which is empty) AND the legacy cant dominates.
         _lgp = clean_machine()
         _lgp["manifest.toml"] = base_manifest()
         _lgp["manifest.toml"]["opf"]["import_status"] = "partial"
         _lgp["imports/{}/plan.toml".format(LEGRUN)] = "schema = 1"
         _lgpr = run(_lgp)
         check("legacy-imports-partial-not-substantiated",
-              _lgpr is not None and _lgpr.status == INVALID
-              and any("no active" in f and "partial" in f for f in _lgpr.findings)
-              and any("C-CONTAINMENT" in f and "toml/imports" in f for f in _lgpr.findings))
+              _lgpr is not None and _lgpr.status == CANNOT_EVALUATE and legacy_named(_lgpr)
+              and any("no active" in f and "partial" in f for f in _lgpr.findings))
 
         # --- C-LEASE (codex-1): the single-writer lease payload (spec 5.7) --------------------------
         def lease(**over):
