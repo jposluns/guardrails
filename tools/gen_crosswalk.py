@@ -600,9 +600,9 @@ def _close_vectors(base):
                 if raise_sent:
                     raise sent
                 return real(fd)
-            ns["_read_fd_all"] = spy
             entry_fd = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY)
-            try:
+            try:                                          # the seam is swapped only where its restore runs
+                ns["_read_fd_all"] = spy
                 _read_payload_fd(entry_fd)
             finally:
                 ns["_read_fd_all"] = real

@@ -3889,8 +3889,9 @@ def _self_test_close_reuse(expect):
         base = os.path.realpath(directory)
         os.makedirs(os.path.join(base, "a", "b"))
         run_fd = os.open(os.path.join(base, "a", "b"), _DIR_ID_FLAGS)
-        cwd_fd = os.open(base, _DIR_ID_FLAGS)
-        try:
+        cwd_fd = None
+        try:                                              # owned before the second open can fail
+            cwd_fd = os.open(base, _DIR_ID_FLAGS)
             physical = types.SimpleNamespace(fd=run_fd)
             relative = types.SimpleNamespace(fd=run_fd, spelling="a/b", cwd_fd=cwd_fd)
             absolute = types.SimpleNamespace(fd=run_fd, spelling=os.path.join(base, "a", "b"), cwd_fd=None)
@@ -3930,8 +3931,11 @@ def _self_test_close_reuse(expect):
                 expect("close-reuse {} under the close-then-rebind body: expected red by REUSE and LEAK, got "
                        "{}".format(label, red or "green"), [p.split(":")[0] for p in red] == ["REUSE", "LEAK"])
         finally:
-            os.close(run_fd)
-            os.close(cwd_fd)
+            try:
+                if cwd_fd is not None:
+                    os.close(cwd_fd)
+            finally:
+                os.close(run_fd)
 
 
 def _self_test():

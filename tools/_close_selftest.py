@@ -408,10 +408,12 @@ def _st_helper_vectors(ns):
         return call
 
     def watch(fault):
-        """The watch itself: each stand-in answers every capability probe as the real call does, and after a
-        failed close each watched call on the released number is recorded once, under its own name, and
-        os.stat of a path is not; the probes are then cleared and the close error raised, so a watch that
-        misses a call, records a path, or hides a call from os.supports_dir_fd is red by WRONG."""
+        """The watch itself: the watched set is exactly every touch below, each on the module it belongs to
+        (an fcntl name on fcntl, never on os), each stand-in answers every capability probe as the real call
+        does, and after a failed close each watched call on the released number is recorded once, under its
+        own name, and os.stat of a path is not; the probes are then cleared and the close error raised, so a
+        watch that drops or misplaces a call, misses one, records a path, or hides a call from
+        os.supports_dir_fd is red by WRONG."""
         for module, name, real in fault._watched:
             for table in _st_supports(module):
                 if (getattr(module, name) in table) != (real in table):
@@ -425,16 +427,21 @@ def _st_helper_vectors(ns):
             raise AssertionError("the armed close did not fail")
         fcntl = _st_fcntl()
         os.stat(os.devnull)
-        touches = (("stat", lambda: os.stat(fd)), ("fstat", lambda: os.fstat(fd)),
-                   ("fstatvfs", lambda: os.fstatvfs(fd)), ("lseek", lambda: os.lseek(fd, 0, os.SEEK_CUR)),
-                   ("get_inheritable", lambda: os.get_inheritable(fd)), ("isatty", lambda: os.isatty(fd)))
+        touches = ((os, "stat", lambda: os.stat(fd)), (os, "fstat", lambda: os.fstat(fd)),
+                   (os, "fstatvfs", lambda: os.fstatvfs(fd)), (os, "lseek", lambda: os.lseek(fd, 0, os.SEEK_CUR)),
+                   (os, "get_inheritable", lambda: os.get_inheritable(fd)), (os, "isatty", lambda: os.isatty(fd)))
         if fcntl:
-            touches += (("fcntl", lambda: fcntl.fcntl(fd, fcntl.F_GETFD)),
-                        ("flock", lambda: fcntl.flock(fd, fcntl.LOCK_UN)),
-                        ("lockf", lambda: fcntl.lockf(fd, fcntl.LOCK_UN)), ("ioctl", lambda: fcntl.ioctl(fd, 0)))
+            touches += ((fcntl, "fcntl", lambda: fcntl.fcntl(fd, fcntl.F_GETFD)),
+                        (fcntl, "flock", lambda: fcntl.flock(fd, fcntl.LOCK_UN)),
+                        (fcntl, "lockf", lambda: fcntl.lockf(fd, fcntl.LOCK_UN)),
+                        (fcntl, "ioctl", lambda: fcntl.ioctl(fd, 0)))
+        watched = sorted((module.__name__, name) for module, name, _real in fault._watched)
+        required = sorted((module.__name__, name) for module, name, _touch in touches if hasattr(module, name))
+        if watched != required:
+            raise AssertionError("the PROBE watch covers {}, expected {}".format(watched, required))
         expected = []
-        for name, touch in touches:
-            if hasattr(fcntl if name in _ST_WATCHED[1] else os, name):
+        for module, name, touch in touches:
+            if hasattr(module, name):
                 expected.append((name, fd))
                 try:
                     touch()
@@ -463,3 +470,25 @@ def _st_helper_vectors(ns):
         vectors += (("helper {} V2: a second thread takes the released number".format(name), masking, "R",
                      direct(name, thread=True), None),)
     return vectors
+
+
+def _st_watch_drop_check():
+    """The watch self-check's own flips: with fcntl.flock, then fcntl.ioctl, dropped from _ST_WATCHED, the
+    watch vector must be red by WRONG alone, so losing either call from the watched set cannot pass
+    unnoticed. Run where fcntl exists (elsewhere there is no fcntl name to drop). Returns (failures, runs)."""
+    if _st_fcntl() is None:
+        return [], 0
+    label, masking, _flips, call, expect = _st_helper_vectors(globals())[0]
+    real = _ST_WATCHED
+    failures, runs = [], 0
+    for dropped in ("flock", "ioctl"):
+        globals()["_ST_WATCHED"] = (real[0], tuple(name for name in real[1] if name != dropped))
+        try:
+            red = _st_close_run(call, masking, expect)
+        finally:
+            globals()["_ST_WATCHED"] = real
+        runs += 1
+        if [problem.split(":")[0] for problem in red] != ["WRONG"]:
+            failures.append("{} with {} dropped from the watch: expected red by WRONG alone, got {}".format(
+                label, dropped, red or "green"))
+    return failures, runs

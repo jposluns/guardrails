@@ -718,8 +718,8 @@ def begin_operation(cap, plan_bytes):
         except _opf_oplock.OpLockError as exc:
             raise InitSubstrateError(str(exc))
         plan_created = True
-        os.close(plan_fd)
-        plan_fd = None
+        closing, plan_fd = plan_fd, None  # cleared first: the unwind never closes it twice
+        _journal._close_fd_propagating(closing)
         op_st = os.fstat(op_fd)
         return OpSubstrate(op_id=op_id, store_root=_writer_root(cap)[0], ops_fd=ops_fd,
                            op_fd=op_fd, op_ident=(op_st.st_dev, op_st.st_ino),

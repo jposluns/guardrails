@@ -3299,6 +3299,53 @@ def _bounded_child_result(data, wstatus):
     return data.decode("utf-8", "replace")
 
 
+def _st_guardian_setup_failure(drive, setup_failed, recorded, journal):
+    """#378: the guardian close vector with its first send raising. Its result must be this vector's named
+    red (NOFIRE, the guardian never ran, and WRONG naming SetupFailed) with no LEAK; every resource the setup
+    created must be closed through its own object; and descriptors opened afterwards, which take the
+    numbers those resources released, must still be the same files after gc.collect(), so no surviving
+    object closes a reused number later. Returns the failures."""
+    import errno
+    import gc
+    import os
+    created = []
+
+    def failing_send(sock):
+        raise OSError(errno.EPIPE, "self-test injected setup failure")
+    got = journal._st_close_run(drive(_FixtureProcess._guardian, send=failing_send, created=created), True,
+                                recorded, False)
+    failures = []
+    tags = [problem.split(":")[0] for problem in got]
+    if tags != ["NOFIRE", "WRONG"] or setup_failed.__name__ not in got[1] or "injected setup failure" not in got[1]:
+        failures.append("guardian-close-reuse setup failure: expected red by NOFIRE and WRONG naming {}, got "
+                        "{}".format(setup_failed.__name__, got or "green"))
+    if len(created) != 3 or not all(getattr(r, "closed", None) is True or getattr(r, "_closed", None) is True
+                                    for r in created):
+        failures.append("guardian-close-reuse setup failure: expected its 3 resources each closed through "
+                        "its object, got {}".format(created))
+    fresh = [os.open(os.devnull, os.O_RDONLY) for _ in range(4)]
+    try:
+        ident = [(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in fresh]
+        del created[:]
+        gc.collect()
+        after = []
+        for fd in fresh:
+            try:
+                after.append((os.fstat(fd).st_dev, os.fstat(fd).st_ino))
+            except OSError:
+                after.append(None)
+        if after != ident:
+            failures.append("guardian-close-reuse setup failure: a descriptor opened afterwards was closed or "
+                            "replaced after gc.collect() ({} became {})".format(ident, after))
+    finally:
+        for fd in fresh:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    return failures
+
+
 def _st_guardian_close_reuse():
     """#378 P1: _FixtureProcess._guardian takes ownership of the subject pidfd before closing it after the
     drain. Driven in-process with every process seam stubbed (no fork, no signal mask, os._exit raising), the
@@ -3306,8 +3353,14 @@ def _st_guardian_close_reuse():
     records the failure at stage "drain" and exits 125, and its cleanup never closes the number again.
     Green is no problem at all, with and without the PROBE watch; under the close-then-rebind body put back
     (os.close(subject_fd), then subject_fd = None) it is red by REUSE alone, the cleanup closing the reuser.
+    Every resource the vector creates (the socket pair, the report file) is owned by an ExitStack the moment
+    it exists, so a failing setup step is this vector's own named red (SetupFailed), each resource is closed
+    once through its object before the harness reads its descriptor table, and nothing is left for the
+    harness to close by number while a traceback keeps the object, whose collection would later close a
+    reused number in another lane. A setup-failure leg (the first send raising) checks exactly that.
     The harness is loaded from its sibling FILE by explicit path, as _load_byte_canon_authority loads its
     authority, so this runs under `python3 -I` too. Returns the failures."""
+    import contextlib
     import gc
     import importlib.util
     import inspect
@@ -3329,48 +3382,60 @@ def _st_guardian_close_reuse():
             super().__init__(code)
             self.code = code
 
-    def drive(guardian):
-        def call(fault):
-            peer, other = socket.socketpair()
-            report = tempfile.TemporaryFile()
-            other.sendall(b"G")
-            child = types.SimpleNamespace(_launch_masked=set(), peer=peer, report=report, keep_fds=(),
-                                          subject=None, deadline=time.monotonic() + 3600)
+    class SetupFailed(Exception):
+        """A step of the vector's own setup failed: this vector's red, never a green or another lane's."""
 
-            def _exit(code):
-                raise Exited(code)
-            stubs = {"_fixture_close_all_except": lambda keep: None, "_fixture_subreaper": lambda: None,
-                     "_fixture_pidfd": lambda pid: fault.arm(os.open(os.devnull, os.O_RDONLY)),
-                     "_fixture_send_subject": lambda peer, subject, fd: None,
-                     "_fixture_ack_subject": os.close, "_fixture_cleanup_deadline": lambda deadline=None: deadline,
-                     "_fixture_drain": lambda subject, fd=None, deadline=None: 0}
-            calls = {(os, "setpgid"): lambda pid, pgrp: None, (os, "fork"): lambda: 1 << 22,
-                     (os, "waitid"): lambda *args: (), (os, "_exit"): _exit,
-                     (signal, "pthread_sigmask"): lambda how, mask: set()}   # the caller's mask is never touched
-            seams = guardian.__globals__                  # the reverted body runs in its own namespace
-            saved = {name: seams[name] for name in stubs}, {seam: getattr(*seam) for seam in calls}
-            enabled = gc.isenabled()
-            seams.update(stubs)
-            for (module, name), stub in calls.items():
-                setattr(module, name, stub)
-            try:
-                guardian(child)
-            except Exited as exc:
-                report.seek(0)
-                failure = json.loads(report.read().decode("ascii"))
-                if exc.code == 125 and failure["stage"] == "drain" \
-                        and failure["error"]["errno"] == fault.err.errno:
-                    raise _journal._StSentinel("recorded at drain")
-                raise
-            finally:
-                seams.update(saved[0])
-                for (module, name), real in saved[1].items():
-                    setattr(module, name, real)
-                if enabled:
-                    gc.enable()
-                peer.close()
-                other.close()
-                report.close()
+    def drive(guardian, send=lambda sock: sock.sendall(b"G"), created=None):
+        def call(fault):
+            made = [] if created is None else created     # what the setup made, for the setup-failure leg
+            with contextlib.ExitStack() as owned:         # each resource owned the moment it exists
+                try:
+                    pair = socket.socketpair()
+                    for end in pair:
+                        owned.callback(end.close)
+                    made.extend(pair)
+                    peer, other = pair
+                    report = tempfile.TemporaryFile()
+                    owned.callback(report.close)
+                    made.append(report)
+                    send(other)
+                    child = types.SimpleNamespace(_launch_masked=set(), peer=peer, report=report, keep_fds=(),
+                                                  subject=None, deadline=time.monotonic() + 3600)
+
+                    def _exit(code):
+                        raise Exited(code)
+                    stubs = {"_fixture_close_all_except": lambda keep: None, "_fixture_subreaper": lambda: None,
+                             "_fixture_pidfd": lambda pid: fault.arm(os.open(os.devnull, os.O_RDONLY)),
+                             "_fixture_send_subject": lambda peer, subject, fd: None,
+                             "_fixture_ack_subject": os.close,
+                             "_fixture_cleanup_deadline": lambda deadline=None: deadline,
+                             "_fixture_drain": lambda subject, fd=None, deadline=None: 0}
+                    calls = {(os, "setpgid"): lambda pid, pgrp: None, (os, "fork"): lambda: 1 << 22,
+                             (os, "waitid"): lambda *args: (), (os, "_exit"): _exit,
+                             (signal, "pthread_sigmask"): lambda how, mask: set()}   # the caller's mask untouched
+                    seams = guardian.__globals__              # the reverted body runs in its own namespace
+                    saved = {name: seams[name] for name in stubs}, {seam: getattr(*seam) for seam in calls}
+                    enabled = gc.isenabled()
+                except Exception as exc:
+                    raise SetupFailed("guardian close vector setup failed: {!r}".format(exc)) from exc
+                try:
+                    seams.update(stubs)
+                    for (module, name), stub in calls.items():
+                        setattr(module, name, stub)
+                    guardian(child)
+                except Exited as exc:
+                    report.seek(0)
+                    failure = json.loads(report.read().decode("ascii"))
+                    if exc.code == 125 and failure["stage"] == "drain" \
+                            and failure["error"]["errno"] == fault.err.errno:
+                        raise _journal._StSentinel("recorded at drain")
+                    raise
+                finally:
+                    seams.update(saved[0])
+                    for (module, name), real in saved[1].items():
+                        setattr(module, name, real)
+                    if enabled:
+                        gc.enable()
         return call
 
     def recorded(exc):
@@ -3381,6 +3446,7 @@ def _st_guardian_close_reuse():
         got = _journal._st_close_run(drive(_FixtureProcess._guardian), True, recorded, watch)
         if got:
             failures.append("guardian-close-reuse (watch={}): expected green, got {}".format(watch, got))
+    failures += _st_guardian_setup_failure(drive, SetupFailed, recorded, _journal)
     source = textwrap.dedent(inspect.getsource(_FixtureProcess._guardian))
     new = ("fd, subject_fd = subject_fd, None         # ownership first: a failed close is never\n"
            "            os.close(fd)                              # closed again by the cleanup (P1, #378)\n")

@@ -344,7 +344,11 @@ def _close_fd_yielding(fd):
 
 
 def working_blob(root, path):
-    """POSIX no-follow, descriptor-relative traversal; unsupported platforms refuse."""
+    """POSIX no-follow, descriptor-relative traversal; unsupported platforms refuse. The final component's
+    file object is made with closefd=False, so it never closes fd: not when os.fdopen refuses a directory
+    (FileIO leaves fd open), not when it fails after creating its raw file (io.open closes that file), and
+    not when a dropped object is collected. The finally's close is the one close of fd on every path, so
+    who closes fd is never in doubt (P1, #378)."""
     require(hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
             and os.open in os.supports_dir_fd, "safe filesystem traversal unavailable")
     directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -364,14 +368,12 @@ def working_blob(root, path):
         except FileNotFoundError:
             return None
         try:
-            stream = os.fdopen(fd, "rb")
-        except BaseException:
-            _close_fd_yielding(fd)                 # fdopen refused (a directory) before owning fd
-            raise
-        with stream:
-            require(stat.S_ISREG(os.fstat(stream.fileno()).st_mode),
-                    path + ": working input is not a regular file")
-            return stream.read()
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                require(stat.S_ISREG(os.fstat(stream.fileno()).st_mode),
+                        path + ": working input is not a regular file")
+                return stream.read()
+        finally:
+            _close_fd_yielding(fd)
     finally:
         _close_fd_yielding(directory)
 
@@ -1051,10 +1053,15 @@ def check(case_id, condition):
 
 
 def _close_vectors(base):
-    """#378: the vectors for this tool's _close_fd_yielding copy and its two sites in working_blob, the
-    directory close and the close of a final component that os.fdopen refuses (a directory). A close that
-    fails while an exception unwinds lets that exception through as the same object; one that fails on the
-    normal path raises; neither leaves a descriptor open. Returns (failures, runs)."""
+    """#378: the vectors for this tool's _close_fd_yielding copy and its sites in working_blob: the directory
+    close, and the final component's close, which the finally makes on every path, including when os.fdopen
+    refuses a directory and when os.fdopen fails after its raw file exists (io.open then closes that file).
+    A close that fails while an exception unwinds lets that exception through as the same object; one that
+    fails on the normal path raises; neither leaves a descriptor open. The wrapping-failure vector is also
+    run against the pre-fix body (fdopen taking fd, its handler closing fd) and must be red by NOFIRE alone:
+    the failed wrapper's own close released fd first, so the handler's close was a second close. Returns
+    (failures, runs)."""
+    import inspect
     import _close_selftest
     base.mkdir()
     (base / "blob").write_bytes(b"blob")
@@ -1085,25 +1092,56 @@ def _close_vectors(base):
                 os.fdopen, ns["require"] = real_fdopen, real_require
         return call
 
-    def directory_blob(fault):
-        real_fdopen = os.fdopen
+    def final_blob(name, wrap, site=None):
+        def call(fault):
+            real_fdopen = os.fdopen
 
-        def fdopen_spy(fd, *args, **kwargs):
-            fault.arm(fd)                         # the final component, a directory fdopen refuses
-            return real_fdopen(fd, *args, **kwargs)
-        os.fdopen = fdopen_spy
-        try:
-            working_blob(str(base), "adir")
-        finally:
-            os.fdopen = real_fdopen
+            def fdopen_spy(fd, *args, **kwargs):
+                fault.arm(fd)                     # the final component's descriptor
+                handle = real_fdopen(fd, *args, **kwargs)
+                if wrap:
+                    handle.close()                # as io.open closes the raw file of a wrapper that failed
+                    raise sent
+                return handle
+            os.fdopen = fdopen_spy
+            try:
+                (site or working_blob)(str(base), name)
+            finally:
+                os.fdopen = real_fdopen
+        return call
 
     vectors = (("check_release_cut site working_blob: finally while an exception unwinds", True, "AR",
                 blob(True), lambda e: e is sent),
                ("check_release_cut site working_blob: normal path", False, "BR", blob(False), None),
-               ("check_release_cut site working_blob: except handler when fdopen refuses a directory",
-                True, "AR", directory_blob, lambda e: type(e) is IsADirectoryError)
+               ("check_release_cut site working_blob: finally when fdopen refuses a directory",
+                True, "AR", final_blob("adir", False), lambda e: type(e) is IsADirectoryError),
+               ("check_release_cut site working_blob: finally when os.fdopen fails after its raw file exists",
+                True, "AR", final_blob("blob", True), lambda e: e is sent),
+               ("check_release_cut site working_blob: the final component's close on the normal path",
+                False, "BR", final_blob("blob", False), None)
                ) + _close_selftest._st_helper_vectors(ns)
-    return _close_selftest._st_close_check(ns, vectors)
+    failures, runs = _close_selftest._st_close_check(ns, vectors)
+    source = inspect.getsource(working_blob)
+    new = ('        try:\n            with os.fdopen(fd, "rb", closefd=False) as stream:\n'
+           "                require(stat.S_ISREG(os.fstat(stream.fileno()).st_mode),\n"
+           '                        path + ": working input is not a regular file")\n'
+           "                return stream.read()\n        finally:\n            _close_fd_yielding(fd)\n")
+    old = ('        try:\n            stream = os.fdopen(fd, "rb")\n        except BaseException:\n'
+           "            _close_fd_yielding(fd)\n            raise\n        with stream:\n"
+           "            require(stat.S_ISREG(os.fstat(stream.fileno()).st_mode),\n"
+           '                    path + ": working input is not a regular file")\n            return stream.read()\n')
+    if source.count(new) != 1:
+        return failures + ["check_release_cut working_blob revert: target found {} times".format(
+            source.count(new))], runs
+    reverted = dict(ns)
+    exec(compile(source.replace(new, old), __file__, "exec"), reverted)
+    red = _close_selftest._st_close_run(final_blob("blob", True, reverted["working_blob"]), True,
+                                        lambda e: e is sent, False)
+    runs += 1
+    if [problem.split(":")[0] for problem in red] != ["NOFIRE"]:
+        failures.append("check_release_cut site working_blob under the pre-fix fdopen ownership: expected red by "
+                        "NOFIRE alone, got {}".format(red or "green"))
+    return failures, runs
 
 
 # The exact bytes of tools/_close_selftest.py ahead of its harness: the docstring and the two imports.
@@ -1138,25 +1176,39 @@ def _close_harness_in_step(journal, copy):
 # #378 P1, the alias-aware close sweep. Re-run it from the repository root with:
 #   cd tools && python3 -c 'import check_release_cut as c; print(*c._close_sweep(".."), sep="\n")'
 # Its rows are (path, line, function, shape, closed, other). The shapes: TRY, a close of an object inside a try
-# body (or an except handler) that a handler or finally of the same try (or that try's finally) closes again,
-# directly or through an alias; AFTER, the same close under a handler that does not re-raise, closed again later
-# in the enclosing block; REBIND, a close followed in the same block by a re-binding of the closed name or
-# attribute (close-then-rebind, in a loop or not), reported whether or not a cleanup reaches it; ATTR, a close of
-# self.<attr> then its re-binding while another method of the class closes the same attribute. A close is a call
-# whose callee name contains "close" (os.close, every _close_* helper) of its first argument, an argument-less
-# x.close() of x, and the exit of a with statement over os.fdopen(fd) or open(fd) of a closed descriptor.
-# Aliases followed: a plain re-binding (a = b, a = self.b), a tuple, list, set or dict display that captures the
-# variable (bound to a name, or appended, extended, inserted or added into one, or stored by subscript), a loop
-# variable over such a container (through reversed/list/tuple/sorted/set, .values/.items/.keys/.copy and
-# `x or {}`), a file object os.fdopen/open wraps a closed descriptor in, and a keyword capture
-# (ns = SimpleNamespace(pidfd=fd) makes ns.pidfd an alias of fd). A tuple assignment that clears its source in the
-# same statement (fd, x = x, None) is an ownership transfer, not an alias.
-# Residual, what it cannot follow: the order of statements (aliases are flow-insensitive, so a two-statement
-# transfer `fd = x; x = None` is still reported, and every hit needs a disposition); a close made through a callee
-# whose name lacks "close" or through a function passed as a value; a second close in another function (a caller's
+# body, an except handler or the try's else block that a cleanup of the same try closes again, directly or
+# through an alias (a body close against the handlers and the finally, a handler or else close against the
+# finally); AFTER, the same close in a try body under a handler that does not re-raise, closed again by a
+# statement that can follow the try; REBIND, a close followed by a re-binding of the closed name or attribute
+# in a statement that can follow it (close-then-rebind, in a loop or not), reported whether or not a cleanup
+# reaches it; ATTR, a close of self.<attr> followed the same way by its re-binding while another method of the
+# class closes the same attribute. The statements that can follow a statement are the rest of its own block,
+# then the rest of every block enclosing it, out to the function body: so a close inside an if, with, loop or
+# try block is paired with a re-binding or a close after that block. A close is a call whose callee name
+# contains "close" (os.close, every _close_* helper) of its first argument, an argument-less x.close() of x,
+# and the exit of a with statement over os.fdopen(fd) or open(fd) of a closed descriptor, unless the call
+# passes closefd=False (that object never closes the descriptor).
+# Aliases followed: a plain re-binding (a = b, a = self.b), which also joins the elements of the two names, so
+# a container bound to a second name (saved = fds) shares its elements; a tuple assignment, each target taking
+# its source's value from before the statement (b, a = a, a makes b an alias of a); a tuple, list, set or dict
+# display that captures the variable (bound to a name, or appended, inserted or added into one, or stored by
+# subscript); the elements of another container joined into one (extend or update with it, `+=` it, or bind
+# list(c), tuple(c), sorted(c), set(c), reversed(c), c.copy(), c.values(), `c or {}` or a + b); a loop variable
+# over a container (through the same wrappers); a file object os.fdopen/open wraps a closed descriptor in; and
+# a keyword capture (ns = SimpleNamespace(pidfd=fd) makes ns.pidfd an alias of fd). A tuple assignment that
+# re-binds a source to any other value in the same statement (fd, x = x, None) hands the source's value on
+# rather than sharing it, so it is an ownership transfer, not an alias; a swap (a, b = b, a) is the same.
+# Residual, what it cannot follow: the order of statements beyond that rule (aliases are flow-insensitive, so a
+# two-statement transfer `fd = x; x = None` is still reported, a swap's names are never joined, a statement
+# after a return, raise or os._exit still counts as following, a loop's next iteration does not, and the
+# finally of a try is not a following statement of its own body); a close made through a callee whose name
+# lacks "close" or through a function passed as a value; a second close in another function (a caller's
 # cleanup, or another method, except the ATTR shape); an element closed by index (fds[i] is one key per
-# container); containers built by comprehension or returned from a call; and descriptors held by objects the sweep
-# does not know wrap one (sockets, subprocess pipes, selectors).
+# container, and a container nested in another shares the outer container's element key only by subscript);
+# a container appended or inserted into another as one element (its elements are not joined to the outer
+# container's); a tuple unpacked from anything but a display (a, b = pair); containers built by comprehension
+# or returned from a call; and descriptors held by objects the sweep does not know wrap one (sockets,
+# subprocess pipes, selectors).
 _CLOSE_SWEEP_DIRS = ("tools", "opf/tools")
 
 
@@ -1199,6 +1251,9 @@ def _cs_wrapped(node):
     name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
     if name not in ("fdopen", "open", "fromfd") or not node.args or not isinstance(node.args[0], ast.Name):
         return None
+    if any(kw.arg == "closefd" and isinstance(kw.value, ast.Constant) and kw.value.value is False
+           for kw in node.keywords):
+        return None                               # closefd=False: the object never closes the descriptor
     return node.args[0].id
 
 
@@ -1244,6 +1299,8 @@ def _cs_aliases(fn, fds):
     def union(a, b):
         if a and b:
             parent[find(a)] = find(b)
+            if not a.startswith("[]") and not b.startswith("[]"):
+                union("[]" + a, "[]" + b)         # two names for one container share its elements
 
     def elements(node):
         if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
@@ -1252,44 +1309,62 @@ def _cs_aliases(fn, fds):
             return [_cs_key(e) for e in node.values if _cs_key(e)]
         return []
 
+    def contents(node):
+        """The element keys a container expression supplies: a display's elements, the element key of a
+        container it names (through _cs_container's wrappers), and both sides of a + concatenation."""
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            return contents(node.left) + contents(node.right)
+        node = _cs_container(node)
+        key = _cs_key(node)
+        return elements(node) + (["[]" + key.lstrip("[]")] if key else [])
+
     for node in _cs_walk(fn.body):
         if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)) and node.value is not None:
             value = node.value
             for target in (node.targets if isinstance(node, ast.Assign) else [node.target]):
                 if isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List)) \
                         and len(target.elts) == len(value.elts):
-                    rebound = {_cs_key(t) for t in target.elts}
+                    # The right side is evaluated before any binding, so each target takes its source's
+                    # old value; a source this statement re-binds to any other value (fd, x = x, None)
+                    # hands that value on rather than sharing it, while one re-bound to itself
+                    # (b, a = a, a) keeps it, so its later key still aliases the target.
+                    moved = {_cs_key(t) for t, v in zip(target.elts, value.elts) if _cs_key(v) != _cs_key(t)}
                     for t, v in zip(target.elts, value.elts):
-                        if _cs_key(v) and _cs_key(v) not in rebound:    # a transfer clears its source
+                        if _cs_key(v) and _cs_key(v) not in moved:
                             union(_cs_key(t), _cs_key(v))
                     continue
                 key = _cs_key(target)
-                if key and _cs_key(value):
+                if not key:
+                    continue
+                if _cs_key(value):
                     union(key, _cs_key(value))
-                if key and _cs_wrapped(value) in fds:
+                else:
+                    for element in contents(value):  # a display, list(c), c.copy(), c or {}, a + b
+                        union("[]" + key.lstrip("[]"), element)
+                if _cs_wrapped(value) in fds:
                     union(key, _cs_wrapped(value))
-                if key and isinstance(value, ast.Call):
+                if isinstance(value, ast.Call):
                     for kw in value.keywords:
                         if kw.arg and _cs_key(kw.value):
                             union(key + "." + kw.arg, _cs_key(kw.value))
-                for element in elements(value):
-                    union("[]" + (key or "").lstrip("[]"), element)
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
-                and node.func.attr in ("append", "extend", "insert", "add") and _cs_key(node.func.value):
-            for arg in node.args:
-                for element in ([_cs_key(arg)] if _cs_key(arg) else elements(arg)):
-                    union("[]" + _cs_key(node.func.value).lstrip("[]"), element)
+                and node.func.attr in ("append", "extend", "insert", "add", "update") and _cs_key(node.func.value):
+            box = "[]" + _cs_key(node.func.value).lstrip("[]")
+            for arg in node.args[1:] if node.func.attr == "insert" else node.args:
+                if node.func.attr in ("extend", "update"):
+                    items = contents(arg)             # the elements of another container, not its name
+                else:
+                    items = [_cs_key(arg)] if _cs_key(arg) else elements(arg)
+                for element in items:
+                    union(box, element)
         elif isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
                 wrapped = _cs_key(item.context_expr) or _cs_wrapped(item.context_expr)
                 if item.optional_vars is not None and _cs_key(item.optional_vars) and wrapped in fds:
                     union(_cs_key(item.optional_vars), wrapped)
         elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)) and _cs_key(node.target):
-            iterable = _cs_container(node.iter)
-            for element in elements(iterable):
+            for element in contents(node.iter):
                 union(_cs_key(node.target), element)
-            if _cs_key(iterable):
-                union(_cs_key(node.target), "[]" + _cs_key(iterable).lstrip("[]"))
     return lambda a, b: find(a) == find(b)
 
 
@@ -1316,15 +1391,20 @@ def _cs_rebinds(stmt, key):
     return False
 
 
-def _cs_blocks(nodes):
-    """`nodes` itself (a function's own body), then every statement list (body, orelse, finalbody, handler
-    body) under it."""
-    yield nodes
-    for node in _cs_walk(nodes):
-        for field in ("body", "orelse", "finalbody"):
-            block = getattr(node, field, None)
-            if isinstance(block, list) and block:
-                yield block
+def _cs_sequence(nodes, after=()):
+    """Each statement under `nodes` (never inside a nested function or class) with the statements that can run
+    after it: the rest of its own block, then the rest of every block that encloses it, out to `nodes`."""
+    import ast
+    for i, stmt in enumerate(nodes):
+        following = list(nodes[i + 1:]) + list(after)
+        yield stmt, following
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        blocks = [getattr(stmt, field, None) for field in ("body", "orelse", "finalbody")]
+        blocks += [h.body for h in getattr(stmt, "handlers", ())] + [c.body for c in getattr(stmt, "cases", ())]
+        for block in blocks:
+            if isinstance(block, list) and block and isinstance(block[0], ast.stmt):
+                yield from _cs_sequence(block, following)
 
 
 def _cs_function(rel, fn):
@@ -1337,17 +1417,16 @@ def _cs_function(rel, fn):
             cleanup = _cs_closes([s for h in node.handlers for s in h.body] + list(node.finalbody), fds)
             pairs = [(c, k, cleanup) for c, k in _cs_closes(node.body, fds)]
             pairs += [(c, k, _cs_closes(node.finalbody, fds))
-                      for h in node.handlers for c, k in _cs_closes(h.body, fds)]
+                      for c, k in _cs_closes([s for h in node.handlers for s in h.body] + list(node.orelse), fds)]
             rows += [(rel, c.lineno, fn.name, "TRY", k, o) for c, k, later in pairs for _a, o in later if same(k, o)]
-    for block in _cs_blocks(fn.body):
-        for i, stmt in enumerate(block):
-            if isinstance(stmt, ast.Expr) and _cs_close_arg(stmt.value) \
-                    and any(_cs_rebinds(after, _cs_close_arg(stmt.value)) for after in block[i + 1:]):
-                rows.append((rel, stmt.lineno, fn.name, "REBIND", _cs_close_arg(stmt.value), ""))
-            if isinstance(stmt, ast.Try) and any(not (h.body and isinstance(h.body[-1], ast.Raise))
-                                                 for h in stmt.handlers):
-                rows += [(rel, c.lineno, fn.name, "AFTER", k, o) for c, k in _cs_closes(stmt.body, fds)
-                         for _a, o in _cs_closes(block[i + 1:], fds) if same(k, o)]
+    for stmt, following in _cs_sequence(fn.body):
+        if isinstance(stmt, ast.Expr) and _cs_close_arg(stmt.value) \
+                and any(_cs_rebinds(after, _cs_close_arg(stmt.value)) for after in following):
+            rows.append((rel, stmt.lineno, fn.name, "REBIND", _cs_close_arg(stmt.value), ""))
+        if isinstance(stmt, ast.Try) and any(not (h.body and isinstance(h.body[-1], ast.Raise))
+                                             for h in stmt.handlers):
+            rows += [(rel, c.lineno, fn.name, "AFTER", k, o) for c, k in _cs_closes(stmt.body, fds)
+                     for _a, o in _cs_closes(following, fds) if same(k, o)]
     return rows
 
 
@@ -1357,12 +1436,11 @@ def _cs_class(rel, cls):
     closes = [(call, key) for m in methods for call, key in _cs_closes(m.body) if key.startswith("self.")]
     rows = []
     for m in methods:
-        for block in _cs_blocks(m.body):
-            for i, stmt in enumerate(block):
-                key = isinstance(stmt, ast.Expr) and _cs_close_arg(stmt.value)
-                if key and key.startswith("self.") and any(_cs_rebinds(a, key) for a in block[i + 1:]) \
-                        and any(k == key and c is not stmt.value for c, k in closes):
-                    rows.append((rel, stmt.lineno, "{}.{}".format(cls.name, m.name), "ATTR", key, ""))
+        for stmt, following in _cs_sequence(m.body):
+            key = isinstance(stmt, ast.Expr) and _cs_close_arg(stmt.value)
+            if key and key.startswith("self.") and any(_cs_rebinds(a, key) for a in following) \
+                    and any(k == key and c is not stmt.value for c, k in closes):
+                rows.append((rel, stmt.lineno, "{}.{}".format(cls.name, m.name), "ATTR", key, ""))
     return rows
 
 
@@ -1389,13 +1467,14 @@ def _close_sweep(root):
 
 # Every hit of the sweep at this commit, keyed (path, function, shape, closed, other) with its count, and its
 # disposition. A hit the table does not hold, or a held hit no longer found, fails the self-test, so a new
-# double-close shape needs a disposition here before it can land. A "part C" row may be absent: off-path part C,
-# merging after #378, fixes begin_operation (closing, plan_fd = plan_fd, None) and adds its own T-p2 RECLOSE flip.
+# double-close shape needs a disposition here before it can land. A "part C" row may be absent: it is a site
+# that only off-path part C, merging after #378, carries.
+_CS_LEGS = ("false positive: sequential self-test legs; each later binding is a fresh {}, and no try closes "
+            "the old one again")
 _CLOSE_SWEEP_DISPOSITIONS = (
-    ("opf/tools/_opf_init_substrate.py", "begin_operation", "REBIND", "plan_fd", "", 1, "part C: fixed there"),
-    ("opf/tools/_opf_init_substrate.py", "begin_operation", "TRY", "plan_fd", "open_fd", 1, "part C: fixed there"),
     ("opf/tools/_opf_oplock.py", "propagating", "AFTER", "fd", "fd", 1,
-     "part C: false positive, part C's _st_reclose_yielding, the deliberate RECLOSE body its T-p2 flip runs"),
+     "part C: false positive, part C's _st_reclose_yielding, the deliberate RECLOSE body its T-p2 flip runs; the "
+     "site exists only in part C (found by this sweep at 15f2f498, absent here)"),
     ("opf/tools/_journal.py", "body", "AFTER", "fd", "fd", 1,
      "false positive: the harness's R flip (reclose), the deliberate pre-P1 body each R leg must turn red"),
     ("tools/_close_selftest.py", "body", "AFTER", "fd", "fd", 1,
@@ -1406,36 +1485,85 @@ _CLOSE_SWEEP_DISPOSITIONS = (
      "false positive: the client closed here is never appended to backlog_clients, which the cleanup loop closes"),
     ("opf/tools/_opf_oplock.py", "_bind_repository_view", "REBIND", "fd", "", 1,
      "false positive: _FdOwner.close removes the number from the owner before os.close, so its exit never repeats it"),
+    ("opf/tools/_opf_oplock.py", "_open_machine_dir", "REBIND", "fd", "", 1,
+     "false positive: an _FdOwner.close (the number leaves the owner before os.close), then fd = nfd, the child "
+     "the owner adopted first"),
+    ("opf/tools/_opf_oplock.py", "_open_store_home", "REBIND", "parent", "", 1,
+     "false positive: an _FdOwner.close (the number leaves the owner before os.close), then parent = fd, the child "
+     "the owner adopted first"),
+    ("opf/tools/_opf_oplock.py", "_probe_init_machine_dir", "REBIND", "fd", "", 1,
+     "false positive: an _FdOwner.close (the number leaves the owner before os.close), then fd = nfd, the child "
+     "the owner adopted first"),
     ("opf/tools/_opf_oplock.py", "_st_f8_4_body", "TRY", "dir_fd", "dir_fd", 1,
      "false positive: _st_f8_4_interrupted_close(dir_fd) closes its own staging descriptor, never dir_fd"),
+    ("opf/tools/_opf_oplock.py", "_st_in_child", "AFTER", "rfd", "rfd", 1,
+     "false positive: a self-test fork helper; the swallowed close runs only in the child, which ends in os._exit "
+     "before the parent's close of its own rfd"),
     ("opf/tools/check_opf_import.py", "_RunDir.close", "ATTR", "self.cwd_fd", "", 1,
      "false positive: every caller closes a _RunDir once, and __init__'s close raises before close() can run"),
     ("opf/tools/check_opf_import.py", "close", "REBIND", "self.cwd_fd", "", 1,
      "false positive: as the ATTR row, close() runs once per _RunDir"),
     ("opf/tools/check_opf_import.py", "_check_staged_run", "REBIND", "store_fd", "", 2,
      "false positive: a failed close in the handler propagates out of the function; nothing closes store_fd again"),
-    ("opf/tools/check_opf_prompt_pack.py", "_read_regular", "TRY", "fd", "fd", 1,
-     "false positive: fd = None is the with body's first statement, so the finally closes only an unwrapped fd"),
-    ("tools/check_footer.py", "_read_regular_page", "TRY", "fd", "fd", 1,
-     "false positive: fd = -1 is the with body's first statement, so the finally closes only an unwrapped fd"),
+    ("opf/tools/check_opf_import.py", "_spelled_route", "REBIND", "prev", "", 1,
+     "false positive: prev is closed only after `prev, cur = cur, nfd` handed cur on; its later re-binding is the "
+     "next such move, and the finally closes only cur"),
+    ("opf/tools/check_opf_import.py", "_self_test_isolated", "REBIND", "jfd", "", 1,
+     _CS_LEGS.format("journal-directory open")),
+    ("opf/tools/_opf_import.py", "_write_ingest_review_bundle", "REBIND", "store_root_fd", "", 1,
+     "false positive: closed in the finally of the staged-read step; the later binding is a fresh store-root open "
+     "with its own cleanup, and no try closes the old number again"),
+    ("opf/tools/_opf_import.py", "_capture_ingest_review", "REBIND", "rd", "", 1,
+     "false positive: rd.close() in a finally; the later binding is a fresh gate._RunDir, and no try closes the "
+     "old one again"),
+    ("opf/tools/_opf_import.py", "_self_test_d5", "REBIND", "jfd", "", 1, _CS_LEGS.format("journal-root open")),
+    ("opf/tools/_opf_import.py", "_self_test_d5", "REBIND", "rfd", "", 1, _CS_LEGS.format("store-root open")),
+    ("opf/tools/_opf_ingest.py", "review_bundle", "REBIND", "fd", "", 3, _CS_LEGS.format("open_fd(root)")),
+    ("opf/tools/_opf_init_operation.py", "_health_check", "REBIND", "pfd", "", 1,
+     "false positive: closed in a finally; the later binding is a fresh _open_parent with its own finally, and no "
+     "try closes the old number again"),
+    ("opf/tools/_opf_init_operation.py", "_release_all", "REBIND", "run.root_fd", "", 1,
+     "false positive: the close's OSError is caught and run.root_fd cleared right after; _release_all runs once, "
+     "from run_init_operation's finally, and nothing else closes run.root_fd"),
+    ("opf/tools/_opf_init_operation.py", "_release_all", "REBIND", "run.sub", "", 1,
+     "false positive: close_operation's InitSubstrateError is caught and run.sub cleared right after, and "
+     "close_operation refuses a handle already closed, so its descriptors are never closed twice"),
+    ("opf/tools/_opf_init_operation.py", "_physical_tests", "REBIND", "rfd", "", 1, _CS_LEGS.format("os.open")),
+    ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "REBIND", "jr_fd", "", 3,
+     _CS_LEGS.format("journal-root open (or None until one)")),
+    ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "REBIND", "root_fd", "", 7,
+     _CS_LEGS.format("_open_dir_nofollow")),
+    ("opf/tools/_opf_emit.py", "_boom_close7", "AFTER", "fd", "fd", 1,
+     "false positive: a self-test close stub; its swallowed close is followed by a raise in the same block, so the "
+     "later close never runs after it"),
+    ("opf/tools/_opf_store.py", "self_test", "AFTER", "_fd", "_fd", 2,
+     "false positive: self-test hygiene loops; each later `for _fd in` loop binds _fd over another leg's "
+     "descriptors"),
+    ("opf/tools/check_opf_homes.py", "_staged_root_self_test", "REBIND", "jfd", "", 1,
+     _CS_LEGS.format("journal-root open")),
     ("tools/gen_crosswalk.py", "_walk_components", "TRY", "prev", "fd", 1,
      "false positive: fd is re-bound to nxt before prev is closed, so the handler closes nxt, never prev"),
-    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "child", "", 1,
-     "false positive: a self-test leg; the name is re-bound to a new _FixtureProcess, the old one never closed again"),
+    ("tools/pin.py", "do_recover", "REBIND", "fd", "", 3,
+     "false positive: each close follows an ownership move (fd, root_fd = root_fd, None) and a return ends its "
+     "block; each later binding of fd is another early return's own move"),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "AFTER", "child", "child", 4,
+     _CS_LEGS.format("_FixtureProcess")),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "child", "", 5, _CS_LEGS.format("_FixtureProcess")),
     ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "child.pidfd", "", 1,
      "false positive: a self-test leg's hygiene close; no try in the function closes it again"),
-    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "fd", "", 3,
-     "false positive: sequential self-test legs; each later binding is a fresh pidfd and no try closes it again"),
-    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "guardian_fd", "", 4,
-     "false positive: sequential self-test legs; each later binding is a fresh pidfd and no try closes it again"),
-    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "subject_fd", "", 1,
-     "false positive: sequential self-test legs; each later binding is a fresh pidfd and no try closes it again"),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "fake", "", 1,
+     _CS_LEGS.format("types.SimpleNamespace stand-in")),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "fd", "", 9, _CS_LEGS.format("pidfd")),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "guardian_fd", "", 6, _CS_LEGS.format("pidfd")),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "leader_fd", "", 1, _CS_LEGS.format("pidfd")),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "subject_fd", "", 1, _CS_LEGS.format("pidfd")),
 ) + tuple(("opf/tools/_opf_init_substrate.py", name, "REBIND", "sub", "", 1,
            "false positive: a self-test step; sub is re-bound to a fresh substrate, the old one never closed again")
           for name in ("_t_s1_sibling_home", "_t_s2_capability_gate", "_t_s13_midread_containment",
                        "_t_s16_staging_sweep", "_t_s20_distinct_nested_homes"))
 
-# Synthetic shapes the sweep must find (or, for the transfer, must not): each is (label, source, expected shapes).
+# Synthetic shapes the sweep must find (or, for the transfer and closefd=False, must not): each is (label,
+# source, expected shapes).
 _CLOSE_SWEEP_SHAPES = (
     ("tuple loop alias (begin_operation)", "def f(a, b):\n    try:\n        os.close(a)\n        a = None\n"
      "    except BaseException:\n        for x in (a, b):\n            if x is not None:\n                os.close(x)\n"
@@ -1453,12 +1581,55 @@ _CLOSE_SWEEP_SHAPES = (
      "        pass\n    _close_fd_quietly(a)\n", ["AFTER"]),
     ("fdopen wraps the descriptor", "def f(fd):\n    try:\n        with os.fdopen(fd) as fh:\n"
      "            fh.read()\n    finally:\n        os.close(fd)\n", ["TRY"]),
+    ("fdopen with closefd=False never closes", "def f(fd):\n    try:\n"
+     "        with os.fdopen(fd, 'rb', closefd=False) as fh:\n            fh.read()\n    finally:\n"
+     "        os.close(fd)\n", []),
     ("keyword capture", "def f(fd):\n    ns = SimpleNamespace(pidfd=fd)\n    try:\n        os.close(fd)\n"
      "    finally:\n        os.close(ns.pidfd)\n", ["TRY"]),
     ("attribute across methods", "class C:\n    def close(self):\n        os.close(self.fd)\n"
      "        self.fd = None\n\n    def __del__(self):\n        if self.fd is not None:\n"
      "            os.close(self.fd)\n", ["ATTR", "REBIND"]),
+    ("tuple assignment keeping its source", "def f(a):\n    b, a = a, a\n    try:\n        os.close(b)\n"
+     "    finally:\n        os.close(a)\n", ["TRY"]),
+    ("container bound to a second name", "def f(a):\n    fds = [a]\n    saved = fds\n    try:\n"
+     "        os.close(a)\n    finally:\n        for fd in saved:\n            os.close(fd)\n", ["TRY"]),
+    ("extend from another container", "def f(a):\n    source = [a]\n    fds = []\n    fds.extend(source)\n"
+     "    try:\n        os.close(a)\n    finally:\n        for fd in fds:\n            os.close(fd)\n", ["TRY"]),
+    ("+= of another container", "def f(a):\n    source = [a]\n    fds = []\n    fds += source\n"
+     "    try:\n        os.close(a)\n    finally:\n        for fd in fds:\n            os.close(fd)\n", ["TRY"]),
+    ("list() copy of another container", "def f(a):\n    source = [a]\n    fds = list(source)\n"
+     "    try:\n        os.close(a)\n    finally:\n        for fd in fds:\n            os.close(fd)\n", ["TRY"]),
+    ("attribute closed in an if, re-bound after it", "class C:\n    def close(self):\n"
+     "        if self.fd is not None:\n            os.close(self.fd)\n        self.fd = None\n\n"
+     "    def __del__(self):\n        if self.fd is not None:\n            os.close(self.fd)\n", ["ATTR", "REBIND"]),
+    ("else closed, finally closes again", "def f(fd):\n    try:\n        x = 1\n    except BaseException:\n"
+     "        raise\n    else:\n        os.close(fd)\n    finally:\n        os.close(fd)\n", ["TRY"]),
 )
+
+# Each fix to the sweep's alias and pairing rules, put back by the self-test under --red-on-revert: (name, the
+# fixed text, its pre-fix text, the shapes that must then be the only ones red).
+_CLOSE_SWEEP_REVERTS = (
+    ("sweep-tuple-source",
+     "moved = {_cs_key(t) for t, v in zip(target.elts, value.elts) if _cs_key(v) != _cs_key(t)}",
+     "moved = {_cs_key(t) for t in target.elts}", ("tuple assignment keeping its source",)),
+    ("sweep-container-elements",
+     'union("[]" + a, "[]" + b)         # two names for one container share its elements', "pass",
+     ("container bound to a second name", "+= of another container")),
+    ("sweep-extend-elements", 'if node.func.attr in ("extend", "update"):', "if False:",
+     ("extend from another container",)),
+    ("sweep-copy-elements", "for element in contents(value):  # a display", "for element in elements(value):  #",
+     ("list() copy of another container",)),
+    ("sweep-enclosing-blocks", "following = list(nodes[i + 1:]) + list(after)", "following = list(nodes[i + 1:])",
+     ("attribute closed in an if, re-bound after it",)),
+    ("sweep-else-finally", "for h in node.handlers for s in h.body] + list(node.orelse), fds)]",
+     "for h in node.handlers for s in h.body], fds)]", ("else closed, finally closes again",)),
+)
+
+
+def _close_sweep_shapes_red():
+    """The labels of the synthetic shapes this sweep gets wrong."""
+    return [label for label, source, shapes in _CLOSE_SWEEP_SHAPES
+            if sorted(row[3] for row in _close_sweep_source("<shape>", source)) != shapes]
 
 
 def _close_sweep_check(root):
@@ -1565,7 +1736,12 @@ def _self_test_isolated(red_on_revert):
         require(copy.count("\nimport sys\n") == 1, "close harness: preamble flip anchor is not unique")
         check("close-harness-preamble-red", not _close_harness_in_step(
             journal, copy.replace("\nimport sys\n", "\nimport sys\nos.close = lambda fd: None\n")))
-        print("PASS close-harness-in-step")
+        import _close_selftest
+        drop_failures, drop_runs = _close_selftest._st_watch_drop_check()
+        for failure in drop_failures:
+            print("FAIL " + failure, file=sys.stderr)
+        check("close-harness-watch-drop-red", not drop_failures)
+        print("PASS close-harness-in-step watch-drop-runs=" + str(drop_runs))
         sweep_failures = _close_sweep_check(script.parents[1])
         for failure in sweep_failures:
             print("FAIL " + failure, file=sys.stderr)
@@ -1576,6 +1752,16 @@ def _self_test_isolated(red_on_revert):
             marker = "# SELF-TEST:" + " mutation targets are restricted to the production prefix above."
             require(source.count(marker) == 1, "self-test mutation boundary is not unique")
             production, tests = source.split(marker)
+            sweep, table, rest = tests.partition("\n_CS_LEGS = (")    # revert the sweep's code, not this table
+            require(bool(table), "sweep revert boundary is missing")
+            for name, old, new, labels in _CLOSE_SWEEP_REVERTS:
+                require(sweep.count(old) == 1, name + ": sweep revert must match exactly once")
+                mutant = {"__name__": "check_release_cut_" + name.replace("-", "_"), "__file__": str(script)}
+                exec(compile(production + marker + sweep.replace(old, new, 1) + table + rest, str(script), "exec"),
+                     mutant)
+                red = mutant["_close_sweep_shapes_red"]()
+                check(name, sorted(red) == sorted(labels))
+                print("RED " + name + " at " + "; ".join(red))
             mutations = (
                 ("declaration", "if not authorized:", "if False:", "undeclared", 0),
                 ("declaration-initialize", "if not authorized:", "if False:",

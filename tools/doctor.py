@@ -457,9 +457,9 @@ def _close_vectors(base):
                 if raise_sent:
                     raise sent
                 return True
-            ns["is_terminal"] = spy
             root_fd = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY)
-            try:
+            try:                                          # the seam is swapped only where its restore runs
+                ns["is_terminal"] = spy
                 assert_open_journal(root_fd, str(base))
             finally:
                 ns["is_terminal"] = real

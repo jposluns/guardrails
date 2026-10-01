@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "6be0069a4867212c488c99c1889963646b4a41c3bc78b2701c8eca7e332a8338"
+tree-sha256 = "f771947fb8bd3317d543c0a2b74af8c14ae386ae07838dc0a6d2e5bae440d420"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2551,8 +2551,8 @@ sha256 = "6594419bc15c14e7e4844e2a34bc5ef24618b7fccf79e9a0787f4e88d0f976ab"
 
 [[sources]]
 path = "opf/tools/_journal.py"
-bytes = 160586
-sha256 = "2c6a3ec2086749f75978ec398c8440dc8fda6bfe321a7b2b75138f7d4e8ebd2d"
+bytes = 162415
+sha256 = "124aa1b7b9dc955cc672404dd8906d839dda36e3cb98b56821a2e2ec4b446ef2"
 
 [[sources]]
 path = "opf/tools/_opf_absorb.py"
@@ -2601,8 +2601,8 @@ sha256 = "9a06e32a44c487c11c53db75e24e3b71092fdca09834be2fa88563cf5af44cea"
 
 [[sources]]
 path = "opf/tools/_opf_emit.py"
-bytes = 250486
-sha256 = "13ead64c30160526ec98554a220a9dbf153125e541eaccb7f8da19c9b54df20c"
+bytes = 254448
+sha256 = "300cfe0a2151a47e46ade67f1a0a17f8f9ca0b7963e59a74a152c71f2d12c67f"
 
 [[sources]]
 path = "opf/tools/_opf_fuzz.py"
@@ -2656,8 +2656,8 @@ sha256 = "4e888d822384a33e835a79c7b9124f70c4ede17b4c99350bd95c119f7561fbc5"
 
 [[sources]]
 path = "opf/tools/_opf_init_substrate.py"
-bytes = 135578
-sha256 = "d68962754e1f691c37d9c01fcb0acae39c5a22b23847be97fe4f998a2c93d9e8"
+bytes = 135669
+sha256 = "d4d3cb988bc5e9530ec8d6c285e014b0a2cc212a9f0be284dfbab62970bd2e00"
 
 [[sources]]
 path = "opf/tools/_opf_journal.py"
@@ -2891,8 +2891,8 @@ sha256 = "2341c2d4a2a8f6e013a6cd5c8b9fd04e42326ec26688e76f7cba365505e9597c"
 
 [[sources]]
 path = "opf/tools/check_opf_import.py"
-bytes = 410584
-sha256 = "40667e86dd1a33c5fb3b68ac61414747b41e8933742c51072e239265ddc5f94a"
+bytes = 410784
+sha256 = "f0fbe5d0feb5035d065e28d542e456fafdb50a848af96a4a1d610aa53c8b6e34"
 
 [[sources]]
 path = "opf/tools/check_opf_ingest.py"
@@ -2926,8 +2926,8 @@ sha256 = "8949c5d986eadf237d8d867a6887362fe87c426736b368a05145b1e109d162c1"
 
 [[sources]]
 path = "opf/tools/check_opf_prompt_pack.py"
-bytes = 21785
-sha256 = "23f104f7fe509f2daeda529bbbac6536b5b20023be3391aa42a14c44764fc27f"
+bytes = 25717
+sha256 = "ce17b2ced71455a2c2fc082b69ccdad987a99d4adc6daefce4b1eacb004f4b8c"
 
 [[sources]]
 path = "opf/tools/check_opf_record.py"
@@ -3146,8 +3146,8 @@ sha256 = "60d56244cf05535c7c4a5cd04750f8f9f1815cf0d6708474de5c6f8e7e43b79a"
 
 [[sources]]
 path = "tools/_close_selftest.py"
-bytes = 21103
-sha256 = "5a0a04a6871e56ad71bf89dc0009a92a136f33fa11a3627aa1fe80f560b9694b"
+bytes = 22707
+sha256 = "e69bac92ea29bf01c50c8ae2f0a7db0ab016813487e425e04a00c4f7509bfae5"
 
 [[sources]]
 path = "tools/_gen_common.py"
@@ -3236,8 +3236,8 @@ sha256 = "327816f450f48bf7f28b1e949f36a3fa2ecf8605e15746da22192a3f8802a91b"
 
 [[sources]]
 path = "tools/check_footer.py"
-bytes = 19608
-sha256 = "aea446afd33aa600562d792e6b500cb1b2d8d0efee16121a33b774f397bedaaf"
+bytes = 22176
+sha256 = "7839b82a8bcbf6246156aeb86f1df3317458fdb0a372a41a0b3bdcf61bc7db31"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
@@ -3351,8 +3351,8 @@ sha256 = "5893faf4680c720f09083ecb4aedfdf68e8e54c5bc35a1fed33dd918ddcd64e5"
 
 [[sources]]
 path = "tools/check_release_cut.py"
-bytes = 87815
-sha256 = "63ed8cbe26c963f5781979a5597e6a64ab4fa7be89384406ff528653b8f1dddc"
+bytes = 102208
+sha256 = "9423c75d1f6366ed658a4b468294b740c4e6fdd44fb636dc527a02a139585b5a"
 
 [[sources]]
 path = "tools/check_release_delta.py"
@@ -3421,8 +3421,8 @@ sha256 = "9205a2311e4bc71d7fca81e8721b80fbf53b1b1146129fc37901b2fc16d77aef"
 
 [[sources]]
 path = "tools/doctor.py"
-bytes = 29159
-sha256 = "0cd2108917d85622a36fbcaa06d198c8dec34f4a65c86aa6c0cee23560cf2229"
+bytes = 29254
+sha256 = "46a75673610e3ec8efa8ca8ad566730d81898d0193fbac554a2a17283cc25fde"
 
 [[sources]]
 path = "tools/gen_adapters.py"
@@ -3446,8 +3446,8 @@ sha256 = "ec42c7dc27f24a7d5fe278645df0adbb74268c76e020e5b8a835ad36be57672d"
 
 [[sources]]
 path = "tools/gen_crosswalk.py"
-bytes = 53302
-sha256 = "f2008bb6f72cd64cc0076a4c3a86acc5ee7ad19202cc02a01fe193eb6457c72b"
+bytes = 53397
+sha256 = "7e5191ea8b2d919fe1e1e3c69a150c0435fa63d28b2dbfbe7a703b66430bf6a9"
 
 [[sources]]
 path = "tools/gen_cursor.py"
