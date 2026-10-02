@@ -7,16 +7,25 @@ Legs, in order:
                  floor (FLOOR below; a change to either is a reviewed change to both).
   pins           every `python-version:` interpreter pin in .github/workflows/*.yml and in PIN_FILES
                  (the shipped adopter CI template and its inline copy) equals the floor; each PIN_FILES
-                 entry must carry at least one pin. Every line of a scanned file that contains the text
-                 python-version must be one strict pin line (PIN_LINE_RE): optional space indentation,
-                 an optional `- ` list marker, the bare key, a colon, one or more spaces, exactly one
+                 entry must carry at least one pin. The leg is a conservative line model, not a YAML
+                 parser. Every line of a scanned file that contains the text python-version must be
+                 one strict pin line (PIN_LINE_RE): optional space indentation, an optional `- ` list
+                 marker, the bare key, optional spaces, a colon, one or more spaces, exactly one
                  plain, single-quoted or double-quoted scalar of [A-Za-z0-9._+-] characters (matching
                  quotes, nothing inside them but those characters), then optional whitespace and an
                  optional `#` comment. Any other line naming the key (a value on the next line or a
                  block scalar, a quoted key, a flow mapping, an empty value, a concatenated or
                  escaped value, a comment that names the key) is cannot-evaluate (exit 2), never a
-                 pass. A plain (unquoted) pin of a floor whose text ends in 0 is a finding, since
-                 YAML reads a plain 3.20 as the number 3.2.
+                 pass. The next non-blank line after a pin (blank lines skipped, comment lines
+                 included) more indented than the pin's key, or led by a tab, is cannot-evaluate: it
+                 would continue the value (a plain 3.14 continued by `|| 3.12` is a range) or nest
+                 under it. In a .yml or .yaml file, a value that opens with a quote or a flow
+                 indicator and does not close on its own line is cannot-evaluate. Lines more indented
+                 than a plain key (or list marker) whose value is a block scalar (| or > with
+                 optional indicators) are its text and are not read as pins; in a non-YAML pin file
+                 that recognition stops after the first unclosed quoted or flow value, so the rest
+                 of that file stays under the strict scan. A plain (unquoted) pin of a floor whose
+                 text ends in 0 is a finding, since YAML reads a plain 3.20 as the number 3.2.
   guard          each guarded-surfaces entrypoint opens with the canonical refusal guard, AST-matched
                  against GUARD_TEMPLATE with the file's own basename and the floor; only a module
                  docstring and `from __future__` imports may precede its `import sys`.
@@ -50,13 +59,18 @@ the guard leg pins the one canonical form. Each file is compiled whole before it
 interpreter too old to parse a later statement stops with a SyntaxError instead of the refusal; the
 dynamic leg sees a compile failure only on the interpreter running it. The completeness scan walks the
 working tree, not the git index: an untracked stray entrypoint is counted, and a directory named in
-SKIPPED_DIR_NAMES is not walked. The pins leg does not parse YAML, and that is also its answer to a
-malformed workflow: a pin can only be set by a line that names the key, so a file with no such line
-has no pin to check, and every line that names it is held to the strict one-line form or the leg
-cannot evaluate. The residual is a key spelled through YAML escapes (for example a double-quoted key
-with backslash-u escapes, or an escaped line break inside the key), which no line names as written and this
-leg does not see; the leg also scans only the files it names. The documentation leg matches the
-exact phrase, not its meaning.
+SKIPPED_DIR_NAMES is not walked. The pins leg is a conservative line model, not a YAML parser, and
+that is also its answer to a malformed workflow: a pin can only be set by a line that names the key,
+so a file with no such line has no pin to check, every line that names it is held to the strict
+one-line form, the line after it may not continue or nest under it, and a quoted or flow value that
+spans lines in a YAML file stops the leg (exit 2). What it cannot model and does not refuse is named
+here: a key spelled through YAML escapes (for example a double-quoted key with backslash-u escapes, or
+an escaped line break inside the key), which no line names as written; a key reached through a YAML
+tag, an alias or a merge key, or a pin value set through an anchor elsewhere in the file, where the
+named line is judged as written; a block scalar header whose key the model misreads, which can only
+put more lines under the strict scan; and in the non-YAML pin file, a multi-line flow value around a
+pin. The leg also scans only the files it names. The documentation leg matches the exact phrase, not
+its meaning.
 
 Run this gate isolated: python3 -I -B tools/check_python_floor.py
 """
@@ -87,8 +101,19 @@ PIN_KEY = "python-version"
 # removed). Group 1 is a plain value, group 2 single-quoted, group 3 double-quoted. A comment may not
 # carry a character a YAML 1.1 reader treats as a line break.
 PIN_LINE_RE = re.compile(
-    r" *(?:- +)?python-version: +(?:([A-Za-z0-9._+-]+)|'([A-Za-z0-9._+-]+)'|\"([A-Za-z0-9._+-]+)\")"
+    r" *(?:- +)?python-version *: +(?:([A-Za-z0-9._+-]+)|'([A-Za-z0-9._+-]+)'|\"([A-Za-z0-9._+-]+)\")"
     r"(?:[ \t]+#[^\r\x85\u2028\u2029]*|[ \t]*)")
+# A block scalar header: a plain key (or a bare list marker) whose value is | or > with optional
+# indentation and chomping indicators. The lines more indented than the key (or the last marker) are
+# the scalar's text, not pins. A header with a quoted key, a tag or an anchor is not recognized, so its
+# text stays under the strict scan.
+BLOCK_HEADER_RE = re.compile(
+    r" *(?:(-) +)*(?:([A-Za-z0-9_][A-Za-z0-9_.-]*) *: +)?[|>](?:[1-9][+-]?|[+-][1-9]?)?"
+    r"(?:[ \t]+#.*|[ \t]*)")
+# A node that opens with a quote or a flow indicator: after the indentation, any list markers, an
+# optional plain key with its colon, and optional anchor or tag properties.
+NODE_START_RE = re.compile(
+    r" *(?:- +)*(?:[A-Za-z0-9_][A-Za-z0-9_.-]* *:[ \t]+)?(?:[&!][^ \t]*[ \t]+)*([\"'\[{].*)")
 # Not shipped (repo-only CI) or byte-exact vendored third-party code under a provenance manifest.
 EXCLUDED_TREES = (".github/", "opf/tools/_vendor/")
 SKIPPED_DIR_NAMES = {".git", "__pycache__", ".venv", "venv", "node_modules"}
@@ -200,14 +225,44 @@ def pin_findings(root, floor):
     findings = []
     for rel, required in targets:
         pins = 0
+        yaml_file = rel.endswith((".yml", ".yaml"))
+        # pin: (key column, line number) of the last strict pin until the next non-blank line is
+        # judged. block: the column a block scalar's text is more indented than. opaque: a quoted or
+        # flow value continued past its line, after which no block scalar is recognized.
+        pin, block, opaque = None, None, False
         for number, line in enumerate(_read_text(root / rel).split("\n"), 1):
             line = line[:-1] if line.endswith("\r") else line
+            if not line.strip(" \t"):
+                continue
+            indent = len(line) - len(line.lstrip(" "))
+            deeper = line[indent] == "\t"
+            if block is not None:
+                if indent > block or deeper:
+                    continue
+                block = None
+            if pin is not None:
+                if indent > pin[0] or deeper:
+                    raise CannotEvaluate(
+                        "{}:{}: more indented than the python-version pin on line {} (a continuation "
+                        "or nested value this gate cannot judge); write the pin on one line as "
+                        "python-version: 'X.Y'".format(rel, number, pin[1]))
+                pin = None
             if PIN_KEY not in line:
+                node = NODE_START_RE.fullmatch(line)
+                if node is not None and not _closes_on_line(node.group(1)):
+                    if yaml_file:
+                        raise CannotEvaluate("{}:{}: a quoted or flow value continues past its line; "
+                                             "this line model cannot follow it".format(rel, number))
+                    opaque = True
+                header = None if opaque else BLOCK_HEADER_RE.fullmatch(line)
+                if header is not None and (header.group(1) or header.group(2)):
+                    block = header.start(2) if header.group(2) else header.start(1)
                 continue
             match = PIN_LINE_RE.fullmatch(line)
             if match is None:
                 raise CannotEvaluate("{}:{}: unrecognized python-version spelling; write the pin on one "
                                      "line as python-version: 'X.Y'".format(rel, number))
+            pin = (line.index(PIN_KEY), number)
             pins += 1
             plain, value = match.group(1), next(group for group in match.groups() if group is not None)
             if value != want:
@@ -219,6 +274,35 @@ def pin_findings(root, floor):
         if required and not pins:
             findings.append("{}: carries no python-version pin (want {!r})".format(rel, want))
     return findings
+
+
+def _closes_on_line(text):
+    """Whether a node that opens with a quote or a flow indicator closes on its own line: a quote
+    (double with backslash escapes, single with '' escapes) opens only at a token start, and a `#`
+    after whitespace outside quotes ends the line."""
+    quote, depth, index = None, 0, 0
+    while index < len(text):
+        char = text[index]
+        if quote == "\"":
+            if char == "\\":
+                index += 1
+            elif char == "\"":
+                quote = None
+        elif quote == "'":
+            if char == "'" and text[index + 1:index + 2] == "'":
+                index += 1
+            elif char == "'":
+                quote = None
+        elif char in "\"'" and (index == 0 or text[index - 1] in " \t[{,:"):
+            quote = char
+        elif char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+        elif char == "#" and index and text[index - 1] in " \t":
+            break
+        index += 1
+    return quote is None and depth <= 0
 
 
 def _parse(root, rel):
@@ -256,13 +340,23 @@ def _preamble_end(tree):
     return index
 
 
+def _too_complex(rel, exc):
+    """A traversal limit (too deep a tree for ast.dump or ast.unparse, or memory): cannot-evaluate,
+    never a crash that reads as a finding."""
+    return CannotEvaluate("{}: too complex to evaluate: {}: {}".format(rel, type(exc).__name__, exc))
+
+
 def guard_findings(root, surfaces, floor):
     findings = []
     for rel in surfaces:
         tree = _parse(root, rel)
         want = _canonical(Path(rel).name, floor)
         start = _preamble_end(tree)
-        if [_dump(node) for node in tree.body[start:start + len(want)]] != want:
+        try:
+            opens = [_dump(node) for node in tree.body[start:start + len(want)]] == want
+        except (MemoryError, RecursionError) as exc:
+            raise _too_complex(rel, exc)
+        if not opens:
             findings.append(
                 "{}: does not open with the canonical floor guard (only a docstring and `from "
                 "__future__` imports may precede `import sys` and `if tuple(sys.version_info[:2]) < "
@@ -337,7 +431,10 @@ def dynamic_findings(root, surfaces, floor):
                         "{!r}, working-dir entries {!r}; want exit 2, empty stdout, the exact refusal "
                         "and an untouched working directory".format(
                             rel, *version, " ".join(flags) or "no flag", *got))
-        prefix = guard_prefix(_parse(root, rel), name, floor)
+        try:
+            prefix = guard_prefix(_parse(root, rel), name, floor)
+        except (MemoryError, RecursionError) as exc:
+            raise _too_complex(rel, exc)
         if prefix is None:
             findings.append("{}: no canonical guard statement to run at the floor boundary".format(rel))
             continue
@@ -554,8 +651,31 @@ def _self_test_cases(base):
             ("pins/trailing-comment-passes", "python-version: '3.14'  # the floor"),
             ("pins/double-quoted-passes", 'python-version: "3.14"'),
             ("pins/list-marker-passes", "- python-version: '3.14'"),
-            ("pins/crlf-line-passes", "python-version: '3.14'\r")):
+            ("pins/crlf-line-passes", "python-version: '3.14'\r"),
+            ("pins/space-before-colon-passes", "python-version : '3.14'"),
+            ("pins/sibling-key-passes", "python-version: 3.14\n          cache: pip"),
+            ("pins/block-scalar-text-passes",
+             "python-version: '3.14'\n      - run: |\n          echo python-version\n"
+             "          python-version: '3.12'\n      - run: echo done")):
         check(check_id, evaluate(_fixture(base, workflow_pin=pin, pin_quote=""))[0], 0)
+    for check_id, pin, marker in (
+            ("pins/plain-continuation-cannot-evaluate", "python-version: 3.14\n            || 3.12",
+             "quality.yml:7: more indented than the python-version pin on line 6"),
+            ("pins/range-continuation-cannot-evaluate", "python-version: 3.14\n            - 3.15",
+             "quality.yml:7: more indented than the python-version pin on line 6"),
+            ("pins/continuation-after-blank-cannot-evaluate",
+             "python-version: 3.14\n\n            || 3.12",
+             "quality.yml:8: more indented than the python-version pin on line 6"),
+            ("pins/deeper-comment-cannot-evaluate", "python-version: '3.14'\n            # 3.12",
+             "quality.yml:7: more indented than the python-version pin on line 6"),
+            ("pins/multi-line-quoted-cannot-evaluate",
+             "python-version: '3.14'\n          note: \"a\n  b: |\n            \"",
+             "quality.yml:7: a quoted or flow value continues past its line"),
+            ("pins/multi-line-flow-cannot-evaluate",
+             "python-version: '3.14'\n          note: {a: 1,\n            b: 2}",
+             "quality.yml:7: a quoted or flow value continues past its line")):
+        code, lines = evaluate(_fixture(base, workflow_pin=pin, pin_quote=""))
+        check(check_id, (code, _has(lines, marker)), (2, True))
     code, lines = evaluate(_fixture(base, workflow_pin="python-version: 3.12", pin_quote=""))
     check("pins/wrong-single-line-finding",
           (code, _has(lines, "quality.yml:6: python-version '3.12' differs")), (1, True))
@@ -584,6 +704,11 @@ def _self_test_cases(base):
     code, lines = evaluate(_fixture(base, source=listed, files={"tools/demo.py": "-" * 200000 + "1\n"}))
     check("guard/parser-overflow-cannot-evaluate",
           (code, _has(lines, "tools/demo.py: too complex to parse: MemoryError")), (2, True))
+    # A 10000-term sum parses, but ast.dump of it exceeds the recursion limit.
+    deep = {"tools/demo.py": "1+" * 10000 + "1\n"}
+    code, lines = evaluate(_fixture(base, source=listed, files=deep))
+    check("guard/deep-tree-cannot-evaluate",
+          (code, _has(lines, "tools/demo.py: too complex to evaluate: RecursionError")), (2, True))
 
     path = _fixture(base, files=demo) / "tools" / "demo.py"
     version = below_floor(floor)[0]
@@ -598,6 +723,12 @@ def _self_test_cases(base):
     check("dynamic/boundary-continues-at-floor", boundary_observed(prefix, floor + (0,), ()),
           (0, CONTINUED + "\n", ""))
     check("dynamic/boundary-refuses-below-floor", boundary_observed(prefix, version, ())[:2], (2, ""))
+    try:
+        dynamic_findings(_fixture(base, files=deep), ["tools/demo.py"], floor)
+        got = "no exception"
+    except CannotEvaluate as exc:
+        got = "too complex to evaluate: RecursionError" in str(exc)
+    check("dynamic/deep-tree-cannot-evaluate", got, True)
 
     unguarded = {"tools/demo.py": _entry("import sys\n")}
     check("completeness/off-ignores-unguarded", evaluate(_fixture(base, files=unguarded))[0], 0)
