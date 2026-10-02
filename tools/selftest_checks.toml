@@ -655,6 +655,7 @@ expected-check-ids = [
   "guard/wrong-basename-finding",
   "guard/late-placement-finding",
   "guard/assert-form-finding",
+  "guard/parser-overflow-cannot-evaluate",
   "dynamic/refusal-exact-under-OO",
   "dynamic/below-floor-vectors",
   "dynamic/compile-failure-finding",

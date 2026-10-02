@@ -226,6 +226,10 @@ def _parse(root, rel):
         return ast.parse(_read_text(root / rel), filename=rel)
     except (SyntaxError, ValueError) as exc:
         raise CannotEvaluate("{}: does not parse: {}".format(rel, exc))
+    except (MemoryError, RecursionError) as exc:
+        # The parser's own limits (too deep a nesting or too long a chain): cannot-evaluate, never a
+        # crash that reads as a finding.
+        raise CannotEvaluate("{}: too complex to parse: {}: {}".format(rel, type(exc).__name__, exc))
 
 
 def _dump(node):
@@ -576,6 +580,10 @@ def _self_test_cases(base):
              _entry("import sys\n\nassert tuple(sys.version_info[:2]) >= (%d, %d)\n" % floor))):
         code, lines = evaluate(_fixture(base, source=listed, files={"tools/demo.py": text}))
         check(check_id, (code, _has(lines, guard_marker)), (1, True))
+    # 200000 unary minus signs overflow the parser's fixed stack at once (a MemoryError).
+    code, lines = evaluate(_fixture(base, source=listed, files={"tools/demo.py": "-" * 200000 + "1\n"}))
+    check("guard/parser-overflow-cannot-evaluate",
+          (code, _has(lines, "tools/demo.py: too complex to parse: MemoryError")), (2, True))
 
     path = _fixture(base, files=demo) / "tools" / "demo.py"
     version = below_floor(floor)[0]
@@ -620,7 +628,7 @@ def _self_test_cases(base):
     _red_on_revert(base, good, declared)
 
 
-def _gate_rc(root, gate_source):
+def _gate_run(root, gate_source):
     _write(root, "tools/check_python_floor.py", gate_source)
     try:
         proc = subprocess.run(
@@ -628,12 +636,12 @@ def _gate_rc(root, gate_source):
             env=CHILD_ENV, stdin=subprocess.DEVNULL, capture_output=True, timeout=CHILD_TIMEOUT * 20)
     except (OSError, subprocess.SubprocessError) as exc:
         raise CannotEvaluate("gate copy launch failed: {}".format(exc))
-    return proc.returncode
+    return proc.returncode, proc.stdout.decode("utf-8", "backslashreplace").splitlines()
 
 
 def _red_on_revert(base, good, declared):
-    """Each leg red on its fixture with the intact gate, green on the same fixture with that leg's
-    check removed from a copy of this gate."""
+    """Each leg red on its fixture with the intact gate, which names that leg's own finding, and green
+    on the same fixture with that leg's check removed from a copy of this gate."""
     gate_source = _read_text(Path(__file__).resolve())
     mutants = {}
     for leg, call in REVERT_CALLS:
@@ -643,26 +651,33 @@ def _red_on_revert(base, good, declared):
                 leg, gate_source.count(line)))
         mutants[leg] = gate_source.replace(line, "findings.extend(())")
     listed = _source_text(surfaces=["tools/demo.py"])
+    # Each case: the leg, its fixture, and the text of that leg's own finding.
     cases = (
-        ("source", dict(source=_source_text(floor="3.13"), workflow_pin="3.13", template_pin="3.13")),
-        ("pins", dict(workflow_pin="3.12")),
-        ("guard", dict(source=listed, files={"tools/demo.py": _entry(good, before="import os\n")})),
-        ("dynamic", dict(source=listed, files={"tools/demo.py": _entry(good, after="return\n")})),
+        ("source", dict(source=_source_text(floor="3.13"), workflow_pin="3.13", template_pin="3.13"),
+         "decided floor"),
+        ("pins", dict(workflow_pin="3.12"), "quality.yml:6: python-version '3.12' differs"),
+        ("guard", dict(source=listed, files={"tools/demo.py": _entry(good, before="import os\n")}),
+         "canonical floor guard"),
+        ("dynamic", dict(source=listed, files={"tools/demo.py": _entry(good, after="return\n")}),
+         "at patched"),
         ("completeness", dict(source=_source_text(completeness=True),
-                              files={"tools/demo.py": _entry("import sys\n")})),
+                              files={"tools/demo.py": _entry("import sys\n")}),
+         "tools/demo.py: a shipped entrypoint"),
         ("documentation", dict(source=_source_text(documentation=True), files=dict(
-            declared, **{DECLARATION_FILES[-1]: "Requires Python.\n"}))),
+            declared, **{DECLARATION_FILES[-1]: "Requires Python.\n"})),
+         DECLARATION_FILES[-1] + ": does not state"),
     )
     results = {}
-    for leg, kwargs in cases:
-        results[leg] = (_gate_rc(_fixture(base, **kwargs), gate_source),
-                        _gate_rc(_fixture(base, **kwargs), mutants[leg]))
-    check("revert/source-leg", results["source"], (1, 0))
-    check("revert/pins-leg", results["pins"], (1, 0))
-    check("revert/guard-leg", results["guard"], (1, 0))
-    check("revert/dynamic-leg", results["dynamic"], (1, 0))
-    check("revert/completeness-leg", results["completeness"], (1, 0))
-    check("revert/documentation-leg", results["documentation"], (1, 0))
+    for leg, kwargs, marker in cases:
+        intact_rc, intact_lines = _gate_run(_fixture(base, **kwargs), gate_source)
+        named = any(line.startswith("FAIL: ") and marker in line for line in intact_lines)
+        results[leg] = (intact_rc, named, _gate_run(_fixture(base, **kwargs), mutants[leg])[0])
+    check("revert/source-leg", results["source"], (1, True, 0))
+    check("revert/pins-leg", results["pins"], (1, True, 0))
+    check("revert/guard-leg", results["guard"], (1, True, 0))
+    check("revert/dynamic-leg", results["dynamic"], (1, True, 0))
+    check("revert/completeness-leg", results["completeness"], (1, True, 0))
+    check("revert/documentation-leg", results["documentation"], (1, True, 0))
 
 
 def _expected_check_ids():

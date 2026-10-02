@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "18d2b122d8ef83ffa55d0ada239127e341e889d1b8ca0caf63362f92ccc361af"
+tree-sha256 = "2a62c0212804683ffb239b7533f7788277e90c776761ddb4a9f67b4103058cc3"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -122,7 +122,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2867
-sha256 = "b2e304f2dcef71c2d142fd14e81ab83d569736fe575bd09a66ab5a8c337e8472"
+sha256 = "35ae45fde8e87d9b2d148565060c9d78ad14de0dfb192d95f52e64a4254e1b0a"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -3132,7 +3132,7 @@ sha256 = "5bb55aeaf3708f9df4545de618311bb22ac484568d5a494055f9967c5eb9ae7f"
 [[sources]]
 path = "tools/_gen_common.py"
 bytes = 5582
-sha256 = "4ad097991ec17d0ffae9c1c19421db06670d867dcaa06baa893019aa000c1ed1"
+sha256 = "3e590bc6b0f969b27434b1be5070636244ce153c871ef0f26ca497c178c0aedf"
 
 [[sources]]
 path = "tools/_git_fixture_env.py"
@@ -3152,7 +3152,7 @@ sha256 = "e19ad231e932a8b9fb463c4bc4d2f5837742b563d7c9f8fd0bd775b6c8832ede"
 [[sources]]
 path = "tools/_standards.py"
 bytes = 16302
-sha256 = "338d7906277a842c10e15cf95e3e1cfd2835c97579597192fad6547bd3f2a651"
+sha256 = "ed6145db0d79aa2f64e5adaf465f4745c6c3b36a03a9ef6f6befc253fbd3f605"
 
 [[sources]]
 path = "tools/_walk.py"
@@ -3306,8 +3306,8 @@ sha256 = "9cddfafc24b89833861c0d8adfb106b48643b1b6ccc16c9d12acd30930c013c4"
 
 [[sources]]
 path = "tools/check_python_floor.py"
-bytes = 38545
-sha256 = "4796d475f3249013761d592158c5231197861577f8338fd43c14cadaa676c282"
+bytes = 39759
+sha256 = "0ed918f2d69eed35cb4bb5fdbe616b67e6930d1c9e3ec83918f88819f951d0de"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
@@ -3586,8 +3586,8 @@ sha256 = "c42cfe6ea421a511c3f34f268716511f0c403f7541770105951ba9ffc1cf5a07"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 24405
-sha256 = "8ffaa56e70e444b8bfc325d8813bc242696e8e8681fcc9e35d754d40c487f9d8"
+bytes = 24448
+sha256 = "f51d6b3cef8fce70c4404db52947a87bff80b87001e5711e05c682f1271fadc1"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
