@@ -1432,7 +1432,7 @@ def _manifest_extra_setup_failures():
     the actual expressions catches removal of their check_returncode calls.
     This bounded probe does not simulate the rest of the generator's self-test.
     """
-    tree = ast.parse((ROOT / "tools" / "gen_manifest.py").read_text(encoding="utf-8"))
+    tree = _optlevel.parse((ROOT / "tools" / "gen_manifest.py").read_text(encoding="utf-8"))
     owners = [n for n in tree.body if isinstance(n, ast.FunctionDef)
               and n.name == "_self_test_main_isolated"]
     for check_id, fixture, operation in (
@@ -1458,7 +1458,7 @@ def _manifest_extra_setup_failures():
                 return subprocess.CompletedProcess(args, 1)
             try:
                 exec(compile(ast.Module(body=expressions, type_ignores=[]),
-                             "<fixture-setup-probe>", "exec"),
+                             "<fixture-setup-probe>", "exec", optimize=0),
                      {"_git": failed_git, fixture: Path("/unused-fixture")})
             except subprocess.CalledProcessError:
                 refused = True
