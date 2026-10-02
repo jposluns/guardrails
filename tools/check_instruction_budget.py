@@ -1,46 +1,82 @@
 #!/usr/bin/env python3
 """Instruction-budget gate: hold what Claude Code loads unconditionally to a committed ratchet.
 
-Claude Code reads every `.claude/rules/**/*.md` file that carries no `paths:` scope, and the project
-CLAUDE.md, into every session before the first prompt. That text is paid for in every session, so this
-gate measures it and fails when the pack's share grows.
+Claude Code reads every `.claude/rules/**/*.md` file that carries no `paths:` scope, the project CLAUDE.md,
+and every file either of them imports, into every session before the first prompt. That text is paid for
+in every session, so this gate measures it and fails when the pack's share grows. The loading rules below
+model the loader of the Claude Code build pinned in the budget source.
 
 What it measures, in UTF-16 code units (the length of the text encoded utf-16-le, divided by 2; a
 character in the Basic Multilingual Plane is one unit, an astral character such as an emoji is two):
 
-  RULE FILES. Every `.claude/rules/**/*.md` file that is unconditional. A leading frontmatter block is
-      removed first (FRONTMATTER_RE below, first match only; its trailing `\\s*` also takes the blank line
-      after the closing fence), then every HTML comment. A file whose frontmatter has a `paths:` key is
-      conditional and is not counted, unless every glob in it is `**` once a single trailing `/**` is
-      stripped, in which case it loads everywhere and is counted.
+  RULE FILES. Every file under `.claude/rules/` whose name ends in `.md` (case sensitive) and that is
+      unconditional. The walk follows a symlinked directory whose target resolves inside the repository
+      and counts the files under it. A symlink, to a directory or a file, that resolves outside the
+      repository, a symlink loop, and a directory reached a second time through a symlink exit 2.
+      A leading byte order mark (BOM) is removed before the frontmatter test, then a leading frontmatter
+      block is removed (FRONTMATTER_RE below, first match only; its trailing `\\s*` also takes the blank
+      line after the closing fence); with no frontmatter the BOM stays counted. HTML comments are then
+      removed as COMMENTS states.
+  SCOPE. A file whose frontmatter has a `paths:` key is conditional and is not counted, unless every glob
+      in it is `**` once a single trailing `/**` is stripped, in which case it loads everywhere and is
+      counted. A typed `paths:` value or item, one YAML would read as null, a boolean, a number, a
+      mapping, an alias, a tag, or a block scalar, and an empty list, exit 2: the loader drops a scope it
+      cannot read as strings and loads the file everywhere, so the gate refuses rather than guesses.
+  COMMENTS. Block-level HTML comments only, as the loader's Markdown lexer (marked, gfm off) removes
+      them: a comment block that opens at column 0, outside a fence or an HTML block, loses its comments,
+      and goes whole when what is left is blank. A comment inside a paragraph, a list, a quote, a code
+      block, or a code span is kept and counted. Stop-removing rule: a line scan places the blocks, and
+      from the first construct it cannot place (an indented, tab led, list or quote nested fence or HTML
+      opener, an opener met inside an HTML block, an unterminated comment, or a lone CR) to the end of
+      the file it removes no comment, so a comment there is counted, not guessed away.
+  IMPORTS. Every `@path` token in a counted rule file, in the managed block, and, for SESSION, in the
+      whole CLAUDE.md is followed relative to the importing file, recursively through imported files
+      too, and each target is counted once, its BOM, frontmatter, and block-level comments removed as for
+      a rule file. A token is skipped inside a block the comment scan places (a fenced code block, an
+      HTML comment block), inside a CommonMark code span (a backtick run closed by a run of the same
+      length in the same paragraph; an escaped backtick, or one inside an inline HTML tag or a link
+      destination, is literal), and inside an inline HTML comment. The `#` fragment is cut and the
+      loader's own token filter applied. An `@` counts only at a line start or after a character that is
+      not a letter or digit, so an email address such as name@example.com is not a token. A token that
+      names no file (a mention such as @alice) is skipped, as the loader skips a target it cannot read:
+      it adds nothing and does not fail. A token the gate cannot settle exits 2 with a message that calls
+      it ambiguous: a home relative or absolute path, or one that escapes the repository (what it loads
+      depends on the machine), and a target that exists but cannot be read or decoded as UTF-8.
   MANAGED BLOCK. The pack-managed RULES-INDEX block of CLAUDE.md (the markers tools/gen_claude.py
-      writes), HTML comments removed, plus every file it imports with Claude Code's `@path` syntax,
-      followed recursively and counted once each.
+      writes), comments removed as COMMENTS states, plus its imports.
 
 Two totals are reported separately:
 
-  PACK     the rule files plus the managed block plus its imports. This is the part the pack controls,
-           and the only total the gate enforces.
-  SESSION  the rule files plus the whole CLAUDE.md (HTML comments removed) plus every file it imports.
-           Reported, not enforced: the bytes outside the managed block belong to the adopter.
+  PACK     the rule files and their imports plus the managed block and its imports. This is the part the
+           pack controls, and the only total the gate enforces.
+  SESSION  the rule files plus the whole CLAUDE.md plus every file either imports. Reported, not
+           enforced: the bytes outside the managed block belong to the adopter.
+
+A rule file or the managed block importing RULES-INDEX.md or AGENTS.md is a finding (exit 1) whatever the
+total; the same import in the adopter's text outside the block is not.
 
 The budget source, .aiqt/core/instruction-budget.toml, carries exactly four keys: `ratchet` (the PACK
 figure enforced today; lower it as the pack shrinks, and raise it only with a reviewed reason), `ceiling`
 (the target PACK figure, reported, not enforced), and `claude-code-version` and `binary-sha256`, which pin
 the Claude Code build whose loading behaviour this gate models.
 
-DISCLOSED RESIDUAL. This gate measures the repository's own files against a model of Claude Code's loading
-rules; it does not run Claude Code. It does not measure user-level files (~/.claude/CLAUDE.md and
-~/.claude/rules/), which load in every session too; an AGENTS.md or other file loaded through the
-instructionFiles setting rather than an `@` import; CLAUDE.md files in other directories, or
-CLAUDE.local.md; skills, hooks, tool definitions, or the system prompt; or loading by a Claude Code version
-other than the one pinned in the budget source. Frontmatter is read with a small fail-closed subset of YAML
-(top-level `key: value` lines, flow lists, and `- item` block lists), so a file using other YAML forms
-exits 2 rather than being guessed at. Import detection skips fenced code blocks, inline code spans, and
-HTML comments, and takes `@` only at a line start or after whitespace; an import that does not resolve to
-a readable file inside the repository exits 2, where Claude Code may instead ignore it. A symlinked
-directory under .claude/rules/ is not descended (a committed symlink is rejected repo-wide by the manifest
-gate). The count is UTF-16 code units, not tokens, so it tracks size, not model cost.
+DISCLOSED RESIDUAL. This gate measures the repository's own files against a model of the pinned loader;
+it does not run Claude Code. Known gaps in that model:
+  - The inline scan does not model reference-style links or their definitions, autolinks, or link labels:
+    a backtick or `@` in one is read as plain paragraph text, so a code span there can pair differently
+    from the loader's, and an import can be reported that the loader does not see.
+  - The loader's own path filter on which import targets it reads is not applied: every target that
+    resolves to a readable file inside the repository is followed and counted, so one the loader would
+    skip is overcounted.
+  - A fence or HTML block nested in a list or quote, or indented, triggers the stop-removing rule, so the
+    rest of the file overcounts: its comments are counted and an `@` in it is followed.
+  - It does not measure user-level files (~/.claude/CLAUDE.md and ~/.claude/rules/), which load in every
+    session too; an AGENTS.md or other file loaded through the instructionFiles setting rather than an `@`
+    import; CLAUDE.md files in other directories, or CLAUDE.local.md; skills, hooks, tool definitions, or
+    the system prompt; or loading by a Claude Code version other than the one pinned in the budget source.
+  - Frontmatter is read with a small fail-closed subset of YAML (top-level `key: value` lines, flow lists,
+    and `- item` block lists), so a file using other YAML forms exits 2 rather than being guessed at.
+  - The count is UTF-16 code units, not tokens, so it tracks size, not model cost.
 
 Usage:
   check_instruction_budget.py                          measure and enforce; print both totals
@@ -53,6 +89,7 @@ Exit 0 clean; 1 on a finding (PACK over the ratchet, a banned import); 2 on a ca
 (fail-closed), so an unreadable or malformed input can never read as clean.
 """
 import contextlib
+import errno
 import io
 import json
 import os
@@ -293,22 +330,62 @@ def loads_everywhere(globs):
     return all((g[:-3] if g.endswith("/**") else g) == "**" for g in globs)
 
 
+def _inside(path, real_root):
+    """True when the resolved `path` is `real_root` or under it."""
+    try:
+        return os.path.commonpath([path, real_root]) == real_root
+    except ValueError:
+        return False
+
+
 def rule_files(root):
-    """Every `*.md` file under .claude/rules/, in a stable order. GateError when the tree is missing or
-    cannot be walked."""
+    """Every `*.md` file under .claude/rules/, in a stable order, following a symlinked directory as the
+    loader does. GateError when the tree is missing or cannot be walked, when a symlink resolves outside
+    the repository or loops, and when a directory is reached a second time through a symlink (whether the
+    loader then loads its files once or twice is ambiguous)."""
     base = root / RULES_REL
     if not base.is_dir():
         raise GateError("{} is missing or not a directory".format(RULES_REL))
+    real_root = os.path.realpath(root)
+    real_base = os.path.realpath(base)
+    if not _inside(real_base, real_root):
+        raise GateError("{} resolves outside the repository; cannot evaluate".format(RULES_REL))
+    found, visited = [], {real_base}
 
-    def _raise(exc):
-        raise GateError("cannot walk {} ({})".format(RULES_REL, exc))
+    def _walk(directory, chain):
+        try:
+            with os.scandir(directory) as it:
+                entries = sorted(it, key=lambda entry: entry.name)
+        except OSError as exc:
+            raise GateError("cannot walk {} ({})".format(RULES_REL, exc))
+        subdirs = []
+        for entry in entries:
+            path = directory / entry.name
+            where = path.relative_to(root).as_posix()
+            if entry.is_symlink():
+                try:
+                    os.stat(path)
+                except OSError as exc:
+                    if exc.errno == errno.ELOOP:
+                        raise GateError("{}: symlink loop; cannot evaluate".format(where))
+                if not _inside(os.path.realpath(path), real_root):
+                    raise GateError("{}: symlink resolves outside the repository; cannot evaluate".format(
+                        where))
+            if entry.is_dir():
+                subdirs.append((path, where))
+            elif entry.name.endswith(".md"):
+                found.append(path)
+        for path, where in subdirs:
+            real = os.path.realpath(path)
+            if real in chain:
+                raise GateError("{}: symlink loop; cannot evaluate".format(where))
+            if real in visited:
+                raise GateError("{}: directory reached a second time through a symlink; whether the loader "
+                                "loads it once or twice is ambiguous; cannot evaluate".format(where))
+            visited.add(real)
+            _walk(path, chain | {real})
 
-    found = []
-    for dirpath, dirnames, filenames in os.walk(base, onerror=_raise):
-        dirnames.sort()
-        for name in sorted(filenames):
-            if name.endswith(".md"):
-                found.append(Path(dirpath) / name)
+    _walk(base, frozenset([real_base]))
     return found
 
 
@@ -419,9 +496,10 @@ def import_targets(text):
 def follow_imports(root, origins, findings):
     """{resolved path: units} for every file reachable through `@path` imports from `origins`, a list of
     (text, the directory it sits in, where), each counted once with frontmatter and HTML comments removed
-    as for a rule file. An import naming a BANNED_IMPORTS file is appended to `findings`. An import that is
-    home relative, absolute, escapes the repository, or does not resolve to a readable regular file is
-    GateError."""
+    as for a rule file. An import naming a BANNED_IMPORTS file is appended to `findings`. An import that names
+    no file is skipped, as the loader skips a target it cannot read. An ambiguous import is GateError: one
+    that is home relative, absolute, or escapes the repository (what it loads depends on the machine), or
+    one whose target exists but is not a regular file the gate can read and decode."""
     real_root = os.path.realpath(root)
     seen = {}
     pending = list(origins)
@@ -429,26 +507,30 @@ def follow_imports(root, origins, findings):
         source, base, where = pending.pop()
         for token in import_targets(source):
             if token.startswith("~") or os.path.isabs(token):
-                raise GateError("{}: import @{} is outside the repository; cannot evaluate".format(
-                    where, token))
+                raise GateError("{}: import @{} is home relative or absolute, so what it loads depends on "
+                                "the machine; ambiguous, cannot evaluate".format(where, token))
             target = os.path.realpath(os.path.join(base, token))
-            try:
-                inside = os.path.commonpath([target, real_root]) == real_root
-            except ValueError:
-                inside = False
-            if not inside:
-                raise GateError("{}: import @{} escapes the repository; cannot evaluate".format(
-                    where, token))
+            if not _inside(target, real_root):
+                raise GateError("{}: import @{} escapes the repository, so what it loads depends on the "
+                                "machine; ambiguous, cannot evaluate".format(where, token))
             if Path(token).name in BANNED_IMPORTS or os.path.basename(target) in BANNED_IMPORTS:
                 findings.append("{}: imports @{}; the pack must not import {}".format(
                     where, token, " or ".join(BANNED_IMPORTS)))
             if target in seen:
                 continue
-            if not os.path.isfile(target):
-                raise GateError("{}: import @{} does not resolve to a file; cannot evaluate".format(
-                    where, token))
+            # The loader skips a target it cannot read, so a token naming no file (a mention such as @alice,
+            # or a directory) loads nothing and is no import.
+            if not os.path.lexists(target) or os.path.isdir(target):
+                continue
             rel = Path(os.path.relpath(target, real_root)).as_posix()
-            body = split_frontmatter(read_text(Path(target), rel), rel)[1]
+            try:
+                if not os.path.isfile(target):
+                    raise GateError("not a regular file")
+                text = read_text(Path(target), rel)
+            except GateError as exc:
+                raise GateError("{}: import @{} names {}, which the gate cannot read ({}); whether the loader "
+                                "loads it is ambiguous; cannot evaluate".format(where, token, rel, exc))
+            body = split_frontmatter(text, rel)[1]
             seen[target] = utf16_units(strip_comments(body))
             pending.append((body, os.path.dirname(target), rel))
     return seen
@@ -593,6 +675,14 @@ def _quiet(fn, *args):
         return fn(*args)
 
 
+def _stderr_of(fn, *args):
+    """(fn(*args), what it wrote to stderr)."""
+    err = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+        code = fn(*args)
+    return code, err.getvalue()
+
+
 def _measured(fn, root):
     """`fn(root)`, or the string "GateError" when it fails closed."""
     try:
@@ -695,11 +785,13 @@ def self_test(report_path=None):
         trail = _tree(tmp / "trail", rules={"a.md": '---\npaths:\n  - "**/**"\n---\nabc\n'})
         m = _measured(measure, trail)
         check("scope/paths-trailing-double-star-stripped-counted", (m["rules"], m["rule_files"]), (4, 1))
-        for case, scope in (("null", "paths: null"), ("mapping", "paths: {bad: value}"),
-                            ("bool-item", "paths:\n  - false"), ("number-item", "paths: [1]"),
-                            ("empty-list", "paths: []")):
+        for check_id, case, scope in (("exit/paths-null-2", "null", "paths: null"),
+                                      ("exit/paths-mapping-2", "mapping", "paths: {bad: value}"),
+                                      ("exit/paths-bool-item-2", "bool-item", "paths:\n  - false"),
+                                      ("exit/paths-number-item-2", "number-item", "paths: [1]"),
+                                      ("exit/paths-empty-list-2", "empty-list", "paths: []")):
             typed = _tree(tmp / ("typed-" + case), rules={"a.md": "---\n" + scope + "\n---\n" + "X" * 100})
-            check("exit/paths-" + case + "-2", _quiet(run, typed), 2)
+            check(check_id, _quiet(run, typed), 2)
         src = _tree(tmp / "src", rules={"a.md": '---\npaths: ["src/**"]\n---\nabc\n', "b.md": "xy\n"})
         m = _measured(measure, src)
         check("scope/paths-src-excluded", (m["rules"], m["rule_files"], m["conditional_files"]), (3, 1, 1))
@@ -716,8 +808,25 @@ def self_test(report_path=None):
               (9, 100, 109, 109))
         ruleagents = _tree(tmp / "ruleagents", rules={"a.md": "@../../AGENTS.md\n"}, extra={"AGENTS.md": "x\n"})
         check("exit/rule-file-agents-import-1", _quiet(run, ruleagents), 1)
+        # The loader skips a target it cannot read: a token naming no file adds nothing and does not fail.
         rulemissing = _tree(tmp / "rulemissing", rules={"a.md": "@missing.txt\n"})
-        check("exit/rule-file-missing-import-2", _quiet(run, rulemissing), 2)
+        check("import/missing-target-skipped-0",
+              (_measured(measure, rulemissing)["pack_imports"], _quiet(run, rulemissing)), (0, 0))
+        email = _tree(tmp / "email", outside="Mail name@example.com before merging.\n")
+        check("exit/outside-block-email-prose-0", _quiet(run, email), 0)
+        mention = _tree(tmp / "mention", outside="Ping @alice before merging.\n")
+        check("exit/outside-block-mention-prose-0", _quiet(run, mention), 0)
+        fragment = _tree(tmp / "fragment", block="@docs/x.md#usage", extra={"docs/x.md": "Doc\n"})
+        check("import/fragment-cut-followed", _measured(measure, fragment)["pack_imports"], 4)
+        # An import the gate cannot settle exits 2 and says it is ambiguous.
+        home = _tree(tmp / "home", outside="See @~/notes.md first.\n")
+        code, err = _stderr_of(run, home)
+        check("exit/home-import-ambiguous-2", (code, "ambiguous" in err), (2, True))
+        undecodable = _tree(tmp / "undecodable", block="@docs/x.md")
+        (undecodable / "docs").mkdir()
+        (undecodable / "docs" / "x.md").write_bytes(b"ok \xff\n")
+        code, err = _stderr_of(run, undecodable)
+        check("exit/undecodable-import-ambiguous-2", (code, "ambiguous" in err), (2, True))
         rulecycle = _tree(tmp / "rulecycle", rules={"a.md": "@b.txt\n"},
                           extra={".claude/rules/b.txt": "@c.txt\n", ".claude/rules/c.txt": "@b.txt\n"})
         check("import/rule-file-cycle-terminates", _measured(measure, rulecycle)["pack_imports"], 14)
@@ -726,6 +835,32 @@ def self_test(report_path=None):
         check("exit/mismatched-backticks-agents-import-1", _quiet(run, mismatched), 1)
         spanned = _tree(tmp / "spanned", block="`@AGENTS.md` and ``@RULES-INDEX.md``\n")
         check("import/matched-code-span-skipped", _quiet(run, spanned), 0)
+        # Symlinks under .claude/rules: a directory resolving inside the repository is followed and
+        # counted; one escaping the repository, a loop, or a second route to a directory exits 2.
+        linked = _tree(tmp / "linked", rules={"a.md": "ab"}, extra={"shared/b.md": "X" * 50})
+        os.symlink(os.path.join("..", "..", "shared"), str(linked / RULES_REL / "shared"))
+        m = _measured(measure, linked)
+        check("scope/symlinked-rule-dir-counted", (m["rules"], m["rule_files"]), (52, 2))
+        outdir = tmp / "linkout" / "outside"
+        outdir.mkdir(parents=True)
+        (outdir / "b.md").write_bytes(b"X\n")
+        linkout = _tree(tmp / "linkout" / "repo")
+        os.symlink(str(outdir), str(linkout / RULES_REL / "out"))
+        check("exit/symlinked-rule-dir-escaping-2", _quiet(run, linkout), 2)
+        linkfile = _tree(tmp / "linkfile" / "repo")
+        os.symlink(str(outdir / "b.md"), str(linkfile / RULES_REL / "b.md"))
+        check("exit/symlinked-rule-file-escaping-2", _quiet(run, linkfile), 2)
+        loop = _tree(tmp / "loop", rules={"sub/a.md": "a"})
+        os.symlink("..", str(loop / RULES_REL / "sub" / "back"))
+        check("exit/symlinked-rule-dir-loop-2", _quiet(run, loop), 2)
+        selfloop = _tree(tmp / "selfloop")
+        os.symlink("self", str(selfloop / RULES_REL / "self"))
+        check("exit/symlink-self-loop-2", _quiet(run, selfloop), 2)
+        twice = _tree(tmp / "twice", rules={"real/a.md": "a"})
+        os.symlink("real", str(twice / RULES_REL / "alias"))
+        code, err = _stderr_of(run, twice)
+        check("exit/rule-dir-reached-twice-ambiguous-2", (code, "ambiguous" in err), (2, True))
+
         session = _tree(tmp / "session", rules={"a.md": "abc\n"}, block="Block", outside="Hello\n")
         m = _measured(measure, session)
         check("totals/session-adds-outside-block", (m["pack"], m["session"]), (9, 15))
@@ -761,6 +896,15 @@ def self_test(report_path=None):
         (tmp / "escape" / "outside.md").write_bytes(b"outside\n")
         check("exit/import-escaping-repo-2", _quiet(run, escape), 2)
 
+        # The module docstring states the model the code implements and its disclosed residuals.
+        doc = sys.modules[__name__].__doc__ or ""
+        check("doc/model-and-residuals-stated",
+              [phrase for phrase in ("column 0", "Stop-removing rule", "counted rule file", "typed `paths:`",
+                                     "CommonMark code span", "byte order mark", "recursively through imported",
+                                     "symlinked directory", "name@example.com", "ambiguous",
+                                     "reference-style links", "autolinks", "link labels", "path filter",
+                                     "nested in a list or quote") if phrase not in doc], [])
+
         # Red on revert: each fix put back in a mutant copy of the production code must turn its case red.
         unstripped = _mutant(tmp, "body = bare[m.end():]", "body = bare")
         check("revert/frontmatter-removal-red",
@@ -788,7 +932,9 @@ def self_test(report_path=None):
           "line after it removed, an HTML comment removed, BMP and astral characters counted as 1 and 2 units, "
           "comments in a fence, a paragraph, and a code span kept, a BOM before frontmatter removed, paths ** "
           "counted and src/** excluded, a typed or empty paths value exit 2, rule file imports counted, banned "
-          "and missing ones exit 1 and 2, cycles ending, mismatched backticks hiding no import, a managed block "
+          "ones exit 1, a token naming no file, an email, and a mention skipped, a fragment cut, home relative "
+          "and undecodable imports exit 2 as ambiguous, a symlinked rule directory counted and escaping, "
+          "looping, or doubled symlinks exit 2, the docstring stating the model, cycles ending, mismatched backticks hiding no import, a managed block "
           "import followed, SESSION over PACK, the "
           "ratchet boundary, banned imports exit 1, unreadable, invalid UTF-8, malformed frontmatter, budget, "
           "markers, and an escaping import exit 2, and both red-on-revert flips turn red); execution set "
