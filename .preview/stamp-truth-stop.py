@@ -172,10 +172,11 @@ a long stretch of ordinary work after old blocks resets the count while a short 
 few tool calls) does not. The transcript count is ESTABLISHED only when its walk ends at a genuine user
 entry, at the start of the file, or at the cap; an unreadable transcript, a counting gap, or the record or
 byte bound leaves it unestablished. At 3 or more the Stop is ALLOWED instead, with a warning that says the cap
-was hit and names the unresolved claims. The own counter is the REQUIRED brake: whenever the counter is
+was hit, counts the unresolved claims, and names the first when it fits (see MESSAGES). The own counter is the REQUIRED brake: whenever the counter is
 unusable under stop_hook_active (no usable private state dir, no transcript_path to key it, a state file that
 cannot be read, or a block that cannot be written to it), the hook could not establish whether it is looping,
-so the Stop FAILS OPEN at once with a one-line warning naming the first unresolved claim, WHATEVER the
+so the Stop FAILS OPEN at once with a one-line warning counting the unresolved claims (the stderr
+diagnostic line names the first), WHATEVER the
 transcript count says (the transcript count alone is never the only brake). An ABSENT state file in a usable
 private dir is an established count of 0 only OUTSIDE the corrective loop. Under stop_hook_active it is an
 UNKNOWN count (round 26): this hook writes the file at every block it makes and never deletes it while it is
@@ -185,8 +186,9 @@ removed or replaced after the evaluation opened it) or pruned after 7 idle days,
 and the Stop FAILS OPEN at once as for an unusable counter,
 never restarting the count at 0; that closes the round-25 residual in which such a deletion, or a transcript
 reset or a synthetic user-role entry resetting the counter, let every corrective Stop block. Each warning is delivered to the user as a top-level {"systemMessage": ...} on stdout (the
-hooks reference's common JSON output field); the same text also goes to stderr, which on exit 0 reaches only
-the host's debug log, so stderr is diagnostic logging, not a user-visible channel.
+hooks reference's common JSON output field), ONE line of at most 100 characters (see MESSAGES); its detail
+(the true UTC, elapsed, and the first violation in full) goes to ONE different diagnostic line on stderr, which
+on exit 0 reaches only the host's debug log, so stderr is diagnostic logging, not a user-visible channel.
 
 Elapsed resolution (same as clock-inject.py). Lease file = env AIQT_LEASE_FILE when set to a non-empty value
 (a legacy spelling is accepted as a fallback, see _cfg); otherwise there is NO lease, elapsed is unknown, and
@@ -210,9 +212,11 @@ at most 64 MiB, each record at most 4 MiB (a longer record is skipped unparsed);
 
 Contract: pass = no stdout, exit 0; block = top-level {"decision": "block", "reason": ...} on stdout, exit 0
 (the Claude Code hooks reference, Stop decision control, specifies top-level decision and reason for Stop);
-capped or fail-open allow (see BLOCK CAP) = top-level {"systemMessage": ...} on stdout (the user-visible
-warning), the same text on stderr as diagnostic logging only (on exit 0 the host sends stderr to its debug
-log), exit 0. Fail-OPEN silently on unparseable hook input or any internal error outside the per-claim
+capped or fail-open allow (see BLOCK CAP), or a busy Stop (see RESIDUAL COVERAGE) = top-level
+{"systemMessage": ...} on stdout (the user-visible warning), exit 0. Round 33: every Stop writes at most ONE
+stdout line, and a block or an allow with a warning then writes at most ONE stderr diagnostic line that
+differs from the stdout text, as diagnostic logging only (on exit 0 the host sends stderr to its debug log);
+see MESSAGES for the shapes and caps. Fail-OPEN silently on unparseable hook input or any internal error outside the per-claim
 isolation, including an argument, stdin, or JSON error before the payload is evaluated: a DISCIPLINE guard,
 not a security boundary. The payload is read as BYTES and parsed by json.loads, so its decoding does not
 depend on the process locale. An error writing the output (a closed or full stdout) also fails open (round
@@ -221,7 +225,28 @@ at once with os._exit(0), so no exit-time flush can fail it. Skipped entirely: a
 detected as env AIQT_HOOKS_WORKER=1 (legacy spellings are also accepted, see _is_worker), and a payload
 carrying agent_id (a subagent's stop). The worker skip writes one warning line to stderr (round 24; never to
 stdout, so worker output is not distorted, and on exit 0 stderr reaches only the host's debug log, so the
-skip is logged, not shown).
+skip is logged, not shown); that line is at most 100 characters.
+
+MESSAGES (round 33). Every message is ONE line. The block reason starts with BLOCK_PREFIX unchanged (the
+recovery marker that block_cycles counts), then the first rejected timestamp literal (final message first,
+then earlier messages) verbatim in a code span, or the first rejected footer when no timestamp was rejected;
+then extras in priority order while the line stays at most 100 characters: the offset (for a footer also the
+true elapsed), "; run `date -u`", "; +K more", and "; UTC now ...". The first extra that does not fit ends
+the line. The marker and the echoed literal are kept whole even past 100 characters (in practice they come
+to about 88 at most). Every systemMessage (capped allow, fail-open allow, busy) is one line of at most 100
+characters; an allow adds the first rejected literal and its offset only when it fits. stderr gets at most
+ONE diagnostic line of at most 160 characters (the kind, the claim count, the true UTC, elapsed, and the
+first violation in full, cut at the cap), never a copy of the systemMessage. The local time, violations after
+the first, and the remedy text are no longer sent; the remedy lives here. Every date-time with an explicit
+zone in prose must not be ahead of when it was written; a [bracketed] stamp that starts the first status line
+must also be recent (an unbracketed leading date is history); the LAST elapsed footer outside code and quotes
+must match the lease. A genuine FUTURE time mid-line (a deadline, an expiry, a planned run) is allowed only
+when a schedule or validity word immediately precedes it (due, deadline, expires, until, through, valid, next
+run at, scheduled for, not before, by, ...) or when it is in a `code span`; a line-leading stamp is always
+checked for being ahead. To quote the rejected value in a correction, put it in a `code span` or a `>` line,
+or leave it out. Re-read the clock with `date` and `date -u` (never compose a time from memory or context),
+then send a short corrected message with the correct stamp and, as its last footer, the correct elapsed
+value. Messages before a block are not re-checked.
 
 RESIDUAL COVERAGE. MISSES: a time without an explicit zone, a
 12-hour or natural-language time, a compact sess- id, an epoch number, and a relative claim ("started 3
@@ -307,7 +332,7 @@ where this hook has never yet written its state for the transcript (round 26: th
 apart from a deletion, so it fails open rather than risk a loop). The capped
 warning reaches
 the user only through systemMessage, so its visibility depends on the host honouring that field; the stderr
-copy is diagnostic logging only (on exit 0 the host sends stderr to its debug log, not to the user).
+diagnostic line is logging only (on exit 0 the host sends stderr to its debug log, not to the user).
 
 Self-test: python3 -I -S -B stamp-truth-stop.py --self-test
 Run beside its sibling hooks, the self-test also checks that the code shared verbatim with them is identical.
@@ -348,6 +373,8 @@ MAX_PENDING = 8
 MAX_REPORTED = 20
 BLOCK_PREFIX = "Clock-truth check (stamp-truth-stop hook) failed"
 FEEDBACK_PREFIX = "Stop hook feedback"
+MSG_CAP = 100  # characters in the one-line block reason and in every systemMessage (see MESSAGES)
+DIAG_CAP = 160  # characters in the one stderr diagnostic line (see MESSAGES)
 BLOCK_CAP = 3  # consecutive prior block cycles after which a stop_hook_active Stop allows with a warning
 CAP_SCAN_BYTES = 8 << 20
 CAP_SCAN_RECORDS = 512
@@ -1583,7 +1610,7 @@ def prune_state(sdir, keep=None, now_ns=None):
     return removed
 
 
-def evaluate(payload, now, start, sdir=None, notes=None):
+def evaluate(payload, now, start, sdir=None, notes=None, report=None, diag=None):
     """Return a block reason string, or None to pass (see _evaluate). Round 28: the WHOLE load, evaluate, and
     save runs under an exclusive non-blocking lock (lock_state; round 29: on a state directory itself, with
     every state read and write relative to the locked directory descriptor; round 30: on the transcript's own
@@ -1596,23 +1623,26 @@ def evaluate(payload, now, start, sdir=None, notes=None):
     block there must record its raised counter, and none is recorded, so every violation fails open with a
     warning), so the counter is unchanged and no loop can form. With no transcript_path there is nothing to key
     a state file and no state is ever read or written. Round 30: a Stop that CREATED its transcript's
-    subdirectory then prunes stale ones (prune_state), after its own lock is released."""
+    subdirectory then prunes stale ones (prune_state), after its own lock is released. `report` (a list), if
+    given, receives the full violation list behind a block or an allow with a warning; `diag` (a list) receives
+    the one stderr diagnostic line (see MESSAGES)."""
     tp = payload.get("transcript_path")
     tp = tp if isinstance(tp, str) and tp else None
     sdir = sdir or default_state_dir()
     if not tp:
-        return _evaluate(payload, now, start, notes, None, False)
+        return _evaluate(payload, now, start, notes, None, False, report, diag)
     info = {}
     dfd, status = lock_state(sdir, tp, info)
     if status == "busy":
         if notes is not None:
-            notes.append(f"WARNING: stamp-truth-stop did not evaluate this Stop (another evaluation holds the "
-                         f"state lock), so it is ALLOWED with its clock claims UNCHECKED and its "
-                         f"block counter unchanged; the real clock now reads UTC "
-                         f"[{now.strftime('%Y-%m-%dT%H:%M:%SZ')}].")
+            notes.append("stamp-truth-stop: another evaluation holds the state lock: UNCHECKED, block counter "
+                         "unchanged")
+        if diag is not None:
+            diag.append(f"stamp-truth-stop diag: busy, Stop allowed unchecked, UTC now "
+                        f"{now.strftime('%Y-%m-%dT%H:%M:%SZ')}")
         return None
     try:
-        return _evaluate(payload, now, start, notes, dfd, status == "held")
+        return _evaluate(payload, now, start, notes, dfd, status == "held", report, diag)
     finally:
         if dfd is not None:
             os.close(dfd)
@@ -1620,14 +1650,14 @@ def evaluate(payload, now, start, sdir=None, notes=None):
             prune_state(sdir, state_subdir(tp))
 
 
-def _evaluate(payload, now, start, notes, dfd, persist):
+def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
     """Return a block reason string, or None to pass. `now` and `start` are aware datetimes (start may be None).
     When the block cap turns a block into an allow, the warning is appended to `notes` (a list) if given.
     Called by evaluate() with the lock held (round 28). Round 29: `dfd` is the locked state-dir descriptor (round
     30: the transcript's own state subdirectory) and
     every state read and write is made relative to it (None: no usable private state dir, so the state is
     UNAVAILABLE); `persist` False (the lock could not be taken: locking unavailable, or no usable private state
-    dir) means no state is written by this call."""
+    dir) means no state is written by this call. `report` and `diag`: see evaluate()."""
     bad, seen, over = [], set(), [0]  # a bounded report list; `seen` dedupes in O(1); `over` counts the rest
 
     def add(vs):
@@ -1836,43 +1866,80 @@ def _evaluate(payload, now, start, notes, dfd, persist):
     if not bad:
         return None
     shown = bad + ([f"... and {over[0]} more distinct violation(s) not listed"] if over[0] else [])
+    if report is not None:
+        report.extend(shown)
+    total = len(bad) + over[0]
+    claim = _first_claim(bad)
+    utc = now.strftime('%Y-%m-%dT%H:%M:%SZ')
+    el = fmt_elapsed_us(now_us - start_us) if start_us is not None else None
+
+    def diagnose(kind):
+        if diag is not None:
+            diag.append(_clip(f"stamp-truth-stop diag: {kind}, {total} claim(s), UTC now {utc}, elapsed "
+                              f"{el or 'unknown'}; first: {bad[0]}", DIAG_CAP))
+
+    said = f": `{claim[0]}` {claim[1]}" if claim else ""
     if cap == "open":
         # round 24: the hook's own consecutive-block counter is unusable (no usable recovery state, or a block
         # that could not be recorded in it), so a loop cannot be ruled out: fail OPEN, loudly, whatever the
         # transcript count says
         if notes is not None:
-            notes.append(f"WARNING: stamp-truth-stop could not establish its consecutive block count under "
-                         f"stop_hook_active, so this Stop is ALLOWED with {len(bad) + over[0]} clock claim(s) "
-                         f"UNRESOLVED (first: {bad[0]}); the real clock now reads UTC "
-                         f"[{now.strftime('%Y-%m-%dT%H:%M:%SZ')}].".replace("\n", " "))
+            notes.append(_fit(f"stamp-truth-stop: could not establish its consecutive block count; ALLOWED, "
+                              f"{total} UNRESOLVED", [said], MSG_CAP))
+        diagnose("fail-open allow")
         return None
     if cap == "cap":
         # defence in depth against a corrective loop the model cannot satisfy (a hook defect, say): allow,
         # loudly, instead of blocking a fourth consecutive time
         if notes is not None:
-            notes.append(f"WARNING: stamp-truth-stop block cap hit ({BLOCK_CAP} consecutive blocks already this "
-                         "turn); this Stop is ALLOWED with these clock claims UNRESOLVED:\n- " + "\n- ".join(shown)
-                         + f"\nThe real clock now reads UTC [{now.strftime('%Y-%m-%dT%H:%M:%SZ')}]. Correct them "
-                         "in your next message; if the hook itself is wrong, report it.")
+            notes.append(_fit(f"stamp-truth-stop: block cap hit ({BLOCK_CAP}); ALLOWED, {total} UNRESOLVED",
+                              [said], MSG_CAP))
+        diagnose("capped allow")
         return None
-    local = now.astimezone()
-    el = fmt_elapsed_us(now_us - start_us) if start_us is not None else None
-    return (BLOCK_PREFIX + ": these clock claims do not match the real clock.\n- " + "\n- ".join(shown) +
-            f"\nTRUE values now: local [{local.strftime('%Y-%m-%d %H:%M:%S')} {local.tzname()}], "
-            f"UTC [{now.strftime('%Y-%m-%dT%H:%M:%SZ')}], session elapsed "
-            f"{el if el else 'unknown (no lease start: see the hook docstring, Elapsed resolution)'}.\n"
-            "Checked: every date-time with an explicit zone in your prose must not be ahead of when it was "
-            "written; a [bracketed] stamp that starts the first status line must also be recent (an unbracketed "
-            "leading date is history); the LAST elapsed footer (\"Session elapsed "
-            "HH:MM\" or \"(session: Xh Ym)\") outside code and quotes must match the lease. Code fences, `>` quote lines, and `code spans` are "
-            "exempt. A genuine FUTURE time mid-line (a deadline, an expiry, a planned run) is allowed only when a "
-            "schedule or validity word immediately precedes it (due, deadline, expires, until, through, valid, "
-            "next run at, scheduled for, not before, by, ...) or when it is in a `code span`; a line-leading "
-            "stamp is always checked for being ahead. To "
-            "quote the rejected value in a correction, put it in a `code span` or a `>` line, or leave it out. "
-            "Re-read the clock with `date` and `date -u` (never compose a time from memory or context), then send "
-            "a short corrected message with the correct stamp and, as its last footer, the correct elapsed value. "
-            "Messages before this block are not re-checked.")
+    diagnose("block")
+    # round 33: ONE line; the recovery marker (BLOCK_PREFIX) and the first rejected timestamp (verbatim, in a code
+    # span) are kept whole, then extras in priority order while the line stays within MSG_CAP (see MESSAGES)
+    if claim is None:
+        return _fit(BLOCK_PREFIX, ["; run `date -u`", f"; UTC now {utc}"], MSG_CAP)
+    return _fit(f"{BLOCK_PREFIX}: `{claim[0]}`", [f" {claim[1]}", "; run `date -u`",
+                                                  f"; +{total - 1} more" if total > 1 else "",
+                                                  f"; UTC now {utc}"], MSG_CAP)
+
+
+def _first_claim(bad):
+    """(literal, offset) of the first rejected TIMESTAMP in the violation strings `bad` (in report order: the
+    final message first), the literal copied verbatim; else of the first rejected footer, whose offset also
+    names the true elapsed (`... AHEAD (true HH:MM)`); else None."""
+    for v in bad:
+        for kind in ("timestamp ", "status stamp "):
+            if v.startswith(kind) and " in " in v:
+                lit, rest = v[len(kind):].split(" in ", 1)
+                off = rest.split(": ", 1)[1].split(" of when", 1)[0] if ": " in rest else ""
+                return lit, off
+    for v in bad:
+        if v.startswith('"') and '" (last elapsed footer in ' in v:
+            lit, rest = v[1:].split('" (last elapsed footer in ', 1)
+            true_el, _, off = rest.partition("true elapsed when written was ")[2].partition(" (")
+            return lit, f"{off.rstrip(')')} (true {true_el})"
+    return None
+
+
+def _clip(text, cap):
+    """`text` on one line, cut to at most `cap` characters."""
+    text = " ".join(str(text).splitlines())
+    return text if len(text) <= cap else text[:cap - 3] + "..."
+
+
+def _fit(core, extras, cap):
+    """One line: `core` kept WHOLE (even past `cap`), then each of `extras` in priority order while the line stays
+    within `cap` characters; the first extra that does not fit ends the line."""
+    line = " ".join(core.splitlines())
+    for x in extras:
+        x = " ".join(x.splitlines())
+        if len(line) + len(x) > cap:
+            break
+        line += x
+    return line
 
 
 def _emit_line(text, *stream):
@@ -1920,15 +1987,17 @@ def main(argv):
             return 0
         tp = payload.get("transcript_path") if isinstance(payload.get("transcript_path"), str) else None
         now = datetime.datetime.now(UTC)
-        notes = []
-        reason = evaluate(payload, now, lease_start(lease_file(), tp), notes=notes)
+        notes, diag = [], []
+        reason = evaluate(payload, now, lease_start(lease_file(), tp), notes=notes, diag=diag)
     except Exception:
         return 0  # fail-open silently
+    # round 33: ONE stdout line per Stop, then at most ONE different diagnostic line on stderr (see MESSAGES)
     if reason:
         _emit_line(json.dumps({"decision": "block", "reason": reason}))
     elif notes:
-        _emit_line(json.dumps({"systemMessage": notes[0]}))  # the capped allow: visible to the user
-        _emit_line(notes[0], sys.stderr)
+        _emit_line(json.dumps({"systemMessage": notes[0]}))  # an allow with a warning: visible to the user
+    if (reason or notes) and diag:
+        _emit_line(diag[0], sys.stderr)
     return 0
 
 
@@ -2168,10 +2237,19 @@ def _self_test():
                 self.write(entries)
             payload = {"transcript_path": self.tr, "hook_event_name": "Stop", "stop_hook_active": False}
             payload.update(extra)
-            return evaluate(payload, now or self.now, self.start, sdir or self.sdir)
+            self.report, self.diag = [], []
+            return evaluate(payload, now or self.now, self.start, sdir or self.sdir, report=self.report,
+                            diag=self.diag)
 
         def final(self, text, now=None):
-            return evaluate({"last_assistant_message": text}, now or self.now, self.start, self.sdir)
+            self.report, self.diag = [], []
+            return evaluate({"last_assistant_message": text}, now or self.now, self.start, self.sdir,
+                            report=self.report, diag=self.diag)
+
+        def rep(self):
+            # round 33: the full violation list behind the last ev() or final() (the one-line reason keeps only
+            # the first rejected timestamp)
+            return "\n".join(self.report)
 
         def seed(self, blocks=0, sdir=None):
             # the recovery state an earlier Stop of this hook leaves for the transcript (round 26: under
@@ -2210,7 +2288,9 @@ def _self_test():
             r = self.ev([self.user("go"), self.asst(f"{lstamp(self.now + 30 * MIN)} x")])
             self.assertIn("30 min AHEAD", r)
             self.assertTrue(r.startswith(BLOCK_PREFIX))
-            self.assertIn("TRUE values now: local [2026-09-23 13:45:00 EDT], UTC [2026-09-23T17:45:00Z]", r)
+            self.assertIn(f"{BLOCK_PREFIX}: `{lstamp(self.now + 30 * MIN)[1:-1]}` 30 min AHEAD", r)
+            # round 33: the true values moved to the one stderr diagnostic line
+            self.assertIn("UTC now 2026-09-23T17:45:00Z", self.diag[0])
 
         def test_status_label_future_blocks(self):
             # finding (codex r2): 'Status: [future]' passed because only a message-leading stamp was checked
@@ -2280,8 +2360,8 @@ def _self_test():
         def test_keyword_exempts_only_following_non_leading_claim(self):
             now = ustamp(self.now)
             self.assertIsNone(self.final(f"{now} merged; next run [2026-09-24T01:00Z] as planned"))
-            self.assertIn("2026-09-24T01:00Z in your final message: 435 min AHEAD",
-                          self.final(f"{now} merged; [2026-09-24T01:00Z] retry by then"))
+            self.assertIn("`2026-09-24T01:00Z` 435 min AHEAD", self.final(f"{now} merged; [2026-09-24T01:00Z] retry by then"))
+            self.assertIn("2026-09-24T01:00Z in your final message: 435 min AHEAD", self.rep())
             self.assertIn("AHEAD", self.final("Summary: 2026-09-24T01:00Z done, next QA"))
 
         def test_fence_and_blockquote_exempt(self):
@@ -2327,7 +2407,7 @@ def _self_test():
             # the header stamp itself is still checked for BEHIND, and AHEAD still applies to every stamp
             self.assertIn("35 min BEHIND", self.final(f"{ustamp(self.now - 35 * MIN)} x\n- [2026-09-22 14:00Z] y"))
             r = self.final(f"{hdr} x\n- [2026-09-23T20:00Z] fabricated history line")
-            self.assertIn("2026-09-23T20:00Z in your final message: 135 min AHEAD", r)
+            self.assertIn("2026-09-23T20:00Z in your final message: 135 min AHEAD", self.rep())
             # a keyword never exempts a later line-leading stamp from AHEAD either
             self.assertIn("AHEAD", self.final(f"{hdr} x\n- [2026-09-23T20:00Z] next run"))
             # each message has its own header
@@ -2344,7 +2424,8 @@ def _self_test():
         def test_wrong_footer_on_last_line_blocks(self):
             for txt in ("status\nSession elapsed 08:07, 1 compaction", "x\nSession elapsed: 08:07", "x\n**Session elapsed** 08:07",
                         "x\n_Session elapsed_: 08:07\n\n", "x\nSession elapsed \u2014 08:07", "x\nsession - elapsed \u2013 08:07"):
-                self.assertIn("true elapsed when written was 03:27", self.final(txt), repr(txt))
+                self.assertTrue(self.final(txt).startswith(f"{BLOCK_PREFIX}: `"), repr(txt))
+                self.assertIn("true elapsed when written was 03:27", self.rep(), repr(txt))
             self.assertIsNone(self.final("x\n**Session elapsed:** 03:28"))
 
         def test_footer_quoted_mid_message_passes(self):
@@ -2363,7 +2444,7 @@ def _self_test():
             for gap in (3, 7, 25, 30):
                 self.assertIsNone(self.final(txt, now=self.now + gap * MIN), gap)
             r = self.final(txt, now=self.now + 35 * MIN)
-            self.assertIn("(last elapsed footer in your final message)", r)
+            self.assertIn("(last elapsed footer in your final message)", self.rep())
             self.assertIn("35 min BEHIND", r)
             # AHEAD stays strict at 2 minutes, final message or not
             self.assertIsNone(self.final("x\nSession elapsed 03:29"))
@@ -2415,7 +2496,8 @@ def _self_test():
             e = self.asst("[2026-09-23T17:45Z] earlier", ts=None)
             e["timestamp"] = "9999-12-31T23:59:59Z"
             r = self.ev([self.user("go"), e], last_assistant_message="[2099-01-01T00:00Z] final")
-            self.assertIn("in your final message", r)
+            self.assertIn("`2099-01-01T00:00Z`", r)
+            self.assertIn("in your final message", self.rep())
 
         def test_claim_compare_is_overflow_safe(self):
             # the comparison itself is integer arithmetic: a 9999 reference cannot overflow it
@@ -2431,9 +2513,10 @@ def _self_test():
             os.environ["TZ"] = "JST-9"
             time.tzset()
             r = self.final("[0001-01-01 00:00 JST] x\n[2099-01-01T00:00Z] y")
-            self.assertIn("2099-01-01T00:00Z", r)
+            self.assertTrue(r.startswith(BLOCK_PREFIX))
+            self.assertIn("2099-01-01T00:00Z", self.rep())
             # an invalid claim (month 13) is isolated and never discards a violation on the same message
-            self.assertIn("2099-01-01T00:00Z", self.final("[2026-13-01T00:00Z] bad\n[2099-01-01T00:00Z] y"))
+            self.assertIn("`2099-01-01T00:00Z`", self.final("[2026-13-01T00:00Z] bad\n[2099-01-01T00:00Z] y"))
 
         def test_malformed_entries_isolated(self):
             ents = [self.user("go"), self.asst("[2099-01-01T00:00Z] x"), {"type": "assistant", "message": 42},
@@ -2533,8 +2616,9 @@ def _self_test():
             self.seed()
             self.assertIsNone(self.ev(stop_hook_active=True, last_assistant_message="Done."))
             r = self.ev(stop_hook_active=True, last_assistant_message="[2026-09-23T22:30:00Z] Done.")
-            self.assertIn("in your final message: 285 min AHEAD", r)  # a bad FINAL message still blocks
-            self.assertIn("earlier message", r)  # and, blocking anyway, the older one is reported too
+            self.assertIn("`2026-09-23T22:30:00Z` 285 min AHEAD", r)  # a bad FINAL message still blocks
+            self.assertIn("in your final message: 285 min AHEAD", self.rep())
+            self.assertIn("earlier message", self.rep())  # and, blocking anyway, the older one is reported too
 
         def test_recovery_boundary_via_state_file(self):
             bad_text = f"{lstamp(self.now + 40 * MIN)} wrong"
@@ -2580,7 +2664,7 @@ def _self_test():
             notes = []
             self.assertIsNone(evaluate({"transcript_path": self.tr, "stop_hook_active": True,
                                         "last_assistant_message": bad_text}, self.now, self.start, self.sdir, notes))
-            self.assertIn("135 min AHEAD", notes[0])
+            self.assertIn("1 UNRESOLVED", notes[0])
             self.assertIn("135 min AHEAD", self.ev(last_assistant_message=bad_text))  # outside the loop: blocks
             self.assertEqual(os.listdir(self.sdir), [])
 
@@ -2605,8 +2689,8 @@ def _self_test():
                 # outside the loop the bad final message still blocks
                 self.assertIsNone(self.ev(sdir=sdir, stop_hook_active=True,
                                           last_assistant_message="[2026-09-23T20:00Z] x"))
-                self.assertIn("in your final message", self.ev(sdir=sdir,
-                                                               last_assistant_message="[2026-09-23T20:00Z] x"))
+                self.assertTrue(self.ev(sdir=sdir, last_assistant_message="[2026-09-23T20:00Z] x"))
+                self.assertIn("in your final message", self.rep())
             finally:
                 os.chmod(locked, 0o700)
 
@@ -2631,7 +2715,7 @@ def _self_test():
             self.assertIsNone(r)
             self.assertEqual(len(notes), 1)
             self.assertIn("block cap hit", notes[0])
-            self.assertIn("in your final message: 135 min AHEAD", notes[0])  # names the unresolved claim
+            self.assertIn("`2026-09-23T20:00Z` 135 min AHEAD", notes[0])  # names the unresolved claim
             self.assertEqual(prior_block_cycles(self.tr), 3)
             r, notes = self.cap_ev(self.cycles(5))
             self.assertIsNone(r)
@@ -2676,7 +2760,13 @@ def _self_test():
             self.assertEqual(rc, 0)
             self.assertNotIn("decision", obj)
             self.assertIn("block cap hit", obj["systemMessage"])
-            self.assertIn("block cap hit", err)
+            # round 33: the systemMessage is one line within MSG_CAP; stderr gets ONE different diagnostic line
+            self.assertNotIn("\n", obj["systemMessage"])
+            self.assertLessEqual(len(obj["systemMessage"]), MSG_CAP)
+            self.assertEqual(len(err.splitlines()), 1, err)
+            self.assertLessEqual(len(err.rstrip("\n")), DIAG_CAP)
+            self.assertIn("diag: capped allow", err)
+            self.assertNotIn(obj["systemMessage"], err)
 
         def test_r8_block_cap_scan_bounded(self):
             # a long run of non-marker records never makes the count scan unbounded. Checked as WORK, not as a
@@ -2778,12 +2868,16 @@ def _self_test():
             doc = " ".join(__doc__.split())
             self.assertNotIn("stderr is the fallback", doc)
             self.assertIn("stderr is diagnostic logging", doc)
-            self.assertIn("the stderr copy is diagnostic logging only", doc)
+            self.assertIn("the stderr diagnostic line is logging only", doc)
+            # round 33: stderr no longer repeats the systemMessage
+            self.assertNotIn("the same text also goes to stderr", doc)
+            self.assertNotIn("the same text on stderr", doc)
 
         def test_r7_state_absent_is_not_unavailable(self):
             self.assertEqual(load_state(self.sdir, self.tr), (0, None, [], True))
             ents = [self.user("go"), self.asst("[2026-09-23T22:25:00Z] x"), self.asst("Done.")]
-            self.assertIn("earlier message", self.ev(ents, last_assistant_message="Done."))
+            self.assertTrue(self.ev(ents, last_assistant_message="Done."))
+            self.assertIn("earlier message", self.rep())
 
         def test_r7_state_unpersistable_drops_older_messages(self):
             # the state reads as absent but cannot be written: the boundary cannot advance, so only the final
@@ -2794,7 +2888,8 @@ def _self_test():
                     self.skipTest("privileges bypass mode 0500")
                 ents = [self.user("go"), self.asst("[2026-09-23T22:25:00Z] x"), self.asst("Done.")]
                 self.assertIsNone(self.ev(ents, last_assistant_message="Done."))
-                self.assertIn("in your final message", self.ev(last_assistant_message="[2026-09-23T20:00Z] y"))
+                self.assertTrue(self.ev(last_assistant_message="[2026-09-23T20:00Z] y"))
+                self.assertIn("in your final message", self.rep())
                 self.write([self.block_entry(), self.asst("[2026-09-23T20:00Z] y"), self.asst("ok")], "a")
                 self.assertIsNone(self.ev(last_assistant_message="ok"))
             finally:
@@ -3091,7 +3186,8 @@ def _self_test():
             for txt in ("Status.\nSession elapsed 08:07\nWORKER_STATUS: COMPLETE",
                         f"{ustamp(self.now)} ok\nSession elapsed 08:07\n---", "Session elapsed 99:00\n> done",
                         "Session elapsed 08:07\n```\nlog\n```"):
-                self.assertIn("true elapsed when written was 03:27", self.final(txt), repr(txt))
+                self.assertTrue(self.final(txt), repr(txt))
+                self.assertIn("true elapsed when written was 03:27", self.rep(), repr(txt))
             # disclosed: an unquoted worker footer pasted after the real one is the one checked
             self.assertIn("05:12", self.final("x\nSession elapsed 03:27\nWorker said: Session elapsed 05:12"))
 
@@ -3123,8 +3219,10 @@ def _self_test():
             self.assertIsNone(self.final(f"{lstamp(self.now)} The TLS cert is valid through 2027-01-01T00:00:00Z."))
             r = self.final(f"{lstamp(self.now)} The eclipse occurs 2027-08-02T18:00:00Z.")
             self.assertIn("AHEAD", r)
-            self.assertIn("`code span`", r)
-            self.assertIn("immediately precedes", r)
+            # round 33: the reason quotes the rejected literal in a code span; the remedy lives in the docstring
+            self.assertIn("`2027-08-02T18:00:00Z`", r)
+            self.assertIn("`code span`", __doc__)
+            self.assertIn("immediately precedes", " ".join(__doc__.split()))
             self.assertIsNone(self.final(f"{lstamp(self.now)} The TLS cert is valid through `2027-01-01T00:00:00Z`."))
             self.assertIsNone(self.final(f"{lstamp(self.now)} The TLS cert expires 2027-01-01T00:00:00Z."))
 
@@ -3162,7 +3260,9 @@ def _self_test():
                     for i in range(40000)]
             self.assertEqual(len(set(lits)), 40000)
             r = self.final(" ".join(lits))
-            self.assertEqual(r.count(" in your final message: "), MAX_REPORTED)
+            self.assertEqual(self.rep().count(" in your final message: "), MAX_REPORTED)
+            self.assertLessEqual(len(r), MSG_CAP)
+            self.assertNotIn("\n", r)
             # linear twice over: first the growth of COUNTED work (see counted_in_child: line events and
             # allocated bytes in this module's frames) from n to GROWTH * n distinct violations (up to
             # 40,000); a WALL-clock frame here read 2.744x on a loaded 16-core host with every sample above
@@ -3191,7 +3291,7 @@ def _self_test():
                 "    assert m.evaluate({'last_assistant_message': ' '.join(lits[:n])}, now, start, sd)\n"
                 % self.tmp, 5000, 3)
             self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
-            self.assertIn(f"... and {40000 - MAX_REPORTED} more distinct violation(s) not listed", r)
+            self.assertIn(f"... and {40000 - MAX_REPORTED} more distinct violation(s) not listed", self.rep())
 
         def test_r4_threat_model_stated(self):
             self.assertIn("THREAT MODEL", __doc__.split("\n\n")[1])
@@ -3268,8 +3368,8 @@ def _self_test():
             p = json.dumps({"transcript_path": self.tr, "last_assistant_message": "done (session: 9h 0m)"})
             rc, out = run_main(p, {"AIQT_LEASE_FILE": self.lease(ids)})
             r = json.loads(out)["reason"]
-            self.assertIn("\"(session: 9h 0m)\" (last elapsed footer in your final message)", r)
-            self.assertIn("session elapsed 02:0", r)
+            self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `(session: 9h 0m)`"), r)
+            self.assertIn("(true 02:0", r)
 
         def test_r13_fifo_transcript_does_not_block(self):
             fifo = os.path.join(self.tmp, "tfifo")
@@ -3296,8 +3396,9 @@ def _self_test():
                        "x (session: 3h 27m) `(session: 9h 0m)`", "x (session: 3h 27m)\n```\n(session: 9h 0m)\n```"):
                 self.assertIsNone(self.final(ok), ok)
             r = self.final("done (session: 2h 5m)")
+            self.assertEqual(r, f"{BLOCK_PREFIX}: `(session: 2h 5m)` 82 min BEHIND (true 03:27)")
             self.assertIn("\"(session: 2h 5m)\" (last elapsed footer in your final message): true elapsed when "
-                          "written was 03:27 (82 min BEHIND)", r)
+                          "written was 03:27 (82 min BEHIND)", self.rep())
             self.assertIn("3 min AHEAD", self.final("done (session: 3h 30m)"))
             self.assertIn("33 min AHEAD", self.final("done (session: 4h)"))
             self.assertIn("147 min BEHIND", self.final("done (session: 60m)"))
@@ -3317,11 +3418,12 @@ def _self_test():
                        "Session elapsed 09:00 then (session: 3h 27m)", "(session: 9h 0m) then Session elapsed 03:27"):
                 self.assertIsNone(self.final(ok), ok)
             r = self.final("Session elapsed 03:27\nlater (session: 9h 0m)")
-            self.assertIn("\"(session: 9h 0m)\" (last elapsed footer", r)
-            self.assertNotIn("\"Session elapsed 03:27\"", r)
+            self.assertIn("\"(session: 9h 0m)\" (last elapsed footer", self.rep())
+            self.assertNotIn("\"Session elapsed 03:27\"", self.rep())
             r = self.final("(session: 3h 27m) and Session elapsed 09:00")
-            self.assertIn("\"Session elapsed 09:00\" (last elapsed footer", r)
-            self.assertEqual(r.count("(last elapsed footer"), 1)
+            self.assertIn("\"Session elapsed 09:00\" (last elapsed footer", self.rep())
+            self.assertEqual(self.rep().count("(last elapsed footer"), 1)
+            self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `Session elapsed 09:00`"), r)
 
         def test_r13_session_footer_scan_linear(self):
             out = in_subprocess("m.check_message('(session: '*100000+'\\n'+'(session: 1'*100000, 0, 0, 'x', 0)",
@@ -3449,7 +3551,8 @@ def _self_test():
             # a claim of the CURRENT time is still checked: a stale bracketed header, a wrong footer, and any
             # future stamp with no schedule or validity word before it (line-leading, or mid-line)
             self.assertIn("35 min BEHIND", self.final(f"{ustamp(self.now - 35 * MIN)} status"))
-            self.assertIn("true elapsed", self.final("x\nSession elapsed 09:00"))
+            self.assertTrue(self.final("x\nSession elapsed 09:00"))
+            self.assertIn("true elapsed", self.rep())
             self.assertIn("AHEAD", self.final("2099-01-01T00:00Z service launched"))
             self.assertIn("AHEAD", self.final("launched 2099-01-01T00:00Z"))
             self.assertIn("AHEAD", self.final("[2099-01-01T00:00Z] valid through"))  # a keyword never exempts a status stamp
@@ -3469,6 +3572,7 @@ def _self_test():
             self.assertEqual((rc, out), (0, ""))
             self.assertEqual(err.count("\n"), 1)
             self.assertIn("skipped, worker marker present", err)
+            self.assertLessEqual(len(err.rstrip("\n")), MSG_CAP)  # round 33: one line within the cap
             if not os.path.exists("/dev/full"):
                 self.skipTest("/dev/full absent")
             env = {k: v for k, v in os.environ.items() if k not in ("AIQT_HOOKS_WORKER", "ORCH_WORKER",
@@ -3511,8 +3615,8 @@ def _self_test():
                 self.assertEqual("skipped, worker marker present" in p.stderr, not closed, (closed, p.stderr))
 
         def test_closed_stderr_capped_allow_note_never_reaches_stdout(self):
-            # the capped allow's copy of its note is for stderr only: with descriptor 2 closed (sys.stderr is None)
-            # it is dropped, so stdout carries exactly the one systemMessage line and no stray note line
+            # the capped allow's diagnostic line is for stderr only: with descriptor 2 closed (sys.stderr is None)
+            # it is dropped, so stdout carries exactly the one systemMessage line and no stray diagnostic line
             self.write(self.cycles(3))
             self.seed(sdir=default_state_dir())  # main() keys the state under XDG_RUNTIME_DIR (round 26)
             p = json.dumps({"transcript_path": self.tr, "hook_event_name": "Stop", "stop_hook_active": True,
@@ -3684,9 +3788,10 @@ def _self_test():
             # no diagnostic survives to be wrong: an unconvertible claim never appears in a block reason, and a
             # convertible violation beside it still blocks
             r = self.final("[2020-02-30 00:00 UTC] x\n[2020-01-01 00:00 PST] y\n2099-01-01T00:00Z z")
-            self.assertIn("2099-01-01T00:00Z in your final message", r)
+            self.assertIn("2099-01-01T00:00Z in your final message", self.rep())
             for s in ("2020-02-30", "PST", "UNVERIFIABLE"):
                 self.assertNotIn(s, r)
+                self.assertNotIn(s, self.rep())
             self.assertNotIn("UNVERIFIABLE and blocks", " ".join(__doc__.split()))
 
         # -- round 27 (codex gpt-6-astra high QA of round 26) --
@@ -3879,6 +3984,8 @@ def _self_test():
             for k in b_kinds:
                 self.assertIn("another evaluation holds the state lock", k)
                 self.assertIn("block counter unchanged", k)
+                self.assertLessEqual(len(k), MSG_CAP)  # round 33: one line within the cap
+                self.assertNotIn("\n", k)
             self.assertEqual(counters, [1] * 8)
             # serialized Stops after the overlap still count up to the cap and stop blocking
             kinds = []
@@ -3909,6 +4016,7 @@ def _self_test():
                                                 "last_assistant_message": bad}, self.now, self.start, self.sdir,
                                                notes))
                     self.assertIn("holds the state lock", notes[0])
+                    self.assertLessEqual(len(notes[0]), MSG_CAP)
                 with open(key, "rb") as f:
                     self.assertEqual(f.read(), before)  # no state change, the counter included
             finally:
@@ -4436,6 +4544,59 @@ def _self_test():
             self.assertNotIn("which each later new transcript continues to remove", doc)
 
         # -- round 32 (codex gpt-6-astra high QA of round 31) --
+        def test_r33_messages_one_line_within_cap(self):
+            # round 33: ONE stdout line per Stop; the reason keeps BLOCK_PREFIX and the first rejected timestamp
+            # verbatim in a code span, then extras while it stays within MSG_CAP; stderr gets ONE different line
+            for lit in ("2099-01-01T00:00Z", "2099-01-01 00:00:00 UTC", "2099-01-01T00:00:00.123456789+05:30"):
+                old_err, sys.stderr = sys.stderr, io.StringIO()
+                try:
+                    rc, out = run_main(json.dumps({"last_assistant_message": f"[{lit}] x\n2099-02-01T00:00Z y"}))
+                    err = sys.stderr.getvalue()
+                finally:
+                    sys.stderr = old_err
+                self.assertEqual((rc, len(out.splitlines())), (0, 1), out)
+                r = json.loads(out)["reason"]
+                core = f"{BLOCK_PREFIX}: `{lit}`"
+                self.assertTrue(r.startswith(core), r)
+                self.assertNotIn("\n", r)
+                self.assertTrue(len(r) <= MSG_CAP or r == core, r)
+                self.assertEqual(len(err.splitlines()), 1, err)
+                self.assertLessEqual(len(err.rstrip("\n")), DIAG_CAP)
+                self.assertIn("diag: block, 2 claim(s)", err)
+                self.assertNotIn(r, err)
+            # the first rejected TIMESTAMP is echoed even when a footer is the first violation reported (the final
+            # message's footer, then an earlier message's stamp)
+            ents = [self.user("go"), self.asst("[2026-09-23T22:25:00Z] x")]
+            r = self.ev(ents, last_assistant_message="Done.\nSession elapsed 09:00")
+            self.assertTrue(self.report[0].startswith('"Session elapsed 09:00"'), self.report)
+            self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `2026-09-23T22:25:00Z` 280 min AHEAD"), r)
+            self.assertLessEqual(len(r), MSG_CAP)
+            # a footer-only block echoes the footer, its offset, and the true elapsed
+            self.assertEqual(self.final("x\nSession elapsed 09:00"),
+                             f"{BLOCK_PREFIX}: `Session elapsed 09:00` 333 min AHEAD (true 03:27)")
+            # _fit keeps the core whole past the cap and stops at the first extra that does not fit
+            self.assertEqual(_fit("x" * 120, [" a"], MSG_CAP), "x" * 120)
+            self.assertEqual(_fit("ab", [" c", "y" * 200, " d"], 10), "ab c")
+            self.assertEqual(_fit("a\nb", ["\nc"], 10), "a b c")
+            # _first_claim: the first timestamp wins over an earlier footer; a footer is the fallback; else None
+            foot = '"(session: 9h 0m)" (last elapsed footer in x): true elapsed when written was 02:05 (415 min AHEAD)'
+            stamp = "timestamp 2099-01-01T00:00Z in x: 5 min AHEAD of when it was written (2026-09-23T17:45:00Z)"
+            self.assertEqual(_first_claim([foot, stamp]), ("2099-01-01T00:00Z", "5 min AHEAD"))
+            self.assertEqual(_first_claim([foot]), ("(session: 9h 0m)", "415 min AHEAD (true 02:05)"))
+            self.assertIsNone(_first_claim(["... and 3 more distinct violation(s) not listed"]))
+            # the fail-open note: one line within the cap, and its diagnostic line is a different line
+            notes, diag = [], []
+            self.assertIsNone(evaluate({"stop_hook_active": True, "last_assistant_message": "[2099-01-01T00:00Z] x"},
+                                       self.now, self.start, self.sdir, notes, diag=diag))
+            self.assertEqual((len(notes), len(diag)), (1, 1), (notes, diag))
+            self.assertNotIn("\n", notes[0])
+            self.assertLessEqual(len(notes[0]), MSG_CAP)
+            self.assertIn("1 UNRESOLVED", notes[0])
+            self.assertIn("diag: fail-open allow", diag[0])
+            self.assertIn("2099-01-01T00:00Z", diag[0])
+            self.assertLessEqual(len(diag[0]), DIAG_CAP)
+            self.assertNotIn(notes[0], diag[0])
+
         def test_r32_fifo_at_prune_cursor_never_hangs(self):
             # finding (codex HIGH): a FIFO planted at prune-cursor blocked round 31's write-only open forever, so
             # a Stop that pruned past a whole window hung. The cursor is now written only through an exclusively
