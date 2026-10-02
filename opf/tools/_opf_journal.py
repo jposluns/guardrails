@@ -1,5 +1,6 @@
-"""Capability-bound store journal API. Its first writer is the MIG-PR5 ingest promotion coordinator
-(publication attempts and the ingest writer lock); other writers keep their legacy homes.
+"""Capability-bound store journal API. Its first writer, the MIG-PR5 ingest promotion coordinator
+(publication attempts and the ingest writer lock), retired with the import engine; other writers keep
+their legacy homes.
 
 Homes-2 store writers must use this API for journal frames and terminal projections. Paths derive from
 kind and run identity; callers cannot choose a destination. Recovery opens existing state
@@ -80,8 +81,8 @@ def _opened(cap, kind, run_id, create):
 
 
 # --- shared native-journal validation (PR B): pure, kind-generic, non-mutating -------------------------
-# The staged-run gate (check_opf_import, generation 2) grades typed evidence through EXACTLY these
-# validators and the projection model below, so the writer and the reader cannot drift. All of them are
+# Typed journal evidence is read through EXACTLY these validators and the projection model below, so a
+# writer and a reader cannot drift. All of them are
 # pure over already-captured frames or identity strings: no descriptor is opened, no directory is created,
 # and no state is mutated. Identity is validated through the shared _opf_store constructors, so every
 # registered kind (import, ingest, adoption, layout, preview, and the journal-only record) is admitted
@@ -228,6 +229,8 @@ def recover_transaction(cap, kind, run_id):
 
 
 # --- publication attempts (MIG-PR5): one logical run, several journal attempts ---------------------------
+# The attempt runner and its state and INTENT readers retired with their only caller, the ingest
+# promotion coordinator; the attempt naming and frame validation remain (check_opf_homes exercises them).
 
 _ATTEMPT_MAX = 9999
 _ATTEMPT_HEADER_KEYS = frozenset(("kind", "run_id", "attempt", "operation_id"))
@@ -240,30 +243,6 @@ def attempt_txn(kind, run_id, attempt):
     if type(attempt) is not int or not 1 <= attempt <= _ATTEMPT_MAX:
         raise _journal.JournalError("attempt must be an int in 1..{}".format(_ATTEMPT_MAX))
     return "{}.a{:04d}".format(run_id, attempt)
-
-
-def _attempt_of(kind, run_id, name):
-    """The attempt number a journal entry names for this run, None for another run's entry. An entry
-    carrying this run's prefix in any other spelling is refused, never skipped."""
-    if name != run_id and not name.startswith(run_id + "."):
-        return None
-    suffix = name[len(run_id) + 2:] if name.startswith(run_id + ".a") else ""
-    if len(suffix) == 4 and suffix.isdigit() and suffix.isascii():
-        n = int(suffix)
-        if 1 <= n <= _ATTEMPT_MAX and attempt_txn(kind, run_id, n) == name:
-            return n
-    raise _journal.JournalError("journal entry {!r} is not an attempt of run {}".format(name, run_id))
-
-
-def attempt_states(cap, kind, run_id):
-    """{attempt: state} for every recorded publication attempt of a run, classified contained."""
-    with _opened(cap, kind, run_id, create=True) as (_root_fd, jr_fd, txn_dir):
-        states = {}
-        for entry in _journal._journal_txn_dirs(jr_fd, txn_dir.parent):
-            n = _attempt_of(kind, run_id, entry.name)
-            if n is not None:
-                states[n] = _journal.classify_state(jr_fd, entry)
-        return states
 
 
 def check_attempt_frames(frames, kind, run_id, attempt):
@@ -281,38 +260,6 @@ def check_attempt_frames(frames, kind, run_id, attempt):
                 and isinstance(header.get("operation_id"), str) and header["operation_id"]):
             raise _journal.JournalError("attempt journal identity does not match {}".format(txn))
     return intent
-
-
-def read_attempt_intent(jr_fd, kind, run_id, attempt):
-    """Read-only: the INTENT of a COMPLETE attempt, read beneath an ALREADY-OPEN journal-root descriptor
-    and bound to its own identity; anything else refuses. Shared by the capability wrapper below and the
-    generation-2 staged-run gate, which must never enter the create-capable _opened path."""
-    txn = attempt_txn(kind, run_id, attempt)
-    frames, _torn, _good = _journal.read_frames(jr_fd, txn)
-    _journal._validate_terminal_agreement(frames)
-    if state_of_frames(frames) != "complete":
-        raise _journal.JournalError("attempt {} is not complete".format(txn))
-    intent = check_attempt_frames(frames, kind, run_id, attempt)
-    if intent is None:
-        raise _journal.JournalError("attempt {} is not complete".format(txn))
-    return intent
-
-
-def attempt_intent(cap, kind, run_id, attempt):
-    """The INTENT of a COMPLETE attempt, under the held capability (read_attempt_intent does the work)."""
-    with _opened(cap, kind, run_id, create=False) as (_root_fd, jr_fd, _txn_dir):
-        return read_attempt_intent(jr_fd, kind, run_id, attempt)
-
-
-def run_attempt_transaction(cap, kind, run_id, attempt, ops, staged_reader):
-    """Run one publication attempt under the held capability. No projection is written: the caller's
-    completion receipt is an operation of the same transaction, bound by its INTENT digest."""
-    txn = attempt_txn(kind, run_id, attempt)
-    _check_ordinary_ops(ops)
-    with _opened(cap, kind, run_id, create=True) as (root_fd, jr_fd, txn_dir):
-        header = dict(kind=kind, run_id=run_id, attempt=attempt, operation_id=cap.op_id)
-        return _journal.run_transaction(root_fd, jr_fd, txn_dir.parent, txn, header,
-                                        ops, staged_reader, cap.holder)
 
 
 def _writer_lock_root(cap, kind):

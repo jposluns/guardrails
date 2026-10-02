@@ -1028,45 +1028,6 @@ def _roster_checks():
     shutil.rmtree(scratch, ignore_errors=True)
 
 
-def _opf_both_legs():
-    code = "\n".join((
-        "import json, os, sys",
-        "from unittest.mock import patch",
-        "sys.path.insert(0, sys.argv[1])",
-        "import _opf_ingest_apply as module",
-        "saved = dict(os.environ)",
-        "seen = []",
-        "class StopProbe(Exception): pass",
-        "def observe():",
-        "    home = os.environ.get('HOME')",
-        "    seen.append([home != saved.get('HOME'), os.path.isdir(home),",
-        "                 home == os.environ.get('XDG_CONFIG_HOME'),",
-        "                 os.environ.get('GIT_CONFIG_NOSYSTEM') == '1'])",
-        "    return 0",
-        "def red():",
-        "    observe()",
-        "    raise StopProbe()",
-        "with patch.object(module, 'self_test', observe), patch.object(module, '_red_on_revert_main', red):",
-        "    try: module.main(['--self-test', '--red-on-revert'])",
-        "    except StopProbe: pass",
-        "print(json.dumps([seen, dict(os.environ) == saved]))",
-    ))
-    env = dict(os.environ, HOME="/caller-home", XDG_CONFIG_HOME="/caller-xdg",
-               GIT_CONFIG_NOSYSTEM="0")
-    try:
-        child = subprocess.run([sys.executable, "-I", "-B", "-c", code,
-                                str(ROOT / "opf" / "tools")], env=env,
-                               capture_output=True, text=True, timeout=60)
-        try:
-            got = (child.returncode, json.loads(child.stdout))
-        except ValueError:
-            got = (child.returncode, child.stdout, child.stderr)
-    except (OSError, subprocess.SubprocessError) as exc:
-        got = str(exc)
-    check("env/opf-ingest-apply-both-legs", got,
-          (0, [[[True, True, True, True], [True, True, True, True]], True]))
-
-
 def _system_pin_probe(base, lifecycle):
     """Observe basename resolution after the same GIT_* scrub production uses."""
     from unittest.mock import patch
@@ -1265,12 +1226,6 @@ def _config_injection_lane(base):
              "opf/tools/_opf_oplock.py"),
             ("config/_opf_observe/rc", "config/_opf_observe/hooks",
              "opf/tools/_opf_observe.py"),
-            ("config/check_opf_import/rc", "config/check_opf_import/hooks",
-             "opf/tools/check_opf_import.py"),
-            ("config/check_opf_ingest/rc", "config/check_opf_ingest/hooks",
-             "opf/tools/check_opf_ingest.py"),
-            ("config/_opf_ingest_apply/rc", "config/_opf_ingest_apply/hooks",
-             "opf/tools/_opf_ingest_apply.py"),
             ("config/opf/rc", "config/opf/hooks",
              "opf/tools/opf.py"),
     ):
@@ -1346,9 +1301,6 @@ def _config_injection_lane(base):
             ("config/_opf_init_operation/malformed", "opf/tools/_opf_init_operation.py"),
             ("config/_opf_oplock/malformed", "opf/tools/_opf_oplock.py"),
             ("config/_opf_observe/malformed", "opf/tools/_opf_observe.py"),
-            ("config/check_opf_import/malformed", "opf/tools/check_opf_import.py"),
-            ("config/check_opf_ingest/malformed", "opf/tools/check_opf_ingest.py"),
-            ("config/_opf_ingest_apply/malformed", "opf/tools/_opf_ingest_apply.py"),
             ("config/opf/malformed", "opf/tools/opf.py"),
     ):
         check(malformed_id, _member_result(malformed_results, member, 0), 0)
@@ -1465,10 +1417,12 @@ def _manifest_extra_setup_failures():
 # lifecycle. They still require a successful observed system-config-lane run.
 # New modules and removed wrappers are NOT implicitly exempt.
 OPF_LIFECYCLE_EXEMPTIONS = {
+    "opf/tools/_journal.py": "Descriptor-helper vectors over in-process pipes with patched os primitives.",
     "opf/tools/_opf_adopt.py": ("Adoption vocabulary and validator vectors; its observe vector suite runs "
                                 "git only inside _opf_adopt_observe._git_archive_fixture's lifecycle."),
     "opf/tools/_opf_adopt_apply.py": "Apply-shell refusal, evidence and journal vectors over temporary filesystem fixtures.",
     "opf/tools/_opf_adopt_hook.py": "Pure enable-hook merge vectors over synthetic registration bytes.",
+    "opf/tools/_opf_allocation.py": "Reservation vectors over a temporary filesystem store fixture.",
     "opf/tools/_opf_init.py": "Canonical model bytes, defaults and validator vectors.",
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
     "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",
@@ -1571,16 +1525,54 @@ def _opf_lifecycle_delegates(trees):
     return delegates
 
 
+# The retired ingest execution coordinator was the one registered module with a two-level wrapper
+# route (self_test -> self_test_isolated, and _self_test_main -> _self_test_main_isolated, which calls
+# self_test). This synthetic mirror of that shape keeps the graph helper's rename and bypass
+# discriminators. It is parsed only, never executed.
+_LIFECYCLE_GRAPH_FIXTURE = """\
+import os
+import tempfile
+from unittest.mock import patch
+
+
+def self_test(only=None):
+    with tempfile.TemporaryDirectory(prefix="probe-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
+            return self_test_isolated(only)
+
+
+def self_test_isolated(only=None):
+    return 0
+
+
+def _red_on_revert_main():
+    return 0
+
+
+def _self_test_main(args):
+    with tempfile.TemporaryDirectory(prefix="probe-home-") as home:
+        with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
+                        GIT_CONFIG_NOSYSTEM="1"):
+            return _self_test_main_isolated(args)
+
+
+def _self_test_main_isolated(args):
+    rc = self_test()
+    return rc if rc != 0 or "--red-on-revert" not in args else _red_on_revert_main()
+"""
+
+
 def _opf_lifecycle_graph_checks():
-    """Mutation D uses the real registered route; rename cases guard discovery."""
+    """Mutation D uses a synthetic route mirroring the retired two-level wrapper shape (the fixture
+    above); rename cases guard discovery."""
     import copy
     names = denial = None
     expected_names = "derivable lifecycle graph"
     expected_denial = "named wrapper bypass"
     try:
-        relative = "opf/tools/_opf_ingest_apply.py"
-        tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
-        module = Path(relative).stem
+        tree = ast.parse(_LIFECYCLE_GRAPH_FIXTURE)
+        module = "lifecycle_fixture"
         entry = "self_test"
         delegates = _opf_lifecycle_delegates({module: tree})
         delegate = delegates[module, entry][1]
@@ -1602,7 +1594,7 @@ def _opf_lifecycle_graph_checks():
         calls = [node for node in ast.walk(route) if isinstance(node, ast.Call)
                  and isinstance(node.func, ast.Name) and node.func.id == entry]
         if len(calls) != 1:
-            raise ValueError("cannot uniquely mutate ingest-apply wrapper route")
+            raise ValueError("cannot uniquely mutate the fixture wrapper route")
         calls[0].func.id = delegate
         expected_denial = "lifecycle bypass: {}.{} -> {}.{}".format(
             module, route.name, module, delegate)
@@ -1695,9 +1687,6 @@ def _opf_home_lifecycles(config_results):
                     if value != (0, [[[True, True, True, True]], True]))
     for check_id, module, entry in (
             ("env/opf-upgrade-home-lifecycle", "check_opf_upgrade", "_suite"),
-            ("env/opf-import-home-lifecycle", "check_opf_import", "_self_test"),
-            ("env/opf-ingest-home-lifecycle", "check_opf_ingest", "_self_test"),
-            ("env/opf-ingest-apply-home-lifecycle", "_opf_ingest_apply", "self_test"),
             ("env/opf-tooling-home-lifecycle", "opf", "run_self_tests"),
     ):
         if (module, entry) not in results:
@@ -2187,9 +2176,6 @@ _SCAN_ALLOWED_UNPINNED = (
     ("opf/tools/check_opf_init_observe.py", "shared_tests.policy", ("dynamic",),
      "exec-based builder for the policy candidate module under test",
      1),
-    ("opf/tools/_opf_ingest_apply.py", "_load_revert_candidate", ("dynamic",),
-     "exec-based loader compiling a revert candidate's source into a fresh module",
-     1),
     ("opf/tools/check_opf_init_p0.py", "red_on_revert", ("dynamic",),
      "exec of the production module's source with one guard reverted (red-leg mutant)",
      1),
@@ -2243,11 +2229,6 @@ _SCAN_ALLOWED_UNPINNED = (
      "exec of _FixtureProcess._guardian's own source with its ownership-first subject_fd close"
      " put back as the close-then-rebind body (red-leg mutant); the exec only defines the"
      " mutant function, which the vector drives with fork, waitid and _exit stubbed",
-     1),
-    ("opf/tools/check_opf_import.py", "_self_test_close_reuse.revert", ("dynamic",),
-     "exec of _physical_home's or _spelled_route's own source with one ownership-first close"
-     " put back as the close-then-rebind body (red-leg mutant); the exec only defines the"
-     " mutant function",
      1),
     ("opf/tools/check_opf_prompt_pack.py", "_close_vectors", ("dynamic",),
      "exec of _read_regular's own source with its closefd=False fdopen put back as the pre-fix"
@@ -4799,7 +4780,6 @@ def main(report_path=None):
 
         _roster_checks()
         _opf_lifecycle_graph_checks()
-        _opf_both_legs()
         config_results = _config_injection_lane(base)
         _manifest_setup_failures(base)
         _manifest_extra_setup_failures()

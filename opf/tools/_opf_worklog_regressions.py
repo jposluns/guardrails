@@ -25,8 +25,6 @@ import _journal          # noqa: E402
 import _opf_absorb       # noqa: E402
 import _opf_changelog    # noqa: E402
 import _opf_check        # noqa: E402
-import _opf_import       # noqa: E402
-import _opf_ingest       # noqa: E402
 import _opf_store        # noqa: E402
 import _opf_views        # noqa: E402
 import _opf_worklog as wl  # noqa: E402
@@ -155,7 +153,6 @@ def _helper_readers(fx):
         "loader": lambda: _error(lambda: wl.load_worklog_at(fx.fd, M)),
         "views": lambda: _error(lambda: _opf_views._load_worklog(
             fx.fd, LEGACY, frozenset(), [])),
-        "import": lambda: _error(lambda: _opf_import._worklog_ids(fx.fd, M)),
         "changelog": lambda: _opf_changelog._load_inputs(fx.res, fx.root)[-1],
         "absorb": lambda: (_opf_absorb.evaluate(fx.root).findings or [None])[0],
     }
@@ -258,7 +255,6 @@ def _manifest_diagnostics(data, validation):
     """32fcfbc manifest translations.
 
     _opf_views.plan_views; _opf_changelog._load_inputs (also absorb);
-    _opf_import._worklog_ids (helper column only);
     _opf_check._validate_opened_store. Loader uses U1's findings.
     """
     message = "; ".join(validation.findings)
@@ -272,7 +268,6 @@ def _manifest_diagnostics(data, validation):
                    ["active worklog source under m is not evaluated: m/manifest.toml failed manifest "
                     "validation (see C-MANIFEST)"]
                    + ["manifest: " + finding for finding in validation.findings]),
-        "import": "store manifest is not VALID ({}: {})".format(validation.status, message),
     }
     expected["absorb"] = expected["changelog"]
     expected["plan_views"] = expected["views"]
@@ -390,7 +385,6 @@ def _manifest_intake_regressions(check):
                     value[0] if phase == "validation" else value)
             control = value[1] if phase == "validation" else None
             expected = _manifest_diagnostics(data, _opf_store.validate_manifest(data, control))
-            del expected["import"]  # Retired public staging (C2); F5 keeps the helper column.
         elif message == exotic:
             expected["views"] = (p + " is present but is not a regular file "
                                  "(a FIFO, device, socket, or directory; fail-closed, never opened)")
@@ -1029,7 +1023,7 @@ def _upgrade_preflight_regressions(check, fence):
 
 
 def _round5_regressions(check):
-    """Full doctor attribution/probe boundary, plus the import refusal contract."""
+    """Full doctor attribution/probe boundary."""
     import _opf_emit
 
     for fault in ("absent", "unparseable", "bad-kind"):
@@ -1074,15 +1068,6 @@ def _round5_regressions(check):
                 result.checks[c] == _opf_store.CANNOT_EVALUATE
                 for c in ("C-ID-SPACE", "C-CHANGELOG-GATES", "C-ARCHIVE-ENUM")))
 
-    with _Fixture() as fx:
-        # Defensive seam: production only raises this exception for absence.
-        # A future non-missing raise must still refuse, never fall through to data.
-        exc = wl.ManifestShapeError(M + "/manifest.toml", {})
-        with patch.object(wl, "read_manifest_at", side_effect=exc):
-            message = _error(lambda: _opf_import._worklog_ids(fx.fd, M))
-        check("F2g-import-shape-refusal", message ==
-              "m/manifest.toml: the store manifest is absent; the storage layout cannot be determined (spec 9)")
-
 
 def self_test():
     failures, checks = [], []
@@ -1095,13 +1080,11 @@ def self_test():
     _round5_regressions(check)
 
     # Baseline 32fcfbc2dba710eab3d03e53ad77fa754461fe50:
-    # _opf_views.py:230-245; _opf_check.py:469-488,1132-1156;
-    # _opf_import.py:486-506,896-919; _opf_changelog.py:451-555.
+    # _opf_views.py:230-245; _opf_check.py:469-488,1132-1156; _opf_changelog.py:451-555.
     # Literal expected bytes, independently read from that revision's translators.
     missing = {
         "views": "declared source m/worklog.toml is missing (the worklog ledger must exist)",
         "doctor": ["m/worklog.toml is absent (the active worklog ledger is required; spec 6.2)"],
-        "import": None,
         "changelog": "worklog.toml is absent from the resolved store (a required input; fail-closed, spec 6.2)",
     }
     parse = "cannot parse m/worklog.toml (Expected '=' after a key in a key/value pair (at line 1, column 5))"
@@ -1110,10 +1093,10 @@ def self_test():
             ("missing", None, missing),
             ("malformed", b"not TOML [", {
                 "views": parse, "doctor": ["cannot read m/worklog.toml: " + parse],
-                "import": parse, "changelog": parse}),
+                "changelog": parse}),
             ("unreadable", PermissionError("fixture unreadable"), {
                 "views": unreadable, "doctor": ["cannot read m/worklog.toml: " + unreadable],
-                "import": unreadable, "changelog": unreadable})):
+                "changelog": unreadable})):
         with _Fixture() as fx:
             if raw is None:
                 del fx.files[LEGACY]
@@ -1217,9 +1200,6 @@ def self_test():
                 want_raw += str(len(name)).encode() + b":" + name
                 want_raw += str(len(body)).encode() + b":" + body
             check("F4-source-byte-order", raw == want_raw)
-            message = _error(lambda: _opf_import._worklog_ids(fx.fd, M))
-            check("F7-selected-display-path",
-                  message is not None and message.startswith("m/worklog: worklog does not satisfy"))
 
         with _Fixture(2) as fx:
             # Valid TOML and a matching id: only the filename grammar should reject it.
@@ -1251,9 +1231,14 @@ def self_test():
         bad = {"opf": {"worklog": "bad", "layout": "inline"}}
         cls = _opf_check.classify_containment(bad, M)
         check("F6-generation-classification", not cls.malformed and bool(cls.worklog_errors))
-        msg = _error(lambda: _opf_ingest._managed_paths(fx.res, bad))
-        check("F6-ingest-attribution", msg is not None
-              and "worklog generation cannot be evaluated" in msg and "[unmanaged]" not in msg)
+        # C-CONTAINMENT is the surviving consumer of that classification: the generation
+        # failure is its own located CANNOT-EVALUATE, never attributed to [unmanaged].
+        rep = _opf_check._Report()
+        with patch.object(_opf_check, "_list_dir", lambda _fd, _rel, _rep: ([], [])):
+            _opf_check._check_containment(fx.fd, M, bad, "clean", rep)
+        check("F6-doctor-attribution", any(
+            "worklog generation cannot be evaluated" in x for x in rep.cannot)
+              and not any("[unmanaged]" in x for x in rep.cannot + rep.findings))
 
     for name in failures:
         print("OPF-WORKLOG REGRESSION: FAIL " + name)

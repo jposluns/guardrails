@@ -771,448 +771,6 @@ def keyword_findings(contract=None):
     return findings
 
 
-def _staged_generation_self_test(check):
-    """Public-boundary refusals, including empty inventories and both run kinds."""
-    from unittest.mock import patch
-    import check_opf_import as gate
-    import _opf_import as imp
-    import _opf_ingest as ingest
-
-    cases = (
-        ("ordinary-unsupplied-generation-cannot", ((2, None),)),
-        ("ordinary-invalid-generation-cannot", tuple(
-            (ceiling, bad) for ceiling in (1, 2)
-            for bad in (True, False, 1.0, 2.0, 1.5, float("nan"), "1", "2", 0, -1, 3))),
-        ("ordinary-unsupported-generation-cannot", ((1, 2),)),
-    )
-    outcomes = {name: [] for name, _ in cases}
-    unprobed, unopened, legacy, ordered = [], [], [], []
-    for is_ingest in (False, True):
-        for empty in (False, True):
-            rd, files = imp._memory_ingest_run()
-            rd.close = lambda: None
-            if not is_ingest:
-                for name in imp._INGEST_RUN_MARKERS:
-                    files.pop(name, None)
-                    rd.tree.pop(name, None)
-                inv = rd.load_toml(imp.INVENTORY_NAME)
-                proposals = [dict(p, _origin=p["origin"])
-                             for p in rd.load_toml(imp.PROPOSALS_NAME)["proposal"]]
-                files[imp.REPORT_MD_NAME] = imp._render_report_md(
-                    inv["inventory_digest"], inv["fragment"], proposals, rd.path.name).encode()
-            if empty:
-                # Refusal must not depend on inventory rows or their consistency with other artefacts.
-                files[imp.INVENTORY_NAME] = imp._emit_bytes(imp._build_inventory([])[0], imp.INVENTORY_NAME)
-            expected_failures = {"transaction-schema", "transaction-consistency"}
-            if empty:
-                expected_failures.add("report-binding-digests")
-                expected_failures.update(
-                    ("ingest-source-binding", "ingest-report-reproducibility")
-                    if is_ingest else ("proposals-artifact",))
-            with patch.object(gate, "_RunDir", return_value=rd) as open_run, \
-                    patch.object(gate, "_ingest_store_fd", return_value=None) as locate, \
-                    patch.object(gate, "_staged_run_store_fd",
-                                 side_effect=gate._GateError("synthetic store unavailable")) as transaction:
-                for name, values in cases:
-                    for ceiling, bad in values:
-                        with patch.object(store, "SUPPORTED_HOMES", ceiling):
-                            open_run.reset_mock()
-                            locate.reset_mock()
-                            transaction.reset_mock()
-                            result = (gate.check_staged_run(rd.path) if bad is None
-                                      else gate.check_staged_run(rd.path, homes=bad))
-                            reason = ("was not supplied" if bad is None else "supplied homes generation")
-                            outcomes[name].append(
-                                tuple(result) == gate.EXPECTED_CHECKS and all(
-                                    not ok and detail.startswith("cannot evaluate:")
-                                    and str(rd.path) in detail and reason in detail
-                                    for ok, detail in result.values()))
-                            unopened.append(not open_run.called)
-                            unprobed.append(not locate.called and not transaction.called)
-                for ceiling in (1, 2):
-                    with patch.object(store, "SUPPORTED_HOMES", ceiling):
-                        baseline = list(gate._check_staged_run(rd, homes=1).items())
-                        result = gate.check_staged_run(rd.path, homes=1)
-                        # Registry-complete: every expected id exactly once (order is pinned by the
-                        # baseline comparison below, since results are not emitted in registry order).
-                        ordered.append(len(result) == len(gate.EXPECTED_CHECKS) and
-                                       set(result) == set(gate.EXPECTED_CHECKS))
-                        legacy.append(list(result.items()) == baseline and
-                                      {cid: ok for cid, (ok, _detail) in result.items()} ==
-                                      {cid: cid not in expected_failures for cid in gate.EXPECTED_CHECKS})
-                        if ceiling == 1:
-                            legacy.append(list(gate.check_staged_run(rd.path).items()) == baseline)
-    for name, values in outcomes.items():
-        check(name, lambda v=values: all(v))
-    check("staged-generation-no-store-probe", lambda: all(unprobed))
-    check("staged-generation-no-run-open", lambda: all(unopened))
-    check("staged-generation-registry-complete", lambda: all(ordered))
-    check("staged-generation-legacy-values-and-order", lambda: all(legacy))
-    with patch.object(gate, "_gate_homes", side_effect=gate._GateError("generation policy sentinel")):
-        check("staged-generation-shared-row-policy", lambda: gate._row_scope_error(
-            ingest, [], None, 1) == "cannot evaluate: generation policy sentinel")
-
-
-def _staged_root_self_test(check):
-    """Exercise physical root binding independently of transaction support.
-
-    Root depth, custom-machine, pointer and decoy cases are controls: they already pass on
-    the predecessor. The detached homes-2 binding case discriminates the new refusal.
-    """
-    import errno
-    import os
-    import shutil
-    from unittest.mock import patch
-    import _journal
-    import _opf_journal
-    import check_opf_import as gate
-    import _opf_import as imp
-
-    def grade(run, generation=2):
-        with patch.object(store, "SUPPORTED_HOMES", 2):
-            return gate.check_staged_run(run, homes=generation)
-
-    def bound(run, root):
-        with patch.object(store, "SUPPORTED_HOMES", 2):
-            rd = gate._RunDir(run)
-            try:
-                fd = gate._staged_run_store_fd(rd, 2)
-                try:
-                    actual, expected = os.fstat(fd), os.stat(root)
-                    return (actual.st_dev, actual.st_ino) == (expected.st_dev, expected.st_ino)
-                finally:
-                    os.close(fd)
-            finally:
-                rd.close()
-
-    def binding_refused(run):
-        with patch.object(store, "SUPPORTED_HOMES", 2):
-            rd = gate._RunDir(run)
-            try:
-                try:
-                    fd = gate._staged_run_store_fd(rd, 2)
-                except gate._GateError as exc:
-                    return str(exc) == "no registered store binding for homes generation 2"
-                os.close(fd)
-                return False
-            finally:
-                rd.close()
-
-    def refused(result, needle):
-        return all(not result[cid][0] and needle in result[cid][1]
-                   for cid in gate._TRANSACTION_CHECKS)
-
-    with tempfile.TemporaryDirectory(prefix="opf-staged-root-") as tmp:
-        base = Path(tmp).resolve()
-        for kind in ("import", "ingest"):
-            root = base / kind
-            machine = root / ".working" / "custom"
-            machine.mkdir(parents=True)
-            (machine / "manifest.toml").write_text('[opf]\nstandard = "opf"\n', encoding="utf-8")
-            run = gate._self_test_gate_generation_disk(
-                root, "accepted" if kind == "import" else None, location=kind)
-            check("staged-root-homes2-" + kind, lambda: bound(run, root))
-            resolution = store.resolve_store(root)
-            check("staged-root-custom-machine-" + kind, lambda:
-                  resolution.status == store.RESOLVED and resolution.machine_dir == "custom"
-                  and bound(run, resolution.store_root))
-            product = base / (kind + "-product")
-            product.mkdir()
-            (product / store.POINTER_REL).write_text(
-                '[store]\ntarget = "dir:{}"\n'.format(root), encoding="utf-8")
-            resolution = store.resolve_store(product)
-            check("staged-root-pointer-" + kind, lambda:
-                  resolution.status == store.RESOLVED and resolution.store_root == root
-                  and bound(run, resolution.store_root))
-            check("staged-root-generation-mismatch-" + kind, lambda:
-                  refused(grade(run, 1), "registered outside homes generation 1"))
-            record = root / imp._txn_record_rel(run.name)
-            record.parent.mkdir(parents=True)
-            record.write_bytes(b"state =\n")
-            with_legacy = grade(run)
-            record.unlink()
-            clean = grade(run)
-            # PR B: generation 2 grades ONLY the typed namespaces; a corrupt legacy `.aiqt` record is
-            # unread there (former legacy state is migration's, receipt-bound), so grading is identical
-            # with the legacy control present-corrupt or absent.
-            check("staged-root-legacy-record-ignored-" + kind, lambda: with_legacy == clean)
-            check("staged-root-no-transaction-" + kind, lambda:
-                  clean["staged-run-structure"] == (True, "")
-                  and all(clean[cid] == (
-                      True, gate._HOMES2_TYPED_UNAPPLIED_DETAIL)
-                      for cid in gate._TRANSACTION_CHECKS))
-            # Inject only after binding: the real constructor has already classified both homes.
-            real_bind, real_stage = gate._staged_run_store_fd, store.stage_run
-            for error in (gate._BindingRefusal, RuntimeError):
-                opened = []
-                def bind_then_arm(rd, generation):
-                    fd = real_bind(rd, generation)
-                    opened.append(fd)
-                    return fd
-                def fail_kind(*args):
-                    if opened:
-                        raise error("kind-check sentinel")
-                    return real_stage(*args)
-                with patch.object(gate, "_staged_run_store_fd", side_effect=bind_then_arm), \
-                        patch.object(store, "stage_run", side_effect=fail_kind):
-                    observed = grade(run)
-                closed = False
-                if opened:
-                    try:
-                        os.fstat(opened[0])
-                    except OSError as exc:
-                        closed = exc.errno == errno.EBADF
-                check("staged-root-kind-exception-{}-{}".format(error.__name__, kind), lambda:
-                      bool(opened) and closed and refused(observed, "kind-check sentinel"))
-
-            # PR B (maintainer ruling): the standalone gate classifies publication attempts ITSELF,
-            # read-only; this intentionally changes the prior tested exclusion (#346). The coordinator's
-            # own preflight remains defence in depth.
-            if kind == "ingest":
-                journal = root / store.journal_root(kind)
-                journal.mkdir(parents=True)
-                attempt = journal / _opf_journal.attempt_txn(kind, run.name, 1)
-                attempt.mkdir()
-                jfd = store._open_root_fd(journal)
-                try:
-                    empty_res = grade(run)
-                    # A pre-INTENT attempt without a receipt permits retry; the note describes
-                    # only the journal's observation, never proof that nothing was applied.
-                    check("staged-root-attempt-empty", lambda:
-                          empty_res["transaction-consistency"][0] is True
-                          and "pre-INTENT (no INTENT recorded)" in empty_res["transaction-consistency"][1]
-                          and empty_res["transaction-consistency"][1]
-                          != gate._HOMES2_TYPED_UNAPPLIED_DETAIL)
-                    _journal.publish(jfd, attempt, _journal.F_INTENT, dict(
-                        txn=attempt.name, header=dict(kind=kind, run_id=run.name, attempt=1,
-                                                     operation_id="synthetic-operation"), ops=[]))
-                    opened_res = grade(run)
-                    check("staged-root-attempt-open", lambda:
-                          _journal.classify_state(jfd, attempt) == "open"
-                          and opened_res["transaction-schema"][0] is True
-                          and not opened_res["transaction-consistency"][0]
-                          and "open publication attempt" in opened_res["transaction-consistency"][1]
-                          and all(opened_res[cid] == clean[cid] for cid in gate.EXPECTED_CHECKS
-                                  if cid not in gate._TRANSACTION_CHECKS))
-                    for frame in (_journal.F_RIP, _journal.F_RC):
-                        _journal.publish(jfd, attempt, frame, {"txn": attempt.name})
-                    rolled_res = grade(run)
-                    check("staged-root-attempt-rolled-back", lambda:
-                          _journal.classify_state(jfd, attempt) == "rolled-back"
-                          and rolled_res["transaction-schema"][0] is True
-                          and rolled_res["transaction-consistency"][0] is True
-                          and "rolled back" in rolled_res["transaction-consistency"][1]
-                          and "retry is permitted" in rolled_res["transaction-consistency"][1])
-                    _journal.publish(jfd, attempt, _journal.F_INTENT, {"txn": attempt.name})
-                    malformed = False
-                    try:
-                        _journal.classify_state(jfd, attempt)
-                    except _journal.JournalError:
-                        malformed = True
-                    bad_res = grade(run)
-                    check("staged-root-attempt-malformed", lambda:
-                          malformed and not bad_res["transaction-consistency"][0]
-                          and "not an accepted terminal sequence" in bad_res["transaction-consistency"][1])
-                finally:
-                    os.close(jfd)
-                shutil.rmtree(attempt)
-                # A COMPLETE attempt requires verified retained completion evidence; the spelling alone
-                # proves nothing.
-                complete = journal / _opf_journal.attempt_txn(kind, run.name, 2)
-                complete.mkdir()
-                jfd = store._open_root_fd(journal)
-                try:
-                    _journal.publish(jfd, complete, _journal.F_INTENT, dict(
-                        txn=complete.name, header=dict(kind=kind, run_id=run.name, attempt=2,
-                                                      operation_id="synthetic-operation"), ops=[]))
-                    _journal.publish(jfd, complete, _journal.F_COMPLETE, {"txn": complete.name})
-                    receiptless = grade(run)
-                    check("staged-root-attempt-complete-receiptless", lambda:
-                          not receiptless["transaction-consistency"][0]
-                          and "completed publication attempt" in receiptless["transaction-consistency"][1])
-                finally:
-                    os.close(jfd)
-                shutil.rmtree(complete)
-                # A reservation alone proves neither publication nor failure: pre-publication
-                # reservation stays admissible.
-                reservation = root / store.allocation_record(kind, run.name)
-                reservation.parent.mkdir(parents=True)
-                reservation.write_bytes(b"reservation-bytes\n")
-                check("staged-root-reservation-only-not-applied", lambda: grade(run) == clean)
-                reservation.unlink()
-            # Typed evidence is GRADED now (PR B): the expected kind reconciles against its journal,
-            # the foreign kind refuses. Probe both namespaces; empty bytes still count.
-            for txn_kind in ("import", "ingest"):
-                typed = root / store.txn_record(txn_kind, run.name)
-                typed.parent.mkdir(parents=True)
-                typed_decoy = root / ".working" / store.txn_record(txn_kind, run.name)
-                typed_decoy.parent.mkdir(parents=True)
-                typed_decoy.write_bytes(b"state =\n")
-                check("staged-root-typed-ignore-decoy-{}-{}".format(txn_kind, kind), lambda:
-                      grade(run) == clean)
-                projection = _opf_journal.projection_payload(txn_kind, run.name, "complete",
-                                                             "synthetic-operation")
-                if txn_kind == kind:
-                    typed_cases = (("empty", b"", "transaction-schema", "producer's fields"),
-                                   ("malformed", b"state =\n", "transaction-schema",
-                                    "unreadable/unparseable"),
-                                   ("projection", projection, "transaction-consistency",
-                                    "has no journal transaction"))
-                else:
-                    typed_cases = tuple(
-                        (label, payload, "transaction-consistency", "foreign-kind typed evidence")
-                        for label, payload in (("empty", b""), ("malformed", b"state =\n"),
-                                               ("projection", projection)))
-                for label, payload, cid, needle in typed_cases:
-                    typed.write_bytes(payload)
-                    observed = grade(run)
-                    check("staged-root-typed-{}-{}-{}".format(label, txn_kind, kind),
-                          lambda o=observed, c=cid, n=needle:
-                          not o[c][0] and n in o[c][1]
-                          and all(o[x] == clean[x] for x in gate.EXPECTED_CHECKS
-                                  if x not in gate._TRANSACTION_CHECKS))
-                    typed.unlink()
-                located_cid = ("transaction-schema" if txn_kind == kind else "transaction-consistency")
-                typed.symlink_to(root / "absent-typed-target")
-                check("staged-root-typed-symlink-{}-{}".format(txn_kind, kind), lambda:
-                      not grade(run)[located_cid][0]
-                      and "not a regular file" in grade(run)[located_cid][1])
-                typed.unlink()
-                os.mkfifo(typed)
-                check("staged-root-typed-fifo-{}-{}".format(txn_kind, kind), lambda:
-                      not grade(run)[located_cid][0]
-                      and "not a regular file" in grade(run)[located_cid][1])
-                typed.unlink()
-                parent = typed.parent
-                moved_typed = parent.with_name(parent.name + "-saved")
-                parent.rename(moved_typed)
-                parent.symlink_to(moved_typed, target_is_directory=True)
-                check("staged-root-typed-parent-{}-{}".format(txn_kind, kind), lambda:
-                      not grade(run)[located_cid][0]
-                      and "cannot be classified" in grade(run)[located_cid][1])
-                parent.unlink()
-                moved_typed.rename(parent)
-                journal = root / store.journal_root(txn_kind)
-                journal.mkdir(parents=True, exist_ok=True)
-                (journal / "lock").write_bytes(b"writer lock")
-                check("staged-root-typed-empty-journal-{}-{}".format(txn_kind, kind), lambda:
-                      grade(run) == clean)
-                single = journal / run.name
-                single.mkdir()
-                single_needle = ("without frames.log" if txn_kind == kind
-                                 else "foreign-kind typed evidence")
-                check("staged-root-typed-journal-{}-{}".format(txn_kind, kind),
-                      lambda n=single_needle:
-                      not grade(run)["transaction-consistency"][0]
-                      and n in grade(run)["transaction-consistency"][1])
-                single.rmdir()
-                # Unreadable typed controls must not collapse into the absent positive above.
-                real_read = gate._read_store_control
-                def denied_typed(fd, rel):
-                    if rel == store.txn_record(txn_kind, run.name):
-                        raise gate._GateError("typed control denied")
-                    return real_read(fd, rel)
-                with patch.object(gate, "_read_store_control", side_effect=denied_typed):
-                    check("staged-root-typed-unreadable-{}-{}".format(txn_kind, kind), lambda:
-                          not grade(run)[located_cid][0]
-                          and "typed control denied" in grade(run)[located_cid][1])
-            # Generation 2 never touches a legacy `.aiqt` control: observe the ATTEMPTED reads and
-            # journal classifications themselves, not only the verdicts (change-carries-check: with the
-            # legacy Group C dispatch restored, the sentinel observes the forbidden access).
-            record.write_bytes(b"state =\n")
-            reads = []
-            real_read = gate._read_store_control
-            real_classify = gate._classify_import_journal
-            def observed_read(fd, rel):
-                reads.append(rel)
-                return real_read(fd, rel)
-            def observed_classify(fd, rel, what="import journal"):
-                reads.append(rel)
-                return real_classify(fd, rel, what=what)
-            with patch.object(gate, "_read_store_control", side_effect=observed_read), \
-                    patch.object(gate, "_classify_import_journal", side_effect=observed_classify):
-                observed = grade(run)
-            check("staged-root-aiqt-unread-" + kind, lambda:
-                  observed == clean and bool(reads)
-                  and not any(rel.startswith(".aiqt") for rel in reads))
-            record.unlink()
-            decoy = root / ".working" / imp._txn_record_rel(run.name)
-            decoy.parent.mkdir(parents=True)
-            decoy.write_bytes(b"state =\n")
-            check("staged-root-ignore-decoy-" + kind, lambda:
-                  grade(run) == clean)
-            # A legacy control in ANY shape (a FIFO, a symlinked parent) is unread at generation 2:
-            # nothing beneath `.aiqt` steers a typed verdict (the sentinel above observes the reads).
-            os.mkfifo(record)
-            check("staged-root-legacy-fifo-ignored-" + kind, lambda: grade(run) == clean)
-            record.unlink()
-            original = record.parent
-            moved = root / "moved-control"
-            original.rename(moved)
-            original.symlink_to(moved, target_is_directory=True)
-            check("staged-root-legacy-symlink-ignored-" + kind, lambda: grade(run) == clean)
-            original.unlink()
-            moved.rename(original)
-            # Deny only the physical store ascent, after _bind_run_name has succeeded.
-            # The run remains readable and its staged-data checks must still grade.
-            real_open, real_home = os.open, gate._physical_home
-            denied_steps = []
-            def denied(path, flags, *args, **kwargs):
-                if path == "..":
-                    denied_steps.append(path)
-                    raise PermissionError("ancestor denied")
-                return real_open(path, flags, *args, **kwargs)
-            def denied_home(rd, rel):
-                with patch.object(gate.os, "open", side_effect=denied):
-                    return real_home(rd, rel)
-            with patch.object(gate, "_physical_home", side_effect=denied_home):
-                observed = grade(run)
-            check("staged-root-unreadable-ancestor-" + kind, lambda:
-                  bool(denied_steps) and refused(observed, "ancestor denied")
-                  and observed["staged-run-structure"] == clean["staged-run-structure"]
-                  and observed["report-schema"] == clean["report-schema"]
-                  and observed["artifact-digest-integrity"] == clean["artifact-digest-integrity"])
-            check("staged-root-readable-ancestor-" + kind, lambda: grade(run) == clean)
-            detached = base / (kind + "-detached") / "a" / "b" / run.name
-            shutil.copytree(run, detached)
-            check("staged-root-detached-legacy-" + kind, lambda:
-                  all(grade(detached, 1)[cid] == (True, "no transaction record (run not yet applied)")
-                      for cid in gate._TRANSACTION_CHECKS))
-            check("staged-root-detached-binding-discriminator-" + kind, lambda:
-                  binding_refused(detached))
-            check("staged-root-detached-homes2-" + kind, lambda:
-                  refused(grade(detached), "no registered store binding for homes generation 2"))
-            other_kind = "ingest" if kind == "import" else "import"
-            crossed = root / store.stage_run(other_kind, run.name)
-            crossed.parent.mkdir(parents=True)
-            run.rename(crossed)
-            try:
-                observed = grade(crossed)
-                check("staged-root-cross-kind-" + kind, lambda:
-                      observed["staged-run-structure"] == (
-                          False, "staging kind does not match {} run content".format(kind))
-                      and observed["report-schema"] == clean["report-schema"])
-            finally:
-                crossed.rename(run)
-            check("staged-root-matching-kind-" + kind, lambda: grade(run) == clean)
-            misplaced = root / ".working" / "staging" / "preview" / run.name
-            misplaced.parent.mkdir(parents=True)
-            run.rename(misplaced)
-            try:
-                check("staged-root-kind-mismatch-" + kind, lambda:
-                      refused(grade(misplaced), "no registered store binding for homes generation 2"))
-            finally:
-                misplaced.rename(run)
-            claimant = base / (kind + "-claimant")
-            claimed = claimant / store.stage_run(kind, run.name)
-            claimed.parent.mkdir(parents=True)
-            claimed.symlink_to(run, target_is_directory=True)
-            route = claimant / "route"
-            route.symlink_to(root, target_is_directory=True)
-            check("staged-root-ambiguous-" + kind, lambda:
-                  refused(grade(route / run.relative_to(root)), "ambiguous second store claim"))
-
-
 def boundary_self_test():
     """Exercise the read-only boundaries with explicit in-memory filesystem observations."""
     import contextlib
@@ -1223,8 +781,6 @@ def boundary_self_test():
     import _journal as journal
     import _opf_adopt as adopt
     import _opf_check as doctor
-    import _opf_import as importer
-    import _opf_ingest as ingest
     import _opf_journal as home_journal
     import _opf_views as views
 
@@ -1242,7 +798,7 @@ def boundary_self_test():
     def refuses(thunk):
         try:
             thunk()
-        except (ValueError, journal.JournalError, ingest._DetectError, views.ViewsError):
+        except (ValueError, journal.JournalError, views.ViewsError):
             return True
         return False
 
@@ -1250,7 +806,7 @@ def boundary_self_test():
         # The refusal message, or None when the thunk completed; any other exception propagates.
         try:
             thunk()
-        except (ValueError, journal.JournalError, ingest._DetectError, views.ViewsError) as exc:
+        except (ValueError, journal.JournalError, views.ViewsError) as exc:
             return str(exc)
         return None
 
@@ -1307,68 +863,7 @@ def boundary_self_test():
     ledger = machine + "/evidence.toml"
     check("unmanaged-legacy-evidence-ledger", lambda: doctor.classify_containment(
         dict(manifest, unmanaged={"paths": [ledger]}), machine).valid_unmanaged == [ledger])
-    resolution = SimpleNamespace(machine_rel=machine, store_root=Path("/store"), product_root=Path("/store"))
-    check("detect-legacy-set-equality",
-          lambda: ingest._managed_paths(resolution, manifest)[0] == {machine, legacy_root})
-    with active():
-        check("detect-checker-set-equality",
-              lambda: ingest._managed_paths(resolution, manifest2)[0] == {machine} | set(homes))
     import stat
-
-    def detect_open(name, *_args, **_kwargs):
-        if name != ".working":
-            raise AssertionError("detect entered control home: " + name)
-        return 99
-
-    for mode in (stat.S_IFDIR, stat.S_IFREG):
-        with active(), patch.object(ingest.os, "open", side_effect=detect_open), \
-                patch.object(ingest.os, "close"), \
-                patch.object(ingest.os, "listdir", return_value=[h.split("/")[-1] for h in homes]), \
-                patch.object(ingest.os, "stat", return_value=SimpleNamespace(st_mode=mode)), \
-                patch.object(ingest, "_digest_of", side_effect=AssertionError("read control bytes")):
-            check("detect-never-reads-controls-" + str(mode), lambda: ingest._detect_store_scope(
-                -1, ingest._managed_paths(resolution, manifest2)[0], set(), set(), homes=2) == [])
-    with patch.object(ingest.os, "open", side_effect=detect_open), patch.object(ingest.os, "close"), \
-            patch.object(ingest.os, "listdir", return_value=[h.split("/")[-1] for h in homes]), \
-            patch.object(ingest.os, "stat", return_value=SimpleNamespace(st_mode=stat.S_IFREG)), \
-            patch.object(ingest, "_digest_of", return_value=("sha256:" + "0" * 64, 0)):
-        # The legacy (homes 1) walk prunes directories only, so a regular FILE named like a home is a row.
-        check("detect-legacy-control-file-rows", lambda: len(ingest._detect_store_scope(
-            -1, ingest._managed_paths(resolution, manifest)[0], set(), set())) == len(homes))
-    for home in homes:
-        check("frozen-row-refusal-" + home,
-              lambda h=home: refuses(lambda: ingest.admit_row_scope("store", h, "", homes=2)))
-    check("frozen-row-legacy-imports", lambda: refusal(lambda: ingest.admit_row_scope("store", legacy_root, ""))
-          == "store-scope row {0!r} lies in the reserved imports tree {0!r}, which detection prunes "
-          "wholesale".format(legacy_root))
-    for home in homes[1:]:
-        check("frozen-row-legacy-" + home, lambda h=home: ingest.admit_row_scope("store", h + "/file", "") is None)
-    # The manifest-free review gate accepts a supplied generation only as the integer 1 or 2. Any other
-    # value (a bool, a float, NaN) cannot evaluate, whatever the tooling supports and whatever the row, and so
-    # does a supplied 2 on tooling that does not support homes 2.
-    import check_opf_import as gate
-    journal_row = dict(scope="store", source_path=".working/journals/x")
-    imports_row = dict(scope="store", source_path=legacy_root + "/x")
-
-    def gated(row, generation):
-        return gate._row_scope_error(ingest, [row], None, generation)
-
-    for supported in (1, 2):
-        with patch.object(store, "SUPPORTED_HOMES", supported):
-            for bad in (0, False, True, 1.5, float("nan"), "2", 3):
-                for label, gated_row in (("journals", journal_row), ("imports", imports_row)):
-                    check("gate-generation-cannot-{}-{}-{!r}".format(supported, label, bad),
-                          lambda r=gated_row, b=bad: gated(r, b).startswith("cannot evaluate"))
-    with patch.object(store, "SUPPORTED_HOMES", 1):
-        check("gate-generation-unsupported-2-cannot",
-              lambda: gated(journal_row, 2).startswith("cannot evaluate"))
-    with active():
-        check("gate-generation-homes2-journal-refused",
-              lambda: "reserved store control area" in gated(journal_row, 2))
-        check("gate-generation-legacy-journal-admitted", lambda: gated(journal_row, 1) == "")
-        check("gate-generation-legacy-imports-refused", lambda: "reserved imports tree" in gated(imports_row, 1))
-    check("move-outside-preserved", lambda: ingest.admit_move_boundary("outside/file", "ops/.working") is None)
-    check("move-store-refused", lambda: refuses(lambda: ingest.admit_move_boundary("ops/.working/x", "ops/.working")))
 
     files = {}
     directories = {".working"}
@@ -1629,8 +1124,7 @@ def boundary_self_test():
         with patch.object(doctor, "_list_contained", listing), patch.object(doctor, "_read_toml", doctor_toml), \
                 patch.object(store, "_read_toml_contained", side_effect=worklog_toml), \
                 patch.object(journal, "_lstat_contained", side_effect=worklog_stat), \
-                patch.object(doctor, "_read_bytes", read_bytes), \
-                patch.object(importer, "_sibling_ids", return_value=[]):
+                patch.object(doctor, "_read_bytes", read_bytes):
             report = doctor._Report()
             doctor._validate_opened_store(0, None, machine, None, {}, None, "default", True, report)
         return report.result(), list(listed)
@@ -1641,12 +1135,12 @@ def boundary_self_test():
     # A legacy (homes 1) report keeps the legacy roster, order and count and the pinned legacy residual
     # text, with the homes-2 names graded as ordinary paths and no evidence read.
     legacy_report, legacy_listed = dispatch(full_manifest)
-    # The roster is pinned independently of the live REQUIRED_CHECKS constant: sha256 over the 29 legacy check
+    # The roster is pinned independently of the live REQUIRED_CHECKS constant: sha256 over the 28 legacy check
     # ids in report order joined by a newline, UTF-8, so an added, removed or reordered check changes it.
-    legacy_roster_sha256 = "38de4ed345c62237a4f01e194a72b3d7af13d552717ba3db3363abbbacd30eee"
+    legacy_roster_sha256 = "21302b2c175604ab67307443e85a85fac592eff17cc4c2bf334948801adbce5f"
 
     def legacy_roster(rep):
-        return len(rep.checks) == 29 and hashlib.sha256("\n".join(rep.checks).encode("utf-8")).hexdigest() \
+        return len(rep.checks) == 28 and hashlib.sha256("\n".join(rep.checks).encode("utf-8")).hexdigest() \
             == legacy_roster_sha256
     check("doctor-legacy-roster-exact", lambda: legacy_roster(legacy_report)
           and tuple(legacy_report.checks) == doctor.REQUIRED_CHECKS and "C-EVIDENCE-ENUM" not in doctor.REQUIRED_CHECKS)
@@ -1664,7 +1158,7 @@ def boundary_self_test():
     with active():
         report, homes2_listed = dispatch(full_manifest2)
     check("doctor-homes2-roster", lambda: tuple(report.checks) == doctor.required_checks(2)
-          and len(report.checks) == 30)
+          and len(report.checks) == 29)
     check("doctor-dispatches-evidence", lambda: report.checks.get("C-EVIDENCE-ENUM") == "FINDING")
     check("doctor-homes2-residual", lambda: all(r in report.residuals for r in doctor._HOMES2_RESIDUALS))
     check("doctor-skips-journals", lambda: not contained(report, ".working/journals")
@@ -1962,48 +1456,6 @@ def boundary_self_test():
     check("plan-validate-legacy-unchanged", lambda: adopt.validate_plan(
         tomllib.loads(legacy_moved.plan.decode())).status == store.VALID)
 
-    same_root = SimpleNamespace(status=store.RESOLVED, machine_rel=machine, store_root=Path("/store"),
-                                product_root=Path("/store"), pointer_source="default", detail="")
-
-    def detected_rows(generation, model=manifest2):
-        with patch.object(store, "SUPPORTED_HOMES", generation), \
-                patch.object(store, "_open_store_root_fd", return_value=-1), patch.object(ingest.os, "close"), \
-                patch.object(store, "_read_toml_contained", return_value=copy.deepcopy(model)), \
-                patch.object(store, "validate_manifest", return_value=store.ManifestValidation(store.VALID)), \
-                patch.object(ingest, "_managed_paths", return_value=(set(), set(), set(), set(), set())), \
-                patch.object(ingest, "_detect_store_scope", return_value=[]) as walked:
-            return ingest._detect_rows("/store", same_root, None), walked.call_args.kwargs.get("homes")
-
-    check("detect-rows-homes2-generation", lambda: detected_rows(2) == (([], 2), 2))
-    check("detect-rows-legacy-generation", lambda: detected_rows(1) == (([], 1), 1))
-    check("detect-rows-activated-legacy-generation", lambda: detected_rows(2, manifest) == (([], 1), 1))
-    with patch.object(journal, "require_containment"), patch.object(store, "resolve_store", return_value=same_root), \
-            patch.object(store, "load_manifest", return_value=store.ManifestValidation(store.VALID)), \
-            patch.object(ingest, "_detect_rows", return_value=([], 2)), \
-            patch.object(ingest, "validate_worksheet", return_value=[]):
-        check("detect-result-carries-generation", lambda: ingest.detect("/store").homes == 2)
-
-    def ingest_planned(generation):
-        journal_row = dict(scope="store", source_path=".working/journals/notes.md", disposition="keep", note="")
-        with patch.object(journal, "require_containment"), \
-                patch.object(ingest, "validate_worksheet", return_value=[]), \
-                patch.object(ingest, "validate_options", return_value=[]), \
-                patch.object(ingest, "detect", return_value=ingest.DetectResult(ingest.CLEAN, homes=generation)), \
-                patch.object(ingest, "_reconcile_worksheet_against_detect"), \
-                patch.object(store, "resolve_store", return_value=same_root), \
-                patch.object(store, "_open_root_fd", return_value=-1), patch.object(ingest.os, "close"), \
-                patch.object(ingest, "_digest_of", side_effect=_Reached):
-            try:
-                result = ingest._plan_ingest("/store", dict(row=[journal_row]), dict(option=[]), now=utc,
-                                             run_nonce="0123456789abcdef")   # the retained engine
-            except _Reached:
-                return "admitted"
-        return result.verdict, " ".join(result.findings)
-
-    check("ingest-plan-homes2-control-row-refused", lambda: ingest_planned(2)[0] == ingest.FINDING
-          and "reserved store control area" in ingest_planned(2)[1])
-    check("ingest-plan-legacy-row-admitted", lambda: ingest_planned(1) == "admitted")
-
     check("internal-api-capability-required", lambda: refuses(
         lambda: home_journal.run_transaction(object(), "import", run, [], lambda _name: b"")))
     with patch.object(home_journal._opf_oplock, "OpCapability", object):
@@ -2193,34 +1645,6 @@ def boundary_self_test():
                 ("payload", lambda: home_journal.projection_payload(bad_kind, bad_run, "complete", "op"))):
             check("internal-identity-{}-{}".format(label, validator), lambda: journal_refuses(call))
 
-    preview = "/store/.working/staging/preview/preview-run"
-
-    def preview_ignored(generation):
-        ignored = {}
-
-        def copytree(_root, _preview, **kwargs):
-            hook = kwargs["ignore"]
-            for root, names in (
-                    ("/store/.working", ["journals", "staging", "imported", "archive"]),
-                    ("/store/.working/staging/preview", ["preview-run", "sibling"]),
-                    ("/store/nested/.working", ["journals"]),
-                    ("/store/nested/.working/staging/preview", ["preview-run"]),
-                    ("/store/.working/imports", [run, "sibling"])):
-                ignored[root] = hook(root, names)
-
-        importer._assemble_preview(resolution, machine, {}, preview, SimpleNamespace(copytree=copytree), run,
-                                   homes=generation)
-        return ignored
-
-    legacy_ignored = preview_ignored(1)
-    ignored = preview_ignored(2)
-    check("preview-legacy-journals-retained", lambda: legacy_ignored["/store/.working"] == set())
-    check("preview-legacy-self-retained", lambda: legacy_ignored["/store/.working/staging/preview"] == set())
-    check("preview-journals-only", lambda: ignored["/store/.working"] == {"journals"})
-    check("preview-self-only", lambda: ignored["/store/.working/staging/preview"] == {"preview-run"})
-    check("preview-nested-retained", lambda: ignored["/store/nested/.working"] == set()
-          and ignored["/store/nested/.working/staging/preview"] == set())
-    check("preview-promoted-only", lambda: ignored["/store/.working/imports"] == {run})
     check("evidence-homes2-roster", lambda: "C-EVIDENCE-ENUM" not in doctor.REQUIRED_CHECKS
           and doctor.required_checks(2).index("C-EVIDENCE-ENUM") == doctor.REQUIRED_CHECKS.index("C-ARCHIVE-ENUM") + 1
           and "C-EVIDENCE-ENUM" in doctor.source_checks(
@@ -2954,7 +2378,7 @@ def self_test():
 
 def _self_test_vectors():
     import _opf_adopt as adopt
-    import _opf_import as importer
+    import _opf_check as doctor
     import _opf_init as init
     failures = []
     checked = 0
@@ -2977,8 +2401,6 @@ def _self_test_vectors():
 
     suffix = "-20260917T120000Z-0123456789abcdef"
     prefixes = {"import": "imp", "ingest": "imp", "adoption": "adopt", "layout": "layout", "preview": "preview"}
-    _staged_generation_self_test(check)
-    _staged_root_self_test(check)
     check("control-boundaries", lambda: boundary_self_test() == 0)
     check("kinds", lambda: store.STAGING_KINDS == tuple(prefixes))
     check("homes", lambda: store.STORE_TREE_CONTROL_DIRS == ("imported", "archive", "staging", "journals"))
@@ -3046,7 +2468,7 @@ def _self_test_vectors():
         check("file-owner-refusal-{!r}".format(bad), lambda: not adopt._is_contained_filepath(bad))
     check("preimage-run-refusal", lambda: refuses(lambda: store.retire_preimage("imp" + suffix, "a")))
     check("import-grammar-owner", lambda: re.compile("^imp" + store._HOME_RUN_SUFFIX + r"\Z").pattern ==
-          importer._RUN_ID_RE.pattern)
+          adopt._IMPORT_RUN_ID_RE.pattern)
     check("adoption-grammar-owner", lambda: re.compile("^adopt" + store._HOME_RUN_SUFFIX + r"\Z").pattern ==
           adopt._RUN_ID_RE.pattern)
     import_run = "imp" + suffix
@@ -3097,8 +2519,8 @@ def _self_test_vectors():
           and store.homes_generation({"opf": {"homes": 2}}) == 1)
     check("inert-init", lambda: init._manifest_model()["opf"]["spec_version"] == "1.2.0"
           and "homes" not in init._manifest_model()["opf"])
-    check("inert-import", lambda: (importer.IMPORTS_REL, importer.IMPORT_OPS_REL, importer.IMPORT_ARCHIVE_REL) ==
-          (".working/imports", ".aiqt/import", ".aiqt/import-archive"))
+    check("inert-import", lambda: doctor.IMPORTS_REL == ".working/imports"
+          and doctor._is_import_run_id("imp" + suffix) and not doctor._is_import_run_id("adopt" + suffix))
     check("inert-root-exclusions", lambda: store.STORE_ROOT_CONTROL_DIRS == (".git", ".aiqt"))
     source = Path(store.__file__).read_text(encoding="utf-8")
     check("transitional-comment", lambda: "In homes 2, .aiqt is AIQT-only" in source

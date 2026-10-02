@@ -4423,7 +4423,6 @@ def self_test():
             ("_maintenance_pin_scan", "read_text"): 1,
             ("_manifest_extra_setup_failures", "read_text"): 1,
             ("_opf_home_lifecycles", "read_text"): 1,
-            ("_opf_lifecycle_graph_checks", "read_text"): 1,
             ("_registered_selftests", "splitlines"): 1,
             ("_require_wrapper_observed", "splitlines"): 1,
             ("_scrub_scoped_first", "read_text"): 1,

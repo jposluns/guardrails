@@ -261,13 +261,13 @@
       <span class="chip ok"><code>opf render</code></span>
       <span class="chip ok"><code>opf doctor</code></span>
       <span class="chip ok"><code>opf upgrade</code></span>
-      <span class="chip ok"><code>opf import</code></span>
+      <span class="chip"><code>opf import</code> (modes retired)</span>
       <span class="chip ok"><code>opf absorb</code></span>
       <span class="chip ok"><code>opf record</code></span>
       <span class="chip"><code>opf migrate</code> (planned)</span>
       <span class="chip"><code>opf sync</code> (planned)</span>
     </p>
-    <p><code>init</code> scaffolds, <code>render</code> regenerates and checks, <code>doctor</code> verifies, <code>upgrade</code> applies the in-place base-schema upgrade, <code>import</code> brings legacy files in, <code>absorb</code> drafts changelog entries for human curation, and <code>record</code> authors one record change at a time. <code>migrate</code> and <code>sync</code> are specified but not yet implemented in the reference CLI.</p>
+    <p><code>init</code> scaffolds, <code>render</code> regenerates and checks, <code>doctor</code> verifies, <code>upgrade</code> applies the in-place base-schema upgrade, <code>absorb</code> drafts changelog entries for human curation, and <code>record</code> authors one record change at a time. The ordinary <code>import</code> modes are retired and refuse with exit 2: clean-start adoption is the intake, and post-adoption import will use the approved prompt pack. <code>migrate</code> and <code>sync</code> are specified but not yet implemented in the reference CLI.</p>
   </div>
 </section>
 
