@@ -1770,19 +1770,33 @@ def _watchdog_completion_case(mode):
             subject = ("import os, time; from pathlib import Path; "
                        "pid = os.fork(); "
                        "os.setsid() if pid == 0 else None; "
-                       "Path(" + repr(directory) + ", "
-                       "'descendant' if pid == 0 else 'subject').write_text(str(os.getpid())); "
+                       "name = 'descendant' if pid == 0 else 'subject'; "
+                       "scratch = Path(" + repr(directory) + ", name + '.tmp'); "
+                       "scratch.write_text(str(os.getpid())); "
+                       "scratch.rename(Path(" + repr(directory) + ", name)); "  # atomic: never a partial PID
                        "time.sleep(60)")
             real_wait = emit._fixture_wait
             observed = []
 
             def observe(pid, flags):
-                if all(path.exists() for path in markers) and not observed:
-                    observed.extend(int(path.read_text()) for path in markers)
-                    if mode == "nested-cancel":
+                if not observed:
+                    try:  # a marker counts only once its pid parses; empty is not ready yet
+                        pids = [int(path.read_text(encoding="ascii")) for path in markers]
+                    except (FileNotFoundError, ValueError):
+                        pids = []
+                    observed.extend(pids)
+                    if pids and mode == "nested-cancel":
                         raise RuntimeError("cancel with nested subject running")
                 return real_wait(pid, flags)
 
+            # Marker-race control: a marker that exists but is still empty (created,
+            # pid not yet written) is no started subject; the observer keeps waiting.
+            markers[0].write_text(str(os.getpid()), encoding="ascii")
+            markers[1].touch()
+            refuses(emit.ChildStatusUnavailable, lambda: observe(os.getpid(), os.WNOHANG))
+            assert not observed, "an empty marker was read as a started subject"
+            for path in markers:
+                path.unlink()
             with patch.object(emit, "_fixture_wait", observe):
                 refuses(subprocess.TimeoutExpired if mode == "nested-timeout" else RuntimeError,
                         lambda: emit.run_status_owned(
