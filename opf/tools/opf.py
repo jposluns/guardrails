@@ -1775,32 +1775,22 @@ def _watchdog_completion_case(mode):
                        "scratch.write_text(str(os.getpid()), encoding='ascii'); "
                        "scratch.rename(Path(" + repr(directory) + ", name)); "  # atomic: never a partial PID
                        "time.sleep(60)")
-            # Writer half, checked on the subject text: every write call
-            # (write_text, write_bytes, touch, open) targets a '.tmp' name, and
-            # one rename after the last write moves that name to one without
-            # '.tmp'. Residual: writes through os.open, os.write, exec or a
-            # shell are not seen.
-            import ast
-            tree = ast.parse(subject.replace(repr(directory), "directory"))  # TMPDIR-blind
-            bound = {target.id: ast.unparse(node.value) for node in ast.walk(tree)
-                     if isinstance(node, ast.Assign) for target in node.targets
-                     if isinstance(target, ast.Name)}
-            def target(node):
-                return bound.get(node.id, "") if isinstance(node, ast.Name) else ast.unparse(node)
-            calls = sorted((node for node in ast.walk(tree) if isinstance(node, ast.Call)),
-                           key=lambda node: (node.lineno, node.col_offset))
-            writes, renames = [], []
-            for node in calls:
-                if isinstance(node.func, ast.Name) and node.func.id == "open" and node.args:
-                    writes.append(target(node.args[0]))
-                elif isinstance(node.func, ast.Attribute):
-                    if node.func.attr in ("write_text", "write_bytes", "touch", "open"):
-                        writes.append(target(node.func.value))
-                    elif node.func.attr in ("rename", "replace") and node.args:
-                        renames.append((len(writes), target(node.func.value), target(node.args[0])))
-            assert writes and all(".tmp" in path for path in writes), writes
-            assert [(after, source) for after, source, dest in renames
-                    if ".tmp" not in dest] == [(len(writes), writes[-1])], renames
+            # Writer half: a tripwire against an accidental edit of the marker
+            # lines above, not a proof of atomic publication. It requires their
+            # exact text once each and in order (the name + '.tmp' scratch path,
+            # the one scratch.write_text call, the scratch.rename to the final
+            # name), and the final marker path nowhere else in the subject. It
+            # does not see any write the subject could make by another route:
+            # any other call, a keyword form, an os-level call, exec or a shell.
+            text = subject.replace(repr(directory), "directory")  # TMPDIR-blind
+            steps = ["scratch = Path(directory, name + '.tmp'); ",
+                     "scratch.write_text(", "scratch.rename(Path(directory, name)); "]
+            found = [text.find(step) for step in steps]
+            if not (all(text.count(step) == 1 for step in steps)
+                    and -1 < found[0] < found[1] < found[2]
+                    and text.count("write_text(") == 1
+                    and text.count("Path(directory, name)") == 1):
+                raise AssertionError("marker write lines changed: " + text)
 
             class Cancelled(RuntimeError):
                 """The nested-cancel stimulus; no other error may stand in for it."""
