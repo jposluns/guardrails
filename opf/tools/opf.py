@@ -13847,7 +13847,7 @@ def _cli_self_test():
             # A watched binding moved under a sys.argv or environment condition, into a try, or past the def
             # keeps its count and literal but can be unbound when the body runs: each is flagged.
             def nest(name, head, tail):
-                s = [s for s in ast.parse(own_text).body if isinstance(s, (ast.Assign, ast.Import))
+                s = [s for s in _optlevel.parse(own_text).body if isinstance(s, (ast.Assign, ast.Import))
                      and name in [getattr(t, "id", None) for t in getattr(s, "targets", ())]
                      + [a.name for a in getattr(s, "names", ())]][0]
                 a, z = s.lineno - 1, s.end_lineno
