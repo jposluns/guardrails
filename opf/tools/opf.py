@@ -339,9 +339,12 @@ def _entry_tail_gap(tree, block):
     (`sys.exit(main())`; an assignment, augmented assignment, import or `as` alias binding <name>, a second
     def, or a `global` naming it anywhere is a gap, each counted as _binds counts), with no exit before that
     last statement's own call (a sys.exit, os._exit, exit or quit call, or a `raise`, anywhere in the tail
-    outside that call). The rule is structural: it does not inspect what the dispatched def does, so a def
-    that reaches self_test or ends the run through exec, eval, getattr, globals() or any other dynamic
-    dispatch is outside it, a code-review matter."""
+    outside that call). Those binding forms are the only rebindings of <name> it rejects. It does not inspect
+    decorators on the def (a decorator returning self_test passes), default arguments (`def main(f=self_test)`),
+    a `__code__` or other attribute swap, a call through another name (`sys.exit(main(run()))` with
+    `run = self_test`), or what the dispatched def does (a def that reaches self_test directly, or through
+    exec, eval, getattr, globals() or any other dynamic dispatch); _self_test_dispatch_probe backstops these
+    at run time for the argument lists it tries."""
     import ast
     tail = block.body[1:]
     if not tail:
@@ -1043,26 +1046,55 @@ def _self_test_floor_probe(registry, directory, elsewhere):
     return misses
 
 
-# The live-mode dispatchers a `__main__` tail falls through to (`sys.exit(<def>(...))`) run self_test only for
-# an exact argument list from a closed set: exactly `--self-test`, or a variant declared here. So does every
-# other module whose source compares against a `--self-test` string (_argv_self_test_compare), whatever its
-# self-test function is called. This table is the single declaration of the variants: each must be called
-# by a runner (_dispatch_runner_forms) or by the module's own source, and every form a runner calls with
-# `--self-test` must be exactly `--self-test` or declared here. Every other list below names the self-test and
-# must be refused (exit 2, a stderr line, no PASS).
-_DISPATCH_VARIANTS = {
-    "check_opf_record.py": (["--self-test", "--red-on-revert"],),
-    "_opf_adopt_observe.py": (["--self-test", "--vectors-only"],),
-    "_opf_pack_manifest.py": (["--self-test", "--vectors-only"],),
-    "check_opf_init_observe.py": (["--self-test", "--red-on-revert"],),
-    "check_opf_init_p0.py": (["--self-test", "--red-on-revert"], ["--self-test", "--vectors-only"]),
+# Every module in this directory with a `__main__` block, this host included, declares here the exact argument
+# lists it is run with: the self-test forms (`--self-test`, and a `--vectors-only` or `--red-on-revert`
+# variant) and the bare live or gate run, `()`. _self_test_dispatch_probe reconciles the table with every
+# invocation of these modules in the runners (_dispatch_runner_forms) and runs every module but this host with
+# each refused form. No module is chosen by reading its source: a module with a `__main__` block that the table
+# does not name is itself a probe failure.
+_DISPATCH_LIBRARY = (("--self-test",),)
+_DISPATCH_LIVE = ((), ("--self-test",))
+_DISPATCH_FORMS = dict(
+    {name: _DISPATCH_LIBRARY for name in (
+        "_journal.py", "_opf_adopt.py", "_opf_adopt_apply.py", "_opf_adopt_hook.py", "_opf_adopt_plan.py",
+        "_opf_allocation.py", "_opf_check.py", "_opf_emit.py", "_opf_fuzz.py", "_opf_init.py",
+        "_opf_init_contract.py", "_opf_init_operation.py", "_opf_init_substrate.py", "_opf_observe.py",
+        "_opf_oplock.py", "_opf_record.py", "_opf_release.py", "_opf_schema.py", "_opf_store.py",
+        "_opf_worklog.py", "_opf_worklog_regressions.py", "check_opf_init_qa.py",
+        "selftest_commonmark_headings.py", "opf.py")},
+    **{name: _DISPATCH_LIVE for name in (
+        "check_opf_doctor.py", "check_opf_drift.py", "check_opf_homes.py", "check_opf_init.py",
+        "check_opf_init_contract.py", "check_opf_prompt_pack.py", "check_opf_upgrade.py")},
+    **{name: ((),) for name in (
+        "_opf_views.py", "_opf_absorb.py", "_opf_changelog.py", "selftest_commonmark_conformance.py")},
+    **{"_opf_adopt_observe.py": (("--self-test",), ("--self-test", "--vectors-only")),
+       "_opf_pack_manifest.py": (("--self-test",), ("--self-test", "--vectors-only")),
+       "check_opf_init_observe.py": (("--self-test",), ("--self-test", "--red-on-revert")),
+       "check_opf_record.py": (("--self-test",), ("--self-test", "--red-on-revert")),
+       "check_opf_init_p0.py": (("--self-test",), ("--self-test", "--red-on-revert"),
+                                ("--self-test", "--vectors-only"))})
+# Declared forms no runner calls, each with its reason. The exact `--self-test` needs no entry: the entry scan
+# requires it of every module that binds self_test, and this host runs most of those suites in process.
+_DISPATCH_UNRUN = {
+    ("_opf_views.py", ()): "the `opf render` engine; run bare it renders the current directory, as the verb does",
+    ("_opf_absorb.py", ()): "the `opf absorb` engine; run bare it absorbs the current directory, as the verb does",
+    ("_opf_changelog.py", ()): "the changelog gates; run bare they check the current directory",
 }
 _DISPATCH_REFUSED = (["--self-test", "extra"], ["--selftest"], ["--self-t"], ["extra", "--self-test"])
-_DISPATCH_FLAGS = ("--self-test", "--selftest")
-# The runners whose `--self-test` forms the table is reconciled against, relative to the repository root two
-# levels above this directory; this directory's own run_all_checks.sh is required, the others are read when
-# present (a standalone opf copy carries only its own).
-_DISPATCH_RUNNERS = ("tools/run_all_checks.sh", ".github/workflows/quality.yml")
+# Also refused by every module: the subcommand spellings, and the bare run where the table declares none.
+_DISPATCH_REFUSED_WORDS = (["selftest"], ["self-test"])
+# The suite functions a refused form must not enter: one so named in any module of the probed directory, or a
+# function of the probed module that an exact `--self-test` branch of it calls (_dispatch_targets).
+_DISPATCH_SUITES = ("self_test", "_suite", "_self_check", "_run_single", "vectors")
+# A refusal's stderr must hold a line containing one of these (case-insensitive): the library modules print
+# `usage: ...`, the live modules name the refused argument.
+_DISPATCH_USAGE = ("usage", "unknown argument", "unexpected argument", "unrecognized argument",
+                   "expected --self-test")
+# The runners the table is reconciled with, relative to the repository root two levels above this directory,
+# besides this directory's own run_all_checks.sh (required). A standalone opf copy carries none of them, so
+# there only the runner-to-table direction is checked.
+_DISPATCH_RUNNERS = ("tools/run_all_checks.sh", ".github/workflows/quality.yml",
+                     "tools/check_opf_standalone_closure.py")
 _DISPATCH_STUB = (
     "import os, sys\n"
     "sys.argv = sys.argv[1:]\n"
@@ -1088,27 +1120,27 @@ _DISPATCH_REACH_STUB = (
     "runpy.run_path(path, run_name='__main__')\n"
     "sys.setprofile(None)\n"
     "print('NOT DISPATCHED')\n")
-
-
-def _argv_self_test_compare(tree):
-    """Whether a parsed module compares against a `--self-test` or `--selftest` string: a comparison with such
-    a literal as an operand or an element of a list, tuple or set operand (`sys.argv[1:] == ["--self-test"]`,
-    `"--self-test" in sys.argv`, `sys.argv[1] in ("--self-test", "--selftest")`), or an add_argument call
-    naming one (an argparse parser, which also accepts a prefix such as `--self-t`)."""
-    import ast
-
-    def flag(node):
-        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-            return any(flag(element) for element in node.elts)
-        return isinstance(node, ast.Constant) and node.value in _DISPATCH_FLAGS
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Compare) and any(flag(operand) for operand in [node.left] + node.comparators):
-            return True
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "add_argument" and any(flag(arg) for arg in node.args)):
-            return True
-    return False
+# A refused form runs the real module as `__main__`, nothing replaced, under a profile hook (this thread and
+# every thread started later) that at the entry of a suite function writes `ENTERED <name>` to stderr and ends
+# the child with exit 3 before the suite runs. argv: module, fallback import directory, suite names, the
+# module's own targets, then the form.
+_DISPATCH_REFUSE_STUB = (
+    "import os, runpy, sys, threading\n"
+    "path, fallback = os.path.realpath(sys.argv[1]), sys.argv[2]\n"
+    "suites, local = set(sys.argv[3].split(',')), set(sys.argv[4].split(',')) - {''}\n"
+    "sys.argv = [path] + sys.argv[5:]\n"
+    "sys.path[:0] = [os.path.dirname(path)]\n"
+    "sys.path.append(fallback)\n"
+    "here = os.path.dirname(path) + os.sep\n"
+    "def hook(frame, event, arg):\n"
+    "    code = frame.f_code\n"
+    "    if event == 'call' and (code.co_name in suites and code.co_filename.startswith(here)\n"
+    "                            or code.co_name in local and code.co_filename == path):\n"
+    "        os.write(2, ('ENTERED ' + code.co_name + '\\n').encode())\n"
+    "        os._exit(3)\n"
+    "threading.setprofile(hook)\n"
+    "sys.setprofile(hook)\n"
+    "runpy.run_path(path, run_name='__main__')\n")
 
 
 def _dispatch_targets(tree):
@@ -1128,38 +1160,54 @@ def _dispatch_targets(tree):
     return targets
 
 
-def _dispatch_guard(tree):
-    """Whether the module refuses every argument list outside a closed set of literal lists naming
-    `--self-test`: an `if <argument list> not in ([...], ["--self-test"], ...):` (check_opf_init.py runs one
-    suite for `[]` and `--self-test`, so it has no separate self-test branch to reach)."""
+def _dispatch_triggers(tree):
+    """The environment variables a refused form also runs with, set to "1": every str constant in the module
+    spelled as an environment name (an upper-case letter, then three or more upper-case letters, digits or
+    underscores) that the probe's own environment does not set. This widens the inputs; it selects no module."""
     import ast
-    for node in ast.walk(tree):
-        test = node.test if isinstance(node, ast.If) else None
-        if (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.NotIn)
-                and isinstance(test.comparators[0], (ast.Tuple, ast.List)) and test.comparators[0].elts
-                and all(isinstance(each, ast.List) and all(isinstance(item, ast.Constant)
-                                                           and isinstance(item.value, str) for item in each.elts)
-                        for each in test.comparators[0].elts)
-                and any(item.value == "--self-test" for each in test.comparators[0].elts for item in each.elts)):
-            return True
-    return False
+    import re
+    return sorted({node.value for node in ast.walk(tree) if isinstance(node, ast.Constant)
+                   and isinstance(node.value, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{3,}", node.value)
+                   and node.value not in os.environ})
 
 
-def _dispatch_runner_forms(directory, names):
-    """Map each module in `names` to the argument lists naming `--self-test` that the runners pass it: this
-    directory's run_all_checks.sh and each _DISPATCH_RUNNERS file present under the repository root. A line is
-    split as a shell word list; the arguments after a token naming the module run to the first shell operator
-    or redirection. Returns (forms, misses)."""
+def _dispatch_runner_forms(directory, names, runners=_DISPATCH_RUNNERS):
+    """Map each module in `names` to every argument list the runners pass it, bare runs included: this
+    directory's run_all_checks.sh and each `runners` file present under the repository root. A shell or
+    workflow line is split as a shell word list; a word naming the module (the basename of a path under
+    `opf/tools/`, or under `$here/` in this directory's runner) takes the words after it up to the first shell
+    operator or redirection. A Python runner is parsed: a str constant naming the module followed, in the same
+    tuple, list or call, by a list or tuple of str constants is one form. Returns (forms, misses, complete),
+    `complete` False when a root runner is absent."""
+    import ast
     import shlex
     forms, misses = {}, []
     root = Path(directory).resolve().parent.parent
-    paths = [Path(directory, "run_all_checks.sh")] + [root / rel for rel in _DISPATCH_RUNNERS
-                                                       if (root / rel).is_file()]
+    own = Path(directory, "run_all_checks.sh")
+    paths = [own] + [root / rel for rel in runners if (root / rel).is_file()]
+    complete = len(paths) == len(runners) + 1
     for path in paths:
         try:
             text = path.read_text(encoding="utf-8")
         except OSError as exc:
             misses.append("runner {} cannot be read ({})".format(path.name, type(exc).__name__))
+            continue
+        if path.suffix == ".py":
+            try:
+                tree = ast.parse(text)
+            except (SyntaxError, ValueError) as exc:
+                misses.append("runner {} cannot be parsed ({})".format(path.name, type(exc).__name__))
+                continue
+            for node in ast.walk(tree):
+                elements = node.elts if isinstance(node, (ast.Tuple, ast.List)) else (
+                    node.args if isinstance(node, ast.Call) else ())
+                for at, each in enumerate(elements[:-1]):
+                    form = elements[at + 1]
+                    if (isinstance(each, ast.Constant) and each.value in names
+                            and isinstance(form, (ast.List, ast.Tuple))
+                            and all(isinstance(item, ast.Constant) and isinstance(item.value, str)
+                                    for item in form.elts)):
+                        forms.setdefault(each.value, set()).add(tuple(item.value for item in form.elts))
             continue
         for line in text.splitlines():
             try:
@@ -1168,104 +1216,241 @@ def _dispatch_runner_forms(directory, names):
                 words = line.split()
             for at, word in enumerate(words):
                 name = word.rsplit("/", 1)[-1]
-                if name not in names:
+                if name not in names or not ("opf/tools/" in word or path == own and word.startswith("$here/")):
                     continue
                 args = []
                 for each in words[at + 1:]:
                     if each in ("|", "||", "&&", ";", "&") or each.startswith((">", "<", "2>", "1>")):
                         break
                     args.append(each)
-                if "--self-test" in args:
-                    forms.setdefault(name, set()).add(tuple(args))
-    return forms, misses
+                forms.setdefault(name, set()).add(tuple(args))
+    return forms, misses, complete
 
 
-def _self_test_dispatch_probe(directory, tmp):
-    """Run each module in `directory` that reaches a self-test from its argument list as a child with every
-    _DISPATCH_REFUSED list: each must exit 2 with a stderr line and no PASS text. Those modules are each
-    live-mode exposer (its `__main__` block ends `sys.exit(<name>(...))`) and each module whose source compares
-    against a `--self-test` string (_argv_self_test_compare), whatever its self-test function is called; this
-    module is the host and is not run. Each declared variant must still reach the self-test: for an exposer a
-    child imports the module, stubs self_test, and calls main() with it; for a module that binds no self_test,
-    `--self-test` and each declared variant run under _DISPATCH_REACH_STUB, which must see a function its
-    exact `--self-test` branches call (_dispatch_targets) entered, a declared variant with a True argument and
-    `--self-test` alone with none; a module with no such branch must hold a closed-set guard (_dispatch_guard)
-    and declare no variant, and its runner gates show that its suite runs. The table is reconciled with _dispatch_runner_forms. Returns a list of the
-    discrepancies, including a probed set that is empty or lacks a module that declares a variant."""
+def _self_test_dispatch_probe(directory, tmp, table=None, unrun=None, runners=_DISPATCH_RUNNERS, fallback=None):
+    """Probe every module in `directory` that has a `__main__` block (_main_tests), whatever its source holds.
+    `table` (default _DISPATCH_FORMS) must name exactly those modules, and is reconciled with
+    _dispatch_runner_forms: a form a runner calls that the table lacks is a miss, and so, when every runner is
+    present, is a declared form no runner calls, except the exact `--self-test`, a variant the module's own
+    source spells out (the runner fixture it forwards, `--self-test --vectors-only`), and the `unrun` entries
+    (default _DISPATCH_UNRUN), which must each be declared and uncalled. Every module but this host (whose verb
+    routing _cli_self_test covers) then runs as a child under _DISPATCH_REFUSE_STUB with each _DISPATCH_REFUSED
+    and _DISPATCH_REFUSED_WORDS form and, unless the table declares a bare run, no argument, with
+    _dispatch_triggers set: each must exit 2, write nothing to stdout, write a stderr line holding a
+    _DISPATCH_USAGE phrase, and enter no _DISPATCH_SUITES function nor any function of its own an exact
+    `--self-test` branch calls. Each declared `--self-test` variant must still reach the self-test: for a
+    module whose `__main__` block ends `sys.exit(<def>(...))` a child imports it, stubs self_test and calls
+    main(); otherwise `--self-test` and each variant run under _DISPATCH_REACH_STUB and must enter a function
+    an exact `--self-test` branch calls, a variant with a True argument and `--self-test` alone with none; a
+    variant with neither route is a miss. Returns the list of discrepancies. Residuals: the hook sees Python
+    function entries in this process only (a suite run in a child process, or as module top-level code, is
+    seen only through the exit, stdout and stderr tests), a trigger needing a value other than "1" or a name
+    built at run time, and argument lists outside the forms tried."""
     import ast
     import concurrent.futures
     import subprocess
     import _optlevel
-    live, compares, sources = [], {}, {}
-    names = sorted(name for name in os.listdir(str(directory)) if name.endswith(".py"))
-    for name in names:
-        source = Path(directory, name).read_bytes()
-        tree = _optlevel.parse(source, name)
+    table = _DISPATCH_FORMS if table is None else table
+    unrun = _DISPATCH_UNRUN if unrun is None else unrun
+    fallback = str(Path(directory).resolve()) if fallback is None else str(fallback)
+    host = Path(__file__).name
+    trees, sources, misses = {}, {}, []
+    for name in sorted(name for name in os.listdir(str(directory)) if name.endswith(".py")):
+        try:
+            source = Path(directory, name).read_bytes()
+            tree = _optlevel.parse(source, name)
+        except (OSError, SyntaxError, ValueError) as exc:
+            misses.append("{} cannot be read or parsed ({})".format(name, type(exc).__name__))
+            continue
+        if _main_tests(tree):
+            trees[name], sources[name] = tree, source.decode("utf-8", "replace")
+    if not trees:
+        misses.append("no module with a `__main__` block found")
+    misses += ["{} has a `__main__` block but is not declared in _DISPATCH_FORMS".format(name)
+               for name in sorted(set(trees) - set(table))]
+    misses += ["{} is declared in _DISPATCH_FORMS but has no `__main__` block here".format(name)
+               for name in sorted(set(table) - set(trees))]
+    forms, runner_misses, complete = _dispatch_runner_forms(directory, set(table), runners)
+    misses += runner_misses
+    for name, called in sorted(forms.items()):
+        misses += ["a runner calls {} {} but that form is not declared in _DISPATCH_FORMS".format(
+            name, list(argv)) for argv in sorted(called - set(table[name]))]
+    for (name, argv), _reason in sorted(unrun.items()):
+        if argv not in table.get(name, ()) or argv in forms.get(name, set()):
+            misses.append("unrun entry {} {} is not a declared form no runner calls".format(name, list(argv)))
+    if complete:
+        misses += ["{} {} is declared in _DISPATCH_FORMS but no runner calls it".format(name, list(argv))
+                   for name, declared in sorted(table.items()) for argv in declared
+                   if argv != ("--self-test",) and argv not in forms.get(name, set()) and (name, argv) not in unrun
+                   and not (len(argv) > 1 and " ".join(argv) in sources.get(name, ""))]
+    runs = []
+    for name, tree in sorted(trees.items()):
+        if name == host or name not in table:
+            continue
+        targets = sorted(_dispatch_targets(tree))
+        refused = list(_DISPATCH_REFUSED) + list(_DISPATCH_REFUSED_WORDS) + ([[]] if () not in table[name] else [])
+        runs += [(name, argv, "refuse", targets) for argv in refused]
+        variants = [list(argv) for argv in table[name] if len(argv) > 1 and argv[0] == "--self-test"]
         exposes, reason = _self_test_entry_gap(tree)
         last = tree.body[-1].body[-1] if exposes and reason is None else None
         if (isinstance(last, ast.Expr) and isinstance(last.value, ast.Call) and last.value.args
                 and isinstance(last.value.args[0], ast.Call) and isinstance(last.value.args[0].func, ast.Name)):
-            live.append(name)
-        elif not exposes and name != Path(__file__).name and _argv_self_test_compare(tree):
-            compares[name] = sorted(_dispatch_targets(tree))
-            sources[name] = source.decode("utf-8", "replace")
-    probed = sorted(set(live) | set(compares))
-    misses = ["self-test dispatcher {} not found".format(name)
-              for name in sorted(set(_DISPATCH_VARIANTS) - set(probed))]
-    if not live:
-        misses.append("no live-mode dispatcher found")
-    if not compares:
-        misses.append("no module that binds no self_test compares against `--self-test`")
-    misses += ["{} compares against `--self-test` but neither an exact `<argument list> == [\"--self-test\", ...]` "
-               "branch calls a function nor an `<argument list> not in ([...], ...)` guard refuses the rest".format(
-                   name) for name, targets in sorted(compares.items())
-               if not targets and not _dispatch_guard(_optlevel.parse(sources[name].encode("utf-8"), name))]
-    forms, runner_misses = _dispatch_runner_forms(directory, set(probed))
-    misses += runner_misses
-    misses += ["{} declares a variant but has no exact `--self-test` branch to reach".format(name)
-               for name, targets in sorted(compares.items()) if not targets and name in _DISPATCH_VARIANTS]
-    for name, called in sorted(forms.items()):
-        declared = {tuple(argv) for argv in _DISPATCH_VARIANTS.get(name, ())} | {("--self-test",)}
-        misses += ["a runner calls {} {} but that form is not declared in _DISPATCH_VARIANTS".format(
-            name, list(argv)) for argv in sorted(called - declared)]
-    for name, variants in sorted(_DISPATCH_VARIANTS.items()):
-        own = sources.get(name)
-        if own is None and Path(directory, name).is_file():
-            own = Path(directory, name).read_text(encoding="utf-8", errors="replace")
-        misses += ["declared variant {} {} is called by no runner and not by the module itself".format(
-            name, argv) for argv in variants
-            if tuple(argv) not in forms.get(name, set()) and " ".join(argv) not in (own or "")]
-    runs = [(name, argv, None) for name in probed for argv in _DISPATCH_REFUSED]
-    runs += [(name, argv, _DISPATCH_STUB) for name, variants in sorted(_DISPATCH_VARIANTS.items())
-             if name in live for argv in variants]
-    runs += [(name, argv, _DISPATCH_REACH_STUB) for name, targets in sorted(compares.items()) if targets
-             for argv in (["--self-test"],) + tuple(_DISPATCH_VARIANTS.get(name, ()))]
+            runs += [(name, argv, "stub", targets) for argv in variants]
+        elif targets and not exposes:
+            runs += [(name, argv, "reach", targets) for argv in [["--self-test"]] + variants]
+        else:
+            misses += ["{} declares {} but neither route can confirm it reaches the self-test".format(name, argv)
+                       for argv in variants]
 
     def child(run):
-        name, argv, stub = run
-        command = [sys.executable, "-I", "-B"] + (["-c", stub] if stub else []) + [str(Path(directory, name))]
-        if stub is _DISPATCH_REACH_STUB:
-            command.append(",".join(compares[name]))
-        command += argv
+        name, argv, mode, targets = run
+        path = str(Path(directory, name))
+        env = None
+        if mode == "refuse":
+            command = [_DISPATCH_REFUSE_STUB, path, fallback, ",".join(_DISPATCH_SUITES), ",".join(targets)] + argv
+            env = dict(os.environ, **{each: "1" for each in _dispatch_triggers(trees[name])})
+        elif mode == "stub":
+            command = [_DISPATCH_STUB, path] + argv
+        else:
+            command = [_DISPATCH_REACH_STUB, path, ",".join(targets)] + argv
         try:
-            proc = subprocess.run(command, cwd=tmp, capture_output=True, text=True, timeout=120,
-                                  stdin=subprocess.DEVNULL)
+            proc = subprocess.run([sys.executable, "-I", "-B", "-c"] + command, cwd=tmp, capture_output=True,
+                                  text=True, timeout=120, stdin=subprocess.DEVNULL, env=env)
         except (OSError, subprocess.SubprocessError) as exc:
             return "{} {}: child failed to run ({})".format(name, argv, type(exc).__name__)
-        if stub:
+        if mode != "refuse":
             variant = argv != ["--self-test"]
             if proc.returncode != 0 or "DISPATCHED" not in proc.stdout or "NOT DISPATCHED" in proc.stdout \
                     or ("True" in proc.stdout) != variant:
                 return "{} {}: the {} did not reach the self-test as declared (rc {})".format(
                     name, argv, "declared variant" if variant else "exact `--self-test`", proc.returncode)
-        elif proc.returncode != 2 or "PASS" in proc.stdout + proc.stderr or not proc.stderr.strip():
-            return "{} {}: not refused (rc {}, want 2 with a stderr line and no PASS)".format(
-                name, argv, proc.returncode)
+            return None
+        entered = [line[len("ENTERED "):] for line in proc.stderr.splitlines() if line.startswith("ENTERED ")]
+        if entered:
+            return "{} {}: not refused, entered {}".format(name, argv, entered[0])
+        if proc.returncode != 2 or proc.stdout or not any(
+                phrase in line.lower() for line in proc.stderr.splitlines() for phrase in _DISPATCH_USAGE):
+            return "{} {}: not refused (rc {}, {} bytes of stdout; want 2, no stdout and a usage line on " \
+                   "stderr)".format(name, argv, proc.returncode, len(proc.stdout))
         return None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         misses += [miss for miss in pool.map(child, runs) if miss]
     return misses
+
+
+_DISPATCH_USAGE_TAIL = '    print("usage: fixture --self-test", file=sys.stderr)\n    sys.exit(2)\n'
+_DISPATCH_SUITE_DEF = "def self_test():\n    return 0\n\n\n"
+# The escape fixtures (name, source, table forms, the phrase its miss must hold, or None for a clean module).
+_DISPATCH_FIXTURES = (
+    ("clean_lib.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n' + _DISPATCH_USAGE_TAIL,
+     _DISPATCH_LIBRARY, None),
+    ("clean_live.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + "def main(argv):\n"
+     '    if argv == ["--self-test"]:\n        return self_test()\n    if argv:\n'
+     '        print("clean_live: unexpected argument(s)", file=sys.stderr)\n        return 2\n    return 0\n\n\n'
+     'if __name__ == "__main__":\n    sys.exit(main(sys.argv[1:]))\n', _DISPATCH_LIVE, None),
+    ("const_alias.py", "import sys\n\n_SELF_TEST_FORMS = ([\"--self-test\"], [\"--selftest\"])\n\n\n"
+     + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n    if sys.argv[1:] in _SELF_TEST_FORMS:\n'
+     "        sys.exit(self_test())\n" + _DISPATCH_USAGE_TAIL, _DISPATCH_LIBRARY, "entered self_test"),
+    ("match_form.py", "import sys\n\n\ndef _suite():\n    return 0\n\n\n" 'if __name__ == "__main__":\n'
+     '    match sys.argv[1:]:\n        case ["--self-test", *_]:\n            sys.exit(_suite())\n'
+     '    print("usage: fixture --self-test", file=sys.stderr)\n    sys.exit(2)\n', _DISPATCH_LIBRARY,
+     "entered _suite"),
+    ("built_string.py", 'import sys\n\nFLAG = "--self" + "-test"\n\n\n' + _DISPATCH_SUITE_DEF
+     + 'if __name__ == "__main__":\n    if sys.argv[1:2] == [FLAG]:\n        sys.exit(self_test())\n'
+     + _DISPATCH_USAGE_TAIL, _DISPATCH_LIBRARY, "entered self_test"),
+    ("env_trigger.py", "import os\nimport sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"] or os.environ.get("FIXTURE_SELF_TEST"):\n'
+     "        sys.exit(self_test())\n" + _DISPATCH_USAGE_TAIL, _DISPATCH_LIBRARY, "entered self_test"),
+    ("argparse_sub.py", "import argparse\nimport sys\n\n\n" + _DISPATCH_SUITE_DEF + "def main():\n"
+     '    parser = argparse.ArgumentParser(prog="fixture")\n    verbs = parser.add_subparsers(dest="verb")\n'
+     '    verbs.add_parser("selftest")\n    args, _ = parser.parse_known_args()\n'
+     '    if args.verb == "selftest":\n        return self_test()\n'
+     '    print("usage: fixture --self-test", file=sys.stderr)\n    return 2\n\n\n'
+     'if __name__ == "__main__":\n    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n'
+     "    sys.exit(main())\n", _DISPATCH_LIBRARY, "entered self_test"),
+    ("decorated_main.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + "def _wrap(func):\n"
+     "    def inner():\n        self_test()\n        return func()\n    return inner\n\n\n@_wrap\ndef main():\n"
+     '    print("usage: fixture --self-test", file=sys.stderr)\n    return 2\n\n\n'
+     'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n    sys.exit(main())\n',
+     _DISPATCH_LIBRARY, "entered self_test"),
+    ("prints_exit2.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + "def _cases():\n"
+     '    print("case 1 ok")\n    return 2\n\n\n' 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n    _cases()\n' + _DISPATCH_USAGE_TAIL,
+     _DISPATCH_LIBRARY, "bytes of stdout"),
+    ("silent_suite.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] != ["--self-test"]:\n        self_test()\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n' + _DISPATCH_USAGE_TAIL,
+     _DISPATCH_LIBRARY, "entered self_test"),
+    ("no_usage.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n'
+     '    print("error", file=sys.stderr)\n    sys.exit(2)\n', _DISPATCH_LIBRARY, "a usage line on stderr"),
+    ("undeclared.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n' + _DISPATCH_USAGE_TAIL,
+     None, "not declared in _DISPATCH_FORMS"),
+    ("runner_form.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n' + _DISPATCH_USAGE_TAIL,
+     _DISPATCH_LIBRARY, "a runner calls runner_form.py"),
+    ("unused_form.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + "def main(argv):\n"
+     '    if argv == ["--self-test"]:\n        return self_test()\n    if argv:\n'
+     '        print("usage: unused_form.py [--self-test]", file=sys.stderr)\n        return 2\n    return 0\n\n\n'
+     'if __name__ == "__main__":\n    sys.exit(main(sys.argv[1:]))\n', _DISPATCH_LIVE, "no runner calls it"),
+)
+# The runner lines the fixture tree carries: every bare declared form is called except unused_form.py's, and
+# runner_form.py is called with a form its table lacks.
+_DISPATCH_FIXTURE_RUNNER = (
+    "python3 -I -B opf/tools/clean_live.py\n"
+    "python3 -I -B opf/tools/runner_form.py --self-test --vectors-only\n"
+    "python3 -I -B opf/tools/selftest_commonmark_conformance.py\n")
+# The reverted conformance pre-check: _self_check runs again before the argument list is checked.
+_DISPATCH_CONFORMANCE_REVERT = ("def main(argv):\n", "def main(argv):\n    _self_check()\n")
+
+
+def _self_test_dispatch_escape_probe(tmp):
+    """Run _self_test_dispatch_probe over a synthetic tree in `tmp`: the reviewers' escape fixtures (a flag
+    set held in a constant, a match statement, a built string, an environment trigger, an argparse
+    subcommand, a decorated main, a suite that prints and exits 2, a suite run silently before the refusal), a
+    refusal without a usage line, an undeclared module, a runner form the table lacks, a declared form no
+    runner calls, and selftest_commonmark_conformance.py with its argument pre-check reverted. Each red module
+    must be named for its reason and the clean ones not at all. The modules are files run as children; nothing
+    is passed to exec or eval. Returns a list of the discrepancies."""
+    root = Path(tmp, "tree")
+    directory = root / "opf" / "tools"
+    os.makedirs(str(directory))
+    os.makedirs(str(root / "tools"))
+    os.makedirs(str(root / ".github" / "workflows"))
+    here = Path(__file__).resolve().parent
+    table, expected = {}, {}
+    for name, source, forms, want in _DISPATCH_FIXTURES:
+        (directory / name).write_text(source, encoding="utf-8")
+        if forms is not None:
+            table[name] = forms
+        expected[name] = want
+    conformance = (here / "selftest_commonmark_conformance.py").read_text(encoding="utf-8")
+    before, after = _DISPATCH_CONFORMANCE_REVERT
+    if conformance.count(before) != 1:
+        return ["selftest_commonmark_conformance.py: the pre-check revert has no single `def main(argv):`"]
+    (directory / "selftest_commonmark_conformance.py").write_text(conformance.replace(before, after),
+                                                                  encoding="utf-8")
+    table["selftest_commonmark_conformance.py"] = ((),)
+    expected["selftest_commonmark_conformance.py"] = "entered _self_check"
+    (directory / "run_all_checks.sh").write_text("", encoding="utf-8")
+    (root / "tools" / "run_all_checks.sh").write_text(_DISPATCH_FIXTURE_RUNNER, encoding="utf-8")
+    (root / ".github" / "workflows" / "quality.yml").write_text("", encoding="utf-8")
+    (root / "tools" / "check_opf_standalone_closure.py").write_text("", encoding="utf-8")
+    os.makedirs(str(Path(tmp, "cwd")))
+    found = _self_test_dispatch_probe(directory, str(Path(tmp, "cwd")), table=table, unrun={}, fallback=here)
+    faults = []
+    for name, want in sorted(expected.items()):
+        mine = [miss for miss in found if name in miss]
+        if want is None and mine:
+            faults.append("clean fixture {} named ({})".format(name, mine[0]))
+        elif want is not None and not any(want in miss for miss in mine):
+            faults.append("escape fixture {} not caught for its reason ({!r}; got {})".format(
+                name, want, "; ".join(mine) or "nothing"))
+    return faults
 
 
 def _aggregator_self_test():
@@ -1290,6 +1475,8 @@ def _aggregator_self_test():
         missed = _self_test_entry_probe(tmp) + _self_test_floor_probe(registry, here, tmp)
     with tempfile.TemporaryDirectory(prefix="opf-entry-dispatch-") as tmp:
         missed += _self_test_dispatch_probe(here, tmp)
+    with tempfile.TemporaryDirectory(prefix="opf-entry-escape-") as tmp:
+        missed += _self_test_dispatch_escape_probe(tmp)
     if gaps or faults or missed:
         print("opf aggregator self-test: FAIL (self_test modules without the canonical `--self-test` entry: {}; "
               "registry floor faults: {}; synthetic probe discrepancies: {})".format(

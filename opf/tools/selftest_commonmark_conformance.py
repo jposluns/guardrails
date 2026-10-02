@@ -228,19 +228,20 @@ def shutil_which(name):
 
 
 def main(argv):
-    selfcheck = _self_check()
-    if selfcheck:
-        return selfcheck
+    # The argument list is checked before _self_check runs, so a refused one runs nothing.
     if argv and argv[0] == "--interpreters":
-        interpreters = argv[1:]
-        if not interpreters:
+        if not argv[1:]:
             print("CONFORMANCE MATRIX ERROR: --interpreters needs at least one interpreter; fail-closed",
                   file=sys.stderr)
             return 2
-        return _run_matrix(interpreters)
-    if argv:
+    elif argv:
         print("CONFORMANCE ERROR: unknown argument {!r}; fail-closed".format(argv[0]), file=sys.stderr)
         return 2
+    selfcheck = _self_check()
+    if selfcheck:
+        return selfcheck
+    if argv:
+        return _run_matrix(argv[1:])
     return _run_single()
 
 
