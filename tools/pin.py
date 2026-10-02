@@ -399,11 +399,19 @@ def _atomic_publish(root, relpath, text):
     never a torn one."""
     data = text.encode("utf-8")
     root_fd = _open_root_fd(root)
+    pfd = None
     try:
         _ensure_parent_dirs(root_fd, relpath)
         pfd, name = _journal._open_parent(root_fd, relpath)
     finally:
-        os.close(root_fd)
+        # pfd is HELD across the root close (the _journal.open_journal_root_from_path idiom): a raising
+        # root close releases pfd quietly and keeps propagating, so neither descriptor stays open.
+        try:
+            _journal._close_fd_yielding(root_fd)
+        except OSError:
+            if pfd is not None:
+                _journal._close_fd_quietly(pfd)
+            raise
     tmpname = name + ".tmp.{}".format(os.getpid())
     try:
         fd = os.open(tmpname, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o644, dir_fd=pfd)
@@ -411,11 +419,11 @@ def _atomic_publish(root, relpath, text):
             _journal._write_all(fd, data)
             os.fsync(fd)
         finally:
-            os.close(fd)
+            _journal._close_fd_yielding(fd)
         os.replace(tmpname, name, src_dir_fd=pfd, dst_dir_fd=pfd)
         os.fsync(pfd)
     finally:
-        os.close(pfd)
+        _journal._close_fd_yielding(pfd)
 
 
 def _remove_contained(root, relpath):
@@ -425,9 +433,13 @@ def _remove_contained(root, relpath):
     try:
         pfd, name = _journal._open_parent(root_fd, relpath)
     except (OSError, _journal.JournalError):
-        os.close(root_fd)
+        _journal._close_fd_propagating(root_fd)
         return
-    os.close(root_fd)
+    try:
+        _journal._close_fd_propagating(root_fd)
+    except OSError:
+        _journal._close_fd_quietly(pfd)                  # pfd held across the root close: never stranded
+        raise
     try:
         try:
             os.unlink(name, dir_fd=pfd)
@@ -435,7 +447,7 @@ def _remove_contained(root, relpath):
             return
         os.fsync(pfd)
     finally:
-        os.close(pfd)
+        _journal._close_fd_yielding(pfd)
 
 
 # --- op construction and the staged reader ------------------------------------------------------------
@@ -502,7 +514,7 @@ def _capture_pin_preimages(root, root_fd, transition_id, ops):
         # a re-resolved absolute path an ancestor symlink could redirect off-tree.
         _journal.capture_preimages(pfd, root / PREIMAGES_REL / transition_id, root_fd, ops)
     finally:
-        os.close(pfd)
+        _journal._close_fd_yielding(pfd)
 
 
 def _contained_swap(root_fd, ops, staged_reader):
@@ -585,7 +597,7 @@ def _blocking_open_journal(root, root_fd):
     try:
         jfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
     except OSError:
-        os.close(pfd)
+        _journal._close_fd_yielding(pfd)
         return True
     try:
         for entry in os.listdir(jfd):
@@ -598,8 +610,10 @@ def _blocking_open_journal(root, root_fd):
     except (OSError, _journal.JournalError):
         return True                                       # fail closed on any read/parse error
     finally:
-        os.close(jfd)
-        os.close(pfd)
+        try:
+            _journal._close_fd_yielding(jfd)
+        finally:
+            _journal._close_fd_yielding(pfd)
 
 
 def do_pin(root, staged, transition_id=None):
@@ -666,7 +680,7 @@ def do_pin(root, staged, transition_id=None):
     except (PinError, _journal.JournalError, OSError, KeyError, ValueError) as exc:
         return _fail(exc)
     finally:
-        os.close(root_fd)
+        _journal._close_fd_yielding(root_fd)
     print("pin: onboarding pin at {} (transition {})".format(release["version"], transition_id))
     return EXIT_OK
 
@@ -755,9 +769,9 @@ def do_un_adopt(root, authorizer, reason):
         _atomic_publish(root, UNADOPT_REL, _render_unadopt(intent))
         _complete_un_adopt(root, root_fd, ops, intent)
     except (PinError, _journal.JournalError, OSError, KeyError, ValueError) as exc:
-        os.close(root_fd)
+        _journal._close_fd_yielding(root_fd)
         return _fail(exc)
-    os.close(root_fd)
+    _journal._close_fd_propagating(root_fd)
     print("un-adopt: reversed transition {} to pre-adoption and recorded the terminal history row"
           .format(txn_rec["transition-id"]))
     return EXIT_OK
@@ -791,7 +805,7 @@ def _rmtree_contained(pfd, name):
         for child in os.listdir(dfd):
             _rmtree_contained(dfd, child)
     finally:
-        os.close(dfd)
+        _journal._close_fd_yielding(dfd)
     os.rmdir(name, dir_fd=pfd)
 
 
@@ -812,7 +826,7 @@ def _sweep_orphan_preimages(root, root_fd):
         _rmtree_contained(pfd, name)
         os.fsync(pfd)
     finally:
-        os.close(pfd)
+        _journal._close_fd_yielding(pfd)
     return 1
 
 
@@ -854,7 +868,7 @@ def _reverse_swap(root, root_fd, ops):
                     pass
             os.fsync(pfd)
         finally:
-            os.close(pfd)
+            _journal._close_fd_yielding(pfd)
 
 
 def _trim_last_pin_row(root, root_fd, txn):
@@ -978,7 +992,8 @@ def do_recover(root):
                                "orphan that state into a MALFORMED post-state, 10.6); resolve the migration first")
             ops = _transition_ops(txn_rec) if txn_rec is not None else []
             _complete_un_adopt(root, root_fd, ops, intent)
-            os.close(root_fd)
+            fd, root_fd = root_fd, None
+            os.close(fd)
             print("recover: completed an interrupted un-adopt (transition {})"
                   .format(intent.get("transition-id")))
             return EXIT_OK
@@ -993,7 +1008,8 @@ def do_recover(root):
                                "refusing to sweep reversal preimages that may still be needed; restore the "
                                "transition record or `un-adopt`")
             removed = _sweep_orphan_preimages(root, root_fd) if preimages_present else 0
-            os.close(root_fd)
+            fd, root_fd = root_fd, None
+            os.close(fd)
             if removed:
                 print("recover: no transition record; swept the orphan preimage store left by a crash "
                       "before the transition was published")
@@ -1002,7 +1018,8 @@ def do_recover(root):
             return EXIT_OK
         phase = txn.get("phase")
         if phase == "committed":
-            os.close(root_fd)
+            fd, root_fd = root_fd, None
+            os.close(fd)
             print("recover: transition {} is committed; nothing to recover"
                   .format(txn.get("transition-id")))
             return EXIT_OK
@@ -1018,7 +1035,8 @@ def do_recover(root):
             committed["phase"] = "committed"
             committed["ops"] = ops
             _atomic_publish(root, TRANSITION_REL, _render_transition(committed))
-            os.close(root_fd)
+            fd, root_fd = root_fd, None
+            os.close(fd)
             print("recover: transition {} was fully applied; rolled FORWARD to committed"
                   .format(transition_id))
             return EXIT_OK
@@ -1028,9 +1046,10 @@ def do_recover(root):
         _remove_contained(root, TRANSITION_REL)
         _sweep_orphan_preimages(root, root_fd)
     except (PinError, _journal.JournalError, OSError, KeyError, ValueError) as exc:
-        os.close(root_fd)
+        if root_fd is not None:                           # None once a close above released it (P1,
+            _journal._close_fd_yielding(root_fd)          # #378): a failed close is never closed again
         return _fail(exc)
-    os.close(root_fd)
+    _journal._close_fd_propagating(root_fd)
     print("recover: transition {} reversed to the prior state; re-run `pin` to retry".format(transition_id))
     return EXIT_OK
 
@@ -1045,9 +1064,12 @@ def do_status(root):
         rows = read_history(root_fd)
         txn = read_transition(root_fd)
     except PinError as exc:
-        os.close(root_fd)
+        _journal._close_fd_yielding(root_fd)
         return _fail(exc)
-    os.close(root_fd)
+    except BaseException:
+        _journal._close_fd_quietly(root_fd)              # a raw error (e.g. a failing close below) never strands root_fd
+        raise
+    _journal._close_fd_propagating(root_fd)
     if pin is None and rows is None and txn is None:
         print("status: not adopted (no pin state)")
         return EXIT_OK
@@ -1147,6 +1169,152 @@ def _run_cli(argv):
     finally:
         sys.argv = saved
     return rc, buf.getvalue()
+
+
+def _close_vectors(base):
+    """#378: _remove_contained's parent close, the representative _close_fd_yielding site. A close that
+    fails while an exception unwinds lets that exception through as the same object; one that fails on the
+    normal path raises; neither leaves a descriptor open (_journal._st_close_check runs them and the flips)."""
+    (base / "d").mkdir(parents=True)
+    ns = vars(_journal)
+    sent = _journal._StSentinel("in flight at _remove_contained")
+
+    def remove(raise_sent):
+        def call(fault):
+            (base / "d" / "f").write_bytes(b"x")
+            real_parent, real_unlink = ns["_open_parent"], os.unlink
+
+            def parent_spy(root_fd, relpath):
+                pfd, name = real_parent(root_fd, relpath)
+                return fault.arm(pfd), name
+
+            def unlink_spy(*args, **kwargs):
+                if raise_sent:
+                    raise sent
+                return real_unlink(*args, **kwargs)
+            ns["_open_parent"], os.unlink = parent_spy, unlink_spy
+            try:
+                _remove_contained(base, "d/f")
+            finally:
+                ns["_open_parent"], os.unlink = real_parent, real_unlink
+        return call
+
+    return (("pin site _remove_contained: finally while an exception unwinds", True, "AR", remove(True),
+             lambda e: e is sent),
+            ("pin site _remove_contained: normal path", False, "BR", remove(False), None))
+
+
+def _recover_close_vectors(base, onop, onpay, rel1):
+    """#378 P1: do_recover's four early closes of root_fd (un-adopt completed, no transition record,
+    committed, rolled FORWARD). Each close fails after releasing its number to a reuser; the failure must
+    surface through _fail and the handler must not close the number again. Returns (vectors, reverted,
+    prints): the vectors run against do_recover; `reverted` runs the same four against the pre-fix
+    do_recover (a bare os.close(root_fd), then the handler's unguarded close), which the caller requires
+    red by REUSE; `prints` runs, fixed and pre-fix, a print that raises after a successful close."""
+    import errno
+    import inspect
+    import io
+    from contextlib import redirect_stderr, redirect_stdout
+    count = iter(range(1 << 16))
+
+    def fixture(kind):
+        root = base / "{}-{}".format(kind, next(count)) / "root"
+        root.mkdir(parents=True)
+        if kind == "none":
+            return root
+        _run_cli(["pin", "--root", str(root), "--staged",
+                  str(_write_staged(root.parent / "s", onop, onpay, rel1, []))])
+        with _RootFd(root) as fd:
+            txn = read_transition(fd)
+        if kind == "unadopt":
+            _atomic_publish(root, UNADOPT_REL, _render_unadopt({
+                "transition-id": txn["transition-id"], "target-version": txn.get("target-version", ""),
+                "quorum": 1, "utc": _utc_now(),
+                "authorization": {"authorizer": "ops", "utc": _utc_now(), "reason": "reverse"}}))
+        elif kind == "applied":
+            applied = dict(txn, phase="applied", ops=_transition_ops(txn))
+            _atomic_publish(root, TRANSITION_REL, _render_transition(applied))
+        return root
+
+    def recover(kind, fn):
+        def call(fault):
+            root = fixture(kind)
+            g = fn.__globals__
+            real_open, real_fail = g["_open_root_fd"], g["_fail"]
+
+            def open_spy(path):
+                g["_open_root_fd"] = real_open
+                return fault.arm(real_open(path))
+
+            def fail_spy(exc):
+                raise exc
+            g["_open_root_fd"], g["_fail"] = open_spy, fail_spy
+            try:
+                with redirect_stdout(io.StringIO()):
+                    fn(root)
+            finally:
+                g["_open_root_fd"], g["_fail"] = real_open, real_fail
+        return call
+
+    def printing(fn):
+        """A print that raises after the close succeeded, its number already taken by a reuser: returns
+        (exit code, whether the reuser still owns the number). The root descriptor's close puts the reuser's
+        pipe on the number with dup2 instead of freeing it (#378 P1), so the number is never free for a
+        real lane to take meanwhile and is closed here only while it still names that pipe."""
+        root, g = fixture("none"), fn.__globals__
+        real_open, real_close, seen = g["_open_root_fd"], os.close, {}
+
+        def open_spy(path):
+            seen["fd"] = real_open(path)
+            return seen["fd"]
+
+        def close_spy(fd):
+            if fd != seen.get("fd") or "ident" in seen:
+                return real_close(fd)
+            rfd, wfd = os.pipe()                          # opened while the number is still held
+            try:
+                os.dup2(rfd, fd)                          # the close: the number goes straight to the reuser
+                st = os.fstat(fd)
+                seen["ident"] = (st.st_dev, st.st_ino)
+            finally:
+                real_close(rfd)
+                real_close(wfd)
+
+        def print_spy(*args, **kwargs):
+            del g["print"]                                # one shot: _fail's own print is the real one
+            raise OSError(errno.EPIPE, "self-test injected print failure")
+        g["_open_root_fd"], g["print"] = open_spy, print_spy
+        os.close = close_spy
+        try:
+            with redirect_stderr(io.StringIO()):
+                rc = fn(root)
+        finally:
+            os.close = real_close
+            g["_open_root_fd"] = real_open
+            g.pop("print", None)
+        try:
+            st = os.fstat(seen["fd"])
+            owned = (st.st_dev, st.st_ino) == seen["ident"]
+        except (KeyError, OSError):
+            owned = False
+        if owned:
+            os.close(seen["fd"])
+        return rc, owned
+
+    source = inspect.getsource(do_recover)
+    for new, old, n in (("fd, root_fd = root_fd, None\n            os.close(fd)\n", "os.close(root_fd)\n", 4),
+                        ("if root_fd is not None:", "if True:", 1)):
+        if source.count(new) != n:
+            raise AssertionError("do_recover close revert: {!r} found {} times, not {}".format(
+                new, source.count(new), n))
+        source = source.replace(new, old)
+    ns = dict(globals())
+    exec(compile(source, __file__, "exec"), ns)
+    kinds = ("unadopt", "none", "committed", "applied")
+    vectors = tuple(("pin site do_recover ({}): the early close of root_fd".format(kind), False, "",
+                     recover(kind, do_recover), None) for kind in kinds)
+    return vectors, tuple((kind, recover(kind, ns["do_recover"])) for kind in kinds), \
+        (lambda: printing(do_recover), lambda: printing(ns["do_recover"]))
 
 
 def self_test():
@@ -1689,6 +1857,24 @@ def self_test():
                             {".aiqt/evil": b"x\n"}, rel1, [])
         rc, out = _run_cli(["pin", "--root", str(t31), "--staged", str(s31)])
         check("T31: do_pin REFUSES an op targeting .aiqt/ exit 2", rc == 2 and ".aiqt" in out)
+
+        # #378: the representative _close_fd_yielding site, each vector green and red under its flip.
+        close_failures, close_runs = _journal._st_close_check(vars(_journal), _close_vectors(tmp / "close"))
+        failures.extend(close_failures)
+        checked += close_runs
+        # #378 P1: do_recover's early closes, each green, and red by REUSE alone under the pre-fix code.
+        recover_vectors, reverted, prints = _recover_close_vectors(tmp / "recover-close", onop, onpay, rel1)
+        close_failures, close_runs = _journal._st_close_check(vars(_journal), recover_vectors)
+        failures.extend(close_failures)
+        checked += close_runs
+        for kind, call in reverted:
+            red = _journal._st_close_run(call, False, None, False)
+            check("do_recover ({}) under the pre-fix close: expected red by REUSE alone, got {}".format(
+                kind, red or "green"), [p.split(":")[0] for p in red] == ["REUSE"])
+        check("do_recover: a print raising after a successful close fails closed and leaves the number's "
+              "reuser open", prints[0]() == (EXIT_MALFORMED, True))
+        check("do_recover under the pre-fix close: a print raising after a successful close closes the "
+              "number's reuser", prints[1]() == (EXIT_MALFORMED, False))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

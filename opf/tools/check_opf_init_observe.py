@@ -265,6 +265,46 @@ def tree_entry_cap(module):
             module.CANNOT_EVALUATE, "tree-entry-cap")
 
 
+def graft_close(module):
+    """#378 P1: GitObjects.graft_snapshot moves ownership of the walk descriptor before closing it. The
+    close of "/" fails after releasing its number to a reuser (the shared _journal close harness): the walk
+    reports CANNOT-EVALUATE and its finally closes only the next directory, never the released number. Green
+    is no problem at all, with and without the PROBE watch. Under the close-then-rebind body the finally
+    closes the reuser's number (REUSE) and the next directory is never closed (LEAK): that pair, and only
+    it, is this case's red; any other outcome is a harness error, never accepted as red."""
+    import os
+    import tempfile
+    import _journal
+    import _opf_store
+    with tempfile.TemporaryDirectory(prefix="opf-graft-close-") as directory:
+        target = os.path.join(os.path.realpath(directory), "info", "grafts")
+        source = types.SimpleNamespace(run=lambda args, budget: (target + "\n").encode("utf-8"),
+                                       product_root="/")
+
+        def call(fault):
+            real = _opf_store._open_dir_nofollow
+
+            def arm(path):
+                _opf_store._open_dir_nofollow = real
+                return fault.arm(real(path))
+            _opf_store._open_dir_nofollow = arm
+            try:
+                module.GitObjects.graft_snapshot(source, None)
+            finally:
+                _opf_store._open_dir_nofollow = real
+
+        def expect(exc):
+            return type(exc) is module.ObservationError and "injected close failure" in exc.detail
+        for watch in (False, True):
+            problems = _journal._st_close_run(call, True, expect, watch)
+            tags = [problem.split(":")[0] for problem in problems]
+            if tags == ["REUSE", "LEAK"] and not watch:
+                print("RED-BY", "graft-close-reuse", "; ".join(problems))
+                raise AssertionError("graft-close-reuse")
+            if problems:
+                raise RuntimeError("graft-close-reuse: {}".format(problems))
+
+
 # Each case owns a deliberate reversal and a reached assertion identity. No syntax
 # error, unexpected exception, timeout or failed fixture setup is accepted as RED.
 CASES = [
@@ -303,6 +343,10 @@ CASES = [
      "if evidence_commit not in chain:", "if False:"),
     ("seed-absent-evidence", absent_evidence,
      'source.run(["cat-file", "-e", evidence_commit], budget)', "pass"),
+    ("graft-close-reuse", graft_close,
+     "prev, fd = fd, next_fd                    # ownership moves first: a failed close is\n"
+     "                os.close(prev)                            # never closed again by the finally (P1, #378)",
+     "os.close(fd)\n                fd = next_fd"),
 ]
 for field, value, identity in (
         ("commits", 0, "limits/commits-zero"),
