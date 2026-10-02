@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T72)
+  check_opf_record.py --self-test                    the fixture suite (T1-T73)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -331,6 +331,18 @@ Each case runs on its own copy of that template; the root is removed in a finall
       oracle refuses); the same ruling filed by an assistant refuses with every byte untouched in its own
       test (flip: the planner's record validation replaced by a pass-through, so the ruling publishes and
       that gate reports its actor finding)
+  T73 a contribution's send carries its delivery bundle: a maintainer creates CN-1; --channel on
+      proposed -> withdrawn, and --receipt-ref on proposed -> sent, each refuse with every byte untouched;
+      an assistant sends CN-1 to sent/proposed with delivery {channel, ref, sent_at} (sent_at the clock
+      value); a maintainer rejection with --reason restores proposed with no delivery and no proposed_from;
+      the assistant sends again and the maintainer's ratification keeps the bundle; the re-send is CN-2,
+      created linking supersedes CN-1, and CN-1 moves to superseded keeping its bundle; a maintainer sends
+      CN-2, an assistant acknowledges it with --receipt-ref to acknowledged/proposed (receipt_ref, and
+      receipted_at the clock value), a maintainer rejection back to sent removes the two receipt keys, and
+      the maintainer then acknowledges with --receipt-ref; doctor VALID after each commit (flips, each
+      refused by the planner's own record validation, so the labelled step assertion turns red: the
+      planner writes no delivery bundle, so the send is refused; the rejection of sent/proposed keeps
+      the bundle; the rejection of acknowledged/proposed keeps the receipt keys)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -2051,6 +2063,94 @@ def t72_assistant_ruling(fx):
 def flip_t72_trust():
     """The planner's record validation replaced by a pass-through: the assistant ruling publishes."""
     return patch.object(record, "_validated", lambda rec, expected_type, ctx: rec)
+
+
+# --- T73: the delivery bundle on a contribution send --------------------------------------------------------
+
+CN_INDEX = MACH + "/contribution.index.toml"
+CN_FIELDS = ["--field", "recipient=peer-project", "--field", "dedup_class=drift-gate", "--field",
+             "content_digest=sha256:00"]
+SEND = ["--channel", "pr", "--delivery-ref", "peer/repo#128"]
+RECEIPT = ["--receipt-ref", "peer/repo#128 merged"]
+SEND_BUNDLE = {"channel": "pr", "ref": "peer/repo#128"}
+
+
+def _cn_create(title, links=()):
+    return (["create", "--type", "contribution", "--title", title] + CN_FIELDS
+            + [arg for link in links for arg in ("--link", link)] + MAINTAINER)
+
+
+def _cn_step(fx, root, args, label):
+    """One contribution operation that must record, then a commit and doctor VALID. A refusal turns T73 red
+    on this labelled assertion, which carries the refusal text."""
+    rc, out, err = record_cli(fx.env, root, args)
+    assert rc == 0, ("T73 " + label + " records", rc, err[-1200:])
+    recorded((rc, out, err))
+    fx.commit_all(root, label)
+    doctor_valid(fx.env, root)
+    return row(root, args[1], CN_INDEX) if args[0] == "transition" else None
+
+
+def t73_contribution_delivery(fx):
+    env = fx.env
+    root = fx.case("t73-delivery")
+    with ticking():
+        _cn_step(fx, root, _cn_create("drift-gate fix"), "CN-1 created")
+        # Each option refusal leaves every byte untouched.
+        refused_untouched(env, root, ["transition", "CN-1", "withdrawn", "--channel", "pr"] + MAINTAINER,
+                          "--channel and --delivery-ref apply only")
+        refused_untouched(env, root, ["transition", "CN-1", "sent"] + SEND + RECEIPT + MAINTAINER,
+                          "--receipt-ref applies only")
+        rec = _cn_step(fx, root, ["transition", "CN-1", "sent"] + SEND + ASSISTANT, "CN-1 sent/proposed")
+        sent = {"channel": "pr", "ref": "peer/repo#128", "sent_at": rec["updated_at"]}
+        assert rec["status"] == "sent/proposed" and rec.get("proposed_from") == "proposed", rec
+        assert rec.get("delivery") == sent, ("T73 the send writes the delivery bundle", rec)
+        rec = _cn_step(fx, root, ["transition", "CN-1", "proposed", "--reason", "not sent yet"] + MAINTAINER,
+                       "CN-1 rejected")
+        assert rec["status"] == "proposed" and "delivery" not in rec and "proposed_from" not in rec, (
+            "T73 the rejection removes the delivery bundle", rec)
+        rec = _cn_step(fx, root, ["transition", "CN-1", "sent"] + SEND + ASSISTANT, "CN-1 sent/proposed again")
+        proposed = rec["delivery"]
+        rec = _cn_step(fx, root, ["transition", "CN-1", "sent"] + MAINTAINER, "CN-1 ratified")
+        assert rec["status"] == "sent" and "proposed_from" not in rec, rec
+        assert rec["delivery"] == proposed, ("T73 the ratification keeps the delivery bundle", rec, proposed)
+        # A re-send is a new record linking supersedes; the superseded record records superseded.
+        _cn_step(fx, root, _cn_create("drift-gate fix, again", ["supersedes=CN-1"]), "CN-2 created")
+        rec = _cn_step(fx, root, ["transition", "CN-1", "superseded"] + MAINTAINER, "CN-1 superseded")
+        assert rec["status"] == "superseded" and rec["delivery"] == proposed, rec
+        assert row(root, "CN-2", CN_INDEX)["links"] == [{"rel": "supersedes", "id": "CN-1"}]
+        rec = _cn_step(fx, root, ["transition", "CN-2", "sent"] + SEND + MAINTAINER, "CN-2 sent")
+        sent = rec["delivery"]
+        assert rec["status"] == "sent" and sent == dict(SEND_BUNDLE, sent_at=rec["updated_at"]), rec
+        rec = _cn_step(fx, root, ["transition", "CN-2", "acknowledged"] + RECEIPT + ASSISTANT,
+                       "CN-2 acknowledged/proposed")
+        assert rec["status"] == "acknowledged/proposed" and rec["delivery"] == dict(
+            sent, receipt_ref="peer/repo#128 merged", receipted_at=rec["updated_at"]), rec
+        rec = _cn_step(fx, root, ["transition", "CN-2", "sent", "--reason", "not merged yet"] + MAINTAINER,
+                       "CN-2 rejected")
+        assert rec["status"] == "sent" and rec["delivery"] == sent, (
+            "T73 the rejection removes the receipt keys", rec, sent)
+        rec = _cn_step(fx, root, ["transition", "CN-2", "acknowledged"] + RECEIPT + MAINTAINER, "CN-2 acknowledged")
+        assert rec["status"] == "acknowledged" and rec["delivery"] == dict(
+            sent, receipt_ref="peer/repo#128 merged", receipted_at=rec["updated_at"]), rec
+        assert lifecycle(root)[-1] == "opf-record transition CN-2 sent -> acknowledged", lifecycle(root)
+
+
+def flip_t73_delivery():
+    """The planner writes no delivery bundle (the reviewed head's behaviour): every send is refused."""
+    return patch.object(record, "_delivery_fields", lambda req, ts: {})
+
+
+def flip_t73_rejection():
+    """The rejection of sent/proposed removes proposed_from only and keeps the bundle, whose sent_at a
+    proposed contribution may not carry."""
+    return patch.object(record, "_proposal_keys", lambda rtype, cur_state, rejection: (record.PROPOSED_FROM,))
+
+
+def flip_t73_receipt():
+    """The rejection of acknowledged/proposed keeps the receipt keys, which a sent contribution may not
+    carry."""
+    return patch.object(record, "_rejected_delivery", lambda rtype, cur_state, rejection, row: None)
 
 
 def t8_collision(fx):
@@ -5295,6 +5395,8 @@ TESTS = (
     ("T72-supersedes-archived-cycle", t72_archived_cycle, flip_t72_archived_cycle),
     ("T72-register-ruling-and-pattern", t72_register, flip_t72_links),
     ("T72-register-assistant-ruling", t72_assistant_ruling, flip_t72_trust),
+    ("T73-contribution-delivery-bundle", t73_contribution_delivery, (flip_t73_delivery, flip_t73_rejection,
+                                                                    flip_t73_receipt)),
 )
 
 
