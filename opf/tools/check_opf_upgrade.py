@@ -2105,7 +2105,8 @@ def _suite_isolated():
             # FIX2) the TOCTOU disclosure on _opf_write_guard.unlink_owned_lease now also discloses the false-success
             # (exit-0 "released") over a swapped peer lease, not only the errant unlink, and names the
             # release-only-when-no-run-is-live reachability condition. Assert the extended clause is present.
-            _fix2_doc = (opf._opf_write_guard.unlink_owned_lease.__doc__ or "").lower()
+            import _optlevel
+            _fix2_doc = (_optlevel.source_docstring(opf._opf_write_guard.__file__, "unlink_owned_lease") or "").lower()
             check("FIX2 TOCTOU disclosure covers the false-success residual",
                   "reports exit-0 success" in _fix2_doc and 'false "released"' in _fix2_doc
                   and "release-only-when-no-run-is-live" in _fix2_doc)

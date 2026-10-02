@@ -42,6 +42,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))  # _journal relocated to opf/tools (OPF-SELF-CONTAIN)
 import _journal  # noqa: E402  the 9.3 engine: contained fd-bound helpers (open/read/lstat/apply/is_terminal)
+import _optlevel  # noqa: E402  level-0 source parse for the docstring check, shared with opf/tools
 
 try:
     import tomllib
@@ -1603,7 +1604,7 @@ def self_test():
         _hdr_m2 = _render_history([row(0, 1, GENESIS)]).lower()
         for _tok in ("interior", "tail-edit", "truncation"):
             check("M2: generated pin-history header discloses '{}'".format(_tok), _tok in _hdr_m2)
-        _vdoc_m2 = (verify_chain.__doc__ or "").lower()
+        _vdoc_m2 = (_optlevel.source_docstring(__file__, "verify_chain") or "").lower()
         check("M2: verify_chain docstring discloses interior-only + tail-edit",
               "interior" in _vdoc_m2 and "tail-edit" in _vdoc_m2)
 

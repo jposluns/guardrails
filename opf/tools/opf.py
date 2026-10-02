@@ -403,6 +403,7 @@ def _self_test_entry_gap(tree):
     a name (_self_test_or_expression_store), and the block's statements after the canonical one are a usage
     refusal or a live-mode dispatch (_entry_tail_gap); otherwise it names the first rule broken."""
     import ast
+    import _optlevel
 
     def bindings_of(name, imported=False):
         # The line of each binding of `name` _binds counts at module scope and of each `global` naming it;
@@ -428,7 +429,7 @@ def _self_test_entry_gap(tree):
     if not isinstance(block, ast.If):
         return True, "its `__main__` test (line {}) is a `{}` statement, not an `if`".format(
             line, type(block).__name__.lower())
-    if ast.dump(block.test) != ast.dump(ast.parse(_ENTRY_TEST, mode="eval").body):
+    if ast.dump(block.test) != ast.dump(_optlevel.parse(_ENTRY_TEST, mode="eval").body):
         return True, "its `__main__` block (line {}) does not test exactly `{}`".format(block.lineno, _ENTRY_TEST)
     if block.orelse:
         return True, "its `__main__` block (line {}) has an else".format(block.lineno)
@@ -437,7 +438,7 @@ def _self_test_entry_gap(tree):
     if not any(isinstance(node, ast.Import) and any(alias.name == "sys" and alias.asname is None
                                                     for alias in node.names) for node in tree.body):
         return True, "it does not `import sys` at top level"
-    entry = ast.dump(ast.parse(_ENTRY_STATEMENT).body[0])
+    entry = ast.dump(_optlevel.parse(_ENTRY_STATEMENT).body[0])
     if ast.dump(block.body[0]) != entry:
         if any(ast.dump(statement) == entry for statement in block.body[1:]):
             return True, "the canonical `--self-test` statement is not the first in its `__main__` block"
@@ -621,6 +622,7 @@ def _self_test_entry_gaps(directory, required=()):
     a code-review matter: the guard is for an accidental missing or miswired entry. The exact-form rule is
     conservative: a working entry in any other form is a gap."""
     import ast
+    import _optlevel
     gaps, exposers = {}, set()
     try:
         names = sorted(os.listdir(directory))
@@ -645,7 +647,7 @@ def _self_test_entry_gaps(directory, required=()):
             gaps[name] = "it cannot be read ({})".format(type(exc).__name__)
             continue
         try:
-            exposes, reason = _self_test_entry_gap(ast.parse(source, path))
+            exposes, reason = _self_test_entry_gap(_optlevel.parse(source, path))
         except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
             gaps[name] = "it cannot be parsed ({})".format(type(exc).__name__)
             continue
@@ -1545,6 +1547,7 @@ def _watchdog_completion_case(mode):
     import threading
     from unittest.mock import patch
     import _opf_emit as emit
+    import _optlevel
 
     command = [sys.executable, "-I", "-B", "-c", "return 0"]
 
@@ -5665,7 +5668,10 @@ def _watchdog_completion_case(mode):
 
         leg11_interpreter_pinned(sys.version_info)
 
-        module_tree = ast.parse(inspect.getsource(emit))
+        # A level-0 parse keeps docstrings under -OO: members of this tree are
+        # indexed, spliced and recompiled below, so they must not follow
+        # the interpreter's optimization level.
+        module_tree = _optlevel.parse(inspect.getsource(emit))
         module_functions, module_methods, module_classes = {}, {}, {}
         for stmt in module_tree.body:
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -7070,7 +7076,7 @@ def _watchdog_completion_case(mode):
         # QA32 vector was verified ACCEPTED (red) by the fix-10
         # machinery at 7182a86e.
         def leg11_vector(source):
-            function = ast.parse(textwrap.dedent(source)).body[0]
+            function = _optlevel.parse(textwrap.dedent(source)).body[0]
             capturing = next(node for node in function.body
                              if isinstance(node, try_nodes))
             return function, capturing
@@ -7188,7 +7194,7 @@ def _watchdog_completion_case(mode):
         # QA31 codex BLOCKER 2: a local rebinding shadows an imported
         # module name -- the receiver is NOT the module, and the
         # origin proof must FAIL it, never clear it as external.
-        shadowing = ast.parse(textwrap.dedent("""
+        shadowing = _optlevel.parse(textwrap.dedent("""
             def mutant(self):
                 os = _qa31_object
                 os.poll()
@@ -7213,7 +7219,7 @@ def _watchdog_completion_case(mode):
         # setattr) on an imported module poisons the NAME module-wide
         # -- module-owned cleanup monkey-patched onto os must never
         # clear as external.
-        poisoned_tree = ast.parse(textwrap.dedent("""
+        poisoned_tree = _optlevel.parse(textwrap.dedent("""
             import os
 
             class _Vector:
@@ -7229,7 +7235,7 @@ def _watchdog_completion_case(mode):
             "an attribute assignment on an imported module did not "
             "poison the imported name: module-owned cleanup can hide "
             "on the module object (fix 10, QA31 gemini BLOCKER c)")
-        setattr_tree = ast.parse(textwrap.dedent("""
+        setattr_tree = _optlevel.parse(textwrap.dedent("""
             import os
             setattr(os, "sneak_cleanup", _fixture_signal)
             """))
@@ -7361,7 +7367,7 @@ def _watchdog_completion_case(mode):
         # accepted; the inverted conditional and a conditional
         # guarding a DIFFERENT name are rejected.
         def vector_pending_arg(source):
-            return ast.parse(
+            return _optlevel.parse(
                 textwrap.dedent(source)).body[0].value.args[0]
 
         boundary_pending_shape(vector_pending_arg("""
@@ -7740,14 +7746,14 @@ def _watchdog_completion_case(mode):
         # runs nothing and must be ACCEPTED -- while the same
         # spelling in an AnnAssign's VALUE executes at the statement
         # and stays rejected.
-        unevaluated = ast.parse(textwrap.dedent("""
+        unevaluated = _optlevel.parse(textwrap.dedent("""
             def step():
                 marker: step.__annotations__
             """)).body[0]
         assert not list(annotation_reads(unevaluated.body)), (
             "an unevaluated local annotation was scanned as a "
             "deferred-annotation READ (fix 16, QA37 codex MINOR)")
-        evaluated = ast.parse(textwrap.dedent("""
+        evaluated = _optlevel.parse(textwrap.dedent("""
             def step():
                 marker: object = step.__annotations__
             """)).body[0]
@@ -7765,7 +7771,7 @@ def _watchdog_completion_case(mode):
         # over-rejected though it runs nothing. Both scanners now
         # skip the annotation, and both still see the VALUE, which
         # executes at the statement.
-        unevaluated_call = ast.parse(textwrap.dedent("""
+        unevaluated_call = _optlevel.parse(textwrap.dedent("""
             def step():
                 marker: getattr(step, "__annotations__")
             """)).body[0]
@@ -7773,7 +7779,7 @@ def _watchdog_completion_case(mode):
             "a call inside an unevaluated local annotation was "
             "scanned as an executing call (fix 17, QA38 "
             "codex/claude MINOR)")
-        evaluated_call = ast.parse(textwrap.dedent("""
+        evaluated_call = _optlevel.parse(textwrap.dedent("""
             def step():
                 marker: object = getattr(step, "__annotations__")
             """)).body[0]
@@ -9605,12 +9611,12 @@ def _watchdog_completion_case(mode):
             "the pinned QA38 mutation site (`pending = exc` inside "
             "_finish_close) is no longer unique (fix 17)",
             len(capture_assigns))
-        capture_assigns[0].value = ast.parse(
+        capture_assigns[0].value = _optlevel.parse(
             "exc if not self.armed else None", mode="eval").body
         mutant_namespace = dict(vars(emit))
         exec(compile(ast.fix_missing_locations(ast.Module(
                 body=[mutant_member], type_ignores=[])),
-             "<fix 17 QA38 pinned mutant>", "exec"),
+             "<fix 17 QA38 pinned mutant>", "exec", optimize=0),
              mutant_namespace)
         qa38_mutant = mutant_namespace["_finish_close"]  # fix 32 reuses it
         try:
@@ -9692,12 +9698,12 @@ def _watchdog_completion_case(mode):
                 "the pinned QA39 capture's holding body is not "
                 "unique (fix 18)", len(holders))
             at = holders[0].body.index(capture_assigns[0])
-            holders[0].body[at + 1:at + 1] = ast.parse(
+            holders[0].body[at + 1:at + 1] = _optlevel.parse(
                 mutation_source).body
             mutant_namespace = dict(vars(emit))
             exec(compile(ast.fix_missing_locations(ast.Module(
                     body=[mutant_member], type_ignores=[])),
-                 "<fix 18 QA39 pinned mutant>", "exec"),
+                 "<fix 18 QA39 pinned mutant>", "exec", optimize=0),
                  mutant_namespace)
             try:
                 with patch.object(
@@ -9758,7 +9764,7 @@ def _watchdog_completion_case(mode):
         )
         for (mutation_source, derived_states, firing_states,
              vector) in fix19_vectors:
-            probe_member = ast.parse(
+            probe_member = _optlevel.parse(
                 "def probe(self):\n" + "".join(
                     "    " + line + "\n"
                     for line in
@@ -9793,7 +9799,7 @@ def _watchdog_completion_case(mode):
                 "the pinned QA40 capture's holding body is not "
                 "unique (fix 19)", len(holders))
             at = holders[0].body.index(capture_assigns[0])
-            holders[0].body[at + 1:at + 1] = ast.parse(
+            holders[0].body[at + 1:at + 1] = _optlevel.parse(
                 mutation_source).body
             mutant_overrides = derived_overrides(
                 "m:_FixtureProcess._finish_close", mutant_member)
@@ -9806,7 +9812,7 @@ def _watchdog_completion_case(mode):
             mutant_namespace = dict(vars(emit))
             exec(compile(ast.fix_missing_locations(ast.Module(
                     body=[mutant_member], type_ignores=[])),
-                 "<fix 19 QA40 pinned mutant>", "exec"),
+                 "<fix 19 QA40 pinned mutant>", "exec", optimize=0),
                  mutant_namespace)
             for pin_state in firing_states:
                 behavioural_case(
@@ -9888,7 +9894,7 @@ def _watchdog_completion_case(mode):
         )
         for (mutation_source, derived_states, firing_states,
              vector) in fix20_vectors:
-            probe_member = ast.parse(
+            probe_member = _optlevel.parse(
                 "def probe(self):\n" + "".join(
                     "    " + line + "\n"
                     for line in
@@ -9924,7 +9930,7 @@ def _watchdog_completion_case(mode):
                 "the pinned QA41 capture's holding body is not "
                 "unique (fix 20)", len(holders))
             at = holders[0].body.index(capture_assigns[0])
-            holders[0].body[at + 1:at + 1] = ast.parse(
+            holders[0].body[at + 1:at + 1] = _optlevel.parse(
                 mutation_source).body
             mutant_overrides = derived_overrides(
                 "m:_FixtureProcess._finish_close", mutant_member)
@@ -9938,7 +9944,7 @@ def _watchdog_completion_case(mode):
             mutant_namespace = dict(vars(emit))
             exec(compile(ast.fix_missing_locations(ast.Module(
                     body=[mutant_member], type_ignores=[])),
-                 "<fix 20 QA41 pinned mutant>", "exec"),
+                 "<fix 20 QA41 pinned mutant>", "exec", optimize=0),
                  mutant_namespace)
             for pin_state in firing_states:
                 behavioural_case(
@@ -10867,7 +10873,7 @@ def _watchdog_completion_case(mode):
             "the pinned QA51 capture's holding body is not unique "
             "(fix 30)", len(holders))
         at = holders[0].body.index(capture_assigns[0])
-        holders[0].body[at + 1:at + 1] = ast.parse(
+        holders[0].body[at + 1:at + 1] = _optlevel.parse(
             "try:\n"
             "    if self.__qa51 == 7:\n"
             "        pending = None\n"
@@ -10885,13 +10891,13 @@ def _watchdog_completion_case(mode):
             "compiler mangles it (fix 30, QA51)", mutant_overrides)
         assert driven_state(dict([("__class__", True)]),
                             mutant_overrides), mutant_overrides
-        mutant_class = ast.parse(
+        mutant_class = _optlevel.parse(
             "class _FixtureProcess:\n    pass").body[0]
         mutant_class.body = [mutant_member]
         mutant_namespace = dict(vars(emit))
         exec(compile(ast.fix_missing_locations(ast.Module(
                 body=[mutant_class], type_ignores=[])),
-             "<fix 30 QA51 pinned mutant>", "exec"),
+             "<fix 30 QA51 pinned mutant>", "exec", optimize=0),
              mutant_namespace)
         behavioural_case(held_case, finish_handles_driver,
                          TimeoutError("pending cancellation"),
@@ -12801,12 +12807,10 @@ def _parse_unoptimized(source):
     that parameter (3.13+), plain ast.parse before, which is equivalent because before 3.13 ast.parse
     never runs the AST optimizer, so it strips no docstring even under python -O or -OO. A bytes
     `source` is decoded as the interpreter decodes a source file, honouring a PEP 263 coding
-    declaration on line 1 or 2."""
-    import ast
+    declaration on line 1 or 2. It delegates to _optlevel.parse, the one shared source of this policy."""
+    import _optlevel
 
-    if sys.version_info >= (3, 13):
-        return ast.parse(source, optimize=0)
-    return ast.parse(source)
+    return _optlevel.parse(source)
 
 
 # The exact body _cmd_import must have after its docstring, compared by AST shape (no line numbers).
@@ -13741,6 +13745,7 @@ def _cli_self_test():
             KNOWN_VERBS branch, restoring any argument check ahead of the pointer, or adding any read,
             write, spawn or other statement to _cmd_import turns rows red."""
             import ast
+            import _optlevel
             import builtins as builtins_mod
             import pathlib
             import re
@@ -13854,7 +13859,7 @@ def _cli_self_test():
                                 "flagged")
             # The structural check flags each planted read or write (inserted ahead of the print) and each
             # rebinding (appended to the module); the unchanged source is clean, as asserted just above.
-            fn_node = [n for n in ast.parse(own_text).body
+            fn_node = [n for n in _optlevel.parse(own_text).body
                        if isinstance(n, ast.FunctionDef) and n.name == "_cmd_import"][0]
             lines = own_text.splitlines(keepends=True)
             at = fn_node.body[1].lineno - 1
@@ -13928,7 +13933,7 @@ def _cli_self_test():
             # A watched binding moved under a sys.argv or environment condition, into a try, or past the def
             # keeps its count and literal but can be unbound when the body runs: each is flagged.
             def nest(name, head, tail):
-                s = [s for s in ast.parse(own_text).body if isinstance(s, (ast.Assign, ast.Import))
+                s = [s for s in _optlevel.parse(own_text).body if isinstance(s, (ast.Assign, ast.Import))
                      and name in [getattr(t, "id", None) for t in getattr(s, "targets", ())]
                      + [a.name for a in getattr(s, "names", ())]][0]
                 a, z = s.lineno - 1, s.end_lineno

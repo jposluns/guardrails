@@ -85,6 +85,7 @@ import _opf_schema       # noqa: E402  record envelope + baseline type schemas +
 import _opf_worklog      # noqa: E402  manifest-selected ledger intake
 import _opf_release      # noqa: E402  version.toml + worklog.toml validators + SemVer
 import _opf_emit          # noqa: E402  canonical TOML emitter (emit_checked) for the machine projection
+import _optlevel         # noqa: E402  level-0 source parses for the docstring checks
 
 try:
     import tomllib
@@ -2434,7 +2435,8 @@ def self_test():
         # a writer-less FIFO source fails closed without hanging, is asserted by "fifo-source-fails-closed-
         # not-hang" above (an actual FIFO under a watchdog), which discriminates the real O_NONBLOCK guard.
         check("read-ledger-schema-divergence-disclosed",
-              "optional-marker" in _load_worklog.__doc__ and "optional-marker" in _load_version.__doc__)
+              "optional-marker" in _optlevel.source_docstring(__file__, "_load_worklog")
+              and "optional-marker" in _optlevel.source_docstring(__file__, "_load_version"))
         check("entry-writes-fixed-date", 'date = "2026-01-01T00:00:00Z"' in _entry("WL-2", "fixed", "x"))
 
         # F4 (cited sink, B2 class): a spec-VALID free-text severity renders as LITERAL text, forging no
