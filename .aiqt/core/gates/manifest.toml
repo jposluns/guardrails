@@ -474,6 +474,15 @@ class = "a"
 residue = "It runs the deterministic standards-currency self-test. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
+id = "cwe-importer-selftest"
+script = "tools/import_cwe.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "a"
+residue = "It runs the CWE importer's offline fixture self-test: the fail-closed render refusals over synthetic catalogue bytes and the #378 close vectors for its _close_fd_propagating copy (tools/_close_selftest.py). It never reaches the network, never runs acquire or render against the MITRE catalogue, and does not validate the committed cwe.toml, which the standards gates check. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
 id = "hooks-behaviour-selftest"
 script = "tools/selftest_aiqt_hooks.py"
 rules = []

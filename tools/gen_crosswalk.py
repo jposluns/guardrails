@@ -150,6 +150,34 @@ def _toml_str(value):
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
 
 
+def _close_fd_propagating(fd):
+    """Close a descriptor on a FAIL-CLOSED path: the close error PROPAGATES. Single close (P1, #378):
+    exactly ONE os.close; if it raises, the number counts as released (close(2) on Linux releases it early,
+    even when the close then reports EINTR or EIO, and a retry can close another thread's reused
+    descriptor: man 2 close), so it is never probed or closed again, and the ORIGINAL close error
+    propagates unchanged. Inlined from opf/tools/_journal._close_fd_propagating (the same body) so this
+    tool keeps working without opf/tools present (copied, mutated, or shipped alone)."""
+    os.close(fd)
+
+
+def _close_fd_yielding(fd):
+    """Close a descriptor from an `except` handler or a `finally` block without letting a close error
+    REPLACE the exception already in flight there: when an exception is unwinding through, or being handled
+    in, the CALLING frame, the same single close still runs (P1: one os.close, the number released either
+    way and never touched again) but its close error is dropped so the ORIGINAL exception keeps
+    propagating; on the normal path this is exactly _close_fd_propagating, so a close error still fails
+    closed. Inlined from opf/tools/_journal._close_fd_yielding (the same body) so this tool keeps working
+    without opf/tools present."""
+    tb = sys.exc_info()[2]
+    if tb is None or tb.tb_frame is not sys._getframe(1):
+        _close_fd_propagating(fd)
+        return
+    try:
+        _close_fd_propagating(fd)
+    except OSError:
+        pass                                      # the in-flight exception wins; the fd was still released
+
+
 def _open_dir_at(dir_fd, name, create):
     """G8/G9: open directory `name` beneath dir_fd through an O_DIRECTORY|O_NOFOLLOW handle so a symlinked
     component can never redirect the archive out of the tree, creating it first when `create`. When a new
@@ -175,7 +203,7 @@ def _open_dir_at(dir_fd, name, create):
         try:
             os.fsync(dir_fd)                              # G9: persist the newly-created directory entry
         except OSError as exc:
-            os.close(fd)
+            _close_fd_yielding(fd)
             raise AdoptError("cannot fsync the parent after creating {!r} ({}); durability not confirmed, "
                              "fail-closed".format(name, exc))
     return fd
@@ -190,12 +218,13 @@ def _walk_components(base_fd, names, create):
     try:
         for name in names:
             nxt = _open_dir_at(fd, name, create)
-            if close_prev:
-                os.close(fd)
+            prev, prev_owned = fd, close_prev             # held first: a raising close cannot strand nxt
             fd, close_prev = nxt, True
+            if prev_owned:
+                _close_fd_propagating(prev)
     except BaseException:
         if close_prev:
-            os.close(fd)
+            _close_fd_yielding(fd)
         raise
     return fd
 
@@ -215,7 +244,7 @@ def _read_payload_fd(entry_fd):
             raise AdoptError("archived payload is not a regular file")
         return _read_fd_all(pfd)
     finally:
-        os.close(pfd)
+        _close_fd_yielding(pfd)
 
 
 _TMP_SEQ = itertools.count()
@@ -242,7 +271,7 @@ def _verify_published_payload(entry_fd, digest, tmp_stat):
         if hashlib.sha256(_read_fd_all(pfd)).hexdigest() != digest:
             raise AdoptError("published payload {}/payload does not hash to its digest".format(digest))
     finally:
-        os.close(pfd)
+        _close_fd_yielding(pfd)
 
 
 def _write_payload(entry_fd, digest, data):
@@ -309,7 +338,7 @@ def archive_file(archive_fd, data):
         _write_payload(entry_fd, digest, data)
         return digest
     finally:
-        os.close(entry_fd)
+        _close_fd_yielding(entry_fd)
 
 
 def _read_fd_all(fd):
@@ -367,7 +396,7 @@ def build_candidates(legacy_root, archive_fd, successor_texts):
             owner = os.fstat(fd).st_uid
             data = _read_fd_all(fd)                        # archive raw bytes FIRST (before any pointers)
         finally:
-            os.close(fd)
+            _close_fd_yielding(fd)
         digest = archive_file(archive_fd, data)
         rel = str(f.relative_to(legacy_root))
         try:
@@ -460,17 +489,17 @@ def run_adopter(legacy_root, out_dir, successor_texts):
         try:
             cand = build_candidates(legacy_root, archive_fd, successor_texts)
         finally:
-            os.close(archive_fd)
+            _close_fd_yielding(archive_fd)
         migration_fd = _walk_components(root_fd, (".aiqt", "migration"), create=True)
         try:
             _write_candidate(migration_fd, render_candidates(cand))
         finally:
-            os.close(migration_fd)
+            _close_fd_yielding(migration_fd)
     except AdoptError as exc:
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return exc.exit_code
     finally:
-        os.close(root_fd)
+        _close_fd_yielding(root_fd)
     print("wrote candidate crosswalk and {} archive entries under {}".format(
         len(cand["archive"]), out_dir))
     return 0
@@ -551,6 +580,42 @@ def main():
 #   (D10-C) the ADOPTER CLI (main() with --successor-inventory) emits ranked candidate mapping rows against
 #       the supplied successor inventory (rather than the pre-fix empty successor set that produced none).
 
+def _close_vectors(base):
+    """#378: the vectors for this tool's _close_fd_yielding copy and its representative site,
+    _read_payload_fd. A close that fails while an exception unwinds lets that exception through as the same
+    object; one that fails on the normal path raises; neither leaves a descriptor open. Returns (failures,
+    runs)."""
+    import _close_selftest
+    base.mkdir()
+    (base / "payload").write_bytes(b"payload")
+    ns = globals()
+    sent = _close_selftest._StSentinel("in flight at _read_payload_fd")
+
+    def read_payload(raise_sent):
+        def call(fault):
+            real = ns["_read_fd_all"]
+
+            def spy(fd):
+                fault.arm(fd)
+                if raise_sent:
+                    raise sent
+                return real(fd)
+            entry_fd = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY)
+            try:                                          # the seam is swapped only where its restore runs
+                ns["_read_fd_all"] = spy
+                _read_payload_fd(entry_fd)
+            finally:
+                ns["_read_fd_all"] = real
+                os.close(entry_fd)
+        return call
+
+    vectors = (("gen_crosswalk site _read_payload_fd: finally while an exception unwinds", True, "AR",
+                read_payload(True), lambda e: e is sent),
+               ("gen_crosswalk site _read_payload_fd: normal path", False, "BR", read_payload(False), None)
+               ) + _close_selftest._st_helper_vectors(ns)
+    return _close_selftest._st_close_check(ns, vectors)
+
+
 def self_test():
     import io
     import shutil
@@ -570,6 +635,7 @@ def self_test():
         print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
         return 2
     failures = []
+    close_runs = 0
     try:
         # (a) REPO mode generate + drift-clean + determinism.
         good = tmp / "good"
@@ -851,6 +917,11 @@ def self_test():
         if "[[mapping]]" not in c_text or 'successor-clause-id = "succ.alpha"' not in c_text:
             failures.append("D10-C: the adopter CLI must emit ranked candidate mapping rows against the "
                             "supplied successor inventory (main() previously passed an empty successor set)")
+
+        # #378: this tool's _close_fd_yielding copy and its representative site, each green and red under
+        # its flip.
+        close_failures, close_runs = _close_vectors(tmp / "close")
+        failures.extend(close_failures)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -868,7 +939,8 @@ def self_test():
           "identical one is idempotent, and computes the unmatched list. Section 8.6-conformant: a pointer "
           "lives only in adopter migration state, never in the archived source, and the Expected-successor:/"
           "Coverage: pointer lines are stripped from the ranking input, so changing only a predecessor's "
-          "pointer content does not change which successor a candidate row names.")
+          "pointer content does not change which successor a candidate row names. The {} #378 close-vector "
+          "runs pass, each flip leg red by its own assertion.".format(close_runs))
     return 0
 
 

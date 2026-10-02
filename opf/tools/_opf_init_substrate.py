@@ -718,8 +718,8 @@ def begin_operation(cap, plan_bytes):
         except _opf_oplock.OpLockError as exc:
             raise InitSubstrateError(str(exc))
         plan_created = True
-        os.close(plan_fd)
-        plan_fd = None
+        closing, plan_fd = plan_fd, None  # cleared first: the unwind never closes it twice
+        _journal._close_fd_propagating(closing)
         op_st = os.fstat(op_fd)
         return OpSubstrate(op_id=op_id, store_root=_writer_root(cap)[0], ops_fd=ops_fd,
                            op_fd=op_fd, op_ident=(op_st.st_dev, op_st.st_ino),
@@ -2421,6 +2421,52 @@ def _t_s22_close_failure_unwind(d, env):
         assert k > 1, "the sweep must see closes in the control-root open ({})".format(store)
 
 
+def _t_s23_plan_close_reuse(d, env):
+    """T-s23 (#378 P1): begin_operation clears plan_fd before its propagating close of the
+    just-written plan, so a close that fails after releasing its number (close(2) on Linux) is
+    never closed again by the unwind. Driven through the shared _journal close harness: the plan
+    descriptor _create_control_file returns is armed, its close releases the number to a reuser
+    and raises EIO, the unwind removes the just-created tree, and that close error propagates.
+    Green is no problem at all, with and without the PROBE watch; under the close-then-rebind
+    body put back (the close of plan_fd, then plan_fd = None) it is red by REUSE alone, the
+    unwind's close of plan_fd closing the reuser's number."""
+    import inspect
+    root = _opf_oplock._st_git_store(d, "repo", env)
+    real_create = _opf_oplock._create_control_file
+
+    def drive(begin):
+        def call(fault):
+            cap = _opf_oplock.acquire_operation(root, "opf-init")
+            try:
+                def armed(*args, **kwargs):
+                    fd, ident = real_create(*args, **kwargs)
+                    return fault.arm(fd), ident
+                _opf_oplock._create_control_file = armed
+                try:
+                    begin(cap, _st_plan_bytes(cap.op_id))
+                finally:
+                    _opf_oplock._create_control_file = real_create
+            finally:
+                _opf_oplock.release_operation(cap)
+        return call
+
+    for watch in (False, True):
+        got = _journal._st_close_run(drive(begin_operation), False, None, watch)
+        assert not got, "T-s23 (watch={}): expected green, got {}".format(watch, got)
+        assert os.listdir(_st_sub_ops(root)) == [], "the unwind must remove the just-created tree"
+    source = inspect.getsource(begin_operation)
+    new = ("        closing, plan_fd = plan_fd, None  # cleared first: the unwind never closes it twice\n"
+           "        _journal._close_fd_propagating(closing)\n")
+    assert source.count(new) == 1, "T-s23 revert target found {} times".format(source.count(new))
+    ns = dict(globals())
+    exec(compile(source.replace(new, "        _journal._close_fd_propagating(plan_fd)\n"
+                                     "        plan_fd = None\n"), __file__, "exec"), ns)
+    red = _journal._st_close_run(drive(ns["begin_operation"]), False, None, False)
+    assert [problem.split(":")[0] for problem in red] == ["REUSE"], \
+        "T-s23 under the close-then-rebind body: expected red by REUSE alone, got {}".format(
+            red or "green")
+
+
 def self_test():
     return _opf_oplock._st_with_git_lifecycle(self_test_isolated)
 
@@ -2441,8 +2487,9 @@ def self_test_isolated():
     publication discarded or resumed (T-s17), the sibling outcomes home (T-s18), the nested
     store's substrate home shared under its enclosing repository's common git dir (T-s19),
     distinct nested stores' distinct homes (T-s20), the signal-deferred control-root
-    resolution and classifier (T-s21), and the leak-free unwind of a failing close in the
-    control-root open (T-s22). A missing containment primitive or git binary, or a fixture base inside
+    resolution and classifier (T-s21), the leak-free unwind of a failing close in the
+    control-root open (T-s22), and the plan descriptor's ownership-first close that the unwind
+    never closes again (T-s23). A missing containment primitive or git binary, or a fixture base inside
     a git repository, is a REFUSAL (non-zero), never a clean skip. The git
     fixtures are pinned hermetically exactly as the lock module's self-test pins them."""
     import tempfile
@@ -2493,6 +2540,8 @@ def self_test_isolated():
          _t_s21_deferred_resolution),
         ("T-s22 a failing close anywhere in the control-root open leaks no descriptor",
          _t_s22_close_failure_unwind),
+        ("T-s23 begin_operation's failing plan close is never closed again by the unwind",
+         _t_s23_plan_close_reuse),
     )
 
     base = os.path.realpath(tempfile.mkdtemp(prefix="opf-init-substrate-selftest-"))
