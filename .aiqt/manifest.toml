@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "4950f237cf4800bead43561581987cf598c271401ee212deb5cc7422f1f866c7"
+tree-sha256 = "20e8b96dcee51dcdef4d6b335d39fe18cdf76efae6a0a712844b9b0ba99c838d"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2576,8 +2576,8 @@ sha256 = "534a2f639ae07e1009760b71a3a23a588a02dfbd4baa07a40cade9d01ce4ae79"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_observe.py"
-bytes = 185069
-sha256 = "cc09578a8ab9bceaa7464e52d18c5f5d002646de9c3b11dd6d5d72c4efcc36e5"
+bytes = 227979
+sha256 = "f74e5f2c66aa19465edb5f479cb14e02d2d710eca8e19bdee59b6d12e6c1b70f"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_plan.py"
@@ -3321,8 +3321,8 @@ sha256 = "5893faf4680c720f09083ecb4aedfdf68e8e54c5bc35a1fed33dd918ddcd64e5"
 
 [[sources]]
 path = "tools/check_release_cut.py"
-bytes = 142641
-sha256 = "5385d7151be91e7b329e89457abe0b238dcaa3994709480a9a9f401eb7f3ce94"
+bytes = 142950
+sha256 = "b3ed27c94a886ccb381080f6f690cfa514c30db6975a8422827ca682ee765050"
 
 [[sources]]
 path = "tools/check_release_delta.py"
