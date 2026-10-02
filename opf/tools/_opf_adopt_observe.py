@@ -1320,8 +1320,8 @@ def _cancellation_self_test():
 
         def close(self):
             if self.fd is not None:
-                os.close(self.fd)
-                self.fd = None
+                fd, self.fd = self.fd, None               # ownership first: a failed close is never
+                os.close(fd)                              # closed again by a later close() (P1, #378)
 
         def detach(self):
             fd, self.fd = self.fd, None

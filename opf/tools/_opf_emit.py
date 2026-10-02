@@ -2025,8 +2025,8 @@ class _FixtureProcess:
             status = _fixture_drain(subject, subject_fd, deadline=cleanup_deadline)
             subject = None
             if subject_fd is not None:
-                os.close(subject_fd)
-                subject_fd = None
+                fd, subject_fd = subject_fd, None         # ownership first: a failed close is never
+                os.close(fd)                              # closed again by the cleanup (P1, #378)
             if status is None:
                 raise ChildStatusUnavailable("subject status unavailable")
             stage = "receipt"
@@ -2734,17 +2734,18 @@ class _FixtureProcess:
         import time
         pending = None
 
+        # Ownership first (#378 P1): the attribute lets go of the number
+        # before os.close, so a raising close (the number counts as
+        # released) never leaves it named for a later signal through it.
         def close_guardian_pidfd():
-            fd = self.pidfd
+            fd, self.pidfd = self.pidfd, None
             if fd is not None:
                 os.close(fd)
-                self.pidfd = None
 
         def close_subject_pidfd():
-            fd = self.subject_pidfd
+            fd, self.subject_pidfd = self.subject_pidfd, None
             if fd is not None:
                 os.close(fd)
-                self.subject_pidfd = None
 
         def close_report():
             self.report.close()
@@ -3299,6 +3300,320 @@ def _bounded_child_result(data, wstatus):
     return data.decode("utf-8", "replace")
 
 
+def _st_guardian_setup_failure(drive, setup_failed, recorded, journal, open_fd=None, private=None, reuse=None):
+    """#378: the guardian close vector with its first send raising. Its result must be this vector's named
+    red (NOFIRE, the guardian never ran, and WRONG naming SetupFailed) with no LEAK; every resource the setup
+    created must be closed through its own object; and descriptors opened afterwards, which take the
+    numbers those resources released, must still be the same files after gc.collect(), so no surviving
+    object closes a reused number later. Each of those descriptors opens a file this check creates in a
+    private directory (`private`, a fresh temporary directory unless a leg passes one it keeps until it has
+    checked the numbers), so its (st_dev, st_ino), recorded at open, is unique to this check while the
+    directory exists and no other lane's open of a reused number (of /dev/null or any other file) compares
+    equal. Each is owned from its open on (a failing fstat of it closes it, its number never yet released)
+    and by an ExitStack from its identity on, so an open that fails (`open_fd`, os.open unless a leg injects
+    one) releases the ones already opened and is this check's own named failure, never an escaping
+    exception. The stack's release closes a number only while fstat still returns the identity recorded at
+    its open, so a number this check expected released, and another lane reopened onto any other file, is
+    never closed by this check's cleanup either (#378 P1). `reuse`, when a leg passes one, is called with
+    the descriptors after gc.collect() and before they are checked, so the leg can put another file on one.
+    Returns the failures."""
+    import contextlib
+    import errno
+    import gc
+    import os
+    import tempfile
+    opener = os.open if open_fd is None else open_fd
+    created = []
+
+    def failing_send(sock):
+        raise OSError(errno.EPIPE, "self-test injected setup failure")
+    got = journal._st_close_run(drive(_FixtureProcess._guardian, send=failing_send, created=created), True,
+                                recorded, False)
+    failures = []
+    tags = [problem.split(":")[0] for problem in got]
+    if tags != ["NOFIRE", "WRONG"] or setup_failed.__name__ not in got[1] or "injected setup failure" not in got[1]:
+        failures.append("guardian-close-reuse setup failure: expected red by NOFIRE and WRONG naming {}, got "
+                        "{}".format(setup_failed.__name__, got or "green"))
+    if len(created) != 3 or not all(getattr(r, "closed", None) is True or getattr(r, "_closed", None) is True
+                                    for r in created):
+        failures.append("guardian-close-reuse setup failure: expected its 3 resources each closed through "
+                        "its object, got {}".format(created))
+
+    def release(fd, ident):
+        """Close fd only while it still names the file recorded at its open, this check's own."""
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            return                                        # released already: never closed again
+        if (st.st_dev, st.st_ino) != ident:
+            return                                        # another file holds the number now: not ours
+        try:
+            os.close(fd)
+        except OSError:
+            pass                                          # released either way (close(2)); never re-touched
+    with contextlib.ExitStack() as owned:
+        if private is None:                               # removed after every descriptor is released
+            private = owned.enter_context(tempfile.TemporaryDirectory(prefix="opf-emit-setup-"))
+        fresh = []
+        ident = []
+        try:
+            for index in range(4):
+                fd = opener(os.path.join(private, "fresh-{}".format(index)), os.O_RDONLY | os.O_CREAT | os.O_EXCL,
+                            0o600)
+                try:
+                    st = os.fstat(fd)
+                except BaseException:
+                    os.close(fd)                          # never released yet: still this check's own number
+                    raise
+                owned.callback(release, fd, (st.st_dev, st.st_ino))   # owned from its identity on
+                fresh.append(fd)
+                ident.append((st.st_dev, st.st_ino))      # this check's own file, recorded at open
+        except OSError as exc:
+            failures.append("guardian-close-reuse setup failure: opening descriptor {} of 4 after the leg "
+                            "failed: {!r}".format(len(fresh) + 1, exc))
+            return failures
+        del created[:]
+        gc.collect()
+        if reuse is not None:
+            reuse(list(fresh))
+        after = []
+        for fd in fresh:
+            try:
+                after.append((os.fstat(fd).st_dev, os.fstat(fd).st_ino))
+            except OSError:
+                after.append(None)
+        if after != ident:
+            failures.append("guardian-close-reuse setup failure: a descriptor opened afterwards was closed or "
+                            "replaced after gc.collect() ({} became {})".format(ident, after))
+    return failures
+
+
+def _st_guardian_close_reuse():
+    """#378 P1: _FixtureProcess._guardian takes ownership of the subject pidfd before closing it after the
+    drain. Driven in-process with every process seam stubbed (no fork, no signal mask, os._exit raising), the
+    close fails after releasing its number to a reuser (the shared _journal close harness): the guardian
+    records the failure at stage "drain" and exits 125, and its cleanup never closes the number again.
+    Green is no problem at all, with and without the PROBE watch; under the close-then-rebind body put back
+    (os.close(subject_fd), then subject_fd = None) it is red by REUSE alone, the cleanup closing the reuser.
+    Every resource the vector creates (the socket pair, the report file) is owned by an ExitStack the moment
+    it exists, so a failing setup step is this vector's own named red (SetupFailed), each resource is closed
+    once through its object before the harness reads its descriptor table, and nothing is left for the
+    harness to close by number while a traceback keeps the object, whose collection would later close a
+    reused number in another lane. A setup-failure leg (the first send raising) checks exactly that, and
+    again with the second of the descriptors it opens afterwards failing to open: that is its named failure,
+    with the descriptor opened first closed. Every descriptor that leg owns opens a file it creates in a
+    private directory, so a number it expected released is closed only while fstat shows that file's
+    identity, by the leg and by the setup check's own cleanup alike: an identity leg shows a number another
+    lane reopened onto another file is never closed and is no failure, a reuse leg shows the setup check
+    reports a number replaced after gc.collect() and its cleanup leaves that number open, and a genuine leak
+    is still reported and closed.
+    The harness is loaded from its sibling FILE by explicit path, as _load_byte_canon_authority loads its
+    authority, so this runs under `python3 -I` too. Returns the failures."""
+    import contextlib
+    import errno
+    import gc
+    import importlib.util
+    import inspect
+    import json
+    import os
+    import signal
+    import socket
+    import tempfile
+    import textwrap
+    import time
+    import types
+    spec = importlib.util.spec_from_file_location("_opf_emit_close_harness",
+                                                  Path(__file__).resolve().parent / "_journal.py")
+    _journal = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(_journal)
+
+    class Exited(Exception):
+        def __init__(self, code):
+            super().__init__(code)
+            self.code = code
+
+    class SetupFailed(Exception):
+        """A step of the vector's own setup failed: this vector's red, never a green or another lane's."""
+
+    def drive(guardian, send=lambda sock: sock.sendall(b"G"), created=None):
+        def call(fault):
+            made = [] if created is None else created     # what the setup made, for the setup-failure leg
+            with contextlib.ExitStack() as owned:         # each resource owned the moment it exists
+                try:
+                    pair = socket.socketpair()
+                    for end in pair:
+                        owned.callback(end.close)
+                    made.extend(pair)
+                    peer, other = pair
+                    report = tempfile.TemporaryFile()
+                    owned.callback(report.close)
+                    made.append(report)
+                    send(other)
+                    child = types.SimpleNamespace(_launch_masked=set(), peer=peer, report=report, keep_fds=(),
+                                                  subject=None, deadline=time.monotonic() + 3600)
+
+                    def _exit(code):
+                        raise Exited(code)
+                    stubs = {"_fixture_close_all_except": lambda keep: None, "_fixture_subreaper": lambda: None,
+                             "_fixture_pidfd": lambda pid: fault.arm(os.open(os.devnull, os.O_RDONLY)),
+                             "_fixture_send_subject": lambda peer, subject, fd: None,
+                             "_fixture_ack_subject": os.close,
+                             "_fixture_cleanup_deadline": lambda deadline=None: deadline,
+                             "_fixture_drain": lambda subject, fd=None, deadline=None: 0}
+                    calls = {(os, "setpgid"): lambda pid, pgrp: None, (os, "fork"): lambda: 1 << 22,
+                             (os, "waitid"): lambda *args: (), (os, "_exit"): _exit,
+                             (signal, "pthread_sigmask"): lambda how, mask: set()}   # the caller's mask untouched
+                    seams = guardian.__globals__              # the reverted body runs in its own namespace
+                    saved = {name: seams[name] for name in stubs}, {seam: getattr(*seam) for seam in calls}
+                    enabled = gc.isenabled()
+                except Exception as exc:
+                    raise SetupFailed("guardian close vector setup failed: {!r}".format(exc)) from exc
+                try:
+                    seams.update(stubs)
+                    for (module, name), stub in calls.items():
+                        setattr(module, name, stub)
+                    guardian(child)
+                except Exited as exc:
+                    report.seek(0)
+                    failure = json.loads(report.read().decode("ascii"))
+                    if exc.code == 125 and failure["stage"] == "drain" \
+                            and failure["error"]["errno"] == fault.err.errno:
+                        raise _journal._StSentinel("recorded at drain")
+                    raise
+                finally:
+                    seams.update(saved[0])
+                    for (module, name), real in saved[1].items():
+                        setattr(module, name, real)
+                    if enabled:
+                        gc.enable()
+        return call
+
+    def recorded(exc):
+        return type(exc) is _journal._StSentinel
+
+    failures = []
+    for watch in (False, True):
+        got = _journal._st_close_run(drive(_FixtureProcess._guardian), True, recorded, watch)
+        if got:
+            failures.append("guardian-close-reuse (watch={}): expected green, got {}".format(watch, got))
+    failures += _st_guardian_setup_failure(drive, SetupFailed, recorded, _journal)
+    opened = []
+
+    def second_open_fails(path, flags, mode):
+        """The setup-failure leg's descriptor opens with the second one failing (EMFILE); each one opened is
+        recorded with its (st_dev, st_ino), taken while this leg still owns the number."""
+        if opened:
+            raise OSError(errno.EMFILE, "self-test injected open failure")
+        fd = os.open(path, flags, mode)
+        try:
+            st = os.fstat(fd)
+        except BaseException:
+            os.close(fd)
+            raise
+        opened.append((fd, (st.st_dev, st.st_ino)))
+        return fd
+
+    def close_if_left_open(fd, ident):
+        """A number this leg expected released is "left open", and closed here, only while fstat still shows
+        ident, a file this leg created in its private directory, which no other lane opens and whose inode
+        stays taken while the directory exists. The number may since belong to another thread's open, so a
+        number naming any other file (another lane's /dev/null included) is never closed (#378 P1). Returns
+        whether it closed fd."""
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            return False
+        if (st.st_dev, st.st_ino) != ident:
+            return False
+        os.close(fd)
+        return True
+
+    def own_file(name):
+        """A descriptor on a new file in the private directory, with its (st_dev, st_ino) taken at open."""
+        fd = os.open(os.path.join(private, name), os.O_RDONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            st = os.fstat(fd)
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd, (st.st_dev, st.st_ino)
+
+    def identity(fd):
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            return None
+        return st.st_dev, st.st_ino
+    with tempfile.TemporaryDirectory(prefix="opf-emit-setup-") as private:   # kept until every number is checked
+        got = _st_guardian_setup_failure(drive, SetupFailed, recorded, _journal, second_open_fails, private)
+        if len(got) != 1 or "opening descriptor 2 of 4" not in got[0] or "injected open failure" not in got[0]:
+            failures.append("guardian-close-reuse setup failure with its second open failing: expected that "
+                            "named failure alone, got {}".format(got or "green"))
+        for fd, ident in opened:
+            if close_if_left_open(fd, ident):
+                failures.append("guardian-close-reuse setup failure with its second open failing: the "
+                                "descriptor opened first was left open")
+        # Another lane opening a file onto the released number: dup2 puts a descriptor on this leg's own
+        # "other-lane" file onto a number this leg still owns, so the number is never free for a real lane to
+        # take meanwhile. It must not be closed and must not be reported; the leg then closes it only while
+        # it still names the other-lane file, whose identity no other lane's open shares.
+        other, other_ident = own_file("other-lane")
+        try:
+            reused, ident = own_file("reused")
+            try:
+                os.dup2(other, reused)
+            except BaseException:
+                os.close(reused)                          # dup2 failed: still this leg's own file
+                raise
+            if close_if_left_open(reused, ident):
+                failures.append("guardian-close-reuse identity check: closed a number another lane reopened "
+                                "onto another file")
+            elif identity(reused) != other_ident:
+                failures.append("guardian-close-reuse identity check: the number another lane reopened no "
+                                "longer names that lane's file")
+            else:
+                os.close(reused)                          # the other-lane file, which this leg owns
+            # The setup check's own cleanup: after gc.collect() another lane's file replaces the second
+            # descriptor the check opened (dup2 onto a number the check still owns). The check must report
+            # it replaced, and its ExitStack must leave the number open, as it names another file.
+            hit = []
+
+            def reuse(fresh):
+                os.dup2(other, fresh[1])
+                hit.append(fresh[1])
+            got = _st_guardian_setup_failure(drive, SetupFailed, recorded, _journal, reuse=reuse)
+            if len(got) != 1 or "closed or replaced" not in got[0]:
+                failures.append("guardian-close-reuse setup failure with a number another lane reused: expected "
+                                "that number reported replaced alone, got {}".format(got or "green"))
+            if len(hit) != 1 or identity(hit[0]) != other_ident:
+                failures.append("guardian-close-reuse setup failure: its cleanup closed a number another lane "
+                                "reused ({})".format(hit))
+            else:
+                os.close(hit[0])                          # the other-lane file, which this leg owns
+        finally:
+            os.close(other)
+        # A genuine leak: a number still naming this leg's own file is reported and closed.
+        leaked, ident = own_file("leaked")
+        if not close_if_left_open(leaked, ident) or identity(leaked) == ident:
+            failures.append("guardian-close-reuse identity check: a descriptor left open on this leg's own "
+                            "file was not reported and closed")
+            if identity(leaked) == ident:
+                os.close(leaked)
+    source = textwrap.dedent(inspect.getsource(_FixtureProcess._guardian))
+    new = ("fd, subject_fd = subject_fd, None         # ownership first: a failed close is never\n"
+           "            os.close(fd)                              # closed again by the cleanup (P1, #378)\n")
+    if source.count(new) != 1:
+        return failures + ["guardian-close-reuse: revert target found {} times".format(source.count(new))]
+    ns = dict(globals())
+    exec(compile(source.replace(new, "os.close(subject_fd)\n            subject_fd = None\n"), __file__,
+                 "exec"), ns)
+    red = _journal._st_close_run(drive(ns["_guardian"]), True, recorded, False)
+    if [problem.split(":")[0] for problem in red] != ["REUSE"]:
+        failures.append("guardian-close-reuse under the close-then-rebind body: expected red by REUSE alone, "
+                        "got {}".format(red or "green"))
+    return failures
+
+
 def self_test():
     """Round-trip fuzz over adversarial bodies, canonical-form determinism, constrained-subset coverage
     (accepted and rejected), and byte-canon cleanliness verified against _byte_canon itself."""
@@ -3659,53 +3974,109 @@ def self_test():
                             "token instead of CHILD-DIED (a successful exit was not required)")
 
         # (9) the parent must CLOSE the pipe read fd (rfd) after reaping, or every run_bounded call leaks a
-        # descriptor. Capture the rfd os.pipe hands out, run one bounded call, and confirm the parent's rfd
-        # is CLOSED afterward (fstat -> EBADF). Removing the parent os.close(rfd) leaves it open, which this
-        # detects (and then closes so the self-test itself leaks nothing).
+        # descriptor. Capture the rfd os.pipe hands out, run one bounded call, and confirm the parent released
+        # it. Removing the parent os.close(rfd) leaves it open, which this detects (and then closes so the
+        # self-test itself leaks nothing). #378 P1: the leg probes and closes by number only what it can show
+        # is still its own. The captured pipe's (st_dev, st_ino) is recorded the moment os.pipe returns, while
+        # the call still holds it (a pipe's inode is its own while an end is open, so no other lane's open
+        # compares equal), and every close of that number the leg's close stub sees in this process marks it
+        # released in a ledger. The number counts as left open only when no close released it AND fstat still
+        # returns the identity recorded at its open, and only then is it closed. Each leg runs twice: with the
+        # parent's close releasing the number, and with another lane's file put on it instead (dup2 of the
+        # leg's own "other-lane" pipe end onto the number at that close, so it is never free for a real lane
+        # meanwhile); after that run the number must still name the other-lane pipe (nothing closed it again,
+        # the leg's check included), and only then does the leg close it, its own descriptor.
         _pipe_real6 = _os6.pipe
-        _cap6 = {}
+        _close_real6 = _os6.close
 
-        def _cap_pipe6():
-            _r, _w = _pipe_real6()
-            _cap6["rfd"] = _r
-            return _r, _w
-
-        try:
-            _os6.pipe = _cap_pipe6
-            _leak_res = run_bounded(lambda: "LEAKCHK")
-        finally:
-            _os6.pipe = _pipe_real6
-        _rfd6 = _cap6.get("rfd")
-        _leaked6 = False
-        if _rfd6 is not None:
+        def _st_ident6(fd):
             try:
-                _os6.fstat(_rfd6)
-                _leaked6 = True                            # still open: the parent close was removed
+                _st = _os6.fstat(fd)
             except OSError:
-                _leaked6 = False
+                return None
+            return _st.st_dev, _st.st_ino
+
+        def _cap_pipe_into(cap):
+            """An os.pipe stand-in recording the rfd it hands out with its identity, taken while still held."""
+            def _cap_pipe():
+                _r, _w = _pipe_real6()
+                try:
+                    _st = _os6.fstat(_r)
+                except BaseException:
+                    _close_real6(_r)                       # never released yet: still this leg's own pipe
+                    _close_real6(_w)
+                    raise
+                cap.update(rfd=_r, wfd=_w, ident=(_st.st_dev, _st.st_ino), released=False)
+                return _r, _w
+            return _cap_pipe
+
+        def _cap_release6(cap, fd, real_close):
+            """The ledger: this process's first close of the captured rfd releases it, or under cap["reuse"]
+            puts the other-lane pipe on its number instead. Returns whether it handled fd."""
+            if _os6.getpid() != cap["owner"] or fd != cap.get("rfd") or cap.get("released") is not False:
+                return False                               # a forked child's close, or not the captured number
+            cap["released"] = True
+            if cap["reuse"]:
+                _os6.dup2(_oth_r6, fd)                     # the number goes straight to another lane's file
+            else:
+                real_close(fd)
+            return True
+
+        def _cap_left_open6(cap):
+            """Whether the captured rfd is left open: no close released it and fstat still shows its identity."""
+            return cap.get("released") is False and _st_ident6(cap["rfd"]) == cap["ident"]
+
+        def _cap_reuse_kept6(cap, label, key="rfd"):
+            """After a reuse run the captured number (cap[key]) must still name the other-lane pipe; the leg then
+            closes it, its own descriptor. Returns the failures."""
+            if cap.get(key) is None or _st_ident6(cap[key]) != _oth6:
+                return ["run_bounded/{}-reused-number: a number another lane reused was closed or replaced "
+                        "({})".format(label, cap.get(key))]
+            _close_real6(cap[key])
+            return []
+        _oth_r6, _oth_w6 = _pipe_real6()                   # the other-lane file: this leg's own pipe
+        _oth6 = _st_ident6(_oth_r6)
+        _cap6 = dict()
+
+        def _cap_close6(fd):
+            if not _cap_release6(_cap6, fd, _close_real6):
+                _close_real6(fd)
+        for _reuse6 in (False, True):
+            _tag6 = "-reused" if _reuse6 else ""
+            _cap6.clear()
+            _cap6.update(reuse=_reuse6, owner=_os6.getpid())
+            try:
+                _os6.pipe = _cap_pipe_into(_cap6)
+                _os6.close = _cap_close6
+                _leak_res = run_bounded(lambda: "LEAKCHK")
+            finally:
+                _os6.pipe = _pipe_real6
+                _os6.close = _close_real6
+            _leaked6 = _cap_left_open6(_cap6)
             if _leaked6:
-                _pipe_real6 and _os6.close(_rfd6)          # close the leak the test just detected
-        if _leak_res != "LEAKCHK":
-            failures.append("run_bounded/leak-check-setup: the capture run did not return its token")
-        if _leaked6:
-            failures.append("run_bounded/parent-rfd-leak: the parent did not close the pipe read fd "
-                            "(a descriptor leaks per call)")
+                _close_real6(_cap6["rfd"])                 # still this leg's own pipe: close the leak it detected
+            if _leak_res != "LEAKCHK":
+                failures.append("run_bounded/leak-check-setup{}: the capture run did not return its "
+                                "token".format(_tag6))
+            if _leaked6:
+                failures.append("run_bounded/parent-rfd-leak{}: the parent did not close the pipe read fd "
+                                "(a descriptor leaks per call)".format(_tag6))
+            elif _reuse6:
+                failures += _cap_reuse_kept6(_cap6, "parent-rfd")
 
         # (finding 7) the parent's wfd close was moved INSIDE the read/cleanup try/finally, so a wfd close that
         # RAISES (OSError EIO) still runs the finally that closes rfd AND reaps the child, rather than leaking
         # the read fd and orphaning the child as a close ahead of the try did. Fault-inject a wfd close that
         # really releases the fd then raises (a hostile teardown close), capturing the pipe fds and the child
-        # pid. Post-fix: rfd is closed and the child is reaped (waitpid -> ECHILD). Pre-fix: run_bounded
-        # skipped both, so rfd stayed open and the child was left unreaped.
-        _pipe_real7 = _os6.pipe
+        # pid. Post-fix: rfd is released and the child is reaped (waitpid -> ECHILD). Pre-fix: run_bounded
+        # skipped both, so rfd stayed open and the child was left unreaped. The rfd is judged as in (9): by the
+        # ledger and the identity recorded at the pipe's open, twice, the second run putting the other-lane
+        # pipe on the rfd's number at its close, and on the wfd's number at the injected close instead of
+        # releasing it (that close's first call only), so a second close of the wfd reaches the real close and
+        # closes the other-lane pipe, which the wfd's reused-number check turns red.
         _close_real7 = _os6.close
         _fork_real7 = _os6.fork
-        _cap7 = {}
-
-        def _cap_pipe7():
-            _r, _w = _pipe_real7()
-            _cap7["rfd"], _cap7["wfd"] = _r, _w
-            return _r, _w
+        _cap7 = dict()
 
         def _cap_fork7():
             _p = _fork_real7()
@@ -3714,46 +4085,99 @@ def self_test():
             return _p
 
         def _boom_close7(fd):
-            if fd == _cap7.get("wfd") and not _cap7.get("wfd_closed"):
+            if fd == _cap7.get("wfd") and not _cap7.get("wfd_closed") and _os6.getpid() == _cap7["owner"]:
                 _cap7["wfd_closed"] = True
-                try:
-                    _close_real7(fd)                       # really release the wfd (no leak) ...
-                except OSError:
-                    pass
+                if _cap7["reuse"]:
+                    _os6.dup2(_oth_r6, fd)                 # the number goes straight to another lane's file ...
+                else:
+                    try:
+                        _close_real7(fd)                   # ... or is really released (no leak) ...
+                    except OSError:
+                        pass
                 raise OSError(5, "EIO (self-test injected wfd close)")   # ... then raise, as a hostile close would
-            return _close_real7(fd)
+            if not _cap_release6(_cap7, fd, _close_real7):
+                return _close_real7(fd)
+        for _reuse7 in (False, True):
+            _tag7 = "-reused" if _reuse7 else ""
+            _cap7.clear()
+            _cap7.update(reuse=_reuse7, owner=_os6.getpid())
+            try:
+                _os6.pipe = _cap_pipe_into(_cap7)
+                _os6.fork = _cap_fork7
+                _os6.close = _boom_close7
+                try:
+                    run_bounded(lambda: "WFDCHK")          # the wfd close raises; the finally must still run
+                except OSError:
+                    pass                                   # a propagated teardown OSError is acceptable; cleanup is what matters
+            finally:
+                _os6.pipe = _pipe_real6
+                _os6.fork = _fork_real7
+                _os6.close = _close_real7
+            if _cap7.get("rfd") is not None and _cap_left_open6(_cap7):
+                _close_real7(_cap7["rfd"])                 # still this leg's own pipe: close the leak it detected
+                failures.append("run_bounded/wfd-close-raise-rfd-leak{}: a raising parent wfd close skipped the "
+                                "rfd cleanup (read fd leaked; finding 7)".format(_tag7))
+            elif _reuse7:
+                failures += _cap_reuse_kept6(_cap7, "wfd-close-raise-rfd")
+            if _reuse7:
+                failures += _cap_reuse_kept6(_cap7, "wfd-close-raise-wfd", "wfd")
+            _pid7c = _cap7.get("pid")
+            if _pid7c is not None and not _fixture_child_reaped(_pid7c):
+                failures.append("run_bounded/wfd-close-raise-unreaped-child{}: a raising parent wfd close "
+                                "skipped the child reap (zombie left; finding 7)".format(_tag7))
+        _close_real6(_oth_r6)
+        _close_real6(_oth_w6)
 
+    # (#378 P1, close policy) _finish_close's held-pidfd closes let go of the attribute BEFORE os.close: a close
+    # that raises has released the number all the same, so an attribute still naming it would let a later
+    # _interrupt_collect -> _address_failed_subject / _escalate signal through a number another lane may hold.
+    # Drive _finish_close on a stand-in whose guardian and subject "pidfds" are the read ends of this leg's own
+    # pipes, with a close stub that releases each of them on its first close and then raises, and require both
+    # attributes None afterwards. The pre-fix close-then-clear left both naming their released numbers. The
+    # stub releases each number once; the leg never closes either read end itself, only the write ends it kept.
+    import types as _types8
+    _close_real8 = _os6.close
+    _g_r8, _g_w8 = _os6.pipe()
+    _s_r8, _s_w8 = _os6.pipe()
+    _armed8 = {_g_r8, _s_r8}
+    _released8 = []
+
+    def _boom_close8(fd):
+        if fd in _armed8:
+            _armed8.discard(fd)
+            _released8.append(fd)
+            _close_real8(fd)                           # really released, as a raising close counts it ...
+            raise OSError(5, "EIO (self-test injected pidfd close)")   # ... then the close raises
+        return _close_real8(fd)
+
+    def _noop8():
+        return None
+
+    _fake8 = _types8.SimpleNamespace(
+        pid=None, collected=True, armed=False, unresolved=False, cleaned=False, _failure=None,
+        pidfd=_g_r8, subject_pidfd=_s_r8, subject_pid=None, _recv_subject=_noop8, _interrupt_collect=_noop8,
+        control=_types8.SimpleNamespace(close=_noop8), peer=_types8.SimpleNamespace(close=_noop8),
+        report=_types8.SimpleNamespace(close=_noop8))
+    _raised8 = None
+    try:
+        _os6.close = _boom_close8
         try:
-            _os6.pipe = _cap_pipe7
-            _os6.fork = _cap_fork7
-            _os6.close = _boom_close7
-            try:
-                run_bounded(lambda: "WFDCHK")              # the wfd close raises; the finally must still run
-            except OSError:
-                pass                                       # a propagated teardown OSError is acceptable; cleanup is what matters
-        finally:
-            _os6.pipe = _pipe_real7
-            _os6.fork = _fork_real7
-            _os6.close = _close_real7
-        _rfd7 = _cap7.get("rfd")
-        _rfd7_open = False
-        if _rfd7 is not None:
-            try:
-                _os6.fstat(_rfd7)
-                _rfd7_open = True                          # still open: the finally's rfd close was skipped
-            except OSError:
-                _rfd7_open = False
-            if _rfd7_open:
-                _os6.close(_rfd7)                          # close the leak the test just detected
-        if _rfd7_open:
-            failures.append("run_bounded/wfd-close-raise-rfd-leak: a raising parent wfd close skipped the "
-                            "rfd cleanup (read fd leaked; finding 7)")
-        _pid7c = _cap7.get("pid")
-        if _pid7c is not None:
-            _reaped7 = _fixture_child_reaped(_pid7c)
-            if not _reaped7:
-                failures.append("run_bounded/wfd-close-raise-unreaped-child: a raising parent wfd close "
-                                "skipped the child reap (zombie left; finding 7)")
+            _FixtureProcess._finish_close(_fake8)
+        except OSError as _exc8:
+            _raised8 = _exc8
+    finally:
+        _os6.close = _close_real8
+    if sorted(_released8) != sorted((_g_r8, _s_r8)) or _raised8 is None:
+        failures.append("finish-close/raising-close-setup: expected both injected closes to release and raise "
+                        "(released {}, raised {!r})".format(_released8, _raised8))
+    if _fake8.pidfd is not None:
+        failures.append("finish-close/raising-guardian-close: the guardian pidfd attribute still names its "
+                        "released number {} (close-then-clear)".format(_fake8.pidfd))
+    if _fake8.subject_pidfd is not None:
+        failures.append("finish-close/raising-subject-close: the subject pidfd attribute still names its "
+                        "released number {} (close-then-clear)".format(_fake8.subject_pidfd))
+    _close_real8(_g_w8)
+    _close_real8(_s_w8)
 
     # _model_equal type-strictness pins: the exact-type clause is the sole carrier of the strictness that
     # makes the round-trip proof meaningful rather than merely plausible. A mutant dropping that clause
@@ -4401,6 +4825,9 @@ def self_test():
     # emit_checked returns exactly what emit returns for a good document (no divergent second path).
     if emit_checked(coverage) != emit(coverage):
         failures.append("emit_checked/parity: emit_checked text differs from emit text")
+
+    # #378 P1: the guardian's subject-pidfd close, green, and red by REUSE alone under the pre-fix body.
+    failures.extend(_st_guardian_close_reuse())
 
     if failures:
         print("SELF-TEST FAIL:")

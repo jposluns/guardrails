@@ -13080,10 +13080,9 @@ def _adopt_read_inputs(path):
                 _opf_adopt_apply._journal._close_fd_propagating(pfd)
             except OSError:
                 # A failing parent close must not leak the just-opened worksheet fd (round-5 defect 2)
-                # or the parent fd itself (round 7: both closes run through the journal engine's
-                # confirm-then-release guards, so a close that raises with its number retained still
-                # releases it, never via a blind double close); the propagating error still fails the
-                # read closed below.
+                # or the parent fd itself (P1, #378: both closes are the journal engine's single
+                # os.close, and close(2) has released the number when it reports the error, so it is
+                # never touched again); the propagating error still fails the read closed below.
                 if fd is not None:
                     _opf_adopt_apply._journal._close_fd_quietly(fd)
                 raise
@@ -14610,6 +14609,7 @@ def _self_tests():
     ("opf-adopt-apply", _opf_adopt_apply.self_test),
     ("opf-fuzz", _opf_fuzz.self_test),
     ("opf-check", _opf_check.self_test),
+    ("opf-journal", _opf_store._journal.self_test),   # #378: the _close_fd_yielding vectors
     ("opf-watchdog-isolation", _watchdog_isolation_self_test),
     ("opf-watchdog-regressions", _watchdog_regression_self_test),
     ("opf-aggregator", _aggregator_self_test),

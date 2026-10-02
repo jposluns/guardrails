@@ -312,9 +312,11 @@ def do_cutover(root, staged, unit):
             return _settle_failed_transaction(journal_root, jr_fd, txn_dir, exc, "cutover")
         _journal.release_lock(journal_root)
     finally:
-        if jr_fd is not None:
-            os.close(jr_fd)
-        os.close(root_fd)
+        try:
+            if jr_fd is not None:
+                _journal._close_fd_yielding(jr_fd)
+        finally:
+            _journal._close_fd_yielding(root_fd)
     print("cutover complete: unit {} txn {}".format(unit, txn_id))
     return 0
 
@@ -414,9 +416,11 @@ def do_recover(root):
             print("recover: no transactions to recover")
         return 0
     finally:
-        if jr_fd is not None:
-            os.close(jr_fd)
-        os.close(root_fd)
+        try:
+            if jr_fd is not None:
+                _journal._close_fd_yielding(jr_fd)
+        finally:
+            _journal._close_fd_yielding(root_fd)
 
 
 def do_status(root):
@@ -431,7 +435,7 @@ def do_status(root):
     try:
         journal_state = _classify_journal(root_fd)
     finally:
-        os.close(root_fd)
+        _journal._close_fd_yielding(root_fd)
     if journal_state == "absent":
         print("status: not adopted (no journal)")
         return 0
@@ -463,7 +467,7 @@ def do_status(root):
             if not terminal:
                 open_txns.append(txn_dir.name)
     finally:
-        os.close(jr_fd)
+        _journal._close_fd_yielding(jr_fd)
     lock = _journal.read_lock_owner(journal_root)
     if lock is not None:
         print("status: journal lock held by pid {}".format(lock.get("pid")))
@@ -730,6 +734,41 @@ def _all_terminal(root):
     finally:
         os.close(jr_fd)
     return not (journal_root / "lock").exists()
+
+
+def _close_vectors(base):
+    """#378: do_status's root close, the representative _close_fd_yielding site. A close that fails while
+    an exception unwinds lets that exception through as the same object; one that fails on the normal path
+    raises; neither leaves a descriptor open (_journal._st_close_check runs them and the flips)."""
+    import io
+    from contextlib import redirect_stdout
+    base.mkdir()
+    ns = globals()
+    sent = _journal._StSentinel("in flight at do_status")
+
+    def status(raise_sent):
+        def call(fault):
+            real_open, real_classify = ns["_open_root_or_none"], ns["_classify_journal"]
+
+            def open_spy(root):
+                fd, err = real_open(root)
+                return fault.arm(fd), err
+
+            def classify_spy(root_fd):
+                if raise_sent:
+                    raise sent
+                return real_classify(root_fd)
+            ns["_open_root_or_none"], ns["_classify_journal"] = open_spy, classify_spy
+            try:
+                with redirect_stdout(io.StringIO()):
+                    do_status(base)
+            finally:
+                ns["_open_root_or_none"], ns["_classify_journal"] = real_open, real_classify
+        return call
+
+    return (("migrate site do_status: finally while an exception unwinds", True, "AR", status(True),
+             lambda e: e is sent),
+            ("migrate site do_status: normal path", False, "BR", status(False), None))
 
 
 def self_test():
@@ -1236,10 +1275,11 @@ def self_test():
         #     loops (_open_parent / _open_dir_contained / ensure_journal_dirs) close several opened dir fds in
         #     a `finally`. A raw os.close there, when one close raised (EINTR/EIO), abandoned the REMAINING
         #     sibling fds (a leak) and let a raw OSError escape the finally. The guarded close
-        #     (_journal._close_fd_quietly) confirms-and-continues so the walk COMPLETES and no sibling leaks.
-        #     Inject a first-close-raises-without-releasing into a DEEP _open_parent walk (>=2 intermediate
-        #     dirs => >=2 opened fds): post-fix _open_parent returns and the process fd count is unchanged;
-        #     pre-fix the first raise aborts the loop, the second fd leaks, and the raw OSError escapes.
+        #     (_journal._close_fd_quietly) swallows and continues so the walk COMPLETES and no sibling leaks.
+        #     Inject the close(2) shape (P1, #378: the number is RELEASED, then the close raises) into a
+        #     DEEP _open_parent walk (>=2 intermediate dirs => >=2 opened fds): post-fix _open_parent
+        #     returns and the process fd count is unchanged; pre-fix the first raise aborts the loop, the
+        #     second fd leaks, and the raw OSError escapes.
         wroot = tmp / "walkclose" / "root"; (wroot / "a" / "b").mkdir(parents=True)
         (wroot / "a" / "b" / "dataA").write_bytes(b"x")
         wroot_fd = os.open(str(wroot), os.O_RDONLY | os.O_DIRECTORY)
@@ -1249,7 +1289,8 @@ def self_test():
         def _w_boom_close(fd):
             _w_state["n"] += 1
             if _w_state["n"] == 1:
-                raise OSError(5, "EIO (self-test injected, fd left open)")   # raise WITHOUT releasing
+                _w_real_close(fd)                                            # released first (close(2))
+                raise OSError(5, "EIO (self-test injected, after release)")
             return _w_real_close(fd)
 
         def _fdcount():
@@ -2225,6 +2266,11 @@ def self_test():
             except _journal.JournalError:
                 pass
             checked += 1
+
+        # #378: the representative _close_fd_yielding site, each vector green and red under its flip.
+        close_failures, close_runs = _journal._st_close_check(vars(_journal), _close_vectors(tmp / "close"))
+        failures.extend(close_failures)
+        checked += close_runs
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
