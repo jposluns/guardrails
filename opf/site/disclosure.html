@@ -94,11 +94,12 @@
         such as a module-type index mirror, makes the whole drift check cannot-evaluate. The reference
         renderer does not render or drift-check per-record views. For a store with module-tier or
         importer records, or a per-record store that declares views, doctor's overall verdict is
-        cannot-evaluate (exit 2). An import that promotes quarantined <code>legacy_fragment</code>
-        records can succeed, but afterwards doctor reports cannot-evaluate, <code>opf render --write</code>
-        refuses, and <code>opf upgrade</code> exits 2 without offering the change, because the baseline
-        validator does not validate those records' content schemas. Module-tier records have the same
-        effect. If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before
+        cannot-evaluate (exit 2). Ordinary import is retired and refuses with exit 2, and nothing in the
+        reference CLI creates <code>legacy_fragment</code> records; the type remains only for stores that
+        hold them from an import under the pre-1.3.0 contract. In such a store, as in a store with
+        module-tier records, doctor reports cannot-evaluate, <code>opf render --write</code> refuses, and
+        <code>opf upgrade</code> exits 2 without offering the change, because the baseline validator does
+        not validate those records' content schemas. If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before
         failing at render, leaving the changes in place for recovery. Transition checks also report
         cannot-evaluate when legality depends on an
         unidentified last-transition actor or a rejection requires unavailable pre-proposal state.

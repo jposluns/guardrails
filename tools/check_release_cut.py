@@ -1708,26 +1708,6 @@ _CLOSE_SWEEP_DISPOSITIONS = (
     ("opf/tools/_opf_oplock.py", "_st_in_child", "AFTER", "rfd", "rfd", 1,
      "false positive: a self-test fork helper; the swallowed close runs only in the child, which ends in os._exit "
      "before the parent's close of its own rfd"),
-    ("opf/tools/check_opf_import.py", "_RunDir.close", "ATTR", "self.cwd_fd", "", 1,
-     "false positive: every caller closes a _RunDir once, and __init__'s close raises before close() can run"),
-    ("opf/tools/check_opf_import.py", "close", "REBIND", "self.cwd_fd", "", 1,
-     "false positive: as the ATTR row, close() runs once per _RunDir"),
-    ("opf/tools/check_opf_import.py", "_check_staged_run", "REBIND", "store_fd", "", 2,
-     "false positive: a failed close in the handler propagates out of the function; nothing closes store_fd again"),
-    ("opf/tools/check_opf_import.py", "_spelled_route", "REBIND", "prev", "", 1,
-     "false positive: prev is closed only after `prev, cur = cur, nfd` handed cur on; its later re-binding is the "
-     "next such move, and the finally closes only cur"),
-    ("opf/tools/check_opf_import.py", "_self_test_isolated", "REBIND", "jfd", "", 1,
-     _CS_LEGS.format("journal-directory open")),
-    ("opf/tools/_opf_import.py", "_write_ingest_review_bundle", "REBIND", "store_root_fd", "", 1,
-     "false positive: closed in the finally of the staged-read step; the later binding is a fresh store-root open "
-     "with its own cleanup, and no try closes the old number again"),
-    ("opf/tools/_opf_import.py", "_capture_ingest_review", "REBIND", "rd", "", 1,
-     "false positive: rd.close() in a finally; the later binding is a fresh gate._RunDir, and no try closes the "
-     "old one again"),
-    ("opf/tools/_opf_import.py", "_self_test_d5", "REBIND", "jfd", "", 1, _CS_LEGS.format("journal-root open")),
-    ("opf/tools/_opf_import.py", "_self_test_d5", "REBIND", "rfd", "", 1, _CS_LEGS.format("store-root open")),
-    ("opf/tools/_opf_ingest.py", "review_bundle", "REBIND", "fd", "", 3, _CS_LEGS.format("open_fd(root)")),
     ("opf/tools/_opf_init_operation.py", "_health_check", "REBIND", "pfd", "", 1,
      "false positive: closed in a finally; the later binding is a fresh _open_parent with its own finally, and no "
      "try closes the old number again"),
@@ -1738,6 +1718,8 @@ _CLOSE_SWEEP_DISPOSITIONS = (
      "false positive: close_operation's InitSubstrateError is caught and run.sub cleared right after, and "
      "close_operation refuses a handle already closed, so its descriptors are never closed twice"),
     ("opf/tools/_opf_init_operation.py", "_physical_tests", "REBIND", "rfd", "", 1, _CS_LEGS.format("os.open")),
+    ("opf/tools/_opf_check.py", "self_test", "REBIND", "sfd", "", 1,
+     _CS_LEGS.format("os.open of a staged-ids fixture root")),
     ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "REBIND", "jr_fd", "", 3,
      _CS_LEGS.format("journal-root open (or None until one)")),
     ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "REBIND", "root_fd", "", 7,
@@ -1745,8 +1727,6 @@ _CLOSE_SWEEP_DISPOSITIONS = (
     ("opf/tools/_opf_emit.py", "_boom_close7", "AFTER", "fd", "fd", 1,
      "false positive: a self-test close stub; its swallowed close is followed by a raise in the same block, so the "
      "later close never runs after it"),
-    ("opf/tools/check_opf_homes.py", "_staged_root_self_test", "REBIND", "jfd", "", 1,
-     _CS_LEGS.format("journal-root open")),
     ("tools/gen_crosswalk.py", "_walk_components", "TRY", "prev", "fd", 1,
      "false positive: fd is re-bound to nxt before prev is closed, so the handler closes nxt, never prev"),
     ("tools/pin.py", "do_recover", "REBIND", "fd", "", 3,
@@ -1773,13 +1753,6 @@ _CLOSE_SWEEP_DISPOSITIONS = (
     ("opf/tools/_opf_init_substrate.py", "begin_operation", "TRY", "closing", "open_fd", 1,
      _CS_P1.format("closing, plan_fd = plan_fd, None runs before the close of closing, so the unwind loop over "
                    "(plan_fd, op_fd, ops_fd) skips plan_fd, and the body never closes op_fd or ops_fd")),
-    ("opf/tools/check_opf_import.py", "_physical_home", "TRY", "prev", "cur", 1,
-     _CS_P1.format("prev, cur = cur, parent runs before os.close(prev), so the finally closes parent, never prev")),
-    ("opf/tools/check_opf_import.py", "visit_ancestors", "TRY", "prev", "ancestor", 1,
-     _CS_P1.format("prev, ancestor = ancestor, parent runs before os.close(prev), so the finally closes parent, "
-                   "never prev")),
-    ("opf/tools/check_opf_import.py", "_spelled_route", "TRY", "prev", "cur", 2,
-     _CS_P1.format("each prev, cur = cur, nfd runs before os.close(prev), so the finally closes nfd, never prev")),
     ("tools/check_crosswalk.py", "_open_archive_dir", "TRY", "prev", "fd", 1,
      _CS_P1.format("prev, fd = fd, nxt runs before the close of prev, so the handler closes nxt, never prev")),
     ("tools/check_release_cut.py", "working_blob", "TRY", "parent", "directory", 1,
@@ -1801,28 +1774,12 @@ _CLOSE_SWEEP_DISPOSITIONS = (
     ("opf/tools/_opf_emit.py", "run_bounded", "AFTER", "wfd", "wfd", 1,
      "false positive: as the rfd row; the handler's own block ends in a return, so the later wfd close never runs "
      "after it"),
-    ("opf/tools/_opf_import.py", "_capture_ingest_review", "AFTER", "rd", "rd", 1,
-     _CS_FRESH.format("steps", "gate._RunDir(run_dir)")),
-    ("opf/tools/_opf_import.py", "_self_test_d5", "AFTER", "jfd", "jfd", 1,
-     _CS_FRESH.format("self-test legs", "journal-root open")),
-    ("opf/tools/_opf_import.py", "_self_test_d5", "AFTER", "rfd", "rfd", 1,
-     _CS_FRESH.format("self-test legs", "store-root open")),
-    ("opf/tools/_opf_import.py", "_write_ingest_review_bundle", "AFTER", "store_root_fd", "store_root_fd", 1,
-     _CS_FRESH.format("steps", "_open_store_root_fd, whose failure handler raises")),
-    ("opf/tools/_opf_ingest.py", "review_bundle", "AFTER", "fd", "fd", 3,
-     _CS_FRESH.format("self-test legs", "open_fd(root)")),
     ("opf/tools/_opf_init_operation.py", "_health_check", "AFTER", "pfd", "pfd", 1,
      _CS_FRESH.format("steps", "_open_parent")),
     ("opf/tools/_opf_init_operation.py", "_physical_tests", "AFTER", "rfd", "rfd", 1,
      _CS_FRESH.format("self-test legs", "os.open")),
-    ("opf/tools/check_opf_homes.py", "_staged_root_self_test", "AFTER", "jfd", "jfd", 1,
-     _CS_FRESH.format("self-test legs", "journal-root open")),
-    ("opf/tools/check_opf_import.py", "_check_staged_run", "AFTER", "store_fd", "store_fd", 2,
-     "false positive: each handler's close is followed in its block by store_fd = None, and a raising close "
-     "propagates out of the function (no try encloses this one), so the later closes, reached only under "
-     "`store_fd is not None`, never see the closed number"),
-    ("opf/tools/check_opf_import.py", "_self_test_isolated", "AFTER", "jfd", "jfd", 1,
-     _CS_FRESH.format("self-test legs", "journal-directory open")),
+    ("opf/tools/_opf_check.py", "self_test", "AFTER", "sfd", "sfd", 1,
+     _CS_FRESH.format("self-test legs", "leg's os.open of a staged-ids fixture root")),
     ("opf/tools/_journal.py", "_fake_close", "REBIND", "fd", "", 1,
      "false positive: the harness's fault stub publishes the number it released to its reuser thread "
      "(state[\"fd\"] = fd); the re-binding is that store into state, whose one element key rule 3 joins to fd, "
