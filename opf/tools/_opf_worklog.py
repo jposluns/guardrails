@@ -110,11 +110,6 @@ def read_manifest_model_at(root_fd, machine_rel, *, supported_profiles=None):
     return model
 
 
-def read_manifest_at(root_fd, machine_rel, *, supported_profiles=None):
-    return read_manifest_model_at(
-        root_fd, machine_rel, supported_profiles=supported_profiles).data
-
-
 def _valid_wl_ref(value):
     """Return (positive number, suffix or None), or None. WL-only extension."""
     if not isinstance(value, str):
@@ -399,7 +394,6 @@ def _self_test():
             resolved = _opf_store.resolve_store(root)
             check("resolved-entry-point", load_worklog(resolved) == old)
             import _opf_views
-            import _opf_import
             import _opf_check
             # The consumers import `_opf_worklog`; under a direct-script run this module is `__main__`, a
             # distinct module object, so the spy must sit on the module they actually call through.
@@ -408,8 +402,13 @@ def _self_test():
                 check("view-intake", _opf_views._load_worklog(
                     fd, ".working/custom/worklog.toml", frozenset(), []) == (raw, [entry])
                       and intake.call_count == 1)
-                check("import-intake", _opf_import._worklog_ids(fd, ".working/custom") == ["WL-1"]
-                      and intake.call_count == 2)
+                # The id-space reader is doctor's active-worklog gather (the retired import
+                # engine's _worklog_ids was the other one); it must route through this intake.
+                rep = _opf_check._Report()
+                check("doctor-intake", _opf_check._gather_worklog(
+                    fd, ".working/custom/worklog.toml", frozenset(), rep, True,
+                    machine_rel=".working/custom") == {1: entry}
+                      and not rep.cannot and not rep.findings and intake.call_count == 2)
             for gen in (1, 2):
                 cls = _opf_check.classify_containment(
                     {"opf": {"worklog": gen, "layout": "inline"}}, ".working/custom")

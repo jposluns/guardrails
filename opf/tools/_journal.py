@@ -48,6 +48,9 @@ forged-checksum journal above. The robust fix, an OS-held fcntl lease bound to t
 lifetime, is a tracked post-1.0.0 hardening.
 
 Exit convention of the CLIs built on this module: 0 clean/NA, 1 finding, 2 malformed or read error.
+
+  _journal.py --self-test   the #378 close vectors and the descriptor-helper vectors (read-error
+                            conversion, quiet cleanup close)
 """
 import hashlib
 import json
@@ -2617,10 +2620,110 @@ def _st_site_vectors(base):
              "siblings still close", None, "RS", siblings, None))
 
 
+def _st_c1_control():
+    """C1-osread's positive control: a readable descriptor returns its bytes."""
+    rfd, wfd = os.pipe()
+    try:
+        try:
+            os.write(wfd, b"journal bytes")
+        finally:
+            os.close(wfd)
+        return _read_fd(rfd) == b"journal bytes"
+    finally:
+        os.close(rfd)
+
+
+def _st_c1_osread():
+    """C1-osread: with os.read failing EIO, _read_fd raises a JournalError, never a raw OSError."""
+    import errno
+    rfd, wfd = os.pipe()
+    saved_read = os.read
+
+    def failing_read(_fd, _n):
+        raise OSError(errno.EIO, "simulated read error")
+
+    os.read = failing_read
+    try:
+        try:
+            _read_fd(rfd)
+            got = "no-raise"
+        except JournalError:
+            got = "journal-error"
+        except OSError:
+            got = "raw-oserror"
+    finally:
+        os.read = saved_read
+        os.close(rfd)
+        os.close(wfd)
+    return got == "journal-error"
+
+
+def _st_n2a():
+    """N2a: a close that raises EBADF returns cleanly; a raw os.close would raise it to the caller. -1 is
+    never a descriptor, so the EBADF is the kernel's own and no open number is touched."""
+    try:
+        _close_fd_quietly(-1)
+    except OSError:
+        return False
+    return True
+
+
+def _st_n2d():
+    """N2d: the helper's one os.close raises EIO while a stderr write would raise OSError too (a broken
+    stderr): the helper must RETURN, having made exactly one close (P1, #378: no probe, no second close).
+    The close is a stub, so no open number is touched. Returns (returned, single_close)."""
+    import errno
+    saved_close, saved_stderr = os.close, sys.stderr
+    closes = []
+
+    class BrokenStderr:
+        def write(self, *_a, **_k):
+            raise OSError(errno.EIO, "broken stderr write")
+
+        def flush(self, *_a, **_k):
+            raise OSError(errno.EIO, "broken stderr flush")
+
+    def failing_close(fd):
+        closes.append(fd)
+        raise OSError(errno.EIO, "injected close failure")
+
+    returned = True
+    try:
+        os.close = failing_close                     # the helper's close now raises
+        sys.stderr = BrokenStderr()                  # ... and a diagnostic write would raise too
+        try:
+            _close_fd_quietly(-1)
+        except BaseException:
+            returned = False
+    finally:
+        os.close, sys.stderr = saved_close, saved_stderr
+    return returned, closes == [-1]
+
+
+def _st_descriptor_helper_checks():
+    """Descriptor-helper vectors, ported from the retired import engine's self-test (their only former
+    home), each driving the helper directly, with a patched os primitive where the contract needs one:
+      C1-osread  _read_fd converts a read-time OSError to a JournalError, never a raw OSError or a
+                 truncated result (with a positive control: a readable descriptor returns its bytes).
+      N2a        _close_fd_quietly swallows a close-time EBADF rather than propagating it.
+      N2d        _close_fd_quietly never raises and closes exactly once (P1, #378): its one close fails while
+                 stderr itself is broken, and the helper still returns without a second close.
+    No store, no journal and no subprocess; every patched primitive is restored in a finally, and each
+    leg's descriptors are its own, closed once. Returns (failures, checks)."""
+    n2d_returned, n2d_single = _st_n2d()
+    results = (("C1-osread-control-reads", _st_c1_control()),
+               ("C1-osread-converts-to-journalerror", _st_c1_osread()),
+               ("N2a-close-quietly-swallows-oserror", _st_n2a()),
+               ("N2d-close-quietly-nonthrow", n2d_returned),
+               ("N2d-close-quietly-single-close", n2d_single))
+    return [name for name, ok in results if ok is not True], len(results)
+
+
 def self_test():
     """The #378 close vectors for the three close helpers (V1, V2), three representative _journal sites,
-    and the sibling closes of a cleanup loop (V3), each green and each red under its flip. Returns 0 clean,
-    1 a failure, 2 cannot-evaluate."""
+    and the sibling closes of a cleanup loop (V3), each green and each red under its flip; then the
+    descriptor-helper vectors (_st_descriptor_helper_checks). Returns 0 clean, 1 a failure, 2
+    cannot-evaluate."""
     import shutil
     import tempfile
     try:
@@ -2635,17 +2738,27 @@ def self_test():
         failures, runs = failures + drop_failures, runs + drop_runs
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    if failures:
-        print("JOURNAL SELF-TEST: FAIL ({} of {} close-vector runs failed)".format(len(failures), runs))
-        for f in failures:
+    helper_failures, checks = _st_descriptor_helper_checks()
+    if failures or helper_failures:
+        print("JOURNAL SELF-TEST: FAIL ({} of {} close-vector runs and {} of {} descriptor-helper checks "
+              "failed)".format(len(failures), runs, len(helper_failures), checks))
+        for f in failures + helper_failures:
             print("  FAILED: {}".format(f))
         return 1
-    print("JOURNAL SELF-TEST: PASS ({} close vectors, {} runs including each flip leg red)".format(
-        len(vectors), runs))
+    print("JOURNAL SELF-TEST: PASS ({} close vectors, {} runs including each flip leg red; {} descriptor-helper "
+          "checks)".format(len(vectors), runs, checks))
     return 0
+
+
+def main(argv=None):
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args == ["--self-test"]:
+        return self_test()
+    print("usage: _journal.py --self-test", file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:
         sys.exit(self_test())
-    sys.exit("usage: _journal.py --self-test")
+    sys.exit(main())

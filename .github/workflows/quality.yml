@@ -139,11 +139,11 @@ jobs:
       - name: OPF tooling self-test
         run: python3 -I -B opf/tools/opf.py --self-test
 
-      - name: OPF import direct self-test
-        run: python3 -I -B opf/tools/_opf_import.py --self-test
+      - name: OPF journal direct self-test
+        run: python3 -I -B opf/tools/_journal.py --self-test
 
-      - name: OPF ingest direct self-test
-        run: python3 -I -B opf/tools/_opf_ingest.py --self-test
+      - name: OPF allocation direct self-test
+        run: python3 -I -B opf/tools/_opf_allocation.py --self-test
 
       - name: OPF observe direct self-test
         run: python3 -I -B opf/tools/_opf_observe.py --self-test
@@ -183,21 +183,6 @@ jobs:
 
       - name: OPF record-authoring gate self-test
         run: python3 -I -B opf/tools/check_opf_record.py --self-test --red-on-revert
-
-      - name: OPF import operation-layer gate self-test
-        run: python3 -I -B opf/tools/check_opf_import.py --self-test
-
-      - name: OPF import operation-layer gate
-        run: python3 -I -B opf/tools/check_opf_import.py
-
-      - name: OPF root-ingest detection gate self-test
-        run: python3 -I -B opf/tools/check_opf_ingest.py --self-test
-
-      - name: OPF root-ingest detection gate
-        run: python3 -I -B opf/tools/check_opf_ingest.py
-
-      - name: OPF ingest promotion coordinator self-test (MIG-PR5 slice 1)
-        run: python3 -I -B opf/tools/_opf_ingest_apply.py --self-test --red-on-revert
 
       - name: OPF adoption schema and read-only planning self-test
         run: python3 -I -B opf/tools/_opf_adopt.py --self-test

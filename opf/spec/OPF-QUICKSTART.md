@@ -65,8 +65,10 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    `version.toml`, `worklog.toml`, and the eleven baseline `<type>.index.toml` files (worklog is the
    exempt ledger listed above, not an index); specification
    sections 4 and 9). A `[profiles.aiqt]` table is optional and is ignored by base-only tooling.
-   Anything already sitting in `.working/` is detected and you choose, per file: keep it, import it
-   into the store, or move it; nothing is absorbed or overwritten silently.
+   Anything already sitting in `.working/` takes a per-file disposition in the adoption plan
+   (`opf adopt`; a fresh `opf init` refuses an existing `.working/` directory): keep it, migrate it
+   for a later post-adoption import, move it, or retire it; nothing is absorbed or overwritten
+   silently.
 2. Commit the tree; confirm nothing under `.working/` is ignored.
 3. Work records-first: append a worklog entry per change; keep the backlog, findings, and decisions
    in their typed files; regenerate views rather than editing them.

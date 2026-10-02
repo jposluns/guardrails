@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF adoption convergence: inert schemas and read-only investigation/planning.
 
-PR-A supplies the `AdoptionPlan`, receipt-core and outcome-event schemas, the closed twelve-op
+PR-A supplies the `AdoptionPlan`, receipt-core and outcome-event schemas, the closed eleven-op
 ADOPT_OPS vocabulary, and pure fail-closed validators. Validators receive already-parsed objects and
 decide well-formedness only; they never read bytes themselves.
 
@@ -17,7 +17,7 @@ file-level effects, the tool release with its independent anchor, the prompt pac
 per platform with its residuals, the completion-check roster with the retirement rule, and the import
 policy with its migrate scope. v2 replaces v1 in place and a v1 marker is refused: no v1 plan was ever
 persisted. A `migrate` source is kept for post-adoption import (spec 14.2), so a v2 plan carries no
-import-file row; that op stays a vocabulary row only.
+import op; the former import-file vocabulary row retired with the import engine.
 
 PR-C2 adds explicit HTTPS gathering and non-executing quarantine through the lazy
 public gather_release() wrapper. Observations confer no trust or apply authority.
@@ -88,7 +88,7 @@ PRODUCT_IDENTITIES = ("aiqt", "opf")
 # Per-file disposition vocabulary (OPF-SPEC 14.2, reconciled in b.5): the closed set of resolutions a plan
 # may record for a foreign file. `keep` is realized by register-unmanaged, `move` by move-file, `retire` by
 # retire-file. `migrate` keeps the source for post-adoption import (spec 14.2): the plan records its source
-# row and import scope and mints no op, so the import-file op stays a vocabulary row only.
+# row and import scope and mints no op.
 DISPOSITIONS = ("keep", "migrate", "move", "retire")
 
 # Plan-v2 binding vocabularies (OPF-SPEC 14.1). The tokens are this module's spellings of the spec's concepts.
@@ -151,22 +151,21 @@ SKIP_POLICIES = ("no-skip", "attributed-skip")
 OUTCOME_EVENTS = ("applied", "premerge-validated", "merged", "postmerge-validated",
                   "failed", "recovered", "signed-off")
 
-# Digest form, matching the store and _opf_import._DIGEST_RE exactly ("sha256:" + 64 lowercase hex).
+# Digest form, matching the store's exactly ("sha256:" + 64 lowercase hex).
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}\Z")
 # RFC 3339 UTC instant, SHAPE only (Z or +00:00; optional fractional seconds). The engine PRs bind to
 # _opf_schema's calendar-validated check; PR-A validates the lexical shape so a receipt/event timestamp is
 # well-formed. A native (unquoted) TOML datetime is a non-string and is rejected as a wrong type.
 _TS_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|\+00:00)\Z")
-# The adoption run-id grammar `adopt-<UTCSTAMP>Z-<hash16>`, analogous to _opf_import's `imp-` grammar. It is
+# The adoption run-id grammar `adopt-<UTCSTAMP>Z-<hash16>`, analogous to the import `imp-` grammar. It is
 # a SHAPE oracle for the finalizer; PR-A neither mints nor parses beyond this shape.
 _RUN_ID_RE = re.compile(r"^adopt-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}\Z")
-# The IMPORT run-id grammar `imp-<UTCSTAMP>Z-<hash16>`, the AUTHORITATIVE grammar minted and enforced by the
-# sibling _opf_import (its `_RUN_ID_RE`, ~line 190). It is MIRRORED here (this module validates an
-# already-parsed receipt/plan, so it does not import _opf_import's engine) and MUST match the sibling's
-# pattern byte for byte; the self-test asserts that equality against _opf_import._RUN_ID_RE so the mirror
-# cannot drift. A receipt import-run id or an import-file op row's import_run_id is validated against THIS
-# grammar, not a generic token check, so a traversing or malformed id (e.g. "../escape") is refused, never
-# accepted.
+# The IMPORT run-id grammar `imp-<UTCSTAMP>Z-<hash16>`, the AUTHORITATIVE grammar of the store's import
+# home (_opf_store: the `import` prefix of _HOME_RUN_PREFIXES plus _HOME_RUN_SUFFIX). It is MIRRORED here
+# (this module validates an already-parsed receipt/plan) and MUST match that grammar byte for byte; the
+# self-test asserts the equality so the mirror cannot drift. A receipt import-run id is validated against
+# THIS grammar, not a generic token check, so a traversing or malformed id (e.g. "../escape") is refused,
+# never accepted.
 _IMPORT_RUN_ID_RE = re.compile(r"^imp-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}\Z")
 # The observed revision a plan binds (spec 14.1): a git object id of 40 (SHA-1) or 64 (SHA-256) lowercase
 # hex digits. Investigation never enters .git, so the caller supplies it and only its shape is checked.
@@ -301,7 +300,8 @@ def _is_contained_filepath(value):
 
 def _is_import_run_id(value):
     """An import run-id validated against its AUTHORITATIVE grammar `imp-<UTCSTAMP>Z-<hash16>` (mirrored from
-    _opf_import, see _IMPORT_RUN_ID_RE), not a generic token: a traversing or malformed id is refused."""
+    the store's import home, see _IMPORT_RUN_ID_RE), not a generic token: a traversing or malformed id is
+    refused."""
     return isinstance(value, str) and bool(_IMPORT_RUN_ID_RE.match(value))
 
 
@@ -343,7 +343,6 @@ def _is_schema_version(value):
 #   "filepath"  a contained relpath that names a FILE operand -> _is_contained_filepath (rejects `.`).
 #   "dirpath"   a contained relpath that names a DIRECTORY / store root -> _is_contained_relpath (allows `.`).
 #   "digest"    sha256:hex -> _is_digest.  "token" a non-empty single-line str -> _is_token.
-#   "import_run_id"  an import run-id -> _is_import_run_id (the `imp-...` grammar, not a generic token).
 #   "members"   a list of {path (file), digest} tables, each path relative to the op's target or store_root:
 #               the exact files an install-pack, init-store or render-views row writes.
 # Path-field classification, grounded in each field's meaning: a create/retire/move/import/enable-hook/
@@ -354,9 +353,9 @@ _FIELD_KINDS = {
     "destination": "filepath", "registration_path": "filepath", "receipt_path": "filepath",
     "entry": "filepath",
     "content_digest": "digest", "source_digest": "digest", "preimage_digest": "digest",
-    "old_digest": "digest", "new_digest": "digest", "acceptance_digest": "digest",
+    "old_digest": "digest", "new_digest": "digest",
     "receipt_core_digest": "digest",
-    "source_member": "token", "plugin_entry": "token", "import_run_id": "import_run_id", "note": "token",
+    "source_member": "token", "plugin_entry": "token", "note": "token",
     "members": "members",
 }
 
@@ -400,11 +399,6 @@ ADOPT_OPS = (
         "remove the planted adapter, restoring the prior absence",
         ("the bytes passed the b.5 trust gate (manifest sha256 and the agreed ROOT); the path is absent (a "
          "pre-existing different file routes to retire-file + create-file under an explicit plan row)",)),
-    AdoptOp(
-        "import-file", ("import_run_id", "acceptance_digest"), ("create", "write", "remove"),
-        "the staged-import cutover's own journalled inverse (apply_import restores the preimage)",
-        ("delegates to the existing staged-import machinery and apply_import's journalled cutover (never "
-         "forks it); per-fragment attributed acceptance is preserved; an unresolved fragment blocks",)),
     AdoptOp(
         "register-unmanaged", ("entry", "old_digest", "new_digest"), ("write",),
         "restore the manifest preimage (drop the [unmanaged] entry)",
@@ -461,10 +455,9 @@ def canonical_op(name):
         "registration_path": ".claude/settings.json", "receipt_path": ".working/toml/adoption.toml",
         "entry": "adopter/LEGACY.md",
         "content_digest": _ZERO, "source_digest": _ZERO, "preimage_digest": _ZERO,
-        "old_digest": _ZERO, "new_digest": _ZERO, "acceptance_digest": _ZERO,
+        "old_digest": _ZERO, "new_digest": _ZERO,
         "receipt_core_digest": _ZERO,
         "source_member": ".aiqt/core/rules/rules.toml", "plugin_entry": "opf-governance",
-        "import_run_id": "imp-20260917T120000Z-0123456789abcdef",
         "members": [{"path": "adopter/.aiqt/core/rules/rules.toml", "digest": _ZERO}],
     }
     op = ADOPT_OPS_BY_NAME[name]
@@ -803,8 +796,6 @@ def _valid_field(field, value):
         return _is_digest(value)
     if kind == "token":
         return _is_token(value)
-    if kind == "import_run_id":
-        return _is_import_run_id(value)
     if kind == "members":
         if not isinstance(value, list) or not value:
             return False
@@ -1203,9 +1194,8 @@ def _validate_enforcement(rows, findings):
 
 
 def _cross_check_plan(plan, missing, sources_clean, findings):
-    """Internal consistency of a plan whose ops are all VALID: no import-file row (a migrate source is kept
-    for post-adoption import and no acceptance happens inside the approved plan, spec 14.1 and 14.2); a move
-    destination inside the frozen store's tree lies strictly beneath its Move archive root (spec 14.2); every
+    """Internal consistency of a plan whose ops are all VALID: a move destination inside the frozen store's
+    tree lies strictly beneath its Move archive root (spec 14.2); every
     op agrees with the frozen store identity; the manifest is rewritten only by its registration chain; every
     enforcement member is installed by an op; and, when the source rows are clean, `effects` equals the
     effects the ops and sources name, those effects collide nowhere and write no control area, each keep,
@@ -1214,9 +1204,6 @@ def _cross_check_plan(plan, missing, sources_clean, findings):
     exactly the migrate-disposed sources. No move destination and no archive preservation copy is a
     protected destination (protected_destination, the one predicate the apply shell also applies)."""
     ops = plan["ops"]
-    if any(row["op"] == "import-file" for row in ops):
-        findings.append("plan carries an import-file row, but a migrate source is kept for post-adoption "
-                        "import with no acceptance inside the approved plan (spec 14.1, 14.2)")
     frozen = _frozen_store(plan)
     root = frozen[0] if frozen is not None else "."
     tree, moved_root = _compose(root, WORKING_DIRNAME), _compose(root, ARCHIVE_REL + "/moved")
@@ -1682,7 +1669,7 @@ def _validate_import_runs(runs, findings):
         if not isinstance(row, dict) or set(row) != {"run_id", "acceptance_digest"}:
             findings.append("receipt import_runs[{}] is not a {{run_id, acceptance_digest}} table".format(i))
             continue
-        # the run_id is validated against the AUTHORITATIVE import run-id grammar (mirrored from _opf_import),
+        # the run_id is validated against the AUTHORITATIVE import run-id grammar (mirrored from _opf_store),
         # not a generic token, so a traversing or malformed id (e.g. "../escape") is refused.
         if not _is_import_run_id(row["run_id"]):
             findings.append("receipt import_runs[{}] run_id does not match the import run-id grammar".format(i))
@@ -1812,11 +1799,11 @@ def self_test():
             failures.append(name)
 
     # 0: the vocabulary is internally consistent and closed.
-    check("adopt-ops-count-12", len(ADOPT_OPS) == 12)
+    check("adopt-ops-count-11", len(ADOPT_OPS) == 11)
     check("adopt-ops-names-unique", len(ADOPT_OP_NAMES) == len(ADOPT_OPS))
     check("adopt-ops-expected-names",
           ADOPT_OP_NAMES == frozenset({
-              "install-pack", "init-store", "create-file", "plant-governance", "import-file",
+              "install-pack", "init-store", "create-file", "plant-governance",
               "register-unmanaged", "move-file", "retire-file", "repoint-consumer", "enable-hook",
               "render-views", "record-adoption"}))
     # every op's journal metadata is a subset of the REAL _journal primitive set (no drift from the engine).
@@ -2097,15 +2084,9 @@ def self_test():
     r_root_dot = canonical_receipt_core(); r_root_dot["store_root"] = "."
     check("receipt-store-root-dot-valid", validate_receipt_core(r_root_dot).status == VALID)
 
-    # 10b (fix 2, import run-id grammar): the op import_run_id field and receipt import_runs[].run_id
-    # validate against the AUTHORITATIVE `imp-<UTCSTAMP>Z-<hash16>` grammar (mirrored from _opf_import), not a
+    # 10b (fix 2, import run-id grammar): the receipt import_runs[].run_id validates against the
+    # AUTHORITATIVE `imp-<UTCSTAMP>Z-<hash16>` grammar (mirrored from _opf_store's import home), not a
     # generic token. Reproduces codex round-4 #3 (import_runs run_id "../escape" was VALID; must be INVALID).
-    op_esc = canonical_op("import-file"); op_esc["import_run_id"] = "../escape"
-    check("op-import-run-id-traversal-invalid", validate_op(op_esc).status == INVALID)
-    op_bad = canonical_op("import-file"); op_bad["import_run_id"] = "imp-not-a-valid-id"
-    check("op-import-run-id-nonconforming-invalid", validate_op(op_bad).status == INVALID)
-    op_good = canonical_op("import-file"); op_good["import_run_id"] = "imp-20260101T000000Z-abcdef0123456789"
-    check("op-import-run-id-valid", validate_op(op_good).status == VALID)
     r_esc = canonical_receipt_core(); r_esc["import_runs"][0]["run_id"] = "../escape"
     check("receipt-import-run-id-traversal-invalid", validate_receipt_core(r_esc).status == INVALID)
     r_bad = canonical_receipt_core(); r_bad["import_runs"][0]["run_id"] = "imp-nope"
@@ -2113,11 +2094,12 @@ def self_test():
     r_good = canonical_receipt_core()
     r_good["import_runs"][0]["run_id"] = "imp-20260101T000000Z-abcdef0123456789"
     check("receipt-import-run-id-valid", validate_receipt_core(r_good).status == VALID)
-    # the mirror MUST match _opf_import's authoritative grammar byte for byte so it cannot drift; import the
-    # sibling only to read its pattern (no filesystem, journal, or network at self-test time).
-    import _opf_import  # noqa: E402
-    check("import-run-id-mirror-matches-sibling",
-          _IMPORT_RUN_ID_RE.pattern == _opf_import._RUN_ID_RE.pattern)
+    # the mirror MUST match the store's import-home grammar byte for byte so it cannot drift (no filesystem,
+    # journal, or network at self-test time).
+    import _opf_store  # noqa: E402
+    check("import-run-id-mirror-matches-store",
+          _IMPORT_RUN_ID_RE.pattern
+          == "^" + _opf_store._HOME_RUN_PREFIXES["import"] + _opf_store._HOME_RUN_SUFFIX + r"\Z")
 
     # 11: round-5 fix discriminators. Each vector FAILS if its corresponding fix is reverted.
     # 11a (fix A, path control-character rejection): a path field carrying an embedded control character
@@ -2263,8 +2245,7 @@ def self_test():
             ("missingness-short", lambda p: p["import_policy"]["missingness"].pop(), False),
             ("missingness-not-list", lambda p: p["import_policy"].update(missingness="all"), False),
             ("import-scope-drift", lambda p: p["import_policy"].update(scope=["legacy/RULES.md"]), False),
-            ("import-scope-not-list", lambda p: p["import_policy"].update(scope="legacy/RULES.md"), False),
-            ("import-file-row", lambda p: p["ops"].append(canonical_op("import-file")), False)):
+            ("import-scope-not-list", lambda p: p["import_policy"].update(scope="legacy/RULES.md"), False)):
         check("plan-v2-{}-invalid".format(label), _mutated(base_plan, mutate, refresh) == INVALID)
     # 14d: an out-of-vocabulary binding token -> CANNOT-EVALUATE (the module outcome model).
     for label, mutate in (
@@ -2276,7 +2257,11 @@ def self_test():
             ("completion-retirement", lambda p: p["completion"].update(retirement="always")),
             ("missingness-reason", lambda p: p["import_policy"]["missingness"].append("zero-fill")),
             ("import-unparsed", lambda p: p["import_policy"].update(unparsed="drop")),
-            ("import-skip", lambda p: p["import_policy"].update(skip="silent"))):
+            ("import-skip", lambda p: p["import_policy"].update(skip="silent")),
+            # the former import-file row retired with the import engine: it is out of vocabulary now.
+            ("import-file-op", lambda p: p["ops"].append(
+                {"op": "import-file", "import_run_id": "imp-20260917T120000Z-0123456789abcdef",
+                 "acceptance_digest": "sha256:" + "0" * 64}))):
         check("plan-v2-{}-out-of-vocab-cannot-eval".format(label),
               _mutated(base_plan, mutate) == CANNOT_EVALUATE)
     # A plan with no disposition ops and no sources is VALID; a non-list `sources` there is INVALID on its
