@@ -17,19 +17,19 @@ Legs, in order:
                  optional `#` comment. Any other line naming the key (a value on the next line or a
                  block scalar, a quoted key, a flow mapping, an empty value, a concatenated or
                  escaped value, a comment that names the key) is cannot-evaluate (exit 2), never a
-                 pass. The next non-blank line after a pin (blank lines skipped, comment lines
-                 included) more indented than the pin's key, or led by a tab, is cannot-evaluate: it
-                 would continue the value (a plain 3.14 continued by `|| 3.12` is a range) or nest
-                 under it. In a .yml or .yaml file, a value that opens with a quote or a flow
-                 indicator and does not close on its own line is cannot-evaluate. Lines more indented
-                 than a plain key (or list marker) whose value is a block scalar (| or > with
-                 optional indicators) are its text and are not read as pins; in a non-YAML pin file
-                 that recognition stops after the first unclosed quoted or flow value, so the rest
-                 of that file stays under the strict scan. A plain (unquoted) pin of a floor whose
-                 text ends in 0 is a finding, since YAML reads a plain 3.20 as the number 3.2.
+                 pass. No line is read as script text: a line inside a block scalar (a run: script,
+                 for example) that names the key is judged as written, so it fails closed (exit 2,
+                 or a finding when it is itself a strict pin of another version), a disclosed
+                 over-rejection. The next non-blank line after a pin (blank lines skipped, comment
+                 lines included) more indented than the pin's key, or led by a tab, is
+                 cannot-evaluate: it would continue the value (a plain 3.14 continued by `|| 3.12`
+                 is a range) or nest under it. In a .yml or .yaml file, a value that opens with a
+                 quote or a flow indicator and does not close on its own line is cannot-evaluate. A
+                 plain (unquoted) pin of a floor whose text ends in 0 is a finding, since YAML reads
+                 a plain 3.20 as the number 3.2.
                  The key is found without regard to case, since the runner reads an input by its
                  upper-cased name: a strict pin whose key is in any other case is cannot-evaluate,
-                 and so is any line, block scalar text included, that names INPUT_PYTHON-VERSION
+                 and so is any line, script text included, that names INPUT_PYTHON-VERSION
                  (in any case), the step environment variable that can also set the input.
   guard          each guarded-surfaces entrypoint opens with the canonical refusal guard, AST-matched
                  against GUARD_TEMPLATE with the file's own basename and the floor; only a module
@@ -68,13 +68,14 @@ SKIPPED_DIR_NAMES is not walked. The pins leg is a conservative line model, not 
 that is also its answer to a malformed workflow: a pin can only be set by a line that names the key,
 so a file with no such line has no pin to check, every line that names it is held to the strict
 one-line form, the line after it may not continue or nest under it, and a quoted or flow value that
-spans lines in a YAML file stops the leg (exit 2). What it cannot model and does not refuse is named
-here: a key spelled through YAML escapes (for example a double-quoted key with backslash-u escapes, or
-an escaped line break inside the key), which no line names as written; an INPUT_PYTHON-VERSION
+spans lines in a YAML file stops the leg (exit 2). It recognizes no block scalar, so script text that
+names the key fails closed even where YAML reads it as text, a disclosed over-rejection; what remains
+of the key's spelling is a key spelled through YAML escapes (for example a double-quoted key with
+backslash-u escapes, or an escaped line break inside the key), which no line names as written. The
+rest of what it cannot model and does not refuse is named here: an INPUT_PYTHON-VERSION
 variable whose name is built at run time, not written on a line; a key reached through a YAML
 tag, an alias or a merge key, or a pin value set through an anchor elsewhere in the file, where the
-named line is judged as written; a block scalar header whose key the model misreads, which can only
-put more lines under the strict scan; and in the non-YAML pin file, a multi-line flow value around a
+named line is judged as written; and in the non-YAML pin file, a multi-line flow value around a
 pin. The leg also scans only the files it names. The documentation leg matches the exact phrase, not
 its meaning.
 
@@ -117,13 +118,6 @@ PIN_LINE_RE = re.compile(
 # The key of a line that is not a strict pin, read only to word the refusal: after the indentation and
 # any list markers, an optionally quoted key and its colon.
 KEY_RE = re.compile(r" *(?:- +)*([\"']?)([^\s\"':#{}\[\],][^\"':#{}\[\],]*?)\1 *:(?=[ \t]|$)")
-# A block scalar header: a plain key (or a bare list marker) whose value is | or > with optional
-# indentation and chomping indicators. The lines more indented than the key (or the last marker) are
-# the scalar's text, not pins. A header with a quoted key, a tag or an anchor is not recognized, so its
-# text stays under the strict scan.
-BLOCK_HEADER_RE = re.compile(
-    r" *(?:(-) +)*(?:([A-Za-z0-9_][A-Za-z0-9_.-]*) *: +)?[|>](?:[1-9][+-]?|[+-][1-9]?)?"
-    r"(?:[ \t]+#.*|[ \t]*)")
 # A node that opens with a quote or a flow indicator: after the indentation, any list markers, an
 # optional plain key with its colon, and optional anchor or tag properties.
 NODE_START_RE = re.compile(
@@ -241,21 +235,14 @@ def pin_findings(root, floor):
         pins = 0
         yaml_file = rel.endswith((".yml", ".yaml"))
         # pin: (key column, line number) of the last strict pin until the next non-blank line is
-        # judged. block: the column a block scalar's text is more indented than. opaque: a quoted or
-        # flow value continued past its line, after which no block scalar is recognized.
-        pin, block, opaque = None, None, False
+        # judged. No line is skipped as block scalar text: every line naming the key is judged.
+        pin = None
         for number, line in enumerate(_read_text(root / rel).split("\n"), 1):
             line = line[:-1] if line.endswith("\r") else line
             if not line.strip(" \t"):
                 continue
             indent = len(line) - len(line.lstrip(" "))
             deeper = line[indent] == "\t"
-            if block is not None:
-                if indent > block or deeper:
-                    if _names(line, INPUT_ENV):
-                        raise CannotEvaluate(_refusal(rel, number, line))
-                    continue
-                block = None
             if pin is not None:
                 if indent > pin[0] or deeper:
                     raise CannotEvaluate(
@@ -264,15 +251,10 @@ def pin_findings(root, floor):
                         "python-version: 'X.Y'".format(rel, number, pin[1]))
                 pin = None
             if not _names(line, PIN_KEY):
-                node = NODE_START_RE.fullmatch(line)
+                node = NODE_START_RE.fullmatch(line) if yaml_file else None
                 if node is not None and not _closes_on_line(node.group(1)):
-                    if yaml_file:
-                        raise CannotEvaluate("{}:{}: a quoted or flow value continues past its line; "
-                                             "this line model cannot follow it".format(rel, number))
-                    opaque = True
-                header = None if opaque else BLOCK_HEADER_RE.fullmatch(line)
-                if header is not None and (header.group(1) or header.group(2)):
-                    block = header.start(2) if header.group(2) else header.start(1)
+                    raise CannotEvaluate("{}:{}: a quoted or flow value continues past its line; "
+                                         "this line model cannot follow it".format(rel, number))
                 continue
             match = PIN_LINE_RE.fullmatch(line)
             if match is None or match.group("key") != PIN_KEY or _names(line, INPUT_ENV):
@@ -730,10 +712,7 @@ def _self_test_cases(base):
             ("pins/list-marker-passes", "- python-version: '3.14'"),
             ("pins/crlf-line-passes", "python-version: '3.14'\r"),
             ("pins/space-before-colon-passes", "python-version : '3.14'"),
-            ("pins/sibling-key-passes", "python-version: 3.14\n          cache: pip"),
-            ("pins/block-scalar-text-passes",
-             "python-version: '3.14'\n      - run: |\n          echo python-version\n"
-             "          python-version: '3.12'\n      - run: echo done")):
+            ("pins/sibling-key-passes", "python-version: 3.14\n          cache: pip")):
         check(check_id, evaluate(_fixture(base, workflow_pin=pin, pin_quote=""))[0], 0)
     for check_id, pin, marker in (
             ("pins/plain-continuation-cannot-evaluate", "python-version: 3.14\n            || 3.12",
@@ -750,12 +729,28 @@ def _self_test_cases(base):
              "quality.yml:7: a quoted or flow value continues past its line"),
             ("pins/multi-line-flow-cannot-evaluate",
              "python-version: '3.14'\n          note: {a: 1,\n            b: 2}",
-             "quality.yml:7: a quoted or flow value continues past its line")):
+             "quality.yml:7: a quoted or flow value continues past its line"),
+            ("pins/block-scalar-text-cannot-evaluate",
+             "python-version: '3.14'\n      - run: |\n          echo python-version\n"
+             "      - run: echo done", "quality.yml:8: unrecognized python-version spelling")):
         code, lines = evaluate(_fixture(base, workflow_pin=pin, pin_quote=""))
         check(check_id, (code, _has(lines, marker)), (2, True))
     code, lines = evaluate(_fixture(base, workflow_pin="python-version: 3.12", pin_quote=""))
     check("pins/wrong-single-line-finding",
           (code, _has(lines, "quality.yml:6: python-version '3.12' differs")), (1, True))
+    code, lines = evaluate(_fixture(base, workflow_pin=(
+        "python-version: '3.14'\n      - run: |\n          python-version: '3.12'\n"
+        "      - run: echo done"), pin_quote=""))
+    check("pins/block-scalar-pin-finding",
+          (code, _has(lines, "quality.yml:8: python-version '3.12' differs")), (1, True))
+    # An explicit-key entry whose value is a quoted scalar over several lines: the text inside it
+    # is no block scalar header, and the real pin after it is judged.
+    code, lines = evaluate(_fixture(base, files={WORKFLOWS_REL + "/attack.yml": (
+        "name: attack\non: push\njobs:\n  q:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - ? name\n        : \"start\nfake: |\n          end\"\n"
+        "        uses: actions/setup-python@v5\n        with:\n          python-version: '3.12'\n")}))
+    check("pins/explicit-key-quoted-value-finding",
+          (code, _has(lines, "attack.yml:13: python-version '3.12' differs")), (1, True))
     root = _fixture(base, workflow_pin="python-version: 3.10", template_pin="3.10", pin_quote="")
     check("pins/unquoted-trailing-zero-finding",
           [line for line in pin_findings(root, (3, 10)) if "unquoted" in line],
