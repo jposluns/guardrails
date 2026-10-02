@@ -1664,6 +1664,27 @@ _CLOSE_SWEEP_DISPOSITIONS = (
      "false positive: the harness's R flip (reclose), the deliberate pre-P1 body each R leg must turn red"),
     ("tools/_close_selftest.py", "body", "AFTER", "fd", "fd", 1,
      "false positive: the harness copy's R flip (reclose), byte-identical to _journal's"),
+    ("opf/tools/_opf_check.py", "_q_reclose", "AFTER", "fd", "fd", 1,
+     "false positive: #377's RECLOSE flip, the deliberate pre-P1 confirm-then-reclose body its "
+     "p1-close-fd-quietly-reclose-flip legs must turn red"),
+    ("opf/tools/_opf_store.py", "_r7_flip_reclose", "AFTER", "fd", "fd", 1,
+     "false positive: the r7 one-close legs' RECLOSE flip, the deliberate pre-P1 _close_fd_propagating body each "
+     "r7-*-one-close-red-under-reclose leg must turn red"),
+    ("opf/tools/_opf_store.py", "_r7w_reclose", "AFTER", "fd", "fd", 1,
+     "false positive: #377's RECLOSE flip, the deliberate pre-P1 _close_fd_exc_safe body the "
+     "r7-working-reclose-flip legs must turn red"),
+    ("opf/tools/_opf_store.py", "_r7w_vector", "AFTER", "[]seen", "[]seen", 1,
+     "false positive: seen[\"pfd\"] and seen[\"wfd\"] share only the one element key of the dict seen; the parent "
+     "and the child opened beneath it (dir_fd=pfd) are held at once, so they are two numbers, and each is closed "
+     "once, the parent's only while it still names the vector's unrelated file"),
+    ("opf/tools/opf.py", "reclose", "AFTER", "fd", "fd", 1,
+     "false positive: #377's RECLOSE flip in _close_exc_safe_vectors_self_test, the deliberate pre-P1 "
+     "confirm-then-reclose body every V1 and V2 vector must turn red under"),
+    ("opf/tools/opf.py", "_close", "REBIND", "fd", "", 1,
+     "false positive: the V1 fault stub's own release-then-reuse in _close_exc_safe_vectors_self_test: "
+     "real_close(fd) is the injected release, os.dup2 then puts the unrelated file on the number, and "
+     "state.number = fd records that new holder; the stub never closes the released descriptor again, and "
+     "p1_fails closes state.number only while it still names the unrelated file"),
     ("opf/tools/_opf_adopt_observe.py", "guarded", "TRY", "stack", "stack", 1,
      "false positive: contextlib.ExitStack.close pops each callback before it runs it, so a repeat runs none twice"),
     ("opf/tools/_opf_adopt_observe.py", "run_case", "TRY", "client", "client", 1,
@@ -1717,10 +1738,6 @@ _CLOSE_SWEEP_DISPOSITIONS = (
      "false positive: close_operation's InitSubstrateError is caught and run.sub cleared right after, and "
      "close_operation refuses a handle already closed, so its descriptors are never closed twice"),
     ("opf/tools/_opf_init_operation.py", "_physical_tests", "REBIND", "rfd", "", 1, _CS_LEGS.format("os.open")),
-    ("opf/tools/_opf_views.py", "_restore_preimages", "AFTER", "store_root_fd", "product_root_fd", 1,
-     "false positive: `store_root_fd = product_root_fd = None` joins the two names only through None (rule 1's "
-     "chained assignment); each is then bound to its own open (_open_store_root_fd, _open_root_fd), both held "
-     "together, and the finally closes each once"),
     ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "REBIND", "jr_fd", "", 3,
      _CS_LEGS.format("journal-root open (or None until one)")),
     ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "REBIND", "root_fd", "", 7,
