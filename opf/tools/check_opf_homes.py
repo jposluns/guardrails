@@ -387,6 +387,8 @@ _CONTRACT = {
         "With no archive tree nothing has rotated; an archive input that the doctor's archive walk finds missing, unreadable, malformed or otherwise defective MUST refuse the transition with nothing written, never be skipped.",
         "A contribution's proposed > sent, landing bare or /proposed, MUST write its delivery bundle (section 8.5) in the same act: transition MUST require the channel and ref values there and MUST refuse them on every other transition, and sent_at MUST be the operation's clock value.",
         "The send MUST refuse a record that already carries delivery, so a rejection of sent/proposed removes the bundle whole and restores the record as it was before the proposal; a ratification MUST keep the bundle.",
+        _D("A record that carries a planned delivery at proposed (section 8.5) therefore cannot be sent by transition; the way out is to withdraw it and create a new contribution, whose send writes the bundle."),
+        _D("transition does not read a standing authorization (section 8.4): an assistant or automation send lands sent/proposed even where the authorization would permit a bare sent, for a maintainer to ratify."),
         "A recipient receipt reference MAY be given only on sent > acknowledged, landing bare or /proposed: transition then adds receipt_ref and receipted_at, the operation's clock value, to delivery, and MUST refuse the value on every other transition.",
         'A rejection of acknowledged/proposed back to sent MUST remove those two keys.',
         'A backlog item MUST reach unqualified done only through done-with-receipt.',

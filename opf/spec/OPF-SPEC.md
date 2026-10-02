@@ -1110,11 +1110,16 @@ history is a new clean record linking back (section 8.6). Its subcommands:
   require the `channel` and `ref` values there and MUST refuse them on every other transition, and
   `sent_at` MUST be the operation's clock value. The send MUST refuse a record that already carries
   `delivery`, so a rejection of `sent/proposed` removes the bundle whole and restores the record as it
-  was before the proposal; a ratification MUST keep the bundle. A recipient receipt reference MAY be
-  given only on `sent` > `acknowledged`, landing bare or `/proposed`: `transition` then adds
-  `receipt_ref` and `receipted_at`, the operation's clock value, to `delivery`, and MUST refuse the
-  value on every other transition. A rejection of `acknowledged/proposed` back to `sent` MUST remove
-  those two keys. A backlog item MUST reach unqualified `done` only through `done-with-receipt`.
+  was before the proposal; a ratification MUST keep the bundle. A record that carries a planned
+  delivery at `proposed` (section 8.5) therefore cannot be sent by `transition`; the way out is to
+  withdraw it and create a new contribution, whose send writes the bundle. `transition` does not read
+  a standing authorization (section 8.4): an assistant or automation send lands `sent/proposed` even
+  where the authorization would permit a bare `sent`, for a maintainer to ratify. A recipient
+  receipt reference MAY be given only on `sent` > `acknowledged`, landing bare or `/proposed`:
+  `transition` then adds `receipt_ref` and `receipted_at`, the operation's clock value, to
+  `delivery`, and MUST refuse the value on every other transition. A rejection of
+  `acknowledged/proposed` back to `sent` MUST remove those two keys. A backlog item MUST reach
+  unqualified `done` only through `done-with-receipt`.
 - `done-with-receipt`: maintainer-only. It moves a backlog item to unqualified `done`, from
   `active` or by ratifying `done/proposed`, and in the same act creates its one-to-one `done`
   receipt linked `receipt_of` (section 8.5). An assistant reaching `done` uses `transition` and

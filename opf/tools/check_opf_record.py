@@ -1494,9 +1494,9 @@ def flip_t18_requires():
     """Drop the requires half of the option guard: a decide without the options is planned."""
     original = record._require_decision_options
 
-    def apply_only(req, rid, rtype, cur_state, target):
+    def apply_only(req, rid, rtype, cur_state, target, cur_qual):
         if "--decision" in req.values:
-            original(req, rid, rtype, cur_state, target)
+            original(req, rid, rtype, cur_state, target, cur_qual)
     return patch.object(record, "_require_decision_options", apply_only)
 
 
@@ -1535,9 +1535,9 @@ def flip_t18_apply_only():
     """Drop the apply-only half of the option guard: the options on any other transition are ignored."""
     original = record._require_decision_options
 
-    def requires_only(req, rid, rtype, cur_state, target):
+    def requires_only(req, rid, rtype, cur_state, target, cur_qual):
         if record._decides(rtype, cur_state, target):
-            original(req, rid, rtype, cur_state, target)
+            original(req, rid, rtype, cur_state, target, cur_qual)
     return patch.object(record, "_require_decision_options", requires_only)
 
 
