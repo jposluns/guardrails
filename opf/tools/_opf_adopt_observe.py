@@ -4181,11 +4181,13 @@ def self_test(vectors_only=False):
         # join, blocked the runs whose live straggler refused this run the
         # resolver (empty if it was evaluated), retained where the slot was
         # not back within main's bound. A blocked run was not evaluated, so
-        # its passed is whether it met every check main applies that does not
-        # read the observation, and unmet names each it failed. The caller
-        # fails the row on a leak, a straggler or a retained slot and records
-        # a blocked run as not evaluated, or INVALID when it failed a check;
-        # none of them counts as the mutant's detection.
+        # its passed is whether it met every one of main's checks that can be
+        # judged without an observation (the residue check regardless of
+        # status, fetch order as a prefix), and unmet names each it failed.
+        # The caller fails the row on a leak, a straggler or a retained slot;
+        # it records a blocked unmutated run as not evaluated, or INVALID when
+        # it failed a check, and a blocked mutant run as not evaluated (its
+        # result is ignored); none of them counts as the mutant's detection.
         return (passed, status, elapsed, fetch_guards, leaks, stragglers, blocked,
                 retained, unmet)
 
@@ -4674,7 +4676,8 @@ def self_test(vectors_only=False):
     #   INVALID, exit 1. Main ran the sweep regardless; a slot still held
     #   then made it raise, losing that row and every later row: exit 2.
     # - A blocked unmutated run makes its row INVALID, naming each check it
-    #   failed among those main applies that do not read the observation;
+    #   failed among main's checks that can be judged without an
+    #   observation (residue regardless of status, fetch order as a prefix);
     #   if it failed none, the row is CANNOT-EVALUATE unless an evaluated
     #   mutant run was not detected (INVALID). A blocked mutant run makes it
     #   CANNOT-EVALUATE unless the normal run failed: exit 1. Main evaluated
