@@ -221,6 +221,34 @@ def _validate_contained_regular(path, sandbox_real, where):
                                 .format(where, real, sandbox_real))
 
 
+def _close_fd_propagating(fd):
+    """Close a descriptor on a FAIL-CLOSED path: the close error PROPAGATES. Single close (P1, #378):
+    exactly ONE os.close; if it raises, the number counts as released (close(2) on Linux releases it early,
+    even when the close then reports EINTR or EIO, and a retry can close another thread's reused
+    descriptor: man 2 close), so it is never probed or closed again, and the ORIGINAL close error
+    propagates unchanged. Inlined from opf/tools/_journal._close_fd_propagating (the same body) so this
+    tool keeps working without opf/tools present (copied, mutated, or shipped alone)."""
+    os.close(fd)
+
+
+def _close_fd_yielding(fd):
+    """Close a descriptor from an `except` handler or a `finally` block without letting a close error
+    REPLACE the exception already in flight there: when an exception is unwinding through, or being handled
+    in, the CALLING frame, the same single close still runs (P1: one os.close, the number released either
+    way and never touched again) but its close error is dropped so the ORIGINAL exception keeps
+    propagating; on the normal path this is exactly _close_fd_propagating, so a close error still fails
+    closed. Inlined from opf/tools/_journal._close_fd_yielding (the same body) so this tool keeps working
+    without opf/tools present."""
+    tb = sys.exc_info()[2]
+    if tb is None or tb.tb_frame is not sys._getframe(1):
+        _close_fd_propagating(fd)
+        return
+    try:
+        _close_fd_propagating(fd)
+    except OSError:
+        pass                                      # the in-flight exception wins; the fd was still released
+
+
 def _read_bytes_safe(path, sandbox_real, where):
     """Read a target's bytes after re-validating it is a contained regular file, opening O_NOFOLLOW so a
     final-component symlink cannot be followed."""
@@ -235,7 +263,7 @@ def _read_bytes_safe(path, sandbox_real, where):
             chunks.append(block)
         return b"".join(chunks)
     finally:
-        os.close(fd)
+        _close_fd_yielding(fd)
 
 
 def _write_bytes_safe(path, data, sandbox_real, where):
@@ -246,7 +274,7 @@ def _write_bytes_safe(path, data, sandbox_real, where):
     try:
         os.write(fd, data)
     finally:
-        os.close(fd)
+        _close_fd_yielding(fd)
 
 
 def _sanitized_env(overrides=None):
@@ -1199,6 +1227,42 @@ def _build_repo(base, gens):
     return base
 
 
+def _close_vectors(base):
+    """#378: the vectors for this tool's _close_fd_yielding copy and its representative site,
+    _read_bytes_safe. A close that fails while an exception unwinds lets that exception through as the same
+    object; one that fails on the normal path raises; neither leaves a descriptor open. Returns (failures,
+    runs)."""
+    import _close_selftest
+    base.mkdir()
+    target = base / "target"
+    target.write_bytes(b"payload")
+    sandbox_real = os.path.realpath(str(base))
+    ns = globals()
+    sent = _close_selftest._StSentinel("in flight at _read_bytes_safe")
+
+    def read_bytes(raise_sent):
+        def call(fault):
+            real = os.read
+
+            def spy(fd, n):
+                fault.arm(fd)
+                if raise_sent:
+                    raise sent
+                return real(fd, n)
+            os.read = spy
+            try:
+                _read_bytes_safe(str(target), sandbox_real, "close vector")
+            finally:
+                os.read = real
+        return call
+
+    vectors = (("check_gensrc_failclose site _read_bytes_safe: finally while an exception unwinds", True, "AR",
+                read_bytes(True), lambda e: e is sent),
+               ("check_gensrc_failclose site _read_bytes_safe: normal path", False, "BR", read_bytes(False),
+                None)) + _close_selftest._st_helper_vectors(ns)
+    return _close_selftest._st_close_check(ns, vectors)
+
+
 def self_test_main():
     from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
     scrub_git_environment()
@@ -1225,6 +1289,7 @@ def _self_test_main_isolated():
     saved_now = _now
     saved_mkdtemp = _mkdtemp
     cleanup_error = None
+    close_runs = 0
     try:
         # (a) A conformant repo (content-guarding file + tree generators) passes.
         good = _build_repo(tmp / "good", {"goodfile": _GOODFILE, "goodtree": _GOODTREE})
@@ -1486,6 +1551,11 @@ def _self_test_main_isolated():
                 if flag not in cvals:
                     failures.append("F-367 no-maintenance flags: template `git {}` call is missing -c {} "
                                     "(git() must splice _TEMPLATE_GIT_NO_MAINTENANCE)".format(sub, flag))
+
+        # #378: this tool's _close_fd_yielding copy and its representative site, each green and red under
+        # its flip.
+        close_failures, close_runs = _close_vectors(tmp / "close")
+        failures.extend(close_failures)
     finally:
         _run_check = saved_run_check
         _now = saved_now
@@ -1523,7 +1593,8 @@ def _self_test_main_isolated():
           "failure and a tracked-set mismatch each fail closed (exit 2) with no git add -A fallback; and "
           "every template git command carries the F-367 no-maintenance flags (gc.auto=0, gc.autoDetach="
           "false, maintenance.auto=false) so no detached auto-gc / auto-maintenance can race the per-call "
-          "copytree of the template")
+          "copytree of the template; and the {} #378 close-vector runs pass, each flip leg red by its own "
+          "assertion".format(close_runs))
     return 0
 
 

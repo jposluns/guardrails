@@ -1685,8 +1685,8 @@ def _physical_home(rd, rel):
         for depth, comp in enumerate(reversed(rel.split("/"))):
             below = _fd_identity(cur)
             parent = os.open("..", _DIR_ID_FLAGS, dir_fd=cur)
-            os.close(cur)
-            cur = parent
+            prev, cur = cur, parent                       # ownership moves first: a failed close is
+            os.close(prev)                                # never closed again by the finally (P1, #378)
             try:
                 entry = os.stat(comp, dir_fd=cur, follow_symlinks=False)
             except FileNotFoundError:
@@ -1736,8 +1736,8 @@ def _spelled_route(rd, visit, ancestor_depth):
             for _ in range(ancestor_depth):
                 parent = os.open("..", flags, dir_fd=ancestor)
                 same = _fd_identity(parent) == _fd_identity(ancestor)
-                os.close(ancestor)
-                ancestor = parent
+                prev, ancestor = ancestor, parent         # ownership first (P1, #378)
+                os.close(prev)
                 visit(ancestor, edges)
                 if same:
                     break
@@ -1769,13 +1769,13 @@ def _spelled_route(rd, visit, ancestor_depth):
                     pending[:0] = target.split("/")
                     if target.startswith("/"):
                         nfd = os.open("/", flags)
-                        os.close(cur)
-                        cur = nfd
+                        prev, cur = cur, nfd              # ownership first (P1, #378)
+                        os.close(prev)
                         visit(cur, expanded)
                     continue
             nfd = os.open(comp, flags, dir_fd=cur)
-            os.close(cur)
-            cur = nfd
+            prev, cur = cur, nfd                          # ownership first (P1, #378)
+            os.close(prev)
             visit(cur, expanded)
         if _fd_identity(cur) != _fd_identity(rd.fd):
             raise _GateError("the supplied run path no longer resolves to the opened run directory (changed "
@@ -3845,6 +3845,110 @@ def _self_test_generation_detail(expect):
            "attempt for this run)")
 
 
+def _self_test_close_reuse(expect):
+    """#378 P1: the three no-follow walks that close the directory they leave (_physical_home, _spelled_route's
+    visit_ancestors, and _spelled_route's component step, the representative of its two loop sites) move
+    ownership of it before the close. Each vector fails that close after its number is released to a reuser
+    (the shared _journal close harness): the failure surfaces and the walk's finally closes only the next
+    directory. Green is no problem at all, with and without the PROBE watch; under the close-then-rebind body
+    put back, each is red by REUSE (the finally closes the reuser's number) and LEAK (the next directory is
+    never closed), exactly that pair."""
+    import inspect
+    import tempfile
+    import types
+    import _journal
+
+    def revert(fn, new, old):
+        source = inspect.getsource(fn)
+        if source.count(new) != 1:
+            raise AssertionError("{} close revert: target found {} times".format(fn.__name__, source.count(new)))
+        ns = dict(globals())
+        exec(compile(source.replace(new, old), __file__, "exec"), ns)
+        return ns[fn.__name__]
+
+    def one_shot(name, nth=1):
+        """Arm the descriptor the nth os.<name> call returns, for os.dup or os.open; each is installed and
+        restored by a direct assignment (no dynamic attribute access on os, which the maintenance-pin scan
+        refuses)."""
+        if name not in ("dup", "open"):
+            raise AssertionError("one_shot: no direct install for os.{}".format(name))
+
+        def put(fn):
+            if name == "dup":
+                os.dup = fn
+            else:
+                os.open = fn
+
+        def install(fault):
+            real, seen = (os.dup if name == "dup" else os.open), []
+
+            def spy(*args, **kwargs):
+                fd = real(*args, **kwargs)
+                seen.append(fd)
+                if len(seen) == nth:
+                    put(real)
+                    fault.arm(fd)
+                return fd
+            put(spy)
+            return lambda: put(real)
+        return install
+
+    def gate_error(exc):
+        return type(exc) is _GateError and "injected close failure" in str(exc)
+
+    with tempfile.TemporaryDirectory(prefix="opf-close-reuse-") as directory:
+        base = os.path.realpath(directory)
+        os.makedirs(os.path.join(base, "a", "b"))
+        run_fd = os.open(os.path.join(base, "a", "b"), _DIR_ID_FLAGS)
+        cwd_fd = None
+        try:                                              # owned before the second open can fail
+            cwd_fd = os.open(base, _DIR_ID_FLAGS)
+            physical = types.SimpleNamespace(fd=run_fd)
+            relative = types.SimpleNamespace(fd=run_fd, spelling="a/b", cwd_fd=cwd_fd)
+            absolute = types.SimpleNamespace(fd=run_fd, spelling=os.path.join(base, "a", "b"), cwd_fd=None)
+            sites = (
+                ("_physical_home", lambda fn: fn(physical, "a/b"), _physical_home, one_shot("dup"), False, None,
+                 "            prev, cur = cur, parent                       "
+                 "# ownership moves first: a failed close is\n"
+                 "            os.close(prev)                                "
+                 "# never closed again by the finally (P1, #378)\n",
+                 "            os.close(cur)\n            cur = parent\n"),
+                ("_spelled_route visit_ancestors", lambda fn: fn(relative, lambda fd, edges: None, 1),
+                 _spelled_route, one_shot("dup", 2), True, gate_error,
+                 "                prev, ancestor = ancestor, parent         # ownership first (P1, #378)\n"
+                 "                os.close(prev)\n",
+                 "                os.close(ancestor)\n                ancestor = parent\n"),
+                ("_spelled_route component step", lambda fn: fn(absolute, lambda fd, edges: None, 0),
+                 _spelled_route, one_shot("open"), True, gate_error,
+                 "            nfd = os.open(comp, flags, dir_fd=cur)\n"
+                 "            prev, cur = cur, nfd                          # ownership first (P1, #378)\n"
+                 "            os.close(prev)\n",
+                 "            nfd = os.open(comp, flags, dir_fd=cur)\n"
+                 "            os.close(cur)\n            cur = nfd\n"),
+            )
+            for label, invoke, fn, arm, masking, want, new, old in sites:
+                def call(fault, fn=fn, invoke=invoke, arm=arm):
+                    restore = arm(fault)
+                    try:
+                        invoke(fn)
+                    finally:
+                        restore()
+                for watch in (False, True):
+                    got = _journal._st_close_run(call, masking, want, watch)
+                    expect("close-reuse {} (watch={}): expected green, got {}".format(label, watch, got), not got)
+                reverted = revert(fn, new, old)
+                red = _journal._st_close_run(lambda fault, call=call, reverted=reverted: call(fault, fn=reverted),
+                                             masking, want, False)
+                expect("close-reuse {} under the close-then-rebind body: expected red by REUSE and LEAK, got "
+                       "{}".format(label, red or "green"), [p.split(":")[0] for p in red] == ["REUSE", "LEAK"])
+        finally:
+            try:
+                if cwd_fd is not None:
+                    os.close(cwd_fd)
+            finally:
+                os.close(run_fd)
+
+
 def _self_test():
     """Keep caller HOME/XDG out of fixture reads, including in-process production helpers."""
     import tempfile
@@ -3879,6 +3983,7 @@ def _self_test_isolated():
     _self_test_generation_detail(expect)
     _self_test_gate_generation(expect)
     _self_test_gate_generation_sites(expect)
+    _self_test_close_reuse(expect)
 
     # Every on-disk fixture below is graded through the generation sweep (_self_test_gate_generation_applied): its
     # generation-independent results must not change under generation 2; invalid generations refuse every id.

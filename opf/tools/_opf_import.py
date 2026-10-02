@@ -8928,37 +8928,39 @@ def self_test_isolated():
             check(n1_label + "-manifest-cannot-eval", vN1big == CANNOT_EVALUATE)
 
         # N2a (PRC-N2 round-4, unit): _journal._close_fd_quietly swallows a close-time OSError rather than
-        # propagating it. A double close (the second os.close raises EBADF and fstat confirms the fd gone)
-        # returns cleanly; a raw os.close would raise EBADF out to the caller.
-        _rp_n2, _wp_n2 = os.pipe()
-        os.close(_wp_n2)
-        os.close(_rp_n2)                       # first, real close
+        # propagating it. Its close of -1, a number no descriptor can hold, raises EBADF and returns cleanly;
+        # a raw os.close would raise EBADF out to the caller. (#378 P1: the leg never closes a number it
+        # released to provoke EBADF, since another thread may have reused that number meanwhile.)
         _n2a_raised = False
         try:
-            _journal._close_fd_quietly(_rp_n2)   # second close: EBADF; fstat EBADF -> confirmed gone, no raise
+            _journal._close_fd_quietly(-1)        # EBADF, swallowed
         except OSError:
             _n2a_raised = True
         check("N2a-close-quietly-swallows-oserror", _n2a_raised is False)
 
-        # N2d (re-QA): _close_fd_quietly's DIAGNOSTIC path must NEVER raise. Drive it to the fail-surface branch
-        # (both os.close calls raise while fstat proves the fd still open) AND make the stderr WRITE itself raise
-        # OSError (a broken stderr): the helper must RETURN, not propagate. Without the try/except around the
-        # final print, a broken-stderr OSError escapes the helper and, at the apply cleanup call sites, reaches
-        # the outer `except OSError` and overturns a committed promotion.
-        _rp_n2d, _wp_n2d = os.pipe()                     # a real, open fd so the helper's fstat confirms it live
+        # N2d (re-QA, P1 #378): _close_fd_quietly stays SILENT and never raises. Its single close fails the
+        # way close(2) does on Linux (the number released, then EIO) while stderr itself is broken (an
+        # OSError on every write): the helper must RETURN, write nothing, and leave the number alone. The
+        # pre-P1 body reached a stderr diagnostic here; a broken-stderr OSError escaping the helper would,
+        # at the apply cleanup call sites, reach the outer `except OSError` and overturn a committed
+        # promotion.
+        _rp_n2d, _wp_n2d = os.pipe()
         _saved_close_n2d = os.close
         _saved_stderr_n2d = sys.stderr
+        _n2d_writes = []
         class _BrokenStderr_n2d:
             def write(self, *_a, **_k):
+                _n2d_writes.append(_a)
                 raise OSError(errno.EIO, "broken stderr write")
             def flush(self, *_a, **_k):
                 raise OSError(errno.EIO, "broken stderr flush")
         def _close_raises_n2d(_fd):
+            _saved_close_n2d(_fd)                         # released first, as close(2) does on Linux
             raise OSError(errno.EIO, "injected close failure")
         _n2d_raised = False
         try:
-            os.close = _close_raises_n2d                  # BOTH closes in the helper now raise
-            sys.stderr = _BrokenStderr_n2d()             # ... and the diagnostic write raises too
+            os.close = _close_raises_n2d
+            sys.stderr = _BrokenStderr_n2d()             # ... and any diagnostic write would raise too
             try:
                 _journal._close_fd_quietly(_rp_n2d)
             except BaseException:
@@ -8966,14 +8968,13 @@ def self_test_isolated():
         finally:
             os.close = _saved_close_n2d
             sys.stderr = _saved_stderr_n2d
-        os.close(_rp_n2d)                                # real cleanup of the still-open fds
-        os.close(_wp_n2d)
-        check("N2d-close-quietly-diagnostic-nonthrow", _n2d_raised is False)
+        os.close(_wp_n2d)                                # real cleanup; _rp_n2d was released by the close
+        check("N2d-close-quietly-silent-nonthrow", _n2d_raised is False and not _n2d_writes)
 
         # N2b (PRC-N2 round-4, behavioural): a descriptor-close OSError on the apply cleanup path does NOT
         # overturn a committed promotion. Inject an OSError on the FIRST close of the journal-root fd (jr_fd),
-        # then promote a reviewed run: _close_fd_quietly swallows the raise (fstat confirms the fd, retries)
-        # and the CLEAN result stands. Without the _close_fd_quietly routing the raw os.close raised into the
+        # after releasing it as close(2) does, then promote a reviewed run: _close_fd_quietly swallows the
+        # raise and the CLEAN result stands. Without the _close_fd_quietly routing the raw os.close raised into the
         # outer OSError handler and flipped promoted=True to aborted. `fired` asserts the injection ran.
         rootN2, mN2 = build_apply_store()
         prN2 = plan_import(rootN2, ["a.txt"], now=NOW, run_nonce="apply-n2")
@@ -8988,6 +8989,7 @@ def self_test_isolated():
         def _close_n2(_fd):
             if _fd == _n2b["jr_fd"] and not _n2b["fired"]:
                 _n2b["fired"] = True
+                _saved_close_n2(_fd)                       # released first, as close(2) does on Linux
                 raise OSError(errno.EIO, "injected jr_fd cleanup-close error")
             return _saved_close_n2(_fd)
         _journal.open_journal_root_fd = _capture_ojr_n2
@@ -9022,6 +9024,7 @@ def self_test_isolated():
                 return _saved_close_n2c(_fd)               # let jr_fd close normally (N2b covers it)
             if _n2c["jr_closed"] and not _n2c["fired"]:
                 _n2c["fired"] = True
+                _saved_close_n2c(_fd)                      # released first, as close(2) does on Linux
                 raise OSError(errno.EIO, "injected root_fd cleanup-close error")
             return _saved_close_n2c(_fd)
         _journal.open_journal_root_fd = _capture_ojr_n2c

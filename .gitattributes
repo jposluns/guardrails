@@ -631,6 +631,7 @@ site/styles.css text eol=lf
 site/teams.html text eol=lf
 site/tech-details.html text eol=lf
 site/theme.js text eol=lf
+tools/_close_selftest.py text eol=lf
 tools/_gen_common.py text eol=lf
 tools/_git_fixture_env.py text eol=lf
 tools/_qa_adapter.py text eol=lf

@@ -210,7 +210,7 @@ def assert_open_journal(root_fd, root):
     try:
         jfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
     except OSError as exc:
-        os.close(pfd)
+        _journal._close_fd_yielding(pfd)
         return Result("open-journal", MALFORMED, "cannot open the journal ({})".format(exc))
     try:
         for entry in sorted(os.listdir(jfd)):
@@ -227,8 +227,10 @@ def assert_open_journal(root_fd, root):
     except OSError as exc:
         return Result("open-journal", MALFORMED, "cannot read the journal ({})".format(exc))
     finally:
-        os.close(jfd)
-        os.close(pfd)
+        try:
+            _journal._close_fd_yielding(jfd)
+        finally:
+            _journal._close_fd_yielding(pfd)
     if open_txns:
         return Result("open-journal", FAIL,
                       "{} open transaction(s) block any new pin operation until recovered: {}"
@@ -422,7 +424,7 @@ def run(root):
                 results.append(Result(fn.__name__, MALFORMED,
                                       "contained-path error (a symlink or traversal was refused): {}".format(exc)))
     finally:
-        os.close(root_fd)
+        _journal._close_fd_yielding(root_fd)
     for r in results:
         line = "  {:<17} {}".format(r.aid, r.status)
         if r.detail:
@@ -436,6 +438,38 @@ def run(root):
 
 
 # --- self-test ----------------------------------------------------------------------------------------
+
+def _close_vectors(base):
+    """#378: assert_open_journal's journal-dir close, the representative _close_fd_yielding site. A close
+    that fails while an exception unwinds lets that exception through as the same object; one that fails on
+    the normal path raises; neither leaves a descriptor open (_journal._st_close_check runs them and the
+    flips)."""
+    (base / pin.JOURNAL_REL / "txn").mkdir(parents=True)
+    ns = vars(_journal)
+    sent = _journal._StSentinel("in flight at assert_open_journal")
+
+    def open_journal(raise_sent):
+        def call(fault):
+            real = ns["is_terminal"]
+
+            def spy(jfd, txn_dir):
+                fault.arm(jfd)
+                if raise_sent:
+                    raise sent
+                return True
+            root_fd = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY)
+            try:                                          # the seam is swapped only where its restore runs
+                ns["is_terminal"] = spy
+                assert_open_journal(root_fd, str(base))
+            finally:
+                ns["is_terminal"] = real
+                os.close(root_fd)
+        return call
+
+    return (("doctor site assert_open_journal: finally while an exception unwinds", True, "AR",
+             open_journal(True), lambda e: e is sent),
+            ("doctor site assert_open_journal: normal path", False, "BR", open_journal(False), None))
+
 
 def self_test():
     """The doctor's own honesty invariants over synthetic installs. The end-to-end assertion coverage is
@@ -502,6 +536,11 @@ def self_test():
         (broken / pin.HISTORY_REL).write_text(pin._render_history([r0, r1]), encoding="utf-8")
         rc = run(str(broken))
         check("a broken chain FAILs (exit 1)", rc == 1)
+
+        # #378: the representative _close_fd_yielding site, each vector green and red under its flip.
+        close_failures, close_runs = _journal._st_close_check(vars(_journal), _close_vectors(tmp / "close"))
+        failures.extend(close_failures)
+        checked += close_runs
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
