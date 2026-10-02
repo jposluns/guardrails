@@ -1097,8 +1097,12 @@ history is a new clean record linking back (section 8.6). Its subcommands:
   `transition` also refuses to decide a record that a pending_decision not at unqualified `decided`
   already supersedes when no other member of its chain is a current resolution, and a supersession
   that passes the checks above but still leaves the chain without a current resolution. The rule
-  reads the active index only, so a chain member rotated to the archive (section 12) is left to the
-  final doctor. A backlog item MUST reach unqualified `done` only through `done-with-receipt`.
+  MUST read the records the doctor reads for that check, the planned index together with every
+  archived record (section 12), so a chain member rotated to the archive is judged before anything
+  is written. With no archive tree nothing has rotated; an archive input that the doctor's archive
+  walk finds missing, unreadable, malformed or otherwise defective MUST refuse the transition with
+  nothing written, never be skipped. A backlog item MUST reach unqualified `done` only through
+  `done-with-receipt`.
 - `done-with-receipt`: maintainer-only. It moves a backlog item to unqualified `done`, from
   `active` or by ratifying `done/proposed`, and in the same act creates its one-to-one `done`
   receipt linked `receipt_of` (section 8.5). An assistant reaching `done` uses `transition` and

@@ -306,8 +306,16 @@ Each case runs on its own copy of that template; the root is removed in a finall
       still have none (the same decide without the link then lands doctor VALID); QA1 Case B, a record
       already superseded by an open successor, decided with --supersedes; and that record decided without
       the link (flip, applied to each of the three: drop the chain rule, under which the decide publishes
-      and the source gate refuses on C-DECISION-CHAINS with no current resolution). The decisions
-      register's other two types are driven end to end: a maintainer files a
+      and the source gate refuses on C-DECISION-CHAINS with no current resolution). The chain rule
+      reads what the doctor reads, the archive included, each case its own test after a release whose
+      worklog rotates to archive/2026 with one decision: QA3 reproduction A, a decide whose chain's one
+      current resolution was rotated, lands doctor VALID; QA3 reproduction B, the decide of a record an
+      archived withdrawn decision supersedes, refuses with every byte untouched; and an archived index
+      that does not parse refuses a decide with every byte untouched, never skipped (flip, applied to
+      each of the three: restore the active-only read, under which A refuses, B publishes and the
+      source gate refuses on C-DECISION-CHAINS with no current resolution, and the third publishes and
+      the final doctor cannot evaluate the archive). The decisions register's other two types are
+      driven end to end: a maintainer files a
       maintainer_decision linking exemplifies PP-1, doctor VALID and listed with its link, and an
       assistant distils a preference_pattern to active/proposed that the maintainer ratifies and then
       retires, doctor VALID (flip: the planner drops the requested links, which only the independent
@@ -335,10 +343,12 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _journal as journal          # noqa: E402
+import _opf_changelog as opf_changelog  # noqa: E402
 import _opf_check as opf_check      # noqa: E402
 import _opf_emit as emit            # noqa: E402
 import _opf_oplock                  # noqa: E402
 import _opf_record as record        # noqa: E402
+import _opf_release as opf_release  # noqa: E402
 import _opf_schema as schema        # noqa: E402
 import _opf_write_guard as guard    # noqa: E402
 import opf                          # noqa: E402
@@ -1801,7 +1811,103 @@ def t72_superseded_record_plain(fx):
 def flip_t72_chain():
     """Drop the pre-publication chain rule: the decide publishes before the doctor finds its chain with no
     current resolution."""
-    return patch.object(record, "_require_one_current_resolution", lambda rows, rid, rel: None)
+    return patch.object(record, "_require_one_current_resolution", lambda ctx, rows, rid, rel: None)
+
+
+ARCHIVE = MACH + "/archive/2026"
+ARCHIVED_PD_INDEX = ARCHIVE + "/pending_decision.index.toml"
+
+
+def _rotate(fx, root, rid):
+    """Release the whole worklog as 0.1.0 (release_cut, its published changelog summary, and VERSION) and
+    rotate it into archive/2026 with `rid`'s pending_decision row, archive.toml enumerating the moved id
+    and span; then render and commit: doctor VALID (spec 12)."""
+    env = fx.env
+    worklog, version = model(root, WORKLOG), model(root, VERSION)
+    cut = opf_release.release_cut(version, worklog, "0.1.0", "2026-09-01T00:00:00Z")
+    assert cut.status == opf_check.VALID, ("the release cut", cut.status, cut.findings)
+    changelog = "# Changelog\n\n## unreleased\n\n## 0.1.0\n\n- 0.1.0 notes\n"
+    entries, _findings = opf_changelog._changelog_entries(changelog)
+    released = cut.version_data
+    released["summary"] = [{"covers": "0.1.0", "status": "published",
+                            "digest": opf_changelog.freeze_digest(dict(entries)["0.1.0"])},
+                           {"covers": "unreleased", "status": "working"}]
+    index = model(root, PD_INDEX)
+    moved = [r for r in index["record"] if r["id"] == rid]
+    assert len(moved) == 1, (rid, index)
+    index["record"] = [r for r in index["record"] if r["id"] != rid]
+    span = [worklog["entry"][0]["id"], worklog["entry"][-1]["id"]]
+    documents = {
+        VERSION: released, PD_INDEX: index, WORKLOG: dict(worklog, entry=[]),
+        ARCHIVED_PD_INDEX: {"schema": 1, "record": moved},
+        ARCHIVE + "/worklog.toml": {"schema": 1, "entry": worklog["entry"]},
+        ARCHIVE + "/archive.toml": {"schema": 1, "moved": [{"id": rid, "type": "pending_decision",
+                                                           "destination": "archive/2026/pending_decision.index.toml"}],
+                                   "worklog_moved": [{"span": span, "destination": "archive/2026/worklog.toml"}]}}
+    (Path(root) / ARCHIVE).mkdir(parents=True)
+    for rel, document in documents.items():
+        (Path(root) / rel).write_bytes(emit.emit_checked(document).encode("utf-8"))
+    (Path(root) / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
+    (Path(root) / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+    rc, out, err = cli(env, ["render", "--root", str(root), "--write"])
+    assert rc == 0, ("render after the rotation", rc, out[-800:], err[-800:])
+    env.git(root, "add", "-A")
+    env.git(root, "commit", "-q", "-m", "release 0.1.0 and rotate " + rid)
+    doctor_valid(env, root)
+
+
+def _withdrawn_successor(fx, root):
+    """PD-1 open and PD-2 created linking supersedes PD-1, then withdrawn. Run under ticking()."""
+    step(fx, root, PD_CREATE + MAINTAINER, "PD-1")
+    step(fx, root, _pd_create("which layout, again") + ["--link", "supersedes=PD-1"] + MAINTAINER, "PD-2")
+    step(fx, root, ["transition", "PD-2", "withdrawn"] + MAINTAINER, "PD-2 withdrawn")
+
+
+def t72_archived_resolution(fx):
+    """QA3 reproduction A. PD-2 (withdrawn) supersedes PD-1 and PD-3 (decided) supersedes PD-2, and PD-3 is
+    rotated to the archive: doctor VALID, PD-3 the chain's one current resolution. Deciding PD-1 keeps the
+    archived PD-3 current, so it lands and the doctor stays VALID."""
+    root = fx.case("t72-archived-resolution")
+    with ticking():
+        _withdrawn_successor(fx, root)
+        step(fx, root, _pd_create("which layout, third") + ["--link", "supersedes=PD-2"] + MAINTAINER, "PD-3")
+        step(fx, root, ["transition", "PD-3", "decided"] + DECIDE + MAINTAINER, "PD-3 decided")
+        _rotate(fx, root, "PD-3")
+        step(fx, root, ["transition", "PD-1", "decided"] + DECIDE + MAINTAINER, "PD-1 decided")
+        assert row(root, "PD-1", PD_INDEX)["status"] == "decided", row(root, "PD-1", PD_INDEX)
+        doctor_valid(fx.env, root)
+
+
+def t72_archived_successor(fx):
+    """QA3 reproduction B. PD-2 (withdrawn) supersedes PD-1 and is rotated to the archive: doctor VALID, the
+    chain wholly undecided. Deciding PD-1 would leave the chain with no current resolution (PD-1
+    superseded by the archived PD-2), so it refuses with every byte untouched."""
+    root = fx.case("t72-archived-successor")
+    with ticking():
+        _withdrawn_successor(fx, root)
+        _rotate(fx, root, "PD-2")
+        refused_untouched(fx.env, root, ["transition", "PD-1", "decided"] + DECIDE + MAINTAINER,
+                          "PD-1 is itself already superseded by PD-2")
+
+
+def t72_unreadable_archive(fx):
+    """PD-1 decided and rotated to the archive, then its archived index replaced by bytes that do not parse
+    (committed): the doctor's archive walk cannot read it, so deciding PD-2 refuses with every byte
+    untouched rather than judging the chain without the archive."""
+    root = fx.case("t72-unreadable-archive")
+    with ticking():
+        _decided(fx, root, "which layout", 1)
+        _rotate(fx, root, "PD-1")
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        write_commit(fx.env, root, ARCHIVED_PD_INDEX, b"record = [\n", "a torn archive index")
+        refused_untouched(fx.env, root, ["transition", "PD-2", "decided"] + DECIDE + MAINTAINER,
+                          "does not pass the doctor's own archive walk")
+
+
+def flip_t72_archive():
+    """Restore the active-only read: the chain rule judges the planned index alone, never the archive."""
+    return patch.object(record, "_chain_records", lambda ctx, rows: [
+        opf_check._make_rec(r, record.PENDING_DECISION, "active") for r in rows if isinstance(r, dict)])
 
 
 PATTERN = ["create", "--type", "preference_pattern", "--field", "context=layout choices", "--field",
@@ -5053,6 +5159,9 @@ TESTS = (
     ("T72-decide-chain-join", t72_chain_join, flip_t72_chain),
     ("T72-decide-superseded-record", t72_superseded_record, flip_t72_chain),
     ("T72-decide-superseded-record-plain", t72_superseded_record_plain, flip_t72_chain),
+    ("T72-decide-archived-resolution", t72_archived_resolution, flip_t72_archive),
+    ("T72-decide-archived-successor", t72_archived_successor, flip_t72_archive),
+    ("T72-decide-unreadable-archive", t72_unreadable_archive, flip_t72_archive),
     ("T72-register-ruling-and-pattern", t72_register, flip_t72_links),
     ("T72-register-assistant-ruling", t72_assistant_ruling, flip_t72_trust),
 )

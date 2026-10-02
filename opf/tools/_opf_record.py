@@ -42,8 +42,11 @@ superseded chain with no current resolution. Every landing at unqualified `decid
 over the planned index: the chain the record belongs to afterwards must have exactly one current effective
 resolution, or the transition refuses with every byte untouched. That also refuses the decide of a record
 already superseded by a pending_decision that is not decided when no other member of its chain is current,
-and a link the target checks pass that still leaves its chain with none. The rule reads the active index
-only, so a chain member rotated to the archive (spec 12) is not seen there and is left to the final doctor.
+and a link the target checks pass that still leaves its chain with none. The rule reads the records the
+doctor's chain check reads, the planned index and every archived record through the doctor's own archive
+walk (_opf_check.archived_records), so a chain member rotated to the archive (spec 12) is judged before
+anything is written, and an archive input that is missing, unreadable or malformed refuses with every
+byte untouched, never skipped.
 `done-with-receipt` is maintainer-only (any other actor is refused before the store is touched): it moves an
 `active` or `done/proposed` backlog item to `done` and mints the one-to-one `done` receipt, linked
 `receipt_of`, in the same transaction (spec 8.5). `transition` never lands a backlog item at unqualified
@@ -473,7 +476,7 @@ def _require_canonical(operand):
 class Context:
     """The resolved store and the models this operation plans from."""
     __slots__ = ("res", "root", "root_fd", "machine_rel", "manifest", "homes", "types", "vendors",
-                 "counters", "version", "worklog", "done_index", "journal_rel")
+                 "import_status", "counters", "version", "worklog", "done_index", "journal_rel")
 
     def __init__(self, res, root, root_fd):
         self.res = res
@@ -485,6 +488,7 @@ class Context:
         self.homes = None
         self.types = None
         self.vendors = frozenset()
+        self.import_status = None  # the manifest's [opf].import_status, which the archive walk reads
         self.counters = None
         self.version = None
         self.worklog = None        # the worklog operand: every subcommand appends one entry
@@ -514,6 +518,7 @@ def _load_manifest(ctx):
     ctx.types = _opf_check._authoritative_types(_opf_check._enabled_modules(manifest), manifest.get("types"))
     reg = (manifest.get("vendors") or {}).get("registered")
     ctx.vendors = frozenset(reg) if isinstance(reg, list) else frozenset()
+    ctx.import_status = base.get("import_status")
 
 
 def _counter_state(ctx, counters_model):
@@ -953,25 +958,43 @@ def _supersession_link(req, ctx, operand, rid):
     return {"rel": SUPERSEDES, "id": target}
 
 
-def _require_one_current_resolution(rows, rid, rel):
+def _chain_records(ctx, rows):
+    """The records the doctor's C-DECISION-CHAINS reads, in its order: the planned active index (`rows`, as
+    _opf_check._make_rec views), then every archived record through the doctor's own archive walk
+    (_opf_check.archived_records), so this check and the final doctor judge a chain over one record set.
+    An archive input the walk finds missing, unreadable or malformed refuses before anything is written,
+    never skipped: a chain judged without it could pass here and fail only after publication, or refuse
+    a decide the doctor accepts (spec 8.8, 12)."""
+    archived, problems = _opf_check.archived_records(ctx.root_fd, ctx.machine_rel, ctx.types, ctx.vendors,
+                                                     ctx.import_status, homes=ctx.homes)
+    if problems:
+        raise RecordError("the archive does not pass the doctor's own archive walk ({}), so the chain rule "
+                          "cannot judge this decide over the records the doctor reads (the planned index and "
+                          "every archived record; spec 8.8, 12). Nothing written; fail-closed".format(
+                              "; ".join(problems)))
+    return [_opf_check._make_rec(r, PENDING_DECISION, "active") for r in rows if isinstance(r, dict)] + archived
+
+
+def _require_one_current_resolution(ctx, rows, rid, rel):
     """A landing at unqualified `decided` must leave the chain the record belongs to with exactly one
     current effective resolution (spec 8.5): the doctor's own derivation (_opf_check.decision_chains over
-    _opf_check._make_rec views, the C-DECISION-CHAINS rule) run over `rows`, the planned index, before
-    anything is written. It catches what the target checks cannot see: the record itself already
-    superseded by a pending_decision that is not decided, with no other current member in its chain (its
-    decide leaves the chain with none), and a link to a chain head that still leaves the joined chain with
-    none. Only this index is read, so a chain member rotated to the archive (spec 12) is not seen here and
-    is left to the final doctor."""
-    recs = [_opf_check._make_rec(r, PENDING_DECISION, "active") for r in rows if isinstance(r, dict)]
+    _opf_check._make_rec views, the C-DECISION-CHAINS rule) run over the records the doctor reads
+    (_chain_records: `rows`, the planned index, then every archived record), before anything is written.
+    It catches what the target checks cannot see: the record itself already superseded by a
+    pending_decision that is not decided, with no other current member in its chain (its decide leaves the
+    chain with none), and a link to a chain head that still leaves the joined chain with none. A chain
+    member rotated to the archive (spec 12) is judged here as the doctor judges it, and an archive the
+    doctor's walk does not pass refuses (_chain_records)."""
+    recs = _chain_records(ctx, rows)
     by_id = {}
     for rec in recs:
         if isinstance(rec.id, str):
-            by_id.setdefault(rec.id, rec)    # the first seated row, as the doctor's own map keeps it
+            by_id.setdefault(rec.id, rec)    # the first seated record, active first, as the doctor's map keeps it
     for members, current in _opf_check.decision_chains(recs, by_id):
         if rid in members and len(current) != 1:
-            held = _superseders(rows, rid)
-            raise RecordError("deciding {} would leave its supersession chain in {} ({}) with {} current effective "
-                              "resolutions ({}); exactly one exists per chain (spec 8.5, C-DECISION-CHAINS){}. "
+            held = [r.id for r in recs if r.rtype == PENDING_DECISION and (SUPERSEDES, rid) in r.links]
+            raise RecordError("deciding {} would leave its supersession chain in {} and the archive ({}) with {} "
+                              "current effective resolutions ({}); exactly one exists per chain (spec 8.5, C-DECISION-CHAINS){}. "
                               "Nothing written; fail-closed".format(
                                   rid, rel, ", ".join(members), len(current), ", ".join(current) or "none",
                                   "; {} is itself already superseded by {}".format(rid, ", ".join(map(str, held)))
@@ -994,7 +1017,7 @@ def _plan_transition(req, ctx, operand, now):
     pending_decision at unqualified `decided` may also append one `supersedes` link (--supersedes, checked
     by _require_supersedes_landing and _supersession_link), and every such landing, the link or not, must
     leave its chain with exactly one current resolution (_require_one_current_resolution, over the planned
-    index). The change is `status`, `updated_at`, the
+    index and the archive). The change is `status`, `updated_at`, the
     `proposed_from` write or removal, that bundle write or removal, and that link append on that one
     record, plus its own worklog entry."""
     rid, target = req.positionals
@@ -1047,8 +1070,8 @@ def _plan_transition(req, ctx, operand, now):
     new_row.update(fields)
     _validated(new_row, rtype, ctx)
     if rtype == PENDING_DECISION and to_status == "decided":
-        _require_one_current_resolution([new_row if isinstance(r, dict) and r.get("id") == rid else r
-                                         for r in _index_rows(operand)], rid, operand.rel)
+        _require_one_current_resolution(ctx, [new_row if isinstance(r, dict) and r.get("id") == rid else r
+                                              for r in _index_rows(operand)], rid, operand.rel)
     (wid,) = _claim(ctx, [_opf_release.WL_NAMESPACE])
     detail = "opf-record transition {} {} -> {}".format(rid, current, to_status)
     if "--reason" in req.values:
@@ -2731,7 +2754,6 @@ def _refuses(fn, needle=""):
 
 
 def _self_test_units(check):
-    from types import SimpleNamespace
     now = datetime.datetime(2026, 9, 27, 1, 2, 3, tzinfo=datetime.timezone.utc)
     # -- the argument grammar ----------------------------------------------------------------------------
     req = parse_request(["create", "--type", "backlog_item", "--title", "t", "--actor", "assistant:c",
@@ -2808,9 +2830,23 @@ def _self_test_units(check):
           and not _txn_of_token(rid.replace(token[:16], "f" * 16), token)
           and not _txn_of_token(legacy.replace(token, "f" * 32), token)
           and not _txn_of_token("imp-20260927T000000Z-" + token[:16], token))
+    # A decide's chain rule reads the archive through the doctor's own walk (_chain_records), so the
+    # synthetic contexts stand on an empty directory: no archive tree, nothing rotated.
+    import tempfile
+    empty = tempfile.mkdtemp(prefix="opf-record-self-test-")
+    empty_fd = os.open(empty, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        _self_test_contexts(check, empty_fd, now)
+    finally:
+        os.close(empty_fd)
+        os.rmdir(empty)
+
+
+def _self_test_contexts(check, root_fd, now):
+    from types import SimpleNamespace
 
     def ctx_of(counters, version=None):
-        ctx = Context(SimpleNamespace(machine_rel=".working/toml"), ".", None)
+        ctx = Context(SimpleNamespace(machine_rel=".working/toml"), ".", root_fd)
         ctx.homes = 1
         ctx.types = dict(_opf_store.BASELINE_TYPES)
         counters_model = {"schema": 1, "counters": dict(counters)}
