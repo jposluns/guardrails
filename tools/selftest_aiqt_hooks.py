@@ -80,11 +80,12 @@ missing tool_name or an absent target field fails closed. Every secret fixture i
 
 It also covers the generated-artefact edit guard (gensrc_guard, gensrc): a Write/Edit/MultiEdit whose
 file_path resolves onto a kind=file or kind=tree entry of the per-repo .aiqt/gensrc.json (read at
-decision time) ASKS the steering ask, while a source edit, an unregistered path, and a kind=block entry
-ALLOW, Bash is out of scope, and component-boundary matching means gen-extra/ and GEN.md.bak do not
-match gen/ and GEN.md. Each fault branch is designed to fail SAFE to ASK (an unreadable, malformed, or
-unknown-version registry, a malformed entry, an unresolvable repo root, a non-contained target, and an
-unreadable payload field), an absent registry is the inert ALLOW, and only a missing tool_name denies.
+decision time) DENIES and names the source to edit, while a source edit, an unregistered path, and a
+kind=block entry ALLOW, Bash is out of scope, and component-boundary matching means gen-extra/ and
+GEN.md.bak do not match gen/ and GEN.md. A PRESENT registry it cannot read (unreadable, malformed, or
+unknown-version, or a malformed entry) DENIES, fail closed; the other cannot-evaluate branches (an
+unresolvable repo root, a non-contained target, an unreadable payload field) ALLOW with a note; an absent
+registry is the inert ALLOW, and a missing tool_name also denies.
 Fixtures are throwaway git repos under the temp tree (a registry-carrying repo, a registry-less repo, a
 mutable-bad-registry repo, and a plain non-git dir), removed in the finally.
 
@@ -7100,7 +7101,7 @@ def _main_isolated():
           "regenerate) AND a PRESENT-but-unreadable/malformed registry (fail-closed, finding 8), and ALLOWS "
           "with a note the remaining cannot-evaluate branches (a non-git session, an outside-repo target, a "
           "malformed payload), the CI drift gate remaining the backstop; a genuinely-absent registry is the "
-          "inert allow and only a missing tool_name denies. secsec (secrets_shift_left) still "
+          "inert allow and a missing tool_name also denies. secsec (secrets_shift_left) still "
           "DENIES a shaped secret in a Write/Edit/Bash write-form (unchanged by the no-ask work) and "
           "fails closed on a missing tool_name or target field. abspth's typed-path predicate still "
           "DENIES a required-absolute relative/drive-relative/tilde/UNC-less path and ALLOWS an absolute "

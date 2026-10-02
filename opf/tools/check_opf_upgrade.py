@@ -96,7 +96,9 @@ VECTOR ROSTER (U1-U28, P1):
       (FIX1 release never-seize, class-width): _opf_write_guard.acquire_lease returns the on-disk payload; after a
       peer REPLACES the lease with its own well-formed bytes, _opf_write_guard.release_lease refuses (never-seize) and
       LEAVES the replacement, yet an ordinary release of this run's OWN lease still removes it (fails under the
-      old ownership-blind unlink, which deleted the peer's lease).
+      old ownership-blind unlink, which deleted the peer's lease). U25c (F-LEASE-RELEASE-ANY-EXC): _upgrade_run
+      called from inside a caller's `except`, with a nonzero render (a return path) and an inert failing
+      release, propagates the release error; a flip restoring the finally's sys.exc_info() test turns it red.
   U26 R8 non-boolean module: the planner precondition refuses a non-boolean value on ANY module (governance,
       operational_policy, decision_support), matching the merge-base _validate_modules, while a fully-boolean
       module set still plans; end-to-end, a stored governance="x" refuses exit 2 before any mutation. FIX3: an
@@ -1905,6 +1907,50 @@ def _suite_isolated():
                       and "restore --staged" in rout
                       and (sf / ".working/toml/lease.toml").is_file()
                       and '"event": "upgraded"' not in rout)
+
+            # U25c) F-LEASE-RELEASE-ANY-EXC: the finally's "is an exception propagating" test is THIS frame's
+            # own exception path, not sys.exc_info(). _upgrade_run is called from inside a CALLER's `except`
+            # with a nonzero render (a return path) and an inert failing release (it raises, touching
+            # nothing): the release error must propagate, never be printed and swallowed because the
+            # caller's handled exception looked in flight. The flip restores the sys.exc_info() test and
+            # must turn the vector red.
+            import inspect as _inspect
+
+            def _caller_handled_release(run, label):
+                sc = base / ("u25c-caller-except-" + label)
+                sc.mkdir()
+                build_store(sc)
+                _orig_render = opf._opf_views.render
+                opf._opf_write_guard.release_lease = lambda *a, **k: (_ for _ in ()).throw(
+                    opf._UpgradeError("synthetic release failure"))
+                opf._opf_views.render = lambda *a, **k: 2
+                try:
+                    with _ctx.redirect_stdout(_io.StringIO()), _ctx.redirect_stderr(_io.StringIO()):
+                        try:
+                            raise RuntimeError("the caller's handled exception")
+                        except RuntimeError:
+                            try:
+                                run(str(sc))
+                            except opf._UpgradeError as exc:
+                                return str(exc) == "synthetic release failure"
+                            return False
+                finally:
+                    opf._opf_write_guard.release_lease = _orig_rel
+                    opf._opf_views.render = _orig_render
+
+            check("U25c a release failure on a return path propagates from inside a caller's except",
+                  _caller_handled_release(opf._upgrade_run, "fixed"))
+            _src25c = _inspect.getsource(opf._upgrade_run)
+            _new25c = "                if not propagating:\n"
+            _flip25c = None
+            if _src25c.count(_new25c) == 1:
+                _ns25c = {}
+                exec(compile(_src25c.replace(_new25c, "                if sys.exc_info()[1] is None:\n"),
+                             opf.__file__, "exec"), vars(opf), _ns25c)
+                _flip25c = _ns25c["_upgrade_run"]
+            check("U25c flip target (the frame-local propagating test) found exactly once", _flip25c is not None)
+            check("U25c flip: the sys.exc_info() test swallows the release failure (vector red)",
+                  _flip25c is not None and not _caller_handled_release(_flip25c, "flip"))
 
             # U25b) FIX1 release never-seize (class-width): the RELEASE path (not only the acquisition path)
             # is ownership-verified. Acquire a lease, capture the payload, then have a peer REPLACE the lease

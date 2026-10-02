@@ -61,12 +61,17 @@ unreadable-input case allows with a note, since there is no hazard to fail close
 denies. A clean pass emits NO decision and exits 0 silently.
 
 gensrc_guard (gensrc): a CONFIRMED registry match (a hand-edit of a registered generated artefact) DENIES
-and names the source to edit and the regenerate command. Its cannot-evaluate branches (an unreadable,
-malformed, or unknown-version registry, an unresolvable repo root, a target outside the repo, an unreadable
-payload field, a non-git session) are NOT confirmed generated-artefact edits and have no reachable "edit the
-source" action to name, and denying them would block legitimate Write/Edit/MultiEdit calls, so they ALLOW
-with a note; the CI generated-artefact drift gate remains the authoritative backstop. An absent registry is
-the inert ALLOW; only a missing tool_name denies under the shared fail-closed contract.
+and names the source to edit and the regenerate command. A PRESENT registry it cannot read (not a regular
+file, a stat or read fault, an oversize, non-UTF-8, malformed-JSON or non-object file, a non-int or unknown
+version, a non-list generated field, a malformed entry) is a cannot-evaluate branch that DENIES, fail
+closed, so a corrupted registry cannot silently disable the protection. Its other cannot-evaluate branches
+(an unreadable tool_name, tool_input or file_path payload field, a control character in file_path, no
+session cwd, a non-git session, an unresolvable target or repo root, a target outside the repo or a
+containment fault, a registry entry that cannot be resolved for containment) are NOT confirmed
+generated-artefact edits and have no reachable "edit the source" action to name, and denying them would
+block legitimate Write/Edit/MultiEdit calls, so they ALLOW with a note; the CI generated-artefact drift gate
+remains the authoritative backstop. An absent registry is the inert ALLOW; a missing tool_name also denies
+under the shared fail-closed contract, and a mis-wired event hard-blocks.
 
 commit_msg_subst (sectvl): a backtick or $( command substitution in a git commit argument is a
 command-injection hazard the shell runs before git sees the argument, so it DENIES and names the safe
