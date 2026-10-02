@@ -12723,12 +12723,10 @@ def _parse_unoptimized(source):
     that parameter (3.13+), plain ast.parse before, which is equivalent because before 3.13 ast.parse
     never runs the AST optimizer, so it strips no docstring even under python -O or -OO. A bytes
     `source` is decoded as the interpreter decodes a source file, honouring a PEP 263 coding
-    declaration on line 1 or 2."""
-    import ast
+    declaration on line 1 or 2. It delegates to _optlevel.parse, the one shared source of this policy."""
+    import _optlevel
 
-    if sys.version_info >= (3, 13):
-        return ast.parse(source, optimize=0)
-    return ast.parse(source)
+    return _optlevel.parse(source)
 
 
 # The exact body _cmd_import must have after its docstring, compared by AST shape (no line numbers).
@@ -13661,6 +13659,7 @@ def _cli_self_test():
             KNOWN_VERBS branch, restoring any argument check ahead of the pointer, or adding any read,
             write, spawn or other statement to _cmd_import turns rows red."""
             import ast
+            import _optlevel
             import builtins as builtins_mod
             import pathlib
             import re
@@ -13774,7 +13773,7 @@ def _cli_self_test():
                                 "flagged")
             # The structural check flags each planted read or write (inserted ahead of the print) and each
             # rebinding (appended to the module); the unchanged source is clean, as asserted just above.
-            fn_node = [n for n in ast.parse(own_text).body
+            fn_node = [n for n in _optlevel.parse(own_text).body
                        if isinstance(n, ast.FunctionDef) and n.name == "_cmd_import"][0]
             lines = own_text.splitlines(keepends=True)
             at = fn_node.body[1].lineno - 1
