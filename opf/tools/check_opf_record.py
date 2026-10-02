@@ -317,9 +317,14 @@ Each case runs on its own copy of that template; the root is removed in a finall
       the final doctor cannot evaluate the archive). The supersedes target checks read the same record
       set, each case its own test: superseding a decided chain head rotated to the archive lands doctor
       VALID, and a second successor for a resolution an archived decision already supersedes refuses at
-      the chain-head check, before the chain rule runs, with every byte untouched (flip, applied to each
-      of the two: restore the active-only target read, under which the archived head is no record and
-      the fork reaches the chain rule). The decisions register's other two types are driven end to end:
+      the chain-head check, before the chain rule runs, with every byte untouched, and an archived
+      withdrawn target refuses as not an unqualified decided resolution, with every byte untouched (flip,
+      applied to each of the three: restore the active-only target read, under which the archived head
+      is no record, the fork reaches the chain rule, and the withdrawn target refuses as no record); and
+      a supersede that would close a cycle through an archived chain member refuses with the cycle
+      check's own message, every byte untouched, in its own test (flip: restore the active-only read for
+      the cycle check alone, under which the chain rule refuses instead with its own message). The
+      decisions register's other two types are driven end to end:
       a maintainer files a maintainer_decision linking exemplifies PP-1, doctor VALID and listed with its link, and an
       assistant distils a preference_pattern to active/proposed that the maintainer ratifies and then
       retires, doctor VALID (flip: the planner drops the requested links, which only the independent
@@ -1945,10 +1950,51 @@ def t72_archived_fork(fx):
         refused_before_chain_rule(fx.env, root, _supersede("PD-3", "PD-1"), "already superseded by PD-2")
 
 
+def t72_archived_withdrawn_target(fx):
+    """PD-1 withdrawn and rotated to the archive: doctor VALID. PD-2 decided with --supersedes PD-1 finds
+    the archived PD-1, which is not a current resolution, so the target-decided check refuses it with
+    every byte untouched."""
+    root = fx.case("t72-archived-withdrawn-target")
+    with ticking():
+        step(fx, root, PD_CREATE + MAINTAINER, "PD-1")
+        step(fx, root, ["transition", "PD-1", "withdrawn"] + MAINTAINER, "PD-1 withdrawn")
+        _rotate(fx, root, "PD-1")
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        refused_untouched(fx.env, root, _supersede("PD-2", "PD-1"),
+                          "PD-1 is 'withdrawn', not an unqualified decided")
+
+
 def flip_t72_archived_target():
     """Restore the active-only target read: the target checks see the active index alone, so the archived
-    head is no record and an archived superseder is missed."""
+    head is no record, an archived superseder is missed, and an archived withdrawn target is no record."""
     return patch.object(record, "_target_rows", lambda ctx, operand: record._index_rows(operand))
+
+
+def t72_archived_cycle(fx):
+    """PD-2 (withdrawn) supersedes PD-1 and PD-3 (decided) supersedes PD-2, then PD-2 is rotated to the
+    archive: doctor VALID, PD-3 the chain's one current resolution. PD-1 decided with --supersedes PD-3
+    would close a cycle through the archived PD-2, so the cycle check, reading the archive, refuses it
+    with its own message and every byte untouched."""
+    root = fx.case("t72-archived-cycle")
+    with ticking():
+        _withdrawn_successor(fx, root)
+        step(fx, root, _pd_create("which layout, third") + ["--link", "supersedes=PD-2"] + MAINTAINER, "PD-3")
+        step(fx, root, ["transition", "PD-3", "decided"] + DECIDE + MAINTAINER, "PD-3 decided")
+        _rotate(fx, root, "PD-2")
+        refused_untouched(fx.env, root, _supersede("PD-1", "PD-3"),
+                          "PD-3 in {} already leads back to PD-1".format(PD_INDEX))
+
+
+def flip_t72_archived_cycle():
+    """Restore the active-only read for the cycle check alone: it walks the active index, so the chain
+    through the archived PD-2 is missed and the chain rule refuses instead, with its own message."""
+    link, acyclic = record._supersession_link, record._require_acyclic
+
+    def active_only(req, ctx, operand, rid):
+        with patch.object(record, "_require_acyclic", lambda rows, rid_, target, rel: acyclic(
+                record._index_rows(operand), rid_, target, rel)):
+            return link(req, ctx, operand, rid)
+    return patch.object(record, "_supersession_link", active_only)
 
 
 PATTERN = ["create", "--type", "preference_pattern", "--field", "context=layout choices", "--field",
@@ -5205,6 +5251,8 @@ TESTS = (
     ("T72-decide-unreadable-archive", t72_unreadable_archive, flip_t72_archive),
     ("T72-supersedes-archived-head", t72_archived_head, flip_t72_archived_target),
     ("T72-supersedes-archived-fork", t72_archived_fork, flip_t72_archived_target),
+    ("T72-supersedes-archived-withdrawn-target", t72_archived_withdrawn_target, flip_t72_archived_target),
+    ("T72-supersedes-archived-cycle", t72_archived_cycle, flip_t72_archived_cycle),
     ("T72-register-ruling-and-pattern", t72_register, flip_t72_links),
     ("T72-register-assistant-ruling", t72_assistant_ruling, flip_t72_trust),
 )

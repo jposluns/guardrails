@@ -949,10 +949,14 @@ def _locate_target(operand, rows, target):
     if not hits:
         raise RecordError("{} is not a record in {} or among the archived pending_decision records; "
                           "fail-closed".format(target, operand.rel))
+    active_rows = _index_rows(operand)
     if len(hits) > 1:
-        raise RecordError("{} is seated {} times in {} and the archive (a duplicate id, spec 8.2); "
-                          "fail-closed".format(target, len(hits), operand.rel))
-    active = any(r is hits[0] for r in _index_rows(operand))
+        in_active = sum(1 for h in hits if any(h is r for r in active_rows))
+        where = " and ".join(place for place, count in ((operand.rel, in_active), ("the archive", len(hits) - in_active))
+                             if count)
+        raise RecordError("{} is seated {} times in {} (a duplicate id, spec 8.2); "
+                          "fail-closed".format(target, len(hits), where))
+    active = any(r is hits[0] for r in active_rows)
     return hits[0], operand.rel if active else "the archive"
 
 
@@ -3319,6 +3323,7 @@ def _self_test_supersession(check, plan, post, full, now):
             (sup + ["PD-2"], base, "PD-2 is 'open', not an unqualified decided"),
             (sup + ["BI-1"], base, "BI-1 is not a record in"),
             (sup + ["PD-9"], base, "PD-9 is not a record in"),
+            (m_argv, base + [pd(1, "decided")], "toml (a duplicate id"),
             (sup + ["PD-3"], base + [pd(3, "open")], "not an unqualified decided"),
             (sup + ["PD-3"], base + [pd(3, "decided/proposed", proposed_from="open")], "not an unqualified decided"),
             (sup + ["PD-3"], base + [dict(pd(3, "decided"), decision="   ")], "not schema-valid"),

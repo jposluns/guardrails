@@ -661,18 +661,25 @@ def _entry_point_regressions(check):
                 check("F2f-reachable-archive-doctor", ARCHIVE in reads)
 
     # The archive walk's public entry (opf record's pre-publication chain rule):
-    # each archive worklog intake fault reaches the caller as exactly the doctor's
-    # own C-ARCHIVE-ENUM attribution for that store, the archive worklog is read,
-    # and the active worklog never is.
+    # the bucket's archive.toml enumerates the archived worklog (a worklog_moved
+    # span), so the healthy store gives no problem and the doctor's C-ARCHIVE-ENUM
+    # reports nothing; each archive worklog intake fault, the enumerated worklog
+    # missing included, reaches the caller as exactly the doctor's own
+    # C-ARCHIVE-ENUM attribution for that store, the archive worklog is read when
+    # present, and the active worklog never is.
+    moved = (b'schema = 1\n[[worklog_moved]]\nspan = ["WL-1", "WL-1"]\n'
+             b'destination = "archive/2026/worklog.toml"\n')
     archive_faults = (
         ("healthy", None, None),
-        ("missing", "absent", None),
+        ("missing", "absent", "C-ARCHIVE-ENUM: worklog_moved span WL-1..WL-1 in m/archive/2026 enumerates 1 "
+         "id(s) not present in 'archive/2026/worklog.toml'; the first missing is WL-1 (spec 12:981-982)"),
         ("malformed", b"not TOML [", "cannot read m/archive/2026/worklog.toml: cannot parse "
          "m/archive/2026/worklog.toml (Expected '=' after a key in a key/value pair (at line 1, column 5))"),
         ("unreadable", PermissionError("fixture unreadable"), "cannot read m/archive/2026/worklog.toml: "
          "cannot read m/archive/2026/worklog.toml (fixture unreadable)"))
     for name, raw, message in archive_faults:
         with _Fixture() as fx:
+            fx.files[M + "/archive/2026/archive.toml"] = moved
             _manifest_readers(fx)
             if raw == "absent":
                 del fx.files[ARCHIVE]
@@ -691,7 +698,9 @@ def _entry_point_regressions(check):
             doctor = _opf_check.validate_store(fx.res).by_check.get("C-ARCHIVE-ENUM", [])
             label = "F2f-entry-archive-walk-" + name
             check(label + "-doctor-attribution", problems == doctor)
-            if message is not None:
+            if message is None:
+                check(label + "-clean", problems == [] and doctor == [])
+            else:
                 check(label + "-diagnostic", message in problems)
             check(label + "-archive-read", (ARCHIVE in reads) == (raw != "absent"))
             check(label + "-no-active-read", not any(
