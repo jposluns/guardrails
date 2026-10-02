@@ -1776,13 +1776,14 @@ def _watchdog_completion_case(mode):
                        "scratch.rename(Path(" + repr(directory) + ", name)); "  # atomic: never a partial PID
                        "time.sleep(60)")
             # Writer half: a tripwire against an accidental edit of the marker
-            # lines above, not a proof of atomic publication. It requires these
-            # text fragments once each and in order: the name + '.tmp' scratch
-            # path, the prefix scratch.write_text( (its arguments are not
-            # checked) and the scratch.rename to the final name; and the text
-            # Path(directory, name) nowhere else. It does not see another spelling
-            # of the final path, a rebinding of scratch, any other call, an
-            # os-level call, exec or a shell.
+            # lines above, not a proof of atomic publication. It requires the
+            # name + '.tmp' scratch path, the prefix scratch.write_text( and the
+            # scratch.rename to the final name once each and in that order, and
+            # no other occurrence of the text write_text( or Path(directory, name)
+            # anywhere in the subject; it does not otherwise check the write's
+            # arguments. It does not see another spelling of the final path, a
+            # rebinding of scratch, a write by any method other than write_text,
+            # an os-level call, exec or a shell.
             text = subject.replace(repr(directory), "directory")  # TMPDIR-blind
             steps = ["scratch = Path(directory, name + '.tmp'); ",
                      "scratch.write_text(", "scratch.rename(Path(directory, name)); "]
