@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "dada4b7d54a7e4bfdb6528b1a8830c1e7bfd9c63541dcb3a61127a89c3699237"
+tree-sha256 = "df4b85d81f19179e5ebf0df5f5c4bbd5181a340a1cc12e68d6c19fd5ec8823fc"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -31,8 +31,8 @@ sha256 = "a2188250b031d6168937b6857d01fe48bdc7f5ed5e93fbc682908b0415a1453f"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
-bytes = 292311
-sha256 = "751318bcd13857050c033de7703453adc94af1e4fd2c63df85a834e53bb49eba"
+bytes = 301641
+sha256 = "0e9a45b10a29c05f9ef3c4a002451a831e8e0cb3be8b61556599f9f61814009c"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -117,7 +117,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2867
-sha256 = "b2e304f2dcef71c2d142fd14e81ab83d569736fe575bd09a66ab5a8c337e8472"
+sha256 = "8539cda47ef860baa6605e3cf5c0681972c5e62c66704a17674b6ad0a0e8aff1"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -3141,8 +3141,8 @@ sha256 = "3d2b51784f18397b11b5865db5232b186c3ff48a803de85da3c77234b4bd2941"
 
 [[sources]]
 path = "tools/_release_schema.py"
-bytes = 46385
-sha256 = "e19ad231e932a8b9fb463c4bc4d2f5837742b563d7c9f8fd0bd775b6c8832ede"
+bytes = 47080
+sha256 = "71038c4707a08efc0c9ccb688ee6061b18ba3b65ddfa54f272da7882c407303e"
 
 [[sources]]
 path = "tools/_standards.py"
@@ -3196,8 +3196,8 @@ sha256 = "87a4f9c429d1fb01d8a3836ab8d55c93846106037224992b21e01611d87e1a73"
 
 [[sources]]
 path = "tools/check_clauses.py"
-bytes = 99910
-sha256 = "e6c66303c6770d8afeacc0f807a3bd807e841344b43a17cfd72d37432d151db1"
+bytes = 110812
+sha256 = "a78822005534c8f29deb843462345d81d519fda48879bdb2a2cd0be8fefe8f87"
 
 [[sources]]
 path = "tools/check_crosswalk.py"
@@ -3491,8 +3491,8 @@ sha256 = "2f91e677d1eaf446d6f4f33b754cd6a6d80cd58888a49e8784e9d4898e38c175"
 
 [[sources]]
 path = "tools/gen_rules.py"
-bytes = 17426
-sha256 = "d2cd9c84712efa8eab503dfcd23a3ff79023d0e6ea895d99970c6f64971f56e4"
+bytes = 27250
+sha256 = "5e8e9d65f8c3617fd82e1ecd20b8daba27c1acb3be729b61ded4c5667c30f489"
 
 [[sources]]
 path = "tools/gen_secret_patterns.py"

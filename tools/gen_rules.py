@@ -5,9 +5,24 @@ Each source is a Markdown rule with a minimal YAML `---` frontmatter carrying it
 path is DERIVED from that frontmatter per the two-axis taxonomy (aiqt/ numbered by priority, security/
 coded CIA+P). The updater's write root is `.aiqt/core/`; CI runs this in --check so the read tree can never
 silently drift (including orphaned generated files with no source). Vendored `external/` trees are untouched.
+
+RULE SOURCE FORMAT (the two-layer split; this step parses and validates it, and moves no text yet):
+  A source may hold at most one visible heading line that reads exactly `## Detail`. The text above it is
+  the CORE layer and the text below it is the DETAIL layer. The heading is a plain Markdown heading, never
+  an HTML comment, because Claude Code strips comments and a hidden marker would hide text silently. Two
+  optional frontmatter keys go with it, on aiqt non-apex and security rules only (the apex never splits):
+    detail-trigger: <a short phrase naming the operation>   required when the heading exists
+    detail-reason:  <one line recording the must-fire review> optional when the heading exists
+  Either key without the heading is refused. So are a second `## Detail` heading, a heading that names
+  Detail in another form (another level, another case, a plural, or trailing text), an empty detail
+  layer, and a key value that is not a non-empty string. A violation is a malformed source (exit 2). The
+  heading is matched on every body line, inside a fenced code block too, so a fenced copy is refused
+  rather than skipped. The generated read tree is still the whole source, byte for byte; the separate
+  detail output and its pointer sentence come in a later step.
   gen_rules.py           regenerate .claude/rules/{aiqt,security}/
   gen_rules.py --check   fail (exit 1) on drift; exit 2 on a malformed source or a read/write failure
-  gen_rules.py --self-test  assert an invalid-UTF-8 generated target fails closed (exit 2)
+  gen_rules.py --self-test  assert an invalid-UTF-8 generated target fails closed (exit 2), and that each
+                            malformed detail layout is refused, with a red-on-revert flip per guard
 """
 import os
 import re
@@ -49,6 +64,12 @@ except OSError as _exc:
 SEQ_KEYS = {"secondary"} | MAP_KEYS
 SLUG_RE = re.compile(r'^[a-z0-9]+(-[a-z0-9]+)*$')
 CID_RE = re.compile(r'^[a-z0-9]{6,}$')
+# The two-layer split (see RULE SOURCE FORMAT above). DETAIL_HEADING is matched as a whole line. Any other
+# heading line that names Detail (another level, case, plural, or trailing text) is refused rather than
+# read as core, so a near miss can never leave the author believing text was split when it was not.
+DETAIL_HEADING = "## Detail"
+DETAIL_KEYS = {"detail-trigger", "detail-reason"}
+_NEAR_DETAIL_RE = re.compile(r'^\s{0,3}#{1,6}\s*details?\b', re.IGNORECASE)
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
@@ -168,7 +189,7 @@ def derive(fm, name, allowed_origins=("pack",)):
             if fm["slug"] != "project-integrity":
                 raise ValueError("{}: apex slug must be 'project-integrity'".format(name))
             return "aiqt/00-project-integrity.md"
-        _check_keys(fm, BASE_KEYS | {"tier", "facet", "secondary"} | MAP_KEYS, name)
+        _check_keys(fm, BASE_KEYS | {"tier", "facet", "secondary"} | MAP_KEYS | DETAIL_KEYS, name)
         tier = str(fm.get("tier", ""))
         facet = fm.get("facet", "")
         if tier not in TIER_FACETS:
@@ -178,13 +199,56 @@ def derive(fm, name, allowed_origins=("pack",)):
         _check_secondary(fm, facet, name)
         return "aiqt/{}-{}-{}.md".format(tier, facet, fm["slug"])
     if family == "security":
-        _check_keys(fm, BASE_KEYS | {"facet", "secondary"} | MAP_KEYS, name)
+        _check_keys(fm, BASE_KEYS | {"facet", "secondary"} | MAP_KEYS | DETAIL_KEYS, name)
         facet = fm.get("facet", "")
         if facet not in CIA_FACETS:
             raise ValueError("{}: security facet must be SECC/SECI/SECA/SECP".format(name))
         _check_secondary(fm, facet, name)
         return "security/{}-{}.md".format(facet, fm["slug"])
     raise ValueError("{}: unknown family '{}'".format(name, family))
+
+
+def detail_heading_line(text, name):
+    """The 1-based line number of the single `## Detail` heading in a rule source's body, or None when the
+    source has none. Raises ValueError on a missing or unterminated frontmatter, a second heading, or a
+    heading line that names Detail in any other form. check_clauses derives each clause's layer from it."""
+    if not text.startswith("---\n"):
+        raise ValueError("{}: no frontmatter".format(name))
+    close = text.find("\n---\n", 4)  # the same frontmatter end parse_source uses
+    if close == -1:
+        raise ValueError("{}: unterminated frontmatter".format(name))
+    first_body = text.count("\n", 0, close + 5) + 1
+    found = None
+    for number, line in enumerate(text.split("\n")[first_body - 1:], first_body):
+        if line == DETAIL_HEADING:
+            if found is not None:
+                raise ValueError("{}: more than one '{}' heading (lines {} and {})".format(
+                    name, DETAIL_HEADING, found, number))
+            found = number
+        elif _NEAR_DETAIL_RE.match(line):
+            raise ValueError("{}: line {}: heading {!r} names Detail but is not exactly '{}'".format(
+                name, number, line, DETAIL_HEADING))
+    return found
+
+
+def check_detail(text, fm, name):
+    """Validate the two-layer split of one source: the detail keys go with exactly one `## Detail` heading,
+    detail-trigger is required with it, each key is a non-empty string, and the detail layer is not empty.
+    Returns the heading's line number, or None. Raises ValueError (a malformed source) on any violation."""
+    heading = detail_heading_line(text, name)
+    if heading is None:
+        present = sorted(k for k in DETAIL_KEYS if k in fm)
+        if present:
+            raise ValueError("{}: {} without a '{}' heading".format(name, ", ".join(present), DETAIL_HEADING))
+        return None
+    if "detail-trigger" not in fm:
+        raise ValueError("{}: a '{}' heading requires a detail-trigger key".format(name, DETAIL_HEADING))
+    for key in sorted(DETAIL_KEYS & set(fm)):
+        if not isinstance(fm[key], str) or not fm[key].strip():
+            raise ValueError("{}: {} must be a non-empty string".format(name, key))
+    if not "\n".join(text.split("\n")[heading:]).strip():
+        raise ValueError("{}: the '{}' layer is empty".format(name, DETAIL_HEADING))
+    return heading
 
 
 def load_corpus(src_dir):
@@ -203,6 +267,7 @@ def load_corpus(src_dir):
     for src in sorted(md_files):
         fm = parse_source(src)
         rel = derive(fm, src.name)
+        check_detail(src.read_text(encoding="utf-8"), fm, src.name)
         cid = str(fm["corpus-id"])
         if cid in seen_ids:
             raise ValueError("{}: corpus-id {} already used by {}".format(src.name, cid, seen_ids[cid]))
@@ -302,6 +367,78 @@ A minimal rule so the reconcile has one desired target to read.
 """
 _RULE_REL = "aiqt/10-QUALI-gen-rules-selftest-target.md"
 
+# The two-layer split cases: (name, frontmatter key lines, body after the core paragraph, expected exit).
+_DETAIL_SRC = """---
+corpus-id: selfd1
+origin: pack
+family: aiqt
+tier: 10
+facet: QUALI
+slug: gen-rules-selftest-detail
+{keys}---
+# Gen-rules detail self-test rule
+
+Core text.
+{body}"""
+_DETAIL_REL = "aiqt/10-QUALI-gen-rules-selftest-detail.md"
+_TRIGGER = "detail-trigger: writing a self-test fixture\n"
+_REASON = "detail-reason: self-test only, no must-fire clause moves\n"
+_DETAIL_BODY = "\n## Detail\n\nDetail text.\n"
+_DETAIL_CASES = (
+    ("detail-with-trigger", _TRIGGER + _REASON, _DETAIL_BODY, 0),
+    ("detail-without-trigger", _REASON, _DETAIL_BODY, 2),
+    ("trigger-without-detail", _TRIGGER, "", 2),
+    ("reason-without-detail", _REASON, "", 2),
+    ("two-detail-headings", _TRIGGER, _DETAIL_BODY + "\n## Detail\n\nMore detail.\n", 2),
+    ("near-miss-heading", "", "\n### Detail\n\nDetail text.\n", 2),
+    ("empty-detail", _TRIGGER, "\n## Detail\n", 2),
+    ("non-string-trigger", "detail-trigger: [writing]\n", _DETAIL_BODY, 2),
+)
+# Red on revert: each guard put back to its pre-fix form in a scratch copy of this module, loaded through
+# importlib, must then ACCEPT (exit 0) the case it exists to refuse. (name, fixed text, reverted text, case)
+_DETAIL_REVERTS = (
+    ("missing-trigger", 'if "detail-trigger" not in fm:', "if False:", "detail-without-trigger"),
+    ("orphan-keys", "        if present:\n", "        if False:\n", "trigger-without-detail"),
+    ("second-heading", "if found is not None:", "if False:", "two-detail-headings"),
+    ("near-miss", "elif _NEAR_DETAIL_RE.match(line):", "elif False:", "near-miss-heading"),
+    ("empty-layer", 'if not "\\n".join(text.split("\\n")[heading:]).strip():', "if False:", "empty-detail"),
+    ("non-string-value", "if not isinstance(fm[key], str) or not fm[key].strip():", "if False:",
+     "non-string-trigger"),
+    ("corpus-wiring", 'check_detail(src.read_text(encoding="utf-8"), fm, src.name)', "pass",
+     "detail-without-trigger"),
+)
+
+
+def _detail_case_root(base, name):
+    """A synthetic corpus holding the one rule of the named detail case. Returns the case root."""
+    _case, keys, body, _expected = next(c for c in _DETAIL_CASES if c[0] == name)
+    src = base / name / ".aiqt" / "core" / "rules"
+    src.mkdir(parents=True)
+    (src / "gen-rules-selftest-detail.md").write_text(_DETAIL_SRC.format(keys=keys, body=body), encoding="utf-8")
+    return base / name
+
+
+def _load_reverted(base, label, old, new):
+    """This module with one production guard reverted, written under base and loaded through importlib
+    (never exec). The mutation is confined to the text above the self-test section, so the revert table
+    itself is never the match. sys.path is restored after the load."""
+    import importlib.util
+    source = Path(__file__).read_text(encoding="utf-8")
+    production, sep, tests = source.partition("\n# --- self-test ")
+    if not sep or production.count(old) != 1:
+        raise AssertionError("revert {}: the fixed text must occur exactly once in the production code"
+                             .format(label))
+    path = base / "gen_rules_reverted_{}.py".format(label.replace("-", "_"))
+    path.write_text(production.replace(old, new, 1) + sep + tests, encoding="utf-8")
+    saved = list(sys.path)
+    try:
+        spec = importlib.util.spec_from_file_location(path.stem, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        sys.path[:] = saved
+    return module
+
 
 def self_test_main():
     import io
@@ -309,13 +446,13 @@ def self_test_main():
     import tempfile
     from contextlib import redirect_stdout, redirect_stderr
 
-    def run_quiet(root, check):
+    def run_quiet(root, check, runner=run):
         # A reverted narrow (OSError-only) arm raises UnicodeDecodeError out of run(); catch it and
         # return a non-int sentinel so it registers as a FAILURE against the expected exit code rather
         # than aborting the self-test or letting it exit early green.
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             try:
-                return run(root, check)
+                return runner(root, check)
             except Exception as exc:  # noqa: BLE001  a revert surfaces here as UnicodeDecodeError
                 return "raised {}".format(type(exc).__name__)
 
@@ -336,6 +473,35 @@ def self_test_main():
         target.write_bytes(b"\xff\xfe not utf-8")
         if run_quiet(tmp, check=True) != 2:
             failures.append("invalid-UTF-8 generated target expected exit 2 (fail-closed)")
+
+        # The two-layer split: a well-formed detail rule generates and then checks clean, its generated
+        # file still the whole source byte for byte; every malformed layout is a malformed source (exit 2).
+        detail_base = tmp / "detail"
+        for name, _keys, _body, expected in _DETAIL_CASES:
+            root = _detail_case_root(detail_base, name)
+            got = run_quiet(root, check=False)
+            if got != expected:
+                failures.append("detail case {}: expected exit {}, got {!r}".format(name, expected, got))
+            elif expected == 0:
+                generated = root / ".claude" / "rules" / _DETAIL_REL
+                source = root / ".aiqt" / "core" / "rules" / "gen-rules-selftest-detail.md"
+                if not generated.is_file() or generated.read_bytes() != source.read_bytes():
+                    failures.append("detail case {}: the generated file is not the source byte for byte"
+                                    .format(name))
+                if run_quiet(root, check=True) != 0:
+                    failures.append("detail case {}: --check after generation expected exit 0".format(name))
+        revert_base = tmp / "reverted"
+        revert_base.mkdir()
+        for label, old, new, case in _DETAIL_REVERTS:
+            try:
+                mutant = _load_reverted(revert_base, label, old, new)
+            except AssertionError as exc:
+                failures.append(str(exc))
+                continue
+            got = run_quiet(_detail_case_root(revert_base / label, case), check=False, runner=mutant.run)
+            if got != 0:
+                failures.append("revert {}: with the guard removed, case {} expected exit 0 (the guard is "
+                                "what refuses it), got {!r}".format(label, case, got))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -345,7 +511,8 @@ def self_test_main():
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: an invalid-UTF-8 generated target fails closed (exit 2), not a raw "
-          "UnicodeDecodeError traceback (guards the widened reconcile arm).")
+          "UnicodeDecodeError traceback (guards the widened reconcile arm); {} detail layout case(s) "
+          "hold and {} guard revert(s) each go red.".format(len(_DETAIL_CASES), len(_DETAIL_REVERTS)))
     return 0
 
 

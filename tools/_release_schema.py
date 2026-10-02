@@ -354,6 +354,10 @@ ORDER_FAMILY_VOCAB = frozenset({"apex", "aiqt", "security"})
 ORDER_TIE_BREAKERS = frozenset({"slug-bytewise"})
 CLAUSE_ROW_KEYS = frozenset({"clause-id", "corpus-id", "source-path", "start-line", "end-line",
                              "canonical-text", "source-digest"})
+# The clause layer field (the two-layer split): head inventories carry it on every row (check_clauses
+# requires it and derives its value); an inventory from before the field existed carries none, so a row
+# holds either the base keyset or the base keyset plus `layer`, and a present layer is core or detail.
+CLAUSE_LAYERS = frozenset({"core", "detail"})
 IDHISTORY_ROW_KEYS = {"born": {"id", "born-release"}, "tombstone": {"id", "retired-release"},
                       "successor": {"id", "retired-release", "successor-id"}}
 
@@ -432,7 +436,7 @@ def strict_order(data, where):
 
 def strict_clause_inventory(data, where):
     """EXHAUSTIVE 7.2 clause-inventory schema (round-4 finding 2): a [[clause]] array of tables, each with
-    EXACTLY the 7.2 keyset; a well-formed clause-id (UNIQUE) whose corpus part equals a well-formed
+    EXACTLY the 7.2 keyset, or that keyset plus a layer of core or detail; a well-formed clause-id (UNIQUE) whose corpus part equals a well-formed
     corpus-id field; a non-empty source-path; positive integer start-line/end-line with end >= start; a
     non-empty canonical-text; and a 64-lowercase-hex source-digest. The full source-file span/text/digest
     CONSISTENCY (reading the rule sources) stays check_clauses'; this validates the record's own structure
@@ -451,9 +455,11 @@ def strict_clause_inventory(data, where):
         rw = "{} clause row #{}".format(where, i)
         if not isinstance(row, dict):
             raise SchemaError("{}: not a table".format(rw))
-        if set(row) != CLAUSE_ROW_KEYS:
-            raise SchemaError("{}: keys are not exactly the 7.2 clause schema {}".format(
-                rw, sorted(CLAUSE_ROW_KEYS)))
+        if set(row) not in (CLAUSE_ROW_KEYS, CLAUSE_ROW_KEYS | {"layer"}):
+            raise SchemaError("{}: keys are not exactly the 7.2 clause schema {} (plus an optional "
+                              "layer)".format(rw, sorted(CLAUSE_ROW_KEYS)))
+        if "layer" in row and (not isinstance(row["layer"], str) or row["layer"] not in CLAUSE_LAYERS):
+            raise SchemaError("{}: layer {!r} is not one of {}".format(rw, row["layer"], sorted(CLAUSE_LAYERS)))
         cid = row["clause-id"]
         parsed = split_clause_id(cid) if isinstance(cid, str) else None
         if parsed is None:
