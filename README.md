@@ -35,9 +35,11 @@ Claude Code reads some files into every session before you type anything: for th
 under `.claude/rules/` and the AIQT block in `CLAUDE.md`. A shipped gate measures that text and fails if
 the pack's share grows.
 
-Keep everything Claude Code loads at the start of a session under 120,000 characters in total. That floor
-covers more than this pack: your own files under `~/.claude/`, such as `~/.claude/CLAUDE.md` and any rules
-there, count too, so add them to the pack's figure when you check your setup.
+Keep everything Claude Code loads at the start of a session under 120,000 characters in total. Claude Code's
+own limit depends on the model; 120,000 is the lowest value it uses, so treat it as a conservative floor,
+not a fixed limit. The gate prints two totals: PACK, the pack's own share, and SESSION, which adds the
+rest of your `CLAUDE.md` and its imports. Compare SESSION, not PACK, plus your own files under
+`~/.claude/`, such as `~/.claude/CLAUDE.md` and any rules there, against the floor when you check your setup.
 
 Do not load `AGENTS.md` into Claude Code as well, whether through the instructionFiles setting or an
 import in `CLAUDE.md`. It carries the same rules as `.claude/rules/`, so every rule would load twice.

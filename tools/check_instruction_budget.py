@@ -84,9 +84,31 @@ FRONTMATTER_RE = re.compile(r"^---\s*\n([\s\S]*?)---\s*\n?")
 # A file that opens a frontmatter fence FRONTMATTER_RE cannot close is malformed, never body text.
 FRONTMATTER_OPEN_RE = re.compile(r"^---\s*\n")
 HTML_COMMENT_RE = re.compile(r"<!--[\s\S]*?-->")
-FENCE_RE = re.compile(r"^[ \t]*(```|~~~)[^\n]*\n[\s\S]*?^[ \t]*\1[^\n]*$", re.M)
-CODE_SPAN_RE = re.compile(r"(`+)[\s\S]*?\1")
-IMPORT_RE = re.compile(r"(?:^|(?<=\s))@(\S+)", re.M)
+# The pinned loader's Markdown lexer (marked, gfm off) and its comment rule, as extracted from the pinned
+# binary: an `html` token whose raw starts with `<!--` and holds `-->` loses its comments, and is dropped
+# whole when what is left is blank under JavaScript's trim(); every other token is kept as written.
+COMMENT_TOKEN_RE = re.compile(r"<!--(?:-?>|[\s\S]*?(?:-->|\Z))[^\n]*(?:\n+|\Z)")
+JS_WHITESPACE = (" \t\n\v\f\r\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008"
+                 "\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff")
+FENCE_OPEN_RE = re.compile(r"(`{3,}(?=[^`]*$)|~{3,})")
+RAW_HTML_OPEN_RE = re.compile(r"<(?:(script|pre|style|textarea)(?=[\s>]|$)|(\?)|(!\[CDATA\[)|(![A-Za-z])|([A-Za-z/]))",
+                              re.I)
+_CONTAINER = r"[ \t>]*(?:(?:[*+-]|\d{1,9}[.)])[ \t>]*)*"
+FENCE_LIKE_RE = re.compile(_CONTAINER + r"(?:```|~~~)")
+HTML_LIKE_RE = re.compile(_CONTAINER + r"<(?:script|pre|style|textarea|!|\?)", re.I)
+INLINE_COMMENT_RE = re.compile(r"<!--(?!-?>)[\s\S]*?-->")
+INLINE_TAG_RE = re.compile(r"<[A-Za-z/][^<>]*>|\[[^\[\]\n]*\]\([^\s()]*\)")
+BLANK_LINE_RE = re.compile(r"\n(?:[ \t]*\r?\n)+")
+ASCII_PUNCT = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+ESCAPED_SPACE = "\x5c\x20"
+# The loader's own import token (`@path`, a backslash escaping a space), taken here after line start,
+# whitespace, or any character that can end a Markdown inline token: a superset of where the loader's text
+# tokens start.
+IMPORT_RE = re.compile(r"(?:^|(?<=[^0-9A-Za-z]))@((?:[^\s\\]|\\[ ])+)", re.M)
+YAML_TYPED_RE = re.compile(
+    r"(?:null|Null|NULL|~|true|True|TRUE|false|False|FALSE|yes|Yes|YES|no|No|NO|on|On|ON|off|Off|OFF|y|Y|n|N)"
+    r"|[-+]?(?:\d[\d_]*(?:\.\d*)?(?:[eE][-+]?\d+)?|\.\d+(?:[eE][-+]?\d+)?|0x[0-9a-fA-F_]+|0o[0-7_]+"
+    r"|\.(?:inf|Inf|INF|nan|NaN|NAN))")
 KEY_RE = re.compile(r"^([A-Za-z0-9_][A-Za-z0-9_.-]*)[ \t]*:(.*)$")
 ITEM_RE = re.compile(r"^[ \t]*-[ \t]+(.*)$")
 VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
@@ -103,9 +125,76 @@ def utf16_units(text):
     return len(text.encode("utf-16-le")) // 2
 
 
+def _scan_blocks(text):
+    """The top-level fenced code blocks and HTML comment blocks of `text` as the pinned loader's lexer
+    sees them, from a line scan: a list of (kind, start, end), kind "fence" or "comment" (a comment token
+    runs to the rest of the line that closes it and the newlines after that). Only a block opened at
+    column 0 is reported. A fence or raw HTML opener that is indented, tab led, list or quote nested, or
+    met inside an HTML block, an unterminated comment, or a lone CR leaves the scan unsure, and nothing
+    after that point is reported, so a comment there is kept and counted, never guessed away."""
+    spans = []
+    if re.search(r"\r(?!\n)", text):
+        return spans
+    pos, state, start = 0, None, 0
+    while pos < len(text):
+        nl = text.find("\n", pos)
+        end = len(text) if nl < 0 else nl + 1
+        line = text[pos:end].rstrip("\n")
+        if line.endswith("\r"):
+            line = line[:-1]
+        if state is None:
+            if line.startswith("<!--"):
+                m = COMMENT_TOKEN_RE.match(text, pos)
+                if "-->" not in m.group(0):
+                    return spans
+                spans.append(("comment", pos, m.end()))
+                pos = m.end()
+                continue
+            fence = FENCE_OPEN_RE.match(line)
+            raw = RAW_HTML_OPEN_RE.match(line)
+            if fence:
+                state = ("fence", re.compile(r" {0,3}" + re.escape(fence.group(1)) + r"[~`]* *"))
+                start = pos
+            elif raw:
+                tag, pi, cdata, decl = raw.group(1), raw.group(2), raw.group(3), raw.group(4)
+                term = ("</" + tag + ">" if tag else r"\?>" if pi else r"\]\]>" if cdata
+                        else ">" if decl else None)
+                if term is None:
+                    state = ("blank", None)
+                elif not re.compile(term, re.I).search(line, raw.end()):
+                    state = ("raw", re.compile(term, re.I))
+            elif FENCE_LIKE_RE.match(line) or HTML_LIKE_RE.match(line):
+                return spans
+        elif state[0] == "fence":
+            if state[1].fullmatch(line):
+                spans.append(("fence", start, end))
+                state = None
+        elif FENCE_LIKE_RE.match(line) or HTML_LIKE_RE.match(line):
+            return spans
+        elif state[0] == "raw":
+            if state[1].search(line):
+                state = None
+        elif not line.strip(" \t"):
+            state = None
+        pos = end
+    if state is not None and state[0] == "fence":
+        spans.append(("fence", start, len(text)))
+    return spans
+
+
 def strip_comments(text):
-    """`text` with every HTML comment removed."""
-    return HTML_COMMENT_RE.sub("", text)
+    """`text` as the pinned loader leaves it: each top-level HTML comment block _scan_blocks reports loses
+    its comments, and goes whole when the rest is blank. A comment inside a paragraph, a list, a quote, a
+    code block, or a code span is kept and counted, as the loader keeps it."""
+    if "<!--" not in text:
+        return text
+    out, pos = [], 0
+    for kind, start, end in _scan_blocks(text):
+        if kind == "comment":
+            rest = HTML_COMMENT_RE.sub("", text[start:end])
+            out.append(text[pos:start] + (rest if rest.strip(JS_WHITESPACE) else ""))
+            pos = end
+    return "".join(out) + text[pos:]
 
 
 def read_text(path, where):
@@ -120,12 +209,15 @@ def read_text(path, where):
 def split_frontmatter(text, where):
     """(frontmatter text or None, body). The body is what follows the FIRST FRONTMATTER_RE match. A file
     that opens a frontmatter fence the regex cannot close is malformed: GateError."""
-    m = FRONTMATTER_RE.match(text)
+    # The loader removes a leading BOM before it matches frontmatter; with no frontmatter the BOM stays
+    # counted (one unit more, never less).
+    bare = text[1:] if text.startswith("\ufeff") else text
+    m = FRONTMATTER_RE.match(bare)
     if m is None:
-        if FRONTMATTER_OPEN_RE.match(text):
+        if FRONTMATTER_OPEN_RE.match(bare):
             raise GateError("{}: unterminated frontmatter block".format(where))
         return None, text
-    body = text[m.end():]
+    body = bare[m.end():]
     return m.group(1), body
 
 
@@ -143,6 +235,8 @@ def parse_frontmatter(block, where):
             continue
         item = ITEM_RE.match(line)
         if item and open_key is not None:
+            if open_key == "paths":
+                _plain_string(item.group(1).strip(), where)
             try:
                 fm[open_key].append(gen_rules._unquote(item.group(1).strip()))
             except ValueError as exc:
@@ -159,11 +253,26 @@ def parse_frontmatter(block, where):
             open_key = key
             continue
         open_key = None
+        if key == "paths":
+            inner = value[1:-1] if value.startswith("[") and value.endswith("]") else None
+            for tok in ([value] if inner is None else [t.strip() for t in inner.split(",") if t.strip()]):
+                _plain_string(tok, where)
         try:
             fm[key] = gen_rules._value(value)
         except ValueError as exc:
             raise GateError("{}: frontmatter: {}".format(where, exc))
     return fm
+
+
+def _plain_string(tok, where):
+    """GateError unless the `paths:` token `tok` is a YAML string: quoted, or a plain scalar YAML would not
+    read as null, a boolean, a number, a mapping, an alias, a tag, or a block scalar. The loader drops a
+    scope it cannot read as strings, so such a value is cannot-evaluate, never a conditional file."""
+    if tok[:1] in ("\"", "'"):
+        return
+    if (not tok or tok[0] in "{}&*!|>%@`#," or YAML_TYPED_RE.fullmatch(tok)
+            or ": " in tok or tok.endswith(":") or " #" in tok):
+        raise GateError("{}: `paths:` value {!r} is not a string glob; cannot evaluate".format(where, tok))
 
 
 def path_globs(fm, where):
@@ -204,8 +313,10 @@ def rule_files(root):
 
 
 def measure_rules(root):
-    """(counted units, counted file count, conditional file count) over the rule tree."""
+    """(counted units, counted file count, conditional file count, import origins) over the rule tree,
+    the origins one (body, directory, where) per counted file, for follow_imports."""
     total = counted = conditional = 0
+    origins = []
     for path in rule_files(root):
         where = path.relative_to(root).as_posix()
         front, body = split_frontmatter(read_text(path, where), where)
@@ -216,7 +327,8 @@ def measure_rules(root):
                 continue
         total += utf16_units(strip_comments(body))
         counted += 1
-    return total, counted, conditional
+        origins.append((body, os.path.dirname(os.path.realpath(path)), where))
+    return total, counted, conditional, origins
 
 
 def managed_block(text):
@@ -231,19 +343,88 @@ def managed_block(text):
     return text[i + len(begin):j]
 
 
+def _inline_text(para):
+    """`para` (one paragraph: no blank line) with its code spans and HTML comments replaced by a space.
+    A backtick run opens a code span only when a run of the same length closes it in the same paragraph;
+    an escaped backtick, or one inside an inline HTML tag or a link destination, is literal."""
+    out, i, n = [], 0, len(para)
+    while i < n:
+        ch = para[i]
+        if ch == "\\" and i + 1 < n and para[i + 1] in ASCII_PUNCT:
+            out.append(para[i:i + 2])
+            i += 2
+            continue
+        if ch in "<[":
+            m = INLINE_COMMENT_RE.match(para, i) if ch == "<" else None
+            if m:
+                out.append(" ")
+                i = m.end()
+                continue
+            m = INLINE_TAG_RE.match(para, i)
+            if m:
+                out.append(m.group(0))
+                i = m.end()
+                continue
+        if ch == "`":
+            j = i
+            while j < n and para[j] == "`":
+                j += 1
+            k, close = j, -1
+            while close < 0:
+                k = para.find("`", k)
+                if k < 0:
+                    break
+                e = k
+                while e < n and para[e] == "`":
+                    e += 1
+                close = k if e - k == j - i else -1
+                k = e
+            if close >= 0:
+                out.append(" ")
+                i = close + j - i
+            else:
+                out.append(para[i:j])
+                i = j
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def import_targets(text):
-    """The `@path` import tokens in `text`, outside HTML comments, fenced code blocks, and code spans."""
-    return IMPORT_RE.findall(CODE_SPAN_RE.sub("", FENCE_RE.sub("", strip_comments(text))))
+    """The `@path` import tokens the pinned loader may follow in `text`, a superset of its own: outside
+    the top-level fenced code blocks and HTML comment blocks _scan_blocks reports, with the code spans and
+    inline comments of each paragraph removed, the `#` fragment cut, and the loader's own token filter
+    applied. A construct this scan cannot place is scanned, so an import can be over-reported, never
+    missed."""
+    pieces, pos = [], 0
+    for kind, start, end in _scan_blocks(text):
+        pieces.append(text[pos:start])
+        if kind == "comment":
+            pieces.append(HTML_COMMENT_RE.sub(" ", text[start:end]))
+        pos = end
+    pieces.append(text[pos:])
+    targets = []
+    for piece in pieces:
+        for para in BLANK_LINE_RE.split(piece):
+            for token in IMPORT_RE.findall(_inline_text(para)):
+                token = token.split("#", 1)[0].replace(ESCAPED_SPACE, " ")
+                if (token and not token.startswith("@") and not re.match(r"[#%^&*()]+", token)
+                        and (token.startswith(("./", "~/", "/")) and token != "/"
+                             or re.match(r"[a-zA-Z0-9._-]", token))):
+                    targets.append(token)
+    return targets
 
 
-def follow_imports(root, text, origin, findings):
-    """{resolved path: units} for every file reachable from `text` (which sits in the repository
-    root) through `@path` imports, each counted once with HTML comments removed. An import naming a
-    BANNED_IMPORTS file is appended to `findings`. An import that is home relative, absolute, escapes the
-    repository, or does not resolve to a readable regular file is GateError."""
+def follow_imports(root, origins, findings):
+    """{resolved path: units} for every file reachable through `@path` imports from `origins`, a list of
+    (text, the directory it sits in, where), each counted once with frontmatter and HTML comments removed
+    as for a rule file. An import naming a BANNED_IMPORTS file is appended to `findings`. An import that is
+    home relative, absolute, escapes the repository, or does not resolve to a readable regular file is
+    GateError."""
     real_root = os.path.realpath(root)
     seen = {}
-    pending = [(text, real_root, origin)]
+    pending = list(origins)
     while pending:
         source, base, where = pending.pop()
         for token in import_targets(source):
@@ -259,7 +440,7 @@ def follow_imports(root, text, origin, findings):
                 raise GateError("{}: import @{} escapes the repository; cannot evaluate".format(
                     where, token))
             if Path(token).name in BANNED_IMPORTS or os.path.basename(target) in BANNED_IMPORTS:
-                findings.append("{}: imports @{}; the managed block must not import {}".format(
+                findings.append("{}: imports @{}; the pack must not import {}".format(
                     where, token, " or ".join(BANNED_IMPORTS)))
             if target in seen:
                 continue
@@ -267,7 +448,7 @@ def follow_imports(root, text, origin, findings):
                 raise GateError("{}: import @{} does not resolve to a file; cannot evaluate".format(
                     where, token))
             rel = Path(os.path.relpath(target, real_root)).as_posix()
-            body = read_text(Path(target), rel)
+            body = split_frontmatter(read_text(Path(target), rel), rel)[1]
             seen[target] = utf16_units(strip_comments(body))
             pending.append((body, os.path.dirname(target), rel))
     return seen
@@ -276,14 +457,17 @@ def follow_imports(root, text, origin, findings):
 def measure(root):
     """Both totals and their parts. Banned imports reached from the managed block are returned as
     findings; every cannot-evaluate condition raises GateError."""
-    rules, counted, conditional = measure_rules(root)
+    rules, counted, conditional, origins = measure_rules(root)
     claude = read_text(root / CLAUDE_REL, CLAUDE_REL)
     block = managed_block(claude)
     findings = []
-    pack_imports = sum(follow_imports(root, block, CLAUDE_REL + " managed block", findings).values())
+    real_root = os.path.realpath(root)
+    # Claude Code follows imports in rule files as in CLAUDE.md, so theirs count into both totals.
+    pack_imports = sum(follow_imports(
+        root, origins + [(block, real_root, CLAUDE_REL + " managed block")], findings).values())
     # The adopter owns the bytes outside the block, so a banned import there is not the pack's finding:
-    # only the managed block's findings fail the gate.
-    session_imports = sum(follow_imports(root, claude, CLAUDE_REL, []).values())
+    # only the rule files' and the managed block's findings fail the gate.
+    session_imports = sum(follow_imports(root, origins + [(claude, real_root, CLAUDE_REL)], []).values())
     block_units = utf16_units(strip_comments(block))
     claude_units = utf16_units(strip_comments(claude))
     return {
@@ -487,8 +671,17 @@ def self_test(report_path=None):
         # character is one unit and an astral character two.
         front = _tree(tmp / "front", rules={"a.md": "---\ncorpus-id: x\n---\n\nBody\n"})
         check("count/frontmatter-and-blank-line-removed", _measured(measure, front)["rules"], 5)
-        comment = _tree(tmp / "comment", rules={"a.md": "A<!-- hidden\nline -->B\n"})
-        check("count/html-comment-removed", _measured(measure, comment)["rules"], 3)
+        comment = _tree(tmp / "comment", rules={"a.md": "<!-- hidden\nline -->\nB\n"})
+        check("count/html-comment-removed", _measured(measure, comment)["rules"], 2)
+        # A comment the loader keeps (in a fence, in a code span, inside a paragraph) is counted.
+        fenced = _tree(tmp / "fenced", rules={"a.md": "```\n<!--" + "X" * 100 + "-->\n```\n"})
+        check("count/comment-in-fence-kept", _measured(measure, fenced)["rules"], 116)
+        inline = _tree(tmp / "inline", rules={"a.md": "A <!--" + "X" * 100 + "--> B\n"})
+        check("count/comment-in-paragraph-kept", _measured(measure, inline)["rules"], 112)
+        span = _tree(tmp / "span", rules={"a.md": "`<!--" + "X" * 100 + "-->`\n"})
+        check("count/comment-in-code-span-kept", _measured(measure, span)["rules"], 110)
+        bom = _tree(tmp / "bom", rules={"a.md": "\ufeff---\nkind: x\n---\nA\n"})
+        check("count/bom-before-frontmatter-removed", _measured(measure, bom)["rules"], 2)
         bmp = _tree(tmp / "bmp", rules={"a.md": "é"})
         check("count/bmp-character-one-unit", _measured(measure, bmp)["rules"], 1)
         astral = _tree(tmp / "astral", rules={"a.md": "\U0001F600"})
@@ -502,6 +695,11 @@ def self_test(report_path=None):
         trail = _tree(tmp / "trail", rules={"a.md": '---\npaths:\n  - "**/**"\n---\nabc\n'})
         m = _measured(measure, trail)
         check("scope/paths-trailing-double-star-stripped-counted", (m["rules"], m["rule_files"]), (4, 1))
+        for case, scope in (("null", "paths: null"), ("mapping", "paths: {bad: value}"),
+                            ("bool-item", "paths:\n  - false"), ("number-item", "paths: [1]"),
+                            ("empty-list", "paths: []")):
+            typed = _tree(tmp / ("typed-" + case), rules={"a.md": "---\n" + scope + "\n---\n" + "X" * 100})
+            check("exit/paths-" + case + "-2", _quiet(run, typed), 2)
         src = _tree(tmp / "src", rules={"a.md": '---\npaths: ["src/**"]\n---\nabc\n', "b.md": "xy\n"})
         m = _measured(measure, src)
         check("scope/paths-src-excluded", (m["rules"], m["rule_files"], m["conditional_files"]), (3, 1, 1))
@@ -511,6 +709,23 @@ def self_test(report_path=None):
         imp = _tree(tmp / "import", block="@docs/extra.md", extra={"docs/extra.md": "Imported\n"})
         m = _measured(measure, imp)
         check("import/managed-block-import-followed", (m["block"], m["pack_imports"], m["pack"]), (14, 9, 23))
+        ruleimp = _tree(tmp / "ruleimp", rules={"a.md": "@big.txt\n"},
+                        extra={".claude/rules/big.txt": "---\nkind: x\n---\n" + "X" * 100})
+        m = _measured(measure, ruleimp)
+        check("import/rule-file-import-counted", (m["rules"], m["pack_imports"], m["pack"], m["session"]),
+              (9, 100, 109, 109))
+        ruleagents = _tree(tmp / "ruleagents", rules={"a.md": "@../../AGENTS.md\n"}, extra={"AGENTS.md": "x\n"})
+        check("exit/rule-file-agents-import-1", _quiet(run, ruleagents), 1)
+        rulemissing = _tree(tmp / "rulemissing", rules={"a.md": "@missing.txt\n"})
+        check("exit/rule-file-missing-import-2", _quiet(run, rulemissing), 2)
+        rulecycle = _tree(tmp / "rulecycle", rules={"a.md": "@b.txt\n"},
+                          extra={".claude/rules/b.txt": "@c.txt\n", ".claude/rules/c.txt": "@b.txt\n"})
+        check("import/rule-file-cycle-terminates", _measured(measure, rulecycle)["pack_imports"], 14)
+        mismatched = _tree(tmp / "mismatched", block="` literal\n\n@AGENTS.md\n\n`` literal\n",
+                           extra={"AGENTS.md": "X" * 100})
+        check("exit/mismatched-backticks-agents-import-1", _quiet(run, mismatched), 1)
+        spanned = _tree(tmp / "spanned", block="`@AGENTS.md` and ``@RULES-INDEX.md``\n")
+        check("import/matched-code-span-skipped", _quiet(run, spanned), 0)
         session = _tree(tmp / "session", rules={"a.md": "abc\n"}, block="Block", outside="Hello\n")
         m = _measured(measure, session)
         check("totals/session-adds-outside-block", (m["pack"], m["session"]), (9, 15))
@@ -547,7 +762,7 @@ def self_test(report_path=None):
         check("exit/import-escaping-repo-2", _quiet(run, escape), 2)
 
         # Red on revert: each fix put back in a mutant copy of the production code must turn its case red.
-        unstripped = _mutant(tmp, "body = text[m.end():]", "body = text")
+        unstripped = _mutant(tmp, "body = bare[m.end():]", "body = bare")
         check("revert/frontmatter-removal-red",
               (_measured(measure, front)["rules"], _measured(unstripped.measure, front)["rules"]), (5, 27))
         lenient = _mutant(tmp, 'if m["pack"] > ratchet:', 'if m["pack"] > ratchet + 1:')
@@ -571,7 +786,10 @@ def self_test(report_path=None):
         return 1
     print("PASS: check_instruction_budget self-test: {} unique checks executed (frontmatter and the blank "
           "line after it removed, an HTML comment removed, BMP and astral characters counted as 1 and 2 units, "
-          "paths ** counted and src/** excluded, a managed block import followed, SESSION over PACK, the "
+          "comments in a fence, a paragraph, and a code span kept, a BOM before frontmatter removed, paths ** "
+          "counted and src/** excluded, a typed or empty paths value exit 2, rule file imports counted, banned "
+          "and missing ones exit 1 and 2, cycles ending, mismatched backticks hiding no import, a managed block "
+          "import followed, SESSION over PACK, the "
           "ratchet boundary, banned imports exit 1, unreadable, invalid UTF-8, malformed frontmatter, budget, "
           "markers, and an escaping import exit 2, and both red-on-revert flips turn red); execution set "
           "reconciled against tools/selftest_checks.toml".format(len(EXECUTED)))
