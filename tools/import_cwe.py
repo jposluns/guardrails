@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Two-phase importer that vendors the MITRE CWE weakness catalogue into .aiqt/standards/cwe.toml.
 
-This is AUTHORING tooling, not a CI gate: CI validates the committed cwe.toml through the existing
-standards gates and never reaches the network. The importer is split so the one network step is
+acquire and render are AUTHORING tooling, not CI gates: CI validates the committed cwe.toml through the
+existing standards gates and never reaches the network; its one CI gate is the offline --self-test
+(cwe-importer-selftest). The importer is split so the one network step is
 separable from the deterministic render, and the render is reproducible from staged bytes:
 
   python3 tools/import_cwe.py acquire --staging-dir <abs dir>            # network; authoring-time only
@@ -322,6 +323,16 @@ def mapped_cwe_ids(root):
     return ids
 
 
+def _close_fd_propagating(fd):
+    """Close a descriptor on a FAIL-CLOSED path: the close error PROPAGATES. Single close (P1, #378):
+    exactly ONE os.close; if it raises, the number counts as released (close(2) on Linux releases it early,
+    even when the close then reports EINTR or EIO, and a retry can close another thread's reused
+    descriptor: man 2 close), so it is never probed or closed again, and the ORIGINAL close error
+    propagates unchanged. Inlined from opf/tools/_journal._close_fd_propagating (the same body) so this
+    tool keeps working without opf/tools present (copied, mutated, or shipped alone)."""
+    os.close(fd)
+
+
 def render(staging_dir, output, *, mapped_ids=None, expected_member=EXPECTED_MEMBER,
            expected_xml_sha256=EXPECTED_XML_SHA256, expected_total=EXPECTED_TOTAL_ELEMENTS,
            expected_active=EXPECTED_ACTIVE, expected_source_url=SOURCE_URL,
@@ -400,7 +411,7 @@ def render(staging_dir, output, *, mapped_ids=None, expected_member=EXPECTED_MEM
     out = Path(output)
     out.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=str(out.parent), prefix=".cwe-candidate-", suffix=".toml")
-    os.close(fd)
+    _close_fd_propagating(fd)
     candidate = Path(tmp_name)
     try:
         candidate.write_text(text, encoding="utf-8", newline="\n")
@@ -655,6 +666,16 @@ def self_test():
         (_stage / PROVENANCE_NAME).write_text(json.dumps(_prov), encoding="utf-8")
     finally:
         shutil.rmtree(_stage, ignore_errors=True)
+    # #378 P1: the V1 / V2 close vectors for this tool's _close_fd_propagating copy, through the harness the
+    # other inlined-helper tools share (tools/_close_selftest.py): one close, the released number never
+    # touched again, each vector red under RECLOSE (the pre-P1 body) by REUSE alone.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import _close_selftest
+    _close_failures, _close_runs = _close_selftest._st_close_check(
+        globals(), _close_selftest._st_helper_vectors(globals()))
+    if _close_failures:
+        raise SystemExit("SELF-TEST FAIL: #378 close vectors: {}".format("; ".join(_close_failures)))
+    print("  ok: {} #378 close-vector runs".format(_close_runs))
     print("SELF-TEST: PASS")
 
 

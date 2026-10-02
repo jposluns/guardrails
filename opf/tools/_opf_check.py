@@ -55,6 +55,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _opf_worklog   # noqa: E402  worklog shape authority
 import _opf_store     # noqa: E402  shared homes and operand boundaries
 import _journal        # noqa: E402  contained no-follow parent-open primitive (reused for listing / raw reads)
 import _opf_emit       # noqa: E402  U8 canonical emitter (the per-record digest basis)
@@ -67,8 +68,6 @@ from _opf_store import (  # noqa: E402
     _read_toml_contained, _open_store_root_fd, _open_root_fd, validate_manifest, classify_target,
     _sorted_key_names, _safe_display, _is_contained_relpath,
     BASELINE_TYPES, MODULE_TYPES, IMPORTER_TYPES, KNOWN_MODULES, SUPPORTED_SPEC_VERSION,
-    snapshot_caller_alarm,  # round-17 F-R16-1: capture caller ITIMER+pending before a fixture borrows SIGALRM
-    restore_caller_alarm,   # round-15 F2 + round-17 F-R16-1: shared elapsed-aware caller-alarm save/restore
 )
 # U2 supplies the record validator, the counter guards, the transition validator, and the type specs.
 from _opf_schema import (  # noqa: E402
@@ -86,7 +85,7 @@ from _opf_release import (  # noqa: E402
 # Fixed store-tree file / directory names (OPF-SPEC 4.2 layout; all lowercase machine source).
 COUNTERS_NAME = "counters.toml"
 VERSION_NAME = "version.toml"
-WORKLOG_NAME = "worklog.toml"
+WORKLOG_NAME = _opf_worklog.LEGACY_NAME
 LEASE_NAME = "lease.toml"                  # present only while the single-writer lease is held (spec 5.7)
 # The managed bootstrap provenance a coupled D2b `opf init` writes (OPF-INIT-D2B "Bootstrap Provenance",
 # base spec 1.2.0): a managed machine-store leaf when present, never required (an upgraded D2a store has
@@ -534,28 +533,17 @@ def _close_fd_quietly(fd):
     (or an exception is already in flight) by the time these closes run, so a cleanup-close irregularity is
     never itself the store's verdict (fail-closed teardown; S1-F1 / S4-F3).
 
-    A raising close is swallowed but never lets a genuine descriptor leak pass CONCEALED (codex round-6;
-    no-concealed-failure): a close that raises does not by itself prove the fd is retained, since on Linux
-    close() releases the descriptor even on EINTR/EIO and EBADF means it was already gone. So on a raise we
-    CONFIRM the descriptor is actually gone (fstat); only when it is genuinely STILL open do we close it
-    once more (fstat has just proven the fd valid, so this is not a blind double-close) and, if even that
-    cannot release it, surface the leak to stderr rather than the old silent pass that could not tell
-    closed-then-errored from still-open."""
+    Single close (P1, #378): the descriptor is closed with exactly ONE os.close. If it raises, the number
+    counts as released and is never touched again: no fstat, no second close. close(2) on Linux "always
+    releases the file descriptor early in the close operation, freeing it for reuse", and retrying "is the
+    wrong thing to do, since this may cause a reused file descriptor from another thread to be closed"
+    (man 2 close, "Dealing with error returns from close()"); an fstat that finds the number open after a
+    failed close is looking at whatever reused it, so a probe-then-reclose recovery closed another owner's
+    descriptor. The error is swallowed silently. _journal._close_fd_quietly carries the same body."""
     try:
         os.close(fd)
-        return
-    except OSError as exc:
-        first = exc
-    try:
-        os.fstat(fd)
     except OSError:
-        return                                            # confirmed gone: the raise was benign teardown noise
-    try:
-        os.close(fd)                                      # genuinely still open (fstat proved it valid): release it
-        return
-    except OSError as exc2:
-        print("warning: cleanup close of fd {} failed to release it ({} / {}); fail-surfaced"
-              .format(fd, first, exc2), file=sys.stderr)
+        pass                                              # released either way (close(2)); never re-touched
 
 
 def _list_contained(root_fd, reldir):
@@ -1146,12 +1134,57 @@ def _gather_active_records(root_fd, machine_rel, enabled_types, layout, register
     return recs, recon
 
 
-def _gather_worklog(root_fd, relpath, registered_vendors, rep, required):
+def _worklog_legacy_conflict(_relpath):
+    """C-CONTAINMENT grades the stray directory; keep inspecting the declared legacy source."""
+    # Only load_worklog_at's generation-1 branch invokes this policy.
+    return None
+
+
+def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine_rel=None,
+                    *, propagate_manifest_failure=False, supported_profiles=None, manifest_model=None):
     """Read and validate a worklog.toml (active or an archive bucket) through U3's validate_worklog, and
     return its WL-number -> entry map. A required (active) worklog that is absent is CANNOT-EVALUATE; an
-    archive-bucket worklog that is absent returns None (the caller only reads it when the bucket has one)."""
-    data, st = _read_toml(root_fd, relpath, rep)
-    if st == "error":
+    archive-bucket worklog that is absent returns None (the caller only reads it when the bucket has one).
+    The enclosing traversal receives manifest failures before diagnostic translation so it can
+    attribute the original diagnostics and stop dependent archive reads; an ordinary ledger
+    failure still permits archive diagnostics."""
+    try:
+        if machine_rel is None:       # explicitly named archive bucket, never shape-probed (M7)
+            data = _opf_worklog.load_archive_worklog_at(root_fd, relpath)
+        else:
+            data = _opf_worklog.load_worklog_at(
+                root_fd, machine_rel, required=False, on_legacy_conflict=_worklog_legacy_conflict,
+                supported_profiles=supported_profiles, manifest_model=manifest_model)
+        st = "absent" if data is None else "present"
+    except _opf_worklog.ManifestShapeError as exc:
+        if propagate_manifest_failure:
+            raise
+        rep.cant("{} is absent (the store manifest is required; spec 4.5)".format(exc.relpath)
+                 if exc.missing else "{}: {}".format(exc.relpath, exc))
+        return None
+    except _opf_worklog.ManifestValidationError as exc:
+        if propagate_manifest_failure:
+            raise
+        if exc.status == CANNOT_EVALUATE:
+            rep.cant("{}: {}".format(exc.relpath, exc))
+        else:
+            rep.cant("{} is not evaluated: {} failed manifest validation "
+                     "(see C-MANIFEST)".format(relpath, exc.relpath))
+        return None
+    except _opf_worklog.ManifestReadError as exc:
+        if propagate_manifest_failure:
+            raise
+        # Match _read_toml's manifest diagnostic, not the worklog ledger's path.
+        rep.cant("cannot read {}: {}".format(exc.relpath, exc))
+        return None
+    except _opf_worklog.WorklogError as exc:
+        rep.cant(str(exc))
+        return None
+    except StoreError as exc:
+        rep.cant("cannot read {}: {}".format(relpath, exc))
+        return None
+    except _journal.JournalError as exc:
+        rep.cant("cannot read {} ({})".format(relpath, exc))
         return None
     if st == "absent":
         if required:
@@ -1974,10 +2007,12 @@ def _check_evidence(root_fd, homes, rep):
 # `managed_file` the tree-walk managed test; and `layout` / `perrecord_body_dirs` / `archive_root` /
 # `imports_root` the derived structures the walk needs; `homes` the store's active homes generation and
 # `control_roots` / `evidence_roots` the store control and homes-2 evidence roots it registers.
+# `worklog_errors` holds generation failures separately from malformed [unmanaged] entries.
 ContainmentClassification = collections.namedtuple(
     "ContainmentClassification",
     ("view_targets", "valid_unmanaged", "malformed", "colliding", "managed_file", "layout",
-     "perrecord_body_dirs", "archive_root", "imports_root", "control_roots", "evidence_roots", "homes"))
+     "perrecord_body_dirs", "archive_root", "imports_root", "control_roots", "evidence_roots", "homes",
+     "worklog_errors"))
 
 
 def classify_containment(manifest_data, machine_rel):
@@ -2030,8 +2065,14 @@ def classify_containment(manifest_data, machine_rel):
                 malformed.append(
                     "C-CONTAINMENT: [unmanaged] path entry {} is not a contained store-relative string "
                     "(spec 14.2); the unmanaged declaration cannot be evaluated".format(_safe_display(p)))
-    ledger_names = frozenset({MANIFEST_NAME, COUNTERS_NAME, VERSION_NAME, WORKLOG_NAME, LEASE_NAME,
-                              INIT_PROVENANCE_NAME})
+    worklog_errors = []
+    try:
+        worklog2 = _opf_worklog.generation(manifest_data) == 2
+    except _opf_worklog.WorklogError as exc:
+        worklog_errors.append("C-CONTAINMENT: worklog generation cannot be evaluated: " + str(exc))
+        worklog2 = False
+    ledger_names = frozenset({MANIFEST_NAME, COUNTERS_NAME, VERSION_NAME, LEASE_NAME,
+                              INIT_PROVENANCE_NAME} | (set() if worklog2 else {WORKLOG_NAME}))
     # Importer namespaces (legacy_fragment) are schema-deferred and, per the decoupled D6 design, are NOT
     # declared in the manifest [types]; their type index (e.g. legacy_fragment.index.toml) is therefore a
     # managed leaf IF PRESENT even without a declaration, mirroring C-COUNTERS' optional_namespaces
@@ -2057,6 +2098,8 @@ def classify_containment(manifest_data, machine_rel):
         prefix = mrel + "/"
         if p.startswith(prefix):
             r = p[len(prefix):]
+            if worklog2 and r.startswith(_opf_worklog.DIRECTORY_NAME + "/"):
+                return _opf_worklog.parse_worklog_filename(r.split("/", 1)[1]) is not None
             if "/" not in r:
                 if r in ledger_names:
                     return True
@@ -2068,7 +2111,7 @@ def classify_containment(manifest_data, machine_rel):
                         return True
             elif layout == "per-record":
                 head, tail = r.split("/", 1)
-                # worklog has no per-record bodies either (F2): entries live in worklog.toml, never in
+                # Generation-1 worklog has no per-record bodies (F2): entries live in worklog.toml, not in
                 # worklog/<id>.toml.
                 if "/" not in tail and tail.endswith(".toml") and head in enabled_types \
                         and head not in _LEDGER_TYPES \
@@ -2125,7 +2168,8 @@ def classify_containment(manifest_data, machine_rel):
         view_targets=view_targets, valid_unmanaged=valid_unmanaged, malformed=malformed,
         colliding=colliding, managed_file=managed_file, layout=layout,
         perrecord_body_dirs=perrecord_body_dirs, archive_root=archive_root, imports_root=imports_root,
-        control_roots=control_roots, evidence_roots=evidence_roots, homes=homes)
+        control_roots=control_roots, evidence_roots=evidence_roots, homes=homes,
+        worklog_errors=worklog_errors)
 
 
 def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
@@ -2143,7 +2187,7 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
     cls = classify_containment(manifest_data, machine_rel)
     # Re-emit the classifier's collected messages in the ORIGINAL order (all malformed CANNOT-EVALUATEs, then
     # all colliding findings), exactly as the inline classification emitted them before the extraction.
-    for msg in cls.malformed:
+    for msg in cls.malformed + cls.worklog_errors:
         rep.cant(msg)
     for msg in cls.colliding:
         rep.finding(msg)
@@ -2174,6 +2218,11 @@ def _check_containment(root_fd, machine_rel, manifest_data, import_status, rep):
         # directory, or a tree of only empty dirs, escaped grading entirely).
         if full == mrel or _under_any(full, staged_roots):
             return True
+        if full == _rel(mrel, _opf_worklog.DIRECTORY_NAME):
+            try:
+                return _opf_worklog.generation(manifest_data) == 2
+            except _opf_worklog.WorklogError:
+                return False
         if layout == "per-record" and full in perrecord_body_dirs:
             return True
         return any(vt == full or vt.startswith(full + "/") for vt in view_targets)
@@ -2404,6 +2453,26 @@ def _normalize_observations(observations):
 
 # --- the whole-store validator -----------------------------------------------------------------------
 
+def _attribute_manifest_failure(rep, exc):
+    """Revisit manifest attribution without registering C-MANIFEST a second time."""
+    current = rep._current
+    rep._current = "C-MANIFEST"
+    try:
+        if isinstance(exc, _opf_worklog.ManifestValidationError):
+            if exc.status == CANNOT_EVALUATE:
+                rep.cant("{}: {}".format(exc.relpath, exc))
+            else:
+                for finding in exc.findings:
+                    rep.finding("manifest: {}".format(finding))
+        elif isinstance(exc, _opf_worklog.ManifestShapeError):
+            rep.cant("{} is absent (the store manifest is required; spec 4.5)".format(exc.relpath)
+                     if exc.missing else "{}: {}".format(exc.relpath, exc))
+        else:
+            rep.cant("cannot read {}: {}".format(exc.relpath, exc))
+    finally:
+        rep._current = current
+
+
 def validate_store(resolution, supported_profiles=None, *, observations=None, ancestral_floor=None):
     """Validate a RESOLVED store's whole-store integrity (OPF-SPEC 11). `resolution` is the object
     _opf_store.resolve_store returns; a resolution that is not RESOLVED is CANNOT-EVALUATE. `observations`
@@ -2484,13 +2553,25 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         if st == "absent":
             rep.cant("{} is absent (the store manifest is required; spec 4.5)".format(manifest_rel))
         return [], []
-    mv = validate_manifest(manifest_data, supported_profiles)
+    manifest_model = _opf_worklog.ManifestModel(
+        root_fd, machine_rel, manifest_data, supported_profiles)
+    mv = manifest_model.validation
     if mv.status == CANNOT_EVALUATE:
         rep.cant("{}: {}".format(manifest_rel, "; ".join(mv.findings)))
         return [], []
-    if mv.status != VALID:
-        for f in mv.findings:
-            rep.finding("manifest: {}".format(f))
+    for f in mv.findings:
+        rep.finding("manifest: {}".format(f))
+
+    # --- C-PROFILES: name the evaluated / unevaluated profile scope (spec 16) -------------------------
+    rep.ran("C-PROFILES")
+    unevaluated_profiles = list(manifest_model.unevaluated_profiles)
+    evaluated_profiles = list(manifest_model.evaluated_profiles)
+    if mv.findings or mv.status != VALID:
+        # No manifest-dependent source is safe to traverse after any finding.
+        rep.ran("C-RECORDS")
+        rep.cant("active worklog source under {} is not evaluated: {} failed manifest "
+                 "validation (see C-MANIFEST)".format(machine_rel, manifest_rel))
+        return evaluated_profiles, unevaluated_profiles
 
     dp = manifest_data.get("opf") if isinstance(manifest_data, dict) else None
     layout = dp.get("layout") if isinstance(dp, dict) else None
@@ -2503,15 +2584,6 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     enabled_modules = _enabled_modules(manifest_data)
     homes = _opf_store.homes_generation(manifest_data)
     rep.require_homes(homes)
-
-    # --- C-PROFILES: name the evaluated / unevaluated profile scope (spec 16) -------------------------
-    rep.ran("C-PROFILES")
-    declared_profiles = set()
-    prof_tbl = manifest_data.get("profiles") if isinstance(manifest_data, dict) else None
-    if isinstance(prof_tbl, dict):
-        declared_profiles = {k for k in prof_tbl if isinstance(k, str)}
-    unevaluated_profiles = list(mv.unevaluated_profiles)
-    evaluated_profiles = sorted(declared_profiles - set(unevaluated_profiles))
 
     # --- C-ROSTER: reconcile the manifest [types] against the authoritative roster (spec 9/8.1) -------
     rep.ran("C-ROSTER")
@@ -2528,8 +2600,17 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     rep.ran("C-RECORDS")
     active_recs, recon = _gather_active_records(root_fd, machine_rel, enabled_types, layout,
                                                 registered_vendors, rep)
-    active_worklog = _gather_worklog(root_fd, _rel(machine_rel, WORKLOG_NAME), registered_vendors, rep,
-                                     required=True) or {}
+    try:
+        active_worklog = _gather_worklog(
+            root_fd, _rel(machine_rel, WORKLOG_NAME), registered_vendors, rep,
+            required=True, machine_rel=machine_rel, propagate_manifest_failure=True,
+            manifest_model=manifest_model) or {}
+    except (_opf_worklog.ManifestShapeError, _opf_worklog.ManifestValidationError,
+            _opf_worklog.ManifestReadError) as exc:
+        _attribute_manifest_failure(rep, exc)
+        rep.cant("{} is not evaluated: {} failed manifest validation "
+                 "(see C-MANIFEST)".format(_rel(machine_rel, WORKLOG_NAME), exc.relpath))
+        return evaluated_profiles, unevaluated_profiles
 
     # --- C-PERRECORD-RECONCILE: replay the bidirectional index<->body reconciliation (spec 13) --------
     rep.ran("C-PERRECORD-RECONCILE")
@@ -2884,7 +2965,14 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     if isinstance(views_tbl := (manifest_data.get("views") if isinstance(manifest_data, dict) else None),
                   dict) and len(views_tbl) > 0:
         try:
-            planned = _opf_views.plan_views(root_fd, machine_rel)
+            planned = _opf_views.plan_views(
+                root_fd, machine_rel, on_legacy_conflict=_worklog_legacy_conflict,
+                manifest_model=manifest_model)
+        except _opf_views.ViewsManifestError as exc:
+            _attribute_manifest_failure(rep, exc.manifest_error)
+            rep.cant("C-VIEW-DRIFT is not evaluated: {} failed manifest validation "
+                     "(see C-MANIFEST)".format(exc.manifest_error.relpath))
+            planned = None
         except _opf_views.ViewsError as exc:
             rep.cant("C-VIEW-DRIFT: {}".format(exc))
             planned = None
@@ -3544,8 +3632,9 @@ def self_test():
         _malr = run(_mal)
         check("unmanaged-malformed-path-cannot-eval", _malr is not None and _malr.status == CANNOT_EVALUATE)
         check("unmanaged-malformed-path-named",
-              _malr is not None and any("not a contained store-relative string" in m
-                                        for m in _malr.cannot_evaluate))
+              _malr is not None and any(
+                  "[unmanaged].paths entry '/etc/passwd' must be a root-relative path" in m
+                  for m in _malr.by_check["C-MANIFEST"]))
         # round-14 empty-dir: an unregistered EMPTY directory under the machine store (no files at all) must
         # be graded as a stray, not silently laundered (the walk previously graded files only).
         _ed_root = build(clean_machine())
@@ -4017,92 +4106,21 @@ def self_test():
             finally:
                 _sig7.setitimer = _real_setitimer
             check("f7-setup-failure-yields-setup-error-not-normal", _setup.startswith("SETUP-ERROR"))
-            # (c) the child must not inherit an ambient SIG_IGN SIGALRM disposition that would defeat the
-            # watchdog: with SIGALRM ignored in the parent, a thunk that sleeps past the timeout must still
-            # TIMEOUT (the child resets SIG_DFL). Reverted (no reset), the ignored timer lets the sleep run
-            # to completion and the thunk's own result returns instead of TIMEOUT.
-            # Test-hermeticity (round-15 F2 + round-17 F-R16-1): installing SIG_IGN over this ~1s window both
-            # DISCARDS a caller SIGALRM pending on entry (POSIX) AND silently drops a caller ITIMER_REAL
-            # deadline that EXPIRES inside the window (the timer's generated SIGALRM is ignored, never
-            # re-armed). So this fixture snapshots the caller's FULL alarm state (ITIMER value+interval and
-            # pending) BEFORE installing SIG_IGN and hands it to the shared restore_caller_alarm helper in the
-            # finally: the timer is re-armed elapsed-aware (an in-window-expired deadline clamps to a tiny
-            # positive so it still FIRES rather than being destroyed), and a discarded pending is re-posted,
-            # leaving the caller's alarm state unchanged. A prior 0.0 stand-in restored only the pending and
-            # let an in-window caller deadline vanish (F-R16-1).
-            # F-R18-COV1TEST: the SINGLE snapshot -> SIG_IGN -> run_bounded -> restore path that BOTH the f7
-            # ignored-sigalrm check and the COV1 caller-deadline-preservation probe exercise, so a revert of
-            # the caller-timer snapshot/restore here (e.g. zeroing _snap7) reds the COV1 probe below rather
-            # than passing on the probe's own separate copy. The caller's FULL alarm is snapshotted BEFORE
-            # SIG_IGN and restored elapsed-aware after (F-R16-1 / F2).
-            def _f7_ignore_window(_thunk, _timeout_s):
-                _snap7 = snapshot_caller_alarm()   # caller ITIMER + pending, captured BEFORE SIG_IGN
-                _prev7 = _sig7.signal(_sig7.SIGALRM, _sig7.SIG_IGN)
-                try:
-                    return run_bounded(_thunk, timeout_s=_timeout_s)
-                finally:
-                    _sig7.signal(_sig7.SIGALRM, _prev7)
-                    restore_caller_alarm(*_snap7)   # elapsed-aware ITIMER restore + re-post pending
-            _to = _f7_ignore_window(lambda: (_t7.sleep(3), "F7-SLEPT-THROUGH")[1], 1)
-            check("f7-inherited-ignored-sigalrm-still-times-out", _to == "TIMEOUT")
-            # (d) the child must also UNBLOCK SIGALRM, not merely reset its DISPOSITION: a caller with
-            # SIGALRM BLOCKED in its signal mask passes that blocked mask across the fork, so the timer's
-            # SIGALRM stays pending (never delivered) and never terminates the child, leaving the parent
-            # blocked in os.read() with no deadline. With SIGALRM blocked in the parent, a thunk that sleeps
-            # past the timeout must still TIMEOUT (the child unblocks it before arming the timer). Reverted
-            # (no unblock), the pending timer never fires and the sleep runs to completion, so the thunk's
-            # own result returns instead of TIMEOUT.
-            if hasattr(_sig7, "pthread_sigmask"):
-                # test-hermeticity: SNAPSHOT the caller's mask and RESTORE it exactly (SIG_SETMASK), never a
-                # blind SIG_UNBLOCK -- a caller that had SIGALRM blocked must stay blocked afterward, so this
-                # probe leaves the ambient signal mask as it found it. SIG_BLOCK returns the prior mask.
-                _prev_mask7 = _sig7.pthread_sigmask(_sig7.SIG_BLOCK, {_sig7.SIGALRM})
-                try:
-                    _tb = run_bounded(lambda: (_t7.sleep(3), "F7-SLEPT-THROUGH")[1], timeout_s=1)
-                finally:
-                    _sig7.pthread_sigmask(_sig7.SIG_SETMASK, _prev_mask7)
-                check("f7-inherited-blocked-sigalrm-still-times-out", _tb == "TIMEOUT")
+            # Change hostile signal state only inside an outer bounded child.
+            # The parent never borrows a caller timer or discards pending SIGALRM.
+            def _hostile_child(blocked):
+                if blocked:
+                    _sig7.pthread_sigmask(_sig7.SIG_BLOCK, {_sig7.SIGALRM})
+                else:
+                    _sig7.signal(_sig7.SIGALRM, _sig7.SIG_IGN)
+                return run_bounded(lambda: (_t7.sleep(3), "F7-SLEPT-THROUGH")[1],
+                                   timeout_s=1)
 
-            # F-R17-COV1 / F-R18-COV1TEST: the f7 checks above assert only the CHILD's TIMEOUT outcome, so the
-            # module self-test passed even with the caller-timer snapshot reverted to zeros -- the
-            # timer-restore class (F-R16-1 / F-R17-C2) went undiscriminated in-suite. Close that gap: arm a
-            # REAL caller ITIMER_REAL that EXPIRES inside the ~1s SIG_IGN window, and run the caller deadline
-            # through the SHARED _f7_ignore_window callable (the ACTUAL f7 restoration path), so zeroing the
-            # snapshot/restore reds this probe. Assert the caller's deadline is PRESERVED and fires PROMPTLY
-            # after the elapsed-aware restore (which clamps an in-window-expired deadline to a tiny positive),
-            # within a TIGHT bound that distinguishes a prompt clamp (fires within a few ms) from a fresh 0.3s
-            # deadline: a zeros revert never re-arms (never fires) and a verbatim revert re-arms the full 0.3s
-            # (fires ~0.3s after the restore, outside the bound) -- both red. The prior 0.5s window admitted a
-            # verbatim-restored 0.3s timer, so it did not discriminate a verbatim revert.
-            # SKIP when SIGALRM is currently BLOCKED (the hostile-ambient wrapper re-runs this self-test with
-            # SIGALRM blocked-and-pending): the probe needs the deadline DELIVERED, and unblocking would
-            # consume the caller's pending SIGALRM the wrapper asserts must survive. In the normal run SIGALRM
-            # is deliverable, so the discrimination still holds where it matters.
-            _cov_blocked = (hasattr(_sig7, "pthread_sigmask")
-                            and _sig7.SIGALRM in _sig7.pthread_sigmask(_sig7.SIG_BLOCK, set()))
-            if hasattr(_sig7, "setitimer") and hasattr(_sig7, "ITIMER_REAL") and not _cov_blocked:
-                _cov_fired = []
-                _cov_outer = snapshot_caller_alarm()
-                _cov_prev = _sig7.signal(_sig7.SIGALRM,
-                                         lambda _s, _f: _cov_fired.append(_t7.monotonic()))
-                try:
-                    _sig7.setitimer(_sig7.ITIMER_REAL, 0)          # quiet baseline
-                    _sig7.setitimer(_sig7.ITIMER_REAL, 0.3, 0.0)   # a caller deadline that EXPIRES in-window
-                    # Exercise the ACTUAL f7 restoration via the shared callable (it snapshots BEFORE its
-                    # SIG_IGN and restores elapsed-aware, then re-installs the counting handler captured as the
-                    # pre-SIG_IGN disposition), so the clamped deadline fires under the counting handler.
-                    _f7_ignore_window(lambda: (_t7.sleep(1), "COV-SLEPT")[1], 1)   # ~1s > 0.3s
-                    # TIGHT bound (0.12s): a prompt clamp fires within a few ms of the restore; a verbatim
-                    # revert's fresh 0.3s deadline fires ~0.3s later (outside 0.12s) and a zeros revert never
-                    # fires -- both red.
-                    _cov_stop = _t7.monotonic() + 0.12
-                    while not _cov_fired and _t7.monotonic() < _cov_stop:
-                        _t7.sleep(0.002)
-                    check("cov1-caller-itimer-preserved-across-f7-fixture", bool(_cov_fired))
-                finally:
-                    _sig7.setitimer(_sig7.ITIMER_REAL, 0)
-                    _sig7.signal(_sig7.SIGALRM, _cov_prev)
-                    restore_caller_alarm(*_cov_outer)
+            check("f7-inherited-ignored-sigalrm-still-times-out",
+                  run_bounded(lambda: _hostile_child(False)) == "TIMEOUT")
+            if hasattr(_sig7, "pthread_sigmask"):
+                check("f7-inherited-blocked-sigalrm-still-times-out",
+                      run_bounded(lambda: _hostile_child(True)) == "TIMEOUT")
 
         # --- io fail-closed ---------------------------------------------------------------------------
         f = clean_machine()
@@ -4455,36 +4473,22 @@ def self_test():
         check("s1-listcontained-finally-close-guarded",
               _s1c_outcome == "returned" and _s1c_sub == ["child"] and _s1c_files == ["afile"])
 
-        # --- ROUND-6 codex: _close_fd_quietly must not CONCEAL a genuine descriptor leak. A close that
-        # raises WITHOUT releasing the fd (a "still open" close error) must be detected and the fd actually
-        # closed, not silently passed. Patch os.close so its FIRST call raises WITHOUT closing (fd stays
-        # open) and later calls really close; after _close_fd_quietly the fd must be GONE (fstat -> EBADF).
-        # Pre-fix (`except OSError: pass`) the single raising close left the fd open and fstat succeeded. --
-        _q_dir = base / "q-close"
-        _q_dir.mkdir()
-        _q_fd = os.open(str(_q_dir), os.O_RDONLY | os.O_DIRECTORY)
-        _q_real_close = os.close
-        _q_state = {"n": 0}
-
-        def _q_boom_close(fd):
-            _q_state["n"] += 1
-            if _q_state["n"] == 1:
-                raise OSError(5, "EIO (self-test injected, fd left open)")  # raise WITHOUT closing
-            return _q_real_close(fd)
-
-        try:
-            os.close = _q_boom_close
-            _close_fd_quietly(_q_fd)
-        finally:
-            os.close = _q_real_close
-        try:
-            os.fstat(_q_fd)
-            _q_still_open = True
-        except OSError:
-            _q_still_open = False
-        if _q_still_open:                                  # would leak under the old silent pass; close it now
-            _q_real_close(_q_fd)
-        check("r6-close-fd-quietly-no-silent-leak", _q_still_open is False)
+        # --- P1 (#378): _close_fd_quietly closes ONCE and never touches the number again. close(2) on
+        # Linux releases the number even when the close then reports EINTR or EIO, and another thread may
+        # reuse it at once, so the old fstat-then-reclose recovery (round 6) could close that thread's
+        # descriptor. The shared _journal harness injects exactly that: a real close, an unrelated
+        # descriptor put on the freed number (inline, and from a real second thread), then the error.
+        # Green: the reuser still owns its number (REUSE), the helper made exactly one close and no fstat
+        # of the number afterwards (PROBE), and the error is swallowed. Each vector is red under RECLOSE
+        # (the old body put back) by REUSE alone and under an fstat-only probe by PROBE alone; each V1
+        # vector also under an fcntl F_GETFD probe by PROBE alone, where fcntl exists (2 more runs). The
+        # harness's own watch check runs first (1 run): every watched call on a released number is
+        # recorded. ----
+        _q_failures, _q_runs = _journal._st_close_check(globals(), _journal._st_helper_vectors(globals()))
+        for _q_failure in _q_failures:
+            print("  close vector: {}".format(_q_failure), file=sys.stderr)
+        check("p1-close-fd-quietly-single-close",
+              not _q_failures and _q_runs == (11 if _journal._st_fcntl() else 9))
 
         # --- S4-F3: validate_store's `finally` block closes its store / product-root descriptors OUTSIDE
         # the B6 barrier, so a close that raises during teardown (EINTR / EIO / an invalid fd) must be
@@ -4624,7 +4628,13 @@ def self_test():
         mbad = base_manifest()
         mbad["bogus_table"] = {"x": 1}
         f["manifest.toml"] = mbad
-        check("manifest-unknown-table-invalid", run(f).status == INVALID)
+        bad_manifest = run(f)
+        check("manifest-unknown-table-invalid", bad_manifest.checks["C-MANIFEST"] == "FINDING"
+              and "manifest: unknown top-level table(s): bogus_table" in bad_manifest.findings)
+        check("manifest-unknown-table-stops-dependent-checks",
+              bad_manifest.status == CANNOT_EVALUATE
+              and bad_manifest.checks["C-RECORDS"] == CANNOT_EVALUATE
+              and bad_manifest.checks["C-ARCHIVE-ENUM"] == CANNOT_EVALUATE)
         # F6.5: index unknown-top-level-key finding (_index_rows).
         f = clean_machine()
         ibad = idx([bi(1, "done"), bi(2, "open")])
@@ -4988,4 +4998,6 @@ def self_test():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
     sys.exit(self_test())

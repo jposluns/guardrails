@@ -14,11 +14,19 @@ here="$(cd "$(dirname "$0")" && pwd)" || exit 2
 export PYTHONDONTWRITEBYTECODE=1
 
 failed=0
+# Name each failing gate as it happens and list the names again before the FAILED line, so a failing
+# subset never needs a hand re-run to find which gate failed.
+failed_names=""
 
 run_gate() {
   local name="$1"; shift
   echo "--- ${name} ---"
-  if "$@"; then :; else failed=1; fi
+  if "$@"; then :; else
+    local rc=$?
+    failed=1
+    failed_names="${failed_names:+${failed_names}, }${name}"
+    echo "GATE FAILED: ${name} (exit ${rc})"
+  fi
   echo
 }
 
@@ -37,7 +45,12 @@ run_gate "opf-upgrade-selftest"        python3 -I -B "$here/check_opf_upgrade.py
 run_gate "opf-import-selftest"         python3 -I -B "$here/check_opf_import.py" --self-test
 run_gate "opf-ingest-selftest"         python3 -I -B "$here/check_opf_ingest.py" --self-test
 run_gate "opf-adopt-selftest"          python3 -I -B "$here/_opf_adopt.py" --self-test
+run_gate "opf-adopt-apply-selftest"    python3 -I -B "$here/_opf_adopt_apply.py" --self-test
+run_gate "opf-adopt-hook-selftest"     python3 -I -B "$here/_opf_adopt_hook.py" --self-test
 run_gate "opf-pack-manifest-selftest"  python3 -I -B "$here/_opf_pack_manifest.py" --self-test
+run_gate "opf-adopt-observe-selftest"  python3 -I -B "$here/_opf_adopt_observe.py" --self-test
+run_gate "opf-prompt-pack-selftest"    python3 -I -B "$here/check_opf_prompt_pack.py" --self-test
+run_gate "opf-prompt-pack"             python3 -I -B "$here/check_opf_prompt_pack.py"
 run_gate "opf-oplock-selftest"         python3 -I -B "$here/_opf_oplock.py" --self-test
 run_gate "opf-init-substrate-selftest" python3 -I -B "$here/_opf_init_substrate.py" --self-test
 run_gate "opf-init-builders-selftest"  python3 -I -B "$here/_opf_init.py" --self-test
@@ -47,6 +60,7 @@ run_gate "commonmark-headings-selftest" python3 -I -B "$here/selftest_commonmark
 run_gate "commonmark-conformance"      python3 -I -B "$here/selftest_commonmark_conformance.py"
 
 if [ "$failed" -ne 0 ]; then
+  echo "FAILED GATES: ${failed_names}"
   echo "OPF STANDALONE SUBSET: FAILED"
   exit 1
 fi

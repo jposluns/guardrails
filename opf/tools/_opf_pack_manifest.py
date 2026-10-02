@@ -433,6 +433,9 @@ def _runner_check(expected, text=None, *, fail_own=0):
     # using the runtime argv log), and propagates exits 1, 2 and 7 (RED
     # own-suite-failure variants, discriminated by swallowed-own-failure
     # and tolerate-1/tolerate-2). Other nonzero statuses are not injected.
+    # An injected own-suite failure must also be named, as a GATE FAILED
+    # line with its exit status and in the FAILED GATES list directly before
+    # the subset's FAILED line (RED unnamed-own-failure, unlisted-own-failure).
     # Every recorded call is also reconciled against the on-disk run_gate
     # roster (/invocations; RED unexpected-call and dropped-sibling): each
     # registered gate once, in order, with its exact argv, and no other
@@ -592,6 +595,14 @@ exit 0
         raise AssertionError(identity + "/own-argv")
 
     if proc.returncode != 0:
+        # Only THIS suite is failed by the fixture, so it alone is named.
+        lines = proc.stdout.splitlines()
+        if fail_own and (
+                "GATE FAILED: opf-pack-manifest-selftest (exit {})".format(fail_own)
+                not in lines
+                or lines[-2:] != ["FAILED GATES: opf-pack-manifest-selftest",
+                                  "OPF STANDALONE SUBSET: FAILED"]):
+            raise AssertionError(identity + "/failure-naming")
         raise AssertionError(identity + "/return-code")
     try:
         reports = [ast.literal_eval(line[len("PACK-MANIFEST "):])
@@ -781,7 +792,12 @@ def _runner_red_checks(expected):
 
     for status in (1, 2, 7):
         own_failure(source, status)
-    propagation = '  if "$@"; then :; else failed=1; fi'
+    propagation = ('  if "$@"; then :; else\n'
+                   '    local rc=$?\n'
+                   '    failed=1\n'
+                   '    failed_names="${failed_names:+${failed_names}, }${name}"\n'
+                   '    echo "GATE FAILED: ${name} (exit ${rc})"\n'
+                   '  fi')
     if source.count(propagation) != 1:
         raise AssertionError(identity + "/red-fixture")
 
@@ -789,6 +805,18 @@ def _runner_red_checks(expected):
     red("swallowed-own-failure", lambda: own_failure(
         source.replace(propagation, '  "$@" || true', 1)),
         AssertionError, identity + "/own-suite-failure/not-red")
+
+    # A failure that still propagates must also be named and listed.
+    listing = '  echo "FAILED GATES: ${failed_names}"\n'
+    if source.count(listing) != 1:
+        raise AssertionError(identity + "/red-fixture")
+    for label, text in (
+        ("unnamed-own-failure", source.replace(
+            propagation, '  if "$@"; then :; else failed=1; fi', 1)),
+        ("unlisted-own-failure", source.replace(listing, "", 1)),
+    ):
+        red(label, lambda text=text: _runner_check(expected, text, fail_own=7),
+            AssertionError, identity + "/failure-naming")
 
     # Selective wrappers must defeat the corresponding failure RED.
     for status in (1, 2):
@@ -1218,4 +1246,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
     sys.exit(main())

@@ -1,6 +1,13 @@
 """Ingest promotion coordinator (MIG-PR5 slice 1): promote a reviewed, ACCEPTED staged ingest run.
 
-`apply_ingest` owns the ingest state machine; it shares acceptance validation, the frozen review snapshot,
+RETIRED (spec 14.1): adoption is the only intake, so the public `apply_ingest` entry refuses on every
+store before any read, store resolution, operation or journal lock, or write, with
+`_opf_import.ORDINARY_IMPORT_RETIRED`, exactly as the import modes and `_opf_ingest.plan_ingest` do. The
+engine is retained, unreachable from the CLI, as `_apply_ingest` until the import engine is removed; only
+the self-tests reach it, through `_opf_import._self_test_engine` (and the red-on-revert candidates, through
+`_load_revert_candidate`).
+
+`_apply_ingest` owns the ingest state machine; it shares acceptance validation, the frozen review snapshot,
 and index helpers with `_opf_import`, and never calls `apply_import`. Sequence:
 
   1. read-only admission: UTC clock, run-id grammar, a co-located product/store root, activated homes 2;
@@ -92,7 +99,7 @@ class _RetainLock(Exception):
 
 
 class _Launch:
-    """The launch boundary's evidence, held by apply_ingest OUTSIDE every fallible post-launch step: whether
+    """The launch boundary's evidence, held by _apply_ingest OUTSIDE every fallible post-launch step: whether
     the publication attempt was launched, the indeterminate result built BEFORE the launch (so reporting a
     nested post-launch failure formats and constructs nothing), and the attempt's own result once formed.
     Only a formed result is an established outcome; a launched attempt without one retains the lock."""
@@ -592,12 +599,14 @@ def _completed_evidence(root_fd, run_id, intent, receipt):
             raise ValueError("evidence {} is corrupt".format(path))
 
 
-def _verify_completed(cap, root_fd, run_id, attempt):
-    """A completed run is a no-op only while its immutable evidence verifies: the attempt's INTENT binds
-    the promotion receipt's exact bytes, the receipt binds the reservation and the evidence inventory,
-    and both inventories cover exactly the retained payload, whose sizes and digests still match.
-    Live index bytes are not compared (later legitimate additions must not trigger republishing)."""
-    intent = _opf_journal.attempt_intent(cap, KIND, run_id, attempt)
+def _verify_completed_evidence(root_fd, run_id, attempt, intent):
+    """The READ-ONLY core of completed-run verification, over a root descriptor and an already-VALIDATED
+    attempt INTENT: the INTENT binds the promotion receipt's exact bytes, the receipt binds the reservation
+    and the evidence inventory, and both inventories cover exactly the retained payload, whose sizes and
+    digests still match. Live index bytes are not compared (later legitimate additions must not trigger
+    republishing). Raises the coordinator's located _StageError on any failure; takes no capability,
+    acquires no lock, reserves nothing, and mutates nothing, so the generation-2 staged-run gate
+    (check_opf_import) shares it verbatim with the apply wrapper below."""
     home = _opf_import._ingest_acceptance_home(run_id)
     rec_rel = home + "/" + PROMOTION_NAME
     raw, _st = _journal._read_contained(root_fd, rec_rel, require_single_link=True)
@@ -617,6 +626,13 @@ def _verify_completed(cap, root_fd, run_id, attempt):
         raise _cannot("completed run {}: {}".format(run_id, exc))
     except (UnicodeDecodeError, ValueError, RecursionError, KeyError, TypeError) as exc:
         raise _cannot("completed run {}: its retained evidence is malformed ({!r})".format(run_id, exc))
+
+
+def _verify_completed(cap, root_fd, run_id, attempt):
+    """A completed run is a no-op only while its immutable evidence verifies (the read-only core above,
+    over the INTENT the held capability reads)."""
+    intent = _opf_journal.attempt_intent(cap, KIND, run_id, attempt)
+    _verify_completed_evidence(root_fd, run_id, attempt, intent)
     ref = dict(txn_id=_opf_journal.attempt_txn(KIND, run_id, attempt), journal_rel=_opf_store.journal_root(KIND))
     return ApplyResult(CLEAN, [], promoted=True, outcome="noop_already_complete", restore_ref=ref)
 
@@ -689,7 +705,7 @@ def _post_launch_result(cap, run_id, attempt, ref, exc, returned):
     formatting step raises. Residual (the shared journal contract): the journal's raise does not say WHICH
     fsync failed, so a COMPLETE whose log fsync succeeded but whose closing directory fsync failed, durable
     in fact, is reported indeterminate too. A BaseException outside Exception (an interrupt or exit) is not
-    caught here; it propagates, and apply_ingest's launch boundary keeps the journal lock held for it."""
+    caught here; it propagates, and _apply_ingest's launch boundary keeps the journal lock held for it."""
     detail = _safe_text(exc)
     if returned:
         return _committed_result(ref, "live verification could not complete (" + detail + ")")
@@ -710,8 +726,8 @@ def _post_launch_result(cap, run_id, attempt, ref, exc, returned):
 def _launched_attempt(cap, root_fd, run_id, attempt, ref, ops, plan, live, run_rel):
     """The launched publication attempt owns its outcome end to end, TOTAL over Exception: from the launch
     on, no exception, from the transaction, verification, the outcome helper itself, or any diagnostic, can
-    reach the generic abort handler in apply_ingest. It returns a formed result or raises _RetainLock; a
-    failure raising even that (constructing _RetainLock itself) is caught by apply_ingest's launch
+    reach the generic abort handler in _apply_ingest. It returns a formed result or raises _RetainLock; a
+    failure raising even that (constructing _RetainLock itself) is caught by _apply_ingest's launch
     boundary, which reports the prebuilt indeterminate result and never aborted."""
     try:
         # ONE guard: no exception, from the transaction, verification, or any later step, can report a
@@ -791,7 +807,21 @@ def _apply_locked(cap, resolution, run_id, homes, now, launch):
                 pass
 
 
-def apply_ingest(product_root, run_id, *, now=None):
+def apply_ingest(product_root, run_id, **_kwargs):
+    """The retired ingest-apply promotion entry: refuses on every store before any read, store resolution,
+    operation or journal lock, or write (spec 14.1)."""
+    return ApplyResult(CANNOT_EVALUATE, [_opf_import.ORDINARY_IMPORT_RETIRED], promoted=False,
+                       outcome="aborted")
+
+
+# The retired public name and its real refusal, bound at import; _opf_import._self_test_engine rebinds it
+# to the retained engine for the self-tests (and _load_revert_candidate for the red-on-revert candidates),
+# as it does the import modes and _opf_ingest.plan_ingest.
+_RETIRED_MODES = ("apply_ingest",)
+_REFUSALS = {name: globals()[name] for name in _RETIRED_MODES}
+
+
+def _apply_ingest(product_root, run_id, *, now=None):
     """Promote the reviewed, accepted staged ingest run `run_id`. Returns an ApplyResult; `promoted` and
     `outcome` are read from the result, never inferred from the verdict. An attempt whose commit can be
     neither confirmed nor ruled out (including a readable COMPLETE whose durability is unconfirmed) reports
@@ -964,7 +994,7 @@ def _st_staged_apply(gate, base, kind, case):
     staged.parent.mkdir(parents=True)
     run.rename(staged)
     if case == "corrupt":
-        record = root / _opf_import.IMPORT_OPS_REL / rid / _opf_import.TRANSACTION_NAME
+        record = root / _opf_store.txn_record("ingest", rid)
         record.parent.mkdir(parents=True)
         record.write_bytes(b"state =\n")
     before = _st_counters(root)
@@ -2052,6 +2082,42 @@ def _t_evidence_move(base, check):
                       for msg in rep.findings))
 
 
+def _t_ordinary_retired(base, check):
+    """Spec 14.1 (round-2 MAJOR): the public apply_ingest is retired and refuses FIRST, with the retirement
+    pointer, before any store resolution, operation-capability or journal-writer-lock acquisition, read or
+    write, even inside an engine block, over a reviewed, accepted run on a legacy-layout store (promotable
+    only under homes-2 activation, which the refusal calls do not run under) and over a root that resolves no
+    store, with promoted False, outcome "aborted", and the store tree byte-unchanged. Either mutation of
+    the refusal fails the suite: restoring the retained engine in place of it turns retired-refused,
+    retired-unresolved-refused and retired-resolves-and-locks-nothing red; literally deleting its return
+    makes apply_ingest return None, so refused() raises AttributeError and the vector crashes, which each
+    runner reports as a non-passing result."""
+    from unittest.mock import patch
+
+    root, rid, _run = _st_build(base, "ordinary-retired")
+    before = _st_tree(root)
+
+    def refused(result):
+        return (result.verdict == CANNOT_EVALUATE
+                and result.findings == [_opf_import.ORDINARY_IMPORT_RETIRED]
+                and result.promoted is False and result.outcome == "aborted")
+
+    with _opf_import._self_test_engine(engine=False), \
+            patch.object(_opf_import, "_resolve_store_for_review",
+                         wraps=_opf_import._resolve_store_for_review) as resolved, \
+            patch.object(_opf_oplock, "acquire_operation",
+                         wraps=_opf_oplock.acquire_operation) as operation, \
+            patch.object(_opf_journal, "acquire_writer_lock",
+                         wraps=_opf_journal.acquire_writer_lock) as writer:
+        result = apply_ingest(root, rid, now=_NOW)
+        unresolved = apply_ingest(str(base / "ordinary-retired-no-store"), rid, now=_NOW)
+    check("retired-refused", refused(result))
+    check("retired-unresolved-refused", refused(unresolved))
+    check("retired-resolves-and-locks-nothing",
+          not resolved.called and not operation.called and not writer.called)
+    check("retired-nothing-written", _st_tree(root) == before)
+
+
 TESTS = (("evidence-composition", _t_evidence_composition), ("evidence-move", _t_evidence_move),
          ("evidence-entries", _t_evidence_entries),
          ("happy-path", _t_happy_path), ("retry-monotonic", _t_retry_monotonic),
@@ -2060,7 +2126,8 @@ TESTS = (("evidence-composition", _t_evidence_composition), ("evidence-move", _t
          ("postverify-committed", _t_postverify_committed),
          ("postcommit-journal-fault", _t_postcommit_journal_fault),
          ("postlaunch-indeterminate", _t_postlaunch_indeterminate), ("postlaunch-total", _t_postlaunch_total),
-         ("postlaunch-retain", _t_postlaunch_retain)) + tuple(
+         ("postlaunch-retain", _t_postlaunch_retain),
+         ("ordinary-retired", _t_ordinary_retired)) + tuple(
              ("staged-{}-{}".format(kind, case), _t_staged_apply(kind, case))
              for kind in ("import", "ingest") for case in ("clean", "corrupt", "withheld"))
 
@@ -2071,7 +2138,7 @@ def self_test(only=None):
     from unittest.mock import patch
     with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
         with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
-                        GIT_CONFIG_NOSYSTEM="1"):
+                        GIT_CONFIG_NOSYSTEM="1"), _opf_import._self_test_engine():
             return self_test_isolated(only)
 
 
@@ -2145,7 +2212,10 @@ _REVERT_MARKER = "# --- in-tree red-on-revert discrimination (mirrors"
 
 def _load_revert_candidate(source, name, file_path):
     """Compile `source` into a fresh module registered under `name`, injecting __file__ so the module's
-    own sys.path bootstrap runs. The caller pops it from sys.modules when the phase is done."""
+    own sys.path bootstrap runs, and bind each retired public name (`_RETIRED_MODES`) to its retained
+    engine, exactly as _opf_import._self_test_engine binds the module under test (the refusals have their
+    own vectors and are never what a discriminator mutates). The caller pops it from sys.modules when the
+    phase is done."""
     import types
     module = types.ModuleType(name)
     module.__dict__["__file__"] = file_path
@@ -2155,6 +2225,8 @@ def _load_revert_candidate(source, name, file_path):
     except BaseException:
         sys.modules.pop(name, None)
         raise
+    for retired in getattr(module, "_RETIRED_MODES", ()):
+        setattr(module, retired, getattr(module, "_" + retired))
     return module
 
 
@@ -2267,8 +2339,8 @@ def _d_staging_alias(kind):
         run.rename(staged)
         link = base_dir / ("staging-alias-link-" + kind)
         link.symlink_to(staged.parent)
-        record = root / _opf_import.IMPORT_OPS_REL / rid / _opf_import.TRANSACTION_NAME
-        decoy = root / ".working" / _opf_import.IMPORT_OPS_REL / rid / _opf_import.TRANSACTION_NAME
+        record = root / _opf_store.txn_record("ingest", rid)
+        decoy = root / ".working" / _opf_store.txn_record("ingest", rid)
         record.parent.mkdir(parents=True)
         decoy.parent.mkdir(parents=True)
         error = ("cannot evaluate: cannot open the store root beneath the run dir no-follow "
@@ -2307,7 +2379,9 @@ _ST_NO_BINDING = (False, "cannot evaluate: store binding refused "
 
 def _st_staged(base_dir, name, kind, corrupt=True):
     """An _st_build run moved to its `kind` staging home, beside a corrupt store-root transaction record when
-    `corrupt`. Returns (root, rid, staged)."""
+    `corrupt`: the legacy record for generation-1 grading AND the typed ingest projection for generation 2
+    (PR B: generation 2 reads only the typed namespaces; the run content is ingest whatever the staging
+    home). Returns (root, rid, staged)."""
     root, rid, run = _st_build(base_dir, name)
     staged = root / _opf_store.stage_run(kind, rid)
     staged.parent.mkdir(parents=True)
@@ -2316,6 +2390,9 @@ def _st_staged(base_dir, name, kind, corrupt=True):
         record = root / _opf_import.IMPORT_OPS_REL / rid / _opf_import.TRANSACTION_NAME
         record.parent.mkdir(parents=True)
         record.write_bytes(b"state =\n")
+        typed = root / _opf_store.txn_record("ingest", rid)
+        typed.parent.mkdir(parents=True)
+        typed.write_bytes(b"state =\n")
     return root, rid, staged
 
 
@@ -2454,15 +2531,18 @@ def _st_route_facts(cwd, spelling, depth):
 
 
 def _st_home_verdict(result, reads, root, rid, corrupt=True):
-    """Registered requires the expected transaction read at the physical store identity.
+    """Registered requires the expected transaction read at the physical store identity: the legacy
+    record at generation 1, the typed ingest projection at generation 2 (PR B).
     Neither a schema failure nor an absent-record verdict alone proves a registered read."""
     schema = result["transaction-schema"]
     if schema[1].startswith("cannot evaluate:"):
         return "refused"
     st = root.stat()
-    txn = str(Path(_opf_import.IMPORT_OPS_REL) / rid / _opf_import.TRANSACTION_NAME)
+    txns = (str(Path(_opf_import.IMPORT_OPS_REL) / rid / _opf_import.TRANSACTION_NAME),
+            _opf_store.txn_record("ingest", rid))
     body = b"state =\n" if corrupt else None
-    if schema[0] is (not corrupt) and ((st.st_dev, st.st_ino), txn, body) in reads:
+    if schema[0] is (not corrupt) and any(
+            ((st.st_dev, st.st_ino), txn, body) in reads for txn in txns):
         return "registered"
     if schema == _ST_DETACHED:
         return "detached"
@@ -2689,6 +2769,60 @@ def _t_home_property(base, check):
 TESTS += (("home-property", _t_home_property),)
 
 
+def _t_gate_typed_grading(base, check):
+    """PR B composition: a GENUINE promoted publication, re-staged byte-identically, grades CLEAN through
+    the generation-2 staged-run gate: the COMPLETE attempt's retained completion evidence verifies through
+    the SHARED read-only core (_verify_completed_evidence, writer-to-reader composition). Each single
+    corruption of the retained evidence then refuses with its own located reason: modified receipt bytes,
+    a tampered reservation, and the old-format ingest inventory (refused, never translated)."""
+    import shutil
+    import tomllib as _tl
+    import check_opf_import as gate
+    root, rid, run = _st_build(base, "gate-typed")
+    keep = base / "gate-typed-keep"
+    shutil.copytree(str(run), str(keep))
+    with _opf_import._self_test_homes2_active(root):
+        result = apply_ingest(root, rid, now=_NOW)
+        check("gate-typed-promoted", result.promoted is True and result.outcome == "promoted")
+        if result.promoted is not True:
+            return
+        shutil.copytree(str(keep), str(run))
+        clean = gate.check_staged_run(run, homes=2)
+        check("gate-typed-complete-verified", clean["transaction-schema"][0] is True
+              and clean["transaction-consistency"][0] is True
+              and "retained completion evidence verified" in clean["transaction-consistency"][1])
+        home = root / _opf_import._ingest_acceptance_home(rid)
+        receipt = home / PROMOTION_NAME
+        original = receipt.read_bytes()
+        receipt.write_bytes(original + b"\n")
+        mutated = gate.check_staged_run(run, homes=2)
+        check("gate-typed-receipt-bytes-refused", mutated["transaction-consistency"][0] is False
+              and "completed publication attempt" in mutated["transaction-consistency"][1])
+        receipt.write_bytes(original)
+        alloc = root / _opf_store.allocation_record(KIND, rid)
+        alloc_original = alloc.read_bytes()
+        alloc.write_bytes(alloc_original + b"# tampered\n")
+        tampered = gate.check_staged_run(run, homes=2)
+        check("gate-typed-reservation-refused", tampered["transaction-consistency"][0] is False
+              and "reservation does not match its receipt" in tampered["transaction-consistency"][1])
+        alloc.write_bytes(alloc_original)
+        inventory = root / _opf_store.evidence_inventory("import", rid)
+        inv_original = inventory.read_bytes()
+        rows = _tl.loads(inv_original.decode("utf-8"))["file"]
+        legacy_rows = [dict(path=r["path"], sha256=r["sha256"], size=r["size"]) for r in rows]
+        inventory.write_bytes(_opf_import._emit_bytes(dict(
+            format="opf.ingest.evidence-inventory/v1", file=legacy_rows), "legacy inventory"))
+        old_format = gate.check_staged_run(run, homes=2)
+        check("gate-typed-old-format-refused", old_format["transaction-consistency"][0] is False
+              and "old-format ingest inventory is unsupported" in old_format["transaction-consistency"][1])
+        inventory.write_bytes(inv_original)
+        restored = gate.check_staged_run(run, homes=2)
+        check("gate-typed-restored", restored == clean)
+
+
+TESTS += (("gate-typed-grading", _t_gate_typed_grading),)
+
+
 def _d_home_claim_ancestors(kind, starting=False):
     """R2 needs both ancestor probes: the foreign claim is reached only by the selected probe."""
     def test(module, base_dir):
@@ -2708,7 +2842,9 @@ def _d_home_claim_ancestors(kind, starting=False):
         outcomes = []
         read_control = module._read_store_control
         st = root.stat()
-        txn = str(Path(_opf_import.IMPORT_OPS_REL) / rid / _opf_import.TRANSACTION_NAME)
+        # The registered read is generation-appropriate: legacy record at 1, typed projection at 2 (PR B).
+        txns = (str(Path(_opf_import.IMPORT_OPS_REL) / rid / _opf_import.TRANSACTION_NAME),
+                _opf_store.txn_record("ingest", rid))
         for homes in (1, 2):
             reads = []
 
@@ -2721,7 +2857,7 @@ def _d_home_claim_ancestors(kind, starting=False):
             with patch.object(module, "_read_store_control", read):
                 clean = _st_graded(module, root, run, homes)
             result = _st_graded(module, root, spelling, homes, cwd)
-            outcomes.append(((st.st_dev, st.st_ino), txn, None) in reads
+            outcomes.append(((st.st_dev, st.st_ino), txns[homes - 1], None) in reads
                             and all(clean[cid][0] for cid in _ST_TXN)
                             and all(not result[cid][0] and "ambiguous second store claim" in result[cid][1]
                                     for cid in _ST_TXN))
@@ -4076,9 +4212,10 @@ def _evidence_red_on_revert():
          'if r["disposition"] == "migrate" or r["dest"].startswith(_opf_store.ARCHIVE_REL + "/moved/"):',
          'if r["disposition"] == "migrate":', "evidence-retained-move"),
         ("generation-detail", "check_opf_import",
-         '_HOMES2_NO_LEGACY_TRANSACTION_DETAIL = (\n'
-         '    "no legacy transaction record (publication attempts are not graded by this gate)")',
-         '_HOMES2_NO_LEGACY_TRANSACTION_DETAIL = "changed wording"',
+         '_HOMES2_TYPED_UNAPPLIED_DETAIL = (\n'
+         '    "no typed transaction evidence (no projection, single-transaction journal, or publication attempt "\n'
+         '    "for this run)")',
+         '_HOMES2_TYPED_UNAPPLIED_DETAIL = "changed wording"',
          "F-OPF-GEN2-DETAIL-UNPINNED"),
     )
     with tempfile.TemporaryDirectory(prefix="opf-evidence-flips-") as tmp:
@@ -4144,7 +4281,7 @@ def _self_test_main(args):
     from unittest.mock import patch
     with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
         with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
-                        GIT_CONFIG_NOSYSTEM="1"):
+                        GIT_CONFIG_NOSYSTEM="1"), _opf_import._self_test_engine():
             return _self_test_main_isolated(args)
 
 
@@ -4164,4 +4301,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
     sys.exit(main())

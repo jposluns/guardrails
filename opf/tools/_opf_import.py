@@ -26,6 +26,13 @@ it (spec 14.1, Fable-synthesized plan):
     the staging run dir is deleted as the terminal journaled step). Fail-closed throughout. `check_opf_import.py`
     is the accompanying gate over a staged run, the scan layer, and the per-run transaction record.
 
+RETIRED (spec 14.1): adoption is the only intake, so the five public entry points above, the `stage_import`
+primitive beneath them, `_opf_ingest.plan_ingest`, and the `_opf_ingest_apply.apply_ingest` promotion entry
+now refuse before any read or write with ORDINARY_IMPORT_RETIRED on every store. Their engines are retained,
+unreachable from the CLI, as `_scan_import`, `_plan_import`, `_review_import`, `_review_import_interactive`,
+`_apply_import`, `_stage_import`, `_opf_ingest._plan_ingest` and `_opf_ingest_apply._apply_ingest` until the
+import engine is removed; only the self-tests reach them, through `_self_test_engine`.
+
 Offline, stdlib only, fail-closed. This module takes an operator-enumerated set of legacy SOURCE files
 and an untrusted MAPPING PLAN, validates both, mints record ids from the store's counters, and STAGES a
 byte-canonical candidate under `.working/imports/<run-id>/` (store scope, a sibling of the machine subdir,
@@ -908,8 +915,30 @@ def _worklog_ids(store_root_fd, machine_rel, roster=None, registered_vendors=fro
     registered custom worklog kinds are outside this build's manifest surface (validate_worklog's built-in
     kind vocabulary is the accepted set here), so a promoted entry using a custom registered kind fails closed
     to CANNOT-EVALUATE rather than being wrongly accepted."""
-    rel = "{}/worklog.toml".format(machine_rel)
-    data = _read_toml(store_root_fd, rel)
+    import _opf_worklog
+    try:
+        manifest = _opf_worklog.read_manifest_at(store_root_fd, machine_rel)
+        rel = _opf_worklog.source_relpath(machine_rel, manifest)
+        data = _opf_worklog.load_worklog_at(store_root_fd, machine_rel, required=False)
+    except _opf_worklog.ManifestShapeError as exc:
+        raise _cannot("{}: the store manifest is absent; the storage layout cannot be determined "
+                      "(spec 9)".format(exc.relpath)) from exc
+    except _opf_worklog.ManifestValidationError as exc:
+        base = exc.manifest.get("opf") if isinstance(exc.manifest, dict) else None
+        layout = base.get("layout") if isinstance(base, dict) else None
+        if isinstance(exc.manifest, dict) and layout != "inline":
+            raise _cannot("{}: storage layout {!r} is unsupported; U7's inline active-store readers stage only "
+                          "an `inline`-layout store (spec 9), so a non-inline layout is fail-closed (never a "
+                          "partial inline read that would miss per-record ids or admit a phantom target)".format(
+                              exc.relpath, layout)) from exc
+        raise _cannot("store manifest is not VALID ({}: {})".format(
+            exc.status, exc)) from exc
+    except _opf_store.StoreError as exc:
+        raise _cannot(str(exc))
+    except _journal.JournalError as exc:
+        raise _cannot("cannot read {} ({})".format(rel, exc))
+    except ValueError as exc:
+        raise _cannot("cannot parse {} ({})".format(rel, exc))
     if data is None:
         return []
     wv = _opf_release.validate_worklog(data, registered_vendors=registered_vendors)
@@ -1082,7 +1111,13 @@ def _tile_spans(rows, source_len, where):
 
 # --- the staging step --------------------------------------------------------------------------------
 
-def stage_import(product_root, import_set, plan, *, now, run_nonce):
+def stage_import(product_root, import_set, plan, **_kwargs):
+    """The retired staging primitive beneath `--plan`: refuses on every store before any read or write
+    (spec 14.1)."""
+    return StageResult(CANNOT_EVALUATE, [ORDINARY_IMPORT_RETIRED])
+
+
+def _stage_import(product_root, import_set, plan, *, now, run_nonce):
     """Validate an enumerated import set against an untrusted mapping plan and, on a full pass, stage the
     byte-canonical candidate under `.working/imports/<run-id>/` (store scope; spec 14.1). Writes only the
     `.working/imports/` staging root (created if absent) and the new run directory beneath it; the active
@@ -1888,7 +1923,19 @@ def _build_inventory(sources):
     return inventory, digest, source_records, fragment_records
 
 
+# Spec 14.1: the former --scan, --plan, --review and --apply modes refuse with a pointer to adoption and the
+# prompt pack. The pointer is in words only; it names no command this build lacks.
+ORDINARY_IMPORT_RETIRED = (
+    "the ordinary import modes (scan, plan, review and apply) are retired: clean-start adoption (OPF spec "
+    "14.1) is the only intake, and post-adoption import uses the approved prompt pack; nothing was written")
+
+
 def scan_import(product_root, import_set):
+    """The retired `--scan` mode: refuses on every store before any read or write (spec 14.1)."""
+    return ScanResult(CANNOT_EVALUATE, [ORDINARY_IMPORT_RETIRED])
+
+
+def _scan_import(product_root, import_set):
     """Deterministically ENUMERATE the declared import set into a digest-stamped inventory (spec 14.1),
     read-only. Resolves the store first (the init-first precondition: an unresolved or invalid store is
     CANNOT-EVALUATE, so `--scan` cannot run against a location with no store), then reads each declared
@@ -2579,8 +2626,13 @@ def _validate_staged_ingest_bundle(bundle, run_id):
     return bundle
 
 
-def plan_import(product_root, import_set, *, proposals=None, importer_proposals=None,
-                candidates_draft=None, ingest_actions=None, ingest_review_inputs=None, now, run_nonce):
+def plan_import(product_root, import_set, **_kwargs):
+    """The retired `--plan` mode, and so plan_ingest: refuses on every store before any write (spec 14.1)."""
+    return PlanResult(CANNOT_EVALUATE, [ORDINARY_IMPORT_RETIRED])
+
+
+def _plan_import(product_root, import_set, *, proposals=None, importer_proposals=None,
+                 candidates_draft=None, ingest_actions=None, ingest_review_inputs=None, now, run_nonce):
     """Produce a candidate mapping PLAN over a scanned import set and STAGE it under
     `.working/imports/<run-id>/` (spec 14.1), plus the review surface. This is the operation-layer plan
     step; it composes the read-only `scan_import` (the single enumeration source of truth, so a plan is
@@ -2606,7 +2658,7 @@ def plan_import(product_root, import_set, *, proposals=None, importer_proposals=
     try:
         _require_utc(now)
         _require_nonce(run_nonce)
-        scan = scan_import(product_root, import_set)
+        scan = _scan_import(product_root, import_set)
         if scan.verdict != CLEAN:
             # A scan finding/cannot-evaluate is the plan's outcome: no plannable inventory, nothing staged.
             return PlanResult(scan.verdict, scan.findings)
@@ -2634,7 +2686,7 @@ def plan_import(product_root, import_set, *, proposals=None, importer_proposals=
         # mechanically mapped). Handed to the settled staging classifier, which mints a legacy_fragment
         # quarantine record per fragment and stages the byte-canonical candidate run dir.
         plan = _baseline_plan(scan.sources)
-        result = stage_import(product_root, import_set, plan, now=now, run_nonce=run_nonce)
+        result = _stage_import(product_root, import_set, plan, now=now, run_nonce=run_nonce)
         if result.verdict != CLEAN:
             return PlanResult(result.verdict, result.findings, run_id=result.run_id,
                               run_rel=result.run_rel, migration_incomplete=result.migration_incomplete)
@@ -3628,8 +3680,8 @@ def _interactive_ingest_review(resolution, run_id, actor, now, stdin, stdout, cl
             d["note"] = note.strip()
     except (KeyboardInterrupt, EOFError):
         raise _cannot("interactive review interrupted; nothing captured")
-    return review_import(resolution.product_root, run_id, actor=actor, now=now,
-                         decisions=envelope["decisions"], ingest=envelope["ingest"], clock=clock)
+    return _review_import(resolution.product_root, run_id, actor=actor, now=now,
+                          decisions=envelope["decisions"], ingest=envelope["ingest"], clock=clock)
 
 
 def _ingest_acceptance_explanation(resolution, run_id):
@@ -3720,7 +3772,12 @@ def _ingest_review_changes(previous, current):
         before, after, fromfile="recorded authority", tofile="current authority", lineterm=""))}
 
 
-def review_import(product_root, run_id, *, actor, decisions, now, ingest=None, clock=None):
+def review_import(product_root, run_id, **_kwargs):
+    """The retired `--review` mode: refuses on every store before any read or write (spec 14.1)."""
+    return ReviewResult(CANNOT_EVALUATE, [ORDINARY_IMPORT_RETIRED])
+
+
+def _review_import(product_root, run_id, *, actor, decisions, now, ingest=None, clock=None):
     """Capture an attributed acceptance record over a staged import run (spec 14.1), writing
     `acceptance.json` into the run dir for an ordinary run, or only into the durable evidence home for an
     ingest run. This is the batch (decisions-list) contract surface; the interactive
@@ -3856,7 +3913,14 @@ def review_import(product_root, run_id, *, actor, decisions, now, ingest=None, c
         return ReviewResult(CANNOT_EVALUATE, ["fail-closed on excessive input nesting: {}".format(exc)])
 
 
-def review_import_interactive(product_root, run_id, *, actor, now, in_stream=None, out_stream=None, clock=None):
+def review_import_interactive(product_root, run_id, **_kwargs):
+    """The retired `--review --interactive` mode: refuses on every store before any read, prompt or write
+    (spec 14.1)."""
+    return ReviewResult(CANNOT_EVALUATE, [ORDINARY_IMPORT_RETIRED])
+
+
+def _review_import_interactive(product_root, run_id, *, actor, now, in_stream=None, out_stream=None,
+                               clock=None):
     """A minimal interactive review front-end: prompt accept/reject (and an optional note) per fragment over
     a TTY, then funnel the collected decisions into review_import (the batch path is the contract surface,
     so this loop is kept deliberately thin). It REFUSES to start when stdin is not a TTY (CANNOT-EVALUATE):
@@ -3924,7 +3988,7 @@ def review_import_interactive(product_root, run_id, *, actor, now, in_stream=Non
         decisions.append({"fragment_id": frag["fragment_id"], "decision": verb,
                           "origin": frag["origin"], "proposed_state": frag["proposed_state"],
                           "note": note})
-    return review_import(product_root, run_id, actor=actor, decisions=decisions, now=now)
+    return _review_import(product_root, run_id, actor=actor, decisions=decisions, now=now)
 
 
 # --- apply-promotion helpers (OPF-IMPORT-APPLY, PR-C ruled full design D1-D5 + terminal delete) --------
@@ -4615,7 +4679,12 @@ def _unmanaged_paths(ops, machine_rel, run_rel, run_id, extra_allowed=frozenset(
     return sorted(bad)
 
 
-def apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
+def apply_import(product_root, run_id, **_kwargs):
+    """The retired `--apply` mode: refuses on every store before any lock, journal or write (spec 14.1)."""
+    return ApplyResult(CANNOT_EVALUATE, [ORDINARY_IMPORT_RETIRED], promoted=False, outcome="aborted")
+
+
+def _apply_import(product_root, run_id, *, accepted_plan_digest=None, now=None):
     """APPLY-PROMOTION (OPF-IMPORT-APPLY, PR-C): validate an ACCEPTED staged import run and promote its
     candidate to the active store through the crash-durable, lock-guarded `_journal.run_transaction` cutover,
     then delete the staging run as the terminal journaled step, leaving a doctor-composable store (its
@@ -5414,33 +5483,39 @@ def arm(*args, **kwargs):
     os.environ[_journal.KILL_ENV] = 'after-apply-{}'.format(index)
     return ops, content
 imp._build_publication_ops = arm
-result = imp.apply_import(Path(sys.argv[2]), sys.argv[3], now=now)
+result = imp._apply_import(Path(sys.argv[2]), sys.argv[3], now=now)   # the retained engine
 raise SystemExit(result.verdict)
 """
-    cp = subprocess.run([sys.executable, "-I", "-B", "-c", child,
-                         str(Path(__file__).resolve().parent), str(root), run, mirror, now.isoformat()],
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-    require("D5-killed-after-view", cp.returncode == 137
-            and (root / mirror).read_bytes() != before_mirror)
-    journal_root = root / IMPORT_JOURNAL_REL
-    rfd = _opf_store._open_store_root_fd(root, False)
-    jfd = _journal.open_journal_root_fd(rfd, IMPORT_JOURNAL_REL)
     try:
-        txns = _journal._journal_txn_dirs(jfd, journal_root)
-        require("D5-crash-journal-enumeration", len(txns) == 1)
-        require("D5-crash-open", _journal.classify_state(jfd, txns[0]) == "open")
-        require("D5-claim-recovers-dead-owner", _claim_apply_lock(journal_root, jfd, rfd) == "acquired")
-        check("D5-crash-recovery-restores", snapshot(root / ".working") == before
-              and _journal.classify_state(jfd, txns[0]) == "rolled-back")
-        check("D5-crash-recovery-idempotent",
-              _recover_open_txns(jfd, journal_root, rfd) == {txns[0].name: "terminal"})
-        _journal.release_lock(journal_root)
-    finally:
-        os.close(jfd)
-        os.close(rfd)
-    retry = apply_import(root, run, now=now)
-    check("D5-retry-after-crash", retry.verdict == CLEAN and retry.promoted
-          and _preview_render_reproducible(root) == (True, False))
+        cp = _opf_emit.run_status_owned([sys.executable, "-I", "-B", "-c", child,
+                             str(Path(__file__).resolve().parent), str(root), run, mirror, now.isoformat()],
+                            fixture_id="D5-killed-after-view", expected_returncode=137, process_fixture=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=150)
+    except (RuntimeError, subprocess.SubprocessError, OSError, ValueError) as exc:
+        print("D5-killed-after-view", str(exc))
+        check("D5-killed-after-view", False)
+    else:
+        require("D5-killed-after-view", cp.returncode == 0
+                and (root / mirror).read_bytes() != before_mirror)
+        journal_root = root / IMPORT_JOURNAL_REL
+        rfd = _opf_store._open_store_root_fd(root, False)
+        jfd = _journal.open_journal_root_fd(rfd, IMPORT_JOURNAL_REL)
+        try:
+            txns = _journal._journal_txn_dirs(jfd, journal_root)
+            require("D5-crash-journal-enumeration", len(txns) == 1)
+            require("D5-crash-open", _journal.classify_state(jfd, txns[0]) == "open")
+            require("D5-claim-recovers-dead-owner", _claim_apply_lock(journal_root, jfd, rfd) == "acquired")
+            check("D5-crash-recovery-restores", snapshot(root / ".working") == before
+                  and _journal.classify_state(jfd, txns[0]) == "rolled-back")
+            check("D5-crash-recovery-idempotent",
+                  _recover_open_txns(jfd, journal_root, rfd) == {txns[0].name: "terminal"})
+            _journal.release_lock(journal_root)
+        finally:
+            os.close(jfd)
+            os.close(rfd)
+        retry = apply_import(root, run, now=now)
+        check("D5-retry-after-crash", retry.verdict == CLEAN and retry.promoted
+              and _preview_render_reproducible(root) == (True, False))
 
     allowed = frozenset({mirror})
     unmanaged_ops = [{"op": "write", "path": p} for p in (
@@ -6042,7 +6117,7 @@ def _self_test_ingest_acceptance(check):
             patch.object(sys.modules[__name__], "_require_ingest_homes"), \
             patch.object(sys.modules[__name__], "_require_review_gate"), \
             patch.object(sys.modules[__name__], "_ingest_snapshot", return_value=snapshot), \
-            patch.object(sys.modules[__name__], "review_import") as submit:
+            patch.object(sys.modules[__name__], "_review_import") as submit:
         submit.return_value = ReviewResult(CLEAN)
         _interactive_ingest_review(resolution, rid, "reviewer", None, TTY("accept\n\n"), io.StringIO(), None)
         sent = submit.call_args.kwargs
@@ -6387,14 +6462,176 @@ def _self_test_ingest_capture_homes2(root, run, now, check, stamp):
           and acc_path.read_bytes() == b"null\n")
 
 
+_RETIRED_MODES = ("scan_import", "plan_import", "review_import", "review_import_interactive", "apply_import",
+                  "stage_import")
+_REFUSALS = {name: globals()[name] for name in _RETIRED_MODES}   # the real refusals, bound at import
+
+
+def _self_test_engine(engine=True):
+    """SELF-TEST ONLY: for one `with` block, bind the retired public names to their retained engines (or,
+    with engine=False, back to the real refusals, so a refusal vector nested in an engine block still faces
+    them): this module's six in this module and in the importable `_opf_import` (distinct objects when this
+    file runs as __main__), and `_opf_ingest.plan_ingest` and `_opf_ingest_apply.apply_ingest` in their
+    importable modules and in __main__ when that is one of those files. The engine vectors, here and in the
+    sibling gates, predate the retirement and still exercise the engine through those names; production
+    never enters this."""
+    import contextlib
+    import importlib
+    from unittest.mock import patch
+    ingest = importlib.import_module("_opf_ingest")
+    ingest_apply = importlib.import_module("_opf_ingest_apply")
+    main = sys.modules.get("__main__")
+    mods = [sys.modules[__name__], importlib.import_module("_opf_import"), ingest, ingest_apply]
+    if os.path.realpath(getattr(main, "__file__", None) or "") in (
+            os.path.realpath(ingest.__file__), os.path.realpath(ingest_apply.__file__)):
+        mods.append(main)
+    stack = contextlib.ExitStack()
+    for mod in {id(m): m for m in mods}.values():
+        for name in mod._RETIRED_MODES:
+            stack.enter_context(patch.object(mod, name, getattr(mod, "_" + name) if engine
+                                             else mod._REFUSALS[name]))
+    return stack
+
+
+def _self_test_ordinary_refused():
+    """Every retired public mode, the stage_import primitive beneath them, and the ingest-apply promotion
+    entry (_opf_ingest_apply.apply_ingest) refuse on every store before any write (spec 14.1): over an
+    unresolved root, and over a store holding a run the engine staged and accepted, each returns
+    CANNOT-EVALUATE with ORDINARY_IMPORT_RETIRED (the ingest-apply entry with promoted False, outcome
+    "aborted") and leaves every path and byte unchanged. Returns 0 pass, 1 fail."""
+    import io
+    import shutil
+    import tempfile
+
+    import _opf_ingest_apply
+    failures, count = [], [0]
+
+    def check(name, cond):
+        count[0] += 1
+        if not cond:
+            failures.append(name)
+
+    def tree(top):
+        out = {}
+        for dirpath, dirs, files in os.walk(top):
+            for name in dirs:
+                out[os.path.relpath(os.path.join(dirpath, name), top)] = None
+            for name in files:
+                with open(os.path.join(dirpath, name), "rb") as fh:
+                    out[os.path.relpath(os.path.join(dirpath, name), top)] = fh.read()
+        return out
+
+    class TTY(io.StringIO):
+        reads = 0
+        def isatty(self):
+            return True
+        def readline(self, *args):
+            self.reads += 1
+            return super().readline(*args)
+
+    def refused(res):
+        return res.verdict == CANNOT_EVALUATE and res.findings == [ORDINARY_IMPORT_RETIRED]
+
+    def modes(root, rid):
+        stdin, stdout = TTY("accept\n\n" * 4), io.StringIO()
+        ingest_apply = _opf_ingest_apply.apply_ingest(root, rid, now=now)
+        return (("scan", scan_import(root, ["a.txt"])),
+                ("plan", plan_import(root, ["a.txt"], now=now, run_nonce="refused")),
+                ("stage", stage_import(root, ["a.txt"], whole, now=now, run_nonce="refused")),
+                ("review", review_import(root, rid, actor="tester", decisions=decisions, now=now)),
+                ("interactive", review_import_interactive(root, rid, actor="tester", now=now,
+                                                          in_stream=stdin, out_stream=stdout)),
+                ("interactive-no-io", stdin.reads == 0 and stdout.getvalue() == ""),
+                ("apply", apply_import(root, rid, now=now)),
+                ("ingest-apply", ingest_apply),
+                ("ingest-apply-aborted", ingest_apply.promoted is False
+                 and ingest_apply.outcome == "aborted"))
+
+    now = datetime.datetime(2026, 9, 9, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    base = Path(tempfile.mkdtemp(prefix="opf-import-refused-")).resolve()
+    try:
+        machine = base / "store" / ".working" / "toml"
+        machine.mkdir(parents=True)
+        (machine / "manifest.toml").write_text("\n".join([
+            "[opf]", 'standard = "opf"', 'spec_version = "{}"'.format(_opf_store.SUPPORTED_SPEC_VERSION),
+            'layout = "inline"', 'posture = "required"', 'import_status = "none"', "", "[store]",
+            'sync_target = ""', "", "[modules]", "governance = true", "", "[types.backlog_item]",
+            'namespace = "BI"', "", "[vendors]", "registered = []", ""]) + "\n", encoding="utf-8")
+        (machine / "counters.toml").write_text("schema = 1\n\n[counters]\nBI = 0\nLF = 0\nWL = 0\n",
+                                               encoding="utf-8")
+        (base / "store" / "a.txt").write_text("legacy source body\n", encoding="utf-8")
+        root = base / "store"
+        whole = dict(fragments=dict([("a.txt", [dict(span=[0, len(b"legacy source body\n")],
+                                                    state="unmapped", origin="baseline")])]))
+        # The library staging intake (codex round 1 staged a run through it) over a copy of the FRESH
+        # store, where its engine stages this whole-file baseline plan. Either mutation of the refusal fails
+        # the suite: restoring that engine in place of it turns fresh-stage-refused and
+        # fresh-stage-nothing-written red; literally deleting its return makes stage_import return None, so
+        # refused() raises AttributeError and the vector crashes, which each runner reports as a
+        # non-passing result.
+        shutil.copytree(root, base / "fresh")
+        before = tree(base)
+        with _self_test_engine(engine=False):
+            fresh = stage_import(base / "fresh", ["a.txt"], whole, now=now, run_nonce="refused")
+        check("fresh-stage-refused", refused(fresh))
+        check("fresh-stage-nothing-written", tree(base) == before)
+        # Positive control: the retained engine still stages and accepts a run, so the refusals below
+        # face a staged, accepted run, not an empty store (one the retained apply engine rejects: this
+        # minimal store is not doctor-composable).
+        staged = _plan_import(root, ["a.txt"], now=now, run_nonce="engine")
+        check("engine-plan-control", staged.verdict == CLEAN)
+        rid = staged.run_id
+        res = _opf_store.resolve_store(root)
+        fd = _opf_store._open_store_root_fd(res.store_root, res.pointer_source != "default")
+        try:
+            ordered = _load_staged_run_for_review(fd, "{}/{}".format(IMPORTS_REL, rid))[4]
+        finally:
+            os.close(fd)
+        decisions = [{"fragment_id": o["fragment_id"], "decision": "accept", "origin": o["origin"],
+                      "proposed_state": o["proposed_state"]} for o in ordered]
+        accepted = _review_import(root, rid, actor="tester", decisions=decisions, now=now)
+        check("engine-review-control", accepted.verdict == CLEAN)
+        (base / "not-adopted").mkdir()
+        for label, top in (("store", root), ("unresolved", base / "not-adopted")):
+            before = tree(base)
+            with _self_test_engine(engine=False):
+                results = modes(top, rid)
+            for mode, res in results:
+                check("{}-{}-refused".format(label, mode), res is True or (res is not False and refused(res)))
+            check("{}-nothing-written".format(label), tree(base) == before)
+        # The pointer is to adoption and the prompt pack in words, naming no command (spec 14.1).
+        check("refusal-points-to-adoption", "adoption (OPF spec 14.1)" in ORDINARY_IMPORT_RETIRED
+              and "prompt pack" in ORDINARY_IMPORT_RETIRED)
+        check("refusal-names-no-command", not re.search(r"`|\bopf [a-z]", ORDINARY_IMPORT_RETIRED))
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    if failures:
+        print("OPF-IMPORT REFUSAL SELF-TEST: FAIL ({} of {} checks failed)".format(len(failures), count[0]))
+        for f in failures:
+            print("  FAILED: {}".format(f))
+        return 1
+    print("OPF-IMPORT REFUSAL SELF-TEST: PASS ({} retired-mode refusal checks)".format(count[0]))
+    return 0
+
+
 def self_test():
-    """Isolate fixture configuration and restore the caller even on failure."""
+    """Isolate fixture configuration and restore the caller even on failure. The refusal vectors run
+    against the real public modes; the engine vectors run inside _self_test_engine."""
     import tempfile
     from unittest.mock import patch
     with tempfile.TemporaryDirectory(prefix="opf-selftest-home-") as home:
         with patch.dict(os.environ, HOME=home, XDG_CONFIG_HOME=home,
                         GIT_CONFIG_NOSYSTEM="1"):
-            return self_test_isolated()
+            return _self_test_suites()
+
+
+def _self_test_suites():
+    """self_test's delegate, entered only inside its isolated configuration: the refusal suite, then the
+    engine suite inside _self_test_engine. Returns the engine suite's code, else the refusal suite's."""
+    refused = _self_test_ordinary_refused()
+    with _self_test_engine():
+        rc = self_test_isolated()
+    return rc or refused
 
 
 def self_test_isolated():
@@ -6653,28 +6890,37 @@ def self_test_isolated():
         # 3: verb wiring (OPF-IMPORT-VERB PR-B, converted from the F-373 dispatch-deferral vector). The
         # `import` verb is now WIRED (opf.py `_cmd_import`), but a bare `opf.py import` with NO mode is a
         # usage error (exactly one mode required) -> exit 2 and stages nothing; and `--apply <run-id>` on an
-        # UNREVIEWED run dispatches onto the now-real apply_import, which finds no acceptance.json and is not
-        # promotion-ready -> exit 2 (cannot-evaluate), mutating nothing (the 3-apply vector below drives that
-        # real apply path). Both cases exercise the live
+        # UNREVIEWED run dispatches onto the public apply_import, which is retired (spec 14.1) and refuses
+        # -> exit 2 (cannot-evaluate), mutating nothing (the 3-apply vector below checks the exit code and the
+        # unchanged store, not the refusal text). Both cases exercise the live
         # dispatcher through opf.py (the CLI round-trip lives in opf.py's own opf-cli self-test leg).
         opf_py = str(Path(__file__).resolve().parent / "opf.py")
         root4, machine4 = build_store(sources={"a.txt": src})
-        cp_nomode = subprocess.run([sys.executable, "-I", "-B", opf_py, "import", "--root", str(root4)],
-                                   capture_output=True)
-        check("3-verb-no-mode-exits-2", cp_nomode.returncode == 2)
+        try:
+            cp_nomode = _opf_emit.run_status_owned([sys.executable, "-I", "-B", opf_py, "import", "--root", str(root4)],
+                                       fixture_id="3-verb-no-mode", expected_returncode=2, process_fixture=True, capture_output=True)
+            check("3-verb-no-mode-exits-2", cp_nomode.returncode == 0)
+        except (RuntimeError, subprocess.SubprocessError, OSError, ValueError) as exc:
+            print("3-verb-no-mode-exits-2", str(exc))
+            check("3-verb-no-mode-exits-2", False)
         check("3-verb-no-mode-stages-nothing", not (machine4.parent / "imports").exists())
-        # Stage a real run over root4, then `--apply` it WITHOUT a review: apply_import (PR-C, now real) finds
-        # no acceptance.json, so the run is not promotion-ready -> exit 2, and the store machine tree is
-        # byte-unchanged (nothing promoted). This exercises the live CLI dispatch onto the REAL apply layer;
-        # the full promoted/idempotent/reject behaviour is covered by the module A1-A6 checks above and the
-        # opf-cli self-test's own promoted/no-op vectors. An INDEPENDENT run-id-grammar literal for the operand.
+        # Stage a real run over root4 through the retained engine, then `--apply` it WITHOUT a review: the
+        # retired public apply_import refuses -> exit 2, and the store machine tree is byte-unchanged (nothing
+        # promoted). The retained engine's promoted/idempotent/reject behaviour is covered by the module A1-A6
+        # checks below (later in this function); the refusal text on each retired CLI mode is checked by
+        # opf.py's own opf-cli leg. An INDEPENDENT run-id-grammar literal for the operand.
         plan4 = plan_import(root4, ["a.txt"], now=NOW, run_nonce="verb-apply-pin")
         check("3-apply-plan-staged", plan4.verdict == 0 and bool(plan4.run_id))
         machine4_before = snapshot(machine4)
-        cp_apply = subprocess.run([sys.executable, "-I", "-B", opf_py, "import", "--apply",
-                                   plan4.run_id or "imp-00000000T000000Z-0000000000000000",
-                                   "--root", str(root4)], capture_output=True)
-        check("3-apply-unreviewed-exits-2", cp_apply.returncode == 2)
+        try:
+            cp_apply = _opf_emit.run_status_owned([sys.executable, "-I", "-B", opf_py, "import", "--apply",
+                                       plan4.run_id or "imp-00000000T000000Z-0000000000000000",
+                                       "--root", str(root4)], fixture_id="3-apply-unreviewed",
+                                       expected_returncode=2, process_fixture=True, capture_output=True)
+            check("3-apply-unreviewed-exits-2", cp_apply.returncode == 0)
+        except (RuntimeError, subprocess.SubprocessError, OSError, ValueError) as exc:
+            print("3-apply-unreviewed-exits-2", str(exc))
+            check("3-apply-unreviewed-exits-2", False)
         check("3-apply-unreviewed-mutates-nothing", snapshot(machine4) == machine4_before)
 
         # 4: R6 active collision: a fully-valid active index already carries the id next_id will mint (BI-1
@@ -8682,37 +8928,39 @@ def self_test_isolated():
             check(n1_label + "-manifest-cannot-eval", vN1big == CANNOT_EVALUATE)
 
         # N2a (PRC-N2 round-4, unit): _journal._close_fd_quietly swallows a close-time OSError rather than
-        # propagating it. A double close (the second os.close raises EBADF and fstat confirms the fd gone)
-        # returns cleanly; a raw os.close would raise EBADF out to the caller.
-        _rp_n2, _wp_n2 = os.pipe()
-        os.close(_wp_n2)
-        os.close(_rp_n2)                       # first, real close
+        # propagating it. Its close of -1, a number no descriptor can hold, raises EBADF and returns cleanly;
+        # a raw os.close would raise EBADF out to the caller. (#378 P1: the leg never closes a number it
+        # released to provoke EBADF, since another thread may have reused that number meanwhile.)
         _n2a_raised = False
         try:
-            _journal._close_fd_quietly(_rp_n2)   # second close: EBADF; fstat EBADF -> confirmed gone, no raise
+            _journal._close_fd_quietly(-1)        # EBADF, swallowed
         except OSError:
             _n2a_raised = True
         check("N2a-close-quietly-swallows-oserror", _n2a_raised is False)
 
-        # N2d (re-QA): _close_fd_quietly's DIAGNOSTIC path must NEVER raise. Drive it to the fail-surface branch
-        # (both os.close calls raise while fstat proves the fd still open) AND make the stderr WRITE itself raise
-        # OSError (a broken stderr): the helper must RETURN, not propagate. Without the try/except around the
-        # final print, a broken-stderr OSError escapes the helper and, at the apply cleanup call sites, reaches
-        # the outer `except OSError` and overturns a committed promotion.
-        _rp_n2d, _wp_n2d = os.pipe()                     # a real, open fd so the helper's fstat confirms it live
+        # N2d (re-QA, P1 #378): _close_fd_quietly stays SILENT and never raises. Its single close fails the
+        # way close(2) does on Linux (the number released, then EIO) while stderr itself is broken (an
+        # OSError on every write): the helper must RETURN, write nothing, and leave the number alone. The
+        # pre-P1 body reached a stderr diagnostic here; a broken-stderr OSError escaping the helper would,
+        # at the apply cleanup call sites, reach the outer `except OSError` and overturn a committed
+        # promotion.
+        _rp_n2d, _wp_n2d = os.pipe()
         _saved_close_n2d = os.close
         _saved_stderr_n2d = sys.stderr
+        _n2d_writes = []
         class _BrokenStderr_n2d:
             def write(self, *_a, **_k):
+                _n2d_writes.append(_a)
                 raise OSError(errno.EIO, "broken stderr write")
             def flush(self, *_a, **_k):
                 raise OSError(errno.EIO, "broken stderr flush")
         def _close_raises_n2d(_fd):
+            _saved_close_n2d(_fd)                         # released first, as close(2) does on Linux
             raise OSError(errno.EIO, "injected close failure")
         _n2d_raised = False
         try:
-            os.close = _close_raises_n2d                  # BOTH closes in the helper now raise
-            sys.stderr = _BrokenStderr_n2d()             # ... and the diagnostic write raises too
+            os.close = _close_raises_n2d
+            sys.stderr = _BrokenStderr_n2d()             # ... and any diagnostic write would raise too
             try:
                 _journal._close_fd_quietly(_rp_n2d)
             except BaseException:
@@ -8720,14 +8968,13 @@ def self_test_isolated():
         finally:
             os.close = _saved_close_n2d
             sys.stderr = _saved_stderr_n2d
-        os.close(_rp_n2d)                                # real cleanup of the still-open fds
-        os.close(_wp_n2d)
-        check("N2d-close-quietly-diagnostic-nonthrow", _n2d_raised is False)
+        os.close(_wp_n2d)                                # real cleanup; _rp_n2d was released by the close
+        check("N2d-close-quietly-silent-nonthrow", _n2d_raised is False and not _n2d_writes)
 
         # N2b (PRC-N2 round-4, behavioural): a descriptor-close OSError on the apply cleanup path does NOT
         # overturn a committed promotion. Inject an OSError on the FIRST close of the journal-root fd (jr_fd),
-        # then promote a reviewed run: _close_fd_quietly swallows the raise (fstat confirms the fd, retries)
-        # and the CLEAN result stands. Without the _close_fd_quietly routing the raw os.close raised into the
+        # after releasing it as close(2) does, then promote a reviewed run: _close_fd_quietly swallows the
+        # raise and the CLEAN result stands. Without the _close_fd_quietly routing the raw os.close raised into the
         # outer OSError handler and flipped promoted=True to aborted. `fired` asserts the injection ran.
         rootN2, mN2 = build_apply_store()
         prN2 = plan_import(rootN2, ["a.txt"], now=NOW, run_nonce="apply-n2")
@@ -8742,6 +8989,7 @@ def self_test_isolated():
         def _close_n2(_fd):
             if _fd == _n2b["jr_fd"] and not _n2b["fired"]:
                 _n2b["fired"] = True
+                _saved_close_n2(_fd)                       # released first, as close(2) does on Linux
                 raise OSError(errno.EIO, "injected jr_fd cleanup-close error")
             return _saved_close_n2(_fd)
         _journal.open_journal_root_fd = _capture_ojr_n2
@@ -8776,6 +9024,7 @@ def self_test_isolated():
                 return _saved_close_n2c(_fd)               # let jr_fd close normally (N2b covers it)
             if _n2c["jr_closed"] and not _n2c["fired"]:
                 _n2c["fired"] = True
+                _saved_close_n2c(_fd)                      # released first, as close(2) does on Linux
                 raise OSError(errno.EIO, "injected root_fd cleanup-close error")
             return _saved_close_n2c(_fd)
         _journal.open_journal_root_fd = _capture_ojr_n2c
@@ -9494,4 +9743,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
     sys.exit(main())

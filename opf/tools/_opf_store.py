@@ -96,6 +96,8 @@ STORE_ROOT_CONTROL_DIRS = (".git", ".aiqt")
 # SUPPORTED_HOMES is the highest homes generation this tooling activates; homes 2 activates with the
 # migration, so until then every store, whatever it declares, keeps its legacy grading (generation 1).
 SUPPORTED_HOMES = 1
+# Worklog 2 remains test-only until schema, doctor, and release support land.
+SUPPORTED_WORKLOG = 1
 EVIDENCE_INVENTORY_FORMAT = "opf.evidence.inventory/v1"  # spec 4.2
 IMPORTED_DIRNAME = "imported"
 ARCHIVE_DIRNAME_STORE = "archive"       # distinct from the machine-store record archive
@@ -108,11 +110,17 @@ JOURNALS_REL = "{}/{}".format(WORKING_DIRNAME, JOURNALS_DIRNAME)
 STORE_TREE_CONTROL_DIRS = (IMPORTED_DIRNAME, ARCHIVE_DIRNAME_STORE, STAGING_DIRNAME, JOURNALS_DIRNAME)
 RESERVED_MACHINE_SUBDIRS = ("imports",) + STORE_TREE_CONTROL_DIRS
 STAGING_KINDS = ("import", "ingest", "adoption", "layout", "preview")
+# The journal-home vocabulary: every staging kind plus the journal-only `record` kind (spec 4.2).
+# Record names ONLY a journal home: journal_root, txn_record and allocation_record admit it, while
+# stage_run, evidence_run and evidence_inventory keep refusing it, so `record` never gains a
+# staging or imported home.
+JOURNAL_KINDS = STAGING_KINDS + ("record",)
 # Import and ingest share the import engine's grammar; adoption has its own existing grammar.
-# Layout and preview reserve new prefixes with the same timestamp/hash shape. This checks shape,
-# not calendar validity, ownership, existence, symlinks, or permission to mutate a constructed path.
+# Layout and preview reserve new prefixes with the same timestamp/hash shape; record reserves
+# record- with that shape too (journal home only). This checks shape, not calendar validity,
+# ownership, existence, symlinks, or permission to mutate a constructed path.
 _HOME_RUN_PREFIXES = {"import": "imp", "ingest": "imp", "adoption": "adopt",
-                      "layout": "layout", "preview": "preview"}
+                      "layout": "layout", "preview": "preview", "record": "record"}
 _HOME_RUN_SUFFIX = r"-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}"
 # Evidence-bundle inventories: inventory.toml, then one inventory-<phase>.toml per later phase.
 _EVIDENCE_INVENTORY_RE = re.compile(r"inventory(?:-[a-z][a-z0-9]{0,31})?\.toml")
@@ -131,7 +139,10 @@ MAX_STORE_READ_BYTES = 1 << 20         # read cap for a contained store file (ma
                                        # store input is refused rather than read unboundedly (SECA)
 SUPPORTED_SPEC_VERSION = "1.2.0"       # the OPFiles base spec_version this tooling implements; a store
                                        # declaring an OLDER spec_version is fail-closed with a distinct
-                                       # migration-needed finding naming the `opf upgrade` remedy (spec 9.x)
+                                       # migration-needed finding naming the `opf upgrade` remedy (spec 9.x),
+                                       # and one declaring a NEWER spec_version is fail-closed with an
+                                       # upgrade-the-tooling finding, except only the reserved homes-2
+                                       # declaration pair, which stays gated on activation (spec 9.2/4.2)
 
 # Resolution outcomes.
 RESOLVED = "RESOLVED"                  # a machine store was resolved and located
@@ -196,7 +207,7 @@ RESERVED_EXCLUDED_TYPES = {
 # Section shapes (closed keysets; see the ambiguity note in the module docstring).
 OPF_KEYS = frozenset({"standard", "spec_version", "layout", "posture", "import_status"})
 # Recognized-but-OPTIONAL [opf] keys: absent homes means legacy generation 1; required-ness waits for L4.
-OPF_OPTIONAL_KEYS = frozenset({"homes"})
+OPF_OPTIONAL_KEYS = frozenset({"homes", "worklog"})
 STORE_KEYS = frozenset({"sync_target"})
 PROFILE_KEYS = frozenset({"version", "base_compat", "posture_floor", "required_modules",
                           "extension_namespace"})
@@ -219,14 +230,18 @@ _NAMESPACE_OK = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 _EXTENSION_VENDOR_OK = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-")   # ASCII x-<vendor> slug alphabet
 
 
-def _home_kind(kind):
-    if not isinstance(kind, str) or kind not in STAGING_KINDS:
+def _home_kind(kind, kinds=None):
+    # `kinds` is the admitting vocabulary: STAGING_KINDS by default, JOURNAL_KINDS for the journal
+    # constructors. Read from the module at call time, never bound at def time, so an edited
+    # vocabulary is honoured wherever it is read.
+    kinds = STAGING_KINDS if kinds is None else kinds
+    if not isinstance(kind, str) or kind not in kinds:
         raise ValueError("unknown homes kind: {!r}".format(kind))
     return kind
 
 
-def _home_run(kind, run_id):
-    kind = _home_kind(kind)
+def _home_run(kind, run_id, kinds=None):
+    kind = _home_kind(kind, kinds)
     pattern = _HOME_RUN_PREFIXES[kind] + _HOME_RUN_SUFFIX
     if not isinstance(run_id, str) or re.fullmatch(pattern, run_id) is None:
         raise ValueError("invalid {} run-id: {!r}".format(kind, run_id))
@@ -266,12 +281,12 @@ def retire_preimage(run_id, path):
 
 def journal_root(kind):
     """Store-root-relative journal frames, disjoint from run projections."""
-    return "{}/{}/journal".format(JOURNALS_REL, _home_kind(kind))
+    return "{}/{}/journal".format(JOURNALS_REL, _home_kind(kind, JOURNAL_KINDS))
 
 
 def txn_record(kind, run_id):
     """Store-root-relative transaction projection."""
-    run = _home_run(kind, run_id)
+    run = _home_run(kind, run_id, JOURNAL_KINDS)
     kind, run_id = run.split("/")
     return "{}/{}/runs/{}/transaction.toml".format(JOURNALS_REL, kind, run_id)
 
@@ -279,7 +294,7 @@ def txn_record(kind, run_id):
 def allocation_record(kind, run_id):
     """Store-root-relative permanent ID reservation of one run. It lives in the journal home, so
     require_ordinary_target refuses it as a publication or rollback operand."""
-    run = _home_run(kind, run_id)
+    run = _home_run(kind, run_id, JOURNAL_KINDS)
     kind, run_id = run.split("/")
     return "{}/{}/allocations/{}.toml".format(JOURNALS_REL, kind, run_id)
 
@@ -354,7 +369,8 @@ def render_homes_gitignore():
 def homes_gitignore_matches(text):
     """Exact managed-block drift check; adopter text outside the block is preserved.
     Only block bytes are checked, not effective git rules or index state. Activation must
-    inspect both before installation; a tracked control path requires reviewed untracking.
+    inspect both before installation (_opf_write_guard.inspect_homes_gitignore is that
+    read-only inspector); a tracked control path requires reviewed untracking.
     """
     if not isinstance(text, str):
         return False
@@ -366,47 +382,103 @@ def homes_gitignore_matches(text):
     return "".join(lines[starts[0]:ends[0] + 1]) == render_homes_gitignore()
 
 
-def snapshot_caller_alarm():
-    """Snapshot the caller's SIGALRM timing state for a hermetic FIFO-probe watchdog, the SINGLE source of
-    truth the opf-side watchdogs share (round-15 F1, so no per-site save/restore can diverge again and
-    re-induce the watchdog-timer class). Captures the caller's ITIMER_REAL value and repeating interval, a
-    monotonic baseline for the elapsed-aware restore, and whether a SIGALRM was already PENDING on entry.
-    Returns an opaque tuple to hand to restore_caller_alarm() in the watchdog's finally. Call it BEFORE the
-    probe installs its own handler / unblocks / arms its timer (so the pending reading is the caller's, not
-    the probe's)."""
-    import signal as _signal
-    import time as _time
-    _prev_value, _prev_interval = _signal.getitimer(_signal.ITIMER_REAL)
-    _was_pending = (hasattr(_signal, "sigpending")
-                    and _signal.SIGALRM in _signal.sigpending())
-    return (_prev_value, _prev_interval, _time.monotonic(), _was_pending)
+def _homes_gitignore_markers(text):
+    """The BEGIN/END marker-line indexes of `text` over splitlines(keepends=True), recognized
+    exactly as homes_gitignore_matches recognizes them (one source for the marker grammar)."""
+    lines = text.splitlines(keepends=True)
+    starts = [i for i, line in enumerate(lines) if line.rstrip("\r\n") == GITIGNORE_BEGIN]
+    ends = [i for i, line in enumerate(lines) if line.rstrip("\r\n") == GITIGNORE_END]
+    return lines, starts, ends
 
 
-def restore_caller_alarm(prev_value, prev_interval, t0, was_pending):
-    """Restore the caller's SIGALRM timing state a FIFO-probe watchdog borrowed, the SINGLE elapsed-aware
-    save/restore every opf-side watchdog shares (round-15 F1, so no per-site verbatim restore can diverge
-    and re-induce the watchdog-timer class the round-13 fix closed once). Two moves:
-      (1) ITIMER_REAL is re-armed ELAPSED-AWARE: the caller's remaining value MINUS the wall time the
-          watchdog held it (interval preserved), so running the watchdog neither PAUSES nor EXTENDS a
-          caller deadline. A deadline that would have expired during the probe clamps to a tiny positive so
-          it still FIRES rather than being silently dropped, never re-armed to its full original value.
-      (2) a SIGALRM the caller had PENDING on entry is RE-POSTED (round-15 F2): the probe's SIG_IGN discards
-          any inherited pending alarm so it cannot fire the watchdog spuriously, which would otherwise
-          DESTROY a blocked+pending ambient SIGALRM the caller still owns; re-posting it here leaves the
-          caller's pending state unchanged, matching the ambient-preserving contract the watchdog docstrings
-          promise. Re-posting happens after the mask is restored (caller blocked => it re-pends; caller
-          unblocked => it delivers at once, as it would have).
-    Call it AFTER restoring the caller's SIGALRM disposition and signal mask, in the watchdog's finally.
-    The pending arguments come from snapshot_caller_alarm(); a test may pass an explicit (value, interval,
-    t0, was_pending) to exercise the elapsed-aware restore directly."""
-    import signal as _signal
-    import time as _time
-    import os as _os
-    if prev_value > 0.0:
-        _rem = prev_value - (_time.monotonic() - t0)
-        _signal.setitimer(_signal.ITIMER_REAL, _rem if _rem > 0.0 else 1e-6, prev_interval)
-    if was_pending:
-        _os.kill(_os.getpid(), _signal.SIGALRM)
+def preview_homes_gitignore_rewrite(existing):
+    """The reviewed-rewrite preview for a drifted managed block: the exact replacement
+    .working/.gitignore bytes, with the single BEGIN..END marker region replaced by
+    render_homes_gitignore() and every adopter byte outside the markers preserved byte-exact
+    (a surrogateescape round trip, so non-UTF-8 adopter bytes survive). Defined ONLY for a
+    well-formed drifted block, exactly one BEGIN line before exactly one END line whose region
+    is not the exact block; anything else raises ValueError: an exact block needs no rewrite, a
+    file without markers is the append case plan_homes_gitignore handles, and duplicated,
+    unbalanced or reversed markers leave no single region to replace, so no preview exists and
+    the drift refusal stands. Nothing is applied here: the caller shows this preview for review
+    and passes it back, with the reviewed bytes, as plan_homes_gitignore(existing,
+    approved_rewrite=..., reviewed_existing=...) only on explicit approval, never silently."""
+    if not isinstance(existing, bytes):
+        raise ValueError("homes-gitignore rewrite preview needs the current file bytes")
+    text = existing.decode("utf-8", "surrogateescape")
+    if homes_gitignore_matches(text):
+        raise ValueError("homes-gitignore rewrite preview: the managed block is already exact; "
+                         "nothing to rewrite")
+    lines, starts, ends = _homes_gitignore_markers(text)
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        raise ValueError(
+            "homes-gitignore-block-drift: the marker structure is not a single BEGIN..END region "
+            "(duplicated, unbalanced or reversed markers), so no reviewed rewrite can be "
+            "previewed; reconcile .working/.gitignore by hand")
+    result = "".join(lines[:starts[0]]) + render_homes_gitignore() + "".join(lines[ends[0] + 1:])
+    if not homes_gitignore_matches(result):
+        raise ValueError("homes-gitignore rewrite preview failed its own drift check; refusing")
+    return result.encode("utf-8", "surrogateescape")
+
+
+def plan_homes_gitignore(existing, approved_rewrite=None, reviewed_existing=None):
+    """Pure .working/.gitignore reconciliation planner: no git, no filesystem, no write.
+    `existing` is the current file's bytes, or None when the file is absent. Returns the full
+    new file bytes to install, or None when the file already carries the exact managed block
+    (no change). Adopter text is preserved byte-exact: the result is `existing` plus the
+    appended block (with one separating newline when `existing` does not end in one), or the
+    file is left alone; the block is appended last, never inserted, and non-UTF-8 adopter
+    bytes survive a surrogateescape round trip. Any marker line without an exact block match
+    (a duplicated, unbalanced, reversed, drifted or CRLF block) raises the named ValueError
+    refusal homes-gitignore-block-drift and is never repaired in place next to adopter text.
+    The one sanctioned repair is the reviewed-rewrite path: pass the bytes
+    preview_homes_gitignore_rewrite returned, after explicit review and approval, as
+    `approved_rewrite`, with the exact file bytes that preview was computed from as
+    `reviewed_existing`; the planner returns exactly those bytes, and only while `existing` still
+    byte-matches `reviewed_existing` and a fresh preview still byte-matches the approval, so a file
+    changed since review refuses (fail-closed). The prestate binding is what refuses an edit INSIDE
+    the drifted block: the replacement discards the whole marker region, so such an edit yields the
+    same preview and only the reviewed bytes can tell it apart. A supplied approval is checked
+    BEFORE the create, no-op and append branches: a file now absent, marker-free or already exact is
+    not the reviewed file, so the stale approval refuses rather than being dropped for another plan.
+    Installation is not performed here: _opf_write_guard.inspect_homes_gitignore must gate the
+    write on effective ignore rules and the index first, and the index is never mutated."""
+    if approved_rewrite is not None and not isinstance(approved_rewrite, bytes):
+        raise ValueError("homes-gitignore approved rewrite must be the previewed bytes")
+    if approved_rewrite is not None:
+        try:
+            bound = (isinstance(existing, bytes) and reviewed_existing == existing
+                     and approved_rewrite == preview_homes_gitignore_rewrite(existing))
+        except ValueError:
+            bound = False    # no preview exists for the current bytes: not the reviewed drifted file
+        if not bound:
+            raise ValueError(
+                "homes-gitignore-block-drift: the current file does not byte-match the reviewed "
+                "bytes, or the approved rewrite does not byte-match the current preview (the file "
+                "changed since review, or the approval is stale); re-preview, re-review and "
+                "re-approve (fail-closed)")
+        return approved_rewrite
+    block = render_homes_gitignore().encode("utf-8")
+    if existing is None:
+        return block
+    if not isinstance(existing, bytes):
+        raise ValueError("homes-gitignore planning needs the current file bytes or None")
+    text = existing.decode("utf-8", "surrogateescape")
+    if homes_gitignore_matches(text):
+        return None
+    _lines, starts, ends = _homes_gitignore_markers(text)
+    if not starts and not ends:
+        result = existing + (b"\n" if existing and not existing.endswith(b"\n") else b"") + block
+        if not (result.startswith(existing)
+                and homes_gitignore_matches(result.decode("utf-8", "surrogateescape"))):
+            raise ValueError("homes-gitignore append postcondition failed; refusing to plan")
+        return result
+    raise ValueError(
+        "homes-gitignore-block-drift: .working/.gitignore carries a marker line without the "
+        "exact managed block (a hand-edited, duplicated, unbalanced, reversed or CRLF block). "
+        "It is never rewritten silently next to adopter text: review the exact replacement "
+        "(preview_homes_gitignore_rewrite) and pass it back as approved_rewrite, with the "
+        "reviewed bytes as reviewed_existing, on explicit approval, or reconcile the file by hand")
 
 
 class StoreError(Exception):
@@ -486,9 +558,9 @@ def _open_dir_nofollow(abspath):
     # returns until the return hands the last one to the caller. The protected region spans the root
     # open through the return itself. During a hand-off BOTH descriptors are held: the child is appended
     # BEFORE the parent leaves `held`, and the parent's ownership is cleared (popped) immediately before
-    # its close, so a failing parent close (on Linux the number is released even when close reports an
-    # error) can neither leak the child nor double-close the parent. Any failure or interruption closes
-    # every descriptor still held and re-raises. Residual (sub-line, disclosed): an interruption between
+    # its close, a single os.close (P1, #378: a raising close has released its number, close(2), and it
+    # is never touched again), so a failing parent close can neither leak the child nor double-close the
+    # parent. Any failure or interruption closes every descriptor still held and re-raises. Residual (sub-line, disclosed): an interruption between
     # an open returning and its append, or between a pop and its close, leaks that one descriptor.
     held = []
     try:
@@ -496,12 +568,12 @@ def _open_dir_nofollow(abspath):
         held.append(os.open(parts[0], os.O_RDONLY | os.O_DIRECTORY))
         for comp in parts[1:]:
             held.append(os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=held[-1]))
-            os.close(held.pop(-2))
+            _journal._close_fd_propagating(held.pop(-2))
         return held.pop()
     except BaseException as exc:
         while held:
             try:
-                os.close(held.pop())
+                _journal._close_fd_propagating(held.pop())
             except OSError as cexc:
                 exc.add_note("additionally the no-follow walk descriptor could not be closed ({})".format(
                     cexc))
@@ -518,10 +590,24 @@ def _open_store_root_fd(store_root, pointer):
     return _open_root_fd(store_root)
 
 
-def _read_toml_contained(root_fd, relpath):
+def _read_toml_contained(root_fd, relpath, *, with_raw=False):
     """Read and parse a contained TOML file beneath root_fd, no-follow. Returns the parsed dict, or None
-    when the file (or a parent) is absent. StoreError (a cannot-evaluate) on an unreadable file, a
+    when the file (or a parent) is absent. with_raw=True returns (original_bytes, parsed_dict) on
+    presence, preserving the same read safeguards. StoreError (a cannot-evaluate) on an unreadable file, a
     refused symlink, or a TOML/parse error: an unreadable input is a failure, never an empty pass."""
+    data = _read_store_bytes_contained(root_fd, relpath)
+    if data is None:
+        return None
+    parsed = _parse_store_toml(relpath, data)
+    return (data, parsed) if with_raw else parsed
+
+
+def _read_store_bytes_contained(root_fd, relpath):
+    """The byte half of _read_toml_contained: read a contained store CONTROL file's exact bytes beneath
+    root_fd, no-follow, singly-linked, capped. Returns the raw bytes, or None when the file (or a
+    parent) is absent; StoreError on any unreadable shape. Split out so the descriptor-bound discovery
+    (discover_machine_store_fd) can keep the EXACT bytes it parses for the resolved manifest rather
+    than re-opening it by path (round-5 defect 1)."""
     try:
         st = _journal._lstat_contained(root_fd, relpath)
     except (_journal.JournalError, OSError) as exc:
@@ -570,6 +656,12 @@ def _read_toml_contained(root_fd, relpath):
     if len(data) > MAX_STORE_READ_BYTES:
         raise StoreError("{} read {} bytes, over the {}-byte store-read cap (a raced swap or growth past "
                          "the pre-open size; fail-closed)".format(relpath, len(data), MAX_STORE_READ_BYTES))
+    return data
+
+
+def _parse_store_toml(relpath, data):
+    """The parse half of _read_toml_contained: parse store-control TOML bytes, with every
+    present-but-unparseable class mapped to a fail-closed StoreError."""
     try:
         return tomllib.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
@@ -592,12 +684,28 @@ def _immediate_subdirs(store_root_fd, working_rel):
     A symlinked entry is skipped (never followed). Returns a sorted list of names. Raises StoreError
     when `working_rel` is present but is not a directory or is a refused symlink; returns None when it
     is absent (the caller reads absence as "no store found" rather than as an error)."""
+    wfd = _open_working_dir_fd(store_root_fd, working_rel)
+    if wfd is None:
+        return None
+    try:
+        return _list_real_subdirs(wfd, working_rel)
+    finally:
+        os.close(wfd)
+
+
+def _open_working_dir_fd(store_root_fd, working_rel):
+    """The open half of _immediate_subdirs: open `working_rel` beneath store_root_fd no-follow and
+    return the directory fd, HELD (the caller owns and closes it), or None when it is absent. Split out
+    so the descriptor-bound discovery (discover_machine_store_fd) can keep the LISTING descriptor open
+    while it reads each listed manifest beneath it (round-5 defect 1). StoreError as
+    _immediate_subdirs: a present non-directory or a refused symlink fails closed."""
     try:
         pfd, name = _journal._open_parent(store_root_fd, working_rel)
     except FileNotFoundError:
         return None
     except (OSError, _journal.JournalError) as exc:
         raise StoreError("cannot open the store tree parent of {} ({})".format(working_rel, exc))
+    wfd = None
     try:
         try:
             wfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pfd)
@@ -608,26 +716,40 @@ def _immediate_subdirs(store_root_fd, working_rel):
         except OSError as exc:
             # O_NOFOLLOW refuses a symlinked .working with ELOOP: refused, not followed, fail-closed.
             raise StoreError("cannot open {} no-follow ({})".format(working_rel, exc))
-        try:
-            try:
-                names = sorted(os.listdir(wfd))
-            except OSError as exc:
-                # A listing I/O error (EIO, or a state change after the open) is fail-closed, never read as
-                # an empty (no-store) directory (check-fails-closed-on-unreadable).
-                raise StoreError("cannot list {} ({})".format(working_rel, exc))
-            subdirs = []
-            for entry in names:
-                try:
-                    est = os.stat(entry, dir_fd=wfd, follow_symlinks=False)
-                except OSError as exc:
-                    raise StoreError("cannot stat {}/{} ({})".format(working_rel, entry, exc))
-                if stat.S_ISDIR(est.st_mode):        # a real dir only; a symlink or file is not a store
-                    subdirs.append(entry)
-            return subdirs
-        finally:
-            os.close(wfd)
     finally:
-        os.close(pfd)
+        # ROUND-6 defect: the new descriptor is HELD in a local across the parent close, so a parent
+        # close that reports an error cannot abandon the return and leak the just-opened `working_rel`
+        # fd (one per discovery/resolution/investigation call). It is released quietly, the parent close
+        # is a single os.close (P1, #378: a raising close has released its number, close(2), and it is
+        # never touched again), and the close error keeps propagating fail-closed.
+        try:
+            _journal._close_fd_propagating(pfd)
+        except OSError:
+            if wfd is not None:
+                _journal._close_fd_quietly(wfd)
+            raise
+    return wfd
+
+
+def _list_real_subdirs(wfd, working_rel):
+    """The listing half of _immediate_subdirs: the sorted immediate real subdirectory names read
+    THROUGH the held `working_rel` descriptor, each entry stat'ed no-follow through that same
+    descriptor. A symlinked entry is skipped (never followed)."""
+    try:
+        names = sorted(os.listdir(wfd))
+    except OSError as exc:
+        # A listing I/O error (EIO, or a state change after the open) is fail-closed, never read as
+        # an empty (no-store) directory (check-fails-closed-on-unreadable).
+        raise StoreError("cannot list {} ({})".format(working_rel, exc))
+    subdirs = []
+    for entry in names:
+        try:
+            est = os.stat(entry, dir_fd=wfd, follow_symlinks=False)
+        except OSError as exc:
+            raise StoreError("cannot stat {}/{} ({})".format(working_rel, entry, exc))
+        if stat.S_ISDIR(est.st_mode):        # a real dir only; a symlink or file is not a store
+            subdirs.append(entry)
+    return subdirs
 
 
 # --- discovery (spec 4.5) ----------------------------------------------------------------------------
@@ -653,11 +775,56 @@ def discover_machine_store(store_root_fd, store_root, accept_tokens=None):
     subdirs = _immediate_subdirs(store_root_fd, WORKING_DIRNAME)
     if subdirs is None:
         return "absent", None, "{}/ is absent".format(WORKING_DIRNAME)
+    matches, legacy = _classify_working_names(
+        subdirs,
+        lambda name: _read_toml_contained(          # StoreError propagates (fail-closed)
+            store_root_fd, "{}/{}/{}".format(WORKING_DIRNAME, name, MANIFEST_NAME)),
+        accept)
+    return _discovery_result(matches, legacy)
+
+
+def discover_machine_store_fd(store_root_fd, accept_tokens=None):
+    """Descriptor-bound sibling of discover_machine_store (round-5 defect 1): the `.working` LISTING
+    descriptor is held for the whole discovery and every listed name's manifest is read BENEATH it,
+    so a `.working` swapped in after the listing is never read (the rounds-2-4 invariant: every name
+    read from a directory listing is read through the descriptor that listed it). Returns
+    (status, machine_dir, detail, manifest_raw): the discover_machine_store triple plus, when the
+    status is "one", the resolved manifest's EXACT bytes as read through the held descriptor (None
+    otherwise), so a descriptor-bound caller (resolve_store_fd, the adoption planner) parses the very
+    bytes discovery matched rather than re-opening the manifest by path. Statuses, details, StoreError
+    behaviour and `accept_tokens` are exactly discover_machine_store's."""
+    accept = (STANDARD_TOKEN,) if accept_tokens is None else tuple(accept_tokens)
+    wfd = _open_working_dir_fd(store_root_fd, WORKING_DIRNAME)
+    if wfd is None:
+        return "absent", None, "{}/ is absent".format(WORKING_DIRNAME), None
+    try:
+        names = _list_real_subdirs(wfd, WORKING_DIRNAME)
+        raws = {}
+
+        def load(name):
+            rel = "{}/{}".format(name, MANIFEST_NAME)
+            data = _read_store_bytes_contained(wfd, rel)   # StoreError propagates (fail-closed)
+            if data is None:
+                return None
+            parsed = _parse_store_toml("{}/{}".format(WORKING_DIRNAME, rel), data)
+            raws[name] = data
+            return parsed
+
+        matches, legacy = _classify_working_names(names, load, accept)
+        status, machine_dir, detail = _discovery_result(matches, legacy)
+        return status, machine_dir, detail, (raws.get(machine_dir) if status == "one" else None)
+    finally:
+        _journal._close_fd_propagating(wfd)
+
+
+def _classify_working_names(names, load, accept):
+    """The candidate classification both discovery variants share. `load(name)` returns the parsed
+    `.working/<name>/manifest.toml` (None when absent) through that variant's own read binding, raising
+    StoreError fail-closed on an unreadable or unparseable manifest. Returns (matches, legacy)."""
     matches = []
     legacy = []
-    for name in subdirs:
-        manifest_rel = "{}/{}/{}".format(WORKING_DIRNAME, name, MANIFEST_NAME)
-        data = _read_toml_contained(store_root_fd, manifest_rel)   # StoreError propagates (fail-closed)
+    for name in names:
+        data = load(name)
         if data is None:
             continue
         matched = False
@@ -675,6 +842,12 @@ def discover_machine_store(store_root_fd, store_root, accept_tokens=None):
             legacy_base = data.get(PRIOR_STANDARD_TOKEN)
             if isinstance(legacy_base, dict) and legacy_base.get("standard") == PRIOR_STANDARD_TOKEN:
                 legacy.append(name)
+    return matches, legacy
+
+
+def _discovery_result(matches, legacy):
+    """The (status, machine_dir, detail) verdict both discovery variants share (spec 4.5); raises
+    StoreError for a reserved sole match."""
     if not matches:
         base_detail = "{}/ is present but no {}/*/{} declares standard = {!r}".format(
             WORKING_DIRNAME, WORKING_DIRNAME, MANIFEST_NAME, STANDARD_TOKEN)
@@ -906,6 +1079,77 @@ def _resolve_at(store_root, source, target, pointer, accept_tokens=None):
                           target=target)
     return Resolution(NOT_ADOPTED, "no store found ({}); opf init is the remedy".format(detail),
                       store_root=store_root, pointer_source=source)
+
+
+def resolve_store_fd(product_root_fd, product_root, accept_tokens=None):
+    """Descriptor-bound resolve_store (round-5 defect 1), for a caller that already HOLDS the product
+    root open and keeps that descriptor for every subsequent read (the adoption planner, which opened
+    it with the _open_dir_nofollow walk). Nothing is re-resolved by path: the pointer files are read
+    through the held descriptor, and discovery holds the `.working` listing descriptor and reads each
+    listed manifest beneath it (discover_machine_store_fd), so a product root or `.working` swapped
+    after the caller's open is never read. The held descriptor can bind only a store AT the product
+    root (the default location, or a pointer whose target resolves to the product root itself); a
+    pointer naming any OTHER root cannot be read through this descriptor and is CANNOT-EVALUATE
+    fail-closed (the planner refuses such companion/remote pointers before resolving; path-based
+    callers keep resolve_store). Returns (Resolution, manifest_raw): manifest_raw is the RESOLVED
+    manifest's exact bytes as read through the listing descriptor (None unless RESOLVED), so the
+    caller parses the same bytes discovery matched instead of re-opening the manifest by path.
+    `product_root` is the path the held descriptor was opened from, used only for pointer-target
+    resolution and reporting; `accept_tokens` as in resolve_store. Statuses and details follow
+    resolve_store/_resolve_at."""
+    product_root = Path(product_root)
+    if not _containment.probe():
+        return Resolution(CANNOT_EVALUATE, "race-free containment primitive absent; fail-closed",
+                          product_root=product_root), None
+    try:
+        local = _read_pointer_target(product_root_fd, LOCAL_POINTER_REL)
+        # The local override wins WHOLESALE (spec 4.3), exactly as in resolve_store (MAJOR 1).
+        committed = _read_pointer_target(product_root_fd, POINTER_REL) if local is None else None
+    except StoreError as exc:
+        return Resolution(CANNOT_EVALUATE, str(exc), product_root=product_root), None
+    pointer = local is not None or committed is not None
+    target = local if local is not None else committed
+    source = ("local-override" if local is not None
+              else "committed" if committed is not None else "default")
+    if pointer:
+        try:
+            store_root = _target_store_root(target, product_root)
+        except StoreError as exc:
+            return Resolution(CANNOT_EVALUATE, str(exc), target=target, pointer_source=source,
+                              product_root=product_root), None
+        if store_root != product_root:
+            return Resolution(
+                CANNOT_EVALUATE,
+                "pointer names a store at {}, outside the held product root {}; a descriptor-bound "
+                "resolution cannot bind it (fail-closed)".format(store_root, product_root),
+                target=target, pointer_source=source, product_root=product_root), None
+    try:
+        status, machine_dir, detail, manifest_raw = discover_machine_store_fd(
+            product_root_fd, accept_tokens=accept_tokens)
+    except StoreError as exc:
+        return Resolution(CANNOT_EVALUATE, str(exc), store_root=product_root, target=target,
+                          pointer_source=source, product_root=product_root), None
+    if status == "one":
+        return Resolution(RESOLVED, detail, store_root=product_root, machine_dir=machine_dir,
+                          machine_rel="{}/{}".format(WORKING_DIRNAME, machine_dir),
+                          pointer_source=source, target=target,
+                          product_root=product_root), manifest_raw
+    if status == "multiple":
+        return Resolution(CANNOT_EVALUATE, detail, store_root=product_root, pointer_source=source,
+                          target=target, product_root=product_root), None
+    # The same fail-closed split _resolve_at makes: a pointer that promised a store never falls back,
+    # a present-but-invalid default store never reads as absent (spec residual 17).
+    if pointer:
+        return Resolution(CANNOT_EVALUATE,
+                          "pointer resolves to {} but {}".format(product_root, detail),
+                          store_root=product_root, pointer_source=source, target=target,
+                          product_root=product_root), None
+    if status == "present":
+        return Resolution(CANNOT_EVALUATE, detail, store_root=product_root, pointer_source=source,
+                          target=target, product_root=product_root), None
+    return Resolution(NOT_ADOPTED, "no store found ({}); opf init is the remedy".format(detail),
+                      store_root=product_root, pointer_source=source,
+                      product_root=product_root), None
 
 
 # --- SemVer and base_compat helpers (spec 9.1) -------------------------------------------------------
@@ -1171,6 +1415,15 @@ def validate_manifest(data, supported_profiles=None):
                                   ["[opf].standard is absent or is not {!r} (not identifiably a "
                                    "opf store)".format(STANDARD_TOKEN)])
 
+    # Refuse activation before any production validator can interpret generation-2
+    # entries using the generation-1 schema/release rules. No schema activation here.
+    if "worklog" in base:
+        import _opf_worklog
+        try:
+            _opf_worklog.generation(data)
+        except _opf_worklog.WorklogError as exc:
+            return ManifestValidation(CANNOT_EVALUATE, [str(exc)])
+
     findings = []
     _validate_top_level(data, findings)
     spec_tuple = _validate_base(base, findings)
@@ -1257,14 +1510,30 @@ def _validate_base(base, findings):
         spec_tuple = _parse(sv) if isinstance(sv, str) else None
         if spec_tuple is None:
             findings.append("[opf].spec_version {} is not a bare SemVer".format(_safe_display(sv)))
-        elif spec_tuple < _parse(SUPPORTED_SPEC_VERSION):
+        elif spec_tuple < _parse(SUPPORTED_SPEC_VERSION) or (
+                spec_tuple > _parse(SUPPORTED_SPEC_VERSION)
+                and not (sv == HOMES2_SPEC_VERSION and base.get("homes") == 2)):
             # A store declaring an OLDER base spec_version than this tooling implements is fail-closed with
             # its OWN named, remedy-carrying finding, rather than cascading into the confusing C-ROSTER /
             # missing-type findings a newer roster would otherwise raise against the older store (spec 9.x).
-            findings.append("[opf].spec_version {} is older than the {} this tooling implements; "
+            # A store declaring a NEWER base spec_version is fail-closed at validation the same way: older
+            # tooling MUST refuse a 1.3.0 (or any above-supported) declaration rather than certify it
+            # under legacy checks (spec 9.2). The one exception is the exact reserved homes-2 declaration
+            # pair, spec_version 2.0.0 with homes = 2 (spec 4.2): homes_generation() gates its activation
+            # on SUPPORTED_HOMES. Both mismatch findings share this ONE emission site:
+            # the census in _opf_manifest_regressions pins the validator's reviewed emission-site set, and
+            # a message selected above a shared censused append keeps each wording reviewable without
+            # widening that set.
+            if spec_tuple < _parse(SUPPORTED_SPEC_VERSION):
+                mismatch = ("[opf].spec_version {} is older than the {} this tooling implements; "
                             "run the store schema upgrade (`opf upgrade`) to migrate this store to {} "
                             "(spec 9.x; fail-closed)".format(
                                 _safe_display(sv), SUPPORTED_SPEC_VERSION, SUPPORTED_SPEC_VERSION))
+            else:
+                mismatch = ("[opf].spec_version {} is above the {} this tooling implements; "
+                            "upgrade the tooling before operating on this store "
+                            "(spec 9.2; fail-closed)".format(_safe_display(sv), SUPPORTED_SPEC_VERSION))
+            findings.append(mismatch)
     # Each closed-vocabulary field is type-checked BEFORE its membership test (MAJOR 3), so a wrong-typed
     # value (e.g. posture as a list) is a fail-closed finding here rather than an unhashable-value crash
     # in a later rank/membership test.
@@ -2013,6 +2282,27 @@ def self_test():
         check("spec-version-current-ok",
               validate_manifest(_t.loads(manifest_text(spec_version=SUPPORTED_SPEC_VERSION))).status == VALID)
 
+        # 10g2 (spec 9.2): a store declaring a spec_version ABOVE SUPPORTED_SPEC_VERSION is fail-closed at
+        # validation with its own named finding, so older tooling never certifies a newer store (a bare
+        # 1.3.0 declaration included) under legacy checks. The single carve-out is the exact reserved
+        # homes-2 declaration pair (spec 4.2), which homes_generation() gates on SUPPORTED_HOMES; a
+        # version-only 2.0.0, or an above-version paired with homes = 2, still refuses.
+        mv_above = validate_manifest(_t.loads(manifest_text(spec_version="1.3.0")))
+        check("spec-version-ceiling-invalid", mv_above.status == INVALID)
+        check("spec-version-ceiling-named",
+              any("above the" in f and "upgrade the tooling" in f for f in mv_above.findings))
+        check("spec-version-ceiling-2.0.0-alone-invalid",
+              validate_manifest(_t.loads(manifest_text(spec_version="2.0.0"))).status == INVALID)
+        ceiling_anchor = 'import_status = "none"'
+        homes2_pair = manifest_text(spec_version="2.0.0").replace(
+            ceiling_anchor, ceiling_anchor + "\nhomes = 2")
+        check("spec-version-ceiling-homes2-pair-recognized",
+              validate_manifest(_t.loads(homes2_pair)).status == VALID)
+        above_pair = manifest_text(spec_version="1.3.0").replace(
+            ceiling_anchor, ceiling_anchor + "\nhomes = 2")
+        check("spec-version-ceiling-non-homes2-pair-invalid",
+              validate_manifest(_t.loads(above_pair)).status == INVALID)
+
         # 10h: [opf].homes is an optional, validated integer generation declaration.
         # Recognition does not activate homes 2 or require a declaration in legacy manifests.
         homes_manifest_text = manifest_text(spec_version=SUPPORTED_SPEC_VERSION)
@@ -2152,6 +2442,7 @@ def self_test():
         # cwd via subprocess cwd=base instead, resolves the relative name there, and prints its status and
         # resolved store root for the parent to compare. This exercises os.path.abspath's cwd anchoring (the
         # MAJOR 2 relative-root path) exactly as before, but with no mutation of this process's cwd.
+        from _opf_emit import run_status_owned
         import subprocess
         import json
         # test-hermeticity: launch the child ISOLATED (-I ignores PYTHON* env like PYTHONHOME/PYTHONPATH and
@@ -2164,16 +2455,22 @@ def self_test():
             "sys.path.insert(0, sys.argv[1])\n"
             "import _opf_store as S\n"
             "r = S.resolve_store(sys.argv[2])\n"
-            "sys.stdout.write(json.dumps([r.status, None if r.store_root is None else str(r.store_root)]))\n")
-        _child = subprocess.run(
-            [sys.executable, "-I", "-B", "-c", _child_src,
-             str(Path(__file__).resolve().parent), rel_prod.name],
-            cwd=str(base), capture_output=True, text=True)
-        _rel_status, _rel_store = (json.loads(_child.stdout)
-                                   if _child.returncode == 0 and _child.stdout else (None, None))
-        check("relative-root-resolves", _rel_status == RESOLVED)
-        check("relative-root-matches-abs",
-              _rel_store is not None and _rel_store == str(abs_res.store_root))
+            "sys.stdout.write(json.dumps([r.status, None if r.store_root is None else str(r.store_root)]))\n"
+            "return 0\n")
+        try:
+            _child = run_status_owned(
+                [sys.executable, "-I", "-B", "-c", _child_src,
+                 str(Path(__file__).resolve().parent), rel_prod.name],
+                fixture_id="relative-root-resolves", cwd=str(base), capture_output=True, text=True)
+            _rel_status, _rel_store = (json.loads(_child.stdout)
+                                       if _child.returncode == 0 and _child.stdout else (None, None))
+            check("relative-root-resolves", _rel_status == RESOLVED)
+            check("relative-root-matches-abs",
+                  _rel_store is not None and _rel_store == str(abs_res.store_root))
+        except (RuntimeError, subprocess.SubprocessError, OSError, ValueError) as exc:
+            print("relative-root-resolves", str(exc))
+            check("relative-root-resolves", False)
+            check("relative-root-matches-abs", False)
 
         # ITEM C (ambient-cwd crash): a RELATIVE product root reaches os.path.abspath, whose os.getcwd()
         # raises when the process cwd is deleted or unreadable. resolve_store must MAP that to
@@ -2280,56 +2577,25 @@ def self_test():
         # TimeoutError into a JournalError, so a genuine writer-less-FIFO hang would read as a refusal and the
         # check would pass while blocking. A distinct non-OSError marker propagates out of the reader instead,
         # so a hang is a check FAILURE, never a silent slow pass (self-test-discrimination).
-        import signal as _signal
+        from _opf_emit import run_bounded
 
-        class _HangMarker(Exception):
-            pass
-
-        import time as _time
-
-        def _refused_no_hang(thunk):
-            """True when thunk() fails closed with a JournalError inside a 2s alarm; False when it HANGS (the
-            marker fires) so a writer-less-FIFO blocking-open regression is a check failure, not a hung suite.
-            Test-hermeticity: snapshot the caller's SIGALRM disposition and signal mask, and snapshot its
-            ITIMER_REAL + pending state through the SHARED snapshot_caller_alarm helper; RESTORE all of them
-            in the finally (disposition and mask directly, the timer + any pending SIGALRM through the shared
-            restore_caller_alarm helper: the timer elapsed-aware with its interval, a caller deadline already
-            passed re-armed to fire at once never silently dropped, and a caller SIGALRM that was pending
-            re-posted). SIGALRM is UNBLOCKED for the probe so the watchdog fires even if the caller had it
-            blocked, then the exact caller mask is restored, so this probe never cancels a caller's running
-            timer, unblocks its SIGALRM, nor destroys its pending alarm."""
-            _prev = _signal.getsignal(_signal.SIGALRM)           # capture WITHOUT installing yet (F2)
-            _have_mask = hasattr(_signal, "pthread_sigmask")
-            _prev_mask = _signal.pthread_sigmask(_signal.SIG_BLOCK, []) if _have_mask else None
-            _alarm_snap = snapshot_caller_alarm()                # ITIMER value/interval + pending (shared helper)
-            # F2 (round-10, class-width): the SIGALRM UNBLOCK and the timer ARM live INSIDE the try, so the
-            # finally restores the caller's mask, disposition, and timer even if a signal fires during setup.
-            # An ambient SIGALRM that is BLOCKED and already PENDING (the timer fired while blocked) would
-            # otherwise be delivered the instant SIGALRM is unblocked and, with the unblock OUTSIDE the
-            # try/finally, would raise _HangMarker out of the probe uncaught AND leave the caller's mask
-            # corrupted (SIGALRM unblocked). Any inherited pending SIGALRM is first DISCARDED under SIG_IGN
-            # (POSIX: setting SIG_IGN discards a pending signal whether or not it is blocked) so it cannot
-            # fire the marker handler spuriously and read as a false hang; the shared restore_caller_alarm
-            # RE-POSTS it on exit (round-15 F2) so the caller's pending alarm is preserved, not destroyed.
-            try:
-                _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)  # discard any inherited pending SIGALRM
-                _signal.signal(_signal.SIGALRM, lambda *a: (_ for _ in ()).throw(_HangMarker()))
-                if _have_mask:
-                    _signal.pthread_sigmask(_signal.SIG_UNBLOCK, {_signal.SIGALRM})
-                _signal.setitimer(_signal.ITIMER_REAL, 2.0)
+        def _refused_no_hang(thunk, keep_fds=()):
+            """Run the refusal probe in a child; never borrow caller signal state. A
+            pre-opened descriptor the probe relies on must be DECLARED via keep_fds
+            (the run_bounded fd allowlist: subjects see only stdio plus declared
+            descriptors), so an undeclared dirfd is a loud EBADF, never a leak."""
+            def probe():
                 try:
                     thunk()
-                    return False
                 except _journal.JournalError:
-                    return True
-                except _HangMarker:
-                    return False
-            finally:
-                _signal.setitimer(_signal.ITIMER_REAL, 0)
-                _signal.signal(_signal.SIGALRM, _prev)
-                if _have_mask:
-                    _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)
-                restore_caller_alarm(*_alarm_snap)        # shared elapsed-aware timer + pending restore
+                    return "REFUSED"
+                return "ACCEPTED"
+            # The bound is a hang guard, not a latency claim: correct code refuses in microseconds, but
+            # PR #363 measured the in-process armed window at up to 73 ms under pinned-CPU contention
+            # (24 busy siblings on one CPU), where 2 s gave only 27x against the required 50x; this probe
+            # also pays a child start-up, so the bound is 20 s (above 270x on that measurement), costing
+            # time only when a hang regression exists.
+            return run_bounded(probe, timeout_s=20, keep_fds=keep_fds) == "REFUSED"
 
         # M2: _read_contained does not hang on a writer-less FIFO (the raced regular-file->FIFO swap); it
         # returns a fail-closed JournalError at once. The non-OSError marker makes a blocking regression a
@@ -2340,7 +2606,7 @@ def self_test():
         _rfd = os.open(str(_fd_dir), os.O_RDONLY | os.O_DIRECTORY)
         try:
             check("m2-fifo-no-hang-refused",
-                  _refused_no_hang(lambda: _journal._read_contained(_rfd, "f")))
+                  _refused_no_hang(lambda: _journal._read_contained(_rfd, "f"), keep_fds=(_rfd,)))
         finally:
             os.close(_rfd)
 
@@ -2352,7 +2618,7 @@ def self_test():
         _rf_jr = os.open(str(base), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             check("new2-read-frames-fifo-no-hang",
-                  _refused_no_hang(lambda: _journal.read_frames(_rf_jr, _rf_dir)))
+                  _refused_no_hang(lambda: _journal.read_frames(_rf_jr, _rf_dir), keep_fds=(_rf_jr,)))
         finally:
             os.close(_rf_jr)
         _rl_dir = base / "n2-read-lock-owner"; _rl_dir.mkdir()
@@ -2362,7 +2628,8 @@ def self_test():
         os.mkfifo(str(_ra_dir / "f"))
         _rafd = os.open(str(_ra_dir), os.O_RDONLY | os.O_DIRECTORY)
         try:
-            check("new2-read-at-fifo-no-hang", _refused_no_hang(lambda: _journal._read_at(_rafd, "f", "f")))
+            check("new2-read-at-fifo-no-hang",
+                  _refused_no_hang(lambda: _journal._read_at(_rafd, "f", "f"), keep_fds=(_rafd,)))
         finally:
             os.close(_rafd)
 
@@ -2391,6 +2658,450 @@ def self_test():
                   _guard(lambda: resolve_store(n3_root).status) == CANNOT_EVALUATE)
         finally:
             _journal._read_contained = _real_rc
+
+        # #378 P1, the r5, r6 and r7 legs' own descriptor checks: a leg probes and closes by number only what
+        # it can show is still its own. Each open is recorded in a ledger with its (st_dev, st_ino), taken the
+        # moment the open returns, while the number is still held, and every close the leg's stub sees marks
+        # that open released. An open counts as left open only when no close released it AND fstat still
+        # returns the identity recorded at it, and only such an open is closed. A released number, the
+        # injected one included, is never probed or closed again, so a number another lane took meanwhile is
+        # never touched. The leg's own directories are unique to it; the walk's ancestors (/ and the
+        # directories above the leg's tree) are opened by other lanes too, so for them it is the ledger that
+        # shows the number was never released. Each leg runs twice: with its closes releasing their numbers,
+        # and with another lane's file put on a number instead (dup2 of the leg's "other-lane" file onto the
+        # number, which the stub still holds, so it is never free for a real lane meanwhile): the r7 legs' on
+        # the number whose close is injected, the r5 and r6 legs' on the number the leg checks. That move is
+        # one-shot per recorded open: only the close that releases the open moves the other-lane file onto
+        # its number, and any later close of the number reaches the real close, so a second close by the
+        # code under test closes the other-lane file. After that run the number must still name the
+        # other-lane file (nothing closed it again, the code under test and the leg's cleanup included), and
+        # only then does the leg close it, its own other-lane descriptor. The ledger is pid-gated, as
+        # _opf_emit's run_bounded legs' is: it records the pid that armed it, and only in that process does an
+        # open record, a close release or fire the injection, or a left-open check find or close anything
+        # (these legs do not fork; a forked child would hold its own copy of the numbers, never the leg's).
+        def _r7_ident(fd):
+            try:
+                st = os.fstat(fd)
+            except OSError:
+                return None
+            return st.st_dev, st.st_ino
+
+        def _r7_ledger():
+            """A leg's ledger, armed in this process: its opens, and the pid it acts in."""
+            return {"owner": os.getpid(), "opens": []}
+
+        def _r7_mine(seen):
+            """Whether this is the process that armed the leg's ledger: only there does its close fire."""
+            return os.getpid() == seen["opened"]["owner"]
+
+        def _r7_opened(ledger, fd, real_close=None):
+            """Record fd's open with its identity, in the ledger's own process only. An open stand-in passes
+            real_close, so a failing fstat closes the number it just opened (never released yet) instead of
+            leaking it."""
+            if os.getpid() != ledger["owner"]:
+                return fd                               # a forked child's open: not the leg's to record
+            try:
+                st = os.fstat(fd)
+            except BaseException:
+                if real_close is not None:
+                    real_close(fd)
+                raise
+            ledger["opens"].append({"fd": fd, "ident": (st.st_dev, st.st_ino), "released": False})
+            return fd
+
+        def _r7_released(ledger, fd):
+            """A close of fd in the ledger's own process: the latest open of fd that no close has released
+            yet is released now. Returns whether this close released a recorded open (False for a repeated
+            close of a released number, and for any close in another process)."""
+            if os.getpid() != ledger["owner"]:
+                return False                            # a forked child's close: never the leg's release
+            for entry in reversed(ledger["opens"]):
+                if entry["fd"] == fd and not entry["released"]:
+                    entry["released"] = True
+                    return True
+            return False
+
+        def _r7_left_open(ledger):
+            """The opens no close released whose number still names the file recorded at the open (none
+            outside the ledger's own process)."""
+            if os.getpid() != ledger["owner"]:
+                return []
+            return [entry for entry in ledger["opens"]
+                    if not entry["released"] and _r7_ident(entry["fd"]) == entry["ident"]]
+
+        def _r7_close_left(ledger):
+            """Close each open _r7_left_open finds (a regressed run's leak), so the failing suite stays clean."""
+            for entry in _r7_left_open(ledger):
+                entry["released"] = True
+                try:
+                    os.close(entry["fd"])
+                except OSError:
+                    pass
+
+        _r7_other_path = base / "r7-other-lane"
+        _r7_other_path.write_bytes(b"")
+        _r7_other_fd = os.open(str(_r7_other_path), os.O_RDONLY)
+        _r7_other = _r7_ident(_r7_other_fd)
+
+        def _r7_fire(fd, real_close, reuse):
+            """The injected close: release fd, or under `reuse` put the other-lane file on it, then raise."""
+            if reuse:
+                os.dup2(_r7_other_fd, fd)       # the number goes straight to another lane's file
+            else:
+                real_close(fd)                  # released first, as close(2) does on Linux
+            raise OSError(5, "injected close failure after release")
+
+        def _r7_let_close(fd, real_close, reuse):
+            """The close that releases the recorded open a leg checks: release fd, or under `reuse` put the
+            other-lane file on it instead (the number goes straight to another lane), so the leg's check must
+            leave it alone. A stub calls this once per recorded open (its _r7_released returned True); a later
+            close of the number goes to the real close, so a repeated close closes the other-lane file."""
+            if reuse:
+                os.dup2(_r7_other_fd, fd)
+            else:
+                real_close(fd)
+
+        def _r7_reuse_kept(fd):
+            """Whether fd, after a `reuse` run, still names the other-lane file: then nothing closed it again,
+            and the leg closes it, its own other-lane descriptor."""
+            if fd is None or _r7_ident(fd) != _r7_other:
+                return False
+            os.close(fd)
+            return True
+
+        # ROUND-5 defect 3: _read_contained's cleanup closes the FILE fd and the PARENT fd each in its
+        # own try/finally, so a file close that reports an error (an EIO surfaced at close) cannot leak
+        # the parent descriptor. Inject the failure at the REAL close (the number is still released, as
+        # on Linux), then prove on the recorded descriptor that the parent is released afterwards, by the
+        # ledger and the identity recorded at its open; the reuse run puts the other-lane file on the
+        # parent's number at its close, and on the FILE fd's number at the injected close (its first close
+        # only, as for the parent), so a second close of either number reaches the real close and closes the
+        # other-lane file, which the reused-number checks turn red.
+        _r5_dir = base / "r5-close-leak"; _r5_dir.mkdir()
+        (_r5_dir / "f").write_bytes(b"x = 1\n")
+        _r5_root = os.open(str(_r5_dir), os.O_RDONLY | os.O_DIRECTORY)
+        _r5_real_open_parent = _journal._open_parent
+        _r5_real_close = os.close
+        for _r5_reuse in (False, True):
+            _r5_tag = "-reused" if _r5_reuse else ""
+            _r5_seen = dict(opened=_r7_ledger())
+
+            def _r5_open_parent(root_fd, relpath):
+                pfd, name = _r5_real_open_parent(root_fd, relpath)
+                _r5_seen["pfd"] = _r7_opened(_r5_seen["opened"], pfd, _r5_real_close)
+                return pfd, name
+
+            def _r5_close(fd):
+                _r5_first = _r7_released(_r5_seen["opened"], fd)
+                if "pfd" in _r5_seen and fd != _r5_seen["pfd"] and "fired" not in _r5_seen and _r7_mine(_r5_seen):
+                    # the first non-parent close after _open_parent returned is the FILE fd's close
+                    _r5_seen["fired"] = True
+                    _r5_seen["ffd"] = fd
+                    _r7_fire(fd, _r5_real_close, _r5_reuse)
+                if fd == _r5_seen.get("pfd") and _r5_first:
+                    _r7_let_close(fd, _r5_real_close, _r5_reuse)   # the parent, which the leg checks
+                    return
+                _r5_real_close(fd)
+
+            _journal._open_parent = _r5_open_parent
+            os.close = _r5_close
+            try:
+                try:
+                    _journal._read_contained(_r5_root, "f")
+                    _r5_out = "returned"
+                except (OSError, _journal.JournalError):
+                    _r5_out = "raised"
+            finally:
+                os.close = _r5_real_close
+                _journal._open_parent = _r5_real_open_parent
+            check("r5-file-close-injection-fired" + _r5_tag, _r5_seen.get("fired") is True and "pfd" in _r5_seen)
+            check("r5-file-close-error-propagates" + _r5_tag, _r5_out == "raised")
+            check("r5-parent-fd-closed-after-file-close-error" + _r5_tag, not _r7_left_open(_r5_seen["opened"]))
+            _r7_close_left(_r5_seen["opened"])        # a pre-fix run leaks it; closed so the suite stays clean
+            if _r5_reuse:
+                check("r5-parent-reused-number-never-closed", _r7_reuse_kept(_r5_seen.get("pfd")))
+                check("r5-file-reused-number-never-closed", _r7_reuse_kept(_r5_seen.get("ffd")))
+        os.close(_r5_root)
+
+        # ROUND-6 defect (K9a fix 6): _open_working_dir_fd returned the freshly-opened `.working`
+        # descriptor from inside a try whose finally closes the parent, so a parent close that reports
+        # an error (the number still released, as on Linux) abandoned the return and leaked the child:
+        # one descriptor per discovery/resolution/planner-investigation call. Inject the failure at the
+        # REAL parent close; the error still propagates fail-closed, and the child descriptor -- recorded
+        # at its open in the ledger with its identity -- is proven released afterwards; the reuse run puts
+        # the other-lane file on the child's number at its close.
+        _r6 = build_store(manifest=manifest_text())
+        _r6_root = os.open(str(_r6), os.O_RDONLY | os.O_DIRECTORY)
+        _r6_real_open_parent = _journal._open_parent
+        _r6_real_open = os.open
+        _r6_real_close = os.close
+        for _r6_reuse in (False, True):
+            _r6_tag = "-reused" if _r6_reuse else ""
+            _r6_seen = dict(opened=_r7_ledger())
+
+            def _r6_open_parent(root_fd, relpath):
+                pfd, name = _r6_real_open_parent(root_fd, relpath)
+                _r6_seen["pfd"] = _r7_opened(_r6_seen["opened"], pfd, _r6_real_close)
+                return pfd, name
+
+            def _r6_open(*args, **kwargs):
+                fd = _r6_real_open(*args, **kwargs)
+                if kwargs.get("dir_fd") is not None and kwargs.get("dir_fd") == _r6_seen.get("pfd"):
+                    _r6_seen["wfd"] = _r7_opened(_r6_seen["opened"], fd, _r6_real_close)   # the child
+                return fd
+
+            def _r6_close(fd):
+                _r6_first = _r7_released(_r6_seen["opened"], fd)
+                if fd == _r6_seen.get("pfd") and "fired" not in _r6_seen and _r7_mine(_r6_seen):
+                    _r6_seen["fired"] = True
+                    _r7_fire(fd, _r6_real_close, False)
+                if fd == _r6_seen.get("wfd") and _r6_first:
+                    _r7_let_close(fd, _r6_real_close, _r6_reuse)   # the child, which the leg checks
+                    return
+                _r6_real_close(fd)
+
+            _journal._open_parent = _r6_open_parent
+            os.open = _r6_open
+            os.close = _r6_close
+            try:
+                try:
+                    _open_working_dir_fd(_r6_root, WORKING_DIRNAME)
+                    _r6_out = "returned"
+                except OSError:
+                    _r6_out = "raised"
+            finally:
+                os.close = _r6_real_close
+                os.open = _r6_real_open
+                _journal._open_parent = _r6_real_open_parent
+            check("r6-working-parent-close-injection-fired" + _r6_tag,
+                  _r6_seen.get("fired") is True and "wfd" in _r6_seen)
+            check("r6-working-parent-close-error-propagates" + _r6_tag, _r6_out == "raised")
+            check("r6-working-fd-closed-after-parent-close-error" + _r6_tag, not _r7_left_open(_r6_seen["opened"]))
+            _r7_close_left(_r6_seen["opened"])        # a pre-fix run leaks it; closed so the suite stays clean
+            if _r6_reuse:
+                check("r6-working-child-reused-number-never-closed", _r7_reuse_kept(_r6_seen.get("wfd")))
+        os.close(_r6_root)
+
+        # ROUND-6 sibling: open_journal_root_from_path returned the freshly-opened journal-root
+        # descriptor from inside a try whose finally closes the operator-root fd, the same
+        # abandoned-return shape. Inject the failure at the REAL root close; the error still propagates
+        # fail-closed and the jr descriptor -- recorded at its open in the ledger with its identity -- is
+        # proven released afterwards; the reuse run puts the other-lane file on jr's number at its close.
+        _r6j = base / "r6-journal-close-leak"
+        (_r6j / "j" / "r").mkdir(parents=True)
+        _r6j_real_odc = _journal._open_dir_contained
+        for _r6j_reuse in (False, True):
+            _r6j_tag = "-reused" if _r6j_reuse else ""
+            _r6j_seen = dict(opened=_r7_ledger())
+
+            def _r6j_odc(root_fd, relpath):
+                _r6j_seen["root_fd"] = _r7_opened(_r6j_seen["opened"], root_fd)
+                fd = _r6j_real_odc(root_fd, relpath)
+                _r6j_seen["jr"] = _r7_opened(_r6j_seen["opened"], fd, _r6_real_close)
+                return fd
+
+            def _r6j_close(fd):
+                _r6j_first = _r7_released(_r6j_seen["opened"], fd)
+                if fd == _r6j_seen.get("root_fd") and "fired" not in _r6j_seen and _r7_mine(_r6j_seen):
+                    _r6j_seen["fired"] = True
+                    _r7_fire(fd, _r6_real_close, False)
+                if fd == _r6j_seen.get("jr") and _r6j_first:
+                    _r7_let_close(fd, _r6_real_close, _r6j_reuse)   # the journal root, which the leg checks
+                    return
+                _r6_real_close(fd)
+
+            _journal._open_dir_contained = _r6j_odc
+            os.close = _r6j_close
+            try:
+                try:
+                    _journal.open_journal_root_from_path(_r6j, "j/r")
+                    _r6j_out = "returned"
+                except OSError:
+                    _r6j_out = "raised"
+            finally:
+                os.close = _r6_real_close
+                _journal._open_dir_contained = _r6j_real_odc
+            check("r6-journal-root-close-injection-fired" + _r6j_tag,
+                  _r6j_seen.get("fired") is True and "jr" in _r6j_seen)
+            check("r6-journal-root-close-error-propagates" + _r6j_tag, _r6j_out == "raised")
+            check("r6-journal-fd-closed-after-root-close-error" + _r6j_tag, not _r7_left_open(_r6j_seen["opened"]))
+            _r7_close_left(_r6j_seen["opened"])       # a pre-fix run leaks it; closed so the suite stays clean
+            if _r6j_reuse:
+                check("r6-journal-root-reused-number-never-closed", _r7_reuse_kept(_r6j_seen.get("jr")))
+
+        # ROUND-7 (codex), under P1 (#378): a parent close in the no-follow walk that reports an error
+        # (EINTR/EIO) must still propagate it fail-closed and leak nothing the walk opened. Each close is
+        # a single _journal._close_fd_propagating; close(2) on Linux has released the number by the time
+        # it reports the error, so the helper never touches it again. Inject that shape: a one-shot close
+        # that RELEASES the number and then raises; the error still propagates fail-closed and NO
+        # descriptor the walk opened survives.
+        _r7 = base / "r7-released-close"
+        (_r7 / "d").mkdir(parents=True)
+        _r7_real_open = os.open
+        _r7_real_close = os.close
+        for _r7_reuse in (False, True):
+            _r7_tag = "-reused" if _r7_reuse else ""
+            _r7_seen = {"opened": _r7_ledger()}
+
+            def _r7_open(*args, **kwargs):
+                return _r7_opened(_r7_seen["opened"], _r7_real_open(*args, **kwargs), _r7_real_close)
+
+            def _r7_close(fd):
+                _r7_released(_r7_seen["opened"], fd)
+                if "fired" not in _r7_seen and _r7_mine(_r7_seen):
+                    _r7_seen["fired"] = fd
+                    _r7_fire(fd, _r7_real_close, _r7_reuse)
+                _r7_real_close(fd)
+
+            os.open = _r7_open
+            os.close = _r7_close
+            try:
+                try:
+                    _open_dir_nofollow(str(_r7 / "d"))
+                    _r7_out = "returned"
+                except OSError:
+                    _r7_out = "raised"
+            finally:
+                os.close = _r7_real_close
+                os.open = _r7_real_open
+            check("r7-nofollow-released-close-injection-fired" + _r7_tag, "fired" in _r7_seen)
+            check("r7-nofollow-released-close-error-propagates" + _r7_tag, _r7_out == "raised")
+            check("r7-nofollow-no-walk-descriptor-survives-released-close" + _r7_tag,
+                  not _r7_left_open(_r7_seen["opened"]))
+            _r7_close_left(_r7_seen["opened"])
+            if _r7_reuse:
+                check("r7-nofollow-reused-number-never-closed", _r7_reuse_kept(_r7_seen.get("fired")))
+
+        # ROUND-7 sibling on _open_working_dir_fd: the parent close raising after releasing its number
+        # (close(2) on Linux; P1, #378) must leave neither the parent nor the held `.working` child open
+        # when the error propagates fail-closed.
+        _r7w = build_store(manifest=manifest_text())
+        _r7w_root = os.open(str(_r7w), os.O_RDONLY | os.O_DIRECTORY)
+        _r7w_real_open_parent = _journal._open_parent
+        _r7w_real_open = os.open
+        _r7w_real_close = os.close
+        for _r7_reuse in (False, True):
+            _r7_tag = "-reused" if _r7_reuse else ""
+            _r7w_seen = {"opened": _r7_ledger()}
+
+            def _r7w_open_parent(root_fd, relpath):
+                pfd, name = _r7w_real_open_parent(root_fd, relpath)
+                _r7w_seen["pfd"] = _r7_opened(_r7w_seen["opened"], pfd)
+                return pfd, name
+
+            def _r7w_open(*args, **kwargs):
+                fd = _r7w_real_open(*args, **kwargs)
+                if kwargs.get("dir_fd") is not None and kwargs.get("dir_fd") == _r7w_seen.get("pfd"):
+                    _r7w_seen["wfd"] = _r7_opened(_r7w_seen["opened"], fd, _r7w_real_close)   # the child
+                return fd
+
+            def _r7w_close(fd):
+                _r7_released(_r7w_seen["opened"], fd)
+                if fd == _r7w_seen.get("pfd") and "fired" not in _r7w_seen and _r7_mine(_r7w_seen):
+                    _r7w_seen["fired"] = True
+                    _r7_fire(fd, _r7w_real_close, _r7_reuse)
+                _r7w_real_close(fd)
+
+            _journal._open_parent = _r7w_open_parent
+            os.open = _r7w_open
+            os.close = _r7w_close
+            try:
+                try:
+                    _open_working_dir_fd(_r7w_root, WORKING_DIRNAME)
+                    _r7w_out = "returned"
+                except OSError:
+                    _r7w_out = "raised"
+            finally:
+                os.close = _r7w_real_close
+                os.open = _r7w_real_open
+                _journal._open_parent = _r7w_real_open_parent
+            check("r7-working-released-close-injection-fired" + _r7_tag,
+                  _r7w_seen.get("fired") is True and "wfd" in _r7w_seen)
+            check("r7-working-released-close-error-propagates" + _r7_tag, _r7w_out == "raised")
+            check("r7-working-no-descriptor-survives-released-close" + _r7_tag,
+                  not _r7_left_open(_r7w_seen["opened"]))
+            _r7_close_left(_r7w_seen["opened"])
+            if _r7_reuse:
+                check("r7-working-reused-number-never-closed", _r7_reuse_kept(_r7w_seen.get("pfd")))
+        os.close(_r7w_root)
+
+        # ROUND-7 sibling on open_journal_root_from_path: the operator-root close raising after releasing
+        # its number (close(2) on Linux; P1, #378) must leave neither the root nor the held journal-root fd
+        # open when the error propagates.
+        _r7j = base / "r7-journal-released-close"
+        (_r7j / "j" / "r").mkdir(parents=True)
+        _r7j_real_odc = _journal._open_dir_contained
+        _r7j_real_close = os.close
+        for _r7_reuse in (False, True):
+            _r7_tag = "-reused" if _r7_reuse else ""
+            _r7j_seen = {"opened": _r7_ledger()}
+
+            def _r7j_odc(root_fd, relpath):
+                _r7j_seen["root_fd"] = _r7_opened(_r7j_seen["opened"], root_fd)
+                fd = _r7j_real_odc(root_fd, relpath)
+                _r7j_seen["jr"] = _r7_opened(_r7j_seen["opened"], fd)
+                return fd
+
+            def _r7j_close(fd):
+                _r7_released(_r7j_seen["opened"], fd)
+                if fd == _r7j_seen.get("root_fd") and "fired" not in _r7j_seen and _r7_mine(_r7j_seen):
+                    _r7j_seen["fired"] = True
+                    _r7_fire(fd, _r7j_real_close, _r7_reuse)
+                _r7j_real_close(fd)
+
+            _journal._open_dir_contained = _r7j_odc
+            os.close = _r7j_close
+            try:
+                try:
+                    _journal.open_journal_root_from_path(_r7j, "j/r")
+                    _r7j_out = "returned"
+                except OSError:
+                    _r7j_out = "raised"
+            finally:
+                os.close = _r7j_real_close
+                _journal._open_dir_contained = _r7j_real_odc
+            check("r7-journal-released-close-injection-fired" + _r7_tag,
+                  _r7j_seen.get("fired") is True and "jr" in _r7j_seen)
+            check("r7-journal-released-close-error-propagates" + _r7_tag, _r7j_out == "raised")
+            check("r7-journal-no-descriptor-survives-released-close" + _r7_tag,
+                  not _r7_left_open(_r7j_seen["opened"]))
+            _r7_close_left(_r7j_seen["opened"])
+            if _r7_reuse:
+                check("r7-journal-reused-number-never-closed", _r7_reuse_kept(_r7j_seen.get("root_fd")))
+        os.close(_r7_other_fd)
+
+        # ROUND-5 defect 1: the descriptor-bound resolver matches resolve_store over a held root. The
+        # default store resolves with the manifest's EXACT bytes (read through the .working listing
+        # descriptor), an empty root is NOT-ADOPTED, and a companion pointer (a store at another root)
+        # is refused fail-closed: it cannot be bound to the held descriptor (the planner refuses such
+        # pointers before resolving; path-based callers keep resolve_store).
+        _r5a = build_store(manifest=manifest_text())
+        _r5a_fd = os.open(str(_r5a), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            _r5a_res, _r5a_raw = resolve_store_fd(_r5a_fd, _r5a)
+        finally:
+            os.close(_r5a_fd)
+        check("r5-fd-default-resolved", _r5a_res.status == RESOLVED
+              and _r5a_res.machine_rel == "{}/{}".format(WORKING_DIRNAME, DEFAULT_MACHINE_SUBDIR))
+        check("r5-fd-manifest-bytes-exact",
+              _r5a_raw == (_r5a / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR / MANIFEST_NAME).read_bytes())
+        _r5b = build_store(make_working=False)
+        _r5b_fd = os.open(str(_r5b), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            _r5b_res, _r5b_raw = resolve_store_fd(_r5b_fd, _r5b)
+        finally:
+            os.close(_r5b_fd)
+        check("r5-fd-empty-not-adopted", _r5b_res.status == NOT_ADOPTED and _r5b_raw is None)
+        _r5c = build_store(make_working=False,
+                           pointer='[store]\ntarget = "dir:{}"\n'.format(_r5a))
+        _r5c_fd = os.open(str(_r5c), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            _r5c_res, _r5c_raw = resolve_store_fd(_r5c_fd, _r5c)
+        finally:
+            os.close(_r5c_fd)
+        check("r5-fd-companion-pointer-refused",
+              _r5c_res.status == CANNOT_EVALUATE and "outside the held product root" in _r5c_res.detail
+              and _r5c_raw is None)
 
         # NEW-4: an oversized-int key rendered into a finding message no longer crashes the validator: the
         # unknown-key idiom (_sorted_key_names) and the duplicate-namespace message both render through
@@ -2638,4 +3349,6 @@ def self_test():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
     sys.exit(self_test())

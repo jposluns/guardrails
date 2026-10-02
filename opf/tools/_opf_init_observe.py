@@ -343,8 +343,8 @@ class GitObjects:
                                       | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
                 except FileNotFoundError:
                     return (path, tuple(identities), "absent-ancestor", component)
-                os.close(fd)
-                fd = next_fd
+                prev, fd = fd, next_fd                    # ownership moves first: a failed close is
+                os.close(prev)                            # never closed again by the finally (P1, #378)
                 st = os.fstat(fd)
                 identities.append((st.st_dev, st.st_ino))
             try:

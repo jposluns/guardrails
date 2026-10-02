@@ -64,7 +64,8 @@ write-gate invocation (VC-4, deferred), so WRITE mode FAILS CLOSED today and wri
 `opf render --write` CLI verb returns exit 2, failing closed at the dispatcher BEFORE the root is resolved.
 A direct-engine write (a `render(...)` call in write mode) is refused exit 2 ONLY once the root RESOLVES as
 an adopter; a non-adopter root returns NOT APPLICABLE (0) FIRST, because non-adopter resolution PRECEDES the
-write refusal. The module `__main__` defaults its command line to `--check`, so it never enters write mode.
+write refusal. The module `__main__` defaults its command line to `--check`, so it never enters write mode;
+exactly `--self-test` runs `self_test()` instead.
 The `opf render` CLI requires exactly one of `--check | --write` (no default): `--check` (read-only drift
 detection) is IMPLEMENTED and keeps working, while `--write` stays fail-closed until VC-4 composes the gate.
 This is a refusal pending the real composition, never a fabricated gate.
@@ -81,6 +82,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _journal          # noqa: E402  contained (dir-fd, no-follow) readers + JournalError + containment probe
 import _opf_store        # noqa: E402  store resolution + discovery + manifest base/profile schema
 import _opf_schema       # noqa: E402  record envelope + baseline type schemas + status parsing + id shape
+import _opf_worklog      # noqa: E402  manifest-selected ledger intake
 import _opf_release      # noqa: E402  version.toml + worklog.toml validators + SemVer
 import _opf_emit          # noqa: E402  canonical TOML emitter (emit_checked) for the machine projection
 
@@ -135,15 +137,23 @@ class ViewsError(Exception):
     malformed record or ledger, or a manifest a view references inconsistently. Callers map it to a
     CANNOT-EVALUATE outcome (exit 2): fail-closed, never a silent empty or partial view."""
 
+class ViewsManifestError(ViewsError):
+    """U4 diagnostic text plus the original typed failure for doctor's attribution."""
+
+    def __init__(self, message, manifest_error):
+        super().__init__(message)
+        self.manifest_error = manifest_error
+
+
 
 # --- source-name -> store file resolution (spec 4.2) -------------------------------------------------
 
-def _source_relpath(machine_rel, name):
+def _source_relpath(machine_rel, name, manifest=None):
     """The store-relative path of a view source. A baseline record type reads its `<type>.index.toml`
-    inline index (spec 9, `layout = "inline"`); the worklog and version ledgers read their own single
-    files (spec 4.2, 6.1). An unknown source name is a manifest/tooling inconsistency, fail-closed."""
+    inline index (spec 9, `layout = "inline"`); worklog follows its manifest generation while version
+    remains a single file. An unknown source name is a manifest/tooling inconsistency, fail-closed."""
     if name == "worklog":
-        return "{}/worklog.toml".format(machine_rel)
+        return _opf_worklog.source_relpath(machine_rel, manifest if manifest is not None else {"opf": {}})
     if name == "version":
         return "{}/version.toml".format(machine_rel)
     if name in _opf_schema.BASELINE_SPECS:
@@ -227,14 +237,44 @@ def _load_records(store_root_fd, relpath, type_name, registered_vendors, registe
     return raw, out
 
 
-def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds):
+def _with_worklog_diagnostics(read):
+    """Keep U4 manifest diagnostics at both planner and worklog intake."""
+    try:
+        return read()
+    except _opf_worklog.ManifestShapeError as exc:
+        raise ViewsManifestError(
+            str(exc) if exc.missing else "manifest is not valid: {}".format(exc), exc) from exc
+    except _opf_worklog.ManifestValidationError as exc:
+        raise ViewsManifestError("manifest is not valid: {}".format(exc), exc) from exc
+    except _opf_worklog.ManifestReadError as exc:
+        # U4's legacy manifest reader used a different non-regular-file label
+        # and exposed the parser's recursion message without U1's extra context.
+        message = str(exc)
+        exotic = (exc.relpath + " is present but is not a regular file "
+                  "(an exotic entry; fail-closed, never opened)")
+        if message == exotic:
+            message = (exc.relpath + " is present but is not a regular file "
+                       "(a FIFO, device, socket, or directory; fail-closed, never opened)")
+        cause = exc.__cause__
+        if isinstance(getattr(cause, "__context__", None), RecursionError):
+            message = "cannot parse {} ({})".format(exc.relpath, cause.__context__)
+        raise ViewsManifestError(message, exc) from exc
+    except _opf_worklog.WorklogError as exc:
+        raise ViewsError(str(exc))
+
+
+def _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds, *,
+                  on_legacy_conflict=None, supported_profiles=None, manifest_model=None):
     """Load and validate worklog.toml (spec 6.2); return (raw_bytes, [entry, ...]) in file order.
     Disclosed divergence (disclose-guard-residuals): unlike the index schema marker, which
     _load_records pins MANDATORY and exact, the ledger schema marker follows U3 optional-marker
     contract: _opf_release.validate_worklog type-pins a PRESENT marker (a non-integer or unsupported
     version is refused) but PERMITS an absent one. A schema-less ledger authored for another schema
     version is not caught here; grading an unsupported-schema-version ledger is U3/U6 remit (F2)."""
-    got = _read_raw_and_parsed(store_root_fd, relpath)
+    got = _with_worklog_diagnostics(lambda: _opf_worklog.load_worklog_at(
+        store_root_fd, relpath.rsplit("/", 1)[0], required=False, with_raw=True,
+        read_legacy=_read_raw_and_parsed, on_legacy_conflict=on_legacy_conflict,
+        supported_profiles=supported_profiles, manifest_model=manifest_model))
     if got is None:
         raise ViewsError("declared source {} is missing (the worklog ledger must exist)".format(relpath))
     raw, data = got
@@ -1574,7 +1614,8 @@ def _render_resolved_store(product_root, res, check, capture=None):
         os.close(product_root_fd)
 
 
-def plan_views(store_root_fd, machine_rel):
+def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported_profiles=None,
+               manifest_model=None):
     """Phase 1 of the resolved-store render, extracted as a public READ-ONLY planner (OPF core-tooling U6
     reuses it for byte-level view-drift detection). Reads the manifest and every declared view source
     beneath store_root_fd, renders each declared target's full text, and returns the planned list of
@@ -1582,14 +1623,12 @@ def plan_views(store_root_fd, machine_rel):
     on an unreadable manifest or source, a `per-record` store (deferred, F7), a view/kind/target mismatch,
     or a byte-canon-invalid render, exactly as the render path does; _render_resolved calls it and performs
     the writes. It makes no state-changing or outbound side effect (a planner is a preview)."""
-    manifest_rel = "{}/{}".format(machine_rel, _opf_store.MANIFEST_NAME)
-    got = _read_raw_and_parsed(store_root_fd, manifest_rel)
-    if got is None:
-        raise ViewsError("{} vanished after discovery".format(manifest_rel))
-    manifest = got[1]
-    mv = _opf_store.validate_manifest(manifest)
-    if mv.status != _opf_store.VALID:
-        raise ViewsError("manifest is not valid: {}".format("; ".join(mv.findings) or mv.status))
+    if manifest_model is None:
+        manifest_model = _with_worklog_diagnostics(
+            lambda: _opf_worklog.read_manifest_model_at(
+                store_root_fd, machine_rel, supported_profiles=supported_profiles))
+    manifest = _with_worklog_diagnostics(
+        lambda: manifest_model.require_valid(store_root_fd, machine_rel))
 
     # U4 renders the `inline` layout only. A `per-record` store is a CLEAR cannot-evaluate (deferred),
     # detected here from the manifest rather than mis-reported as a downstream malformed-record error and
@@ -1620,9 +1659,11 @@ def plan_views(store_root_fd, machine_rel):
     raw_by_relpath = {}
     rows_by_source = {}
     for name in sorted(needed):
-        relpath = _source_relpath(machine_rel, name)
+        relpath = _source_relpath(machine_rel, name, manifest)
         if name == "worklog":
-            raw, entries = _load_worklog(store_root_fd, relpath, registered_vendors, registered_kinds)
+            raw, entries = _load_worklog(
+                store_root_fd, relpath, registered_vendors, registered_kinds,
+                on_legacy_conflict=on_legacy_conflict, manifest_model=manifest_model)
             rows_by_source[name] = entries
         elif name == "version":
             raw, releases, summaries = _load_version(store_root_fd, relpath)
@@ -1660,8 +1701,8 @@ def plan_views(store_root_fd, machine_rel):
         if name == "VERSION":
             text = body                                   # header-exempt exact-bytes deliverable (spec 6.1)
         else:
-            source_blobs = {_source_relpath(machine_rel, s): raw_by_relpath[_source_relpath(machine_rel, s)]
-                            for s in required}
+            source_blobs = {_source_relpath(machine_rel, s, manifest):
+                            raw_by_relpath[_source_relpath(machine_rel, s, manifest)] for s in required}
             if kind == "projection":
                 # A machine projection (spec 10.5) carries the SAME identity header as a markdown view, but a
                 # `.toml` deliverable takes it as leading `#` comment lines (_toml_header), never the HTML
@@ -2191,15 +2232,10 @@ def self_test():
         check("project-column-closed", raises_views_error(lambda: t_project({"id": "BI-1"}, ("bogus",))))
         check("filter-predicate-closed", raises_views_error(lambda: t_filter([], "bogus")))
 
-        import signal as _signal
-        import time as _time
+        from _opf_emit import run_bounded
         _fifo_dir = base / "fifo-src"; _fifo_dir.mkdir()
         os.mkfifo(str(_fifo_dir / "blk.index.toml"))
         _ffd = os.open(str(_fifo_dir), os.O_RDONLY | os.O_DIRECTORY)
-        class _Watchdog(Exception):
-            pass
-        def _boom(_s, _f):
-            raise _Watchdog()
         # G (self-test-discrimination): the LOCAL pre-open S_ISREG guard in _read_raw_and_parsed, not the
         # hardened downstream _journal._read_contained (which ALSO refuses a non-regular file with an
         # identical "not a regular file" diagnostic), must be what refuses the FIFO. Record whether the
@@ -2211,45 +2247,20 @@ def self_test():
             _rc_calls.append(relpath)
             return _orig_rc(root_fd, relpath)
         _journal._read_contained = _recording_rc
-        # C (test-hermeticity): snapshot the caller's SIGALRM disposition and mask, and its ITIMER_REAL +
-        # pending state through the SHARED _opf_store.snapshot_caller_alarm helper; unblock SIGALRM for the
-        # probe; and restore all of them so this watchdog leaves the ambient alarm state unchanged (never
-        # cancelling a caller's timer, unblocking its SIGALRM, nor destroying its pending alarm).
-        _prev = _signal.getsignal(_signal.SIGALRM)               # capture WITHOUT installing yet (F2)
-        _have_mask = hasattr(_signal, "pthread_sigmask")
-        _prev_mask = _signal.pthread_sigmask(_signal.SIG_BLOCK, []) if _have_mask else None
-        _alarm_snap = _opf_store.snapshot_caller_alarm()         # ITIMER value/interval + pending (shared helper)
-        _fifo_ok = False
-        # F2 (round-10, class-width): the SIGALRM UNBLOCK and the timer ARM live INSIDE the try, so the
-        # finally restores the caller's mask, disposition, and timer even if a signal fires during setup. An
-        # ambient SIGALRM that is BLOCKED and already PENDING (the timer fired while blocked) would otherwise
-        # be delivered the instant SIGALRM is unblocked and, with the unblock OUTSIDE the try/finally, would
-        # raise _Watchdog out of the probe uncaught AND leave the caller's mask corrupted (SIGALRM
-        # unblocked). Any inherited pending SIGALRM is first DISCARDED under SIG_IGN (POSIX: setting SIG_IGN
-        # discards a pending signal whether or not it is blocked) so it cannot fire _boom spuriously; the
-        # shared restore_caller_alarm RE-POSTS it on exit (round-15 F2) so the caller's pending alarm is
-        # preserved, not destroyed.
-        try:
-            _signal.signal(_signal.SIGALRM, _signal.SIG_IGN)     # discard any inherited pending SIGALRM
-            _signal.signal(_signal.SIGALRM, _boom)               # now install the watchdog handler
-            if _have_mask:
-                _signal.pthread_sigmask(_signal.SIG_UNBLOCK, {_signal.SIGALRM})
-            _signal.setitimer(_signal.ITIMER_REAL, 5)
+        def _fifo_probe():
             try:
                 _read_raw_and_parsed(_ffd, "blk.index.toml")
             except ViewsError:
-                _fifo_ok = True
-            except _Watchdog:
-                _fifo_ok = False
+                return str(not _rc_calls)
+            return "ACCEPTED"
+
+        try:
+            # The probe reads through the pre-opened dirfd: DECLARE it (fd allowlist).
+            fifo_result = run_bounded(_fifo_probe, timeout_s=5, keep_fds=(_ffd,))
         finally:
-            _signal.setitimer(_signal.ITIMER_REAL, 0)
-            _signal.signal(_signal.SIGALRM, _prev)
-            if _have_mask:
-                _signal.pthread_sigmask(_signal.SIG_SETMASK, _prev_mask)
-            _opf_store.restore_caller_alarm(*_alarm_snap)        # shared elapsed-aware timer + pending restore
             _journal._read_contained = _orig_rc
             os.close(_ffd)
-        check("fifo-source-fails-closed-not-hang", _fifo_ok and not _rc_calls)
+        check("fifo-source-fails-closed-not-hang", fifo_result == "True")
         _slp = base / "symparent"; _slp.mkdir(); (_slp / "real").mkdir()
         (_slp / "real" / "x.index.toml").write_text("schema = 1\n", encoding="utf-8")
         (_slp / "toml").symlink_to("real")
@@ -4280,6 +4291,10 @@ def _entry(wid, kind, summary):
 
 
 if __name__ == "__main__":
+    # Exactly `--self-test` runs this module's self-test (the same entry the other self_test modules carry);
+    # the render parser has no such flag, so no render command line is taken over.
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
     _argv = sys.argv[1:]
     # Until render COMPOSES the U6 store-integrity write-gate (VC-4), this module entry runs CHECK-only
     # (drift detection, never a write): a write requires that composition, so default the command line to

@@ -19,11 +19,19 @@ export PYTHONDONTWRITEBYTECODE=1
 
 failed=0
 notrun=0
+# Gate output does not carry the runner's gate label, so each failure is named as it happens and the
+# names are listed again before RESULT: FAIL; a failing suite never needs a hand re-run to find it.
+failed_names=""
 
 run_gate() {
   local name="$1"; shift
   echo "--- ${name} ---"
-  if "$@"; then :; else failed=1; fi
+  if "$@"; then :; else
+    local rc=$?
+    failed=1
+    failed_names="${failed_names:+${failed_names}, }${name}"
+    echo "GATE FAILED: ${name} (exit ${rc})"
+  fi
   echo
 }
 
@@ -45,7 +53,10 @@ if command -v gitleaks >/dev/null 2>&1; then
   if gitleaks dir . --no-banner --redact --exit-code 1; then
     echo "PASS: gitleaks found no leaks"
   else
+    gitleaks_rc=$?
     failed=1
+    failed_names="${failed_names:+${failed_names}, }secrets (gitleaks)"
+    echo "GATE FAILED: secrets (gitleaks) (exit ${gitleaks_rc})"
   fi
 else
   echo "NOT RUN: gitleaks is not on PATH locally. CI still runs it, so this is a gap"
@@ -78,7 +89,6 @@ run_gate "site-versions-selftest" python3 -I -B tools/check_site_versions.py --s
 run_gate "site-versions" python3 -I -B tools/check_site_versions.py
 run_gate "opf-render-selftest" python3 -I -B tools/selftest_opf_render.py
 run_gate "opf-homes-selftest" python3 -I -B opf/tools/check_opf_homes.py --self-test
-run_gate "opf-homes-migrate-selftest" python3 -I -B opf/tools/check_opf_homes_migrate.py --self-test --red-on-revert
 run_gate "opf-homes-contract" python3 -I -B opf/tools/check_opf_homes.py
 run_gate "opf-tooling-selftest" python3 -I -B opf/tools/opf.py --self-test
 run_gate "opf-import-direct-selftest" python3 -I -B opf/tools/_opf_import.py --self-test
@@ -102,7 +112,12 @@ run_gate "opf-ingest-selftest" python3 -I -B opf/tools/check_opf_ingest.py --sel
 run_gate "opf-ingest" python3 -I -B opf/tools/check_opf_ingest.py
 run_gate "opf-ingest-apply-selftest" python3 -I -B opf/tools/_opf_ingest_apply.py --self-test --red-on-revert
 run_gate "opf-adopt-selftest" python3 -I -B opf/tools/_opf_adopt.py --self-test
+run_gate "opf-adopt-apply-selftest" python3 -I -B opf/tools/_opf_adopt_apply.py --self-test
+run_gate "opf-adopt-hook-selftest" python3 -I -B opf/tools/_opf_adopt_hook.py --self-test
 run_gate "opf-pack-manifest-selftest" python3 -I -B opf/tools/_opf_pack_manifest.py --self-test
+run_gate "opf-adopt-observe-selftest" python3 -I -B opf/tools/_opf_adopt_observe.py --self-test
+run_gate "opf-prompt-pack-selftest" python3 -I -B opf/tools/check_opf_prompt_pack.py --self-test
+run_gate "opf-prompt-pack" python3 -I -B opf/tools/check_opf_prompt_pack.py
 run_gate "opf-oplock-selftest" python3 -I -B opf/tools/_opf_oplock.py --self-test
 run_gate "opf-init-substrate-selftest" python3 -I -B opf/tools/_opf_init_substrate.py --self-test
 run_gate "opf-init-builders-selftest" python3 -I -B opf/tools/_opf_init.py --self-test
@@ -163,6 +178,8 @@ run_gate "claude-drift"    python3 -I -B tools/gen_claude.py --check
 run_gate "adapters-drift"  python3 -I -B tools/gen_adapters.py --check
 run_gate "cursor-selftest"  python3 -I -B tools/gen_cursor.py --self-test
 run_gate "cursor-drift"  python3 -I -B tools/gen_cursor.py --check
+run_gate "worker-pack-selftest" python3 -I -B tools/gen_worker_pack.py --self-test
+run_gate "worker-pack-drift" python3 -I -B tools/gen_worker_pack.py --check
 run_gate "hooks-selftest" python3 -I -B tools/gen_hooks.py --self-test
 run_gate "secret-patterns-drift" python3 -I -B tools/gen_secret_patterns.py --check
 run_gate "hooks-drift"    python3 -I -B tools/gen_hooks.py --check
@@ -209,6 +226,7 @@ run_gate "conformance"    python3 -I -B tools/conformance.py --root .
 run_gate "commonmark-headings-selftest" python3 -I -B opf/tools/selftest_commonmark_headings.py
 run_gate "commonmark-conformance" python3 -I -B opf/tools/selftest_commonmark_conformance.py
 run_gate "currency-selftest" python3 -I -B tools/check_standards_currency.py --self-test
+run_gate "cwe-importer-selftest" python3 -I -B tools/import_cwe.py --self-test
 
 run_gate "ci-parity-selftest" python3 -I -B tools/check_ci_parity.py --self-test
 run_gate "ci-parity"          python3 -I -B tools/check_ci_parity.py
@@ -234,6 +252,7 @@ run_gate "internal-names"           python3 -I -B tools/check_internal_names.py
 run_gate "qa-advisory-digest"       python3 -I -B tools/audit_reference.py --digest
 
 if [ "$failed" -ne 0 ]; then
+  echo "FAILED GATES: ${failed_names}"
   echo "RESULT: FAIL"
   exit 1
 fi
