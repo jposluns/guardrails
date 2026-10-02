@@ -18,7 +18,9 @@ to the PR's own head branch. One observer reads the remote after the push whatev
 
 The config is read from the fetched base tip (`git show <M>:.aiqt/merge-train.toml`), never from a PR
 branch or the checkout. The branch pushed to is the worktree's own symbolic ref, re-confirmed against gh
-before the commit and before the push; the tool takes no branch-name argument.
+before the commit and before the push; the tool takes no branch-name argument. The tool ships with the
+pack; this repository's own .aiqt/merge-train.toml does not (.aiqt/core/ownership.toml excludes it),
+because its presence is what enables the tool. An adopting project commits its own.
 
 Stdout carries one JSON line per PR (schema merge-train/1); stderr carries one human line per PR.
 Exit codes: 0 every PR current, pushed, already pushed or (dry run) mergeable; 1 any PR refused or
@@ -127,12 +129,13 @@ def _forbidden(args):
 def _git(cwd, *args, extra_env=None, timeout=GIT_TIMEOUT, ok=(0,)):
     """The single pinned git funnel: auto-maintenance pinned off in option position, scrubbed GIT_*,
     a timeout. Returns (returncode, stdout bytes, stderr text); raises Refuse("git-failed") on a
-    timeout and on an exit code outside ok when ok is not None."""
+    timeout and on an exit code outside ok when ok is not None. The audit records every attempted
+    argv, a refused one included."""
+    GIT_AUDIT.append(list(args))
     if _forbidden(args):
         raise AssertionError("forbidden git operation refused by the argv audit: %r" % (args,))
     argv = ["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"]
     argv += list(args)
-    GIT_AUDIT.append(list(args))
     try:
         proc = subprocess.run(argv, cwd=str(cwd), env=_clean_env(extra_env), capture_output=True,
                               timeout=timeout, stdin=subprocess.DEVNULL)
@@ -914,7 +917,7 @@ with open(target, "w") as handle:
     handle.write(text)
 """
 
-FAKE_GH = r"""import json, os, sys
+FAKE_GH = r"""import json, os, subprocess, sys
 state_path = os.environ["FAKE_GH_STATE"]
 with open(state_path) as handle:
     state = json.load(handle)
@@ -934,6 +937,10 @@ elif args[:2] == ["pr", "view"]:
     rename_after = state.get("rename_after", dict()).get(number)
     if rename_after is not None and calls[number] > rename_after:
         view["headRefName"] = "renamed/branch"
+    move = state.get("move_on_view", dict()).get(number)
+    if move is not None and calls[number] == move["call"]:
+        subprocess.run(["git", "--git-dir=" + move["remote"], "update-ref", move["ref"], move["new"],
+                        move["old"]], check=True, timeout=60)
     print(json.dumps(view))
 else:
     sys.exit(5)
@@ -971,10 +978,38 @@ def check(name, got, want):
         _RECORDER["failures"].append("%s: got %r, want %r" % (name, got, want))
 
 
+ZERO = "0" * 40
+
+
+def _audit_violation(args):
+    """The self-test's own forbidden-operation predicate, written apart from _forbidden so that a
+    weakened funnel cannot also blind the audit: no force, lease, mirror, delete or + push refspec,
+    no push to the base, no rebase, cherry-pick, stash, clean, gc, worktree prune, reset --hard or
+    any reset other than reset --keep."""
+    words = list(args)
+    if words[:1] in (["rebase"], ["cherry-pick"], ["stash"], ["clean"], ["gc"], ["prune"]):
+        return True
+    if words[:2] == ["worktree", "prune"]:
+        return True
+    if words[:1] == ["reset"] and ("--hard" in words or "--keep" not in words):
+        return True
+    if words[:1] == ["push"]:
+        flags = [w for w in words[1:] if w.startswith("-")]
+        specs = [w for w in words[1:] if not w.startswith("-")]
+        if any(w.startswith(("--force", "--mirror", "--delete", "--all", "--prune"))
+               or w in ("-f", "-d") for w in flags):
+            return True
+        if any(w.startswith(("+", ":")) or w.endswith(":refs/heads/main") for w in specs):
+            return True
+    return False
+
+
 class Fixture:
     """A bare remote whose pre-receive hook can refuse and whose post-receive hook logs every ref
-    update, a main checkout carrying the toy generator and the config, PR branches as linked
-    worktrees of that checkout, and a fake gh answering from a JSON state file."""
+    update (and, when asked, then makes the remote unreadable to the main checkout), a main checkout
+    carrying the toy generator and the config, PR branches as linked worktrees of that checkout, and
+    a fake gh answering from a JSON state file. Every tool run records the plan's per-case
+    invariants into self.violations."""
 
     def __init__(self, base, probe="[]"):
         self.base = Path(base)
@@ -986,13 +1021,20 @@ class Fixture:
         self.push_log = self.base / "push.log"
         self.path = os.environ.get("PATH", os.defpath)
         self.prs = []
+        self.runs = 0
+        self.violations = []
+        self.gone = self.base / "gone.git"
         gh = self.bin / "gh"
         gh.write_text("#!%s\n%s" % (sys.executable, FAKE_GH), encoding="utf-8")
         gh.chmod(0o755)
         _git(self.base, "init", "-q", "--bare", "-b", "main", str(self.remote))
         hooks = self.remote / "hooks"
-        (hooks / "post-receive").write_text("#!/bin/sh\ncat >> '%s'\n" % self.push_log,
-                                            encoding="utf-8")
+        (hooks / "post-receive").write_text(
+            "#!/bin/sh\ncat >> '%s'\nif [ -e '%s' ]; then\n  rm -f '%s'\n"
+            "  git config --file '%s' remote.origin.url '%s'\nfi\n" % (
+                self.push_log, self.base / "unreadable-after-push",
+                self.base / "unreadable-after-push", self.main / ".git" / "config", self.gone),
+            encoding="utf-8")
         (hooks / "pre-receive").write_text(
             "#!/bin/sh\nif [ -e '%s' ]; then exit 1; fi\nexit 0\n" % (self.base / "reject"),
             encoding="utf-8")
@@ -1047,22 +1089,69 @@ class Fixture:
         self.state.write_text(json.dumps(state), encoding="utf-8")
 
     def run(self, apply=False, only=None):
+        """One tool run; the per-case invariants are recorded even when the run is killed."""
         os.environ["FAKE_GH_STATE"] = str(self.state)
         os.environ["PATH"] = str(self.bin) + os.pathsep + self.path
-        return run_train(self.main, apply, only)
+        refs = self.remote_refs()
+        logged = len(self.log_rows())
+        audit = len(GIT_AUDIT)
+        try:
+            return run_train(self.main, apply, only)
+        finally:
+            attempted = GIT_AUDIT[audit:]
+            self.runs += 1
+            self.violations += self._violations(refs, logged, attempted, apply)
+
+    def _violations(self, refs, logged, attempted, apply):
+        """Plan section 9, for one run: the remote base ref byte-identical; only refs/heads/<PR
+        branch> changed, only by fast-forward and only under --apply; every logged ref update a
+        fast-forward of a PR branch; no forbidden argv attempted."""
+        bad = ["argv %r" % (a,) for a in attempted if _audit_violation(a)]
+        after = self.remote_refs()
+        if after.get("refs/heads/main") != refs.get("refs/heads/main"):
+            bad.append("base ref refs/heads/main %s -> %s" % (
+                refs.get("refs/heads/main"), after.get("refs/heads/main")))
+        allowed = set("refs/heads/" + p["headRefName"] for p in self.prs)
+        for ref in sorted(set(refs) | set(after)):
+            old, new = refs.get(ref), after.get(ref)
+            if old != new and not (apply and ref in allowed and old and new
+                                   and self.fast_forward(old, new)):
+                bad.append("ref %s %s -> %s" % (ref, old, new))
+        for old, new, ref in self.log_rows()[logged:]:
+            if ref not in allowed or ZERO in (old, new) or not self.fast_forward(old, new):
+                bad.append("logged update %s %s -> %s" % (ref, old, new))
+        return bad
+
+    def remote_refs(self):
+        out = _git_text(self.remote, "for-each-ref", "--format=%(refname) %(objectname)")
+        return dict(line.split(" ", 1) for line in out.splitlines() if line.strip())
+
+    def fast_forward(self, old, new):
+        return _git(self.remote, "merge-base", "--is-ancestor", old, new, ok=None)[0] == 0
+
+    def foreign_commit(self, parent, ref=None):
+        """A commit made by someone else straight in the remote (parent's tree), optionally moving
+        ref onto it from parent; the post-receive log does not see it."""
+        sha = _git_text(self.remote, "commit-tree", parent + "^{tree}", "-p", parent, "-m",
+                        "foreign", extra_env=FIXTURE_IDENT)
+        if ref:
+            _git(self.remote, "update-ref", ref, sha, parent)
+        return sha
 
     def remote_ref(self, branch):
         code, out, _err = _git(self.remote, "rev-parse", "--verify", "-q",
                                "refs/heads/" + branch, ok=None)
         return out.decode().strip() if code == 0 else None
 
+    def log_rows(self):
+        if not self.push_log.exists():
+            return []
+        return [line.split() for line in self.push_log.read_text().splitlines() if line.strip()]
+
     def pushes(self):
         """Tool-made ref updates: branch creations and base advances made by the fixture are
         filtered out."""
-        if not self.push_log.exists():
-            return []
-        rows = [line.split() for line in self.push_log.read_text().splitlines() if line.strip()]
-        return [r for r in rows if r[0] != "0" * 40 and r[2] != "refs/heads/main"]
+        return [r for r in self.log_rows() if r[0] != ZERO and r[2] != "refs/heads/main"]
 
 
 def _result(reports, number):
@@ -1087,7 +1176,24 @@ def _git_dir(wt):
     return _git_text(wt, "rev-parse", "--path-format=absolute", "--git-dir")
 
 
+def _invariants(*fixtures):
+    """The per-case invariants recorded over every tool run of the given fixtures; a fixture the
+    case never ran through the tool is itself a violation."""
+    bad = []
+    for fx in fixtures:
+        bad += ["%s: %s" % (fx.base.name, v) for v in fx.violations]
+        if not fx.runs:
+            bad.append("%s: no tool run observed" % fx.base.name)
+    return bad
+
+
+def _has_marker(wt):
+    return os.path.exists(os.path.join(_git_dir(wt), MARKER_NAME))
+
+
 def case_config(_tmp):
+    # Pure schema checks: no tool run, no git call and no remote, so the per-case invariants are
+    # vacuous here and not asserted.
     good = dict(version=1, remote="origin", base="main",
                 commit=dict(name="A", email="a@example.invalid"),
                 generated=dict(paths=["gen/d.txt"], regenerate=[["x"]], check=[["y"]]))
@@ -1125,6 +1231,17 @@ def case_absent(tmp):
     _git(fx.main, "push", "-q", "origin", "main")
     rc, reports, fatal = fx.run()
     check("config/absent-exit2", (rc, reports, "not enabled" in (fatal or "")), (2, [], True))
+    fx2 = _fixture(tmp, "malformed")
+    wt = _stale_pr(fx2)
+    fx2.write(fx2.main, CONFIG_PATH, "version = 1\nextra = true\n")
+    _git(fx2.main, "commit", "-q", "-am", "malformed config", extra_env=FIXTURE_IDENT)
+    _git(fx2.main, "push", "-q", "origin", "main")
+    before = _snapshot(wt)
+    rc, reports, fatal = fx2.run(apply=True)
+    check("config/malformed-exit2",
+          (rc, reports, "malformed" in (fatal or ""), _snapshot_diff(before, _snapshot(wt))),
+          (2, [], True, []))
+    check("config/absent-invariants", _invariants(fx, fx2), [])
 
 
 def case_frombase(tmp):
@@ -1133,6 +1250,7 @@ def case_frombase(tmp):
     fx.write(fx.main, CONFIG_PATH, "version = 99\n")
     rc, reports, _fatal = fx.run()
     check("config/read-from-base-not-checkout", (rc, _result(reports, 1)), (0, "would-merge"))
+    check("config/read-from-base-invariants", _invariants(fx), [])
 
 
 def case_dry(tmp):
@@ -1144,6 +1262,7 @@ def case_dry(tmp):
     check("dry/would-merge", (rc, _result(reports, 1)), (0, "would-merge"))
     check("dry/changes-nothing", (_snapshot_diff(before, _snapshot(wt)), fx.remote_ref("feat/x"),
                                   fx.pushes()), ([], remote_before, []))
+    check("dry/invariants", _invariants(fx), [])
 
 
 def case_happy(tmp):
@@ -1186,6 +1305,7 @@ def case_happy(tmp):
     rc2, reports2, _fatal = fx.run(apply=True)
     check("apply/second-run-current", (rc2, _result(reports2, 1), len(fx.pushes())),
           (0, "current", 1))
+    check("apply/invariants", _invariants(fx), [])
 
 
 def case_carry(tmp):
@@ -1202,6 +1322,7 @@ def case_carry(tmp):
     rc, reports, _fatal = fx2.run(apply=True)
     check("carry/false-when-pr-lines-change",
           (_result(reports, 1), reports[0]["review_carry"] if reports else None), ("pushed", False))
+    check("carry/invariants", _invariants(fx, fx2), [])
 
 
 def case_discover(tmp):
@@ -1237,6 +1358,7 @@ def case_discover(tmp):
     fx.set_gh(fail=True)
     rc, reports, _fatal = fx.run()
     check("discover/gh-failure-exit2", (rc, reports), (2, []))
+    check("discover/invariants", _invariants(fx), [])
 
 
 def case_ambiguous_worktree(tmp):
@@ -1245,6 +1367,7 @@ def case_ambiguous_worktree(tmp):
     _git(fx.main, "worktree", "add", "-q", "-f", str(fx.base / "wt-dup"), "feat/x")
     rc, reports, _fatal = fx.run()
     check("discover/ambiguous-worktree", (rc, _result(reports, 1)), (1, "ambiguous-worktree"))
+    check("discover/ambiguous-worktree-invariants", _invariants(fx), [])
 
 
 def case_branch(tmp):
@@ -1259,6 +1382,7 @@ def case_branch(tmp):
     check("discover/branch-renamed-before-commit",
           (_result(reports, 1), _snapshot_diff(before, _snapshot(wt)), fx.pushes()),
           ("branch-mismatch", [], []))
+    check("discover/branch-invariants", _invariants(fx), [])
 
 
 def case_busy(tmp):
@@ -1283,6 +1407,7 @@ def case_busy(tmp):
     _stale_pr(fx2)
     rc, reports, _fatal = fx2.run(apply=True)
     check("refuse/busy-probe", _result(reports, 1), "busy")
+    check("refuse/busy-invariants", _invariants(fx, fx2), [])
 
 
 def case_dirty(tmp):
@@ -1300,6 +1425,7 @@ def case_dirty(tmp):
     _git(wt, "add", "src/b.txt")
     rc, reports, _fatal = fx.run(apply=True)
     check("refuse/dirty-staged", _result(reports, 1), "dirty")
+    check("refuse/dirty-invariants", _invariants(fx), [])
 
 
 def case_conflict(tmp):
@@ -1316,12 +1442,16 @@ def case_conflict(tmp):
           (_snapshot_diff(before, _snapshot(wt)), fx.remote_ref("feat/x"), fx.pushes(),
            os.path.exists(os.path.join(_git_dir(wt), MARKER_NAME))),
           ([], old, [], False))
+    check("refuse/source-conflict-invariants", _invariants(fx), [])
 
 
-def _refusal_run(tmp, name, env_key=None, failing_check=False):
+def _refusal_run(tmp, name, env_key=None, failing_check=False, seen=None):
     """A stale-generated PR run with --apply under one injected generator fault; returns
-    (exit code, result, reason, (snapshot differences, tool pushes))."""
+    (exit code, result, reason, (snapshot differences, tool pushes)). The fixture is appended to
+    seen for the invariant check."""
     fx = _fixture(tmp, name)
+    if seen is not None:
+        seen.append(fx)
     wt = _stale_pr(fx)
     if failing_check:
         text = _read_text(fx.main / CONFIG_PATH).replace(
@@ -1341,19 +1471,21 @@ def _refusal_run(tmp, name, env_key=None, failing_check=False):
 
 
 def case_regen(tmp):
-    rc, result, _reason, restored = _refusal_run(tmp, "regen-fail", "TOY_FAIL")
+    seen = []
+    rc, result, _reason, restored = _refusal_run(tmp, "regen-fail", "TOY_FAIL", seen=seen)
     check("refuse/regenerate-failed", (rc, result, restored), (1, "regenerate-failed", ([], [])))
-    rc, result, _reason, restored = _refusal_run(tmp, "check-fail", failing_check=True)
+    rc, result, _reason, restored = _refusal_run(tmp, "check-fail", failing_check=True, seen=seen)
     check("refuse/check-failed", (rc, result, restored), (1, "check-failed", ([], [])))
     # A regenerator that edits a tracked file outside the generated set cannot be undone by merge
     # --abort, and the tool never resets or deletes, so the honest end state is restore-failed.
-    rc, result, reason, restored = _refusal_run(tmp, "not-fixpoint", "TOY_DRIFT")
+    rc, result, reason, restored = _refusal_run(tmp, "not-fixpoint", "TOY_DRIFT", seen=seen)
     check("refuse/regenerate-not-fixpoint", (rc, result, "regenerate-not-fixpoint" in reason,
                                              restored[1]),
           (3, "restore-failed", True, []))
-    rc, result, reason, restored = _refusal_run(tmp, "litter", "TOY_LITTER")
+    rc, result, reason, restored = _refusal_run(tmp, "litter", "TOY_LITTER", seen=seen)
     check("refuse/undeclared-write-restore-failed",
           (rc, result, "undeclared-write" in reason, restored[1]), (3, "restore-failed", True, []))
+    check("refuse/regenerate-invariants", _invariants(*seen), [])
 
 
 def case_reject(tmp):
@@ -1367,6 +1499,7 @@ def case_reject(tmp):
           (rc, _result(reports, 1), _git_text(wt, "rev-parse", "HEAD"), fx.remote_ref("feat/x"),
            _snapshot_diff(before, _snapshot(wt))),
           (1, "push-rejected", old, old, []))
+    check("push/rejected-invariants", _invariants(fx), [])
 
 
 def _killed_run(fx, replacement):
@@ -1392,19 +1525,23 @@ def case_idem(tmp):
     def kill_in_merge(*_args):
         raise KeyboardInterrupt("simulated kill mid-merge")
 
+    seen = []
     fx = _fixture(tmp, "kill-commit")
+    seen.append(fx)
     _stale_pr(fx)
     _killed_run(fx, kill)
     rc, reports, _fatal = fx.run(apply=True)
     check("idem/kill-after-commit-one-push", (rc, _result(reports, 1), len(fx.pushes())),
           (0, "pushed", 1))
     fx = _fixture(tmp, "kill-push")
+    seen.append(fx)
     _stale_pr(fx)
     _killed_run(fx, push_then_kill)
     rc, reports, _fatal = fx.run(apply=True)
     check("idem/kill-after-push-already-pushed", (rc, _result(reports, 1), len(fx.pushes())),
           (0, "already-pushed", 1))
     fx = _fixture(tmp, "kill-merge")
+    seen.append(fx)
     _stale_pr(fx)
     saved = GUARDS["fixpoint"]
     GUARDS["fixpoint"] = kill_in_merge
@@ -1418,6 +1555,7 @@ def case_idem(tmp):
     check("idem/kill-mid-merge-restarts", (rc, _result(reports, 1), len(fx.pushes())),
           (0, "pushed", 1))
     fx = _fixture(tmp, "foreign-merge")
+    seen.append(fx)
     wt = _stale_pr(fx)
     _git(wt, "merge", "--no-commit", "--no-ff", fx.remote_ref("main"), ok=None,
          extra_env=FIXTURE_IDENT)
@@ -1426,6 +1564,202 @@ def case_idem(tmp):
     check("idem/foreign-merge-left-alone",
           (_result(reports, 1), _snapshot_diff(before, _snapshot(wt))),
           ("in-progress-operation", []))
+    check("idem/invariants", _invariants(*seen), [])
+
+
+def _reason(reports, number):
+    rows = [r for r in reports if r["pr"] == number]
+    return rows[0]["reason"] if rows else ""
+
+
+def case_remote_changed(tmp):
+    fx = _fixture(tmp, "remote-changed")
+    wt = _stale_pr(fx)
+    old = fx.remote_ref("feat/x")
+    other = fx.foreign_commit(old)
+    # The third gh view (the re-check after the commit, just before the push) moves the PR branch
+    # as a concurrent pusher would, so the tool's plain push is not a fast-forward and git refuses it.
+    fx.set_gh(move_on_view=dict([("1", dict(call=3, remote=str(fx.remote), ref="refs/heads/feat/x",
+                                            old=old, new=other))]))
+    before, pushed = _snapshot(wt), fx.pushes()
+    rc, reports, _fatal = fx.run(apply=True)
+    check("push/remote-changed", (rc, _result(reports, 1), other in _reason(reports, 1)),
+          (1, "remote-changed", True))
+    check("push/remote-changed-restored",
+          (_snapshot_diff(before, _snapshot(wt)), fx.remote_ref("feat/x"), fx.pushes() == pushed,
+           _has_marker(wt)), ([], other, True, False))
+    check("push/remote-changed-invariants", _invariants(fx), [])
+
+
+def case_push_unknown(tmp):
+    fx = _fixture(tmp, "push-unknown")
+    wt = _stale_pr(fx)
+    old = fx.remote_ref("feat/x")
+    # The post-receive hook points the checkout's origin at a missing path once the push has
+    # landed, so the observer's ls-remote cannot read the remote.
+    (fx.base / "unreadable-after-push").write_text("", encoding="utf-8")
+    rc, reports, _fatal = fx.run(apply=True)
+    head = _git_text(wt, "rev-parse", "HEAD")
+    marker = _read_marker(_git_dir(wt)) or dict()
+    status = _git(wt, "status", "--porcelain=v2", "-z", "--untracked-files=all")[1]
+    check("push/unknown-keeps-commit-and-marker",
+          (rc, _result(reports, 1), head != old, marker.get("phase"), marker.get("new") == head,
+           status, fx.remote_ref("feat/x") == head, len(fx.pushes())),
+          (1, "push-unknown", True, "committed", True, b"", True, 1))
+    _git(fx.main, "config", "remote.origin.url", str(fx.remote))
+    rc, reports, _fatal = fx.run(apply=True)
+    check("push/unknown-rerun-already-pushed",
+          (rc, _result(reports, 1), _has_marker(wt), len(fx.pushes())),
+          (0, "already-pushed", False, 1))
+    check("push/unknown-invariants", _invariants(fx), [])
+
+
+def case_hook_failed(tmp):
+    fx = _fixture(tmp, "hook-failed")
+    wt = _stale_pr(fx)
+    old = fx.remote_ref("feat/x")
+    hook = fx.main / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\necho 'fixture pre-commit refuses' >&2\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    before, pushed = _snapshot(wt), fx.pushes()
+    rc, reports, _fatal = fx.run(apply=True)
+    check("refuse/hook-failed",
+          (rc, _result(reports, 1), "fixture pre-commit refuses" in _reason(reports, 1)),
+          (1, "hook-failed", True))
+    check("refuse/hook-failed-restored",
+          (_snapshot_diff(before, _snapshot(wt)), fx.remote_ref("feat/x"), fx.pushes() == pushed,
+           _has_marker(wt)), ([], old, True, False))
+    check("refuse/hook-failed-invariants", _invariants(fx), [])
+
+
+def case_generated_delete(tmp):
+    fx = _fixture(tmp, "generated-delete")
+    wt = fx.add_pr(1, "feat/x", dict([("src/b.txt", "bravo\n")]))
+    _git(wt, "rm", "-q", "--", "gen/digest.txt")
+    _git(wt, "commit", "-q", "-m", "pr drops the generated file", extra_env=FIXTURE_IDENT)
+    _git(wt, "push", "-q", "origin", "feat/x:refs/heads/feat/x")
+    fx.prs[0]["headRefOid"] = old = _git_text(wt, "rev-parse", "HEAD")
+    fx.set_gh()
+    fx.advance_main(dict([("src/c.txt", "charlie\n")]))
+    before, pushed = _snapshot(wt), fx.pushes()
+    rc, reports, _fatal = fx.run(apply=True)
+    check("refuse/generated-delete-conflict",
+          (rc, _result(reports, 1), _reason(reports, 1)), (1, "generated-delete-conflict",
+                                                           "gen/digest.txt"))
+    check("refuse/generated-delete-conflict-restored",
+          (_snapshot_diff(before, _snapshot(wt)), fx.remote_ref("feat/x"), fx.pushes() == pushed,
+           _has_marker(wt)), ([], old, True, False))
+    check("refuse/generated-delete-conflict-invariants", _invariants(fx), [])
+
+
+def case_busy_unknown(tmp):
+    # A real unreadable process table (no /proc, or an access error on a same-uid entry) cannot be
+    # produced without privileges, so the scan is replaced by one reporting the table unreadable.
+    global _process_users
+    fx = _fixture(tmp, "busy-unknown")
+    wt = _stale_pr(fx)
+    old = fx.remote_ref("feat/x")
+    before, pushed = _snapshot(wt), fx.pushes()
+    real = _process_users
+    _process_users = lambda _wt: None
+    try:
+        rc, reports, _fatal = fx.run(apply=True)
+    finally:
+        _process_users = real
+    check("refuse/busy-unknown", (rc, _result(reports, 1)), (1, "busy-unknown"))
+    check("refuse/busy-unknown-untouched",
+          (_snapshot_diff(before, _snapshot(wt)), fx.remote_ref("feat/x"), fx.pushes() == pushed,
+           _has_marker(wt)), ([], old, True, False))
+    check("refuse/busy-unknown-invariants", _invariants(fx), [])
+
+
+def case_lock_held(tmp):
+    fx = _fixture(tmp, "lock-held")
+    wt = _stale_pr(fx)
+    old = fx.remote_ref("feat/x")
+    common = _git_text(fx.main, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    before, pushed = _snapshot(wt), fx.pushes()
+    with open(os.path.join(common, LOCK_NAME), "a+") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        audit = len(GIT_AUDIT)
+        rc, reports, fatal = fx.run(apply=True)
+        fetched = [a for a in GIT_AUDIT[audit:] if a[:1] == ["fetch"]]
+    check("run/lock-held-exit2", (rc, reports, LOCK_NAME in (fatal or "")), (2, [], True))
+    check("run/lock-held-touches-nothing",
+          (fetched, _snapshot_diff(before, _snapshot(wt)), fx.remote_ref("feat/x"),
+           fx.pushes() == pushed, _has_marker(wt)), ([], [], old, True, False))
+    check("run/lock-held-invariants", _invariants(fx), [])
+
+
+def case_fetch_failure(tmp):
+    fx = _fixture(tmp, "fetch-failure")
+    wt = _stale_pr(fx)
+    old = fx.remote_ref("feat/x")
+    before, pushed = _snapshot(wt), fx.pushes()
+    _git(fx.main, "config", "remote.origin.url", str(fx.gone))
+    audit = len(GIT_AUDIT)
+    try:
+        rc, reports, fatal = fx.run(apply=True)
+    finally:
+        _git(fx.main, "config", "remote.origin.url", str(fx.remote))
+    touching = [a for a in GIT_AUDIT[audit:] if a[:1] in (
+        ["merge"], ["commit"], ["push"], ["ls-remote"], ["checkout"], ["add"], ["reset"])]
+    check("run/fetch-failure-exit2", (rc, reports, "fetch failed" in (fatal or "")), (2, [], True))
+    check("run/fetch-failure-touches-nothing",
+          (touching, _snapshot_diff(before, _snapshot(wt)), fx.remote_ref("feat/x"),
+           fx.pushes() == pushed, _has_marker(wt)), ([], [], old, True, False))
+    check("run/fetch-failure-invariants", _invariants(fx), [])
+
+
+def case_position(tmp):
+    fx = _fixture(tmp, "position")
+    behind = fx.add_pr(1, "feat/behind", dict([("src/one.txt", "1\n")]))
+    ahead = fx.add_pr(2, "feat/ahead", dict([("src/two.txt", "2\n")]))
+    diverged = fx.add_pr(3, "feat/diverged", dict([("src/three.txt", "3\n")]))
+    fx.advance_main(dict([("src/c.txt", "c\n")]))
+    fx.prs[0]["headRefOid"] = fx.foreign_commit(fx.prs[0]["headRefOid"], "refs/heads/feat/behind")
+    fx.write(ahead, "src/two.txt", "2 local\n")
+    fx.commit(ahead, "local only")
+    fx.prs[2]["headRefOid"] = fx.foreign_commit(fx.prs[2]["headRefOid"],
+                                                "refs/heads/feat/diverged")
+    fx.write(diverged, "src/three.txt", "3 local\n")
+    fx.commit(diverged, "local only")
+    fx.set_gh()
+    trees = (behind, ahead, diverged)
+    branches = ("feat/behind", "feat/ahead", "feat/diverged")
+    befores = [_snapshot(wt) for wt in trees]
+    remotes = [fx.remote_ref(b) for b in branches]
+    pushed = fx.pushes()
+    rc, reports, _fatal = fx.run(apply=True)
+    check("position/worktree-behind", _result(reports, 1), "worktree-behind")
+    check("position/unpushed-commits", _result(reports, 2), "unpushed-commits")
+    check("position/diverged", _result(reports, 3), "diverged")
+    check("position/exit1-untouched",
+          (rc, [_snapshot_diff(b, _snapshot(wt)) for b, wt in zip(befores, trees)],
+           [fx.remote_ref(b) for b in branches], fx.pushes() == pushed,
+           [_has_marker(wt) for wt in trees]),
+          (1, [[], [], []], remotes, True, [False, False, False]))
+    check("position/invariants", _invariants(fx), [])
+
+
+def case_state_mismatch(tmp):
+    fx = _fixture(tmp, "state-mismatch")
+    wt = _stale_pr(fx)
+    old = fx.remote_ref("feat/x")
+    git_dir = _git_dir(wt)
+    _write_marker(git_dir, dict(pr=1, branch="feat/x", old=old, base_sha=fx.remote_ref("main"),
+                                phase="committed", new=ZERO))
+    marker = Path(git_dir) / MARKER_NAME
+    marker_bytes = marker.read_bytes()
+    before, pushed = _snapshot(wt), fx.pushes()
+    rc, reports, _fatal = fx.run(apply=True)
+    check("idem/state-mismatch-refused", (rc, _result(reports, 1)), (1, "state-mismatch"))
+    rc, reports, _fatal = fx.run()
+    check("idem/state-mismatch-dry-run", (rc, _result(reports, 1)), (1, "state-mismatch"))
+    check("idem/state-mismatch-touches-nothing",
+          (_snapshot_diff(before, _snapshot(wt)), marker.read_bytes() == marker_bytes,
+           fx.remote_ref("feat/x"), fx.pushes() == pushed), ([], True, old, True))
+    check("idem/state-mismatch-invariants", _invariants(fx), [])
 
 
 def case_cli(tmp):
@@ -1434,8 +1768,11 @@ def case_cli(tmp):
     check("cli/bad-argument-exit2", proc.returncode, 2)
     plain = Path(tmp) / "not-a-repo"
     plain.mkdir()
+    audit = len(GIT_AUDIT)
     rc, reports, fatal = run_train(plain)
     check("cli/not-a-repo-exit2", (rc, reports, bool(fatal)), (2, [], True))
+    # No remote exists here, so of the per-case invariants only the argv audit applies.
+    check("cli/invariants", [a for a in GIT_AUDIT[audit:] if _audit_violation(a)], [])
 
 
 CASES = dict([
@@ -1443,7 +1780,11 @@ CASES = dict([
     ("dry", case_dry), ("happy", case_happy), ("carry", case_carry), ("discover", case_discover),
     ("ambiguous", case_ambiguous_worktree), ("branch", case_branch), ("busy", case_busy),
     ("dirty", case_dirty), ("conflict", case_conflict), ("regen", case_regen),
-    ("reject", case_reject), ("idem", case_idem), ("cli", case_cli),
+    ("reject", case_reject), ("idem", case_idem), ("remote-changed", case_remote_changed),
+    ("push-unknown", case_push_unknown), ("hook-failed", case_hook_failed),
+    ("generated-delete", case_generated_delete), ("busy-unknown", case_busy_unknown),
+    ("lock-held", case_lock_held), ("fetch-failure", case_fetch_failure),
+    ("position", case_position), ("state-mismatch", case_state_mismatch), ("cli", case_cli),
 ])
 
 
