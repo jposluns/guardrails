@@ -534,12 +534,14 @@ def _close_fd_quietly(fd):
     never itself the store's verdict (fail-closed teardown; S1-F1 / S4-F3).
 
     Single close (P1, #378): the descriptor is closed with exactly ONE os.close. If it raises, the number
-    counts as released and is never touched again: no fstat, no second close. close(2) on Linux "always
-    releases the file descriptor early in the close operation, freeing it for reuse", and retrying "is the
-    wrong thing to do, since this may cause a reused file descriptor from another thread to be closed"
-    (man 2 close, "Dealing with error returns from close()"); an fstat that finds the number open after a
-    failed close is looking at whatever reused it, so a probe-then-reclose recovery closed another owner's
-    descriptor. The error is swallowed silently. _journal._close_fd_quietly carries the same body."""
+    counts as released and is never touched again: no fstat or fcntl probe, no second close. close(2) on
+    Linux "always releases the file descriptor early in the close operation, freeing it for reuse", and
+    retrying "is the wrong thing to do, since this may cause a reused file descriptor from another thread to
+    be closed" (man 2 close, "Dealing with error returns from close()"); an fstat that finds the number
+    open after a failed close is looking at whatever reused it, so a probe-then-reclose recovery closed
+    another owner's descriptor. The error is swallowed silently. _journal._close_fd_quietly carries the same
+    body. Residual (disclosed, #377): a platform that keeps the descriptor on a failed close (HP-UX, and
+    POSIX.1-2024 as close(2) reports it) leaks it until exit; Linux does not, and macOS is assumed not to."""
     try:
         os.close(fd)
     except OSError:
@@ -4504,6 +4506,100 @@ def self_test():
             print("  close vector: {}".format(_q_failure), file=sys.stderr)
         check("p1-close-fd-quietly-single-close",
               not _q_failures and _q_runs == (11 if _journal._st_fcntl() else 9))
+
+        # --- P1 (one close; man 2 close): _close_fd_quietly closes ONCE and never touches the number again.
+        # V1, deterministic reuse: the injected close really releases the fd, dup2s an unrelated file onto
+        # the freed number, and only then raises EINTR (and, separately, EIO). The helper must swallow it
+        # (RULE), make exactly one os.close and no os.fstat on that number afterwards (PROBE), and leave the
+        # unrelated descriptor open with its own (st_dev, st_ino) (REUSE). The RECLOSE flip puts the old
+        # fstat-then-reclose body back and must turn the vector red by REUSE; the PROBE flip (one close, then
+        # an fstat of the released number, no second close; #378's P flip) must turn it red by PROBE alone.
+        # This is #377's own lane, kept beside the #378 harness run above. --------------------------------
+        _q_dir = base / "q-close"
+        _q_dir.mkdir()
+        (_q_dir / "other").write_bytes(b"unrelated")
+        _q_real_close, _q_real_fstat = os.close, os.fstat
+
+        def _q_reclose(fd):                                # RECLOSE: the pre-P1 confirm-then-reclose body
+            try:
+                os.close(fd)
+                return
+            except OSError:
+                pass
+            try:
+                os.fstat(fd)
+            except OSError:
+                return
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+        def _q_probe(fd):                                  # PROBE: fstat after the failed close, no reclose
+            try:
+                os.close(fd)
+                return
+            except OSError:
+                pass
+            try:
+                os.fstat(fd)
+            except OSError:
+                pass
+
+        def _q_vector(helper, err):
+            """The failed tags of one V1 run of `helper` (empty: green)."""
+            fd = os.open(str(_q_dir), os.O_RDONLY | os.O_DIRECTORY)
+            other = os.open(str(_q_dir / "other"), os.O_RDONLY)
+            want = _q_real_fstat(other)
+            seen = {"closes": 0, "probes": 0, "fired": False}
+
+            def close(n):
+                if n == fd:
+                    seen["closes"] += 1
+                    if not seen["fired"]:
+                        seen["fired"] = True
+                        _q_real_close(n)
+                        os.dup2(other, n)                  # an unrelated file takes the freed number
+                        raise OSError(err, "self-test injected: released, then the number was reused")
+                return _q_real_close(n)
+
+            def fstat(n, *args, **kwargs):
+                if n == fd and seen["fired"]:
+                    seen["probes"] += 1
+                return _q_real_fstat(n, *args, **kwargs)
+
+            failed = []
+            os.close, os.fstat = close, fstat
+            try:
+                helper(fd)
+            except OSError:
+                failed.append("rule")
+            finally:
+                os.close, os.fstat = _q_real_close, _q_real_fstat
+            if not seen["fired"]:
+                failed.append("injection")
+            if seen["closes"] != 1 or seen["probes"]:
+                failed.append("probe")
+            try:
+                now = _q_real_fstat(fd)
+            except OSError:
+                failed.append("reuse")                     # the unrelated descriptor was closed
+            else:
+                if (now.st_dev, now.st_ino) != (want.st_dev, want.st_ino):
+                    failed.append("reuse")                 # another file holds the number: never closed here
+                else:
+                    _q_real_close(fd)                      # still the unrelated file this vector put there
+            _q_real_close(other)
+            return failed
+
+        for _q_err, _q_tag in ((4, "eintr"), (5, "eio")):
+            check("p1-close-fd-quietly-one-close-no-probe-reuse-" + _q_tag,
+                  _q_vector(_close_fd_quietly, _q_err) == [])
+            _q_red = _q_vector(_q_reclose, _q_err)
+            check("p1-close-fd-quietly-reclose-flip-red-by-reuse-" + _q_tag,
+                  "reuse" in _q_red and set(_q_red) <= {"reuse", "probe"})
+            check("p1-close-fd-quietly-probe-flip-red-by-probe-alone-" + _q_tag,
+                  _q_vector(_q_probe, _q_err) == ["probe"])
 
         # --- S4-F3: validate_store's `finally` block closes its store / product-root descriptors OUTSIDE
         # the B6 barrier, so a close that raises during teardown (EINTR / EIO / an invalid fd) must be
