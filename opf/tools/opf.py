@@ -614,6 +614,10 @@ _ENTRY_FLOOR_EXEMPT = {
     "opf-watchdog-isolation": "the dispatcher's watchdog isolation suite (_watchdog_isolation_self_test)",
     "opf-watchdog-regressions": "the dispatcher's watchdog regression suite (_watchdog_regression_self_test)",
     "opf-aggregator": "this aggregator's own suite (_aggregator_self_test)",
+    "opf-retained-close-offpath": "the dispatcher's off-path released-close sweep (#377, "
+                                  "_retained_close_offpath_self_test)",
+    "opf-close-exc-safe-vectors": "the dispatcher's in-flight-exception close vectors (#377, "
+                                  "_close_exc_safe_vectors_self_test)",
     "opf-cli": "the dispatcher's command-line suite (_cli_self_test)",
 }
 
@@ -11400,7 +11404,7 @@ def _init_inventory(root_fd):
                     try:
                         walk(child_fd, relpath, depth + 1)
                     finally:
-                        os.close(child_fd)
+                        _opf_store._close_fd_exc_safe(child_fd)
 
     try:
         working = _opf_store.WORKING_DIRNAME
@@ -11414,7 +11418,7 @@ def _init_inventory(root_fd):
                 try:
                     walk(working_fd, working, 0)
                 finally:
-                    os.close(working_fd)
+                    _opf_store._close_fd_exc_safe(working_fd)
         report["complete"] = True
     except Exception as exc:  # noqa: BLE001  an incomplete inventory never licenses a write
         report["error"] = ascii(exc)
@@ -11446,7 +11450,7 @@ def _init_repo(root):
     if root != repo and repo not in root.parents:
         raise RuntimeError("git preflight: reported repository does not contain root")
     repo_fd = _opf_store._open_dir_nofollow(repo)
-    os.close(repo_fd)
+    _opf_store._journal._close_fd_propagating(repo_fd)
     if _init_git(git, repo, args) != raw:
         raise RuntimeError("git preflight: repository identity changed during confirmation")
     return git, repo
@@ -11541,7 +11545,7 @@ def _init_same_root(root, root_fd):
         if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
             raise RuntimeError("root changed since its contained directory was opened")
     finally:
-        os.close(check_fd)
+        _opf_store._close_fd_exc_safe(check_fd)
 
 
 def _init_create(root_fd, relpath, data):
@@ -11561,7 +11565,7 @@ def _init_create(root_fd, relpath, data):
             raise RuntimeError("create-only publication refused {!r}: {!r}".format(
                 relpath, exc)) from exc
     finally:
-        os.close(pfd)
+        _opf_store._close_fd_exc_safe(pfd)
 
 
 def _init_observed(root_fd, directories, payloads):
@@ -11587,7 +11591,7 @@ def _init_observed(root_fd, directories, payloads):
                     data, opened = journal._read_at(
                         pfd, name, relpath, cap=len(payloads[relpath]) + 1)
                 finally:
-                    os.close(pfd)
+                    _opf_store._close_fd_exc_safe(pfd)
                 row["state"] = (
                     "matches-payload" if opened.st_nlink == 1 and data == payloads[relpath]
                     else "different-content-or-link-count")
@@ -11714,7 +11718,7 @@ def _cmd_init(rest):
                 os.mkdir(name, 0o755, dir_fd=pfd)
                 os.fsync(pfd)
             finally:
-                os.close(pfd)
+                _opf_store._close_fd_exc_safe(pfd)
         for relpath, data in payloads.items():
             stage = "creating " + relpath
             _init_same_root(root, root_fd)
@@ -11858,7 +11862,7 @@ def _upgrade_replace(root_fd, relpath, data):
                 journal._write_all(fd, data)
                 os.fsync(fd)
             finally:
-                os.close(fd)
+                _opf_store._close_fd_exc_safe(fd)
             os.rename(tmpname, name, src_dir_fd=pfd, dst_dir_fd=pfd)
             renamed = True
             os.fsync(pfd)
@@ -11869,7 +11873,7 @@ def _upgrade_replace(root_fd, relpath, data):
                 except OSError:
                     pass
     finally:
-        os.close(pfd)
+        _opf_store._close_fd_exc_safe(pfd)
 
 
 def _upgrade_create_index(root_fd, relpath, data):
@@ -11885,7 +11889,7 @@ def _upgrade_create_index(root_fd, relpath, data):
         os.fsync(pfd)
         return True
     finally:
-        os.close(pfd)
+        _opf_store._close_fd_exc_safe(pfd)
 
 
 def _upgrade_plan(manifest_model, counters_model):
@@ -12478,7 +12482,7 @@ def _upgrade_run(root):
                     raise _UpgradeError("upgrade destination {!r} is not a regular file "
                                         "(fail-closed)".format(relpath))
             finally:
-                os.close(pfd)
+                _opf_store._close_fd_exc_safe(pfd)
         # DISTINCT roots for the recovery/staging advice (R1): `.working` lives under the STORE root, product-
         # scope targets under the PRODUCT root; the two differ for a RELOCATED store.
         recovery_store_root = res.store_root
@@ -12617,7 +12621,7 @@ def _upgrade_run(root):
             print(_upgrade_recovery_text(*recovery), file=sys.stderr)
         raise
     finally:
-        os.close(root_fd)
+        _opf_store._close_fd_exc_safe(root_fd)
 
 
 # Spec 14.1: the former --scan, --plan, --review and --apply modes refuse with a pointer to adoption and the
@@ -13004,12 +13008,13 @@ def _adopt_read_inputs(path):
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
         finally:
             try:
-                _opf_adopt_apply._journal._close_fd_propagating(pfd)
+                _opf_store._close_fd_exc_safe(pfd)
             except OSError:
                 # A failing parent close must not leak the just-opened worksheet fd (round-5 defect 2)
-                # or the parent fd itself (P1, #378: both closes are the journal engine's single
-                # os.close, and close(2) has released the number when it reports the error, so it is
-                # never touched again); the propagating error still fails the read closed below.
+                # or the parent fd itself (P1, #378): the parent close is _close_fd_exc_safe's single
+                # os.close (#377) and the worksheet close the journal engine's, and close(2) has released
+                # the number when it reports the error, so it is never touched again; the propagating
+                # error still fails the read closed below.
                 if fd is not None:
                     _opf_adopt_apply._journal._close_fd_quietly(fd)
                 raise
@@ -13033,7 +13038,7 @@ def _adopt_read_inputs(path):
     except (OSError, _opf_adopt_apply._journal.JournalError) as exc:
         raise ValueError("--inputs worksheet unreadable ({}): {}".format(path, exc))
     finally:
-        _opf_adopt_apply._journal._close_fd_propagating(fd)
+        _opf_store._close_fd_exc_safe(fd)
     try:
         doc = tomllib.loads(raw.decode("utf-8"))
     except (ValueError, RecursionError) as exc:   # UnicodeDecodeError and TOMLDecodeError are ValueErrors
@@ -13290,10 +13295,10 @@ def _cmd_adopt(rest):
                             name, "; ".join(checked.findings)))
             finally:
                 if dfd is not None:
-                    journal._close_fd_propagating(dfd)
+                    _opf_store._close_fd_exc_safe(dfd)
             owner, opened = adopt.journal_state(root_fd, adopt._journal_root(root_abs))
         finally:
-            journal._close_fd_propagating(root_fd)
+            _opf_store._close_fd_exc_safe(root_fd)
         journal_rel = adopt.JOURNAL_REL
         if owner is not None:
             findings.append("the adoption journal lock at {} is held (pid {}); status never seizes it "
@@ -14740,6 +14745,1181 @@ def _cli_self_test():
         return EXIT_MALFORMED
 
 
+def _retained_close_offpath_self_test():
+    """F-RETAINED-CLOSE-OFFPATH (part B), under P1: swept over every descriptor-closing helper family OFF
+    the adopt status/plan paths K9a hardened. Each family's fixture call runs clean to count the os.close
+    calls made from opf/tools code (an ExitStack callback is attributed to the code that registered it;
+    _journal's own bare closes are part A's), then once per position N with the N-th such close releasing
+    its descriptor and then raising OSError(EINTR), the only mode: on Linux a close that raises has
+    released the number (man 2 close), so no mode models a close that keeps it. Whatever the call then
+    returns or raises, every descriptor it opened (os.open / os.dup / os.pipe) must be closed afterwards:
+    what this still catches is a raising close that skips or masks a sibling close (a raising first close
+    in a two-close finally that skips the second). Returns 0 clean, 1 on a failing check, 2 on a harness
+    error."""
+    import contextlib
+    import errno
+    import gzip
+    import io
+    import shutil
+    import tarfile
+    import tempfile
+    import types
+    from unittest import mock
+    import check_opf_prompt_pack
+    import check_opf_upgrade
+    import _opf_adopt_observe
+    this = sys.modules[__name__]
+    tools = os.path.dirname(os.path.abspath(__file__))
+    real_open, real_dup, real_pipe, real_close = os.open, os.dup, os.pipe, os.close
+    failures = []
+    ran = []
+
+    def tools_caller():
+        frame = sys._getframe(2)
+        while frame is not None and os.path.basename(frame.f_code.co_filename) == "contextlib.py":
+            frame = frame.f_back
+        if frame is None or os.path.dirname(os.path.abspath(frame.f_code.co_filename)) != tools:
+            return False
+        # _journal's own remaining bare closes (_read_at, _recreate_file, the path-based lock reader, the
+        # _fsync_* helpers) are hardened by part A of this fix and are not injection points here; the two
+        # _journal close helpers some part-B sites route through are.
+        return (os.path.basename(frame.f_code.co_filename) != "_journal.py"
+                or frame.f_code.co_name in ("_close_fd_propagating", "_close_fd_quietly"))
+
+    def sweep(call):
+        """(positions, survivors) of `call` under the injection at every close position."""
+        state = types.SimpleNamespace(opened=[], seen=0, target=None, fired=False)
+
+        def _open(*args, **kwargs):
+            fd = real_open(*args, **kwargs)
+            state.opened.append(fd)
+            return fd
+
+        def _dup(fd):
+            new = real_dup(fd)
+            state.opened.append(new)
+            return new
+
+        def _pipe():
+            pair = real_pipe()
+            state.opened.extend(pair)
+            return pair
+
+        def _close(fd):
+            if tools_caller():
+                state.seen += 1
+                if state.seen - 1 == state.target:
+                    state.fired = True
+                    real_close(fd)
+                    raise OSError(errno.EINTR, "injected released-close failure")
+            real_close(fd)
+
+        def run(target):
+            state.opened, state.seen, state.target, state.fired = [], 0, target, False
+            os.open, os.dup, os.pipe, os.close = _open, _dup, _pipe, _close
+            os.supports_dir_fd.add(_open)     # _containment.probe keys off os.open's dir_fd support
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    try:
+                        call()
+                    except Exception:  # noqa: BLE001  graded on descriptor retention only
+                        pass
+            finally:
+                os.supports_dir_fd.discard(_open)
+                os.open, os.dup, os.pipe, os.close = real_open, real_dup, real_pipe, real_close
+            left = []
+            for fd in sorted(set(state.opened)):
+                try:
+                    os.fstat(fd)
+                except OSError:
+                    continue
+                left.append(fd)
+            for fd in left:                   # a pre-fix run leaks; release so the suite itself stays clean
+                try:
+                    real_close(fd)
+                except OSError:
+                    pass
+            return left
+
+        run(None)                             # warm any one-time probe so every counted run is identical
+        survivors = [("clean", fd) for fd in run(None)]
+        positions = state.seen
+        for mode in ("released",):
+            for target in range(positions):
+                left = run(target)
+                if not state.fired:
+                    survivors.append((mode, target, "injection did not fire"))
+                survivors.extend((mode, target, fd) for fd in left)
+        return positions, survivors
+
+    def expect(name, call):
+        positions, survivors = sweep(call)
+        ran.append(name)
+        ok = positions > 0 and not survivors
+        print("  {} {}: {} close positions, released mode; surviving descriptors: {!r} (first six)".format(
+            "PASS" if ok else "FAIL", name, positions, survivors[:6]))
+        if not ok:
+            failures.append(name)
+
+    base = Path(tempfile.mkdtemp(prefix="opf-retained-close-offpath-")).resolve()
+    held = []
+    try:
+        # A render-clean empty-state store (the check_opf_drift fixture idiom), its views populated through
+        # the engine's own planner, plus a store-control .gitignore for the write-guard reader.
+        root = base / "store"
+        machine_rel = _opf_store.WORKING_DIRNAME + "/" + _opf_store.DEFAULT_MACHINE_SUBDIR
+        machine = root / machine_rel
+        machine.mkdir(parents=True)
+        types_block = "".join(
+            "[types." + name + ']\nnamespace = "' + ns + '"\n' for name, ns in _opf_store.BASELINE_TYPES.items())
+        views_block = "".join(
+            _opf_views._view(name, kind, list(sources))
+            for name, (kind, sources, _renderer) in _opf_views.NAMED_VIEWS.items())
+        manifest = (
+            "[opf]\n"
+            'standard = "opf"\n'
+            'spec_version = "' + _opf_store.SUPPORTED_SPEC_VERSION + '"\n'
+            'layout = "inline"\n'
+            'posture = "required"\n'
+            'import_status = "none"\n'
+            "\n[store]\n"
+            'sync_target = ""\n'
+            "\n[modules]\ngovernance = true\noperational_policy = true\nconcurrent_operation = true\n\n"
+            + types_block + "\n[vendors]\nregistered = []\n\n" + views_block)
+        (machine / _opf_store.MANIFEST_NAME).write_text(manifest, encoding="utf-8")
+        for name in _opf_store.BASELINE_TYPES:
+            if name != "worklog":
+                (machine / (name + ".index.toml")).write_text("schema = 1\n", encoding="utf-8")
+        (machine / "worklog.toml").write_text("schema = 1\n", encoding="utf-8")
+        (machine / "version.toml").write_text(
+            "schema = 1\n\n[[release]]\n"
+            'version = "0.1.0"\n'
+            'date = "2026-01-01T00:00:00Z"\n'
+            "worklog_span = []\n"
+            'coverage_digest = "' + _opf_release.coverage_digest([]) + '"\n', encoding="utf-8")
+        (root / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
+        (root / _opf_store.WORKING_DIRNAME / ".gitignore").write_text("*.tmp\n", encoding="utf-8")
+        store_view = None
+        plan_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for _name, scope, dest_rel, text in _opf_views.plan_views(plan_fd, machine_rel):
+                (root / dest_rel).write_text(text, encoding="utf-8")
+                if scope == "store" and store_view is None:
+                    store_view = dest_rel
+        finally:
+            os.close(plan_fd)
+        res = _opf_store.resolve_store(root)
+        if res.status != _opf_store.RESOLVED or store_view is None:
+            print("opf retained-close offpath self-test: harness error: the fixture store did not resolve "
+                  "with a store-scope view ({})".format(res.detail), file=sys.stderr)
+            return EXIT_MALFORMED
+
+        # _opf_store: the path-based resolve chain (resolve_store -> _resolve_at -> discover_machine_store
+        # -> _immediate_subdirs) and load_manifest.
+        expect("offpath-store-resolve-chain", lambda: _opf_store.load_manifest(_opf_store.resolve_store(root)))
+        # _opf_views: the render check and write bodies, and the rollback restore.
+        expect("offpath-views-render-check", lambda: _opf_views._render_resolved_store(root, res, True))
+
+        def render_write():
+            (root / store_view).write_text("stale\n", encoding="utf-8")
+            _opf_views._render_resolved_store(root, res, False)
+
+        expect("offpath-views-render-write", render_write)
+        preimages = dict()
+        preimages[("store", store_view)] = b"restored\n"
+        expect("offpath-views-restore", lambda: _opf_views._restore_preimages(root, res, preimages))
+        # _opf_absorb / _opf_changelog: the resolved-store input readers.
+        expect("offpath-absorb-load-done", lambda: _opf_absorb._load_done(res, frozenset()))
+        expect("offpath-changelog-load-inputs", lambda: _opf_changelog._load_inputs(res, root))
+        # _opf_observe: git's open+fstat fallback probe.
+        expect("offpath-observe-worktree-open",
+               lambda: _opf_observe._worktree_open_succeeds(root / "CHANGELOG.md"))
+        # _opf_write_guard: the gitignore reader and the lease acquire / held-lease message / release cycle.
+        expect("offpath-write-guard-gitignore", lambda: _opf_write_guard._homes_read_gitignore(root, "render"))
+        root_fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+        held.append(root_fd)
+        lease = root / machine_rel / _opf_check.LEASE_NAME
+
+        def lease_cycle():
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(str(lease))
+            payload = _opf_write_guard.acquire_lease(root_fd, machine_rel, "render")
+            with contextlib.suppress(_opf_write_guard.WriteGuardError):
+                _opf_write_guard.acquire_lease(root_fd, machine_rel, "render")    # held: names the holder
+            _opf_write_guard.release_lease(root_fd, machine_rel, payload, "render")
+
+        expect("offpath-write-guard-lease", lease_cycle)
+        # check_opf_prompt_pack: the regular-file reader refusing a directory after its open.
+        expect("offpath-prompt-pack-read-regular",
+               lambda: check_opf_prompt_pack._read_regular(str(root), 16, "probe"))
+        # _opf_adopt_observe: _open_directory's refusal teardown and the ExitStack descriptor callbacks.
+        observe = base / "observe"
+        (observe / "public").mkdir(parents=True)
+        os.chmod(str(observe / "public"), 0o755)
+        (observe / "archive.tar.gz").write_bytes(b"archive")
+        observe_fd = os.open(str(observe), os.O_RDONLY | os.O_DIRECTORY)
+        held.append(observe_fd)
+        deadline = types.SimpleNamespace(left=lambda: 1.0)
+        expect("offpath-adopt-observe-open-directory",
+               lambda: _opf_adopt_observe._open_directory(observe_fd, "public", owner=types.SimpleNamespace()))
+
+        def put_and_read():
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink("member", dir_fd=observe_fd)
+            _opf_adopt_observe._put(observe_fd, "member", b"payload", deadline)
+            _opf_adopt_observe._read_archive(observe_fd, deadline)
+
+        expect("offpath-adopt-observe-descriptor-stack", put_and_read)
+        # #377 fix 2 (claude QA r1 coverage gaps): the quarantine stack's five exit-callback closes and the
+        # rollback owner's parent reopen, then the unpacker's members descriptor and per-entry stacks.
+        quarantine = base / "quarantine"
+        quarantine.mkdir()
+
+        def quarantine_cycle():
+            owners = []
+            try:
+                with _opf_adopt_observe._quarantine(str(quarantine), owners):
+                    pass
+            finally:
+                for owner in owners:
+                    with contextlib.suppress(Exception):
+                        owner.finish(False)
+
+        def tar_member(name, kind, payload=b""):
+            info = tarfile.TarInfo(name)
+            info.type, info.mode, info.size = kind, 0o644, len(payload)
+            return info.tobuf(format=tarfile.USTAR_FORMAT) + payload + b"\0" * ((-len(payload)) % 512)
+
+        archive = gzip.compress(b"".join((
+            tar_member("wrap/", tarfile.DIRTYPE), tar_member("wrap/d/", tarfile.DIRTYPE),
+            tar_member("wrap/d/f", tarfile.REGTYPE, b"data"), b"\0" * 1024)), mtime=0)
+        unpack_parent = base / "unpack"
+        unpack_parent.mkdir(mode=0o700)
+        unpack_fd = os.open(str(unpack_parent), os.O_RDONLY | os.O_DIRECTORY)
+        held.append(unpack_fd)
+
+        def unpack():
+            shutil.rmtree(str(unpack_parent / "members"), ignore_errors=True)
+            _opf_adopt_observe._unpack(unpack_fd, archive, deadline)
+
+        for label, call in (("quarantine", quarantine_cycle), ("unpack", unpack)):
+            call()                            # the fixture reaches every registration before it is swept
+            expect("offpath-adopt-observe-" + label, call)
+        # _opf_adopt_apply: the product-root closes of verify_bundle, reconcile, the default-store probe
+        # and a transaction refused at the store posture (nothing written).
+        run_id = "adopt-20260101T000000Z-0123456789abcdef"
+        expect("offpath-adopt-apply-verify-bundle", lambda: _opf_adopt_apply.verify_bundle(str(root), run_id))
+        expect("offpath-adopt-apply-reconcile", lambda: _opf_adopt_apply.reconcile(str(root)))
+        expect("offpath-adopt-apply-default-store-probe",
+               lambda: _opf_adopt_apply._default_store_present_without_manifest(str(root)))
+        expect("offpath-adopt-apply-transaction-refusal",
+               lambda: _opf_adopt_apply.run_adopt_transaction(str(root), run_id, lambda ops: None))
+        # opf.py: the init inventory / root-binding / create-only / observation helpers and the upgrade
+        # replace / create-index writers, beneath a held root.
+        init = base / "init"
+        (init / _opf_store.WORKING_DIRNAME / "a" / "b").mkdir(parents=True)
+        (init / "VERSION").write_bytes(b"1.0.0\n")
+        init_fd = os.open(str(init), os.O_RDONLY | os.O_DIRECTORY)
+        held.append(init_fd)
+
+        def init_helpers():
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink("created.txt", dir_fd=init_fd)
+            _init_inventory(init_fd)
+            _init_same_root(init, init_fd)
+            _init_create(init_fd, "created.txt", b"x\n")
+            _init_observed(init_fd, [_opf_store.WORKING_DIRNAME], dict(VERSION=b"1.0.0\n"))
+
+        expect("offpath-opf-init-helpers", init_helpers)
+
+        def upgrade_helpers():
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink("new.index.toml", dir_fd=init_fd)
+            _upgrade_replace(init_fd, "VERSION", b"1.0.0\n")
+            _upgrade_create_index(init_fd, "new.index.toml", b"schema = 1\n")
+
+        expect("offpath-opf-upgrade-helpers", upgrade_helpers)
+        # #377 fix 2 (claude QA r1 coverage gaps): _render_resolved_store's product-root open-failure branch,
+        # _init_repo's repository-root probe (a real git worktree), _cmd_init's directory publication (its
+        # git boundary stubbed), and _upgrade_run's destination loop and root close over the frozen 1.0.0
+        # store (the cleanliness gate stubbed, stopped at the ignore probe before any write).
+        missing = base / "no-such-product-root"
+        with contextlib.redirect_stderr(io.StringIO()):
+            if _opf_views._render_resolved_store(missing, res, True) != _opf_views.EXIT_CANNOT_EVALUATE:
+                raise RuntimeError("the unopenable product root did not refuse")
+        expect("offpath-views-product-root-unopenable",
+               lambda: _opf_views._render_resolved_store(missing, res, True))
+        repo = base / "repo"
+        repo.mkdir()
+        git = _opf_observe._git_path()
+        made = None if git is None else _opf_observe._run_git(
+            git, repo, ["-c", "init.templateDir=", "-c", "init.defaultBranch=main", "init", "-q"])
+        if made is None or not made.completed or made.rc != 0:
+            raise RuntimeError("the fixture worktree could not be initialized ({})".format(
+                "git not found" if made is None else made.err))
+        _init_repo(repo)
+        expect("offpath-opf-init-repo", lambda: _init_repo(repo))
+        fresh = base / "init-cmd"
+        fresh.mkdir()
+
+        def cmd_init():
+            shutil.rmtree(str(fresh / _opf_store.WORKING_DIRNAME), ignore_errors=True)
+            for name in (_opf_store.POINTER_REL, "CHANGELOG.md"):
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(str(fresh / name))
+            with mock.patch.object(this, "_init_repo", lambda root: ("git", root)), \
+                    mock.patch.object(this, "_init_untracked", lambda *args: None), \
+                    mock.patch.object(this, "_init_unignored", lambda *args: None):
+                return _cmd_init(["--root", str(fresh)])
+
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            if cmd_init() != EXIT_OK:
+                raise RuntimeError("the stubbed init fixture did not publish")
+        expect("offpath-opf-cmd-init", cmd_init)
+        legacy = base / "upgrade"
+        legacy_machine = legacy / _opf_store.WORKING_DIRNAME / _opf_store.DEFAULT_MACHINE_SUBDIR
+        legacy_machine.mkdir(parents=True)
+        for name, text in ((_opf_store.MANIFEST_NAME, check_opf_upgrade._FIX_MANIFEST),
+                           (_opf_check.COUNTERS_NAME, check_opf_upgrade._FIX_COUNTERS),
+                           (_opf_check.VERSION_NAME, check_opf_upgrade._FIX_VERSION),
+                           (_opf_check.WORKLOG_NAME, check_opf_upgrade._FIX_WORKLOG)):
+            (legacy_machine / name).write_text(text, encoding="utf-8")
+        for name in check_opf_upgrade._FIX_INDEX_TYPES:
+            (legacy_machine / (name + _opf_check.INDEX_SUFFIX)).write_text(
+                check_opf_upgrade._FIX_INDEX, encoding="utf-8")
+        (legacy / _opf_store.POINTER_REL).write_text('[store]\ntarget = "dir:."\n', encoding="utf-8")
+        (legacy / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
+
+        class _StopBeforeWrite(Exception):
+            pass
+
+        def stop(*args):
+            raise _StopBeforeWrite()
+
+        def upgrade_run():
+            with mock.patch.object(_opf_write_guard, "check_clean", lambda *args: None), \
+                    mock.patch.object(_opf_write_guard, "check_ignored", stop):
+                _upgrade_run(str(legacy))
+
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                upgrade_run()
+        except _StopBeforeWrite:
+            pass
+        else:
+            raise RuntimeError("the frozen 1.0.0 upgrade fixture did not reach the ignore probe")
+        expect("offpath-opf-upgrade-run", upgrade_run)
+    except Exception as exc:  # noqa: BLE001  a fixture that cannot be built is a harness error, never a pass
+        print("opf retained-close offpath self-test: harness error ({!r})".format(exc), file=sys.stderr)
+        return EXIT_MALFORMED
+    finally:
+        for fd in held:
+            os.close(fd)
+        shutil.rmtree(str(base), ignore_errors=True)
+    if failures:
+        print("opf retained-close offpath self-test: FAIL: {} (failing {} of {} checks)".format(
+            ", ".join(failures), len(failures), len(ran)), file=sys.stderr)
+        return EXIT_FINDING
+    print("opf retained-close offpath self-test: PASS ({} checks)".format(len(ran)))
+    return EXIT_OK
+
+
+def _close_exc_safe_vectors_self_test():
+    """#377 fix 2, under P1 (one close): the in-flight-exception close vectors. Each vector drives one call
+    site with the close it names releasing its descriptor and then raising (EINTR, and separately EIO, as
+    close(2) does on Linux), and grades one property on its own assertion:
+      body    the body's exception is in flight at the close: that SAME exception object must propagate;
+      normal  nothing is in flight: the injected close error must propagate (fail-closed);
+      caller  the normal vector run from inside a CALLER's `except` block: the close error must still
+              propagate, since the caller's handled exception is not in flight at the close;
+      quiet   a teardown close that swallows by design: the call must complete without the close error.
+    Every vector also requires that no descriptor it opened survives. V1, deterministic reuse, on every
+    vector: the fault also dup2s an unrelated file onto the freed number before it raises, and two more
+    assertions hold: REUSE, that descriptor is still open with its own (st_dev, st_ino); PROBE, the number
+    sees no further os.close and no os.fstat. A run whose reuse setup failed (the unrelated file never
+    reached the number) is red by REUSE, never a pass. Five flips then re-run the vectors and must turn
+    exactly their own vectors red, each by that vector's own assertion: MASK (every close helper always
+    propagating) the body vectors; SWALLOW (always quiet) the normal and caller vectors; CALLER-FRAME
+    (#377 fix 1's any-exception test in place of the calling-frame test, in both helpers, the ExitStack
+    callback and the descriptor stack's close) the caller vectors; RECLOSE (the pre-P1 fstat-then-reclose
+    recovery put back in #377's helpers, in _journal's _close_fd_quietly and _close_fd_propagating, and in
+    _opf_check._close_fd_quietly) every V1 vector, by REUSE (PROBE may fail with it; nothing else may);
+    and PROBE (#378's P flip: the same helpers making one close, then an fstat of the number when it
+    fails, never a second close) every V1 vector, by PROBE alone. The six sites #377 routes through
+    _journal's helpers (_opf_adopt_observe._open_directory's except, _opf_views._render_resolved_store's
+    product-root refusal, both closes in _opf_views._restore_preimages' finally,
+    _opf_write_guard.lease_held_message and opf._init_repo) carry the same V1 vectors; all but
+    _open_directory run unflipped, under RECLOSE and under PROBE only (MASK, SWALLOW and CALLER-FRAME name
+    #377's own helpers, which those sites do not call). V2 then drives each #377 helper, the descriptor
+    stack and _opf_check._close_fd_quietly with a real second thread that takes the freed number before
+    the close raises: that thread must still own it, and RECLOSE (by REUSE) and PROBE (by PROBE alone) must
+    turn each V2 vector red. Last, a forced reuse-setup failure must turn a V1 row red by REUSE.
+    Returns 0 clean, 1 on a failing check, 2 on a harness error."""
+    import contextlib
+    import errno
+    import functools
+    import io
+    import shutil
+    import tempfile
+    import threading
+    import types
+    from unittest import mock
+    import check_opf_prompt_pack
+    import _opf_adopt_observe
+    journal = _opf_store._journal
+    real_open, real_dup, real_close, real_fstat, real_read = os.open, os.dup, os.close, os.fstat, os.read
+    ANY = object()
+    state = types.SimpleNamespace(opened=[], target=None, injected=None, err=errno.EIO, reuse=False,
+                                  number=None, closes=0, probes=0, unrelated=None, want=None,
+                                  break_reuse=False)
+
+    def propagating(fd):
+        """A P1 propagating close (the MASK and CALLER-FRAME stand-in): one os.close, its error raised."""
+        os.close(fd)
+
+    def quietly(fd):
+        """A P1 quiet close (the SWALLOW and CALLER-FRAME stand-in): one os.close, its error swallowed."""
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+    def reclose(fd, quiet):
+        """RECLOSE: the pre-P1 confirm-then-reclose recovery, inlined so the flip outlives #378's _journal."""
+        try:
+            os.close(fd)
+            return
+        except OSError as exc:
+            first = exc
+        try:
+            os.fstat(fd)
+        except OSError:
+            if quiet:
+                return
+            raise first
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        if not quiet:
+            raise first
+
+    def reclose_exc_safe(fd):
+        tb = sys.exc_info()[2]
+        reclose(fd, tb is not None and tb.tb_frame is sys._getframe(1))
+
+    def probe(fd, quiet):
+        """PROBE (#378's P flip): one os.close, then an fstat of the number when it fails, never a second
+        close; the error rule is the helper's own, so the flip is red by PROBE alone."""
+        try:
+            os.close(fd)
+            return
+        except OSError as exc:
+            first = exc
+        with contextlib.suppress(OSError):
+            os.fstat(fd)
+        if not quiet:
+            raise first
+
+    def probe_exc_safe(fd):
+        tb = sys.exc_info()[2]
+        probe(fd, tb is not None and tb.tb_frame is sys._getframe(1))
+
+    class _Body(BaseException):
+        """The body's in-flight exception; a BaseException, so no site handler maps it."""
+
+    class _CallerHandled(Exception):
+        """The exception a CALLER is handling while it calls the site normally."""
+
+    def arm(fd=ANY):
+        """Make the next close (of `fd`, when given) release the descriptor and then raise."""
+        state.target = fd
+
+    def _open(*args, **kwargs):
+        fd = real_open(*args, **kwargs)
+        state.opened.append(fd)
+        return fd
+
+    def _dup(fd):
+        new = real_dup(fd)
+        state.opened.append(new)
+        return new
+
+    def _close(fd):
+        if state.number is not None and fd == state.number:
+            state.closes += 1                 # a second close of the injected number (PROBE)
+        if state.target is ANY or (state.target is not None and state.target == fd):
+            state.target = None
+            real_close(fd)                    # RELEASED first, as close(2) does on Linux
+            state.injected = OSError(state.err, "injected released-close failure")
+            if state.reuse:
+                try:                          # V1: an unrelated file takes the freed number
+                    os.dup2(-1 if state.break_reuse else state.unrelated, fd)
+                except OSError:
+                    pass                      # the reuse setup failed: p1_fails reports it, never a pass
+                else:
+                    state.number = fd
+            raise state.injected
+        real_close(fd)
+
+    def _fstat(fd, *args, **kwargs):
+        if state.number is not None and fd == state.number:
+            state.probes += 1                 # an fstat probe of the injected number (PROBE)
+        return real_fstat(fd, *args, **kwargs)
+
+    def holds_unrelated(fd):
+        """Whether fd still names the unrelated file a V1 fault put on it (only then is it closed here)."""
+        try:
+            now = real_fstat(fd)
+        except OSError:
+            return False
+        return (now.st_dev, now.st_ino) == (state.want.st_dev, state.want.st_ino)
+
+    def p1_fails():
+        """The REUSE and PROBE failures of the run just made; releases the reused number. A run that asked
+        for reuse whose unrelated file never reached the injected number is red by REUSE: without it the
+        REUSE and PROBE assertions have nothing to observe, so the row proves nothing."""
+        fails = []
+        if state.number is None:
+            if state.reuse:
+                fails.append("reuse: the reuse setup failed (no unrelated file was put on the injected "
+                             "number{})".format("" if state.injected is not None else "; nothing fired"))
+            return fails
+        if state.closes or state.probes:
+            fails.append("probe: the injected number saw {} more close(s) and {} fstat(s)".format(
+                state.closes, state.probes))
+        if not holds_unrelated(state.number):
+            try:
+                real_fstat(state.number)
+            except OSError:
+                fails.append("reuse: the unrelated descriptor on the reused number was closed")
+            else:                             # another file holds the number now: never closed here
+                fails.append("reuse: the reused number no longer holds the unrelated file")
+        else:
+            real_close(state.number)          # still the unrelated file this run put there
+        return fails
+
+    def run(call, reuse=False, err=errno.EIO):
+        """(the exception `call` raised, or None; the descriptors it opened that are still open; its REUSE
+        and PROBE failures)."""
+        state.opened, state.target, state.injected = [], None, None
+        state.reuse, state.err, state.number, state.closes, state.probes = reuse, err, None, 0, 0
+        got = None
+        os.open, os.dup, os.close, os.fstat = _open, _dup, _close, _fstat
+        os.supports_dir_fd.add(_open)         # _containment.probe keys off os.open's dir_fd support
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                call()
+        except BaseException as exc:  # noqa: BLE001  graded by the vector
+            got = exc
+        finally:
+            os.supports_dir_fd.discard(_open)
+            os.open, os.dup, os.close, os.fstat = real_open, real_dup, real_close, real_fstat
+            state.target = None
+        left = []
+        for fd in sorted(set(state.opened)):
+            if fd == state.number and holds_unrelated(fd):
+                continue                      # the unrelated file: graded by REUSE, never as a survivor
+            try:
+                real_fstat(fd)
+            except OSError:
+                continue
+            left.append(fd)
+        for fd in left:                       # a failing vector leaks; release so the suite stays clean
+            with contextlib.suppress(OSError):
+                real_close(fd)
+        return got, left, p1_fails()
+
+    def raiser(body, result=None):
+        """A stand-in that arms the next close, then raises the body exception or returns `result`."""
+        def hook(*args, **kwargs):
+            arm()
+            if body is not None:
+                raise body
+            return result
+        return hook
+
+    def first_call(obj, name, body, real):
+        """Patch obj.name so its first call arms the next close and raises `body` (or delegates)."""
+        calls = []
+
+        def hook(*args, **kwargs):
+            calls.append(None)
+            if len(calls) == 1:
+                arm()
+                if body is not None:
+                    raise body
+            return real(*args, **kwargs)
+        return mock.patch.object(obj, name, hook)
+
+    def then_arm(obj, name, body):
+        """Patch obj.name so it runs, THEN arms the next close and raises `body` (or returns its result)."""
+        real = getattr(obj, name)
+
+        def hook(*args, **kwargs):
+            result = real(*args, **kwargs)
+            arm()
+            if body is not None:
+                raise body
+            return result
+        return mock.patch.object(obj, name, hook)
+
+    def dirfd(path):
+        return real_open(str(path), os.O_RDONLY | os.O_DIRECTORY)
+
+    tmp = Path(tempfile.mkdtemp(prefix="opf-close-exc-safe-")).resolve()
+    res = types.SimpleNamespace(status=_opf_store.RESOLVED, store_root=tmp, machine_rel="m",
+                                pointer_source="default")
+
+    # Each case maps a body exception (None: the normal path) to the call a vector runs.
+    def c_store_subdirs(body):
+        def call():
+            root = dirfd(tmp)
+            try:
+                with mock.patch.object(_opf_store, "_list_real_subdirs", raiser(body, [])):
+                    _opf_store._immediate_subdirs(root, ".working")
+            finally:
+                real_close(root)
+        return call
+
+    def c_store_load_manifest(body):
+        def call():
+            with mock.patch.object(_opf_store, "_read_toml_contained", raiser(body, {})):
+                _opf_store.load_manifest(res)
+        return call
+
+    def c_views_render(body):
+        def call():
+            with mock.patch.object(_opf_views, "_render_resolved", raiser(body, 0)):
+                _opf_views._render_resolved_store(tmp, res, True)
+        return call
+
+    def c_views_write_temp(body):
+        def call():
+            root = dirfd(tmp)
+            try:
+                with mock.patch.object(_opf_views, "_WRITE_GATE_COMPOSED", True), \
+                        then_arm(journal, "_write_all", body):
+                    _opf_views._write_contained(root, "m/VIEW.md", "view\n", False)
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(str(tmp / "m" / "VIEW.md"))
+                real_close(root)
+        return call
+
+    def c_adopt_apply_probe(body):
+        def call():
+            with mock.patch.object(_opf_store, "discover_machine_store", raiser(body, ("present", None, None))):
+                _opf_adopt_apply._default_store_present_without_manifest(tmp)
+        return call
+
+    def c_adopt_apply_transaction(body):
+        def call():
+            product = Path(tempfile.mkdtemp(dir=str(tmp))).resolve()
+            (product / "legacy").mkdir()
+            (product / "legacy" / "RULES.md").write_bytes(b"old rules\n")
+            digest = "sha256:" + _opf_adopt_apply._sha256(b"old rules\n")
+            real_root = _opf_adopt_apply._open_product_root
+
+            def open_root(product_root):
+                fd = real_root(product_root)
+                arm(fd)                       # only the product-root descriptor's close is injected
+                return fd
+
+            def compose(ops):
+                ops.preserve("legacy/RULES.md", digest)
+                if body is not None:
+                    raise body
+            try:
+                with mock.patch.object(_opf_adopt_apply, "_open_product_root", open_root):
+                    _opf_adopt_apply.run_adopt_transaction(
+                        str(product), "adopt-20260101T000000Z-0123456789abcdef", compose)
+            finally:
+                shutil.rmtree(str(product), ignore_errors=True)
+        return call
+
+    def c_adopt_observe_open_directory(body):
+        def call():
+            parent = dirfd(tmp)
+            try:
+                with mock.patch.object(_opf_adopt_observe.planning, "_stamp", raiser(body)):
+                    _opf_adopt_observe._open_directory(parent, "other")
+            finally:
+                real_close(parent)
+        return call
+
+    def c_adopt_observe_put(body):
+        def call():
+            parent = dirfd(tmp)
+            name = "put-" + os.urandom(6).hex()
+            try:
+                _opf_adopt_observe._put(parent, name, b"data", types.SimpleNamespace(left=raiser(body)))
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(name, dir_fd=parent)
+                real_close(parent)
+        return call
+
+    def c_adopt_observe_quarantine(body):
+        def call():
+            owners = []
+            try:
+                with _opf_adopt_observe._quarantine(str(tmp / "q"), owners):
+                    arm()                     # the stack's first exit callback closes the quarantine fd
+                    if body is not None:
+                        raise body
+            finally:
+                for owner in owners:
+                    with contextlib.suppress(Exception):
+                        owner.finish(False)
+        return call
+
+    def c_changelog(body):
+        def call():
+            with mock.patch.object(_opf_store, "_read_toml_contained", raiser(body, None)):
+                _opf_changelog._load_inputs(res, tmp)
+        return call
+
+    def c_absorb(body):
+        def call():
+            with mock.patch.object(_opf_store, "_read_toml_contained", raiser(body, {})):
+                _opf_absorb._load_done(res, frozenset())
+        return call
+
+    def c_observe(body):
+        def call():
+            with first_call(os, "fstat", body, _fstat):
+                _opf_observe._worktree_open_succeeds(tmp / "lease")
+        return call
+
+    def c_write_guard_read(body):
+        def call():
+            parent = dirfd(tmp)
+            try:
+                with first_call(os, "read", body, real_read):
+                    _opf_write_guard.read_lease_payload(parent, "lease")
+            finally:
+                real_close(parent)
+        return call
+
+    def c_write_guard_acquire(body):
+        def call():
+            root = dirfd(tmp)
+            try:
+                with then_arm(journal, "_write_all", body):
+                    _opf_write_guard.acquire_lease(root, "m", "render")
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(str(tmp / "m" / _opf_check.LEASE_NAME))
+                real_close(root)
+        return call
+
+    def c_prompt_pack(body):
+        if body is None:
+            # The site's normal path hands the fd to fdopen, so its normal vector drives the helper itself.
+            def call():
+                fd = os.open(str(tmp / "lease"), os.O_RDONLY)
+                arm()
+                check_opf_prompt_pack._close_fd_exc_safe(fd)
+            return call
+        real_require = check_opf_prompt_pack._require
+
+        def require(condition, *args, **kwargs):
+            if not condition:
+                arm()
+                try:
+                    real_require(condition, *args, **kwargs)
+                except check_opf_prompt_pack._Refusal as exc:
+                    body.want = exc           # the site's own refusal is the exception in flight
+                    raise
+
+        def call():
+            with mock.patch.object(check_opf_prompt_pack, "_require", require):
+                check_opf_prompt_pack._read_regular(str(tmp / "big"), 8, "vector")
+        return call
+
+    def c_opf_same_root(body):
+        def call():
+            root = dirfd(tmp)
+            calls = []
+
+            def fstat(fd, *args, **kwargs):
+                calls.append(None)
+                if len(calls) == 1:
+                    arm()
+                elif len(calls) == 2 and body is not None:
+                    raise body
+                return _fstat(fd, *args, **kwargs)
+            try:
+                with mock.patch.object(os, "fstat", fstat):
+                    _init_same_root(tmp, root)
+            finally:
+                real_close(root)
+        return call
+
+    def c_opf_init_create(body):
+        def call():
+            root = dirfd(tmp)
+            try:
+                with then_arm(journal, "_recreate_file", body):
+                    _init_create(root, "created.txt", b"x\n")
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(str(tmp / "created.txt"))
+                real_close(root)
+        return call
+
+    def c_views_render_root_refused(body):
+        def call():
+            real_root = _opf_store._open_root_fd
+            calls = []
+
+            def open_root(path):
+                calls.append(path)
+                if len(calls) == 2:           # the product root: refused, so its handler closes the store fd
+                    arm()
+                    raise FileNotFoundError(errno.ENOENT, "self-test: product root refused")
+                return real_root(path)
+            with mock.patch.object(_opf_store, "_open_root_fd", open_root):
+                code = _opf_views._render_resolved_store(tmp, res, True)
+            if code != _opf_views.EXIT_CANNOT_EVALUATE:
+                raise RuntimeError("the refused product root returned {!r}".format(code))
+        return call
+
+    def c_views_restore(which):
+        """_restore_preimages with the `which`-th root it opens armed: 1, the store root; 2, the product root."""
+        def case(body):
+            def call():
+                real_root = _opf_store._open_root_fd
+                opened = []
+
+                def open_root(path):
+                    fd = real_root(path)
+                    opened.append(fd)
+                    if len(opened) == which:
+                        arm(fd)
+                    return fd
+                with mock.patch.object(_opf_store, "_open_root_fd", open_root):
+                    failed = _opf_views._restore_preimages(tmp, res, {})
+                if failed:
+                    raise RuntimeError("the empty rollback reported {!r}".format(failed))
+            return call
+        return case
+
+    def c_write_guard_lease_held(body):
+        def call():
+            parent = dirfd(tmp)
+            try:
+                with then_arm(os, "open", None):  # the lease open arms its own close
+                    message = _opf_write_guard.lease_held_message(parent, "held.toml", "m/held.toml", "render")
+            finally:
+                real_close(parent)
+            if "held by 'vector'" not in message:
+                raise RuntimeError("the held-lease message lost its holder ({!r})".format(message))
+        return call
+
+    def c_opf_init_repo(body):
+        def call():
+            real_nofollow = _opf_store._open_dir_nofollow
+
+            def nofollow(path):
+                fd = real_nofollow(path)
+                arm(fd)                       # only the repository-root probe's close is injected
+                return fd
+            with mock.patch.object(_opf_store, "_open_dir_nofollow", nofollow):
+                _init_repo(repo)
+        return call
+
+    # (site, case, vector kinds, the flips it runs under: None for every flip).
+    every = ("body", "normal", "caller")
+    journal_flips = (None, "RECLOSE", "PROBE")
+    cases = (
+        ("_opf_store._immediate_subdirs finally", c_store_subdirs, every, None),
+        ("_opf_store.load_manifest finally", c_store_load_manifest, every, None),
+        ("_opf_views._render_resolved_store two-close finally", c_views_render, every, None),
+        ("_opf_views._write_contained temp-file finally", c_views_write_temp, every, None),
+        ("_opf_adopt_apply._default_store_present_without_manifest finally", c_adopt_apply_probe, every, None),
+        ("_opf_adopt_apply.run_adopt_transaction product-root finally", c_adopt_apply_transaction, every, None),
+        # Its normal path returns the fd unclosed, so it has a body vector only. Its close is
+        # _journal._close_fd_quietly (#377 routes it there); MASK covers it as the journal helper propagating.
+        ("_opf_adopt_observe._open_directory except", c_adopt_observe_open_directory, ("body",), None),
+        ("_opf_adopt_observe._put descriptor-stack exit callback", c_adopt_observe_put, every, None),
+        ("_opf_adopt_observe._quarantine with-stack exit callback", c_adopt_observe_quarantine, every, None),
+        ("_opf_changelog._load_inputs finally", c_changelog, every, None),
+        ("_opf_absorb._load_done finally", c_absorb, every, None),
+        ("_opf_observe._worktree_open_succeeds finally", c_observe, every, None),
+        ("_opf_write_guard.read_lease_payload finally", c_write_guard_read, every, None),
+        ("_opf_write_guard.acquire_lease payload-fd finally", c_write_guard_acquire, every, None),
+        ("check_opf_prompt_pack._read_regular finally", c_prompt_pack, every, None),
+        ("opf._init_same_root finally", c_opf_same_root, every, None),
+        ("opf._init_create finally", c_opf_init_create, every, None),
+        # The other five closes #377 routes through _journal's helpers: four quiet teardown closes
+        # (_journal._close_fd_quietly) and _init_repo's normal-path probe close (_journal._close_fd_propagating).
+        ("_opf_views._render_resolved_store product-root refusal", c_views_render_root_refused, ("quiet",),
+         journal_flips),
+        ("_opf_views._restore_preimages finally, store-root close", c_views_restore(1), ("quiet",),
+         journal_flips),
+        ("_opf_views._restore_preimages finally, product-root close", c_views_restore(2), ("quiet",),
+         journal_flips),
+        ("_opf_write_guard.lease_held_message finally", c_write_guard_lease_held, ("quiet",), journal_flips),
+        ("opf._init_repo repository-root probe close", c_opf_init_repo, ("normal", "caller"), journal_flips),
+    )
+
+    def chain(exc):
+        seen = []
+        while exc is not None and all(exc is not e for e in seen):
+            seen.append(exc)
+            exc = exc.__cause__ if exc.__cause__ is not None else exc.__context__
+        return seen
+
+    def vector(kind, case, reuse, err):
+        """The failure messages of one vector run (empty: green), each prefixed by the assertion it broke."""
+        body = _Body("vector-original") if kind == "body" else None
+        call = case(body)
+        if kind == "caller":
+            inner = call
+
+            def call():
+                try:
+                    raise _CallerHandled("an exception the caller is handling")
+                except _CallerHandled:
+                    inner()
+        got, left, p1 = run(call, reuse, err)
+        fails = []
+        if state.injected is None:
+            fails.append("injection: the close injection never fired")
+        elif kind == "body":
+            if got is not getattr(body, "want", body):
+                fails.append("body: the in-flight exception was replaced (got {!r})".format(got))
+        elif kind == "quiet":
+            if got is not None:
+                fails.append("quiet: the teardown close did not complete quietly (got {!r})".format(got))
+        elif all(e is not state.injected for e in chain(got)):
+            fails.append("{}: the close error was not raised (got {!r})".format(kind, got))
+        if left:
+            fails.append("descriptors: {} survived".format(left))
+        return fails + p1
+
+    def fix1_close(fd):
+        """#377 fix 1's test: ANY exception in sys.exc_info() counts as in flight."""
+        if sys.exc_info()[1] is not None:
+            quietly(fd)
+        else:
+            propagating(fd)
+
+    def graded(fails, wanted, flip):
+        """A vector is green when nothing is wanted; else red by the wanted assertion, and RECLOSE may also
+        break PROBE, since the old body probes the number before it closes it again."""
+        if wanted is None:
+            return not fails
+        allowed = (wanted, "probe") if flip == "RECLOSE" else (wanted,)
+        return (any(f.startswith(wanted + ":") for f in fails)
+                and all(f.split(":", 1)[0] in allowed for f in fails))
+
+    def stack_close(fd):
+        stack = _opf_adopt_observe._UnwindingStack()
+        stack.push(functools.partial(_opf_store._close_fd_on_exit, fd))
+        stack.close()
+
+    # V2's helpers, each called through its module so a flip applies: (name, call, propagates on raise).
+    v2_helpers = (
+        ("_opf_store._close_fd_exc_safe", lambda fd: _opf_store._close_fd_exc_safe(fd), True),
+        ("_opf_store._close_fd_on_exit", lambda fd: _opf_store._close_fd_on_exit(fd, None, None, None), True),
+        ("check_opf_prompt_pack._close_fd_exc_safe",
+         lambda fd: check_opf_prompt_pack._close_fd_exc_safe(fd), True),
+        ("_opf_adopt_observe._UnwindingStack.close", stack_close, True),
+        ("_opf_check._close_fd_quietly", lambda fd: _opf_check._close_fd_quietly(fd), False),
+    )
+
+    def second_thread(helper, propagates, err):
+        """One V2 run (modelled on T-f8-2): the fault releases the number and sets an Event; a second thread
+        opens a file on that number (forced with dup2 when its open lands elsewhere) and replies; only then
+        does the close raise. Returns the failure messages (empty: green)."""
+        fd = real_open(str(tmp / "lease"), os.O_RDONLY)
+        released, replied = threading.Event(), threading.Event()
+        seen = types.SimpleNamespace(injected=None, closes=0, probes=0, want=None, error=None)
+
+        def take():
+            if not released.wait(10):
+                return
+            try:
+                new = real_open(str(tmp / "big"), os.O_RDONLY)
+                if new != fd:
+                    os.dup2(new, fd)
+                    real_close(new)
+                seen.want = real_fstat(fd)
+            except OSError as exc:
+                seen.error = exc
+            finally:
+                replied.set()
+
+        def close(n):
+            if n == fd:
+                if seen.injected is not None:
+                    seen.closes += 1
+                else:
+                    real_close(n)
+                    seen.injected = OSError(err, "injected released-close failure; a second thread took it")
+                    released.set()
+                    replied.wait(10)
+                    raise seen.injected
+            real_close(n)
+
+        def fstat(n, *args, **kwargs):
+            if n == fd and seen.injected is not None:
+                seen.probes += 1
+            return real_fstat(n, *args, **kwargs)
+
+        thread = threading.Thread(target=take, name="opf-close-v2-reuse", daemon=True)
+        thread.start()
+        got = None
+        os.close, os.fstat = close, fstat
+        try:
+            helper(fd)
+        except OSError as exc:
+            got = exc
+        finally:
+            os.close, os.fstat = real_close, real_fstat
+            released.set()                    # never leave the thread waiting
+            thread.join(10)
+        if seen.injected is None or seen.want is None:
+            with contextlib.suppress(OSError):
+                real_close(fd)
+            return ["injection: the second thread never took the number ({!r})".format(seen.error)]
+        fails = []
+        if got is not (seen.injected if propagates else None):
+            fails.append("rule: the helper's error rule broke (got {!r})".format(got))
+        if seen.closes or seen.probes:
+            fails.append("probe: the released number saw {} more close(s) and {} fstat(s)".format(
+                seen.closes, seen.probes))
+        try:
+            now = real_fstat(fd)
+        except OSError:
+            fails.append("reuse: the second thread's descriptor was closed")
+        else:
+            if (now.st_dev, now.st_ino) != (seen.want.st_dev, seen.want.st_ino):
+                fails.append("reuse: the second thread's number no longer holds its file")   # never closed here
+            else:
+                real_close(fd)                # still the second thread's file
+        return fails
+
+    flips = (
+        (None, ()),
+        ("MASK", ((_opf_store, "_close_fd_exc_safe", propagating),
+                  (check_opf_prompt_pack, "_close_fd_exc_safe", propagating),
+                  (_opf_store, "_close_fd_on_exit", lambda fd, *exc: propagating(fd)),
+                  (journal, "_close_fd_quietly", propagating))),
+        ("SWALLOW", ((_opf_store, "_close_fd_exc_safe", quietly),
+                     (check_opf_prompt_pack, "_close_fd_exc_safe", quietly),
+                     (_opf_store, "_close_fd_on_exit", lambda fd, *exc: quietly(fd)))),
+        ("CALLER-FRAME", ((_opf_store, "_close_fd_exc_safe", fix1_close),
+                          (check_opf_prompt_pack, "_close_fd_exc_safe", fix1_close),
+                          (_opf_store, "_close_fd_on_exit", lambda fd, *exc: fix1_close(fd)),
+                          (_opf_adopt_observe._UnwindingStack, "close",
+                           lambda stack: stack.__exit__(*sys.exc_info())))),
+        ("RECLOSE", ((_opf_store, "_close_fd_exc_safe", reclose_exc_safe),
+                     (check_opf_prompt_pack, "_close_fd_exc_safe", reclose_exc_safe),
+                     (_opf_store, "_close_fd_on_exit",
+                      lambda fd, exc_type, exc, tb: reclose(fd, exc is not None)),
+                     (_opf_check, "_close_fd_quietly", lambda fd: reclose(fd, True)),
+                     (journal, "_close_fd_quietly", lambda fd: reclose(fd, True)),
+                     (journal, "_close_fd_propagating", lambda fd: reclose(fd, False)))),
+        ("PROBE", ((_opf_store, "_close_fd_exc_safe", probe_exc_safe),
+                   (check_opf_prompt_pack, "_close_fd_exc_safe", probe_exc_safe),
+                   (_opf_store, "_close_fd_on_exit", lambda fd, exc_type, exc, tb: probe(fd, exc is not None)),
+                   (_opf_check, "_close_fd_quietly", lambda fd: probe(fd, True)),
+                   (journal, "_close_fd_quietly", lambda fd: probe(fd, True)),
+                   (journal, "_close_fd_propagating", lambda fd: probe(fd, False)))),
+    )
+    # The one assertion each flip must break, per vector kind; every other vector must stay green.
+    reds = {None: {}, "MASK": {"body": "body"}, "SWALLOW": {"normal": "normal", "caller": "caller"},
+            "CALLER-FRAME": {"caller": "caller"}}
+    # RECLOSE breaks REUSE (PROBE may break with it) on every V1 vector, the journal-routed sites' included
+    # (the flip puts the pre-P1 body back in _journal's helpers too); PROBE breaks PROBE alone on every one.
+    reds["RECLOSE"] = dict(body="reuse", normal="reuse", caller="reuse", quiet="reuse")
+    reds["PROBE"] = dict(body="probe", normal="probe", caller="probe", quiet="probe")
+    failures = []
+    checks = 0
+    try:
+        for sub in (".working", "other", "m", "q"):
+            (tmp / sub).mkdir()
+        (tmp / "lease").write_bytes(b"payload")
+        (tmp / "big").write_bytes(b"x" * 64)
+        (tmp / "unrelated").write_bytes(b"unrelated")
+        (tmp / "held.toml").write_bytes(
+            b'holder = "vector"\noperation = "render"\nacquired_at = "2026-01-01T00:00:00Z"\n')
+        # The journal-routed sites resolve the helpers a flip patches through this one _journal module.
+        if _opf_views._journal is not journal or _opf_adopt_observe.store._journal is not journal:
+            raise RuntimeError("a journal-routed site does not resolve the patched _journal module")
+        repo = tmp / "repo"
+        repo.mkdir()
+        git = _opf_observe._git_path()
+        made = None if git is None else _opf_observe._run_git(
+            git, repo, ["-c", "init.templateDir=", "-c", "init.defaultBranch=main", "init", "-q"])
+        if made is None or not made.completed or made.rc != 0:
+            raise RuntimeError("the fixture worktree could not be initialized ({})".format(
+                "git not found" if made is None else made.err))
+        state.unrelated = real_open(str(tmp / "unrelated"), os.O_RDONLY)
+        state.want = real_fstat(state.unrelated)
+        for flip, patches in flips:
+            with contextlib.ExitStack() as patched:
+                for obj, name, value in patches:
+                    patched.enter_context(mock.patch.object(obj, name, value))
+                for site, case, kinds, only in cases:
+                    if only is not None and flip not in only:
+                        continue
+                    for kind in kinds:
+                        for err in (errno.EINTR, errno.EIO):
+                            fails = vector(kind, case, True, err)
+                            wanted = reds[flip].get(kind)
+                            ok = graded(fails, wanted, flip)
+                            checks += 1
+                            if not ok:
+                                failures.append(
+                                    (flip or "unflipped", kind, errno.errorcode[err], site, fails))
+                            print("  {} {} {} {} [{}]: {}".format(
+                                "PASS" if ok else "FAIL", flip or "unflipped", kind, errno.errorcode[err],
+                                site, "; ".join(fails) if fails else "green"))
+        for flip in (None, "RECLOSE", "PROBE"):
+            with contextlib.ExitStack() as patched:
+                for obj, name, value in dict(flips)[flip]:
+                    patched.enter_context(mock.patch.object(obj, name, value))
+                for name, helper, propagates in v2_helpers:
+                    for err in (errno.EINTR, errno.EIO):
+                        fails = second_thread(helper, propagates, err)
+                        ok = graded(fails, {"RECLOSE": "reuse", "PROBE": "probe"}.get(flip), flip)
+                        checks += 1
+                        if not ok:
+                            failures.append((flip or "unflipped", "V2", errno.errorcode[err], name, fails))
+                        print("  {} {} V2 {} [{}]: {}".format(
+                            "PASS" if ok else "FAIL", flip or "unflipped", errno.errorcode[err], name,
+                            "; ".join(fails) if fails else "green"))
+        # A V1 row whose reuse setup fails (the unrelated file never reaches the number: here dup2 is handed
+        # an invalid source) must be red by REUSE, never pass because REUSE and PROBE had nothing to observe.
+        for err in (errno.EINTR, errno.EIO):
+            state.break_reuse = True
+            try:
+                fails = vector("body", c_store_subdirs, True, err)
+            finally:
+                state.break_reuse = False
+            ok = any(f.startswith("reuse:") for f in fails)
+            checks += 1
+            if not ok:
+                failures.append(("forced-reuse-setup-failure", "body", errno.errorcode[err],
+                                 "_opf_store._immediate_subdirs finally", fails))
+            print("  {} forced-reuse-setup-failure body {} [_opf_store._immediate_subdirs finally]: {}".format(
+                "PASS" if ok else "FAIL", errno.errorcode[err], "; ".join(fails) if fails else "green"))
+    except Exception as exc:  # noqa: BLE001  a fixture that cannot be built is a harness error, never a pass
+        print("opf close exc-safe vectors self-test: harness error ({!r})".format(exc), file=sys.stderr)
+        return EXIT_MALFORMED
+    finally:
+        if state.unrelated is not None:
+            real_close(state.unrelated)
+        shutil.rmtree(str(tmp), ignore_errors=True)
+    if failures:
+        print("opf close exc-safe vectors self-test: FAIL (failing {} of {} checks): {!r}".format(
+            len(failures), checks, failures[:4]), file=sys.stderr)
+        return EXIT_FINDING
+    print("opf close exc-safe vectors self-test: PASS ({} checks)".format(checks))
+    return EXIT_OK
+
+
 # Registered helper self-tests, run by `opf.py --self-test`. Each is (label, callable) returning a
 # 0/1/2 exit code (0 clean, 1 finding, 2 cannot-evaluate). Later units append their own helper here.
 # Built by a function rather than a module-level tuple because the _opf_* helpers it references are bound by
@@ -14765,6 +15945,8 @@ def _self_tests():
     ("opf-watchdog-isolation", _watchdog_isolation_self_test),
     ("opf-watchdog-regressions", _watchdog_regression_self_test),
     ("opf-aggregator", _aggregator_self_test),
+    ("opf-retained-close-offpath", _retained_close_offpath_self_test),
+    ("opf-close-exc-safe-vectors", _close_exc_safe_vectors_self_test),
     ("opf-cli", _cli_self_test),
 )
 
