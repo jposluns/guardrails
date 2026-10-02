@@ -1343,7 +1343,7 @@ def _write_contained(root_fd, relpath, text, check, preimages=None, scope=None):
                 _journal._write_all(fd, new_bytes)
                 os.fsync(fd)
             finally:
-                os.close(fd)
+                _opf_store._close_fd_exc_safe(fd)
             os.rename(tmpname, name, src_dir_fd=pfd, dst_dir_fd=pfd)   # atomic entry replace, no truncation
             _renamed = True
             os.fsync(pfd)                                 # the rename (a directory entry change) is durable
@@ -1359,7 +1359,7 @@ def _write_contained(root_fd, relpath, text, check, preimages=None, scope=None):
     except OSError as exc:                                 # ELOOP (a component/target raced to a symlink), etc.
         raise ViewsError("cannot write {} ({})".format(relpath, exc))
     finally:
-        os.close(pfd)
+        _opf_store._close_fd_exc_safe(pfd)
 
 
 def _check_declared_sources(view_name, required, declared):
@@ -1596,7 +1596,7 @@ def _render_resolved_store(product_root, res, check, capture=None):
     try:
         product_root_fd = _opf_store._open_root_fd(product_root)   # no-follow fd for the public VERSION write
     except OSError as exc:
-        os.close(store_root_fd)
+        _journal._close_fd_quietly(store_root_fd)
         print("opf render: cannot open product root {} ({})".format(product_root, exc), file=sys.stderr)
         return EXIT_CANNOT_EVALUATE
     try:
@@ -1610,8 +1610,10 @@ def _render_resolved_store(product_root, res, check, capture=None):
             print("opf render: cannot evaluate: {}".format(exc), file=sys.stderr)
             return EXIT_CANNOT_EVALUATE
     finally:
-        os.close(store_root_fd)
-        os.close(product_root_fd)
+        try:
+            _opf_store._close_fd_exc_safe(store_root_fd)
+        finally:
+            _opf_store._close_fd_exc_safe(product_root_fd)
 
 
 def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported_profiles=None,
@@ -1843,7 +1845,7 @@ def _restore_contained(root_fd, relpath, old_bytes):
                 _journal._write_all(fd, old_bytes)
                 os.fsync(fd)
             finally:
-                os.close(fd)
+                _opf_store._close_fd_exc_safe(fd)
             os.rename(tmpname, name, src_dir_fd=pfd, dst_dir_fd=pfd)
             _renamed = True
             os.fsync(pfd)
@@ -1854,7 +1856,7 @@ def _restore_contained(root_fd, relpath, old_bytes):
                 except OSError:
                     pass
     finally:
-        os.close(pfd)
+        _opf_store._close_fd_exc_safe(pfd)
 
 
 def _restore_preimages(product_root, res, preimages):
@@ -1885,15 +1887,9 @@ def _restore_preimages(product_root, res, preimages):
                 failed.append(relpath)
     finally:
         if store_root_fd is not None:
-            try:
-                os.close(store_root_fd)
-            except OSError:
-                pass
+            _journal._close_fd_quietly(store_root_fd)
         if product_root_fd is not None:
-            try:
-                os.close(product_root_fd)
-            except OSError:
-                pass
+            _journal._close_fd_quietly(product_root_fd)
     return failed
 
 

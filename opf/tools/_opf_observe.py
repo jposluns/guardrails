@@ -486,7 +486,7 @@ def _worktree_open_succeeds(worktree_path):
     except OSError:
         return False
     finally:
-        os.close(fd)
+        _opf_store._close_fd_exc_safe(fd)
     return True
 
 
