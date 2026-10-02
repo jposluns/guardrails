@@ -1781,9 +1781,11 @@ def _watchdog_completion_case(mode):
             # scratch.rename to the final name once each and in that order, and
             # no other occurrence of the text write_text( or Path(directory, name)
             # anywhere in the subject; it does not otherwise check the write's
-            # arguments. It does not see another spelling of the final path, a
-            # rebinding of scratch, a write by any method other than write_text,
-            # an os-level call, exec or a shell.
+            # arguments. It matches exact text only, so anything spelled
+            # differently is outside it: another spelling of a call, the final
+            # path or a binding (spacing, an alias, a rebinding of scratch), a
+            # write by any method other than write_text, an os-level call, exec
+            # or a shell.
             text = subject.replace(repr(directory), "directory")  # TMPDIR-blind
             steps = ["scratch = Path(directory, name + '.tmp'); ",
                      "scratch.write_text(", "scratch.rename(Path(directory, name)); "]
