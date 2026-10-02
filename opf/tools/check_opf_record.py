@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OPF record-authoring gate (spec 8.8): `opf record` behaviour, and red-on-revert discriminators.
 
-  check_opf_record.py --self-test                    the fixture suite (T1-T71)
+  check_opf_record.py --self-test                    the fixture suite (T1-T72)
   check_opf_record.py --self-test --red-on-revert    the same, plus each test's flip must turn it red
 
 There is no live-adopter leg (this repository is not an OPFiles adopter), so the whole assurance rides the
@@ -278,6 +278,59 @@ Each case runs on its own copy of that template; the root is removed in a finall
   T71 the module residual list states once, beside the asynchronous-interrupt disclosure, that an
       interpreter allocation failure may leave a lease, a capability record, a journal lock or a
       descriptor for the next run's recovery (flip: the statement removed)
+  T72 a decision that lands unqualified decided supersedes its chain's current resolution in the same act:
+      a maintainer decides PD-2 with --supersedes PD-1, doctor VALID, and DECISIONS lists PD-2 effective
+      and PD-1 superseded; the maintainer's ratification of an assistant's decided/proposed PD-3 with
+      --supersedes PD-2 makes PD-3 the one effective resolution, doctor VALID (flip: the planner writes no
+      link, which only the independent oracle refuses). Each supersession refusal is its own test with its
+      own flip, every byte untouched: a --supersedes value that is not a record id refuses before the
+      store is resolved (flip: drop the parser's record-id check); --supersedes on an assistant decide (a
+      decided/proposed landing) refuses (flip: drop the landing check); a target still open refuses (flip:
+      drop the target-decided check); a target the schema grades invalid, and separately a target seated
+      in the index as another type, each refuses (flip, applied to each of the two: drop only the
+      target-validation call); a target that is no record, and separately an existing backlog item in
+      another namespace, each refuses (flip, applied to each of the two: append the link without locating
+      or checking the target, since the lookup cannot be dropped alone); a second successor for a
+      resolution already superseded refuses (flip: drop the chain-head check); and a target whose own
+      chain leads back to the record refuses (flip: drop the cycle check). Under each of the landing,
+      target-validation, and unchecked-target flips the link publishes and the post-publication render's
+      source gate then refuses on a doctor finding: C-DECISION-CHAINS with no current resolution
+      (landing), the target's own pre-existing finding (invalid or wrong-type target), or C-LINKS (a
+      dangling link, or a supersession of another type); under the target-decided flip the link publishes
+      doctor VALID; each exits with bytes changed, so the untouched assertion turns red. The fork and
+      cycle tests assert that their own check refuses before the chain rule runs, because under their
+      flips the chain rule still refuses with every byte untouched (two current resolutions for the fork,
+      none for the cycle). Every landing at unqualified decided must leave its chain with exactly one
+      current resolution (the doctor's own rule, recomputed over the planned index), each case its own
+      test, every byte untouched: QA1 Case A, a --supersedes naming a chain head whose joined chain would
+      still have none (the same decide without the link then lands doctor VALID); QA1 Case B, a record
+      already superseded by an open successor, decided with --supersedes; and that record decided without
+      the link (flip, applied to each of the three: drop the chain rule, under which the decide publishes
+      and the source gate refuses on C-DECISION-CHAINS with no current resolution). The chain rule
+      reads what the doctor reads, the archive included, each case its own test after a release whose
+      worklog rotates to archive/2026 with one decision: QA3 reproduction A, a decide whose chain's one
+      current resolution was rotated, lands doctor VALID; QA3 reproduction B, the decide of a record an
+      archived withdrawn decision supersedes, refuses with every byte untouched; and an archived index
+      that does not parse refuses a decide with every byte untouched, never skipped (flip, applied to
+      each of the three: restore the active-only read, under which A refuses, B publishes and the
+      source gate refuses on C-DECISION-CHAINS with no current resolution, and the third publishes and
+      the final doctor cannot evaluate the archive). The supersedes target checks read the same record
+      set, each case its own test: superseding a decided chain head rotated to the archive lands doctor
+      VALID, and a second successor for a resolution an archived decision already supersedes refuses at
+      the chain-head check, before the chain rule runs, with every byte untouched, and an archived
+      withdrawn target refuses as not an unqualified decided resolution, with every byte untouched (flip,
+      applied to each of the three: restore the active-only target read, under which the archived head
+      is no record, the fork reaches the chain rule, and the withdrawn target refuses as no record); and
+      a supersede that would close a cycle through an archived chain member refuses with the cycle
+      check's own message, every byte untouched, in its own test (flip: restore the active-only read for
+      the cycle check alone, under which the chain rule refuses instead with its own message). The
+      decisions register's other two types are driven end to end:
+      a maintainer files a maintainer_decision linking exemplifies PP-1, doctor VALID and listed with its link, and an
+      assistant distils a preference_pattern to active/proposed that the maintainer ratifies and then
+      retires, doctor VALID (flip: the planner drops the requested links, which only the independent
+      oracle refuses); the same ruling filed by an assistant refuses with every byte untouched in its own
+      test (flip: the planner's record validation replaced by a pass-through, so the ruling publishes and
+      that gate reports its actor finding)
 
 Exit convention: 0 every assertion passes; 1 an assertion fails; 2 the harness cannot evaluate (git absent
 or unusable, temporary storage unusable, or any unexpected harness fault), never a clean skip.
@@ -299,10 +352,12 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _journal as journal          # noqa: E402
+import _opf_changelog as opf_changelog  # noqa: E402
 import _opf_check as opf_check      # noqa: E402
 import _opf_emit as emit            # noqa: E402
 import _opf_oplock                  # noqa: E402
 import _opf_record as record        # noqa: E402
+import _opf_release as opf_release  # noqa: E402
 import _opf_schema as schema        # noqa: E402
 import _opf_write_guard as guard    # noqa: E402
 import _optlevel                    # noqa: E402
@@ -313,6 +368,9 @@ MACH = ".working/toml"
 COUNTERS = MACH + "/counters.toml"
 BI_INDEX = MACH + "/backlog_item.index.toml"
 PD_INDEX = MACH + "/pending_decision.index.toml"
+MD_INDEX = MACH + "/maintainer_decision.index.toml"
+PP_INDEX = MACH + "/preference_pattern.index.toml"
+DECISIONS_VIEW = ".working/DECISIONS.md"
 DN_INDEX = MACH + "/done.index.toml"
 WORKLOG = MACH + "/worklog.toml"
 VERSION = MACH + "/version.toml"
@@ -1469,6 +1527,530 @@ def flip_t18_apply_only():
         if record._decides(rtype, cur_state, target):
             original(req, rid, rtype, cur_state, target)
     return patch.object(record, "_require_decision_options", requires_only)
+
+
+# --- T72: supersession when a decision is decided, and the rest of the decisions register ---------------
+
+def _section(root, heading):
+    """The entry lines of one section of the rendered DECISIONS view."""
+    text = read(root, DECISIONS_VIEW).decode("utf-8")
+    assert "## " + heading + "\n" in text, (heading, text)
+    return text.split("## " + heading + "\n", 1)[1].split("\n## ", 1)[0].strip().splitlines()
+
+
+def _pd_create(title):
+    return ["create", "--type", "pending_decision", "--title", title]
+
+
+def _decided(fx, root, title, n):
+    """PD-n created and decided by a maintainer, each step committed. Run under ticking()."""
+    rid = "PD-{}".format(n)
+    step(fx, root, _pd_create(title) + MAINTAINER, rid)
+    step(fx, root, ["transition", rid, "decided"] + DECIDE + MAINTAINER, rid + " decided")
+
+
+def _supersede(rid, target, actor=MAINTAINER):
+    return ["transition", rid, "decided"] + DECIDE + ["--supersedes", target] + actor
+
+
+def t72_supersession(fx):
+    env = fx.env
+    root = fx.case("t72-supersedes")
+    with ticking():
+        _decided(fx, root, "which layout", 1)
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        step(fx, root, ["transition", "PD-2", "decided", "--decision", "the split layout", "--decided-by",
+                        "the architecture board", "--supersedes", "PD-1"] + MAINTAINER, "PD-2 supersedes PD-1")
+        rec = row(root, "PD-2", PD_INDEX)
+        assert rec["status"] == "decided" and rec["links"] == [{"rel": "supersedes", "id": "PD-1"}], rec
+        assert "links" not in row(root, "PD-1", PD_INDEX), row(root, "PD-1", PD_INDEX)
+        entry = model(root, WORKLOG)["entry"][-1]
+        assert entry["detail"] == "opf-record transition PD-2 open -> decided\nsupersedes: PD-1", entry
+        assert entry["links"] == [{"rel": "relates", "id": "PD-2"}, {"rel": "relates", "id": "PD-1"}], entry
+        doctor_valid(env, root)
+        assert _section(root, "Effective resolutions") == ["- PD-2 which layout, again (supersedes PD-1)"], (
+            read(root, DECISIONS_VIEW))
+        assert _section(root, "Superseded resolutions") == ["- PD-1 which layout"], read(root, DECISIONS_VIEW)
+        # An assistant files PD-3's answer at decided/proposed; the maintainer's ratification carries the link.
+        step(fx, root, _pd_create("which layout, third") + ASSISTANT, "PD-3")
+        step(fx, root, ["transition", "PD-3", "decided"] + DECIDE + ASSISTANT, "PD-3 decided/proposed")
+        step(fx, root, ["transition", "PD-3", "decided", "--supersedes", "PD-2"] + MAINTAINER, "PD-3 ratified")
+        rec = row(root, "PD-3", PD_INDEX)
+        assert rec["status"] == "decided" and "proposed_from" not in rec, rec
+        assert rec["links"] == [{"rel": "supersedes", "id": "PD-2"}] and _bundle(rec)[0] == "the inline layout", rec
+        assert lifecycle(root)[-1] == ("opf-record transition PD-3 decided/proposed -> decided\n"
+                                       "supersedes: PD-2"), lifecycle(root)
+        doctor_valid(env, root)
+        assert _section(root, "Effective resolutions") == ["- PD-3 which layout, third (supersedes PD-2)"], (
+            read(root, DECISIONS_VIEW))
+        assert _section(root, "Superseded resolutions") == ["- PD-1 which layout", "- PD-2 which layout, again"]
+
+
+def flip_t72_link():
+    """The planner writes no link: only the independent oracle, which reads --supersedes, refuses it."""
+    return patch.object(record, "_supersession_link", lambda req, ctx, operand, rid: None)
+
+
+# Each supersession refusal is its own test, so its own flip must turn it red (the PR2 fix 5 rule).
+
+def t72_record_id(fx):
+    """A --supersedes value that is not a record id refuses in the parser, before the store is resolved."""
+    root = fx.case("t72-record-id")
+    with ticking():
+        _decided(fx, root, "which layout", 1)
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        refused_before_store(fx.env, root, _supersede("PD-2", "layout"), "is not a record id")
+
+
+def flip_t72_record_id():
+    """Drop the parser's record-id check: the malformed value reaches the store."""
+    return patch.object(record, "_require_supersedes_id", lambda values: None)
+
+
+def t72_proposed_landing(fx):
+    """--supersedes on an assistant decide (a decided/proposed landing) refuses with every byte untouched:
+    the doctor counts the link from a proposal, which would leave PD-1's chain with no current resolution."""
+    root = fx.case("t72-proposed-landing")
+    with ticking():
+        _decided(fx, root, "which layout", 1)
+        step(fx, root, _pd_create("which layout, again") + ASSISTANT, "PD-2")
+        refused_untouched(fx.env, root, _supersede("PD-2", "PD-1", ASSISTANT),
+                          "applies only to a transition that lands")
+
+
+def flip_t72_landing():
+    """Drop the landing check: the proposal's link publishes before the doctor finds the chain with no
+    current resolution."""
+    return patch.object(record, "_require_supersedes_landing", lambda req, rid, rtype, current, to_status: None)
+
+
+def t72_undecided_target(fx):
+    """A target that is still open is not a current resolution: the supersede refuses with every byte
+    untouched."""
+    root = fx.case("t72-undecided-target")
+    with ticking():
+        step(fx, root, PD_CREATE + MAINTAINER, "PD-1")
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        refused_untouched(fx.env, root, _supersede("PD-2", "PD-1"), "not an unqualified decided")
+
+
+def flip_t72_decided():
+    """Drop the target-decided check: the link to an open decision publishes (doctor VALID)."""
+    return patch.object(record, "_require_superseded_decided", lambda trow, target: None)
+
+
+def t72_invalid_target(fx):
+    """A target the schema grades invalid (a whitespace decision, committed by a canonical hand edit: a
+    doctor finding) is never trusted: the supersede refuses with every byte untouched."""
+    env = fx.env
+    root = fx.case("t72-invalid-target")
+    with ticking():
+        _decided(fx, root, "which layout", 1)
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        index = model(root, PD_INDEX)
+        assert index["record"][0]["id"] == "PD-1", index["record"][0]
+        index["record"][0]["decision"] = "   "
+        write_commit(env, root, PD_INDEX, emit.emit_checked(index).encode("utf-8"), "a blank decision")
+        rc, out, err = cli(env, ["doctor", "--root", str(root)])
+        assert rc != 0 and "PD-1" in out, ("T72 the blank decision is a doctor finding", rc, out[-1600:])
+        refused_untouched(env, root, _supersede("PD-2", "PD-1"), "not schema-valid")
+
+
+def flip_t72_target():
+    """Drop only the target's validation call: the invalid target is trusted, the link publishes, and the
+    final doctor then reports the target's own pre-existing finding."""
+    return patch.object(record, "_require_valid_target", lambda trow, ctx, target, rel: None)
+
+
+def t72_wrong_type_target(fx):
+    """A target seated in the pending_decision index as another type (its `type` rewritten to backlog_item
+    by a canonical hand edit: a doctor finding) is never trusted: the supersede refuses with every byte
+    untouched."""
+    env = fx.env
+    root = fx.case("t72-wrong-type-target")
+    with ticking():
+        _decided(fx, root, "which layout", 1)
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        index = model(root, PD_INDEX)
+        assert index["record"][0]["id"] == "PD-1", index["record"][0]
+        index["record"][0]["type"] = "backlog_item"
+        write_commit(env, root, PD_INDEX, emit.emit_checked(index).encode("utf-8"), "a wrong-type row")
+        rc, out, err = cli(env, ["doctor", "--root", str(root)])
+        assert rc != 0, ("T72 the wrong-type row is a doctor finding", rc, out[-1600:])
+        refused_untouched(env, root, _supersede("PD-2", "PD-1"), "not schema-valid")
+
+
+def t72_missing_target(fx):
+    """A target that is no record at all (PD-9 in a store holding PD-1 and PD-2) refuses with every byte
+    untouched."""
+    root = fx.case("t72-missing-target")
+    with ticking():
+        _decided(fx, root, "which layout", 1)
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        refused_untouched(fx.env, root, _supersede("PD-2", "PD-9"), "PD-9 is not a record in")
+
+
+def t72_wrong_namespace_target(fx):
+    """A target in another namespace (the backlog item BI-1, which exists) is not in the pending_decision
+    index, so the supersede refuses with every byte untouched."""
+    root = fx.case("t72-wrong-namespace-target")
+    with ticking():
+        step(fx, root, ["create", "--type", "backlog_item", "--title", "an item"] + MAINTAINER, "BI-1")
+        step(fx, root, _pd_create("which layout") + MAINTAINER, "PD-1")
+        refused_untouched(fx.env, root, _supersede("PD-1", "BI-1"), "BI-1 is not a record in")
+
+
+def flip_t72_unchecked_target():
+    """Append the link to whatever --supersedes names, never locating or checking the target: the link to a
+    missing record or a backlog item publishes before the doctor finds it dangling or of the wrong type
+    (C-LINKS). The lookup cannot be dropped alone: every later target check reads the row it returns, and
+    a missing row still fails the schema check closed."""
+    def unchecked(req, ctx, operand, rid):
+        target = req.values.get("--supersedes")
+        return None if target is None else {"rel": record.SUPERSEDES, "id": target}
+    return patch.object(record, "_supersession_link", unchecked)
+
+
+def refused_before_chain_rule(env, root, args, needle):
+    """A supersede refused by its own target check, before the planned chain is judged:
+    _require_one_current_resolution is never called, asserted before the bytes and the message, so the
+    check removed under a flip turns this red on the isolated guard even though the chain rule behind it
+    still refuses with every byte untouched."""
+    calls = []
+    original = record._require_one_current_resolution
+
+    def observing(*a):
+        calls.append(a)
+        return original(*a)
+
+    before = snapshot(root)
+    with patch.object(record, "_require_one_current_resolution", observing):
+        result = record_cli(env, root, args)
+    assert calls == [], ("refused before the chain rule runs", args, result[0], result[2][-800:])
+    assert snapshot(root) == before, ("bytes untouched on refusal", args, result[0], result[2][-800:])
+    refused(result, needle)
+
+
+def t72_fork(fx):
+    """A second successor for a resolution its chain has already superseded would fork the chain into two
+    current resolutions: the supersede refuses with every byte untouched."""
+    root = fx.case("t72-fork")
+    with ticking():
+        _decided(fx, root, "which layout", 1)
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        step(fx, root, _supersede("PD-2", "PD-1"), "PD-2 supersedes PD-1")
+        step(fx, root, _pd_create("which layout, third") + MAINTAINER, "PD-3")
+        refused_before_chain_rule(fx.env, root, _supersede("PD-3", "PD-1"), "already superseded by PD-2")
+
+
+def flip_t72_fork():
+    """Drop the chain-head check: the second successor reaches the chain rule, which then refuses the fork."""
+    return patch.object(record, "_require_chain_head", lambda rows, target, rel: None)
+
+
+def t72_cycle(fx):
+    """PD-2 was created linking supersedes PD-1 while both were open, then decided: PD-1 superseding PD-2
+    would close a cycle and leave the chain with no current resolution, so it refuses with every byte
+    untouched."""
+    root = fx.case("t72-cycle")
+    with ticking():
+        step(fx, root, PD_CREATE + MAINTAINER, "PD-1")
+        step(fx, root, _pd_create("which layout, again") + ["--link", "supersedes=PD-1"] + MAINTAINER, "PD-2")
+        step(fx, root, ["transition", "PD-2", "decided"] + DECIDE + MAINTAINER, "PD-2 decided")
+        doctor_valid(fx.env, root)
+        refused_before_chain_rule(fx.env, root, _supersede("PD-1", "PD-2"), "close a cycle")
+
+
+def flip_t72_cycle():
+    """Drop the cycle check: the closing link reaches the chain rule, which then refuses the chain with no
+    current resolution."""
+    return patch.object(record, "_require_acyclic", lambda rows, rid, target, rel: None)
+
+
+def t72_chain_join(fx):
+    """QA1 Case A. PD-3 (open) supersedes PD-2 and PD-1 and PD-4 supersedes PD-1, then PD-4 is decided:
+    the chain's one current resolution, doctor VALID. PD-2 decided with --supersedes PD-4 passes every
+    target check (PD-4 is decided, schema-valid, and the head of its chain, and its own chain never reaches
+    PD-2), but it would leave the chain with none (PD-2 superseded by PD-3, PD-4 by PD-2), so it refuses
+    with every byte untouched; the same decide without the link keeps PD-4 current and lands doctor
+    VALID."""
+    root = fx.case("t72-chain-join")
+    with ticking():
+        step(fx, root, PD_CREATE + MAINTAINER, "PD-1")
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        step(fx, root, _pd_create("which layout, third") + ["--link", "supersedes=PD-2", "--link",
+                                                            "supersedes=PD-1"] + MAINTAINER, "PD-3")
+        step(fx, root, _pd_create("which layout, fourth") + ["--link", "supersedes=PD-1"] + MAINTAINER, "PD-4")
+        step(fx, root, ["transition", "PD-4", "decided"] + DECIDE + MAINTAINER, "PD-4 decided")
+        doctor_valid(fx.env, root)
+        refused_untouched(fx.env, root, _supersede("PD-2", "PD-4"),
+                          "(PD-1, PD-2, PD-3, PD-4) with 0 current effective resolutions")
+        step(fx, root, ["transition", "PD-2", "decided"] + DECIDE + MAINTAINER, "PD-2 decided")
+        doctor_valid(fx.env, root)
+
+
+def _shadowed(fx, root):
+    """PD-1 decided, PD-2 open, and PD-3 created open linking supersedes PD-2: doctor VALID (PD-1's chain
+    has its one resolution, and the PD-2 and PD-3 chain is wholly undecided). Run under ticking()."""
+    _decided(fx, root, "which layout", 1)
+    step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+    step(fx, root, _pd_create("which layout, third") + ["--link", "supersedes=PD-2"] + MAINTAINER, "PD-3")
+    doctor_valid(fx.env, root)
+
+
+def t72_superseded_record(fx):
+    """QA1 Case B. PD-2 is already superseded by the open PD-3, so PD-2 decided with --supersedes PD-1
+    would leave the joined chain with no current resolution (PD-1 superseded by PD-2, PD-2 by PD-3): it
+    refuses with every byte untouched."""
+    root = fx.case("t72-superseded-record")
+    with ticking():
+        _shadowed(fx, root)
+        refused_untouched(fx.env, root, _supersede("PD-2", "PD-1"), "PD-2 is itself already superseded by PD-3")
+
+
+def t72_superseded_record_plain(fx):
+    """QA1 Case B without the link: PD-2's own decide would leave its chain with PD-3 with no current
+    resolution, so it refuses with every byte untouched too."""
+    root = fx.case("t72-superseded-record-plain")
+    with ticking():
+        _shadowed(fx, root)
+        refused_untouched(fx.env, root, ["transition", "PD-2", "decided"] + DECIDE + MAINTAINER,
+                          "PD-2 is itself already superseded by PD-3")
+
+
+def flip_t72_chain():
+    """Drop the pre-publication chain rule: the decide publishes before the doctor finds its chain with no
+    current resolution."""
+    return patch.object(record, "_require_one_current_resolution", lambda ctx, rows, rid, rel: None)
+
+
+ARCHIVE = MACH + "/archive/2026"
+ARCHIVED_PD_INDEX = ARCHIVE + "/pending_decision.index.toml"
+
+
+def _rotate(fx, root, rid):
+    """Release the whole worklog as 0.1.0 (release_cut, its published changelog summary, and VERSION) and
+    rotate it into archive/2026 with `rid`'s pending_decision row, archive.toml enumerating the moved id
+    and span; then render and commit: doctor VALID (spec 12)."""
+    env = fx.env
+    worklog, version = model(root, WORKLOG), model(root, VERSION)
+    cut = opf_release.release_cut(version, worklog, "0.1.0", "2026-09-01T00:00:00Z")
+    assert cut.status == opf_check.VALID, ("the release cut", cut.status, cut.findings)
+    changelog = "# Changelog\n\n## unreleased\n\n## 0.1.0\n\n- 0.1.0 notes\n"
+    entries, _findings = opf_changelog._changelog_entries(changelog)
+    released = cut.version_data
+    released["summary"] = [{"covers": "0.1.0", "status": "published",
+                            "digest": opf_changelog.freeze_digest(dict(entries)["0.1.0"])},
+                           {"covers": "unreleased", "status": "working"}]
+    index = model(root, PD_INDEX)
+    moved = [r for r in index["record"] if r["id"] == rid]
+    assert len(moved) == 1, (rid, index)
+    index["record"] = [r for r in index["record"] if r["id"] != rid]
+    span = [worklog["entry"][0]["id"], worklog["entry"][-1]["id"]]
+    documents = {
+        VERSION: released, PD_INDEX: index, WORKLOG: dict(worklog, entry=[]),
+        ARCHIVED_PD_INDEX: {"schema": 1, "record": moved},
+        ARCHIVE + "/worklog.toml": {"schema": 1, "entry": worklog["entry"]},
+        ARCHIVE + "/archive.toml": {"schema": 1, "moved": [{"id": rid, "type": "pending_decision",
+                                                           "destination": "archive/2026/pending_decision.index.toml"}],
+                                   "worklog_moved": [{"span": span, "destination": "archive/2026/worklog.toml"}]}}
+    (Path(root) / ARCHIVE).mkdir(parents=True)
+    for rel, document in documents.items():
+        (Path(root) / rel).write_bytes(emit.emit_checked(document).encode("utf-8"))
+    (Path(root) / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
+    (Path(root) / "VERSION").write_text("0.1.0\n", encoding="utf-8")
+    rc, out, err = cli(env, ["render", "--root", str(root), "--write"])
+    assert rc == 0, ("render after the rotation", rc, out[-800:], err[-800:])
+    env.git(root, "add", "-A")
+    env.git(root, "commit", "-q", "-m", "release 0.1.0 and rotate " + rid)
+    doctor_valid(env, root)
+
+
+def _withdrawn_successor(fx, root):
+    """PD-1 open and PD-2 created linking supersedes PD-1, then withdrawn. Run under ticking()."""
+    step(fx, root, PD_CREATE + MAINTAINER, "PD-1")
+    step(fx, root, _pd_create("which layout, again") + ["--link", "supersedes=PD-1"] + MAINTAINER, "PD-2")
+    step(fx, root, ["transition", "PD-2", "withdrawn"] + MAINTAINER, "PD-2 withdrawn")
+
+
+def t72_archived_resolution(fx):
+    """QA3 reproduction A. PD-2 (withdrawn) supersedes PD-1 and PD-3 (decided) supersedes PD-2, and PD-3 is
+    rotated to the archive: doctor VALID, PD-3 the chain's one current resolution. Deciding PD-1 keeps the
+    archived PD-3 current, so it lands and the doctor stays VALID."""
+    root = fx.case("t72-archived-resolution")
+    with ticking():
+        _withdrawn_successor(fx, root)
+        step(fx, root, _pd_create("which layout, third") + ["--link", "supersedes=PD-2"] + MAINTAINER, "PD-3")
+        step(fx, root, ["transition", "PD-3", "decided"] + DECIDE + MAINTAINER, "PD-3 decided")
+        _rotate(fx, root, "PD-3")
+        step(fx, root, ["transition", "PD-1", "decided"] + DECIDE + MAINTAINER, "PD-1 decided")
+        assert row(root, "PD-1", PD_INDEX)["status"] == "decided", row(root, "PD-1", PD_INDEX)
+        doctor_valid(fx.env, root)
+
+
+def t72_archived_successor(fx):
+    """QA3 reproduction B. PD-2 (withdrawn) supersedes PD-1 and is rotated to the archive: doctor VALID, the
+    chain wholly undecided. Deciding PD-1 would leave the chain with no current resolution (PD-1
+    superseded by the archived PD-2), so it refuses with every byte untouched."""
+    root = fx.case("t72-archived-successor")
+    with ticking():
+        _withdrawn_successor(fx, root)
+        _rotate(fx, root, "PD-2")
+        refused_untouched(fx.env, root, ["transition", "PD-1", "decided"] + DECIDE + MAINTAINER,
+                          "PD-1 is itself already superseded by PD-2")
+
+
+def t72_unreadable_archive(fx):
+    """PD-1 decided and rotated to the archive, then its archived index replaced by bytes that do not parse
+    (committed): the doctor's archive walk cannot read it, so deciding PD-2 refuses with every byte
+    untouched rather than judging the chain without the archive."""
+    root = fx.case("t72-unreadable-archive")
+    with ticking():
+        _decided(fx, root, "which layout", 1)
+        _rotate(fx, root, "PD-1")
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        write_commit(fx.env, root, ARCHIVED_PD_INDEX, b"record = [\n", "a torn archive index")
+        refused_untouched(fx.env, root, ["transition", "PD-2", "decided"] + DECIDE + MAINTAINER,
+                          "does not pass the doctor's own archive walk")
+
+
+def flip_t72_archive():
+    """Restore the active-only read: the chain rule judges the planned index alone, never the archive."""
+    return patch.object(record, "_chain_records", lambda ctx, rows: [
+        opf_check._make_rec(r, record.PENDING_DECISION, "active") for r in rows if isinstance(r, dict)])
+
+
+def t72_archived_head(fx):
+    """QA4 MINOR-3. PD-2 decided superseding PD-1, then PD-2, the chain's head, rotated to the archive:
+    doctor VALID. PD-3 decided with --supersedes PD-2 finds the archived head through the chain rule's
+    record set, so it lands and the doctor stays VALID, PD-3 the chain's one current resolution."""
+    root = fx.case("t72-archived-head")
+    with ticking():
+        _decided(fx, root, "which layout", 1)
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        step(fx, root, _supersede("PD-2", "PD-1"), "PD-2 supersedes PD-1")
+        _rotate(fx, root, "PD-2")
+        step(fx, root, _pd_create("which layout, third") + MAINTAINER, "PD-3")
+        step(fx, root, _supersede("PD-3", "PD-2"), "PD-3 supersedes the archived PD-2")
+        rec = row(root, "PD-3", PD_INDEX)
+        assert rec["status"] == "decided" and rec["links"] == [{"rel": "supersedes", "id": "PD-2"}], rec
+        doctor_valid(fx.env, root)
+
+
+def t72_archived_fork(fx):
+    """PD-2 decided superseding PD-1 and rotated to the archive, PD-1 still active: a second successor for
+    PD-1 would fork the chain, and the chain-head check, reading the archive, refuses it before the chain
+    rule runs, with every byte untouched."""
+    root = fx.case("t72-archived-fork")
+    with ticking():
+        _decided(fx, root, "which layout", 1)
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        step(fx, root, _supersede("PD-2", "PD-1"), "PD-2 supersedes PD-1")
+        _rotate(fx, root, "PD-2")
+        step(fx, root, _pd_create("which layout, third") + MAINTAINER, "PD-3")
+        refused_before_chain_rule(fx.env, root, _supersede("PD-3", "PD-1"), "already superseded by PD-2")
+
+
+def t72_archived_withdrawn_target(fx):
+    """PD-1 withdrawn and rotated to the archive: doctor VALID. PD-2 decided with --supersedes PD-1 finds
+    the archived PD-1, which is not a current resolution, so the target-decided check refuses it with
+    every byte untouched."""
+    root = fx.case("t72-archived-withdrawn-target")
+    with ticking():
+        step(fx, root, PD_CREATE + MAINTAINER, "PD-1")
+        step(fx, root, ["transition", "PD-1", "withdrawn"] + MAINTAINER, "PD-1 withdrawn")
+        _rotate(fx, root, "PD-1")
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        refused_untouched(fx.env, root, _supersede("PD-2", "PD-1"),
+                          "PD-1 is 'withdrawn', not an unqualified decided")
+
+
+def flip_t72_archived_target():
+    """Restore the active-only target read: the target checks see the active index alone, so the archived
+    head is no record, an archived superseder is missed, and an archived withdrawn target is no record."""
+    return patch.object(record, "_target_rows", lambda ctx, operand: record._index_rows(operand))
+
+
+def t72_archived_cycle(fx):
+    """PD-2 (withdrawn) supersedes PD-1 and PD-3 (decided) supersedes PD-2, then PD-2 is rotated to the
+    archive: doctor VALID, PD-3 the chain's one current resolution. PD-1 decided with --supersedes PD-3
+    would close a cycle through the archived PD-2, so the cycle check, reading the archive, refuses it
+    with its own message and every byte untouched."""
+    root = fx.case("t72-archived-cycle")
+    with ticking():
+        _withdrawn_successor(fx, root)
+        step(fx, root, _pd_create("which layout, third") + ["--link", "supersedes=PD-2"] + MAINTAINER, "PD-3")
+        step(fx, root, ["transition", "PD-3", "decided"] + DECIDE + MAINTAINER, "PD-3 decided")
+        _rotate(fx, root, "PD-2")
+        refused_untouched(fx.env, root, _supersede("PD-1", "PD-3"),
+                          "PD-3 in {} already leads back to PD-1".format(PD_INDEX))
+
+
+def flip_t72_archived_cycle():
+    """Restore the active-only read for the cycle check alone: it walks the active index, so the chain
+    through the archived PD-2 is missed and the chain rule refuses instead, with its own message."""
+    link, acyclic = record._supersession_link, record._require_acyclic
+
+    def active_only(req, ctx, operand, rid):
+        with patch.object(record, "_require_acyclic", lambda rows, rid_, target, rel: acyclic(
+                record._index_rows(operand), rid_, target, rel)):
+            return link(req, ctx, operand, rid)
+    return patch.object(record, "_supersession_link", active_only)
+
+
+PATTERN = ["create", "--type", "preference_pattern", "--field", "context=layout choices", "--field",
+           "rationale=fewer files to keep in sync"]
+RULING = ["create", "--type", "maintainer_decision", "--title", "inline for the site", "--field",
+          "decision=use the inline layout for the site", "--link", "exemplifies=PP-1"]
+
+
+def t72_register(fx):
+    env = fx.env
+    root = fx.case("t72-register")
+    with ticking():
+        step(fx, root, PATTERN + ["--title", "prefer inline layouts"] + MAINTAINER, "PP-1")
+        assert row(root, "PP-1", PP_INDEX)["status"] == "active", row(root, "PP-1", PP_INDEX)
+        step(fx, root, RULING + MAINTAINER, "MD-1")
+        rec = row(root, "MD-1", MD_INDEX)
+        assert rec["status"] == "recorded" and rec["links"] == [{"rel": "exemplifies", "id": "PP-1"}], rec
+        assert rec["decision"] == "use the inline layout for the site", rec
+        doctor_valid(env, root)
+        assert _section(root, "Maintainer decisions") == ["- MD-1 inline for the site (exemplifies PP-1)"], (
+            read(root, DECISIONS_VIEW))
+        step(fx, root, PATTERN + ["--title", "prefer short titles"] + ASSISTANT, "PP-2")
+        assert row(root, "PP-2", PP_INDEX)["status"] == "active/proposed", row(root, "PP-2", PP_INDEX)
+        doctor_valid(env, root)
+        step(fx, root, ["transition", "PP-2", "active"] + MAINTAINER, "PP-2 ratified")
+        assert row(root, "PP-2", PP_INDEX)["status"] == "active", row(root, "PP-2", PP_INDEX)
+        step(fx, root, ["transition", "PP-2", "retired"] + MAINTAINER, "PP-2 retired")
+        rec = row(root, "PP-2", PP_INDEX)
+        assert rec["status"] == "retired" and "proposed_from" not in rec, rec
+        doctor_valid(env, root)
+
+
+def flip_t72_links():
+    """The planner drops the requested links: only the independent oracle, which reads --link, refuses the
+    ruling's missing exemplifies link."""
+    original = record._envelope_extras
+
+    def no_links(req, rec):
+        original(req, rec)
+        rec.pop("links", None)
+    return patch.object(record, "_envelope_extras", no_links)
+
+
+def t72_assistant_ruling(fx):
+    """A maintainer_decision is a maintainer act: the same ruling filed by an assistant refuses with every
+    byte untouched."""
+    root = fx.case("t72-assistant-ruling")
+    with ticking():
+        step(fx, root, PATTERN + ["--title", "prefer inline layouts"] + MAINTAINER, "PP-1")
+        refused_untouched(fx.env, root, RULING + ASSISTANT, "not valid")
+
+
+def flip_t72_trust():
+    """The planner's record validation replaced by a pass-through: the assistant ruling publishes."""
+    return patch.object(record, "_validated", lambda rec, expected_type, ctx: rec)
 
 
 def t8_collision(fx):
@@ -4691,6 +5273,28 @@ TESTS = (
     ("T69-token-failure-closes-fd", t69_token_failure_closes_fd, flip_t69),
     ("T70-tag-after-unwind", t70_tag_after_unwind, flip_t70),
     ("T71-allocation-residual-disclosed", t71_allocation_residual_disclosed, flip_t71),
+    ("T72-decision-supersession", t72_supersession, flip_t72_link),
+    ("T72-supersedes-record-id", t72_record_id, flip_t72_record_id),
+    ("T72-supersedes-proposed-landing", t72_proposed_landing, flip_t72_landing),
+    ("T72-supersedes-undecided-target", t72_undecided_target, flip_t72_decided),
+    ("T72-supersedes-invalid-target", t72_invalid_target, flip_t72_target),
+    ("T72-supersedes-wrong-type-target", t72_wrong_type_target, flip_t72_target),
+    ("T72-supersedes-missing-target", t72_missing_target, flip_t72_unchecked_target),
+    ("T72-supersedes-wrong-namespace-target", t72_wrong_namespace_target, flip_t72_unchecked_target),
+    ("T72-supersedes-fork", t72_fork, flip_t72_fork),
+    ("T72-supersedes-cycle", t72_cycle, flip_t72_cycle),
+    ("T72-decide-chain-join", t72_chain_join, flip_t72_chain),
+    ("T72-decide-superseded-record", t72_superseded_record, flip_t72_chain),
+    ("T72-decide-superseded-record-plain", t72_superseded_record_plain, flip_t72_chain),
+    ("T72-decide-archived-resolution", t72_archived_resolution, flip_t72_archive),
+    ("T72-decide-archived-successor", t72_archived_successor, flip_t72_archive),
+    ("T72-decide-unreadable-archive", t72_unreadable_archive, flip_t72_archive),
+    ("T72-supersedes-archived-head", t72_archived_head, flip_t72_archived_target),
+    ("T72-supersedes-archived-fork", t72_archived_fork, flip_t72_archived_target),
+    ("T72-supersedes-archived-withdrawn-target", t72_archived_withdrawn_target, flip_t72_archived_target),
+    ("T72-supersedes-archived-cycle", t72_archived_cycle, flip_t72_archived_cycle),
+    ("T72-register-ruling-and-pattern", t72_register, flip_t72_links),
+    ("T72-register-assistant-ruling", t72_assistant_ruling, flip_t72_trust),
 )
 
 

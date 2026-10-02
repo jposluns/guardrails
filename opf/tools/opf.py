@@ -13461,6 +13461,8 @@ def _cli_self_test():
                EXIT_MALFORMED)                                   # the qualifier is derived, never given
         expect(["record", "transition", "PD-1", "decided", "--actor", "maintainer", "--decision", "x"],
                EXIT_MALFORMED)                                   # the bundle options come together
+        expect(["record", "transition", "PD-2", "decided", "--actor", "maintainer", "--supersedes", "PD 1"],
+               EXIT_MALFORMED)                                   # --supersedes takes a record id
         expect(["record", "done-with-receipt", "BI-1"], EXIT_MALFORMED)    # missing --actor
         expect(["record", "done-with-receipt", "BI-1", "--actor", "assistant"],
                EXIT_MALFORMED)                                   # maintainer-only, refused before the store

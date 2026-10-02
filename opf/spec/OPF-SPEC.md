@@ -1081,7 +1081,31 @@ history is a new clean record linking back (section 8.6). Its subcommands:
   explicitly, never inferred from the actor, because the recorder of an answer is often not its
   decider, and `decided_at` MUST be the operation's clock value. A ratification MUST keep the
   bundle; a rejection of `decided/proposed` MUST remove it together with `proposed_from`, since
-  an open decision carries none of it. A backlog item MUST reach unqualified `done` only through
+  an open decision carries none of it. A transition that lands a pending_decision at unqualified
+  `decided`, a maintainer's `open` > `decided` or a maintainer's ratification of
+  `decided/proposed`, MAY supersede the current resolution of a chain in the same act: `transition`
+  then appends the `supersedes` link (section 8.5) to the record's `links`. Before anything is
+  written, the superseded record MUST be another pending_decision at unqualified `decided`,
+  schema-valid, and the head of its chain (no pending_decision already links `supersedes` to it),
+  and its own chain MUST NOT lead back to the superseding record. These target checks MUST read the
+  same records as the chain rule below, the active index together with every archived record
+  (section 12), so a decided, schema-valid chain head rotated to the archive can be superseded, and
+  an archived pending_decision that already supersedes the target or leads back to the superseding
+  record is counted. `transition` MUST refuse the link on every other transition, a `/proposed`
+  landing included, because the doctor counts a `supersedes` link from a proposal too and would
+  then find the superseded chain without a current resolution. Every transition that lands a
+  pending_decision at unqualified `decided`, with or without a supersession, MUST then apply the
+  doctor's chain rule (section 8.5) to the planned index together with every archived record before
+  anything is written: the chain the record belongs to afterwards, a connected component over
+  `supersedes` links in either direction, MUST have exactly one current effective resolution. So
+  `transition` also refuses to decide a record that a pending_decision not at unqualified `decided`
+  already supersedes when no other member of its chain is a current resolution, and a supersession
+  that passes the checks above but still leaves the chain without a current resolution. The rule
+  MUST read the records the doctor reads for that check, the planned index together with every
+  archived record (section 12), so a chain member rotated to the archive is judged before anything
+  is written. With no archive tree nothing has rotated; an archive input that the doctor's archive
+  walk finds missing, unreadable, malformed or otherwise defective MUST refuse the transition with
+  nothing written, never be skipped. A backlog item MUST reach unqualified `done` only through
   `done-with-receipt`.
 - `done-with-receipt`: maintainer-only. It moves a backlog item to unqualified `done`, from
   `active` or by ratifying `done/proposed`, and in the same act creates its one-to-one `done`
@@ -1130,7 +1154,8 @@ guarantees:
 4. Postcondition: the model diff of every rewritten file equals exactly the operation's allowed
    delta (the new rows appended, the counters advanced by exactly the claim, and for a transition
    one status and `updated_at` change plus the `proposed_from` write or removal and, for a
-   pending_decision, the resolution bundle write or removal), value for value
+   pending_decision, the resolution bundle write or removal and the `supersedes` link append),
+   value for value
    and type for type (a boolean or float is never equal to an integer), before anything is
    written. The expected
    delta MUST be derived from the request, the prior bytes of each rewritten file, the claimed IDs,
