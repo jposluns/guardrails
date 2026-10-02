@@ -92,7 +92,6 @@ run_gate "opf-homes-selftest" python3 -I -B opf/tools/check_opf_homes.py --self-
 run_gate "opf-homes-contract" python3 -I -B opf/tools/check_opf_homes.py
 run_gate "opf-tooling-selftest" python3 -I -B opf/tools/opf.py --self-test
 run_gate "opf-journal-direct-selftest" python3 -I -B opf/tools/_journal.py --self-test
-run_gate "opf-allocation-direct-selftest" python3 -I -B opf/tools/_opf_allocation.py --self-test
 run_gate "opf-observe-direct-selftest" python3 -I -B opf/tools/_opf_observe.py --self-test
 run_gate "opf-drift-selftest" python3 -I -B opf/tools/check_opf_drift.py --self-test
 run_gate "opf-drift" python3 -I -B opf/tools/check_opf_drift.py
