@@ -1667,6 +1667,9 @@ _CLOSE_SWEEP_DISPOSITIONS = (
      "false positive: contextlib.ExitStack.close pops each callback before it runs it, so a repeat runs none twice"),
     ("opf/tools/_opf_adopt_observe.py", "run_case", "TRY", "client", "client", 1,
      "false positive: the client closed here is never appended to backlog_clients, which the cleanup loop closes"),
+    ("opf/tools/_opf_adopt_observe.py", "run_case", "TRY", "[]resolver_sockets", "[]resolver_sockets", 2,
+     "false positive: these are socket.socket objects; the first close() sets their fileno to -1, so the "
+     "finally's second close() of each closes no descriptor, even after the number is reused"),
     ("opf/tools/_opf_oplock.py", "_bind_repository_view", "REBIND", "fd", "", 1,
      "false positive: _FdOwner.close removes the number from the owner before os.close, so its exit never repeats it"),
     ("opf/tools/_opf_oplock.py", "_open_machine_dir", "REBIND", "fd", "", 1,
