@@ -7731,8 +7731,9 @@ def _load_gensrc_registry(root):
             raw_bytes = handle.read(_GENSRC_MAX_BYTES + 1)
     except FileNotFoundError:
         # The lstat above saw a regular file, but it is gone at open: a concurrent DELETE race in the
-        # lstat->open window. This is BAD (fail-safe ASK), never absent: absence is ONLY the lstat-probe
-        # FileNotFoundError, so a benign delete race can never read as the inert no-coverage ALLOW.
+        # lstat->open window. This is BAD (gensrc_guard denies it fail-closed), never absent: absence is ONLY
+        # the lstat-probe FileNotFoundError, so a benign delete race can never read as the inert no-coverage
+        # ALLOW.
         return ("bad", "the registry disappeared during the read (a concurrent change); failing safe")
     except OSError as exc:
         return ("bad", "the registry could not be read ({})".format(exc))
@@ -7751,8 +7752,8 @@ def _load_gensrc_registry(root):
     version = obj.get("version")
     # type(version) is int, not `== _GENSRC_VERSION` alone: `True == 1` in Python, so a JSON bool version
     # (true) would else read as version 1. type(True) is bool, not int, so a bool (or a string "1", a
-    # float) is rejected. A future version 2 also degrades to a fail-safe ask, never a misread of an
-    # unknown shape.
+    # float) is rejected. A future version 2 is also BAD (gensrc_guard denies it fail-closed), never a
+    # misread of an unknown shape.
     if type(version) is not int or version != _GENSRC_VERSION:
         return ("bad", "unknown registry version (expected {})".format(_GENSRC_VERSION))
     generated = obj.get("generated")
@@ -7773,8 +7774,8 @@ def _load_gensrc_registry(root):
         if not isinstance(target, str) or not target or "\\" in target or _is_absolute(target):
             return ("bad", "a registry entry has a malformed target")
         # Reject a control character (any codepoint < 0x20, NUL included, or DEL 0x7f) in ANY target,
-        # BEFORE the kind==block skip below, so a NUL-bearing block entry is BAD (ASK), never silently
-        # dropped to zero entries and read as the inert no-coverage ALLOW.
+        # BEFORE the kind==block skip below, so a NUL-bearing block entry is BAD (gensrc_guard denies it
+        # fail-closed), never silently dropped to zero entries and read as the inert no-coverage ALLOW.
         if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in target):
             return ("bad", "a registry entry target contains a control character")
         has_trailing = target.endswith("/")
@@ -7805,8 +7806,8 @@ def _gensrc_within(candidate, parent):
     "err" when the check FAULTS (a symlink loop, or commonpath given mixed or foreign inputs such as two
     Windows drive roots). DELIBERATELY NOT the shared _path_is_within, which errs to True (matched) so
     git_discard REFUSES to write recovery data inside a tree it cannot clear; here an unresolved
-    containment must not read as a match NOR as a no-match ALLOW, so the fault surfaces as "err" and the
-    caller fails safe to ask."""
+    containment must not read as a match NOR as a silent no-match ALLOW, so the fault surfaces as "err" and
+    the caller allows the edit with a warning systemMessage (_gensrc_fail_ask; there is no ask posture)."""
     try:
         cand = os.path.realpath(candidate)
         base = os.path.realpath(parent)
@@ -7821,7 +7822,8 @@ def _gensrc_match(entries, target, root_c):
     """The first registry entry that `target` (an already-realpath'd absolute path) matches, as
     (entry_target, sources, regenerate); None on a PROVEN no-match; or the _GENSRC_MATCH_FAULT sentinel
     when a resolution or containment fault means no-match cannot be proven (the handler turns the
-    sentinel into a fail-safe ask, never a match and never a silent allow). A FILE entry matches on
+    sentinel into an allow with a warning systemMessage via _gensrc_fail_ask, never a match and never a
+    silent allow; there is no ask posture). A FILE entry matches on
     realpath EQUALITY; a TREE entry matches when `target` is the tree root or lies under it, by
     component-boundary containment (_gensrc_within), never a raw string prefix, so gen-extra/ never
     matches gen/ and GEN.md.bak never matches GEN.md. Each entry target is repo-root-relative, so it is
@@ -7862,18 +7864,22 @@ def gensrc_guard(data):
     "edit the source" action to name, and are outside any expected coverage, so they ALLOW with an
     informational note rather than block a legitimate edit; a genuinely-ABSENT registry is likewise the inert
     ALLOW (adopters author their own). The CI generated-artefact drift gate remains the authoritative
-    backstop. Only a missing tool_name denies under the shared fail-closed contract. The repo
-    root is the git toplevel of the SESSION cwd via the scrubbed _recovery_toplevel primitive (NOT
+    backstop. Besides a confirmed registry match, the guard denies fail-closed in exactly three cases: a
+    missing tool_name (the shared fail-closed contract), a PRESENT-but-unreadable/malformed registry, and a
+    mis-wired event (a hard block, exit 2). The repo root is the git toplevel of the SESSION cwd via the scrubbed _recovery_toplevel primitive (NOT
     _gen_common.repo_root, which falls back to cwd and would fabricate a root)."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: gensrc_guard wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
     tool_name = data.get("tool_name")
     if tool_name is None:
-        return _deny_missing_tool_name("gensrc")  # the ONLY deny: a missing field cannot be matched
+        # A missing field cannot be matched. This is one of three fail-closed denies, with a present but
+        # unreadable/malformed registry and a mis-wired event (the hard block above).
+        return _deny_missing_tool_name("gensrc")
     if not isinstance(tool_name, str) or not tool_name:
         # A present-but-unreadable tool_name (an empty string, a list, a bool) cannot be matched against
-        # the scope set; fail SAFE to ask rather than silently allow (only a MISSING tool_name denies).
+        # the scope set; allow with a warning systemMessage rather than silently allow. The fail-closed
+        # denies are a MISSING tool_name, a present but unreadable/malformed registry, and a mis-wired event.
         return _gensrc_fail_ask("the tool_name was unreadable")
     if tool_name not in _GENSRC_TOOLS:
         return _allow()  # out of scope (defensive; the matcher governs Write/Edit/MultiEdit)
@@ -7884,7 +7890,8 @@ def gensrc_guard(data):
     if not isinstance(file_path, str) or not file_path:
         return _gensrc_fail_ask("the {} payload carried no readable file_path".format(tool_name))
     # A control character (NUL included) in file_path is malformed input that would also raise inside
-    # os.path.realpath ("embedded null byte"); reject it here so it fails SAFE to ask, never crashes.
+    # os.path.realpath ("embedded null byte"); reject it here so it allows with a warning systemMessage,
+    # never crashes.
     if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in file_path):
         return _gensrc_fail_ask("the {} payload file_path contains a control character".format(tool_name))
     cwd = data.get("cwd")
@@ -7920,8 +7927,8 @@ def gensrc_guard(data):
         return _allow()  # a registry of only block entries has nothing this path guard can match
     # A relative file_path can only arrive via MultiEdit (abs-paths does not cover it); joining it onto
     # cwd matches the platform's own resolution. Canonicalize both to realpaths for the match; a
-    # resolution fault (a symlink loop, an unresolvable path) is an unresolvable target -> fail SAFE to
-    # ask, NOT an uncaught crash the dispatcher would turn into an exit-2 hard DENY.
+    # resolution fault (a symlink loop, an unresolvable path) is an unresolvable target -> allow with a
+    # warning systemMessage, NOT an uncaught crash the dispatcher would turn into an exit-2 hard DENY.
     try:
         target = os.path.realpath(file_path if _is_absolute(file_path) else os.path.join(cwd, file_path))
         root_c = os.path.realpath(root)
@@ -7929,8 +7936,9 @@ def gensrc_guard(data):
         return _gensrc_fail_ask("the target or repo root could not be resolved (an unresolvable path)")
     within = _gensrc_within(target, root_c)
     if within != "in":
-        # "out" (proven outside) OR "err" (a containment fault) both fail safe: an uncleared target
-        # cannot be judged against the registry of THIS repo, so it must never read as a silent allow.
+        # "out" (proven outside) OR "err" (a containment fault) both allow with a warning systemMessage: an
+        # uncleared target cannot be judged against the registry of THIS repo, so it must never read as a
+        # silent allow.
         return _gensrc_fail_ask("the target canonicalizes outside the resolved repo, or the containment "
                                 "check could not be cleared, so it cannot be judged against the registry "
                                 "of this repo")

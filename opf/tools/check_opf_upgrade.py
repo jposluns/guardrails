@@ -98,7 +98,8 @@ VECTOR ROSTER (U1-U28, P1):
       LEAVES the replacement, yet an ordinary release of this run's OWN lease still removes it (fails under the
       old ownership-blind unlink, which deleted the peer's lease). U25c (F-LEASE-RELEASE-ANY-EXC): _upgrade_run
       called from inside a caller's `except`, with a nonzero render (a return path) and an inert failing
-      release, propagates the release error; a flip restoring the finally's sys.exc_info() test turns it red.
+      release, propagates the release error; a flip restoring the finally's sys.exc_info() test turns it red,
+      and the flip leg asserts its exact swallow outcome (exit 2 plus the "additionally" release-failure note).
   U26 R8 non-boolean module: the planner precondition refuses a non-boolean value on ANY module (governance,
       operational_policy, decision_support), matching the merge-base _validate_modules, while a fully-boolean
       module set still plans; end-to-end, a stored governance="x" refuses exit 2 before any mutation. FIX3: an
@@ -1913,12 +1914,15 @@ def _suite_isolated():
             # with a nonzero render (a return path) and an inert failing release (it raises, touching
             # nothing): the release error must propagate, never be printed and swallowed because the
             # caller's handled exception looked in flight. The flip restores the sys.exc_info() test and
-            # must turn the vector red.
+            # must turn the vector red with the EXACT swallow outcome (exit 2 plus the "additionally" note),
+            # so a flip that fails for an unrelated reason does not pass the leg.
             import importlib.util as _importlib_util
             import inspect as _inspect
             import types as _types
 
-            def _caller_handled_release(run, label):
+            def _caller_release_outcome(run, label):
+                # ("raised", message, stderr) for an _UpgradeError, ("other", repr, stderr) for any other
+                # Exception, or ("returned", rc, stderr) for a normal return.
                 sc = base / ("u25c-caller-except-" + label)
                 sc.mkdir()
                 build_store(sc)
@@ -1926,22 +1930,27 @@ def _suite_isolated():
                 opf._opf_write_guard.release_lease = lambda *a, **k: (_ for _ in ()).throw(
                     opf._UpgradeError("synthetic release failure"))
                 opf._opf_views.render = lambda *a, **k: 2
+                err = _io.StringIO()
                 try:
-                    with _ctx.redirect_stdout(_io.StringIO()), _ctx.redirect_stderr(_io.StringIO()):
+                    with _ctx.redirect_stdout(_io.StringIO()), _ctx.redirect_stderr(err):
                         try:
                             raise RuntimeError("the caller's handled exception")
                         except RuntimeError:
                             try:
-                                run(str(sc))
+                                rc = run(str(sc))
                             except opf._UpgradeError as exc:
-                                return str(exc) == "synthetic release failure"
-                            return False
+                                return ("raised", str(exc), err.getvalue())
+                            except Exception as exc:  # noqa: BLE001  recorded, so the check names it red
+                                return ("other", repr(exc), err.getvalue())
+                            return ("returned", rc, err.getvalue())
                 finally:
                     opf._opf_write_guard.release_lease = _orig_rel
                     opf._opf_views.render = _orig_render
 
+            _fixed25c = _caller_release_outcome(opf._upgrade_run, "fixed")
             check("U25c a release failure on a return path propagates from inside a caller's except",
-                  _caller_handled_release(opf._upgrade_run, "fixed"))
+                  _fixed25c[:2] == ("raised", "synthetic release failure")
+                  and "releasing the upgrade lease failed" not in _fixed25c[2])
             _src25c = _inspect.getsource(opf._upgrade_run)
             _new25c = "                if not propagating:\n"
             _flip25c = None
@@ -1956,8 +1965,12 @@ def _suite_isolated():
                 _spec25c.loader.exec_module(_mod25c)
                 _flip25c = _types.FunctionType(_mod25c._upgrade_run.__code__, vars(opf), "_upgrade_run")
             check("U25c flip target (the frame-local propagating test) found exactly once", _flip25c is not None)
-            check("U25c flip: the sys.exc_info() test swallows the release failure (vector red)",
-                  _flip25c is not None and not _caller_handled_release(_flip25c, "flip"))
+            _flipout25c = _caller_release_outcome(_flip25c, "flip") if _flip25c is not None else None
+            check("U25c flip: the sys.exc_info() test swallows the release failure (returns 2 and prints the "
+                  "release-failure note; vector red)",
+                  _flipout25c is not None and _flipout25c[:2] == ("returned", EXIT_ERROR)
+                  and "opf upgrade: additionally, releasing the upgrade lease failed (synthetic release "
+                      "failure)" in _flipout25c[2])
 
             # U25b) FIX1 release never-seize (class-width): the RELEASE path (not only the acquisition path)
             # is ownership-verified. Acquire a lease, capture the payload, then have a peer REPLACE the lease

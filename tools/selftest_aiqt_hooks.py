@@ -5238,9 +5238,9 @@ def _main_isolated():
             if _cs_any_hit(_pl) != (aiqt_hooks._scan_secret(_pl) is not None):
                 failures.append("(ss-gd121-parity) gate/hook disagree on a GD-121 line")
 
-        # === gensrc_guard (gensrc): a Write/Edit/MultiEdit onto a REGISTERED generated artefact ASKS =
+        # === gensrc_guard (gensrc): a Write/Edit/MultiEdit onto a REGISTERED generated artefact DENIES =
         # A registry-driven PATH guard: the handler reads the per-repo .aiqt/gensrc.json at decision
-        # time and ASKS on a kind=file or kind=tree match. Judged by the STRUCTURED decision, never by
+        # time and DENIES on a kind=file or kind=tree match. Judged by the STRUCTURED decision, never by
         # grepping output. Fixtures are throwaway git repos under tmp (removed in the finally); registry
         # targets need not exist on disk (realpath resolves a non-existent path), so no seed commits are
         # needed beyond git init.
@@ -5337,13 +5337,13 @@ def _main_isolated():
         grsp, grlink, grdir, grbig = str(gs_repo_sp), str(gs_link), str(gs_dir), str(gs_big)
         grnl, grfifo, grrace = str(gs_repo_nl), str(gs_fifo), str(gs_race)
 
-        # ASK: a file match, a tree-member match, and a MultiEdit file match. gs-a proves the EXPLICIT
-        # _ask (the manifest default is never rendered, so an ask here cannot be leaning on it).
-        gexpect("(gs-a) Write a registered file target ASKS", "deny",
+        # DENY: a file match, a tree-member match, and a MultiEdit file match. gs-a proves the EXPLICIT
+        # _deny (the manifest default is never rendered, so the deny here cannot be leaning on it).
+        gexpect("(gs-a) Write a registered file target DENIES", "deny",
                 tool="Write", file_path=os.path.join(gr, "GEN.md"), cwd=gr)
-        gexpect("(gs-b) Edit a member of a registered tree ASKS", "deny",
+        gexpect("(gs-b) Edit a member of a registered tree DENIES", "deny",
                 tool="Edit", file_path=os.path.join(gr, "gen", "part.md"), cwd=gr)
-        gexpect("(gs-c) MultiEdit a registered file target ASKS (MultiEdit in scope)", "deny",
+        gexpect("(gs-c) MultiEdit a registered file target DENIES (MultiEdit in scope)", "deny",
                 tool="MultiEdit", file_path=os.path.join(gr, "GEN.md"),
                 edits=[{"old_string": "a", "new_string": "b"}], cwd=gr)
         # ALLOW: a source edit, an unregistered path, a block-entry file.
@@ -5380,39 +5380,40 @@ def _main_isolated():
         # -> deny) and gs-h (absent -> allow) is registry READABILITY, so the deny is attributable to the
         # fail-closed treatment of a present-but-unreadable registry, not to a path match (gr3 has no match
         # for GEN.md when the registry is unreadable). Under the old allow-note it was "allow".
-        # ASK: an unresolved repo root (a plain non-git cwd).
-        gexpect("(gs-j) a non-git cwd (unresolved root) ASKS", "allow",
+        # ALLOW with a note: an unresolved repo root (a plain non-git cwd).
+        gexpect("(gs-j) a non-git cwd (unresolved root) allows with a note", "allow",
                 tool="Write", file_path=os.path.join(gng, "GEN.md"), cwd=gng)
-        # DENY: the only deny, the shared fail-closed contract (no tool_name).
+        # DENY: the shared fail-closed contract (no tool_name); the other fail-closed denies are the
+        # present-but-unreadable registry cases (gs-i*, gs-q, ...) and the mis-wired event (gs-s).
         gexpect("(gs-k) a missing tool_name DENIES (fail-closed contract)", "deny",
                 file_path=os.path.join(gr, "GEN.md"), cwd=gr, with_tool=False)
-        # ASK: no session cwd, so the root cannot be resolved.
-        gexpect("(gs-l) a missing cwd ASKS (root cannot be resolved)", "allow",
+        # ALLOW with a note: no session cwd, so the root cannot be resolved.
+        gexpect("(gs-l) a missing cwd allows with a note (root cannot be resolved)", "allow",
                 tool="Write", file_path=os.path.join(gr, "GEN.md"), with_cwd=False)
-        # ASK: a target outside the repo cannot be cleared against this repo registry.
-        gexpect("(gs-m) a target outside the repo ASKS (non-contained)", "allow",
+        # ALLOW with a note: a target outside the repo cannot be cleared against this repo registry.
+        gexpect("(gs-m) a target outside the repo allows with a note (non-contained)", "allow",
                 tool="Write", file_path=str(tmp / "outside.md"), cwd=gr)
         # ALLOW: Bash is out of scope by design (defensive branch; the matcher excludes it too).
         gexpect("(gs-n) Bash is out of scope (allow)", "allow",
                 tool="Bash", file_path=os.path.join(gr, "GEN.md"), cwd=gr)
-        # ASK: payload fail-safes (non-dict tool_input, missing file_path).
-        gexpect("(gs-o) a non-dict tool_input ASKS", "allow",
+        # ALLOW with a note: payload cannot-evaluate cases (non-dict tool_input, missing file_path).
+        gexpect("(gs-o) a non-dict tool_input allows with a note", "allow",
                 tool="Write", cwd=gr, tool_input="not-a-dict")
-        gexpect("(gs-p) a missing file_path ASKS", "allow",
+        gexpect("(gs-p) a missing file_path allows with a note", "allow",
                 tool="Write", cwd=gr)
-        # ASK: a non-regular-file registry is BAD, never absent (integ-check-fails-closed-on-unreadable).
+        # DENY: a non-regular-file registry is BAD, never absent (integ-check-fails-closed-on-unreadable).
         # DETERMINISTIC: the registry PATH is a DIRECTORY, so the lstat/S_ISREG probe rejects it as
         # non-regular BEFORE the open (a directory's st_mode is not S_ISREG -> bad) on every runner, root
         # included. No os.access/chmod skip (F-166).
         gexpect("(gs-q) a non-regular (directory-at-path) registry DENIES fail-closed (not a regular file, "
                 "never absent; finding 8)", "deny",
                 tool="Write", file_path=os.path.join(grdir, "GEN.md"), cwd=grdir)
-        # ASK: a MultiEdit relative file_path is joined onto cwd, then matched.
-        gexpect("(gs-r) a MultiEdit relative file_path is cwd-joined then matched (ASKS)", "deny",
+        # DENY: a MultiEdit relative file_path is joined onto cwd, then matched.
+        gexpect("(gs-r) a MultiEdit relative file_path is cwd-joined then matched (DENIES)", "deny",
                 tool="MultiEdit", file_path="GEN.md",
                 edits=[{"old_string": "a", "new_string": "b"}], cwd=gr)
 
-        # === round-2 hardening: input-validation holes that must fail SAFE to ASK, never silent-allow ===
+        # === round-2 hardening: input-validation holes that must deny or allow with a note, never silent-allow
         # HARD BLOCK: a mis-wired event (not PreToolUse) fails closed at exit 2 (no structured decision).
         _hb_code, _hb_out, _hb_err = aiqt_hooks.gensrc_guard(
             {"hook_event_name": "PostToolUse", "tool_name": "Write",
@@ -5420,15 +5421,15 @@ def _main_isolated():
         if _hb_code != 2:
             failures.append("(gs-s) a mis-wired event hard-blocks (exit 2): expected 2, got {}"
                             .format(_hb_code))
-        # ASK: a present-but-unreadable tool_name (empty string, list, bool) cannot be matched -> fail-safe
-        # ask (only a MISSING tool_name denies). Was a silent ALLOW (not in _GENSRC_TOOLS). (F-161)
-        gexpect("(gs-t1) an empty-string tool_name ASKS (unreadable, not a miss)", "allow",
+        # ALLOW with a note: a present-but-unreadable tool_name (empty string, list, bool) cannot be matched
+        # (a MISSING tool_name denies instead, gs-k). Was a silent ALLOW (not in _GENSRC_TOOLS). (F-161)
+        gexpect("(gs-t1) an empty-string tool_name allows with a note (unreadable, not a miss)", "allow",
                 tool="", file_path=os.path.join(gr, "GEN.md"), cwd=gr)
-        gexpect("(gs-t2) a list tool_name ASKS (unreadable, not a miss)", "allow",
+        gexpect("(gs-t2) a list tool_name allows with a note (unreadable, not a miss)", "allow",
                 tool=[], file_path=os.path.join(gr, "GEN.md"), cwd=gr)
-        gexpect("(gs-t3) a bool tool_name ASKS (unreadable, not a miss)", "allow",
+        gexpect("(gs-t3) a bool tool_name allows with a note (unreadable, not a miss)", "allow",
                 tool=True, file_path=os.path.join(gr, "GEN.md"), cwd=gr)
-        # ASK: version:true is a JSON bool, not int 1 (type(True) is bool). Was ALLOW (True == 1). (F-159)
+        # DENY: version:true is a JSON bool, not int 1 (type(True) is bool). Was ALLOW (True == 1). (F-159)
         gs_reg3.write_text(json.dumps({"version": True, "generated": [
             {"kind": "file", "target": "GEN.md", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
         gexpect("(gs-u) a JSON-bool version:true DENIES fail-closed (type is bool, not int; finding 8)",
@@ -5438,46 +5439,47 @@ def _main_isolated():
             {"kind": "file", "target": "GEN.md", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
         gexpect("(gs-v) a string version:\"1\" DENIES fail-closed (not int; finding 8)", "deny",
                 tool="Write", file_path=os.path.join(gr3, "README.md"), cwd=gr3)
-        # ASK: a control character (NUL) in a FILE entry target is malformed -> bad. Was ALLOW (target
+        # DENY: a control character (NUL) in a FILE entry target is malformed -> bad. Was ALLOW (target
         # passed the old validation, no match on an unregistered query). (F-160)
         gs_reg3.write_text(json.dumps({"version": 1, "generated": [
             {"kind": "file", "target": "GEN\x00.md", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
         gexpect("(gs-w) a NUL in a file-entry target DENIES fail-closed (control-char rejected; finding 8)",
                 "deny", tool="Write", file_path=os.path.join(gr3, "README.md"), cwd=gr3)
-        # ASK: a NON-NUL control char (0x1f) in a file target. Unlike NUL, realpath does NOT raise on it,
+        # DENY: a NON-NUL control char (0x1f) in a file target. Unlike NUL, realpath does NOT raise on it,
         # so ONLY the control-char rejection (not the realpath-fault wrap) catches it - guards F-160's
         # independent value. Was ALLOW (target passed old validation; no match on an unregistered query).
         gs_reg3.write_text(json.dumps({"version": 1, "generated": [
             {"kind": "file", "target": "GEN\x1f.md", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
         gexpect("(gs-w2) a non-NUL control char in a file-entry target DENIES fail-closed (finding 8)",
                 "deny", tool="Write", file_path=os.path.join(gr3, "README.md"), cwd=gr3)
-        # ASK: a NUL in a BLOCK entry target is rejected BEFORE the block-skip. Was a zero-entry ALLOW
+        # DENY: a NUL in a BLOCK entry target is rejected BEFORE the block-skip. Was a zero-entry ALLOW
         # (the block was dropped, leaving no entries). (F-160)
         gs_reg3.write_text(json.dumps({"version": 1, "generated": [
             {"kind": "block", "target": "X\x00", "sources": ["s"], "regenerate": "r"}]}), encoding="utf-8")
         gexpect("(gs-x) a NUL in a block-entry target DENIES fail-closed (rejected before the block-skip; "
                 "finding 8)", "deny", tool="Write", file_path=os.path.join(gr3, "GEN.md"), cwd=gr3)
-        # ASK: a NUL in the PAYLOAD file_path is rejected before realpath. Was an uncaught crash
+        # ALLOW with a note: a NUL in the PAYLOAD file_path is rejected before realpath. Was an uncaught crash
         # (os.path.realpath raises ValueError on an embedded NUL). (F-160 + F-157)
-        gexpect("(gs-y) a NUL in the payload file_path ASKS (was a crash-to-deny)", "allow",
+        gexpect("(gs-y) a NUL in the payload file_path allows with a note (was a crash-to-deny)", "allow",
                 tool="Write", file_path=os.path.join(gr, "GEN\x00.md"), cwd=gr)
-        # ASK: a NON-NUL control char (0x1f) in the payload file_path. realpath would NOT raise on it, so
+        # ALLOW with a note: a NON-NUL control char (0x1f) in the payload file_path. realpath would NOT raise on it, so
         # only the control-char rejection catches it (guards F-160's independent value). Was a silent ALLOW.
-        gexpect("(gs-y2) a non-NUL control char in the payload file_path ASKS (realpath would not reject)",
+        gexpect("(gs-y2) a non-NUL control char in the payload file_path allows with a note (realpath would not "
+                "reject)",
                 "allow", tool="Write", file_path=os.path.join(gr, "GEN\x1f.md"), cwd=gr)
-        # ASK: a repo dir name with a TRAILING SPACE: the toplevel is preserved because only git's single
+        # DENY: a repo dir name with a TRAILING SPACE: the toplevel is preserved because only git's single
         # trailing-newline terminator is stripped (result.stdout[:-1] when it endswith "\\n", stripping
-        # exactly that one \\n), not strip(), so the registry IS found and the registered target ASKS. Was
+        # exactly that one \\n), not strip(), so the registry IS found and the registered target DENIES. Was
         # ALLOW (strip() dropped the space -> wrong root -> registry not found -> absent). (F-162)
-        gexpect("(gs-z) a trailing-space repo dir keeps its toplevel; the registered target ASKS", "deny",
+        gexpect("(gs-z) a trailing-space repo dir keeps its toplevel; the registered target DENIES", "deny",
                 tool="Write", file_path=os.path.join(grsp, "GEN.md"), cwd=grsp)
-        # ASK: a DANGLING symlink registry is BAD (a symlink is not a trusted regular file). lstat does NOT
+        # DENY: a DANGLING symlink registry is BAD (a symlink is not a trusted regular file). lstat does NOT
         # follow the link, so S_ISREG is False on the link itself -> bad; this rejects a STATIONARY symlink
         # (best-effort against the accidental case, not a TOCTOU-closure claim). Was an inert ALLOW
         # (open -> FileNotFoundError -> absent). (F-164)
         gexpect("(gs-aa) a dangling-symlink registry DENIES fail-closed (a symlink is never a regular file; "
                 "finding 8)", "deny", tool="Write", file_path=os.path.join(grlink, "GEN.md"), cwd=grlink)
-        # ASK: a multibyte OVERSIZE registry (>1M BYTES but <1M chars) exceeds the BYTE bound. Was ALLOW
+        # DENY: a multibyte OVERSIZE registry (>1M BYTES but <1M chars) exceeds the BYTE bound. Was ALLOW
         # (a char-count read stayed under the cap and parsed to an empty registry). (F-165)
         gexpect("(gs-ab) a multibyte-oversize registry DENIES fail-closed (the bound is on BYTES; finding 8)",
                 "deny", tool="Write", file_path=os.path.join(grbig, "GEN.md"), cwd=grbig)
@@ -5487,11 +5489,11 @@ def _main_isolated():
         # POSIX (a control-char input is rejected before realpath; a realpath'd absolute never makes
         # os.path.commonpath raise on Linux). Exercise them DETERMINISTICALLY by INJECTING the fault:
         # monkeypatch the module-shared os.path primitive to raise within the call, assert the handler
-        # returns ASK, restore in the finally. The good repo (gr) + a registered target gives a resolvable
+        # returns an allow with a note, restore in the finally. The good repo (gr) + a registered target gives a resolvable
         # root and a real registry, so the flow REACHES the guarded call before the fault fires.
         # Falsifiable: removing the guarding try/except (gs-ac the gensrc_guard realpath wrap, gs-ad the
         # _gensrc_within wrap / its "err" sentinel handling) turns the injected fault into an uncaught
-        # crash the dispatcher hard-DENIES, not an ASK.
+        # crash the dispatcher hard-DENIES, not an allow with a note.
         def _raise_realpath(*_a, **_k):
             raise OSError("injected realpath fault (gs-ac)")
 
@@ -5502,38 +5504,39 @@ def _main_isolated():
         _real_realpath = os.path.realpath
         try:
             os.path.realpath = _raise_realpath
-            gexpect("(gs-ac) an injected realpath fault on the target ASKS (guarded-realpath branch)",
+            gexpect("(gs-ac) an injected realpath fault on the target allows with a note (guarded-realpath branch)",
                     "allow", tool="Write", file_path=_gs_inj_fp, cwd=gr)
         finally:
             os.path.realpath = _real_realpath
         _real_commonpath = os.path.commonpath
         try:
             os.path.commonpath = _raise_commonpath
-            gexpect("(gs-ad) an injected commonpath fault ASKS (_gensrc_within containment 'err' branch)",
+            gexpect("(gs-ad) an injected commonpath fault allows with a note (_gensrc_within containment "
+                    "'err' branch)",
                     "allow", tool="Write", file_path=_gs_inj_fp, cwd=gr)
         finally:
             os.path.commonpath = _real_commonpath
 
-        # ASK: a repo dir name ending in a NEWLINE keeps its toplevel. git prints the path + EXACTLY one \n
+        # DENY: a repo dir name ending in a NEWLINE keeps its toplevel. git prints the path + EXACTLY one \n
         # terminator, so stripping only that one \n preserves the dir's own trailing newline; the registry
         # IS found and the registered target (relative MultiEdit route, cwd = the newline-terminal repo)
-        # ASKS. Falsifiable: rstrip("\n") eats the dir's own newline too -> wrong root -> registry not
+        # DENIES. Falsifiable: rstrip("\n") eats the dir's own newline too -> wrong root -> registry not
         # found -> inert absent ALLOW. (F-167)
-        gexpect("(gs-ae) a newline-terminal repo dir keeps its toplevel; the registered target ASKS", "deny",
+        gexpect("(gs-ae) a newline-terminal repo dir keeps its toplevel; the registered target DENIES", "deny",
                 tool="MultiEdit", file_path="GEN.md",
                 edits=[{"old_string": "a", "new_string": "b"}], cwd=grnl)
 
-        # ASK: a NON-UTF-8 registry (invalid bytes) is BAD, never absent: the explicit
+        # DENY: a NON-UTF-8 registry (invalid bytes) is BAD, never absent: the explicit
         # raw_bytes.decode("utf-8") raises UnicodeDecodeError, which is caught -> bad. Falsifiable:
         # removing the decode try/except turns the invalid bytes into an uncaught crash the dispatcher
-        # hard-DENIES, not a clean ASK. (F-169 deterministic decode-path proof)
+        # hard-DENIES (exit 2), not the structured fail-closed deny. (F-169 deterministic decode-path proof)
         gs_reg3.write_bytes(b"\xff\xfe\x00\x01not utf-8\xc3\x28")
         gexpect("(gs-af) a non-UTF-8 registry DENIES fail-closed (invalid bytes -> decode fault -> bad; "
                 "finding 8)", "deny", tool="Write", file_path=os.path.join(gr3, "GEN.md"), cwd=gr3)
-        # ASK: a FIFO registry is BAD (lstat/S_ISREG sees S_ISFIFO before the open), and the probe does NOT
+        # DENY: a FIFO registry is BAD (lstat/S_ISREG sees S_ISFIFO before the open), and the probe does NOT
         # block: os.lstat does not open the FIFO, so no writer is needed and there is no hang. Falsifiable:
         # dropping the lstat/S_ISREG probe would make open(path, "rb") block on the FIFO until the hook
-        # timeout instead of returning ASK. The fifo is unlinked in the finally below. (F-169)
+        # timeout instead of returning the deny. The fifo is unlinked in the finally below. (F-169)
         _fifo_path = os.path.join(grfifo, ".aiqt", "gensrc.json")
         os.mkfifo(_fifo_path)
         try:
@@ -5542,11 +5545,11 @@ def _main_isolated():
                     tool="Write", file_path=os.path.join(grfifo, "GEN.md"), cwd=grfifo)
         finally:
             os.remove(_fifo_path)
-        # ASK: a DELETE RACE in the lstat->open window. The registry file does not exist, so open() would
+        # DENY: a DELETE RACE in the lstat->open window. The registry file does not exist, so open() would
         # raise FileNotFoundError; monkeypatch os.lstat to report a REGULAR file for that path so the
-        # S_ISREG probe passes and the flow reaches the open, which then raises FNF -> bad (fail-safe ASK),
+        # S_ISREG probe passes and the flow reaches the open, which then raises FNF -> bad (fail-closed DENY),
         # NOT absent. Falsifiable: the pre-fix open FileNotFoundError returned ("absent", None) -> the inert
-        # ALLOW; the fix maps it to bad -> ASK. os.lstat is restored in the finally. (F-169)
+        # ALLOW; the fix maps it to bad -> DENY. os.lstat is restored in the finally. (F-169)
         _real_lstat = os.lstat
         _regular_st = _real_lstat(os.path.join(gr, ".aiqt", "gensrc.json"))  # a genuine regular-file stat
         _race_rel = os.path.join("gsrace", ".aiqt", "gensrc.json")
