@@ -1624,7 +1624,8 @@ def _cs_class(rel, cls):
 
 def _close_sweep_source(rel, text):
     import ast
-    tree = ast.parse(text, rel)
+    import _optlevel
+    tree = _optlevel.parse(text, rel)
     rows = []
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef):
@@ -2146,6 +2147,7 @@ def _cs_robustness_failures(sources):
     """Each (label, text) source the sweep raises on, named with the innermost statements that raise when each
     is swept on its own (as a function body, and as a class when it is one). Any exception is a failure."""
     import ast
+    import _optlevel
     import types
     failures = []
     for label, text in sources:
@@ -2155,7 +2157,7 @@ def _cs_robustness_failures(sources):
         except Exception as exc:                      # a crash is a defect, never a pass or a skip
             error = exc
         try:
-            tree = ast.parse(text, label)
+            tree = _optlevel.parse(text, label)
         except SyntaxError:
             tree = ast.Module(body=[], type_ignores=[])
         culprits = []

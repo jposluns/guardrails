@@ -361,6 +361,7 @@ def _self_test_entry_gap(tree):
     to or deletes through the name self_test or through a target that starts from an expression rather than
     a name (_self_test_or_expression_store); otherwise it names the first rule broken."""
     import ast
+    import _optlevel
 
     def bindings_of(name, imported=False):
         # The line of each binding of `name` _binds counts at module scope and of each `global` naming it;
@@ -386,7 +387,7 @@ def _self_test_entry_gap(tree):
     if not isinstance(block, ast.If):
         return True, "its `__main__` test (line {}) is a `{}` statement, not an `if`".format(
             line, type(block).__name__.lower())
-    if ast.dump(block.test) != ast.dump(ast.parse(_ENTRY_TEST, mode="eval").body):
+    if ast.dump(block.test) != ast.dump(_optlevel.parse(_ENTRY_TEST, mode="eval").body):
         return True, "its `__main__` block (line {}) does not test exactly `{}`".format(block.lineno, _ENTRY_TEST)
     if block.orelse:
         return True, "its `__main__` block (line {}) has an else".format(block.lineno)
@@ -395,7 +396,7 @@ def _self_test_entry_gap(tree):
     if not any(isinstance(node, ast.Import) and any(alias.name == "sys" and alias.asname is None
                                                     for alias in node.names) for node in tree.body):
         return True, "it does not `import sys` at top level"
-    entry = ast.dump(ast.parse(_ENTRY_STATEMENT).body[0])
+    entry = ast.dump(_optlevel.parse(_ENTRY_STATEMENT).body[0])
     if ast.dump(block.body[0]) != entry:
         if any(ast.dump(statement) == entry for statement in block.body[1:]):
             return True, "the canonical `--self-test` statement is not the first in its `__main__` block"
@@ -576,6 +577,7 @@ def _self_test_entry_gaps(directory, required=()):
     a code-review matter: the guard is for an accidental missing or miswired entry. The exact-form rule is
     conservative: a working entry in any other form is a gap."""
     import ast
+    import _optlevel
     gaps, exposers = {}, set()
     try:
         names = sorted(os.listdir(directory))
@@ -600,7 +602,7 @@ def _self_test_entry_gaps(directory, required=()):
             gaps[name] = "it cannot be read ({})".format(type(exc).__name__)
             continue
         try:
-            exposes, reason = _self_test_entry_gap(ast.parse(source, path))
+            exposes, reason = _self_test_entry_gap(_optlevel.parse(source, path))
         except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
             gaps[name] = "it cannot be parsed ({})".format(type(exc).__name__)
             continue
@@ -7100,7 +7102,7 @@ def _watchdog_completion_case(mode):
         # setattr) on an imported module poisons the NAME module-wide
         # -- module-owned cleanup monkey-patched onto os must never
         # clear as external.
-        poisoned_tree = ast.parse(textwrap.dedent("""
+        poisoned_tree = _optlevel.parse(textwrap.dedent("""
             import os
 
             class _Vector:
@@ -7116,7 +7118,7 @@ def _watchdog_completion_case(mode):
             "an attribute assignment on an imported module did not "
             "poison the imported name: module-owned cleanup can hide "
             "on the module object (fix 10, QA31 gemini BLOCKER c)")
-        setattr_tree = ast.parse(textwrap.dedent("""
+        setattr_tree = _optlevel.parse(textwrap.dedent("""
             import os
             setattr(os, "sneak_cleanup", _fixture_signal)
             """))
