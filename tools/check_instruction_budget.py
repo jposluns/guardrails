@@ -4,7 +4,13 @@
 Claude Code reads every `.claude/rules/**/*.md` file that carries no `paths:` scope, the project CLAUDE.md,
 and every file either of them imports, into every session before the first prompt. That text is paid for
 in every session, so this gate measures it and fails when the pack's share grows. The loading rules below
-model the loader of the Claude Code build pinned in the budget source.
+are taken from the loader of the Claude Code build pinned in the budget source.
+
+OVER-COUNT BY CONSTRUCTION. A budget gate must never under-count, so the gate does not model the loader's
+Markdown (code spans, paragraph boundaries, HTML blocks, comment placement). It counts every character of a
+counted file and every file an `@` in it could name, and it removes only what the loader certainly
+removes: a leading byte order mark before frontmatter, the frontmatter block, and an HTML comment in the
+one shape COMMENTS states. The figure can be higher than what the loader keeps, never lower.
 
 What it measures, in UTF-16 code units (the length of the text encoded utf-16-le, divided by 2; a
 character in the Basic Multilingual Plane is one unit, an astral character such as an emoji is two):
@@ -17,33 +23,52 @@ character in the Basic Multilingual Plane is one unit, an astral character such 
       block is removed (FRONTMATTER_RE below, first match only; its trailing `\\s*` also takes the blank
       line after the closing fence); with no frontmatter the BOM stays counted. HTML comments are then
       removed as COMMENTS states.
-  SCOPE. A file whose frontmatter has a `paths:` key is conditional and is not counted, unless every glob
-      in it is `**` once a single trailing `/**` is stripped, in which case it loads everywhere and is
-      counted. A typed `paths:` value or item, one YAML would read as null, a boolean, a number, a
-      mapping, an alias, a tag, or a block scalar, and an empty list, exit 2: the loader drops a scope it
-      cannot read as strings and loads the file everywhere, so the gate refuses rather than guesses.
-  COMMENTS. Block-level HTML comments only, as the loader's Markdown lexer (marked, gfm off) removes
-      them: a comment block that opens at column 0, outside a fence or an HTML block, loses its comments,
-      and goes whole when what is left is blank. A comment inside a paragraph, a list, a quote, a code
-      block, or a code span is kept and counted. Stop-removing rule: a line scan places the blocks, and
-      from the first construct it cannot place (an indented, tab led, list or quote nested fence or HTML
-      opener, an opener met inside an HTML block, an unterminated comment, or a lone CR) to the end of
-      the file it removes no comment, so a comment there is counted, not guessed away.
-  IMPORTS. Every `@path` token in a counted rule file, in the managed block, and, for SESSION, in the
-      whole CLAUDE.md is followed relative to the importing file, recursively through imported files
-      too, and each target is counted once, its BOM, frontmatter, and block-level comments removed as for
-      a rule file. A token is skipped inside a block the comment scan places (a fenced code block, an
-      HTML comment block), inside a CommonMark code span (a backtick run closed by a run of the same
-      length in the same paragraph; an escaped backtick, or one inside an inline HTML tag or a link
-      destination, is literal), and inside an inline HTML comment. The `#` fragment is cut and the
-      loader's own token filter applied. An `@` counts only at a line start or after a character that is
-      not a letter or digit, so an email address such as name@example.com is not a token. A token that
-      names no file (a mention such as @alice) is skipped, as the loader skips a target it cannot read:
-      it adds nothing and does not fail. A token the gate cannot settle exits 2 with a message that calls
-      it ambiguous: a home relative or absolute path, or one that escapes the repository (what it loads
-      depends on the machine), and a target that exists but cannot be read or decoded as UTF-8.
+  SCOPE. A file whose frontmatter has a `paths:` key is conditional and is not counted, unless its globs
+      load everywhere. The value (a scalar, or each item of a list) is normalized in the loader's order:
+      split on the commas outside braces, each piece trimmed, one level of brace alternation `{a,b}`
+      expanded, one trailing `/**` stripped, and empty globs dropped. The file is unconditional, and
+      counted, when no glob is left or every glob is `**` (so `**`, `**/**`, `/**`, `**,`, ` ** `,
+      `{**,**}`, and `["**", "/**"]`). A glob the normalizer cannot read (nested braces, an unbalanced
+      brace, a backslash escape) exits 2. A typed `paths:` value or item, one YAML would read as null, a
+      boolean, a number, a mapping, an alias, a tag, or a block scalar, exits 2: the loader drops a scope
+      it cannot read as strings and loads the file everywhere, so the gate refuses rather than guesses.
+  FRONTMATTER. A strict line reader: blank and `#` lines are skipped; it classifies a `key: value` line
+      with a plain key (letters, digits, `_`, `-` only) at column 0 and a space after the colon, and a
+      `- item` line (indented with spaces only) under a key whose value is empty. When the loader's YAML
+      cannot parse frontmatter it loads the file everywhere, so any line the reader cannot classify (an
+      indented or dotted key, a value holding a second `: ` or starting with `@`, a backtick, `|`, `>`,
+      `&`, `*` or `!` outside quotes, a value the scalar parser refuses, any other line) makes the file
+      unconditional: counted, never left out.
+  COMMENTS. An HTML comment is removed only in the one shape the loader certainly removes: a line that is
+      exactly one `<!-- ... -->` comment at column 0, with a blank line or the start of the file before it
+      and a blank line or the end of the file after it, outside a fenced code block. The line and its
+      newline go; the blank lines around it stay counted. Every other comment is counted. The line scan
+      that finds fenced code blocks follows only fences opened at column 0; from the first line it cannot
+      place (a fence opener that is not at column 0, any line that opens with `<` at any indent or inside
+      a list or quote, or a fence-like line inside a fence that is not a plain close) to the end of the
+      file it removes no comment, and a file holding a carriage return has no comment removed.
+  IMPORTS. Every `@` in a counted rule file, in the managed block, in an imported file, and, for SESSION,
+      in the whole CLAUDE.md is an import candidate, with no exclusion for code spans, comments, or other
+      Markdown structure. The candidate is the run of non-whitespace characters after the `@` (a
+      backslash-escaped space stays in the run). The paths it may name are tested longest first: the
+      whole run, then each prefix that ends just before a Markdown delimiter character (`*`, `_`, a
+      backtick, `)`, `]`, `}`, `>`, `,`, `.`, `;`, `:`, `!`, `?`, quotes) or an inline opener (`<`, `[`,
+      `(`, `{`, a backslash), each with its `#` fragment cut, read with the escaped space and also with
+      Markdown backslash escapes undone. This takes trailing delimiters off one at a time as a special
+      case, and also finds the path in `<b>@big.txt</b>` and `[@big.txt](x)`. Every tested path that names
+      an existing regular file inside the repository, resolved relative to the importing file, is an
+      import, so the loader's own token, always one of these prefixes, is never missed. When a path names
+      no file under exact case but one file inside the repository matches it case-insensitively, that file
+      is the import (the loader on a case-insensitive file system reads it); two such matches exit 2. Each
+      target is counted once, recursively through imported files to any depth (a cycle ends), its BOM,
+      frontmatter, and comments removed as for a rule file. A candidate none of whose paths names a file
+      adds 0 and does not fail: a mention such as @alice, or an email address such as name@example.com.
+      A candidate the gate cannot settle exits 2 with a message that calls it ambiguous: a home relative
+      (`~/`) or absolute path, a path that resolves outside the repository (what it loads depends on the
+      machine), and a target that exists but is not a regular file or cannot be read or decoded as UTF-8.
   MANAGED BLOCK. The pack-managed RULES-INDEX block of CLAUDE.md (the markers tools/gen_claude.py
-      writes), comments removed as COMMENTS states, plus its imports.
+      writes), comments removed as COMMENTS states with the scan run over the whole CLAUDE.md (so a fence
+      opened before the block keeps the block's comments counted), plus its imports.
 
 Two totals are reported separately:
 
@@ -53,30 +78,34 @@ Two totals are reported separately:
            enforced: the bytes outside the managed block belong to the adopter.
 
 A rule file or the managed block importing RULES-INDEX.md or AGENTS.md is a finding (exit 1) whatever the
-total; the same import in the adopter's text outside the block is not.
+total: a candidate any of whose tested paths, or any of whose targets, has either as its final path
+component in any case, whether a file exists there or not. The same import in the adopter's text outside
+the block is not.
 
 The budget source, .aiqt/core/instruction-budget.toml, carries exactly four keys: `ratchet` (the PACK
 figure enforced today; lower it as the pack shrinks, and raise it only with a reviewed reason), `ceiling`
 (the target PACK figure, reported, not enforced), and `claude-code-version` and `binary-sha256`, which pin
-the Claude Code build whose loading behaviour this gate models.
+the Claude Code build whose loading behaviour this gate follows.
 
-DISCLOSED RESIDUAL. This gate measures the repository's own files against a model of the pinned loader;
-it does not run Claude Code. Known gaps in that model:
-  - The inline scan does not model reference-style links or their definitions, autolinks, or link labels:
-    a backtick or `@` in one is read as plain paragraph text, so a code span there can pair differently
-    from the loader's, and an import can be reported that the loader does not see.
-  - The loader's own path filter on which import targets it reads is not applied: every target that
-    resolves to a readable file inside the repository is followed and counted, so one the loader would
-    skip is overcounted.
-  - A fence or HTML block nested in a list or quote, or indented, triggers the stop-removing rule, so the
-    rest of the file overcounts: its comments are counted and an `@` in it is followed.
-  - It does not measure user-level files (~/.claude/CLAUDE.md and ~/.claude/rules/), which load in every
-    session too; an AGENTS.md or other file loaded through the instructionFiles setting rather than an `@`
-    import; CLAUDE.md files in other directories, or CLAUDE.local.md; skills, hooks, tool definitions, or
-    the system prompt; or loading by a Claude Code version other than the one pinned in the budget source.
-  - Frontmatter is read with a small fail-closed subset of YAML (top-level `key: value` lines, flow lists,
-    and `- item` block lists), so a file using other YAML forms exits 2 rather than being guessed at.
-  - The count is UTF-16 code units, not tokens, so it tracks size, not model cost.
+KNOWN OVER-COUNTS, by design (each can make PACK or SESSION higher than what the loader keeps):
+  - A comment in any other place (inside a paragraph, a list, a quote, a code block or span, not
+    surrounded by blank lines, spread over lines, after the comment scan stops, or in a file holding a
+    carriage return) is counted although the loader may remove it.
+  - `@` text that happens to name a file is counted as an import: an email address, a mention, or a
+    prefix of either that names a file, and an `@` in link destinations or HTML attributes.
+  - An import inside a code span, a fenced code block, or an HTML comment is counted although the loader
+    skips it, and a banned name there exits 1.
+  - Every target is followed without the loader's own path filter and to any depth, and two prefixes of
+    one candidate that name two files both count.
+  - A frontmatter line the strict reader cannot classify makes a file with a `paths:` scope count.
+  - A rule file reached under two names counts twice.
+
+DISCLOSED RESIDUAL. This gate measures the repository's own files; it does not run Claude Code. It does
+not measure user-level files (~/.claude/CLAUDE.md and ~/.claude/rules/), which load in every session too;
+an AGENTS.md or other file loaded through the instructionFiles setting rather than an `@` import;
+CLAUDE.md files in other directories, or CLAUDE.local.md; skills, hooks, tool definitions, or the system
+prompt; or loading by a Claude Code version other than the one pinned in the budget source. The count is
+UTF-16 code units, not tokens, so it tracks size, not model cost.
 
 Usage:
   check_instruction_budget.py                          measure and enforce; print both totals
@@ -113,41 +142,43 @@ CLAUDE_REL = "CLAUDE.md"
 BUDGET_REL = ".aiqt/core/instruction-budget.toml"
 BUDGET_KEYS = {"ratchet", "ceiling", "claude-code-version", "binary-sha256"}
 # Importing either from the managed block loads the rule index or a second full copy of the corpus on top
-# of the rule tree, so either is a finding whatever the measured total.
+# of the rule tree, so either is a finding whatever the measured total. Matched on the final path
+# component in any case, as a case-insensitive file system reads it.
 BANNED_IMPORTS = ("RULES-INDEX.md", "AGENTS.md")
+BANNED_FOLDED = {name.casefold() for name in BANNED_IMPORTS}
 
 # The leading frontmatter block, exactly as the approved design states it (first match only).
 FRONTMATTER_RE = re.compile(r"^---\s*\n([\s\S]*?)---\s*\n?")
 # A file that opens a frontmatter fence FRONTMATTER_RE cannot close is malformed, never body text.
 FRONTMATTER_OPEN_RE = re.compile(r"^---\s*\n")
-HTML_COMMENT_RE = re.compile(r"<!--[\s\S]*?-->")
-# The pinned loader's Markdown lexer (marked, gfm off) and its comment rule, as extracted from the pinned
-# binary: an `html` token whose raw starts with `<!--` and holds `-->` loses its comments, and is dropped
-# whole when what is left is blank under JavaScript's trim(); every other token is kept as written.
-COMMENT_TOKEN_RE = re.compile(r"<!--(?:-?>|[\s\S]*?(?:-->|\Z))[^\n]*(?:\n+|\Z)")
 JS_WHITESPACE = (" \t\n\v\f\r\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008"
                  "\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff")
-FENCE_OPEN_RE = re.compile(r"(`{3,}(?=[^`]*$)|~{3,})")
-RAW_HTML_OPEN_RE = re.compile(r"<(?:(script|pre|style|textarea)(?=[\s>]|$)|(\?)|(!\[CDATA\[)|(![A-Za-z])|([A-Za-z/]))",
-                              re.I)
+# The one comment shape the gate removes: a whole line that is exactly one `<!-- ... -->` comment.
+COMMENT_LINE_RE = re.compile(r"<!--(?:(?!-->)[^\n])*-->")
+FENCE_OPEN_RE = re.compile(r"(`{3,})[^`]*$|(~{3,})")
+FENCE_ANY_RE = re.compile(r"[ \t]*(?:`{3,}|~{3,})")
 _CONTAINER = r"[ \t>]*(?:(?:[*+-]|\d{1,9}[.)])[ \t>]*)*"
-FENCE_LIKE_RE = re.compile(_CONTAINER + r"(?:```|~~~)")
-HTML_LIKE_RE = re.compile(_CONTAINER + r"<(?:script|pre|style|textarea|!|\?)", re.I)
-INLINE_COMMENT_RE = re.compile(r"<!--(?!-?>)[\s\S]*?-->")
-INLINE_TAG_RE = re.compile(r"<[A-Za-z/][^<>]*>|\[[^\[\]\n]*\]\([^\s()]*\)")
-BLANK_LINE_RE = re.compile(r"\n(?:[ \t]*\r?\n)+")
-ASCII_PUNCT = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+# A line the comment scan cannot place: a fence opener that is not at column 0, or any line opening with
+# `<` (an HTML block may run past blank lines), at any indent or container depth.
+UNPLACED_RE = re.compile(_CONTAINER + r"(?:```|~~~|<)")
 ESCAPED_SPACE = "\x5c\x20"
-# The loader's own import token (`@path`, a backslash escaping a space), taken here after line start,
-# whitespace, or any character that can end a Markdown inline token: a superset of where the loader's text
-# tokens start.
-IMPORT_RE = re.compile(r"(?:^|(?<=[^0-9A-Za-z]))@((?:[^\s\\]|\\[ ])+)", re.M)
+# An import candidate: the run of non-whitespace characters after an `@` (a backslash-escaped space stays
+# in the run, as in the loader's own token).
+CANDIDATE_RE = re.compile(r"(?:\\ |\S)+")
+# A prefix of the run is tested wherever it ends just before one of these: the trailing Markdown delimiter
+# characters, the openers of inline markup, and the backslash of an escape.
+DELIMITERS = "*_`)]}>,.;:!?\"'"
+CUT_BEFORE = DELIMITERS + "<[({\\"
+MARKDOWN_ESCAPE_RE = re.compile(r"\\([!-/:-@\[-`{-~ ])")
 YAML_TYPED_RE = re.compile(
     r"(?:null|Null|NULL|~|true|True|TRUE|false|False|FALSE|yes|Yes|YES|no|No|NO|on|On|ON|off|Off|OFF|y|Y|n|N)"
     r"|[-+]?(?:\d[\d_]*(?:\.\d*)?(?:[eE][-+]?\d+)?|\.\d+(?:[eE][-+]?\d+)?|0x[0-9a-fA-F_]+|0o[0-7_]+"
     r"|\.(?:inf|Inf|INF|nan|NaN|NAN))")
-KEY_RE = re.compile(r"^([A-Za-z0-9_][A-Za-z0-9_.-]*)[ \t]*:(.*)$")
-ITEM_RE = re.compile(r"^[ \t]*-[ \t]+(.*)$")
+# The strict line reader: a plain key (letters, digits, `_`, `-`) at column 0, a colon, and a space before
+# any value; a `- item` line indented with spaces only.
+KEY_RE = re.compile(r"([A-Za-z0-9_-]+):(?: +(.*))?")
+ITEM_RE = re.compile(r" *- +(.*)")
+QUOTED_RE = re.compile(r"\"[^\"]*\"|'[^']*'")
 VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -162,75 +193,49 @@ def utf16_units(text):
     return len(text.encode("utf-16-le")) // 2
 
 
-def _scan_blocks(text):
-    """The top-level fenced code blocks and HTML comment blocks of `text` as the pinned loader's lexer
-    sees them, from a line scan: a list of (kind, start, end), kind "fence" or "comment" (a comment token
-    runs to the rest of the line that closes it and the newlines after that). Only a block opened at
-    column 0 is reported. A fence or raw HTML opener that is indented, tab led, list or quote nested, or
-    met inside an HTML block, an unterminated comment, or a lone CR leaves the scan unsure, and nothing
-    after that point is reported, so a comment there is kept and counted, never guessed away."""
+def comment_spans(text):
+    """The (start, end) spans of `text` the loader certainly removes as HTML comments: each a line that is
+    exactly one `<!-- ... -->` comment at column 0, with a blank line or the start of `text` before it and
+    a blank line or the end of `text` after it, outside a fenced code block, with its newline. The scan
+    follows only fences opened at column 0; from the first line it cannot place (UNPLACED_RE, or a
+    fence-like line inside a fence that is not a plain close) it reports nothing more, and a text holding a
+    carriage return has no span, so a comment there is counted, never guessed away."""
     spans = []
-    if re.search(r"\r(?!\n)", text):
+    if "<!--" not in text or "\r" in text:
         return spans
-    pos, state, start = 0, None, 0
-    while pos < len(text):
-        nl = text.find("\n", pos)
-        end = len(text) if nl < 0 else nl + 1
-        line = text[pos:end].rstrip("\n")
-        if line.endswith("\r"):
-            line = line[:-1]
-        if state is None:
-            if line.startswith("<!--"):
-                m = COMMENT_TOKEN_RE.match(text, pos)
-                if "-->" not in m.group(0):
-                    return spans
-                spans.append(("comment", pos, m.end()))
-                pos = m.end()
-                continue
-            fence = FENCE_OPEN_RE.match(line)
-            raw = RAW_HTML_OPEN_RE.match(line)
-            if fence:
-                state = ("fence", re.compile(r" {0,3}" + re.escape(fence.group(1)) + r"[~`]* *"))
-                start = pos
-            elif raw:
-                tag, pi, cdata, decl = raw.group(1), raw.group(2), raw.group(3), raw.group(4)
-                term = ("</" + tag + ">" if tag else r"\?>" if pi else r"\]\]>" if cdata
-                        else ">" if decl else None)
-                if term is None:
-                    state = ("blank", None)
-                elif not re.compile(term, re.I).search(line, raw.end()):
-                    state = ("raw", re.compile(term, re.I))
-            elif FENCE_LIKE_RE.match(line) or HTML_LIKE_RE.match(line):
+    lines = text.split("\n")
+    pos, fence = 0, None
+    for idx, line in enumerate(lines):
+        start, pos = pos, pos + len(line) + 1
+        if fence is not None:
+            if re.fullmatch(" {0,3}" + re.escape(fence[0]) + "{" + str(fence[1]) + ",} *", line):
+                fence = None
+            elif FENCE_ANY_RE.match(line):
                 return spans
-        elif state[0] == "fence":
-            if state[1].fullmatch(line):
-                spans.append(("fence", start, end))
-                state = None
-        elif FENCE_LIKE_RE.match(line) or HTML_LIKE_RE.match(line):
+            continue
+        if line.startswith("<!--") and "-->" in line[2:]:
+            # A comment block that closes on its own line ends there, whatever follows on the line, so it
+            # leaves the fence state unchanged; only the exact shape with blank neighbours is removed.
+            if (COMMENT_LINE_RE.fullmatch(line)
+                    and (idx == 0 or not lines[idx - 1].strip(" \t"))
+                    and (idx == len(lines) - 1 or not lines[idx + 1].strip(" \t"))):
+                spans.append((start, min(pos, len(text))))
+            continue
+        opener = FENCE_OPEN_RE.match(line)
+        if opener:
+            run = opener.group(1) or opener.group(2)
+            fence = (run[0], len(run))
+        elif UNPLACED_RE.match(line):
             return spans
-        elif state[0] == "raw":
-            if state[1].search(line):
-                state = None
-        elif not line.strip(" \t"):
-            state = None
-        pos = end
-    if state is not None and state[0] == "fence":
-        spans.append(("fence", start, len(text)))
     return spans
 
 
 def strip_comments(text):
-    """`text` as the pinned loader leaves it: each top-level HTML comment block _scan_blocks reports loses
-    its comments, and goes whole when the rest is blank. A comment inside a paragraph, a list, a quote, a
-    code block, or a code span is kept and counted, as the loader keeps it."""
-    if "<!--" not in text:
-        return text
+    """`text` without the comment lines comment_spans reports; every other comment stays counted."""
     out, pos = [], 0
-    for kind, start, end in _scan_blocks(text):
-        if kind == "comment":
-            rest = HTML_COMMENT_RE.sub("", text[start:end])
-            out.append(text[pos:start] + (rest if rest.strip(JS_WHITESPACE) else ""))
-            pos = end
+    for start, end in comment_spans(text):
+        out.append(text[pos:start])
+        pos = end
     return "".join(out) + text[pos:]
 
 
@@ -258,31 +263,51 @@ def split_frontmatter(text, where):
     return m.group(1), body
 
 
+def _odd_value(value):
+    """True when a frontmatter value is one the loader's YAML may reject or read as other than a plain
+    scalar: it starts with `@`, a backtick, `|`, `>`, `&`, `*` or `!`, or holds a second `: ` (or ends with
+    `:`) outside quotes."""
+    if value[:1] in "@`|>&*!":
+        return True
+    bare = QUOTED_RE.sub("", value)
+    return ": " in bare or bare.endswith(":")
+
+
 def parse_frontmatter(block, where):
-    """The frontmatter as {key: value}, read with a small fail-closed YAML subset: blank and `#`
-    comment lines are skipped, a top-level `key: value` line takes gen_rules' validated scalar and
-    flow-list parser, and `- item` lines form a block list under a key whose value is empty. Any other
-    line, a duplicate key, or a malformed value is GateError."""
+    """({key: value}, unclassified) from the strict line reader: blank and `#` comment lines are skipped, a
+    `key: value` line (KEY_RE) takes gen_rules' validated scalar and flow-list parser, and `- item` lines
+    form a block list under a key whose value is empty. `unclassified` is True when any other line, or a
+    value _odd_value flags or the scalar parser refuses, is met: the loader then may fail to parse the
+    frontmatter and load the file everywhere, so the caller counts it. A `paths:` value or item that is
+    not a plain string, and a duplicate key, are GateError."""
     fm = {}
     open_key = None
+    unclassified = False
     for raw in block.splitlines():
         line = raw.rstrip()
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        item = ITEM_RE.match(line)
+        item = ITEM_RE.fullmatch(line)
         if item and open_key is not None:
+            tok = item.group(1).strip()
             if open_key == "paths":
-                _plain_string(item.group(1).strip(), where)
+                _plain_string(tok, where)
+            elif _odd_value(tok):
+                unclassified = True
             try:
-                fm[open_key].append(gen_rules._unquote(item.group(1).strip()))
+                fm[open_key].append(gen_rules._unquote(tok))
             except ValueError as exc:
-                raise GateError("{}: frontmatter: {}".format(where, exc))
+                if open_key == "paths":
+                    raise GateError("{}: frontmatter: {}".format(where, exc))
+                unclassified = True
             continue
-        kv = KEY_RE.match(line)
+        kv = KEY_RE.fullmatch(line)
         if kv is None:
-            raise GateError("{}: malformed frontmatter line {!r}".format(where, stripped))
-        key, value = kv.group(1), kv.group(2).strip()
+            unclassified = True
+            open_key = None
+            continue
+        key, value = kv.group(1), (kv.group(2) or "").strip()
         if key in fm:
             raise GateError("{}: duplicate frontmatter key {!r}".format(where, key))
         if value == "":
@@ -294,11 +319,16 @@ def parse_frontmatter(block, where):
             inner = value[1:-1] if value.startswith("[") and value.endswith("]") else None
             for tok in ([value] if inner is None else [t.strip() for t in inner.split(",") if t.strip()]):
                 _plain_string(tok, where)
+        elif _odd_value(value):
+            unclassified = True
         try:
             fm[key] = gen_rules._value(value)
         except ValueError as exc:
-            raise GateError("{}: frontmatter: {}".format(where, exc))
-    return fm
+            if key == "paths":
+                raise GateError("{}: frontmatter: {}".format(where, exc))
+            fm[key] = value
+            unclassified = True
+    return fm, unclassified
 
 
 def _plain_string(tok, where):
@@ -313,21 +343,74 @@ def _plain_string(tok, where):
 
 
 def path_globs(fm, where):
-    """None when the frontmatter has no `paths:` key; else its globs as a non-empty list of non-empty
-    strings (a scalar is one glob). Any other shape is malformed: GateError."""
+    """None when the frontmatter has no `paths:` key; else its values as a list of strings (a scalar is one
+    value). Any other shape is malformed: GateError."""
     if "paths" not in fm:
         return None
     value = fm["paths"]
     globs = [value] if isinstance(value, str) else value
-    if (not isinstance(globs, list) or not globs
-            or not all(isinstance(g, str) and g.strip() for g in globs)):
-        raise GateError("{}: `paths:` must be a glob or a non-empty list of globs".format(where))
+    if not isinstance(globs, list) or not all(isinstance(g, str) for g in globs):
+        raise GateError("{}: `paths:` must be a glob or a list of globs".format(where))
     return globs
 
 
+def _split_top(value, where):
+    """`value` split on the commas outside braces. GateError on what the normalizer cannot read: a
+    backslash escape, a nested brace, or an unbalanced brace."""
+    parts, current, depth = [], [], 0
+    for ch in value:
+        if ch == "\\":
+            raise GateError("{}: `paths:` glob {!r} holds an escape; cannot evaluate".format(where, value))
+        if ch == "{":
+            depth += 1
+            if depth > 1:
+                raise GateError("{}: `paths:` glob {!r} nests braces; cannot evaluate".format(where, value))
+        elif ch == "}":
+            depth -= 1
+            if depth < 0:
+                raise GateError("{}: `paths:` glob {!r} has an unbalanced brace; cannot evaluate".format(
+                    where, value))
+        if ch == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    if depth:
+        raise GateError("{}: `paths:` glob {!r} has an unbalanced brace; cannot evaluate".format(where, value))
+    parts.append("".join(current))
+    return parts
+
+
+def _expand_braces(glob):
+    """Every expansion of the (non-nested) brace alternations in `glob`, each alternative trimmed."""
+    expansions = [""]
+    for piece in re.split(r"(\{[^{}]*\})", glob):
+        if piece.startswith("{") and piece.endswith("}"):
+            choices = [c.strip(JS_WHITESPACE) for c in piece[1:-1].split(",")]
+        else:
+            choices = [piece]
+        expansions = [e + c for e in expansions for c in choices]
+    return expansions
+
+
+def normalize_globs(values, where):
+    """The globs the loader matches for `paths:` values, in its own order: split on commas outside braces,
+    trim, expand one level of braces, strip one trailing `/**`, drop empty globs."""
+    out = []
+    for value in values:
+        for piece in _split_top(value, where):
+            for glob in _expand_braces(piece.strip(JS_WHITESPACE)):
+                glob = glob.strip(JS_WHITESPACE)
+                if glob.endswith("/**"):
+                    glob = glob[:-3]
+                if glob:
+                    out.append(glob)
+    return out
+
+
 def loads_everywhere(globs):
-    """True when every glob is `**` once a single trailing `/**` is stripped (so `**` and `**/**`)."""
-    return all((g[:-3] if g.endswith("/**") else g) == "**" for g in globs)
+    """True when no normalized glob is left or every one is `**` (so `**`, `**/**`, `/**`, `**,`)."""
+    return all(g == "**" for g in globs)
 
 
 def _inside(path, real_root):
@@ -398,8 +481,10 @@ def measure_rules(root):
         where = path.relative_to(root).as_posix()
         front, body = split_frontmatter(read_text(path, where), where)
         if front is not None:
-            globs = path_globs(parse_frontmatter(front, where), where)
-            if globs is not None and not loads_everywhere(globs):
+            fm, unclassified = parse_frontmatter(front, where)
+            globs = path_globs(fm, where)
+            if (globs is not None and not unclassified
+                    and not loads_everywhere(normalize_globs(globs, where))):
                 conditional += 1
                 continue
         total += utf16_units(strip_comments(body))
@@ -409,139 +494,141 @@ def measure_rules(root):
 
 
 def managed_block(text):
-    """The text between the RULES-INDEX markers gen_claude.py writes. Each marker must appear exactly
-    once, BEGIN before END; otherwise GateError."""
+    """(start, end) of the text between the RULES-INDEX markers gen_claude.py writes. Each marker must
+    appear exactly once, BEGIN before END; otherwise GateError."""
     begin, end = gen_claude.BEGIN, gen_claude.END
     if text.count(begin) != 1 or text.count(end) != 1:
         raise GateError("{}: the RULES-INDEX markers must each appear exactly once".format(CLAUDE_REL))
     i, j = text.find(begin), text.find(end)
     if j < i:
         raise GateError("{}: the RULES-INDEX END marker precedes BEGIN".format(CLAUDE_REL))
-    return text[i + len(begin):j]
+    return i + len(begin), j
 
 
-def _inline_text(para):
-    """`para` (one paragraph: no blank line) with its code spans and HTML comments replaced by a space.
-    A backtick run opens a code span only when a run of the same length closes it in the same paragraph;
-    an escaped backtick, or one inside an inline HTML tag or a link destination, is literal."""
-    out, i, n = [], 0, len(para)
-    while i < n:
-        ch = para[i]
-        if ch == "\\" and i + 1 < n and para[i + 1] in ASCII_PUNCT:
-            out.append(para[i:i + 2])
-            i += 2
-            continue
-        if ch in "<[":
-            m = INLINE_COMMENT_RE.match(para, i) if ch == "<" else None
-            if m:
-                out.append(" ")
-                i = m.end()
+def import_candidates(text):
+    """For every `@` in `text`, with no exclusion for code spans, comments, or other Markdown structure:
+    the run of non-whitespace characters after it (CANDIDATE_RE), or "" when none follows."""
+    runs = []
+    pos = text.find("@")
+    while pos >= 0:
+        m = CANDIDATE_RE.match(text, pos + 1)
+        runs.append(m.group(0) if m else "")
+        pos = text.find("@", pos + 1)
+    return runs
+
+
+def candidate_paths(run):
+    """The paths a candidate run may name, longest first: the whole run and each prefix that ends just
+    before a CUT_BEFORE character, each with its `#` fragment cut, read with the loader's escaped space
+    and also with every Markdown backslash escape undone."""
+    cuts = sorted({len(run)} | {k for k, ch in enumerate(run) if ch in CUT_BEFORE}, reverse=True)
+    paths = []
+    for k in cuts:
+        prefix = run[:k].split("#", 1)[0]
+        for variant in (prefix.replace(ESCAPED_SPACE, " "), MARKDOWN_ESCAPE_RE.sub(r"\1", prefix), prefix):
+            if variant and variant not in paths:
+                paths.append(variant)
+    return paths
+
+
+def _casefold_matches(target, real_root):
+    """The regular files inside the repository whose path matches `target` (an absolute path under
+    `real_root`) component by component in any case."""
+    rel = os.path.relpath(target, real_root)
+    if rel == "." or rel.split(os.sep)[0] == "..":
+        return []
+    paths = [real_root]
+    for comp in rel.split(os.sep):
+        folded, step = comp.casefold(), []
+        for directory in paths:
+            try:
+                names = os.listdir(directory)
+            except OSError:
                 continue
-            m = INLINE_TAG_RE.match(para, i)
-            if m:
-                out.append(m.group(0))
-                i = m.end()
-                continue
-        if ch == "`":
-            j = i
-            while j < n and para[j] == "`":
-                j += 1
-            k, close = j, -1
-            while close < 0:
-                k = para.find("`", k)
-                if k < 0:
-                    break
-                e = k
-                while e < n and para[e] == "`":
-                    e += 1
-                close = k if e - k == j - i else -1
-                k = e
-            if close >= 0:
-                out.append(" ")
-                i = close + j - i
-            else:
-                out.append(para[i:j])
-                i = j
-            continue
-        out.append(ch)
-        i += 1
-    return "".join(out)
+            step.extend(os.path.join(directory, n) for n in sorted(names) if n.casefold() == folded)
+        paths = step
+    return sorted({os.path.realpath(p) for p in paths
+                   if os.path.isfile(p) and _inside(os.path.realpath(p), real_root)})
 
 
-def import_targets(text):
-    """The `@path` import tokens the pinned loader may follow in `text`, a superset of its own: outside
-    the top-level fenced code blocks and HTML comment blocks _scan_blocks reports, with the code spans and
-    inline comments of each paragraph removed, the `#` fragment cut, and the loader's own token filter
-    applied. A construct this scan cannot place is scanned, so an import can be over-reported, never
-    missed."""
-    pieces, pos = [], 0
-    for kind, start, end in _scan_blocks(text):
-        pieces.append(text[pos:start])
-        if kind == "comment":
-            pieces.append(HTML_COMMENT_RE.sub(" ", text[start:end]))
-        pos = end
-    pieces.append(text[pos:])
-    targets = []
-    for piece in pieces:
-        for para in BLANK_LINE_RE.split(piece):
-            for token in IMPORT_RE.findall(_inline_text(para)):
-                token = token.split("#", 1)[0].replace(ESCAPED_SPACE, " ")
-                if (token and not token.startswith("@") and not re.match(r"[#%^&*()]+", token)
-                        and (token.startswith(("./", "~/", "/")) and token != "/"
-                             or re.match(r"[a-zA-Z0-9._-]", token))):
-                    targets.append(token)
-    return targets
+def resolve_candidate(path, base, real_root, where, token):
+    """The regular file `path` names relative to the directory `base`, or None when it names nothing (a
+    missing path, a directory). Under exact case first; else the one file matching it case-insensitively
+    inside the repository. GateError when it resolves outside the repository, names something that is not
+    a regular file or a directory, or matches two files case-insensitively."""
+    if all(part in ("", ".", "..") for part in path.split("/")):
+        return None  # only dot components: always a directory, never a file
+    target = os.path.realpath(os.path.join(base, path))
+    if not _inside(target, real_root):
+        raise GateError("{}: import @{} escapes the repository, so what it loads depends on the "
+                        "machine; ambiguous, cannot evaluate".format(where, token))
+    if os.path.isdir(target):
+        return None
+    if os.path.lexists(target):
+        if not os.path.isfile(target):
+            rel = Path(os.path.relpath(target, real_root)).as_posix()
+            raise GateError("{}: import @{} names {}, which is not a regular file; whether the loader loads "
+                            "it is ambiguous; cannot evaluate".format(where, token, rel))
+        return target
+    matches = _casefold_matches(target, real_root)
+    if len(matches) > 1:
+        raise GateError("{}: import @{} matches {} files case-insensitively; which one a case-insensitive "
+                        "file system loads is ambiguous; cannot evaluate".format(where, token, len(matches)))
+    return matches[0] if matches else None
 
 
 def follow_imports(root, origins, findings):
-    """{resolved path: units} for every file reachable through `@path` imports from `origins`, a list of
-    (text, the directory it sits in, where), each counted once with frontmatter and HTML comments removed
-    as for a rule file. An import naming a BANNED_IMPORTS file is appended to `findings`. An import that names
-    no file is skipped, as the loader skips a target it cannot read. An ambiguous import is GateError: one
-    that is home relative, absolute, or escapes the repository (what it loads depends on the machine), or
-    one whose target exists but is not a regular file the gate can read and decode."""
+    """{resolved path: units} for every file reachable through `@` import candidates from `origins`, a
+    list of (text, the directory it sits in, where), each counted once with frontmatter and comments
+    removed as for a rule file. Every path candidate_paths gives that names a file is followed, so an
+    import can be over-reported, never missed. A candidate whose tested paths or targets carry a
+    BANNED_IMPORTS final component (any case) is appended to `findings`. GateError when a candidate is
+    home relative or absolute (what it loads depends on the machine), when resolve_candidate fails, or
+    when a target cannot be read and decoded."""
     real_root = os.path.realpath(root)
     seen = {}
     pending = list(origins)
     while pending:
         source, base, where = pending.pop()
-        for token in import_targets(source):
-            if token.startswith("~") or os.path.isabs(token):
+        for run in import_candidates(source):
+            token = run.split("#", 1)[0].replace(ESCAPED_SPACE, " ")
+            if token.startswith("~/") or (token.startswith("/") and token != "/"):
                 raise GateError("{}: import @{} is home relative or absolute, so what it loads depends on "
                                 "the machine; ambiguous, cannot evaluate".format(where, token))
-            target = os.path.realpath(os.path.join(base, token))
-            if not _inside(target, real_root):
-                raise GateError("{}: import @{} escapes the repository, so what it loads depends on the "
-                                "machine; ambiguous, cannot evaluate".format(where, token))
-            if Path(token).name in BANNED_IMPORTS or os.path.basename(target) in BANNED_IMPORTS:
+            banned, targets = False, []
+            for path in candidate_paths(run):
+                if os.path.basename(path.rstrip("/")).casefold() in BANNED_FOLDED:
+                    banned = True
+                target = resolve_candidate(path, base, real_root, where, run)
+                if target is not None and target not in targets:
+                    targets.append(target)
+            if any(os.path.basename(t).casefold() in BANNED_FOLDED for t in targets):
+                banned = True
+            if banned:
                 findings.append("{}: imports @{}; the pack must not import {}".format(
-                    where, token, " or ".join(BANNED_IMPORTS)))
-            if target in seen:
-                continue
-            # The loader skips a target it cannot read, so a token naming no file (a mention such as @alice,
-            # or a directory) loads nothing and is no import.
-            if not os.path.lexists(target) or os.path.isdir(target):
-                continue
-            rel = Path(os.path.relpath(target, real_root)).as_posix()
-            try:
-                if not os.path.isfile(target):
-                    raise GateError("not a regular file")
-                text = read_text(Path(target), rel)
-            except GateError as exc:
-                raise GateError("{}: import @{} names {}, which the gate cannot read ({}); whether the loader "
-                                "loads it is ambiguous; cannot evaluate".format(where, token, rel, exc))
-            body = split_frontmatter(text, rel)[1]
-            seen[target] = utf16_units(strip_comments(body))
-            pending.append((body, os.path.dirname(target), rel))
+                    where, run, " or ".join(BANNED_IMPORTS)))
+            for target in targets:
+                if target in seen:
+                    continue
+                rel = Path(os.path.relpath(target, real_root)).as_posix()
+                try:
+                    text = read_text(Path(target), rel)
+                except GateError as exc:
+                    raise GateError("{}: import @{} names {}, which the gate cannot read ({}); whether the "
+                                    "loader loads it is ambiguous; cannot evaluate".format(where, run, rel, exc))
+                body = split_frontmatter(text, rel)[1]
+                seen[target] = utf16_units(strip_comments(body))
+                pending.append((body, os.path.dirname(target), rel))
     return seen
 
 
 def measure(root):
-    """Both totals and their parts. Banned imports reached from the managed block are returned as
-    findings; every cannot-evaluate condition raises GateError."""
+    """Both totals and their parts. Banned imports reached from the rule files and the managed block are
+    returned as findings; every cannot-evaluate condition raises GateError."""
     rules, counted, conditional, origins = measure_rules(root)
     claude = read_text(root / CLAUDE_REL, CLAUDE_REL)
-    block = managed_block(claude)
+    start, end = managed_block(claude)
+    block = claude[start:end]
     findings = []
     real_root = os.path.realpath(root)
     # Claude Code follows imports in rule files as in CLAUDE.md, so theirs count into both totals.
@@ -550,7 +637,9 @@ def measure(root):
     # The adopter owns the bytes outside the block, so a banned import there is not the pack's finding:
     # only the rule files' and the managed block's findings fail the gate.
     session_imports = sum(follow_imports(root, origins + [(claude, real_root, CLAUDE_REL)], []).values())
-    block_units = utf16_units(strip_comments(block))
+    # The block's comments are placed in the whole CLAUDE.md, so a fence opened before the block counts.
+    spans = comment_spans(claude)
+    block_units = utf16_units(block) - sum(utf16_units(claude[s:e]) for s, e in spans if start <= s and e <= end)
     claude_units = utf16_units(strip_comments(claude))
     return {
         "rules": rules, "rule_files": counted, "conditional_files": conditional,
@@ -623,8 +712,9 @@ def run(root):
 # SELF-TEST: production code ends here; the red-on-revert mutations below target only the text above.
 # Fixture trees only, never the live corpus. Every case asserts its exact count or exit code through the
 # instrumented check() choke point, and the executed id set is reconciled against tools/selftest_checks.toml
-# (suite instruction-budget-selftest), both in-run and by tools/check_selftest_execution.py. The two
-# revert/ cases put the frontmatter removal and the ratchet comparison back to a broken form in a mutant
+# (suite instruction-budget-selftest), both in-run and by tools/check_selftest_execution.py. The
+# revert/ cases put the frontmatter removal, the ratchet comparison, the prefix scan, the scope normalizer,
+# and the comment shape back to a broken form in a mutant
 # copy of the production code above and require the matching case to turn red.
 
 SUITE_ID = "instruction-budget-selftest"
@@ -757,27 +847,40 @@ def _write_report(report_path):
 def self_test(report_path=None):
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-instruction-budget-selftest-"))
     try:
-        # Counting: frontmatter goes with the blank line after it; an HTML comment goes; a non-ASCII BMP
-        # character is one unit and an astral character two.
+        # Counting: frontmatter goes with the blank line after it; a whole-line comment between blank lines
+        # goes, its blank lines stay; a non-ASCII BMP character is one unit and an astral character two.
         front = _tree(tmp / "front", rules={"a.md": "---\ncorpus-id: x\n---\n\nBody\n"})
         check("count/frontmatter-and-blank-line-removed", _measured(measure, front)["rules"], 5)
-        comment = _tree(tmp / "comment", rules={"a.md": "<!-- hidden\nline -->\nB\n"})
-        check("count/html-comment-removed", _measured(measure, comment)["rules"], 2)
-        # A comment the loader keeps (in a fence, in a code span, inside a paragraph) is counted.
+        comment = _tree(tmp / "comment", rules={"a.md": "<!-- hidden -->\n\nB\n"})
+        check("count/html-comment-removed", _measured(measure, comment)["rules"], 3)
+        # Every other comment is counted: in a fence, in a code span, inside a paragraph, not between blank
+        # lines, spread over lines, inside an HTML block, after an indented HTML opener, in a CRLF file.
         fenced = _tree(tmp / "fenced", rules={"a.md": "```\n<!--" + "X" * 100 + "-->\n```\n"})
         check("count/comment-in-fence-kept", _measured(measure, fenced)["rules"], 116)
         inline = _tree(tmp / "inline", rules={"a.md": "A <!--" + "X" * 100 + "--> B\n"})
         check("count/comment-in-paragraph-kept", _measured(measure, inline)["rules"], 112)
         span = _tree(tmp / "span", rules={"a.md": "`<!--" + "X" * 100 + "-->`\n"})
         check("count/comment-in-code-span-kept", _measured(measure, span)["rules"], 110)
-        bom = _tree(tmp / "bom", rules={"a.md": "\ufeff---\nkind: x\n---\nA\n"})
+        for check_id, case, body in (
+                ("count/comment-after-paragraph-line-kept", "after-line", "A\n<!--" + "X" * 100 + "-->\n"),
+                ("count/multi-line-comment-kept", "multi-line", "<!--\n" + "X" * 100 + "\n-->\n"),
+                ("count/comment-inside-pre-block-kept", "pre",
+                 "<pre>\n\n<!--" + "X" * 100 + "-->\n\n</pre>\n"),
+                ("count/indented-div-then-comment-kept", "div", "  <div>\n<!--" + "X" * 1000 + "-->\n"),
+                ("count/list-item-comment-kept", "list-item", "- a <!--" + "X" * 100 + "-->\n"),
+                ("count/crlf-comment-kept", "crlf", "\r\n<!--" + "X" * 100 + "-->\r\n\r\n")):
+            kept = _tree(tmp / ("kept-" + case), rules={"a.md": body})
+            check(check_id, _measured(measure, kept)["rules"], utf16_units(body))
+        fenceblock = _tree(tmp / "fenceblock", outside="```\n", block="\n\n<!--" + "X" * 100 + "-->\n\n")
+        check("count/block-comment-after-open-fence-kept", _measured(measure, fenceblock)["block"], 111)
+        bom = _tree(tmp / "bom", rules={"a.md": "﻿---\nkind: x\n---\nA\n"})
         check("count/bom-before-frontmatter-removed", _measured(measure, bom)["rules"], 2)
         bmp = _tree(tmp / "bmp", rules={"a.md": "é"})
         check("count/bmp-character-one-unit", _measured(measure, bmp)["rules"], 1)
         astral = _tree(tmp / "astral", rules={"a.md": "\U0001F600"})
         check("count/astral-character-two-units", _measured(measure, astral)["rules"], 2)
 
-        # Scope: `paths: ["**"]` loads everywhere and counts; a trailing /** is stripped before the test;
+        # Scope: `paths:` globs that load everywhere once normalized as the loader does are counted;
         # `paths: ["src/**"]` is conditional and is not counted.
         star = _tree(tmp / "star", rules={"a.md": '---\npaths: ["**"]\n---\nabc\n'})
         m = _measured(measure, star)
@@ -785,16 +888,36 @@ def self_test(report_path=None):
         trail = _tree(tmp / "trail", rules={"a.md": '---\npaths:\n  - "**/**"\n---\nabc\n'})
         m = _measured(measure, trail)
         check("scope/paths-trailing-double-star-stripped-counted", (m["rules"], m["rule_files"]), (4, 1))
+        for check_id, case, scope in (("scope/paths-slash-double-star-counted", "slash", 'paths: "/**"'),
+                                      ("scope/paths-trailing-comma-counted", "comma", 'paths: "**,"'),
+                                      ("scope/paths-list-slash-double-star-counted", "list",
+                                       'paths: ["**", "/**"]'),
+                                      ("scope/paths-spaced-double-star-counted", "spaced", 'paths: " ** "'),
+                                      ("scope/paths-comma-split-counted", "split", 'paths: "**,**"'),
+                                      ("scope/paths-brace-expanded-counted", "brace", 'paths: "{**,**}"'),
+                                      ("scope/paths-empty-list-counted", "empty", "paths: []"),
+                                      ("scope/dotted-key-frontmatter-counted", "dotted",
+                                       'paths: ["src/**"]\nx.y: a: b'),
+                                      ("scope/at-value-frontmatter-counted", "at-value",
+                                       'paths: ["src/**"]\nv2: @owner'),
+                                      ("scope/unclassified-frontmatter-line-counted", "unclassified",
+                                       'paths: ["src/**"]\nnot a key line')):
+            wide = _tree(tmp / ("wide-" + case), rules={"a.md": "---\n" + scope + "\n---\n" + "X" * 100})
+            m = _measured(measure, wide)
+            check(check_id, (m["rules"], m["rule_files"], m["conditional_files"]), (100, 1, 0))
         for check_id, case, scope in (("exit/paths-null-2", "null", "paths: null"),
                                       ("exit/paths-mapping-2", "mapping", "paths: {bad: value}"),
                                       ("exit/paths-bool-item-2", "bool-item", "paths:\n  - false"),
                                       ("exit/paths-number-item-2", "number-item", "paths: [1]"),
-                                      ("exit/paths-empty-list-2", "empty-list", "paths: []")):
+                                      ("exit/paths-nested-brace-2", "nested", 'paths: "{a,{b,c}}"'),
+                                      ("exit/paths-unbalanced-brace-2", "unbalanced", 'paths: "src/{a,b"'),
+                                      ("exit/paths-escape-2", "escape", "paths: 'src/\\*.md'")):
             typed = _tree(tmp / ("typed-" + case), rules={"a.md": "---\n" + scope + "\n---\n" + "X" * 100})
             check(check_id, _quiet(run, typed), 2)
-        src = _tree(tmp / "src", rules={"a.md": '---\npaths: ["src/**"]\n---\nabc\n', "b.md": "xy\n"})
+        src = _tree(tmp / "src", rules={"a.md": '---\npaths: ["src/**"]\n---\nabc\n', "b.md": "xy\n",
+                                        "c.md": '---\npaths: "{src,lib}/**"\n---\nabc\n'})
         m = _measured(measure, src)
-        check("scope/paths-src-excluded", (m["rules"], m["rule_files"], m["conditional_files"]), (3, 1, 1))
+        check("scope/paths-src-excluded", (m["rules"], m["rule_files"], m["conditional_files"]), (3, 1, 2))
 
         # Imports and totals: an @import in the managed block is followed and counted into PACK; SESSION
         # adds the bytes outside the block.
@@ -805,16 +928,46 @@ def self_test(report_path=None):
                         extra={".claude/rules/big.txt": "---\nkind: x\n---\n" + "X" * 100})
         m = _measured(measure, ruleimp)
         check("import/rule-file-import-counted", (m["rules"], m["pack_imports"], m["pack"], m["session"]),
-              (9, 100, 109, 109))
+              (9, 100, 109, 171))
+        # Every `@` is a candidate whatever Markdown surrounds it: delimiters after the path, a tag or a
+        # link around it, a comment or a code span holding it, and backticks paired across blocks.
+        big = {".claude/rules/big.txt": "X" * 1000}
+        for check_id, case, body in (("import/bold-import-counted", "bold", "**@big.txt**\n"),
+                                     ("import/underscore-import-counted", "underscore", "_@big.txt_\n"),
+                                     ("import/html-tag-import-counted", "tag", "<b>@big.txt</b>\n"),
+                                     ("import/link-import-counted", "link", "[see @big.txt](x)\n"),
+                                     ("import/list-item-comment-import-counted", "list-comment",
+                                      "- a <!-- @big.txt -->\n"),
+                                     ("import/backticks-across-heading-counted", "heading",
+                                      "` x\n# @big.txt\n` y\n"),
+                                     ("import/backticks-across-list-items-counted", "list-items",
+                                      "- ` x\n- @big.txt\n- ` y\n"),
+                                     ("import/code-span-import-counted", "span", "`@big.txt`\n"),
+                                     ("import/case-insensitive-import-counted", "case", "@BIG.txt\n")):
+            marked = _tree(tmp / ("marked-" + case), rules={"a.md": body}, extra=big)
+            check(check_id, _measured(measure, marked)["pack_imports"], 1000)
+        prefixes = _tree(tmp / "prefixes", rules={"a.md": "@x.txt_b.txt\n"},
+                         extra={".claude/rules/x.txt_b.txt": "X" * 10, ".claude/rules/x.txt": "Y" * 7})
+        check("import/every-prefix-naming-a-file-counted", _measured(measure, prefixes)["pack_imports"], 17)
+        twocase = _tree(tmp / "twocase", block="@Docs/Big.md", extra={"docs/big.md": "x", "DOCS/big.md": "y"})
+        code, err = _stderr_of(run, twocase)
+        check("exit/case-insensitive-two-matches-ambiguous-2", (code, "ambiguous" in err), (2, True))
         ruleagents = _tree(tmp / "ruleagents", rules={"a.md": "@../../AGENTS.md\n"}, extra={"AGENTS.md": "x\n"})
         check("exit/rule-file-agents-import-1", _quiet(run, ruleagents), 1)
-        # The loader skips a target it cannot read: a token naming no file adds nothing and does not fail.
+        boldagents = _tree(tmp / "boldagents", rules={"a.md": "**@../../AGENTS.md**\n"},
+                           extra={"AGENTS.md": "x\n"})
+        check("exit/bold-agents-import-1", _quiet(run, boldagents), 1)
+        listspan = _tree(tmp / "listspan", block="- see `cat @AGENTS.md now`\n", extra={"AGENTS.md": "x\n"})
+        check("exit/list-item-code-span-agents-import-1", _quiet(run, listspan), 1)
+        lowercase = _tree(tmp / "lowercase", block="@agents.md\n")
+        check("exit/lowercase-agents-name-1", _quiet(run, lowercase), 1)
+        # A candidate naming no file adds nothing and does not fail.
         rulemissing = _tree(tmp / "rulemissing", rules={"a.md": "@missing.txt\n"})
         check("import/missing-target-skipped-0",
               (_measured(measure, rulemissing)["pack_imports"], _quiet(run, rulemissing)), (0, 0))
         email = _tree(tmp / "email", outside="Mail name@example.com before merging.\n")
         check("exit/outside-block-email-prose-0", _quiet(run, email), 0)
-        mention = _tree(tmp / "mention", outside="Ping @alice before merging.\n")
+        mention = _tree(tmp / "mention", outside="Ping @alice before merging...@...\n")
         check("exit/outside-block-mention-prose-0", _quiet(run, mention), 0)
         fragment = _tree(tmp / "fragment", block="@docs/x.md#usage", extra={"docs/x.md": "Doc\n"})
         check("import/fragment-cut-followed", _measured(measure, fragment)["pack_imports"], 4)
@@ -834,7 +987,7 @@ def self_test(report_path=None):
                            extra={"AGENTS.md": "X" * 100})
         check("exit/mismatched-backticks-agents-import-1", _quiet(run, mismatched), 1)
         spanned = _tree(tmp / "spanned", block="`@AGENTS.md` and ``@RULES-INDEX.md``\n")
-        check("import/matched-code-span-skipped", _quiet(run, spanned), 0)
+        check("exit/code-span-banned-import-1", _quiet(run, spanned), 1)
         # Symlinks under .claude/rules: a directory resolving inside the repository is followed and
         # counted; one escaping the repository, a loop, or a second route to a directory exits 2.
         linked = _tree(tmp / "linked", rules={"a.md": "ab"}, extra={"shared/b.md": "X" * 50})
@@ -863,7 +1016,7 @@ def self_test(report_path=None):
 
         session = _tree(tmp / "session", rules={"a.md": "abc\n"}, block="Block", outside="Hello\n")
         m = _measured(measure, session)
-        check("totals/session-adds-outside-block", (m["pack"], m["session"]), (9, 15))
+        check("totals/session-adds-outside-block", (m["pack"], m["session"]), (9, 77))
 
         # Exit codes: at the ratchet passes; one unit over fails; a banned import fails.
         at = _tree(tmp / "at", rules={"a.md": "x" * 10}, ratchet=10)
@@ -884,8 +1037,8 @@ def self_test(report_path=None):
         check("exit/invalid-utf8-rule-file-2", _quiet(run, badutf8), 2)
         unterminated = _tree(tmp / "unterminated", rules={"a.md": '---\npaths: ["**"]\nBody\n'})
         check("exit/unterminated-frontmatter-2", _quiet(run, unterminated), 2)
-        badline = _tree(tmp / "badline", rules={"a.md": "---\nnot a key line\n---\nBody\n"})
-        check("exit/malformed-frontmatter-line-2", _quiet(run, badline), 2)
+        dupkey = _tree(tmp / "dupkey", rules={"a.md": "---\nkind: a\nkind: b\n---\nBody\n"})
+        check("exit/duplicate-frontmatter-key-2", _quiet(run, dupkey), 2)
         badbudget = _tree(tmp / "badbudget")
         (badbudget / BUDGET_REL).write_bytes(b"ratchet = true\nceiling = 90000\n")
         check("exit/malformed-budget-2", _quiet(run, badbudget), 2)
@@ -899,11 +1052,12 @@ def self_test(report_path=None):
         # The module docstring states the model the code implements and its disclosed residuals.
         doc = sys.modules[__name__].__doc__ or ""
         check("doc/model-and-residuals-stated",
-              [phrase for phrase in ("column 0", "Stop-removing rule", "counted rule file", "typed `paths:`",
-                                     "CommonMark code span", "byte order mark", "recursively through imported",
-                                     "symlinked directory", "name@example.com", "ambiguous",
-                                     "reference-style links", "autolinks", "link labels", "path filter",
-                                     "nested in a list or quote") if phrase not in doc], [])
+              [phrase for phrase in ("OVER-COUNT BY CONSTRUCTION", "KNOWN OVER-COUNTS", "column 0",
+                                     "counted rule file", "typed `paths:`", "brace alternation",
+                                     "cannot classify", "code span", "byte order mark",
+                                     "recursively through imported", "symlinked directory", "name@example.com",
+                                     "ambiguous", "case-insensitively", "never missed", "path filter",
+                                     "a banned name there exits 1") if phrase not in doc], [])
 
         # Red on revert: each fix put back in a mutant copy of the production code must turn its case red.
         unstripped = _mutant(tmp, "body = bare[m.end():]", "body = bare")
@@ -911,6 +1065,19 @@ def self_test(report_path=None):
               (_measured(measure, front)["rules"], _measured(unstripped.measure, front)["rules"]), (5, 27))
         lenient = _mutant(tmp, 'if m["pack"] > ratchet:', 'if m["pack"] > ratchet + 1:')
         check("revert/ratchet-comparison-red", (_quiet(run, over), _quiet(lenient.run, over)), (1, 0))
+        bold = tmp / "marked-bold"
+        whole = _mutant(tmp, "cuts = sorted({len(run)} | {k for k, ch in enumerate(run) if ch in CUT_BEFORE}, "
+                             "reverse=True)", "cuts = [len(run)]")
+        check("revert/prefix-scan-red",
+              (_measured(measure, bold)["pack_imports"], _measured(whole.measure, bold)["pack_imports"]), (1000, 0))
+        split = tmp / "wide-split"
+        unsplit = _mutant(tmp, "for piece in _split_top(value, where):", "for piece in [value]:")
+        check("revert/scope-normalizer-red",
+              (_measured(measure, split)["rule_files"], _measured(unsplit.measure, split)["rule_files"]), (1, 0))
+        shape = tmp / "kept-after-line"
+        anywhere = _mutant(tmp, "                    and (idx == 0 or not lines[idx - 1].strip(\" \\t\"))\n", "")
+        check("revert/comment-shape-red",
+              (_measured(measure, shape)["rules"], _measured(anywhere.measure, shape)["rules"]), (110, 2))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -929,15 +1096,15 @@ def self_test(report_path=None):
             print("  - " + failure)
         return 1
     print("PASS: check_instruction_budget self-test: {} unique checks executed (frontmatter and the blank "
-          "line after it removed, an HTML comment removed, BMP and astral characters counted as 1 and 2 units, "
-          "comments in a fence, a paragraph, and a code span kept, a BOM before frontmatter removed, paths ** "
-          "counted and src/** excluded, a typed or empty paths value exit 2, rule file imports counted, banned "
-          "ones exit 1, a token naming no file, an email, and a mention skipped, a fragment cut, home relative "
-          "and undecodable imports exit 2 as ambiguous, a symlinked rule directory counted and escaping, "
-          "looping, or doubled symlinks exit 2, the docstring stating the model, cycles ending, mismatched backticks hiding no import, a managed block "
-          "import followed, SESSION over PACK, the "
-          "ratchet boundary, banned imports exit 1, unreadable, invalid UTF-8, malformed frontmatter, budget, "
-          "markers, and an escaping import exit 2, and both red-on-revert flips turn red); execution set "
+          "line after it removed, a whole-line comment between blank lines removed and every other comment "
+          "counted, BMP and astral characters counted as 1 and 2 units, a BOM before frontmatter removed, paths "
+          "that normalize to ** counted and src/** excluded, unclassified frontmatter counted, typed or "
+          "unreadable globs exit 2, every @ candidate followed whatever Markdown surrounds it, case-insensitive "
+          "imports counted, banned names exit 1 in any case or code span, a candidate naming no file skipped, "
+          "home relative, escaping, undecodable, and doubly matched imports exit 2 as ambiguous, symlinked rule "
+          "directories counted and escaping, looping, or doubled symlinks exit 2, cycles ending, SESSION over "
+          "PACK, the ratchet boundary, unreadable, invalid UTF-8, malformed frontmatter, budget, and markers "
+          "exit 2, the docstring stating the model, and every red-on-revert flip turning red); execution set "
           "reconciled against tools/selftest_checks.toml".format(len(EXECUTED)))
     return 0
 
