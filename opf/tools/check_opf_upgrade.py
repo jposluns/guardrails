@@ -1914,7 +1914,9 @@ def _suite_isolated():
             # nothing): the release error must propagate, never be printed and swallowed because the
             # caller's handled exception looked in flight. The flip restores the sys.exc_info() test and
             # must turn the vector red.
+            import importlib.util as _importlib_util
             import inspect as _inspect
+            import types as _types
 
             def _caller_handled_release(run, label):
                 sc = base / ("u25c-caller-except-" + label)
@@ -1944,10 +1946,15 @@ def _suite_isolated():
             _new25c = "                if not propagating:\n"
             _flip25c = None
             if _src25c.count(_new25c) == 1:
-                _ns25c = {}
-                exec(compile(_src25c.replace(_new25c, "                if sys.exc_info()[1] is None:\n"),
-                             opf.__file__, "exec"), vars(opf), _ns25c)
-                _flip25c = _ns25c["_upgrade_run"]
+                # The reverted body is written to a scratch module and loaded; its code is then bound to
+                # opf's live globals, so the flip sees exactly the module state the fixed function sees.
+                _path25c = base / "u25c_flip_upgrade_run.py"
+                _path25c.write_text(_src25c.replace(_new25c, "                if sys.exc_info()[1] is None:\n"),
+                                    encoding="utf-8")
+                _spec25c = _importlib_util.spec_from_file_location("_opf_u25c_flip", _path25c)
+                _mod25c = _importlib_util.module_from_spec(_spec25c)
+                _spec25c.loader.exec_module(_mod25c)
+                _flip25c = _types.FunctionType(_mod25c._upgrade_run.__code__, vars(opf), "_upgrade_run")
             check("U25c flip target (the frame-local propagating test) found exactly once", _flip25c is not None)
             check("U25c flip: the sys.exc_info() test swallows the release failure (vector red)",
                   _flip25c is not None and not _caller_handled_release(_flip25c, "flip"))

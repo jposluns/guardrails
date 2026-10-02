@@ -633,6 +633,7 @@ def _fdopen_vectors(base):
     exactly one vector red: PREFIX (the pre-fix `with os.fdopen(fd)`) leaks under EARLY, and EXCEPT (an
     os.close in an except around the fdopen call, which then owns the descriptor) closes it twice under LATE.
     Returns (failures, runs)."""
+    import importlib.util
     import inspect
     base.mkdir()
     real_open, real_fdopen = os.open, os.fdopen
@@ -697,9 +698,16 @@ def _fdopen_vectors(base):
         else:
             new = ("{0}try:\n{0}    fh = {1}\n{0}except BaseException:\n{0}    os.close({2})\n{0}    raise\n"
                    "{0}with fh:\n").format(indent, opener, fd_name)
-        reverted = dict(globals())
-        exec(compile(source.replace(line, new).replace(close, "pass"), __file__, "exec"), reverted)
-        return reverted
+        # The reverted writer is written to a scratch module and loaded over a copy of this module's globals.
+        flip_dir = base.with_name(base.name + "-flips")
+        flip_dir.mkdir(exist_ok=True)
+        flip_path = flip_dir / "{}_{}.py".format(name.lstrip("_"), mode.lower())
+        flip_path.write_text(source.replace(line, new).replace(close, "pass"), encoding="utf-8")
+        spec = importlib.util.spec_from_file_location("_crosswalk_fdopen_flip_" + flip_path.stem, flip_path)
+        reverted = importlib.util.module_from_spec(spec)
+        reverted.__dict__.update((k, v) for k, v in globals().items() if not k.startswith("__"))
+        spec.loader.exec_module(reverted)
+        return reverted.__dict__
 
     failures = []
     runs = 0
