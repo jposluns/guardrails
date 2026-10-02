@@ -694,8 +694,8 @@ platform = "ci"
 default = "block"
 class = "c"
 residue = """
-It runs the OPF record-authoring gate (opf/tools/check_opf_record.py, OPF-RECORD PR1 and PR2, and the
-decisions PR1 resolution bundle) via its
+It runs the OPF record-authoring gate (opf/tools/check_opf_record.py, OPF-RECORD PR1 and PR2, the
+decisions PR1 resolution bundle, and the decisions PR2 supersession and register paths) via its
 --self-test --red-on-revert: there is no live-adopter leg (this repository is not an OPFiles adopter), so
 the whole assurance rides the self-test. Each case copies a doctor-VALID template store built beneath the
 gate's own temporary root (opf init, a commit, opf render --write, a commit) and drives opf record
@@ -752,7 +752,23 @@ proposed_from open; a ratification keeps the bundle unchanged; a rejection with 
 with no bundle and no proposed_from), while a decide without the bundle options (before its bundle is
 planned), --decision without --decided-by (before the store is resolved), the options on open ->
 withdrawn, and the options on a ratification each refuse with every byte untouched, each in its own
-test. Under
+test; that a decision landing unqualified decided supersedes its chain's current resolution in the same
+act (a maintainer decide with --supersedes PD-1, doctor-VALID, with DECISIONS listing the successor
+effective and PD-1 superseded, and a maintainer ratification of an assistant's decided/proposed carrying
+the link instead), while a --supersedes value that is not a record id (before the store is resolved),
+--supersedes on an assistant decide (a decided/proposed landing), a target still open, a target the
+schema grades invalid, a target seated in the index as another type, a target that is no record, an
+existing backlog item named as the target, a second successor for a resolution already superseded, and
+a target whose own chain leads back to the record each refuse with every byte untouched, each in its own
+test; that every landing at unqualified decided leaves its chain with exactly one current resolution
+(the doctor's own chain rule, recomputed over the planned index), so a supersession of a chain head that
+would still leave the joined chain with none (the same decide without the link then lands doctor-VALID),
+and the decide of a record already superseded by an open successor, with and without --supersedes, each
+refuse with every byte untouched, each in its own test; and that a
+maintainer files a maintainer_decision linking exemplifies to a preference_pattern (doctor-VALID and
+listed with its link) and an assistant-distilled preference_pattern lands active/proposed and is ratified
+and then retired by the maintainer, doctor-VALID, while the same ruling filed by an assistant refuses
+with every byte untouched in its own test. Under
 --red-on-revert each test's flip (the byte-reproduction precondition, emit_checked, the allowed-delta
 postcondition, the known-complete proof, the in-transaction counters operand, the derived '/proposed'
 qualifier, the maintainer-only check, the done-only-through-its-receipt guard, the rejection reason the
@@ -761,12 +777,25 @@ ordering, the release-failure outcome text, the final doctor, the released-span 
 lease, the intervening-edit check, the --type check before the operand read, the leftover-lock outcome
 text, the record-carried pre-proposal state's flip (the worklog lifecycle line read instead of the
 record's own field), the current-row validation's flip (the row trusted without the schema check,
-applied separately to each of those three invalid-row tests), the strict type-aware delta
+applied separately to each of those three invalid-row tests), the
+strict type-aware delta
 comparator's flip (ordinary equality, under which
 true and 1.0 read as 1), the three resolution-bundle flips (the planner writing no bundle, the
 rejection keeping it, and decided_by taken from --actor, which only the independent oracle refuses),
-and the three option-guard flips (the requires half dropped, the parser's given-together check
-dropped, and the apply-only half dropped, the last applied separately to each of its two tests))
+the three option-guard flips (the requires half dropped, the parser's given-together check
+dropped, and the apply-only half dropped, the last applied separately to each of its two tests), and
+the supersession and register flips (the planner writing no supersedes link, which only the
+independent oracle refuses; the parser's record-id check dropped; the landing check, the target-decided
+check, the target's validation call alone (applied separately to the invalid and the wrong-type
+target), the target lookup together with every check after it (the lookup cannot be dropped alone;
+applied separately to the missing and the other-namespace target), and the pre-publication chain rule
+(applied separately to each of its three tests) each dropped, each but the target-decided check
+publishing a store the post-publication render's source gate then refuses on a doctor finding, while
+that one publishes doctor-VALID; the chain-head check and the cycle check each dropped, under which the
+chain rule still refuses with every byte untouched, so those two tests assert that their own check
+refused before the chain rule ran; the planner dropping the requested links, which only the oracle
+refuses; and the planner's record validation replaced by a pass-through, publishing the assistant
+ruling))
 is applied in turn and must turn its test red
 with an assertion; where an independent guard would still refuse, the test asserts the written bytes or an
 isolated guard before any message. The unit leg (_opf_record.py, via opf.py --self-test) covers the
@@ -775,15 +804,17 @@ record-carried pre-proposal state (proposed_from written on a proposal, restored
 rejection and ratification, never read from worklog text, and the current row schema-validated before
 it is trusted or overwritten), the resolution bundle (written on a decide by a maintainer, an
 assistant, or automation, kept on ratification,
-removed on rejection, its option refusals, and its postcondition vectors), the exact-integer schema
+removed on rejection, its option refusals, and its postcondition vectors), the supersedes link (appended
+on a decide and on a ratification, its landing, target, chain-head, and cycle refusals, the chain
+rule's refusals and passes over the planned index, and its postcondition vectors), the exact-integer schema
 markers, the one
 accepted snapshot cannot-evaluate, the leftover-lock outcome bound to its lock's token (a reused pid is
 not attributed), and the postcondition vectors including the strict type-aware comparisons. It arguably
 serves the change-carries-a-check and check-fails-closed-on-unreadable disciplines, but the linkage to a
 single corpus rule is not undeniable, so none is claimed here. Class c: coverage is representative, so it
 asserts these enumerated scenarios over synthetic stores rather than the verb's whole input space;
-transitions are driven end to end for backlog items and, for the resolution bundle, pending
-decisions, with other types covered by the unit leg; the
+transitions are driven end to end for backlog items, pending decisions (the resolution bundle and
+supersession), and preference patterns, with other types covered by the unit leg; the
 kill points are the journal engine's own injection hooks, not power loss or filesystem I/O failures, and
 they drive one create, one assistant transition, and one maintainer done-with-receipt; the
 merge coverage of the recorded pre-proposal state is the --no-ff and squash shapes of one
