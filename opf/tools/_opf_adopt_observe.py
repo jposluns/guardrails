@@ -4674,8 +4674,9 @@ def self_test(vectors_only=False):
     #   INVALID, exit 1. Main ran the sweep regardless; a slot still held
     #   then made it raise, losing that row and every later row: exit 2.
     # - A blocked unmutated run makes its row INVALID, naming each check it
-    #   failed among those main applies that do not read the observation,
-    #   or else CANNOT-EVALUATE; a blocked mutant run makes it
+    #   failed among those main applies that do not read the observation;
+    #   if it failed none, the row is CANNOT-EVALUATE unless an evaluated
+    #   mutant run was not detected (INVALID). A blocked mutant run makes it
     #   CANNOT-EVALUATE unless the normal run failed: exit 1. Main evaluated
     #   that run beside the live worker.
     # - A resolver worker alive before the first case is a setup
@@ -4690,10 +4691,11 @@ def self_test(vectors_only=False):
     #   the product snapshot and sys.path after both waits): on the normal
     #   run it fails the row INVALID, exit 1; on an evaluated mutant run it
     #   counts as the mutation detected, so the row can pass (exit 0 where
-    #   main exited 1); on a blocked mutant run it changes nothing: that
-    #   run's checks are not read, so it is neither a detection nor a
-    #   failure. Main evaluated them right after the call, before either
-    #   wait, so it missed changes made during them.
+    #   main exited 1); on a blocked mutant run it changes nothing: run_case
+    #   evaluates that run's checks but record_row ignores their result, so
+    #   it is neither a detection nor a failure. Main evaluated them right
+    #   after the call, before either wait, so it missed changes made
+    #   during them.
     SELF_TEST_ROSTER = tuple(executed)
     print(json.dumps({"opf_adopt_observe_tests": executed}, sort_keys=True))
     for name, failures in vector_results:
