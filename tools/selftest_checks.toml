@@ -612,3 +612,75 @@ expected-check-ids = [
   "leak/imported-gitdir-poison-fixture-green",
   "leak/imported-gitdir-poison-caller-unchanged",
 ]
+
+[[suite]]
+id = "merge-train-selftest"
+runner = "tools/merge_train.py"
+expected-check-ids = [
+  # ---------- the fail-closed config schema and the trusted (base-tip) config source ----------
+  "config/valid-accepted",
+  "config/unknown-key",
+  "config/bad-type",
+  "config/absolute-path",
+  "config/dotdot-path",
+  "config/glob-path",
+  "config/empty-list",
+  "config/duplicate-path",
+  "config/empty-command",
+  "config/missing-identity",
+  "config/absent-exit2",
+  "config/read-from-base-not-checkout",
+  # ---------- the default dry run ----------
+  "dry/would-merge",
+  "dry/changes-nothing",
+  # ---------- the --apply happy path ----------
+  "apply/pushed",
+  "apply/parents-old-then-base",
+  "apply/config-identity-no-ai-trailer",
+  "apply/generated-fresh",
+  "apply/report-fields",
+  "apply/one-fast-forward-push",
+  "apply/base-ref-untouched",
+  "apply/argv-audit-clean",
+  "apply/marker-removed",
+  "apply/second-run-current",
+  # ---------- review_carry (information only) ----------
+  "carry/true-when-pr-lines-unchanged",
+  "carry/false-when-pr-lines-change",
+  # ---------- PR and worktree discovery ----------
+  "discover/ambiguous-pr",
+  "discover/no-worktree-skipped",
+  "discover/fork-pr",
+  "discover/base-mismatch",
+  "discover/pr-head-moved",
+  "discover/worktree-on-other-branch",
+  "discover/refusal-exit1",
+  "discover/truncated-list-exit2",
+  "discover/gh-failure-exit2",
+  "discover/ambiguous-worktree",
+  "discover/branch-mismatch",
+  "discover/branch-renamed-before-commit",
+  # ---------- per-PR refusals and the restore proof ----------
+  "refuse/busy-process",
+  "refuse/busy-index-lock",
+  "refuse/busy-probe",
+  "refuse/dirty-untracked",
+  "refuse/dirty-modified",
+  "refuse/dirty-staged",
+  "refuse/source-conflict",
+  "refuse/source-conflict-restored",
+  "refuse/regenerate-failed",
+  "refuse/check-failed",
+  "refuse/regenerate-not-fixpoint",
+  "refuse/undeclared-write-restore-failed",
+  # ---------- the push observer ----------
+  "push/rejected-restored",
+  # ---------- idempotence and safe retry ----------
+  "idem/kill-after-commit-one-push",
+  "idem/kill-after-push-already-pushed",
+  "idem/kill-mid-merge-restarts",
+  "idem/foreign-merge-left-alone",
+  # ---------- the command line ----------
+  "cli/bad-argument-exit2",
+  "cli/not-a-repo-exit2",
+]

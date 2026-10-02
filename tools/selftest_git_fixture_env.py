@@ -2084,6 +2084,12 @@ _SCAN_ALLOWED_UNPINNED = (
      " never absorbed here: the maintenance-capable add and commit argvs carry the three"
      " F-367 pins as literal `-c` pairs in option position, and the bare `git init -q`"
      " carries none (init is not maintenance-triggering)"),
+    ("tools/merge_train.py", "_run_external", ("unresolved",),
+     "cannot-evaluate head: launches the gh CLI (pr list / pr view reads) and the trusted"
+     " config's own argv lists (the regenerate and check commands and the optional busy probe,"
+     " python3 generator forms in this repo); every git launch in the tool goes through its"
+     " separate _git funnel, which carries the three F-367 pins as literal -c pairs in option"
+     " position"),
     ("tools/selftest_aiqt_hooks.py", "_main_isolated", ("unresolved",),
      "cannot-evaluate head: replays the REGISTERED hook entry's own dispatcher command (a"
      " python3 hook-script argv from the hooks registry), not a git launch; the suite's"
