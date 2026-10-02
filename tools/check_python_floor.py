@@ -8,11 +8,12 @@ Legs, in order:
   pins           every `python-version:` interpreter pin in .github/workflows/*.yml and in PIN_FILES
                  (the shipped adopter CI template and its inline copy) equals the floor; each PIN_FILES
                  entry must carry at least one pin. The leg is a conservative line model, not a YAML
-                 parser. Every line of a scanned file that contains the text python-version must be
-                 one strict pin line (PIN_LINE_RE): optional space indentation, an optional `- ` list
-                 marker, the bare key, optional spaces, a colon, one or more spaces, exactly one
-                 plain, single-quoted or double-quoted scalar of [A-Za-z0-9._+-] characters (matching
-                 quotes, nothing inside them but those characters), then optional whitespace and an
+                 parser. Every line of a scanned file that contains the text python-version (in any
+                 case) must be one strict pin line (PIN_LINE_RE): optional space indentation, an
+                 optional `- ` list marker, the bare key in lower case, optional spaces, a colon, one
+                 or more spaces, exactly one plain, single-quoted or double-quoted scalar of
+                 [A-Za-z0-9._+-] characters (matching quotes, nothing inside them but those
+                 characters), then optional whitespace and an
                  optional `#` comment. Any other line naming the key (a value on the next line or a
                  block scalar, a quoted key, a flow mapping, an empty value, a concatenated or
                  escaped value, a comment that names the key) is cannot-evaluate (exit 2), never a
@@ -26,6 +27,10 @@ Legs, in order:
                  that recognition stops after the first unclosed quoted or flow value, so the rest
                  of that file stays under the strict scan. A plain (unquoted) pin of a floor whose
                  text ends in 0 is a finding, since YAML reads a plain 3.20 as the number 3.2.
+                 The key is found without regard to case, since the runner reads an input by its
+                 upper-cased name: a strict pin whose key is in any other case is cannot-evaluate,
+                 and so is any line, block scalar text included, that names INPUT_PYTHON-VERSION
+                 (in any case), the step environment variable that can also set the input.
   guard          each guarded-surfaces entrypoint opens with the canonical refusal guard, AST-matched
                  against GUARD_TEMPLATE with the file's own basename and the floor; only a module
                  docstring and `from __future__` imports may precede its `import sys`.
@@ -65,7 +70,8 @@ so a file with no such line has no pin to check, every line that names it is hel
 one-line form, the line after it may not continue or nest under it, and a quoted or flow value that
 spans lines in a YAML file stops the leg (exit 2). What it cannot model and does not refuse is named
 here: a key spelled through YAML escapes (for example a double-quoted key with backslash-u escapes, or
-an escaped line break inside the key), which no line names as written; a key reached through a YAML
+an escaped line break inside the key), which no line names as written; an INPUT_PYTHON-VERSION
+variable whose name is built at run time, not written on a line; a key reached through a YAML
 tag, an alias or a merge key, or a pin value set through an anchor elsewhere in the file, where the
 named line is judged as written; a block scalar header whose key the model misreads, which can only
 put more lines under the strict scan; and in the non-YAML pin file, a multi-line flow value around a
@@ -97,12 +103,20 @@ SOURCE_KEYS = {"format-version", "python-floor", "guarded-surfaces", "completene
 WORKFLOWS_REL = ".github/workflows"
 PIN_FILES = ("opf/enforcement/ci/github-actions.yml", "opf/tools/check_opf_doctor.py")
 PIN_KEY = "python-version"
+# The step environment variable the Actions toolkit reads the input from ("INPUT_" plus the upper-cased
+# name). A line naming it can set the input outside a pin.
+INPUT_ENV = "INPUT_" + PIN_KEY.upper()
 # The one accepted spelling of a line naming PIN_KEY (fullmatch on a "\n"-split line, one trailing "\r"
-# removed). Group 1 is a plain value, group 2 single-quoted, group 3 double-quoted. A comment may not
-# carry a character a YAML 1.1 reader treats as a line break.
+# removed). The key matches without regard to case, so a strict pin whose key is not spelled in lower
+# case is seen and refused (pin_findings), never passed over. A comment may not carry a character a
+# YAML 1.1 reader treats as a line break.
 PIN_LINE_RE = re.compile(
-    r" *(?:- +)?python-version *: +(?:([A-Za-z0-9._+-]+)|'([A-Za-z0-9._+-]+)'|\"([A-Za-z0-9._+-]+)\")"
+    r" *(?:- +)?(?P<key>(?i:python-version)) *: +"
+    r"(?:(?P<plain>[A-Za-z0-9._+-]+)|'(?P<single>[A-Za-z0-9._+-]+)'|\"(?P<double>[A-Za-z0-9._+-]+)\")"
     r"(?:[ \t]+#[^\r\x85\u2028\u2029]*|[ \t]*)")
+# The key of a line that is not a strict pin, read only to word the refusal: after the indentation and
+# any list markers, an optionally quoted key and its colon.
+KEY_RE = re.compile(r" *(?:- +)*([\"']?)([^\s\"':#{}\[\],][^\"':#{}\[\],]*?)\1 *:(?=[ \t]|$)")
 # A block scalar header: a plain key (or a bare list marker) whose value is | or > with optional
 # indentation and chomping indicators. The lines more indented than the key (or the last marker) are
 # the scalar's text, not pins. A header with a quoted key, a tag or an anchor is not recognized, so its
@@ -238,6 +252,8 @@ def pin_findings(root, floor):
             deeper = line[indent] == "\t"
             if block is not None:
                 if indent > block or deeper:
+                    if _names(line, INPUT_ENV):
+                        raise CannotEvaluate(_refusal(rel, number, line))
                     continue
                 block = None
             if pin is not None:
@@ -247,7 +263,7 @@ def pin_findings(root, floor):
                         "or nested value this gate cannot judge); write the pin on one line as "
                         "python-version: 'X.Y'".format(rel, number, pin[1]))
                 pin = None
-            if PIN_KEY not in line:
+            if not _names(line, PIN_KEY):
                 node = NODE_START_RE.fullmatch(line)
                 if node is not None and not _closes_on_line(node.group(1)):
                     if yaml_file:
@@ -259,12 +275,13 @@ def pin_findings(root, floor):
                     block = header.start(2) if header.group(2) else header.start(1)
                 continue
             match = PIN_LINE_RE.fullmatch(line)
-            if match is None:
-                raise CannotEvaluate("{}:{}: unrecognized python-version spelling; write the pin on one "
-                                     "line as python-version: 'X.Y'".format(rel, number))
-            pin = (line.index(PIN_KEY), number)
+            if match is None or match.group("key") != PIN_KEY or _names(line, INPUT_ENV):
+                raise CannotEvaluate(_refusal(rel, number, line))
+            pin = (match.start("key"), number)
             pins += 1
-            plain, value = match.group(1), next(group for group in match.groups() if group is not None)
+            plain = match.group("plain")
+            value = next(group for group in match.group("plain", "single", "double")
+                         if group is not None)
             if value != want:
                 findings.append("{}:{}: python-version {!r} differs from the floor {!r}".format(
                     rel, number, value, want))
@@ -274,6 +291,40 @@ def pin_findings(root, floor):
         if required and not pins:
             findings.append("{}: carries no python-version pin (want {!r})".format(rel, want))
     return findings
+
+
+def _names(line, token):
+    """Whether a line names token without regard to case: under Python's lower-casing, or under its
+    upper-casing, the fold the Actions runner applies to an input name (which also maps the dotless i
+    and the long s onto ASCII letters)."""
+    return token.lower() in line.lower() or token.upper() in line.upper()
+
+
+def _refusal(rel, number, line):
+    """The cannot-evaluate message for a line that names the key (or INPUT_ENV) but is not a strict
+    lower-case pin. Every such line is exit 2; the message says what the gate cannot judge."""
+    where = "{}:{}: ".format(rel, number)
+    if _names(line, INPUT_ENV):
+        return (where + "names {}, an environment variable that can set the python-version input "
+                "outside a pin; this gate cannot evaluate it, so remove it and set the interpreter "
+                "only with a literal pin python-version: 'X.Y'".format(INPUT_ENV))
+    strict = PIN_LINE_RE.fullmatch(line)
+    if strict is not None:
+        return (where + "python-version key spelled {!r}; the runner reads an input by its upper-cased "
+                "name, so this gate cannot evaluate a key in any other case; spell the key in lower "
+                "case as python-version: 'X.Y'".format(strict.group("key")))
+    key = KEY_RE.match(line)
+    if key is not None and _names(key.group(2), PIN_KEY) and len(key.group(2)) == len(PIN_KEY):
+        value = line[key.end():].strip(" \t")
+        if value.startswith(("[", "{")) or "${{" in value:
+            return (where + "this gate cannot evaluate a matrix or expression pin; write each pinned "
+                    "interpreter as a literal single-line pin python-version: 'X.Y'")
+    elif key is not None or line.lstrip(" \t").startswith("#"):
+        return (where + "the text python-version appears outside a pin (in a comment, a value or "
+                "another key) and must not; name it only as the key of a literal single-line pin "
+                "python-version: 'X.Y'")
+    return where + "unrecognized python-version spelling; write the pin on one line as " \
+        "python-version: 'X.Y'"
 
 
 def _closes_on_line(text):
@@ -638,8 +689,6 @@ def _self_test_cases(base):
             ("pins/empty-quoted-value-cannot-evaluate", "python-version: ''"),
             ("pins/flow-mapping-cannot-evaluate", "{python-version: 3.12}"),
             ("pins/mismatched-quotes-cannot-evaluate", "python-version: '3.14\""),
-            ("pins/comment-mention-cannot-evaluate", "# python-version: '3.12'"),
-            ("pins/version-file-input-cannot-evaluate", "python-version-file: .python-version"),
             ("pins/line-separator-cannot-evaluate", "python-version: 3.14\u2028.12"),
             ("pins/comment-line-separator-cannot-evaluate",
              "python-version: '3.14' # x\u2028python-version: '3.12'"),
@@ -647,6 +696,34 @@ def _self_test_cases(base):
              "python-version: '3.14'\r          python-version: '3.12'")):
         code, lines = evaluate(_fixture(base, workflow_pin=pin, pin_quote=""))
         check(check_id, (code, _has(lines, unrecognized)), (2, True))
+    outside = "quality.yml:6: the text python-version appears outside a pin"
+    lower = "spell the key in lower case"
+    matrix = "quality.yml:6: this gate cannot evaluate a matrix or expression pin"
+    for check_id, pin, marker in (
+            ("pins/comment-mention-cannot-evaluate", "# python-version: '3.12'", outside),
+            ("pins/version-file-input-cannot-evaluate", "python-version-file: .python-version", outside),
+            ("pins/prose-mention-cannot-evaluate", "- name: Show python-version", outside),
+            ("pins/title-case-key-cannot-evaluate", "Python-Version: '3.12'", lower),
+            ("pins/upper-case-key-cannot-evaluate", "PYTHON-VERSION: '3.12'", lower),
+            ("pins/upper-case-floor-key-cannot-evaluate", "- PYTHON-VERSION: '3.14'", lower),
+            ("pins/dotless-i-key-cannot-evaluate", "python-vers\u0131on: '3.12'", lower),
+            ("pins/long-s-key-cannot-evaluate", "python-ver\u017fion: '3.12'", lower),
+            ("pins/case-variant-block-header-cannot-evaluate", "Python-Version: |\n            3.12",
+             unrecognized),
+            ("pins/case-variant-continuation-cannot-evaluate",
+             "PYTHON-VERSION:\n            '3.12'", unrecognized),
+            ("pins/matrix-expression-cannot-evaluate", "python-version: ${{ matrix.python-version }}",
+             matrix),
+            ("pins/matrix-row-cannot-evaluate", "python-version: ['3.14']", matrix),
+            ("pins/input-env-cannot-evaluate", "INPUT_PYTHON-VERSION: '3.12'", INPUT_ENV),
+            ("pins/input-env-any-case-cannot-evaluate", "- Input_Python-Version: '3.12'", INPUT_ENV)):
+        code, lines = evaluate(_fixture(base, workflow_pin=pin, pin_quote=""))
+        check(check_id, (code, _has(lines, marker)), (2, True))
+    code, lines = evaluate(_fixture(base, workflow_pin=(
+        "python-version: '3.14'\n      - run: |\n          echo \"INPUT_PYTHON-VERSION=3.12\" >> "
+        "\"$GITHUB_ENV\""), pin_quote=""))
+    check("pins/input-env-in-script-cannot-evaluate",
+          (code, _has(lines, "quality.yml:8: names " + INPUT_ENV)), (2, True))
     for check_id, pin in (
             ("pins/trailing-comment-passes", "python-version: '3.14'  # the floor"),
             ("pins/double-quoted-passes", 'python-version: "3.14"'),
