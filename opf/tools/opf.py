@@ -1765,21 +1765,59 @@ def _watchdog_completion_case(mode):
             subject = ("import os, time; from pathlib import Path; "
                        "pid = os.fork(); "
                        "os.setsid() if pid == 0 else None; "
-                       "Path(" + repr(directory) + ", "
-                       "'descendant' if pid == 0 else 'subject').write_text(str(os.getpid())); "
+                       "name = 'descendant' if pid == 0 else 'subject'; "
+                       "scratch = Path(" + repr(directory) + ", name + '.tmp'); "
+                       "scratch.write_text(str(os.getpid()), encoding='ascii'); "
+                       "scratch.rename(Path(" + repr(directory) + ", name)); "  # atomic: never a partial PID
                        "time.sleep(60)")
+            # Writer half: a tripwire against an accidental edit of the marker
+            # lines above, not a proof of atomic publication. It requires the
+            # name + '.tmp' scratch path, the prefix scratch.write_text( and the
+            # scratch.rename to the final name once each and in that order, and
+            # no other occurrence of the text write_text( or Path(directory, name)
+            # anywhere in the subject; it does not otherwise check the write's
+            # arguments. It matches exact text only, so anything spelled
+            # differently is outside it: another spelling of a call, the final
+            # path or a binding (spacing, an alias, a rebinding of scratch), a
+            # write by any method other than write_text, an os-level call, exec
+            # or a shell.
+            text = subject.replace(repr(directory), "directory")  # TMPDIR-blind
+            steps = ["scratch = Path(directory, name + '.tmp'); ",
+                     "scratch.write_text(", "scratch.rename(Path(directory, name)); "]
+            found = [text.find(step) for step in steps]
+            if not (all(text.count(step) == 1 for step in steps)
+                    and -1 < found[0] < found[1] < found[2]
+                    and text.count("write_text(") == 1
+                    and text.count("Path(directory, name)") == 1):
+                raise AssertionError("marker write lines changed: " + text)
+
+            class Cancelled(RuntimeError):
+                """The nested-cancel stimulus; no other error may stand in for it."""
+
             real_wait = emit._fixture_wait
             observed = []
 
             def observe(pid, flags):
-                if all(path.exists() for path in markers) and not observed:
-                    observed.extend(int(path.read_text()) for path in markers)
-                    if mode == "nested-cancel":
-                        raise RuntimeError("cancel with nested subject running")
+                if not observed:
+                    try:  # a marker counts only once its pid parses; empty is not ready yet
+                        pids = [int(path.read_text(encoding="ascii")) for path in markers]
+                    except (FileNotFoundError, ValueError):
+                        pids = []
+                    observed.extend(pids)
+                    if pids and mode == "nested-cancel":
+                        raise Cancelled("cancel with nested subject running")
                 return real_wait(pid, flags)
 
+            # Marker-race control: a marker that exists but is still empty (created,
+            # pid not yet written) is no started subject; the observer keeps waiting.
+            markers[0].write_text(str(os.getpid()), encoding="ascii")
+            markers[1].touch()
+            refuses(emit.ChildStatusUnavailable, lambda: observe(os.getpid(), os.WNOHANG))
+            assert not observed, "an empty marker was read as a started subject"
+            for path in markers:
+                path.unlink()
             with patch.object(emit, "_fixture_wait", observe):
-                refuses(subprocess.TimeoutExpired if mode == "nested-timeout" else RuntimeError,
+                refuses(subprocess.TimeoutExpired if mode == "nested-timeout" else Cancelled,
                         lambda: emit.run_status_owned(
                             [*command[:4], subject], fixture_id="tree/" + mode,
                             process_fixture=True, timeout=2))
