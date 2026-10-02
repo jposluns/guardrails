@@ -4787,11 +4787,12 @@ def self_test():
     # flag runs the self-test, and anything else (an unknown or extra token, a duplicated flag, a bare
     # positional, or an empty vector) is misuse. A membership regression (`"--self-test" in args`) would
     # let a malformed control vector read as a valid self-test run, so these turn that regression red.
-    for good_argv in (["--self-test"], ["--selftest"]):
+    for good_argv in (["--self-test"],):
         if _selected_mode(good_argv) != "self-test":
             failures.append("cli/valid: {!r} was not recognized as a self-test invocation".format(good_argv))
     for bad_argv in ([], ["--self-test", "--unknown"], ["--self-test", "--self-test"],
-                     ["--selftest", "extra"], ["positional"], ["--self-test", "--selftest"]):
+                     ["--selftest"], ["--selftest", "extra"], ["--self-t"], ["positional"],
+                     ["--self-test", "--selftest"]):
         if _selected_mode(bad_argv) != "misuse":
             failures.append("cli/misuse: {!r} was not classified as misuse (membership, not whole-vector, "
                             "validation)".format(bad_argv))
@@ -4843,15 +4844,15 @@ def self_test():
 
 
 def _selected_mode(args):
-    """Map a CLI argument vector to a mode. The WHOLE vector is validated, not mere membership: exactly one
-    recognized self-test flag selects 'self-test', and any other vector (an unknown or extra argument, a
-    duplicated flag, a bare positional, or an empty vector) is 'misuse', so a malformed control vector is
+    """Map a CLI argument vector to a mode. The WHOLE vector is validated, not mere membership: exactly
+    `["--self-test"]` selects 'self-test' (no alias, no prefix), and any other vector (an unknown or extra
+    argument, a duplicated flag, a bare positional, or an empty vector) is 'misuse', so a malformed control vector is
     never silently read as a valid self-test invocation. The vector must be an exact list of exact `str`
     tokens; a non-list, or a token that is not exactly `str` (a hostile str subclass whose `__eq__` could
     raise or always match), is 'misuse' before any equality comparison runs."""
     if type(args) is not list or not all(type(a) is str for a in args):
         return "misuse"
-    if args in (["--self-test"], ["--selftest"]):
+    if args == ["--self-test"]:
         return "self-test"
     return "misuse"
 

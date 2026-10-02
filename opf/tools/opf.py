@@ -335,8 +335,13 @@ def _entry_tail_gap(tree, block):
     None. That tail must be non-empty and name self_test nowhere, and it must be exactly the refusal the
     library modules use, `print("usage: ...", file=sys.stderr)` (one str constant starting "usage: " and only
     the keyword file=sys.stderr) then `sys.exit(2)` and nothing else, or a live mode whose last statement is
-    `sys.exit(<name>(...))` for a <name> a top-level def binds (`sys.exit(main())`). What that def does is
-    not inspected."""
+    `sys.exit(<name>(...))` for a <name> whose only module-scope binding is its single top-level def
+    (`sys.exit(main())`; an assignment, augmented assignment, import or `as` alias binding <name>, a second
+    def, or a `global` naming it anywhere is a gap, each counted as _binds counts), with no exit before that
+    last statement's own call (a sys.exit, os._exit, exit or quit call, or a `raise`, anywhere in the tail
+    outside that call). The rule is structural: it does not inspect what the dispatched def does, so a def
+    that reaches self_test or ends the run through exec, eval, getattr, globals() or any other dynamic
+    dispatch is outside it, a code-review matter."""
     import ast
     tail = block.body[1:]
     if not tail:
@@ -370,10 +375,28 @@ def _entry_tail_gap(tree, block):
             return None
     code = exits(tail[-1])
     if isinstance(code, ast.Call) and isinstance(code.func, ast.Name):
-        if any(isinstance(node, ast.FunctionDef) and node.name == code.func.id for node in tree.body[:-1]):
-            return None
-        return "its `__main__` block (line {}) ends with `sys.exit({}(...))`, but {} is not a top-level def".format(
-            block.lineno, code.func.id, code.func.id)
+        name = code.func.id
+        ends = [ast.dump(ast.parse(spelling).body[0].value)
+                for spelling in ("sys.exit", "os._exit", "exit", "quit")]
+        early = [node.lineno for statement in tail for node in ast.walk(statement)
+                 if node is not tail[-1].value and (isinstance(node, ast.Raise)
+                                                    or isinstance(node, ast.Call) and ast.dump(node.func) in ends)]
+        if early:
+            return "its `__main__` block (line {}) can end the run (line {}) before its last statement " \
+                   "dispatches to {}, so an argument may exit without that dispatch's refusal".format(
+                       block.lineno, min(early), name)
+        defs = [node for node in tree.body[:-1] if isinstance(node, ast.FunctionDef) and node.name == name]
+        if not defs:
+            return "its `__main__` block (line {}) ends with `sys.exit({}(...))`, but {} is not a top-level " \
+                   "def".format(block.lineno, name, name)
+        bound = [node.lineno for node in _module_scope(tree) for _ in range(_binds(node, name))] + [
+            node.lineno for node in ast.walk(tree) if isinstance(node, ast.Global) for each in node.names
+            if each == name]
+        if len(bound) != 1:
+            return "its `__main__` block (line {}) dispatches to {}, which is bound {} times at module scope " \
+                   "(lines {}), other than by its single top-level def".format(
+                       block.lineno, name, len(bound), ", ".join(str(line) for line in sorted(bound)))
+        return None
     return "its `__main__` block (line {}) does not follow the canonical `--self-test` statement with exactly " \
            "a refusal (`print(\"usage: ...\", file=sys.stderr)` then `sys.exit(2)`) or a last statement " \
            "`sys.exit(<def>(...))`".format(block.lineno)
@@ -522,8 +545,9 @@ def _self_test_entry_gaps(directory, required=()):
             sys.exit(2)
 
     or, for a module with a live mode, the same block whose statements after the canonical one name self_test
-    nowhere and end with `sys.exit(<def>(...))` for a top-level def (`sys.exit(main())`), as its last
-    top-level statement, with that operand order, sys imported at top level, the inner `if` holding
+    nowhere, end with `sys.exit(<def>(...))` for a name whose only module-scope binding is one top-level def
+    (`sys.exit(main())`), and hold no sys.exit, os._exit, exit or quit call or `raise` outside that last call,
+    as its last top-level statement, with that operand order, sys imported at top level, the inner `if` holding
     nothing else and no else, no other test of `__name__` against "__main__" that runs at import (an if, while,
     conditional expression, and/or, comprehension condition or match, at module scope or in a class body, whose
     test mentions both), exactly one module-scope binding of self_test counted by name occurrence (each alias
@@ -600,7 +624,11 @@ def _self_test_entry_gaps(directory, required=()):
     including one under a `__main__` test it does not count, such as one in a function body or one reached
     through a held value). For example, _opf_adopt_observe's sys.path setup holds its `__name__` comparison in
     a name, so its `if` is not counted as a `__main__` test. Nor does it catch exit subversion after the call
-    (an atexit hook, os._exit, a SystemExit handler, a stateful self_test).
+    (an atexit hook, os._exit, a SystemExit handler, a stateful self_test). For a live-mode entry the rule is
+    structural: it checks that the dispatched name is one top-level def and that the tail cannot end the run
+    first, and it does not inspect what that def does. A def that reaches self_test or ends the run through
+    exec, eval, getattr, globals(), an alias held in a value, or any other dynamic dispatch is residual; each
+    live-mode dispatcher carries its own exact-argument rule and child-run vectors for that.
 
     Beyond the return shape above, the guard does not check the value self_test returns at run time, or how
     sys.exit treats that value. How sys.exit treats a value is platform- and version-dependent, and no rule
@@ -738,6 +766,8 @@ _ENTRY_TAIL_SELF_TEST = "names self_test after the canonical `--self-test` state
 _ENTRY_TAIL_EMPTY = "ends with the canonical `--self-test` statement"
 _ENTRY_TAIL_SHAPE = "does not follow the canonical `--self-test` statement with exactly"
 _ENTRY_TAIL_DISPATCH = "is not a top-level def"
+_ENTRY_TAIL_EARLY_EXIT = "before its last statement dispatches"
+_ENTRY_TAIL_REBOUND = "other than by its single top-level def"
 _ENTRY_FIXTURES = (
     ("canonical.py", _ENTRY_HEAD + "def main(argv):\n    return 2\n\n\n" + _ENTRY_OPEN
      + "    sys.exit(main(sys.argv[1:]))\n", True, None),
@@ -934,6 +964,21 @@ _ENTRY_FIXTURES = (
      + _ENTRY_HEAD[len("import sys\n\n\n"):] + _ENTRY_OPEN + "    sys.exit(main())\n", True, _ENTRY_TAIL_DISPATCH),
     ("tail_dispatch.py", _ENTRY_HEAD + "def render(argv):\n    return len(argv)\n\n\n" + _ENTRY_OPEN
      + "    argv = sys.argv[1:]\n    sys.exit(render(argv))\n", True, None),
+    ("tail_main_assigned.py", _ENTRY_HEAD + "def main():\n    return 2\n\n\nmain = self_test\n\n\n" + _ENTRY_OPEN
+     + "    sys.exit(main())\n", True, _ENTRY_TAIL_REBOUND),
+    ("tail_main_augmented.py", _ENTRY_HEAD + "def main():\n    return 2\n\n\nmain += 0\n\n\n" + _ENTRY_OPEN
+     + "    sys.exit(main())\n", True, _ENTRY_TAIL_REBOUND),
+    ("tail_main_import_as.py", _ENTRY_HEAD + "def main():\n    return 2\n\n\nfrom _no_such_module import helper as main"
+     "\n\n\n" + _ENTRY_OPEN + "    sys.exit(main())\n", True, _ENTRY_TAIL_REBOUND),
+    ("tail_main_two_defs.py", _ENTRY_HEAD + "def main():\n    return 2\n\n\ndef main():\n    return self_test()\n\n\n"
+     + _ENTRY_OPEN + "    sys.exit(main())\n", True, _ENTRY_TAIL_REBOUND),
+    ("tail_main_global.py", _ENTRY_HEAD + "def main():\n    return 2\n\n\ndef install():\n    global main\n"
+     "    main = len\n\n\n" + _ENTRY_OPEN + "    sys.exit(main())\n", True, _ENTRY_TAIL_REBOUND),
+    ("tail_early_exit.py", _ENTRY_HEAD + "def main():\n    return 2\n\n\n" + _ENTRY_OPEN
+     + "    sys.exit(0)\n    sys.exit(main())\n", True, _ENTRY_TAIL_EARLY_EXIT),
+    ("tail_early_nested.py", _ENTRY_HEAD + "def main(code):\n    return 2\n\n\n" + _ENTRY_OPEN
+     + "    if sys.argv[1:]:\n        raise SystemExit(0)\n    sys.exit(main(sys.exit(0)))\n", True,
+     _ENTRY_TAIL_EARLY_EXIT),
 )
 
 
@@ -998,6 +1043,75 @@ def _self_test_floor_probe(registry, directory, elsewhere):
     return misses
 
 
+# The live-mode dispatchers a `__main__` tail falls through to (`sys.exit(<def>(...))`) run self_test only for
+# an exact argument list from a closed set: exactly `--self-test`, or a variant declared here that a runner
+# calls. Every other list below names the self-test and must be refused (exit 2, a stderr line, no PASS).
+_DISPATCH_VARIANTS = {
+    "check_opf_record.py": (["--self-test", "--red-on-revert"],),
+    "_opf_adopt_observe.py": (["--self-test", "--vectors-only"],),
+    "_opf_pack_manifest.py": (["--self-test", "--vectors-only"],),
+}
+_DISPATCH_REFUSED = (["--self-test", "extra"], ["--selftest"], ["--self-t"], ["extra", "--self-test"])
+_DISPATCH_STUB = (
+    "import os, sys\n"
+    "sys.argv = sys.argv[1:]\n"
+    "sys.path.insert(0, os.path.dirname(sys.argv[0]))\n"
+    "module = __import__(os.path.basename(sys.argv[0])[:-3])\n"
+    "module.self_test = lambda **kwargs: print('DISPATCHED', sorted(kwargs.items())) or 0\n"
+    "sys.exit(module.main())\n")
+
+
+def _self_test_dispatch_probe(directory, tmp):
+    """Run each live-mode exposer in `directory` (its `__main__` block ends `sys.exit(<name>(...))`) as a child
+    with every _DISPATCH_REFUSED list: each must exit 2 with a stderr line and no PASS text. Each declared
+    variant must still reach self_test: a child imports the module, stubs self_test, and calls main() with
+    it. Returns a list of the discrepancies, including a live-mode set that is empty or lacks a module that
+    declares a variant."""
+    import ast
+    import concurrent.futures
+    import subprocess
+    import _optlevel
+    live = []
+    for name in sorted(os.listdir(str(directory))):
+        if not name.endswith(".py"):
+            continue
+        tree = _optlevel.parse(Path(directory, name).read_bytes(), name)
+        exposes, reason = _self_test_entry_gap(tree)
+        last = tree.body[-1].body[-1] if exposes and reason is None else None
+        if (isinstance(last, ast.Expr) and isinstance(last.value, ast.Call) and last.value.args
+                and isinstance(last.value.args[0], ast.Call) and isinstance(last.value.args[0].func, ast.Name)):
+            live.append(name)
+    misses = ["live-mode dispatcher {} not found".format(name)
+              for name in sorted(set(_DISPATCH_VARIANTS) - set(live))]
+    if not live:
+        misses.append("no live-mode dispatcher found")
+    runs = [(name, argv, None) for name in live for argv in _DISPATCH_REFUSED]
+    runs += [(name, argv, _DISPATCH_STUB) for name, variants in sorted(_DISPATCH_VARIANTS.items())
+             for argv in variants]
+
+    def child(run):
+        name, argv, stub = run
+        command = [sys.executable, "-I", "-B"] + (["-c", stub] if stub else []) + [str(Path(directory, name))]
+        command += argv
+        try:
+            proc = subprocess.run(command, cwd=tmp, capture_output=True, text=True, timeout=120,
+                                  stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return "{} {}: child failed to run ({})".format(name, argv, type(exc).__name__)
+        if stub:
+            if proc.returncode != 0 or "DISPATCHED" not in proc.stdout or "True" not in proc.stdout:
+                return "{} {}: the declared variant did not reach self_test (rc {})".format(
+                    name, argv, proc.returncode)
+        elif proc.returncode != 2 or "PASS" in proc.stdout + proc.stderr or not proc.stderr.strip():
+            return "{} {}: not refused (rc {}, want 2 with a stderr line and no PASS)".format(
+                name, argv, proc.returncode)
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        misses += [miss for miss in pool.map(child, runs) if miss]
+    return misses
+
+
 def _aggregator_self_test():
     """Guard the aggregator's fail-closed return-vocabulary check (MAJOR 3). A helper returning a value
     OUTSIDE the {0,1,2} int vocabulary must fail the aggregate CLOSED (a non-zero worst), never be
@@ -1018,6 +1132,8 @@ def _aggregator_self_test():
     gaps, exposers = _self_test_entry_gaps(here, required)
     with tempfile.TemporaryDirectory(prefix="opf-entry-scan-") as tmp:
         missed = _self_test_entry_probe(tmp) + _self_test_floor_probe(registry, here, tmp)
+    with tempfile.TemporaryDirectory(prefix="opf-entry-dispatch-") as tmp:
+        missed += _self_test_dispatch_probe(here, tmp)
     if gaps or faults or missed:
         print("opf aggregator self-test: FAIL (self_test modules without the canonical `--self-test` entry: {}; "
               "registry floor faults: {}; synthetic probe discrepancies: {})".format(
