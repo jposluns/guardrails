@@ -31,6 +31,19 @@ Legs, in order:
                  upper-cased name: a strict pin whose key is in any other case is cannot-evaluate,
                  and so is any line, script text included, that names INPUT_PYTHON-VERSION
                  (in any case), the step environment variable that can also set the input.
+                 In every scanned file, a line that still carries a carriage return once its one
+                 trailing CR is removed, or carries U+0085, U+2028 or U+2029, is cannot-evaluate: a
+                 YAML reader may read each as a line break, and the leg splits only on newline.
+                 A step that uses actions/setup-python (the name in any case, any version) is a
+                 finding unless a strict pin line sets its python-version input: a pin whose parent
+                 line (the nearest earlier line less indented, comment lines skipped) is the step's
+                 own with: key. The step runs from its `-` marker line (a with: before the uses: line
+                 counts) to the next non-blank line at the same or lesser indentation than that
+                 marker. A uses: line (the key in any case) that is not one plain or quoted literal, a
+                 line that names setup-python anywhere else (a comment or a flow mapping included),
+                 and a setup-python uses: line whose `-` marker the line model cannot find are
+                 cannot-evaluate; a python-version-file input is already cannot-evaluate as a line
+                 that names the key.
   guard          each guarded-surfaces entrypoint opens with the canonical refusal guard, AST-matched
                  against GUARD_TEMPLATE with the file's own basename and the floor; only a module
                  docstring and `from __future__` imports may precede its `import sys`.
@@ -66,7 +79,8 @@ dynamic leg sees a compile failure only on the interpreter running it. The compl
 working tree, not the git index: an untracked stray entrypoint is counted, and a directory named in
 SKIPPED_DIR_NAMES is not walked. The pins leg is a conservative line model, not a YAML parser, and
 that is also its answer to a malformed workflow: a pin can only be set by a line that names the key,
-so a file with no such line has no pin to check, every line that names it is held to the strict
+so a file with no such line has no pin to check (a setup-python step in it is a finding), no line may
+carry a line break character other than newline, every line that names it is held to the strict
 one-line form, the line after it may not continue or nest under it, and a quoted or flow value that
 spans lines in a YAML file stops the leg (exit 2). It recognizes no block scalar, so script text that
 names the key fails closed even where YAML reads it as text, a disclosed over-rejection; what remains
@@ -75,8 +89,9 @@ backslash-u escapes, or an escaped line break inside the key), which no line nam
 rest of what it cannot model and does not refuse is named here: an INPUT_PYTHON-VERSION
 variable whose name is built at run time, not written on a line; a key reached through a YAML
 tag, an alias or a merge key, or a pin value set through an anchor elsewhere in the file, where the
-named line is judged as written; and in the non-YAML pin file, a multi-line flow value around a
-pin. The leg also scans only the files it names. The documentation leg matches the exact phrase, not
+named line is judged as written; a setup-python step reached through an alias or a merge key, or the
+action run as a fork or copy under another name, which is not seen as a setup-python step; and in the
+non-YAML pin file, a multi-line flow value around a pin. The leg also scans only the files it names. The documentation leg matches the exact phrase, not
 its meaning.
 
 Run this gate isolated: python3 -I -B tools/check_python_floor.py
@@ -122,6 +137,24 @@ KEY_RE = re.compile(r" *(?:- +)*([\"']?)([^\s\"':#{}\[\],][^\"':#{}\[\],]*?)\1 *
 # optional plain key with its colon, and optional anchor or tag properties.
 NODE_START_RE = re.compile(
     r" *(?:- +)*(?:[A-Za-z0-9_][A-Za-z0-9_.-]* *:[ \t]+)?(?:[&!][^ \t]*[ \t]+)*([\"'\[{].*)")
+# Characters a YAML reader may read as a line break that the "\n" split does not: a carriage return
+# left inside a line, and the next-line, line-separator and paragraph-separator characters a YAML 1.1
+# reader also breaks on. A scanned line that carries one is cannot-evaluate (pin_findings).
+LINE_BREAKS = {"\r": "a carriage return", "\x85": "U+0085 (next line)",
+               "\u2028": "U+2028 (line separator)", "\u2029": "U+2029 (paragraph separator)"}
+SETUP_PYTHON = "actions/setup-python"
+# The one accepted spelling of a line whose key is uses: optional space indentation, an optional `- `
+# list marker, the bare key in lower case, optional spaces, a colon, one or more spaces, exactly one
+# plain, single-quoted or double-quoted literal of [A-Za-z0-9._/@:+~-] characters, then optional
+# whitespace and an optional `#` comment.
+USES_LINE_RE = re.compile(
+    r" *(?:- +)?(?P<key>uses) *: +"
+    r"(?:(?P<plain>[A-Za-z0-9./][A-Za-z0-9._/@:+~-]*)|'(?P<single>[A-Za-z0-9._/@:+~-]+)'"
+    r"|\"(?P<double>[A-Za-z0-9._/@:+~-]+)\")(?:[ \t]+#.*|[ \t]*)")
+# A step's input key: with: alone on its line, after an optional `- ` list marker.
+WITH_LINE_RE = re.compile(r" *(?:- +)?(?P<key>with) *:(?:[ \t]+#.*|[ \t]*)")
+# A block sequence entry's `-` marker and the spaces after it, up to the entry's first key.
+STEP_MARKER_RE = re.compile(r" *- +(?=[^\s#])")
 # Not shipped (repo-only CI) or byte-exact vendored third-party code under a provenance manifest.
 EXCLUDED_TREES = (".github/", "opf/tools/_vendor/")
 SKIPPED_DIR_NAMES = {".git", "__pycache__", ".venv", "venv", "node_modules"}
@@ -237,8 +270,16 @@ def pin_findings(root, floor):
         # pin: (key column, line number) of the last strict pin until the next non-blank line is
         # judged. No line is skipped as block scalar text: every line naming the key is judged.
         pin = None
+        lines, pin_lines = [], set()
         for number, line in enumerate(_read_text(root / rel).split("\n"), 1):
             line = line[:-1] if line.endswith("\r") else line
+            lines.append(line)
+            for char, label in LINE_BREAKS.items():
+                if char in line:
+                    raise CannotEvaluate(
+                        "{}:{}: carries {}, which a YAML reader may read as a line break; this line "
+                        "model splits only on newline and cannot evaluate the file, so remove it"
+                        .format(rel, number, label))
             if not line.strip(" \t"):
                 continue
             indent = len(line) - len(line.lstrip(" "))
@@ -261,6 +302,7 @@ def pin_findings(root, floor):
                 raise CannotEvaluate(_refusal(rel, number, line))
             pin = (match.start("key"), number)
             pins += 1
+            pin_lines.add(number)
             plain = match.group("plain")
             value = next(group for group in match.group("plain", "single", "double")
                          if group is not None)
@@ -272,6 +314,79 @@ def pin_findings(root, floor):
                                 "quote it as '{}'".format(rel, number, value, want))
         if required and not pins:
             findings.append("{}: carries no python-version pin (want {!r})".format(rel, want))
+        findings.extend(_setup_python_findings(rel, lines, pin_lines))
+    return findings
+
+
+def _indent(line):
+    return len(line) - len(line.lstrip(" "))
+
+
+def _parent(lines, index):
+    """Index of the nearest earlier non-blank, non-comment line less indented than lines[index], or
+    None."""
+    for back in range(index - 1, -1, -1):
+        text = lines[back]
+        if text.strip(" \t") and not text.lstrip(" \t").startswith("#") \
+                and _indent(text) < _indent(lines[index]):
+            return back
+    return None
+
+
+def _setup_python_findings(rel, lines, pin_lines):
+    """Each step that uses actions/setup-python must set its python-version input on a strict pin line
+    (pin_lines, 1-based) whose parent line is the step's own with: key; a step without one is a finding,
+    since the action then falls back to another interpreter. What the line model cannot judge is
+    cannot-evaluate: a uses: line that is not one plain or quoted literal, a line that names
+    setup-python outside such a line, and a setup-python uses: line whose `-` marker it cannot find."""
+    findings = []
+    for index, line in enumerate(lines):
+        number = index + 1
+        key = KEY_RE.match(line)
+        uses = key is not None and (key.group(2).lower() == "uses" or key.group(2).upper() == "USES")
+        match = USES_LINE_RE.fullmatch(line) if uses else None
+        if uses and match is None:
+            raise CannotEvaluate(
+                "{}:{}: a uses: line that is not one plain or quoted literal (an anchor, alias, tag, "
+                "escape, block scalar, empty value or a key in another case); this line model cannot "
+                "judge which action it runs, so write it as uses: owner/action@ref".format(rel, number))
+        if match is None:
+            if _names(line, "setup-python"):
+                raise CannotEvaluate(
+                    "{}:{}: names setup-python outside a literal uses: line (a comment, a flow mapping, "
+                    "a continued value or another key); this line model cannot judge whether a step "
+                    "runs it, so name it only in uses: actions/setup-python@REF".format(rel, number))
+            continue
+        value = next(group for group in match.group("plain", "single", "double") if group is not None)
+        action = value.split("@", 1)[0].lower()
+        if action != SETUP_PYTHON and not action.startswith(SETUP_PYTHON + "/"):
+            continue
+        column = match.start("key")
+        if column > _indent(line):
+            dash = index
+        else:
+            dash = _parent(lines, index)
+            marker = STEP_MARKER_RE.match(lines[dash]) if dash is not None else None
+            if marker is None or marker.end() != column:
+                raise CannotEvaluate(
+                    "{}:{}: a setup-python uses: line whose step `-` marker this line model cannot "
+                    "find; write the step as a block sequence entry".format(rel, number))
+        end = next((fwd for fwd in range(index + 1, len(lines)) if lines[fwd].strip(" \t")
+                    and _indent(lines[fwd]) <= _indent(lines[dash])), len(lines))
+        pinned = False
+        for pin_index in range(dash, end):
+            if pin_index + 1 not in pin_lines:
+                continue
+            parent = _parent(lines, pin_index)
+            with_key = WITH_LINE_RE.fullmatch(lines[parent]) if parent is not None else None
+            if parent is not None and parent >= dash and with_key is not None \
+                    and with_key.start("key") == column:
+                pinned = True
+        if not pinned:
+            findings.append(
+                "{}:{}: a step that uses actions/setup-python sets no python-version input (no strict "
+                "pin line directly under the step's with:), so the action falls back to another "
+                "interpreter; add python-version: 'X.Y' under its with:".format(rel, number))
     return findings
 
 
@@ -670,14 +785,37 @@ def _self_test_cases(base):
             ("pins/empty-value-cannot-evaluate", "python-version:   "),
             ("pins/empty-quoted-value-cannot-evaluate", "python-version: ''"),
             ("pins/flow-mapping-cannot-evaluate", "{python-version: 3.12}"),
-            ("pins/mismatched-quotes-cannot-evaluate", "python-version: '3.14\""),
-            ("pins/line-separator-cannot-evaluate", "python-version: 3.14\u2028.12"),
-            ("pins/comment-line-separator-cannot-evaluate",
-             "python-version: '3.14' # x\u2028python-version: '3.12'"),
-            ("pins/bare-carriage-return-cannot-evaluate",
-             "python-version: '3.14'\r          python-version: '3.12'")):
+            ("pins/mismatched-quotes-cannot-evaluate", "python-version: '3.14\"")):
         code, lines = evaluate(_fixture(base, workflow_pin=pin, pin_quote=""))
         check(check_id, (code, _has(lines, unrecognized)), (2, True))
+    for check_id, pin, label in (
+            ("pins/line-separator-cannot-evaluate", "python-version: 3.14\u2028.12", "U+2028"),
+            ("pins/comment-line-separator-cannot-evaluate",
+             "python-version: '3.14' # x\u2028python-version: '3.12'", "U+2028"),
+            ("pins/bare-carriage-return-cannot-evaluate",
+             "python-version: '3.14'\r          python-version: '3.12'", "a carriage return")):
+        code, lines = evaluate(_fixture(base, workflow_pin=pin, pin_quote=""))
+        check(check_id, (code, _has(lines, "quality.yml:6: carries " + label)), (2, True))
+    # A line break character on a line that does not name the key, after a floor pin.
+    for check_id, char in (
+            ("pins/mid-line-carriage-return-cannot-evaluate", "\r"),
+            ("pins/mid-line-next-line-cannot-evaluate", "\x85"),
+            ("pins/mid-line-line-separator-cannot-evaluate", "\u2028"),
+            ("pins/mid-line-paragraph-separator-cannot-evaluate", "\u2029")):
+        code, lines = evaluate(_fixture(base, workflow_pin="python-version: '3.14'\n          cache: pip"
+                                        + char + "x: 1", pin_quote=""))
+        check(check_id, (code, _has(lines, "quality.yml:7: carries " + LINE_BREAKS[char])), (2, True))
+    # A bare CR inside run: script text carries a whole step that YAML reads as structure.
+    code, lines = evaluate(_fixture(base, files={WORKFLOWS_REL + "/attack.yml": (
+        "name: attack\non: push\njobs:\n  q:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n"
+        "          echo hi\r      - uses: actions/setup-python@v5\r        with:\r"
+        "          python-version: '3.12'\n")}))
+    check("pins/bare-carriage-return-in-script-cannot-evaluate",
+          (code, _has(lines, "attack.yml:8: carries a carriage return")), (2, True))
+    root = _fixture(base)
+    for rel in (WORKFLOWS_REL + "/quality.yml", PIN_FILES[0]):
+        _write(root, rel, _read_text(root / rel).replace("\n", "\r\n"))
+    check("pins/crlf-file-passes", evaluate(root)[0], 0)
     outside = "quality.yml:6: the text python-version appears outside a pin"
     lower = "spell the key in lower case"
     matrix = "quality.yml:6: this gate cannot evaluate a matrix or expression pin"
@@ -744,13 +882,58 @@ def _self_test_cases(base):
     check("pins/block-scalar-pin-finding",
           (code, _has(lines, "quality.yml:8: python-version '3.12' differs")), (1, True))
     # An explicit-key entry whose value is a quoted scalar over several lines: the text inside it
-    # is no block scalar header, and the real pin after it is judged.
+    # is no block scalar header, and the real pin after it is judged. The step runs another action,
+    # since this line model cannot find the `-` marker of a setup-python step across that scalar.
     code, lines = evaluate(_fixture(base, files={WORKFLOWS_REL + "/attack.yml": (
         "name: attack\non: push\njobs:\n  q:\n    runs-on: ubuntu-latest\n    steps:\n"
         "      - ? name\n        : \"start\nfake: |\n          end\"\n"
-        "        uses: actions/setup-python@v5\n        with:\n          python-version: '3.12'\n")}))
+        "        uses: actions/setup-other@v5\n        with:\n          python-version: '3.12'\n")}))
     check("pins/explicit-key-quoted-value-finding",
           (code, _has(lines, "attack.yml:13: python-version '3.12' differs")), (1, True))
+    def steps(body):
+        return {WORKFLOWS_REL + "/steps.yml": "jobs:\n  q:\n    steps:\n" + body}
+
+    no_input = "steps.yml:4: a step that uses actions/setup-python sets no python-version input"
+    for check_id, body in (
+            ("pins/setup-python-without-with-finding",
+             "      - uses: actions/setup-python@v5\n      - run: echo done\n"),
+            ("pins/setup-python-without-pin-finding",
+             "      - uses: actions/setup-python@v5\n        with:\n          cache: pip\n"),
+            ("pins/setup-python-case-variant-finding", "      - uses: Actions/Setup-Python@V5\n"),
+            ("pins/setup-python-env-pin-finding",
+             "      - uses: actions/setup-python@v5\n        env:\n          python-version: '3.14'\n"),
+            ("pins/setup-python-next-step-pin-finding",
+             "      - uses: actions/setup-python@v5\n      - uses: actions/checkout@v4\n        with:\n"
+             "          python-version: '3.14'\n")):
+        code, lines = evaluate(_fixture(base, files=steps(body)))
+        check(check_id, (code, _has(lines, no_input)), (1, True))
+    for check_id, body in (
+            ("pins/setup-python-pinned-passes",
+             "      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.14'\n"),
+            ("pins/setup-python-name-first-passes",
+             "      - name: Python\n        # the floor\n        uses: \"actions/setup-python@v5\"  # v5\n"
+             "        with:\n          cache: pip\n          python-version: '3.14'\n"
+             "      - run: echo done\n"),
+            ("pins/setup-python-with-first-passes",
+             "      - with:\n          python-version: '3.14'\n        uses: actions/setup-python@v5\n")):
+        check(check_id, evaluate(_fixture(base, files=steps(body)))[0], 0)
+    literal = "steps.yml:4: a uses: line that is not one plain or quoted literal"
+    for check_id, body, marker in (
+            ("pins/setup-python-version-file-cannot-evaluate",
+             "      - uses: actions/setup-python@v5\n        with:\n"
+             "          python-version-file: .python-version\n",
+             "steps.yml:6: the text python-version appears outside a pin"),
+            ("pins/setup-python-escaped-uses-cannot-evaluate",
+             "      - uses: \"actions/setup-\\x70ython@v5\"\n", literal),
+            ("pins/setup-python-anchored-uses-cannot-evaluate",
+             "      - uses: &a actions/setup-python@v5\n", literal),
+            ("pins/setup-python-flow-step-cannot-evaluate",
+             "      - {uses: actions/setup-python@v5}\n",
+             "steps.yml:4: names setup-python outside a literal uses: line"),
+            ("pins/setup-python-unfound-marker-cannot-evaluate", "      uses: actions/setup-python@v5\n",
+             "steps.yml:4: a setup-python uses: line whose step `-` marker")):
+        code, lines = evaluate(_fixture(base, files=steps(body)))
+        check(check_id, (code, _has(lines, marker)), (2, True))
     root = _fixture(base, workflow_pin="python-version: 3.10", template_pin="3.10", pin_quote="")
     check("pins/unquoted-trailing-zero-finding",
           [line for line in pin_findings(root, (3, 10)) if "unquoted" in line],
