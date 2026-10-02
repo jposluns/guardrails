@@ -7,7 +7,16 @@ Legs, in order:
                  floor (FLOOR below; a change to either is a reviewed change to both).
   pins           every `python-version:` interpreter pin in .github/workflows/*.yml and in PIN_FILES
                  (the shipped adopter CI template and its inline copy) equals the floor; each PIN_FILES
-                 entry must carry at least one pin.
+                 entry must carry at least one pin. Every line of a scanned file that contains the text
+                 python-version must be one strict pin line (PIN_LINE_RE): optional space indentation,
+                 an optional `- ` list marker, the bare key, a colon, one or more spaces, exactly one
+                 plain, single-quoted or double-quoted scalar of [A-Za-z0-9._+-] characters (matching
+                 quotes, nothing inside them but those characters), then optional whitespace and an
+                 optional `#` comment. Any other line naming the key (a value on the next line or a
+                 block scalar, a quoted key, a flow mapping, an empty value, a concatenated or
+                 escaped value, a comment that names the key) is cannot-evaluate (exit 2), never a
+                 pass. A plain (unquoted) pin of a floor whose text ends in 0 is a finding, since
+                 YAML reads a plain 3.20 as the number 3.2.
   guard          each guarded-surfaces entrypoint opens with the canonical refusal guard, AST-matched
                  against GUARD_TEMPLATE with the file's own basename and the floor; only a module
                  docstring and `from __future__` imports may precede its `import sys`.
@@ -41,8 +50,13 @@ the guard leg pins the one canonical form. Each file is compiled whole before it
 interpreter too old to parse a later statement stops with a SyntaxError instead of the refusal; the
 dynamic leg sees a compile failure only on the interpreter running it. The completeness scan walks the
 working tree, not the git index: an untracked stray entrypoint is counted, and a directory named in
-SKIPPED_DIR_NAMES is not walked. The pins leg sees only the `python-version:` spelling in the files it
-names. The documentation leg matches the exact phrase, not its meaning.
+SKIPPED_DIR_NAMES is not walked. The pins leg does not parse YAML, and that is also its answer to a
+malformed workflow: a pin can only be set by a line that names the key, so a file with no such line
+has no pin to check, and every line that names it is held to the strict one-line form or the leg
+cannot evaluate. The residual is a key spelled through YAML escapes (for example a double-quoted key
+with backslash-u escapes, or an escaped line break inside the key), which no line names as written and this
+leg does not see; the leg also scans only the files it names. The documentation leg matches the
+exact phrase, not its meaning.
 
 Run this gate isolated: python3 -I -B tools/check_python_floor.py
 """
@@ -68,7 +82,13 @@ SOURCE_KEYS = {"format-version", "python-floor", "guarded-surfaces", "completene
                "documentation-check"}
 WORKFLOWS_REL = ".github/workflows"
 PIN_FILES = ("opf/enforcement/ci/github-actions.yml", "opf/tools/check_opf_doctor.py")
-PIN_RE = re.compile(r"""python-version:\s*['"]?([^'"\s#]+)['"]?""")
+PIN_KEY = "python-version"
+# The one accepted spelling of a line naming PIN_KEY (fullmatch on a "\n"-split line, one trailing "\r"
+# removed). Group 1 is a plain value, group 2 single-quoted, group 3 double-quoted. A comment may not
+# carry a character a YAML 1.1 reader treats as a line break.
+PIN_LINE_RE = re.compile(
+    r" *(?:- +)?python-version: +(?:([A-Za-z0-9._+-]+)|'([A-Za-z0-9._+-]+)'|\"([A-Za-z0-9._+-]+)\")"
+    r"(?:[ \t]+#[^\r\x85\u2028\u2029]*|[ \t]*)")
 # Not shipped (repo-only CI) or byte-exact vendored third-party code under a provenance manifest.
 EXCLUDED_TREES = (".github/", "opf/tools/_vendor/")
 SKIPPED_DIR_NAMES = {".git", "__pycache__", ".venv", "venv", "node_modules"}
@@ -180,12 +200,22 @@ def pin_findings(root, floor):
     findings = []
     for rel, required in targets:
         pins = 0
-        for number, line in enumerate(_read_text(root / rel).splitlines(), 1):
-            for match in PIN_RE.finditer(line):
-                pins += 1
-                if match.group(1) != want:
-                    findings.append("{}:{}: python-version {!r} differs from the floor {!r}".format(
-                        rel, number, match.group(1), want))
+        for number, line in enumerate(_read_text(root / rel).split("\n"), 1):
+            line = line[:-1] if line.endswith("\r") else line
+            if PIN_KEY not in line:
+                continue
+            match = PIN_LINE_RE.fullmatch(line)
+            if match is None:
+                raise CannotEvaluate("{}:{}: unrecognized python-version spelling; write the pin on one "
+                                     "line as python-version: 'X.Y'".format(rel, number))
+            pins += 1
+            plain, value = match.group(1), next(group for group in match.groups() if group is not None)
+            if value != want:
+                findings.append("{}:{}: python-version {!r} differs from the floor {!r}".format(
+                    rel, number, value, want))
+            elif plain is not None and want.endswith("0"):
+                findings.append("{}:{}: python-version {} is unquoted; YAML reads it as a number, so "
+                                "quote it as '{}'".format(rel, number, value, want))
         if required and not pins:
             findings.append("{}: carries no python-version pin (want {!r})".format(rel, want))
     return findings
@@ -430,12 +460,15 @@ def _write(root, rel, text):
     path.write_text(text, encoding="utf-8")
 
 
-def _fixture(base, source=None, workflow_pin="3.14", template_pin="3.14", files=None):
+def _fixture(base, source=None, workflow_pin="3.14", template_pin="3.14", files=None, pin_quote="'"):
+    """A clean tree; workflow_pin is the version on quality.yml line 6, or with pin_quote="" the whole
+    text after that line's indentation."""
     root = Path(tempfile.mkdtemp(prefix="tree-", dir=base))
     _write(root, SOURCE_REL, _source_text() if source is None else source)
+    pin = "python-version: {0}{1}{0}".format(pin_quote, workflow_pin) if pin_quote else workflow_pin
     _write(root, WORKFLOWS_REL + "/quality.yml",
            "jobs:\n  q:\n    steps:\n      - uses: actions/setup-python@v5\n        with:\n"
-           "          python-version: '{}'\n".format(workflow_pin))
+           "          {}\n".format(pin))
     _write(root, PIN_FILES[0], "      - uses: actions/setup-python@v5\n        with:\n"
            "          python-version: '{}'\n".format(template_pin))
     _write(root, PIN_FILES[1], "TEMPLATE = \"\"\"\n          python-version: '{}'\n\"\"\"\n".format(
@@ -494,6 +527,39 @@ def _self_test_cases(base):
     code, lines = evaluate(root)
     check("pins/template-without-pin-finding", (code, _has(lines, "carries no python-version pin")),
           (1, True))
+    unrecognized = "quality.yml:6: unrecognized python-version spelling"
+    for check_id, pin in (
+            ("pins/block-scalar-value-cannot-evaluate", "python-version:\n            '3.12'"),
+            ("pins/block-indicator-cannot-evaluate", "python-version: |\n            3.12"),
+            ("pins/json-quoted-key-cannot-evaluate", '"python-version": "3.12"'),
+            ("pins/concatenated-quotes-cannot-evaluate", "python-version: '3.14''3.12'"),
+            ("pins/empty-value-cannot-evaluate", "python-version:   "),
+            ("pins/empty-quoted-value-cannot-evaluate", "python-version: ''"),
+            ("pins/flow-mapping-cannot-evaluate", "{python-version: 3.12}"),
+            ("pins/mismatched-quotes-cannot-evaluate", "python-version: '3.14\""),
+            ("pins/comment-mention-cannot-evaluate", "# python-version: '3.12'"),
+            ("pins/version-file-input-cannot-evaluate", "python-version-file: .python-version"),
+            ("pins/line-separator-cannot-evaluate", "python-version: 3.14\u2028.12"),
+            ("pins/comment-line-separator-cannot-evaluate",
+             "python-version: '3.14' # x\u2028python-version: '3.12'"),
+            ("pins/bare-carriage-return-cannot-evaluate",
+             "python-version: '3.14'\r          python-version: '3.12'")):
+        code, lines = evaluate(_fixture(base, workflow_pin=pin, pin_quote=""))
+        check(check_id, (code, _has(lines, unrecognized)), (2, True))
+    for check_id, pin in (
+            ("pins/trailing-comment-passes", "python-version: '3.14'  # the floor"),
+            ("pins/double-quoted-passes", 'python-version: "3.14"'),
+            ("pins/list-marker-passes", "- python-version: '3.14'"),
+            ("pins/crlf-line-passes", "python-version: '3.14'\r")):
+        check(check_id, evaluate(_fixture(base, workflow_pin=pin, pin_quote=""))[0], 0)
+    code, lines = evaluate(_fixture(base, workflow_pin="python-version: 3.12", pin_quote=""))
+    check("pins/wrong-single-line-finding",
+          (code, _has(lines, "quality.yml:6: python-version '3.12' differs")), (1, True))
+    root = _fixture(base, workflow_pin="python-version: 3.10", template_pin="3.10", pin_quote="")
+    check("pins/unquoted-trailing-zero-finding",
+          [line for line in pin_findings(root, (3, 10)) if "unquoted" in line],
+          ["{}/quality.yml:6: python-version 3.10 is unquoted; YAML reads it as a number, so quote it "
+           "as '3.10'".format(WORKFLOWS_REL)])
 
     check("guard/canonical-passes", evaluate(_fixture(base, source=listed, files=demo)), (0, [
         "PASS: python floor 3.14 ({}): source, pins, guard and dynamic legs over 1 guarded "
