@@ -598,10 +598,10 @@ def _open_dir_nofollow(abspath):
     # returns until the return hands the last one to the caller. The protected region spans the root
     # open through the return itself. During a hand-off BOTH descriptors are held: the child is appended
     # BEFORE the parent leaves `held`, and the parent's ownership is cleared (popped) immediately before
-    # its close, which is a single close (P1: a raising close has released its number, close(2); the
-    # _journal._close_fd_propagating body is #378's), so a failing parent close can neither leak the
-    # child nor double-close the parent. Any failure or interruption closes
-    # every descriptor still held and re-raises. Residual (sub-line, disclosed): an interruption between
+    # its close, a single os.close (P1, #378: _journal._close_fd_propagating is a bare os.close; a raising
+    # close has released its number, close(2), and it is never touched again), so a failing parent close
+    # can neither leak the child nor double-close the parent. Any failure or interruption closes every
+    # descriptor still held and re-raises. Residual (sub-line, disclosed): an interruption between
     # an open returning and its append, or between a pop and its close, leaks that one descriptor.
     held = []
     try:
@@ -761,8 +761,9 @@ def _open_working_dir_fd(store_root_fd, working_rel):
         # ROUND-6 defect: the new descriptor is HELD in a local across the parent close, so a parent
         # close that reports an error cannot abandon the return and leak the just-opened `working_rel`
         # fd (one per discovery/resolution/investigation call). It is released quietly, the parent close
-        # is a single close (P1: a raising close has released its number, so it is never probed or closed
-        # again), and the close error keeps propagating fail-closed.
+        # is _close_fd_exc_safe's single os.close (P1: a raising close has released its number, close(2),
+        # and it is never touched again), and its close error propagates fail-closed unless an exception is
+        # already in flight here, which then keeps propagating in its place.
         try:
             _close_fd_exc_safe(pfd)
         except OSError:
@@ -2700,226 +2701,454 @@ def self_test():
         finally:
             _journal._read_contained = _real_rc
 
+        # #378 P1, the r5, r6 and r7 legs' own descriptor checks: a leg probes and closes by number only what
+        # it can show is still its own. Each open is recorded in a ledger with its (st_dev, st_ino), taken the
+        # moment the open returns, while the number is still held, and every close the leg's stub sees marks
+        # that open released. An open counts as left open only when no close released it AND fstat still
+        # returns the identity recorded at it, and only such an open is closed. A released number, the
+        # injected one included, is never probed or closed again, so a number another lane took meanwhile is
+        # never touched. The leg's own directories are unique to it; the walk's ancestors (/ and the
+        # directories above the leg's tree) are opened by other lanes too, so for them it is the ledger that
+        # shows the number was never released. Each leg runs twice: with its closes releasing their numbers,
+        # and with another lane's file put on a number instead (dup2 of the leg's "other-lane" file onto the
+        # number, which the stub still holds, so it is never free for a real lane meanwhile): the r7 legs' on
+        # the number whose close is injected, the r5 and r6 legs' on the number the leg checks. That move is
+        # one-shot per recorded open: only the close that releases the open moves the other-lane file onto
+        # its number, and any later close of the number reaches the real close, so a second close by the
+        # code under test closes the other-lane file. After that run the number must still name the
+        # other-lane file (nothing closed it again, the code under test and the leg's cleanup included), and
+        # only then does the leg close it, its own other-lane descriptor. The ledger is pid-gated, as
+        # _opf_emit's run_bounded legs' is: it records the pid that armed it, and only in that process does an
+        # open record, a close release or fire the injection, or a left-open check find or close anything
+        # (these legs do not fork; a forked child would hold its own copy of the numbers, never the leg's).
+        def _r7_ident(fd):
+            try:
+                st = os.fstat(fd)
+            except OSError:
+                return None
+            return st.st_dev, st.st_ino
+
+        def _r7_ledger():
+            """A leg's ledger, armed in this process: its opens, and the pid it acts in."""
+            return {"owner": os.getpid(), "opens": []}
+
+        def _r7_mine(seen):
+            """Whether this is the process that armed the leg's ledger: only there does its close fire."""
+            return os.getpid() == seen["opened"]["owner"]
+
+        def _r7_opened(ledger, fd, real_close=None):
+            """Record fd's open with its identity, in the ledger's own process only. An open stand-in passes
+            real_close, so a failing fstat closes the number it just opened (never released yet) instead of
+            leaking it."""
+            if os.getpid() != ledger["owner"]:
+                return fd                               # a forked child's open: not the leg's to record
+            try:
+                st = os.fstat(fd)
+            except BaseException:
+                if real_close is not None:
+                    real_close(fd)
+                raise
+            ledger["opens"].append({"fd": fd, "ident": (st.st_dev, st.st_ino), "released": False})
+            return fd
+
+        def _r7_released(ledger, fd):
+            """A close of fd in the ledger's own process: the latest open of fd that no close has released
+            yet is released now. Returns whether this close released a recorded open (False for a repeated
+            close of a released number, and for any close in another process)."""
+            if os.getpid() != ledger["owner"]:
+                return False                            # a forked child's close: never the leg's release
+            for entry in reversed(ledger["opens"]):
+                if entry["fd"] == fd and not entry["released"]:
+                    entry["released"] = True
+                    return True
+            return False
+
+        def _r7_left_open(ledger):
+            """The opens no close released whose number still names the file recorded at the open (none
+            outside the ledger's own process)."""
+            if os.getpid() != ledger["owner"]:
+                return []
+            return [entry for entry in ledger["opens"]
+                    if not entry["released"] and _r7_ident(entry["fd"]) == entry["ident"]]
+
+        def _r7_close_left(ledger):
+            """Close each open _r7_left_open finds (a regressed run's leak), so the failing suite stays clean."""
+            for entry in _r7_left_open(ledger):
+                entry["released"] = True
+                try:
+                    os.close(entry["fd"])
+                except OSError:
+                    pass
+
+        _r7_other_path = base / "r7-other-lane"
+        _r7_other_path.write_bytes(b"")
+        _r7_other_fd = os.open(str(_r7_other_path), os.O_RDONLY)
+        _r7_other = _r7_ident(_r7_other_fd)
+
+        def _r7_fire(fd, real_close, reuse):
+            """The injected close: release fd, or under `reuse` put the other-lane file on it, then raise."""
+            if reuse:
+                os.dup2(_r7_other_fd, fd)       # the number goes straight to another lane's file
+            else:
+                real_close(fd)                  # released first, as close(2) does on Linux
+            raise OSError(5, "injected close failure after release")
+
+        def _r7_let_close(fd, real_close, reuse):
+            """The close that releases the recorded open a leg checks: release fd, or under `reuse` put the
+            other-lane file on it instead (the number goes straight to another lane), so the leg's check must
+            leave it alone. A stub calls this once per recorded open (its _r7_released returned True); a later
+            close of the number goes to the real close, so a repeated close closes the other-lane file."""
+            if reuse:
+                os.dup2(_r7_other_fd, fd)
+            else:
+                real_close(fd)
+
+        def _r7_reuse_kept(fd):
+            """Whether fd, after a `reuse` run, still names the other-lane file: then nothing closed it again,
+            and the leg closes it, its own other-lane descriptor."""
+            if fd is None or _r7_ident(fd) != _r7_other:
+                return False
+            os.close(fd)
+            return True
+
         # ROUND-5 defect 3: _read_contained's cleanup closes the FILE fd and the PARENT fd each in its
         # own try/finally, so a file close that reports an error (an EIO surfaced at close) cannot leak
         # the parent descriptor. Inject the failure at the REAL close (the number is still released, as
-        # on Linux), then prove on the recorded descriptor that the parent is closed afterwards.
+        # on Linux), then prove on the recorded descriptor that the parent is released afterwards, by the
+        # ledger and the identity recorded at its open; the reuse run puts the other-lane file on the
+        # parent's number at its close, and on the FILE fd's number at the injected close (its first close
+        # only, as for the parent), so a second close of either number reaches the real close and closes the
+        # other-lane file, which the reused-number checks turn red.
         _r5_dir = base / "r5-close-leak"; _r5_dir.mkdir()
         (_r5_dir / "f").write_bytes(b"x = 1\n")
         _r5_root = os.open(str(_r5_dir), os.O_RDONLY | os.O_DIRECTORY)
-        _r5_seen = {}
         _r5_real_open_parent = _journal._open_parent
         _r5_real_close = os.close
+        for _r5_reuse in (False, True):
+            _r5_tag = "-reused" if _r5_reuse else ""
+            _r5_seen = dict(opened=_r7_ledger())
 
-        def _r5_open_parent(root_fd, relpath):
-            pfd, name = _r5_real_open_parent(root_fd, relpath)
-            _r5_seen["pfd"] = pfd
-            return pfd, name
+            def _r5_open_parent(root_fd, relpath):
+                pfd, name = _r5_real_open_parent(root_fd, relpath)
+                _r5_seen["pfd"] = _r7_opened(_r5_seen["opened"], pfd, _r5_real_close)
+                return pfd, name
 
-        def _r5_close(fd):
-            _r5_real_close(fd)
-            if "pfd" in _r5_seen and fd != _r5_seen["pfd"] and "fired" not in _r5_seen:
-                # the first non-parent close after _open_parent returned is the FILE fd's close
-                _r5_seen["fired"] = True
-                raise OSError(5, "injected close failure")
+            def _r5_close(fd):
+                _r5_first = _r7_released(_r5_seen["opened"], fd)
+                if "pfd" in _r5_seen and fd != _r5_seen["pfd"] and "fired" not in _r5_seen and _r7_mine(_r5_seen):
+                    # the first non-parent close after _open_parent returned is the FILE fd's close
+                    _r5_seen["fired"] = True
+                    _r5_seen["ffd"] = fd
+                    _r7_fire(fd, _r5_real_close, _r5_reuse)
+                if fd == _r5_seen.get("pfd") and _r5_first:
+                    _r7_let_close(fd, _r5_real_close, _r5_reuse)   # the parent, which the leg checks
+                    return
+                _r5_real_close(fd)
 
-        _journal._open_parent = _r5_open_parent
-        os.close = _r5_close
-        try:
+            _journal._open_parent = _r5_open_parent
+            os.close = _r5_close
             try:
-                _journal._read_contained(_r5_root, "f")
-                _r5_out = "returned"
-            except (OSError, _journal.JournalError):
-                _r5_out = "raised"
-        finally:
-            os.close = _r5_real_close
-            _journal._open_parent = _r5_real_open_parent
-        check("r5-file-close-injection-fired", _r5_seen.get("fired") is True and "pfd" in _r5_seen)
-        check("r5-file-close-error-propagates", _r5_out == "raised")
-        _r5_leaked = True
-        try:
-            os.fstat(_r5_seen.get("pfd", -1))
-        except OSError:
-            _r5_leaked = False
-        check("r5-parent-fd-closed-after-file-close-error", not _r5_leaked)
-        if _r5_leaked:                    # a pre-fix run leaks it; close so the failing suite stays clean
-            try:
-                os.close(_r5_seen["pfd"])
-            except OSError:
-                pass
+                try:
+                    _journal._read_contained(_r5_root, "f")
+                    _r5_out = "returned"
+                except (OSError, _journal.JournalError):
+                    _r5_out = "raised"
+            finally:
+                os.close = _r5_real_close
+                _journal._open_parent = _r5_real_open_parent
+            check("r5-file-close-injection-fired" + _r5_tag, _r5_seen.get("fired") is True and "pfd" in _r5_seen)
+            check("r5-file-close-error-propagates" + _r5_tag, _r5_out == "raised")
+            check("r5-parent-fd-closed-after-file-close-error" + _r5_tag, not _r7_left_open(_r5_seen["opened"]))
+            _r7_close_left(_r5_seen["opened"])        # a pre-fix run leaks it; closed so the suite stays clean
+            if _r5_reuse:
+                check("r5-parent-reused-number-never-closed", _r7_reuse_kept(_r5_seen.get("pfd")))
+                check("r5-file-reused-number-never-closed", _r7_reuse_kept(_r5_seen.get("ffd")))
         os.close(_r5_root)
 
         # ROUND-6 defect (K9a fix 6): _open_working_dir_fd returned the freshly-opened `.working`
         # descriptor from inside a try whose finally closes the parent, so a parent close that reports
         # an error (the number still released, as on Linux) abandoned the return and leaked the child:
         # one descriptor per discovery/resolution/planner-investigation call. Inject the failure at the
-        # REAL parent close; the error still propagates fail-closed, and the child descriptor --
-        # recorded at its open -- is proven closed afterwards.
+        # REAL parent close; the error still propagates fail-closed, and the child descriptor -- recorded
+        # at its open in the ledger with its identity -- is proven released afterwards; the reuse run puts
+        # the other-lane file on the child's number at its close.
         _r6 = build_store(manifest=manifest_text())
         _r6_root = os.open(str(_r6), os.O_RDONLY | os.O_DIRECTORY)
-        _r6_seen = {}
         _r6_real_open_parent = _journal._open_parent
         _r6_real_open = os.open
         _r6_real_close = os.close
+        for _r6_reuse in (False, True):
+            _r6_tag = "-reused" if _r6_reuse else ""
+            _r6_seen = dict(opened=_r7_ledger())
 
-        def _r6_open_parent(root_fd, relpath):
-            pfd, name = _r6_real_open_parent(root_fd, relpath)
-            _r6_seen["pfd"] = pfd
-            return pfd, name
+            def _r6_open_parent(root_fd, relpath):
+                pfd, name = _r6_real_open_parent(root_fd, relpath)
+                _r6_seen["pfd"] = _r7_opened(_r6_seen["opened"], pfd, _r6_real_close)
+                return pfd, name
 
-        def _r6_open(*args, **kwargs):
-            fd = _r6_real_open(*args, **kwargs)
-            if kwargs.get("dir_fd") is not None and kwargs.get("dir_fd") == _r6_seen.get("pfd"):
-                _r6_seen["wfd"] = fd          # the child opened beneath the recorded parent
-            return fd
+            def _r6_open(*args, **kwargs):
+                fd = _r6_real_open(*args, **kwargs)
+                if kwargs.get("dir_fd") is not None and kwargs.get("dir_fd") == _r6_seen.get("pfd"):
+                    _r6_seen["wfd"] = _r7_opened(_r6_seen["opened"], fd, _r6_real_close)   # the child
+                return fd
 
-        def _r6_close(fd):
-            _r6_real_close(fd)
-            if fd == _r6_seen.get("pfd") and "fired" not in _r6_seen:
-                _r6_seen["fired"] = True
-                raise OSError(5, "injected close failure")
+            def _r6_close(fd):
+                _r6_first = _r7_released(_r6_seen["opened"], fd)
+                if fd == _r6_seen.get("pfd") and "fired" not in _r6_seen and _r7_mine(_r6_seen):
+                    _r6_seen["fired"] = True
+                    _r7_fire(fd, _r6_real_close, False)
+                if fd == _r6_seen.get("wfd") and _r6_first:
+                    _r7_let_close(fd, _r6_real_close, _r6_reuse)   # the child, which the leg checks
+                    return
+                _r6_real_close(fd)
 
-        _journal._open_parent = _r6_open_parent
-        os.open = _r6_open
-        os.close = _r6_close
-        try:
+            _journal._open_parent = _r6_open_parent
+            os.open = _r6_open
+            os.close = _r6_close
             try:
-                _open_working_dir_fd(_r6_root, WORKING_DIRNAME)
-                _r6_out = "returned"
-            except OSError:
-                _r6_out = "raised"
-        finally:
-            os.close = _r6_real_close
-            os.open = _r6_real_open
-            _journal._open_parent = _r6_real_open_parent
-        check("r6-working-parent-close-injection-fired",
-              _r6_seen.get("fired") is True and "wfd" in _r6_seen)
-        check("r6-working-parent-close-error-propagates", _r6_out == "raised")
-        _r6_leaked = True
-        try:
-            os.fstat(_r6_seen.get("wfd", -1))
-        except OSError:
-            _r6_leaked = False
-        check("r6-working-fd-closed-after-parent-close-error", not _r6_leaked)
-        if _r6_leaked:                    # a pre-fix run leaks it; close so the failing suite stays clean
-            try:
-                os.close(_r6_seen["wfd"])
-            except OSError:
-                pass
+                try:
+                    _open_working_dir_fd(_r6_root, WORKING_DIRNAME)
+                    _r6_out = "returned"
+                except OSError:
+                    _r6_out = "raised"
+            finally:
+                os.close = _r6_real_close
+                os.open = _r6_real_open
+                _journal._open_parent = _r6_real_open_parent
+            check("r6-working-parent-close-injection-fired" + _r6_tag,
+                  _r6_seen.get("fired") is True and "wfd" in _r6_seen)
+            check("r6-working-parent-close-error-propagates" + _r6_tag, _r6_out == "raised")
+            check("r6-working-fd-closed-after-parent-close-error" + _r6_tag, not _r7_left_open(_r6_seen["opened"]))
+            _r7_close_left(_r6_seen["opened"])        # a pre-fix run leaks it; closed so the suite stays clean
+            if _r6_reuse:
+                check("r6-working-child-reused-number-never-closed", _r7_reuse_kept(_r6_seen.get("wfd")))
         os.close(_r6_root)
 
         # ROUND-6 sibling: open_journal_root_from_path returned the freshly-opened journal-root
         # descriptor from inside a try whose finally closes the operator-root fd, the same
         # abandoned-return shape. Inject the failure at the REAL root close; the error still propagates
-        # fail-closed and the jr descriptor -- recorded at its open -- is proven closed afterwards.
+        # fail-closed and the jr descriptor -- recorded at its open in the ledger with its identity -- is
+        # proven released afterwards; the reuse run puts the other-lane file on jr's number at its close.
         _r6j = base / "r6-journal-close-leak"
         (_r6j / "j" / "r").mkdir(parents=True)
-        _r6j_seen = {}
         _r6j_real_odc = _journal._open_dir_contained
+        for _r6j_reuse in (False, True):
+            _r6j_tag = "-reused" if _r6j_reuse else ""
+            _r6j_seen = dict(opened=_r7_ledger())
 
-        def _r6j_odc(root_fd, relpath):
-            _r6j_seen["root_fd"] = root_fd
-            fd = _r6j_real_odc(root_fd, relpath)
-            _r6j_seen["jr"] = fd
-            return fd
+            def _r6j_odc(root_fd, relpath):
+                _r6j_seen["root_fd"] = _r7_opened(_r6j_seen["opened"], root_fd)
+                fd = _r6j_real_odc(root_fd, relpath)
+                _r6j_seen["jr"] = _r7_opened(_r6j_seen["opened"], fd, _r6_real_close)
+                return fd
 
-        def _r6j_close(fd):
-            _r6_real_close(fd)
-            if fd == _r6j_seen.get("root_fd") and "fired" not in _r6j_seen:
-                _r6j_seen["fired"] = True
-                raise OSError(5, "injected close failure")
+            def _r6j_close(fd):
+                _r6j_first = _r7_released(_r6j_seen["opened"], fd)
+                if fd == _r6j_seen.get("root_fd") and "fired" not in _r6j_seen and _r7_mine(_r6j_seen):
+                    _r6j_seen["fired"] = True
+                    _r7_fire(fd, _r6_real_close, False)
+                if fd == _r6j_seen.get("jr") and _r6j_first:
+                    _r7_let_close(fd, _r6_real_close, _r6j_reuse)   # the journal root, which the leg checks
+                    return
+                _r6_real_close(fd)
 
-        _journal._open_dir_contained = _r6j_odc
-        os.close = _r6j_close
-        try:
+            _journal._open_dir_contained = _r6j_odc
+            os.close = _r6j_close
             try:
-                _journal.open_journal_root_from_path(_r6j, "j/r")
-                _r6j_out = "returned"
-            except OSError:
-                _r6j_out = "raised"
-        finally:
-            os.close = _r6_real_close
-            _journal._open_dir_contained = _r6j_real_odc
-        check("r6-journal-root-close-injection-fired",
-              _r6j_seen.get("fired") is True and "jr" in _r6j_seen)
-        check("r6-journal-root-close-error-propagates", _r6j_out == "raised")
-        _r6j_leaked = True
-        try:
-            os.fstat(_r6j_seen.get("jr", -1))
-        except OSError:
-            _r6j_leaked = False
-        check("r6-journal-fd-closed-after-root-close-error", not _r6j_leaked)
-        if _r6j_leaked:                   # a pre-fix run leaks it; close so the failing suite stays clean
-            try:
-                os.close(_r6j_seen["jr"])
-            except OSError:
-                pass
+                try:
+                    _journal.open_journal_root_from_path(_r6j, "j/r")
+                    _r6j_out = "returned"
+                except OSError:
+                    _r6j_out = "raised"
+            finally:
+                os.close = _r6_real_close
+                _journal._open_dir_contained = _r6j_real_odc
+            check("r6-journal-root-close-injection-fired" + _r6j_tag,
+                  _r6j_seen.get("fired") is True and "jr" in _r6j_seen)
+            check("r6-journal-root-close-error-propagates" + _r6j_tag, _r6j_out == "raised")
+            check("r6-journal-fd-closed-after-root-close-error" + _r6j_tag, not _r7_left_open(_r6j_seen["opened"]))
+            _r7_close_left(_r6j_seen["opened"])       # a pre-fix run leaks it; closed so the suite stays clean
+            if _r6j_reuse:
+                check("r6-journal-root-reused-number-never-closed", _r7_reuse_kept(_r6j_seen.get("jr")))
 
-        # ROUND-7 under P1 (one close; man 2 close): a close that raises has still RELEASED its number, so
-        # the injection releases the descriptor and then raises EINTR. The no-follow walk must still
-        # propagate the error fail-closed, close the failing parent number exactly once, and leave no walk
-        # descriptor open. This parent close is _journal._close_fd_propagating's, whose P1 body (no fstat
-        # probe after the raise) is #378's; the reuse vector for #377's own helper is r7-working below.
+        # ROUND-7 (codex), under P1 (#378): a parent close in the no-follow walk that reports an error
+        # (EINTR/EIO) must still propagate it fail-closed and leak nothing the walk opened. Each close is
+        # a single _journal._close_fd_propagating (a bare os.close at #378); close(2) on Linux has released
+        # the number by the time it reports the error, so the helper never touches it again. Inject that
+        # shape: a one-shot close that RELEASES the number (in the reuse run, puts the other-lane file on
+        # it instead) and then raises; the error still propagates fail-closed and NO descriptor the walk
+        # opened survives. The one-close check (#377) counts what the injected number sees after its failed
+        # close: every later os.close of it and every os.fstat of it (PROBE), until an open hands the number
+        # out again; both must be zero. Two flips put a pre-P1 body back as _journal._close_fd_propagating
+        # for a reuse run: RECLOSE (fstat, then close again) must turn the one-close check red with exactly
+        # one more close, and the reused-number check red; PROBE (fstat after the failed close, no second
+        # close) must turn the one-close check red by its fstat count alone, the other-lane file kept.
         _r7 = base / "r7-released-close"
         (_r7 / "d").mkdir(parents=True)
-        _r7_seen = dict(opened=[])
         _r7_real_open = os.open
         _r7_real_close = os.close
+        _r7_real_fstat = os.fstat
+        _r7_real_propagating = _journal._close_fd_propagating
 
-        def _r7_open(*args, **kwargs):
-            fd = _r7_real_open(*args, **kwargs)
-            _r7_seen["opened"].append(fd)
-            return fd
-
-        def _r7_close(fd):
-            if "fired" not in _r7_seen:
-                _r7_seen["fired"] = fd          # RELEASED, then raise (what close(2) does on Linux)
-                _r7_real_close(fd)
-                raise OSError(4, "injected released-close failure")
-            if fd == _r7_seen["fired"]:
-                _r7_seen["reclosed"] = True
-            _r7_real_close(fd)
-
-        os.open = _r7_open
-        os.close = _r7_close
-        try:
+        def _r7_flip_reclose(fd):
+            """RECLOSE: the pre-P1 _journal._close_fd_propagating, its fstat-then-reclose recovery inlined."""
             try:
-                _open_dir_nofollow(str(_r7 / "d"))
-                _r7_out = "returned"
+                os.close(fd)
+                return
+            except OSError as exc:
+                first = exc
+            try:
+                os.fstat(fd)
             except OSError:
-                _r7_out = "raised"
-        finally:
-            os.close = _r7_real_close
-            os.open = _r7_real_open
-        check("r7-nofollow-released-close-injection-fired", "fired" in _r7_seen)
-        check("r7-nofollow-released-close-error-propagates", _r7_out == "raised")
-        check("r7-nofollow-released-close-one-close", "reclosed" not in _r7_seen)
-        _r7_left = []
-        for _fd in _r7_seen["opened"]:
+                raise first
             try:
-                os.fstat(_fd)
-            except OSError:
-                continue
-            _r7_left.append(_fd)
-        check("r7-nofollow-no-walk-descriptor-survives-released-close", not _r7_left)
-        for _fd in _r7_left:              # a failing run leaks one; close so the failing suite stays clean
-            try:
-                os.close(_fd)
+                os.close(fd)                    # the retry close(2) warns against
             except OSError:
                 pass
+            raise first
 
-        # ROUND-7 sibling on _open_working_dir_fd under P1. Its parent close is _close_fd_exc_safe's (#377).
-        # V1, deterministic reuse: the injected parent close really releases the number, dup2s an unrelated
-        # file onto it, and only then raises EINTR (and, separately, EIO). The error must propagate
-        # fail-closed (RULE) with the held `.working` child released (LEAK); the parent number must see
-        # exactly one os.close and no os.fstat afterwards (PROBE); and the unrelated descriptor must keep
-        # its (st_dev, st_ino) (REUSE). The RECLOSE flip puts the old fstat-then-reclose body back as
-        # _close_fd_exc_safe and must turn the vector red by REUSE.
+        def _r7_flip_probe(fd):
+            """PROBE: one close, then an fstat of the released number when it fails; never a second close."""
+            try:
+                os.close(fd)
+                return
+            except OSError as exc:
+                first = exc
+            try:
+                os.fstat(fd)
+            except OSError:
+                pass
+            raise first
+
+        def _r7_after(seen, fd, what):
+            """Count a close ("closes") or fstat ("probes") of the injected number after its failed close."""
+            if seen.get("fired") is not None and fd == seen["fired"] and not seen["reopened"] and _r7_mine(seen):
+                seen[what] += 1
+
+        def _r7_one_close(seen):
+            """The one-close check: the injection fired and its number saw no further close and no fstat."""
+            return seen.get("fired") is not None and not seen["closes"] and not seen["probes"]
+
+        def _r7_flip_red(seen, flip, kept):
+            """A flipped reuse run is red by the flip's own assertions, every other assertion still green."""
+            if seen.get("fired") is None or seen["out"] != "raised" or _r7_left_open(seen["opened"]):
+                return False
+            if flip == "reclose":
+                return seen["closes"] == 1 and seen["probes"] >= 1 and not kept
+            return not seen["closes"] and seen["probes"] >= 1 and kept
+
+        def _r7_nofollow_run(reuse, flip=None):
+            seen = {"opened": _r7_ledger(), "closes": 0, "probes": 0, "reopened": False}
+
+            def _r7_open(*args, **kwargs):
+                fd = _r7_real_open(*args, **kwargs)
+                if fd == seen.get("fired"):
+                    seen["reopened"] = True     # the number is handed out again: no longer the injected one
+                return _r7_opened(seen["opened"], fd, _r7_real_close)
+
+            def _r7_close(fd):
+                _r7_after(seen, fd, "closes")
+                _r7_released(seen["opened"], fd)
+                if "fired" not in seen and _r7_mine(seen):
+                    seen["fired"] = fd
+                    _r7_fire(fd, _r7_real_close, reuse)
+                _r7_real_close(fd)
+
+            def _r7_fstat(fd, *args, **kwargs):
+                _r7_after(seen, fd, "probes")
+                return _r7_real_fstat(fd, *args, **kwargs)
+
+            os.open, os.close, os.fstat = _r7_open, _r7_close, _r7_fstat
+            if flip is not None:
+                _journal._close_fd_propagating = flip
+            try:
+                try:
+                    _open_dir_nofollow(str(_r7 / "d"))
+                    seen["out"] = "returned"
+                except OSError:
+                    seen["out"] = "raised"
+            finally:
+                _journal._close_fd_propagating = _r7_real_propagating
+                os.open, os.close, os.fstat = _r7_real_open, _r7_real_close, _r7_real_fstat
+            return seen
+
+        for _r7_reuse in (False, True):
+            _r7_tag = "-reused" if _r7_reuse else ""
+            _r7_seen = _r7_nofollow_run(_r7_reuse)
+            check("r7-nofollow-released-close-injection-fired" + _r7_tag, "fired" in _r7_seen)
+            check("r7-nofollow-released-close-error-propagates" + _r7_tag, _r7_seen["out"] == "raised")
+            check("r7-nofollow-released-close-one-close" + _r7_tag, _r7_one_close(_r7_seen))
+            check("r7-nofollow-no-walk-descriptor-survives-released-close" + _r7_tag,
+                  not _r7_left_open(_r7_seen["opened"]))
+            _r7_close_left(_r7_seen["opened"])
+            if _r7_reuse:
+                check("r7-nofollow-reused-number-never-closed", _r7_reuse_kept(_r7_seen.get("fired")))
+        for _r7_flip, _r7_flip_body in (("reclose", _r7_flip_reclose), ("probe", _r7_flip_probe)):
+            _r7_seen = _r7_nofollow_run(True, _r7_flip_body)
+            _r7_one = _r7_one_close(_r7_seen)
+            _r7_red = _r7_flip_red(_r7_seen, _r7_flip, _r7_reuse_kept(_r7_seen.get("fired")))
+            _r7_close_left(_r7_seen["opened"])
+            check("r7-nofollow-released-close-one-close-red-under-" + _r7_flip, not _r7_one and _r7_red)
+
+        # ROUND-7 sibling on _open_working_dir_fd: the parent close raising after releasing its number
+        # (close(2) on Linux; P1, #378) must leave neither the parent nor the held `.working` child open
+        # when the error propagates fail-closed.
         _r7w = build_store(manifest=manifest_text())
         _r7w_root = os.open(str(_r7w), os.O_RDONLY | os.O_DIRECTORY)
-        (base / "r7-unrelated").write_bytes(b"unrelated")
         _r7w_real_open_parent = _journal._open_parent
         _r7w_real_open, _r7w_real_close, _r7w_real_fstat = os.open, os.close, os.fstat
+        for _r7_reuse in (False, True):
+            _r7_tag = "-reused" if _r7_reuse else ""
+            _r7w_seen = {"opened": _r7_ledger()}
+
+            def _r7w_open_parent(root_fd, relpath):
+                pfd, name = _r7w_real_open_parent(root_fd, relpath)
+                _r7w_seen["pfd"] = _r7_opened(_r7w_seen["opened"], pfd)
+                return pfd, name
+
+            def _r7w_open(*args, **kwargs):
+                fd = _r7w_real_open(*args, **kwargs)
+                if kwargs.get("dir_fd") is not None and kwargs.get("dir_fd") == _r7w_seen.get("pfd"):
+                    _r7w_seen["wfd"] = _r7_opened(_r7w_seen["opened"], fd, _r7w_real_close)   # the child
+                return fd
+
+            def _r7w_close(fd):
+                _r7_released(_r7w_seen["opened"], fd)
+                if fd == _r7w_seen.get("pfd") and "fired" not in _r7w_seen and _r7_mine(_r7w_seen):
+                    _r7w_seen["fired"] = True
+                    _r7_fire(fd, _r7w_real_close, _r7_reuse)
+                _r7w_real_close(fd)
+
+            _journal._open_parent = _r7w_open_parent
+            os.open = _r7w_open
+            os.close = _r7w_close
+            try:
+                try:
+                    _open_working_dir_fd(_r7w_root, WORKING_DIRNAME)
+                    _r7w_out = "returned"
+                except OSError:
+                    _r7w_out = "raised"
+            finally:
+                os.close = _r7w_real_close
+                os.open = _r7w_real_open
+                _journal._open_parent = _r7w_real_open_parent
+            check("r7-working-released-close-injection-fired" + _r7_tag,
+                  _r7w_seen.get("fired") is True and "wfd" in _r7w_seen)
+            check("r7-working-released-close-error-propagates" + _r7_tag, _r7w_out == "raised")
+            check("r7-working-no-descriptor-survives-released-close" + _r7_tag,
+                  not _r7_left_open(_r7w_seen["opened"]))
+            _r7_close_left(_r7w_seen["opened"])
+            if _r7_reuse:
+                check("r7-working-reused-number-never-closed", _r7_reuse_kept(_r7w_seen.get("pfd")))
+
+        # The same _open_working_dir_fd parent close under #377's own V1 vector. Its parent close is
+        # _close_fd_exc_safe's (#377). V1, deterministic reuse: the injected parent close really releases
+        # the number, dup2s an unrelated file onto it, and only then raises EINTR (and, separately, EIO). The
+        # error must propagate fail-closed (RULE) with the held `.working` child released (LEAK); the parent
+        # number must see exactly one os.close and no os.fstat afterwards (PROBE); and the unrelated
+        # descriptor must keep its (st_dev, st_ino) (REUSE). The RECLOSE flip puts the old fstat-then-reclose
+        # body back as _close_fd_exc_safe and must turn the vector red by REUSE.
+        (base / "r7-unrelated").write_bytes(b"unrelated")
         _r7w_p1 = _close_fd_exc_safe
 
         def _r7w_reclose(fd):
@@ -3000,8 +3229,9 @@ def self_test():
                     failed.append("reuse")    # the unrelated descriptor was closed
                 else:
                     if (now.st_dev, now.st_ino) != (want.st_dev, want.st_ino):
-                        failed.append("reuse")
-                    _r7w_real_close(seen["pfd"])
+                        failed.append("reuse")    # another file holds the number now: never closed here
+                    else:
+                        _r7w_real_close(seen["pfd"])   # still the unrelated file this vector put there
             if "wfd" in seen:
                 try:
                     _r7w_real_fstat(seen["wfd"])
@@ -3024,61 +3254,78 @@ def self_test():
                   "reuse" in _r7w_red and set(_r7w_red) <= set(("reuse", "probe")))
         os.close(_r7w_root)
 
-        # ROUND-7 sibling on open_journal_root_from_path under P1: the operator-root close releasing its
-        # number and then raising EINTR must close the root exactly once and release the held journal-root
-        # fd before the error propagates (the close is _journal's; its P1 body is #378's).
+        # ROUND-7 sibling on open_journal_root_from_path: the operator-root close raising after releasing
+        # its number (close(2) on Linux; P1, #378) must leave neither the root nor the held journal-root fd
+        # open when the error propagates. The root close is _journal._close_fd_yielding's, which on this
+        # normal path is the bare os.close of _journal._close_fd_propagating; the one-close check and its
+        # RECLOSE and PROBE flips are the no-follow leg's above, applied to the root number.
         _r7j = base / "r7-journal-released-close"
         (_r7j / "j" / "r").mkdir(parents=True)
-        _r7j_seen = dict()
         _r7j_real_odc = _journal._open_dir_contained
         _r7j_real_close = os.close
 
-        def _r7j_odc(root_fd, relpath):
-            _r7j_seen["root_fd"] = root_fd
-            fd = _r7j_real_odc(root_fd, relpath)
-            _r7j_seen["jr"] = fd
-            return fd
+        def _r7j_run(reuse, flip=None):
+            seen = {"opened": _r7_ledger(), "closes": 0, "probes": 0, "reopened": False}
 
-        def _r7j_close(fd):
-            if fd == _r7j_seen.get("root_fd"):
-                if "fired" in _r7j_seen:
-                    _r7j_seen["reclosed"] = True
-                else:
-                    _r7j_seen["fired"] = True     # RELEASED, then raise
-                    _r7j_real_close(fd)
-                    raise OSError(4, "injected released-close failure")
-            _r7j_real_close(fd)
+            def _r7j_odc(root_fd, relpath):
+                seen["root_fd"] = _r7_opened(seen["opened"], root_fd)
+                fd = _r7j_real_odc(root_fd, relpath)
+                seen["jr"] = _r7_opened(seen["opened"], fd)
+                return fd
 
-        _journal._open_dir_contained = _r7j_odc
-        os.close = _r7j_close
-        try:
+            def _r7j_open(*args, **kwargs):
+                fd = _r7_real_open(*args, **kwargs)
+                if fd == seen.get("fired"):
+                    seen["reopened"] = True     # the number is handed out again: no longer the injected one
+                return fd
+
+            def _r7j_close(fd):
+                _r7_after(seen, fd, "closes")
+                _r7_released(seen["opened"], fd)
+                if fd == seen.get("root_fd") and "fired" not in seen and _r7_mine(seen):
+                    seen["fired"] = fd
+                    _r7_fire(fd, _r7j_real_close, reuse)
+                _r7j_real_close(fd)
+
+            def _r7j_fstat(fd, *args, **kwargs):
+                _r7_after(seen, fd, "probes")
+                return _r7_real_fstat(fd, *args, **kwargs)
+
+            _journal._open_dir_contained = _r7j_odc
+            os.open, os.close, os.fstat = _r7j_open, _r7j_close, _r7j_fstat
+            if flip is not None:
+                _journal._close_fd_propagating = flip
             try:
-                _journal.open_journal_root_from_path(_r7j, "j/r")
-                _r7j_out = "returned"
-            except OSError:
-                _r7j_out = "raised"
-        finally:
-            os.close = _r7j_real_close
-            _journal._open_dir_contained = _r7j_real_odc
-        check("r7-journal-released-close-injection-fired",
-              _r7j_seen.get("fired") is True and "jr" in _r7j_seen)
-        check("r7-journal-released-close-error-propagates", _r7j_out == "raised")
-        check("r7-journal-released-close-one-close", "reclosed" not in _r7j_seen)
-        _r7j_left = []
-        for _fd in (_r7j_seen.get("root_fd"), _r7j_seen.get("jr")):
-            if _fd is None:
-                continue
-            try:
-                os.fstat(_fd)
-            except OSError:
-                continue
-            _r7j_left.append(_fd)
-        check("r7-journal-no-descriptor-survives-released-close", not _r7j_left)
-        for _fd in _r7j_left:             # a failing run leaks the root; close so the suite stays clean
-            try:
-                os.close(_fd)
-            except OSError:
-                pass
+                try:
+                    _journal.open_journal_root_from_path(_r7j, "j/r")
+                    seen["out"] = "returned"
+                except OSError:
+                    seen["out"] = "raised"
+            finally:
+                _journal._close_fd_propagating = _r7_real_propagating
+                os.open, os.close, os.fstat = _r7_real_open, _r7j_real_close, _r7_real_fstat
+                _journal._open_dir_contained = _r7j_real_odc
+            return seen
+
+        for _r7_reuse in (False, True):
+            _r7_tag = "-reused" if _r7_reuse else ""
+            _r7j_seen = _r7j_run(_r7_reuse)
+            check("r7-journal-released-close-injection-fired" + _r7_tag,
+                  _r7j_seen.get("fired") is not None and "jr" in _r7j_seen)
+            check("r7-journal-released-close-error-propagates" + _r7_tag, _r7j_seen["out"] == "raised")
+            check("r7-journal-released-close-one-close" + _r7_tag, _r7_one_close(_r7j_seen))
+            check("r7-journal-no-descriptor-survives-released-close" + _r7_tag,
+                  not _r7_left_open(_r7j_seen["opened"]))
+            _r7_close_left(_r7j_seen["opened"])
+            if _r7_reuse:
+                check("r7-journal-reused-number-never-closed", _r7_reuse_kept(_r7j_seen.get("fired")))
+        for _r7_flip, _r7_flip_body in (("reclose", _r7_flip_reclose), ("probe", _r7_flip_probe)):
+            _r7j_seen = _r7j_run(True, _r7_flip_body)
+            _r7_one = _r7_one_close(_r7j_seen)
+            _r7_red = _r7_flip_red(_r7j_seen, _r7_flip, _r7_reuse_kept(_r7j_seen.get("fired")))
+            _r7_close_left(_r7j_seen["opened"])
+            check("r7-journal-released-close-one-close-red-under-" + _r7_flip, not _r7_one and _r7_red)
+        os.close(_r7_other_fd)
 
         # ROUND-5 defect 1: the descriptor-bound resolver matches resolve_store over a held root. The
         # default store resolves with the manifest's EXACT bytes (read through the .working listing
@@ -3359,4 +3606,6 @@ def self_test():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
     sys.exit(self_test())

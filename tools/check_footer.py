@@ -111,22 +111,51 @@ def check_pages(pages, allowlist, href=DISCLOSURE_HREF):
     return findings
 
 
+def _close_fd_propagating(fd):
+    """Close a descriptor on a FAIL-CLOSED path: the close error PROPAGATES. Single close (P1, #378):
+    exactly ONE os.close; if it raises, the number counts as released (close(2) on Linux releases it early,
+    even when the close then reports EINTR or EIO, and a retry can close another thread's reused
+    descriptor: man 2 close), so it is never probed or closed again, and the ORIGINAL close error
+    propagates unchanged. Inlined from opf/tools/_journal._close_fd_propagating (the same body) so this
+    tool keeps working without opf/tools present (copied, mutated, or shipped alone)."""
+    os.close(fd)
+
+
+def _close_fd_yielding(fd):
+    """Close a descriptor from an `except` handler or a `finally` block without letting a close error
+    REPLACE the exception already in flight there: when an exception is unwinding through, or being handled
+    in, the CALLING frame, the same single close still runs (P1: one os.close, the number released either
+    way and never touched again) but its close error is dropped so the ORIGINAL exception keeps
+    propagating; on the normal path this is exactly _close_fd_propagating, so a close error still fails
+    closed. Inlined from opf/tools/_journal._close_fd_yielding (the same body) so this tool keeps working
+    without opf/tools present."""
+    tb = sys.exc_info()[2]
+    if tb is None or tb.tb_frame is not sys._getframe(1):
+        _close_fd_propagating(fd)
+        return
+    try:
+        _close_fd_propagating(fd)
+    except OSError:
+        pass                                      # the in-flight exception wins; the fd was still released
+
+
 def _read_regular_page(path):
     """Read a page's text through a fail-closed, symlink-safe open. Opens O_NOFOLLOW (a symlink at the final
     component fails - never followed) + O_NONBLOCK (a FIFO open returns instead of blocking), fstats the
     OPENED fd to confirm a regular file (closing the check-then-read TOCTOU: the fd type-checked is the fd
     read), then reads UTF-8. Raises OSError (open or non-regular type) or UnicodeDecodeError; the caller
-    fails closed. A symlink, FIFO, socket, or device raises here rather than being read or followed."""
+    fails closed. A symlink, FIFO, socket, or device raises here rather than being read or followed.
+    The file object is made with closefd=False, so it never closes fd: os.fdopen that fails after creating
+    its raw file closes that file, and a dropped object closes on collection, but neither touches fd. The
+    one close of fd is the finally's, on every path, so who closes fd is never in doubt (P1, #378)."""
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError("not a regular file (symlink, FIFO, socket, or device)")
-        with os.fdopen(fd, "r", encoding="utf-8") as fh:
-            fd = -1
+        with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as fh:
             return fh.read()
     finally:
-        if fd >= 0:
-            os.close(fd)
+        _close_fd_yielding(fd)
 
 
 def _run_one(root, subdir, href, allowlist):
@@ -180,6 +209,67 @@ def run(root):
     for subdir, href, allowlist in COVERAGE_ROOTS:
         worst = max(worst, _run_one(root, subdir, href, allowlist))
     return worst
+
+
+def _close_vectors(base):
+    """#378: the vectors for this tool's _close_fd_yielding copy and its one site, _read_regular_page, whose
+    finally makes the only close of the page descriptor on every path: while an exception unwinds (os.fdopen
+    refusing before it creates anything, and os.fdopen failing after its raw file exists, which io.open then
+    closes), and on the normal path. The wrapping-failure vector is also run against the pre-fix body
+    (fdopen taking fd, `fd = -1` as the with body's first statement) and must be red there by NOFIRE alone:
+    the failed wrapper's own close released fd first, so the finally's close was a second close of a number
+    already free. Returns (failures, runs)."""
+    import inspect
+    import _close_selftest
+    page = base / "page.html"
+    page.write_text("<nav></nav>", encoding="utf-8")
+    ns = globals()
+    sent = _close_selftest._StSentinel("in flight at _read_regular_page")
+
+    def read_page(mode, site=None):
+        def call(fault):
+            real = os.fdopen
+
+            def spy(fd, *args, **kwargs):
+                fault.arm(fd)
+                if mode == "refused":
+                    raise sent
+                handle = real(fd, *args, **kwargs)
+                if mode == "wrap":
+                    handle.close()                # as io.open closes the raw file of a wrapper that failed
+                    raise sent
+                return handle
+            os.fdopen = spy
+            try:
+                (site or _read_regular_page)(page)
+            finally:
+                os.fdopen = real
+        return call
+
+    vectors = (("check_footer site _read_regular_page: finally while an exception unwinds", True, "AR",
+                read_page("refused"), lambda e: e is sent),
+               ("check_footer site _read_regular_page: finally when os.fdopen fails after its raw file exists",
+                True, "AR", read_page("wrap"), lambda e: e is sent),
+               ("check_footer site _read_regular_page: normal path", False, "BR", read_page("read"), None)
+               ) + _close_selftest._st_helper_vectors(ns)
+    failures, runs = _close_selftest._st_close_check(ns, vectors)
+    source = inspect.getsource(_read_regular_page)
+    new = ('        with os.fdopen(fd, "r", encoding="utf-8", closefd=False) as fh:\n'
+           "            return fh.read()\n    finally:\n        _close_fd_yielding(fd)\n")
+    old = ('        with os.fdopen(fd, "r", encoding="utf-8") as fh:\n            fd = -1\n'
+           "            return fh.read()\n    finally:\n        if fd >= 0:\n            _close_fd_yielding(fd)\n")
+    if source.count(new) != 1:
+        return failures + ["check_footer _read_regular_page revert: target found {} times".format(
+            source.count(new))], runs
+    reverted = dict(ns)
+    exec(compile(source.replace(new, old), __file__, "exec"), reverted)
+    red = _close_selftest._st_close_run(read_page("wrap", reverted["_read_regular_page"]), True,
+                                        lambda e: e is sent, False)
+    runs += 1
+    if [problem.split(":")[0] for problem in red] != ["NOFIRE"]:
+        failures.append("check_footer site _read_regular_page under the pre-fix fdopen ownership: expected red "
+                        "by NOFIRE alone, got {}".format(red or "green"))
+    return failures, runs
 
 
 def _self_test():
@@ -285,12 +375,16 @@ def _self_test():
         (root4 / "opf" / "site" / "stale.html").write_text(nav, encoding="utf-8")
         if quiet_run(root4) != 1:
             failures.append("an opf/site page missing the ./disclosure nav link was not reported (expected 1)")
+    with tempfile.TemporaryDirectory() as d5:
+        close_failures, close_runs = _close_vectors(Path(d5))
+    failures.extend(close_failures)
     if failures:
         print("FAIL: check_footer self-test")
         for f in failures:
             print("  " + f)
         return 1
-    print("PASS: check_footer self-test ({} check_pages cases + run() exit-code legs)".format(len(cases)))
+    print("PASS: check_footer self-test ({} check_pages cases + run() exit-code legs + {} #378 close-vector "
+          "runs)".format(len(cases), close_runs))
     return 0
 
 

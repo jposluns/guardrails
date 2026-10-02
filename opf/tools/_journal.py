@@ -153,69 +153,51 @@ def _close_fd_quietly(fd):
     ensure_journal_dirs), each of which closes SEVERAL opened fds in a `finally`: a raw `os.close` there,
     when one close raised, abandoned the rest (codex round-8, the sibling of _opf_check._close_fd_quietly).
 
-    A raising close is swallowed but never lets a genuine descriptor leak pass CONCEALED
-    (no-concealed-failure): a close that raises does not by itself prove the fd is retained, since on Linux
-    close() releases the descriptor even on EINTR/EIO and EBADF means it was already gone. So on a raise we
-    CONFIRM the descriptor is actually gone (fstat); only when it is genuinely STILL open do we close it once
-    more (fstat has just proven the fd valid, so this is not a blind double-close) and, if even that cannot
-    release it, surface the leak to stderr rather than a silent pass that could not tell closed-then-errored
-    from still-open. This mirrors _opf_check._close_fd_quietly byte-for-byte; _journal cannot import it (the
-    dependency runs the other way), so the idiom is duplicated rather than shared."""
+    Single close (P1, #378): the descriptor is closed with exactly ONE os.close. If it raises, the number
+    counts as released and is never touched again: no fstat, no second close. close(2) on Linux "always
+    releases the file descriptor early in the close operation, freeing it for reuse", and retrying "is the
+    wrong thing to do, since this may cause a reused file descriptor from another thread to be closed"
+    (man 2 close, "Dealing with error returns from close()"); an fstat that finds the number open after a
+    failed close is looking at whatever reused it, so a probe-then-reclose recovery closed another owner's
+    descriptor. The error is swallowed silently, as on every teardown path. This mirrors
+    _opf_check._close_fd_quietly; _journal cannot import it (the dependency runs the other way), so the
+    idiom is duplicated rather than shared."""
     try:
         os.close(fd)
-        return
-    except OSError as exc:
-        first = exc
-    try:
-        os.fstat(fd)
     except OSError:
-        return                                            # confirmed gone: the raise was benign teardown noise
-    try:
-        os.close(fd)                                      # genuinely still open (fstat proved it valid): release it
-        return
-    except OSError as exc2:
-        # The diagnostic itself must never raise out of this teardown helper: a broken stderr (an OSError
-        # on the write) after this double close-failure would otherwise ESCAPE the helper and, at the apply
-        # cleanup call sites, reach the outer `except OSError` and overturn a committed promotion. Swallow a
-        # stderr-write OSError so the fail-surface path still returns; the leak is already surfaced when it can be.
-        try:
-            print("warning: cleanup close of fd {} failed to release it ({} / {}); fail-surfaced"
-                  .format(fd, first, exc2), file=sys.stderr)
-        except OSError:
-            pass
+        pass                                              # released either way (close(2)); never re-touched
 
 
 def _close_fd_propagating(fd):
     """Close a descriptor on a FAIL-CLOSED path where the close error must PROPAGATE to the caller (unlike
-    _close_fd_quietly's teardown swallow), while never leaving the descriptor itself retained (codex round
-    7): a close that raises does not by itself prove the fd was released (on Linux close() releases the
-    number even on EINTR/EIO, but that release is not assumed), so a bare `os.close` on such a path could
-    leak the very descriptor it was releasing when the raising close RETAINED it. On a raise this runs the
-    same confirm-then-release recovery as _close_fd_quietly: CONFIRM with fstat that the descriptor is
-    actually gone (EBADF means it was already released); only when it is genuinely STILL open close it once
-    more (fstat has just proven the fd valid, so this is not a blind double-close) and, if even that cannot
-    release it, surface the leak to stderr. The ORIGINAL close error then re-raises either way, so every
-    existing fail-closed mapping of a raising close is preserved."""
-    try:
-        os.close(fd)
+    _close_fd_quietly's teardown swallow). Single close (P1, #378): exactly ONE os.close; if it raises, the
+    number counts as released (close(2) on Linux releases it early, even when the close then reports EINTR
+    or EIO, and a retry can close another thread's reused descriptor: man 2 close), so it is never probed
+    or closed again, and the ORIGINAL close error propagates unchanged, preserving every existing
+    fail-closed mapping of a raising close."""
+    os.close(fd)
+
+
+def _close_fd_yielding(fd):
+    """Close a descriptor from an `except` handler or a `finally` block without letting a close error
+    REPLACE the exception already in flight there (#378): the close error _close_fd_propagating raises would
+    otherwise mask the body's error whenever the body raised. When an exception is unwinding through, or
+    being handled in, the CALLING frame, the same single close still runs (P1: one os.close, the number
+    released either way and never touched again) but its close error is dropped, so the ORIGINAL exception
+    keeps propagating; when none is (the normal path through a `finally`), this is exactly
+    _close_fd_propagating and a close error still fails closed. "In flight in the calling frame" means the
+    current exception's traceback head is that frame: an exception a CALLER is handling (this code reached
+    normally from inside the caller's `except` block) is not in flight here and never quiets the close.
+    Residual (disclosed): a `finally` reached NORMALLY while lexically inside an `except` handler of the
+    SAME function would read that handled exception as in flight; no call site is nested that way."""
+    tb = sys.exc_info()[2]
+    if tb is None or tb.tb_frame is not sys._getframe(1):
+        _close_fd_propagating(fd)
         return
-    except OSError as exc:
-        first = exc
     try:
-        os.fstat(fd)
+        _close_fd_propagating(fd)
     except OSError:
-        raise first                                       # confirmed gone: still propagate the close error
-    try:
-        os.close(fd)                                      # genuinely still open (fstat proved it valid): release it
-    except OSError as exc2:
-        # As in _close_fd_quietly: the diagnostic itself must never replace the original error; a broken
-        # stderr is swallowed so the original close error below still propagates fail-closed.
-        try:
-            print("warning: fail-closed close of fd {} failed to release it ({} / {}); fail-surfaced"
-                  .format(fd, first, exc2), file=sys.stderr)
-        except OSError:
-            pass
-    raise first
+        pass                                      # the in-flight exception wins; the fd was still released
 
 
 def _open_parent(root_fd, relpath):
@@ -289,7 +271,7 @@ def _lstat_contained(root_fd, relpath):
     try:
         return _lstat_at(pfd, name)
     finally:
-        _close_fd_propagating(pfd)
+        _close_fd_yielding(pfd)
 
 
 def _lstat_at(pfd, name):
@@ -331,7 +313,7 @@ def _read_at(pfd, name, relpath, cap=None):
             raise JournalError("contained path {!r} is not a regular file".format(relpath))
         return _read_fd(fd, cap=cap), st
     finally:
-        os.close(fd)
+        _close_fd_yielding(fd)
 
 
 def _read_contained(root_fd, relpath, require_single_link=False):
@@ -354,7 +336,7 @@ def _read_contained(root_fd, relpath, require_single_link=False):
         # regular file (SECA resource-bounds; the TOCTOU-hang backstop behind a check-then-open gate).
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=pfd)
     except OSError as exc:
-        _close_fd_propagating(pfd)
+        _close_fd_yielding(pfd)
         raise JournalError("cannot read contained file {!r} ({})".format(relpath, exc))
     try:
         st = os.fstat(fd)
@@ -371,13 +353,13 @@ def _read_contained(root_fd, relpath, require_single_link=False):
         return _read_fd(fd, cap=_MAX_PRODUCT_READ_BYTES), st
     finally:
         # Each close in its own try/finally (round-5 defect 3): a FILE close that reports an error must
-        # not skip the parent close and leak pfd. Each close runs through the confirm-then-release guard
-        # (round 7: a raising close is not assumed to have released its number), so both descriptors are
-        # released either way, and the file-close error keeps propagating fail-closed to the caller.
+        # not skip the parent close and leak pfd. Each close is a single os.close (P1: a raising close has
+        # released its number, close(2), and it is never touched again), so both descriptors are released
+        # either way, and the file-close error keeps propagating fail-closed to the caller.
         try:
-            _close_fd_propagating(fd)
+            _close_fd_yielding(fd)
         finally:
-            _close_fd_propagating(pfd)
+            _close_fd_yielding(pfd)
 
 
 def _fsync_dir_fd(fd):
@@ -389,7 +371,7 @@ def _fsync_parent(root_fd, relpath):
     try:
         os.fsync(pfd)
     finally:
-        os.close(pfd)
+        _close_fd_yielding(pfd)
 
 
 def _fsync_path_dir(path):
@@ -406,7 +388,7 @@ def _fsync_path_dir(path):
     try:
         os.fsync(fd)
     finally:
-        os.close(fd)
+        _close_fd_yielding(fd)
 
 
 def _fsync_contained_dir(pfd, name):
@@ -418,7 +400,7 @@ def _fsync_contained_dir(pfd, name):
     try:
         os.fsync(dfd)
     finally:
-        os.close(dfd)
+        _close_fd_yielding(dfd)
 
 
 def ensure_journal_dirs(root_fd, journal_rel):
@@ -502,12 +484,11 @@ def open_journal_root_from_path(root, journal_rel):
     finally:
         # ROUND-6 defect sibling (_opf_store._open_working_dir_fd): the new jr fd is HELD in a local
         # across the root close, so a root close that reports an error cannot abandon the return and
-        # leak the just-opened journal-root fd. It is released quietly, the root close runs through the
-        # confirm-then-release guard (round 7: a raising close is not assumed to have released its
-        # number, so the root descriptor itself can never stay retained), and the close error keeps
-        # propagating fail-closed.
+        # leak the just-opened journal-root fd. It is released quietly, the root close is a single
+        # os.close (P1: a raising close has released its number, close(2), and it is never touched
+        # again), and the close error keeps propagating fail-closed.
         try:
-            _close_fd_propagating(root_fd)
+            _close_fd_yielding(root_fd)
         except OSError:
             if jr_fd is not None:
                 _close_fd_quietly(jr_fd)
@@ -558,10 +539,10 @@ def _create_frames_excl(jr_fd, txn_dir):
         try:
             os.fsync(fd)
         finally:
-            os.close(fd)
+            _close_fd_yielding(fd)
         os.fsync(txnfd)                                   # the new dir entry durable through the CONTAINED fd
     finally:
-        os.close(txnfd)
+        _close_fd_yielding(txnfd)
 
 
 def publish(jr_fd, txn_dir, ftype, obj):
@@ -626,10 +607,10 @@ def publish(jr_fd, txn_dir, ftype, obj):
             _write_all(fd, frame)
             os.fsync(fd)
         finally:
-            os.close(fd)
+            _close_fd_yielding(fd)
         os.fsync(txnfd)                                   # the txn dir durable through the CONTAINED fd
     finally:
-        os.close(txnfd)
+        _close_fd_yielding(txnfd)
     _kill_point("after-publish-" + ftype)
 
 
@@ -688,9 +669,9 @@ def read_frames(jr_fd, txn_dir, txn_fd=None):
                                    "(fail-closed)".format(_st.st_size, _MAX_JOURNAL_READ_BYTES))
             raw = _read_fd(ffd, cap=_MAX_JOURNAL_READ_BYTES)
         finally:
-            _close_fd_propagating(ffd)
+            _close_fd_yielding(ffd)
     finally:
-        _close_fd_propagating(txnfd)
+        _close_fd_yielding(txnfd)
     frames, off = [], 0
     while off < len(raw):
         nl = raw.find(b"\n", off)
@@ -756,10 +737,10 @@ def _truncate_log(jr_fd, txn_dir, good_len):
             os.ftruncate(fd, good_len)
             os.fsync(fd)
         finally:
-            os.close(fd)
+            _close_fd_yielding(fd)
         os.fsync(txnfd)                                   # the txn dir durable through the CONTAINED fd
     finally:
-        os.close(txnfd)
+        _close_fd_yielding(txnfd)
 
 
 def _first(frames, ftype):
@@ -820,7 +801,7 @@ def acquire_lock(journal_root, session_id):
         _write_all(fd, json.dumps(owner, sort_keys=True).encode())   # loop: a short write cannot leave a malformed lock
         os.fsync(fd)
     finally:
-        os.close(fd)
+        _close_fd_yielding(fd)
     _fsync_path_dir(journal_root)
     _kill_point("after-lock")
     return lock
@@ -845,7 +826,7 @@ def read_lock_owner(journal_root):
     try:
         return read_lock_owner_at(jr_fd)
     finally:
-        os.close(jr_fd)
+        _close_fd_yielding(jr_fd)
 
 
 def read_lock_owner_at(jr_fd):
@@ -884,7 +865,7 @@ def read_lock_owner_at(jr_fd):
                                "(fail-closed)".format(_st.st_size, _MAX_JOURNAL_READ_BYTES))
         raw = _read_fd(lfd, cap=_MAX_JOURNAL_READ_BYTES)
     finally:
-        _close_fd_propagating(lfd)
+        _close_fd_yielding(lfd)
     try:
         owner = json.loads(raw)
     except ValueError as exc:
@@ -1148,7 +1129,7 @@ def reconcile_and_claim_stale(journal_root, jr_fd, root_fd, session_id):
         finally:
             fcntl.flock(afd, fcntl.LOCK_UN)
     finally:
-        os.close(afd)
+        _close_fd_yielding(afd)
 
 
 # --- preimages (durably FIRST; the whole reversal is reconstructable from them alone) -----------------
@@ -1254,17 +1235,17 @@ def capture_preimages(parent_fd, txn_dir, root_fd, ops):
                         _write_all(pfd, data)
                         os.fsync(pfd)
                     finally:
-                        os.close(pfd)
+                        _close_fd_yielding(pfd)
                     op["prestate"] = {"kind": "file", "mode": stat.S_IMODE(st.st_mode),
                                       "size": len(data), "payload": ref,
                                       "sha256": hashlib.sha256(data).hexdigest()}
                 _kill_point("after-preimage-{}".format(seq))
             os.fsync(prefd)                               # the preimages dir durable, CONTAINED
         finally:
-            os.close(prefd)
+            _close_fd_yielding(prefd)
         os.fsync(txnfd)                                   # the txn dir durable, CONTAINED
     finally:
-        os.close(txnfd)
+        _close_fd_yielding(txnfd)
     _kill_point("after-preimages")
 
 
@@ -1446,7 +1427,7 @@ def apply_ops(root_fd, ops, staged_reader):
                     os.fsync(fd)
                     _read_back_verify(fd, op["poststate"]["content-sha256"], op["path"], "written")
                 finally:
-                    os.close(fd)
+                    _close_fd_yielding(fd)
             elif kind == "create":
                 # O_RDWR (not O_WRONLY): the spec 14.2 checkpoint re-reads the written bytes through this
                 # same descriptor; creation-time access is granted regardless of the created mode.
@@ -1461,7 +1442,7 @@ def apply_ops(root_fd, ops, staged_reader):
                     os.fsync(fd)
                     _read_back_verify(fd, op["poststate"]["content-sha256"], op["path"], "written")
                 finally:
-                    os.close(fd)
+                    _close_fd_yielding(fd)
             elif kind == "remove":
                 _verify_prestate_at(pfd, name, op["path"], op["prestate"])   # E1: check bound to the SAME pfd
                 os.unlink(name, dir_fd=pfd)
@@ -1478,7 +1459,7 @@ def apply_ops(root_fd, ops, staged_reader):
         except OSError as exc:
             raise JournalError("apply of {} {!r} failed ({})".format(op["op"], op["path"], exc))
         finally:
-            os.close(pfd)
+            _close_fd_yielding(pfd)
         _kill_point("after-apply-{}".format(i))
 
 
@@ -1583,7 +1564,7 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
             try:
                 data, _pst = _read_at(ppfd, pname, pre_rel, cap=prestate["size"])
             finally:
-                os.close(ppfd)
+                _close_fd_yielding(ppfd)
             if hashlib.sha256(data).hexdigest() != prestate["sha256"]:
                 raise JournalError("preimage for {!r} does not match recorded prestate digest".format(path))
             if st is None:
@@ -1821,14 +1802,14 @@ def _restore_preimage(jr_fd, txn_dir, root_fd, op, op_index=0):
                         raise
                 finally:
                     if fd is not None:
-                        os.close(fd)
+                        _close_fd_yielding(fd)
             else:                                     # a racing external writer left a non-regular file where a regular file is expected: fail closed
                 raise JournalError("cannot restore {!r}: unexpected non-regular file at restore time".format(path))
         os.fsync(pfd)
     except OSError as exc:
         raise JournalError("cannot restore {!r} ({})".format(path, exc))
     finally:
-        os.close(pfd)
+        _close_fd_yielding(pfd)
 
 
 def _recreate_file(pfd, name, data, mode):
@@ -1848,7 +1829,7 @@ def _recreate_file(pfd, name, data, mode):
         os.fchmod(fd, mode)                  # the exact prestate mode, only after the bytes verified
         os.fsync(fd)                         # the final mode durable alongside the verified bytes
     finally:
-        os.close(fd)
+        _close_fd_yielding(fd)
 
 
 # --- recovery (from the journal alone, both directions, idempotent) -----------------------------------
@@ -2076,3 +2057,595 @@ def build_inverse_ops(intent_ops):
         else:
             raise JournalError("cannot invert unknown op kind {!r}".format(kind))
     return inverse
+
+
+# --- self-test: the #378 close vectors -------------------------------------------------------------------
+# `_journal.py --self-test` runs these, and opf.py registers self_test so `opf.py --self-test` runs them in
+# CI. The four tools that import _journal (check_crosswalk, doctor, migrate, pin) drive their own
+# representative site through the same harness; the six tools with a local helper copy use
+# tools/_close_selftest.py, a copy of it kept in step, and _opf_check runs the helper vectors (V1, V2) for
+# its own _close_fd_quietly through this one.
+
+class _StSentinel(Exception):
+    """The in-flight exception a masking vector raises: not an OSError, so no site's `except OSError`
+    converts it, and it must reach the caller as the same object."""
+
+
+class _StCloseFault:
+    """While active, the FIRST close of an ARMED descriptor fails the way close(2) documents for Linux:
+    the number is released first (a real close), an unrelated descriptor then takes it (the reuse another
+    thread may make the moment the number is free), and only then does the close raise EIO (or the errno
+    the arm names). Every other close is the real one. `fired` records, per injected failure, the
+    descriptor's fstat taken BEFORE the close (None if it was already closed): a vector whose fault never
+    fired, or fired on a closed descriptor, proves nothing and is red (NOFIRE). The reuser is a pipe end
+    put on the number with dup2, inline or, armed with thread=True, by a real second thread that takes
+    the number while the close is still in progress and checks afterwards that it still owns it; settle()
+    reports each reuser that lost its number (REUSE). While `watch` is set, every later os.close of a
+    released number by the faulting thread, and every call that inspects it by number (_ST_WATCHED: os.stat
+    given the number itself, os.fstat, os.fstatvfs, os.lseek, os.get_inheritable, os.isatty, fcntl.fcntl,
+    fcntl.flock, fcntl.lockf, fcntl.ioctl), is recorded in `probes` (PROBE)."""
+
+    def __init__(self, watch=True):
+        import errno
+        import threading
+        self.armed = {}
+        self.fired = []
+        self.probes = []
+        self.lost = []
+        self.watch = watch
+        self.err = OSError(errno.EIO, "self-test injected close failure")
+        self._close = os.close
+        self._fstat = os.fstat
+        fcntl = _st_fcntl()
+        self._watched = [(module, name, getattr(module, name)) for module, names in ((os, _ST_WATCHED[0]),
+                         (fcntl, _ST_WATCHED[1])) if module for name in names if hasattr(module, name)]
+        self._threading = threading
+        self._released = set()
+        self._faulting = None
+        self._inline = []
+        self._threads = []
+
+    def arm(self, fd, errnum=None, thread=False):
+        if errnum is not None:
+            self.err = OSError(errnum, "self-test injected close failure")
+        state = None
+        if thread:
+            ev = self._threading.Event
+            state = {"fd": None, "ident": None, "owned": None, "started": ev(), "go": ev(), "ready": ev(),
+                     "done": ev()}
+            worker = self._threading.Thread(target=self._reuse_in_thread, args=(state,), daemon=True)
+            worker.start()
+            state["started"].wait(10)
+            self._threads.append((worker, state))
+        self.armed[fd] = state
+        return fd
+
+    def _reuse_in_thread(self, state):
+        """The second thread: its pipe is opened BEFORE the number is free, so dup2 is what puts it there."""
+        rfd, wfd = os.pipe()
+        try:
+            state["started"].set()
+            state["go"].wait(10)
+            if state["fd"] is not None:
+                os.dup2(rfd, state["fd"])
+                st = self._fstat(state["fd"])
+                state["ident"] = (st.st_dev, st.st_ino)
+        finally:
+            self._close(rfd)
+            self._close(wfd)
+            state["ready"].set()
+        if state["ident"] is None or not state["done"].wait(10):
+            return
+        try:
+            st = self._fstat(state["fd"])
+            state["owned"] = (st.st_dev, st.st_ino) == state["ident"]
+        except OSError:
+            state["owned"] = False
+        if state["owned"]:
+            self._close(state["fd"])                      # the second thread releases what it still owns
+
+    def _fake_close(self, fd):
+        if fd in self._released and self.watch and self._threading.get_ident() == self._faulting:
+            self.probes.append(("close", fd))
+        if fd not in self.armed:
+            return self._close(fd)
+        state = self.armed.pop(fd)
+        try:
+            self.fired.append(self._fstat(fd))
+        except OSError:
+            self.fired.append(None)
+        if self.fired[-1] is not None:
+            self._faulting = self._threading.get_ident()
+            if state is None:
+                rfd, wfd = os.pipe()                      # opened before the release, never on fd itself
+                try:
+                    self._close(fd)
+                    self._released.add(fd)
+                    os.dup2(rfd, fd)
+                    st = self._fstat(fd)
+                    self._inline.append((fd, (st.st_dev, st.st_ino)))
+                finally:
+                    self._close(rfd)
+                    self._close(wfd)
+            else:
+                self._close(fd)
+                self._released.add(fd)
+                state["fd"] = fd
+                state["go"].set()
+                if not state["ready"].wait(10) or state["ident"] is None:
+                    self.lost.append((fd, "the second thread never took the number"))
+        raise self.err
+
+    def _watcher(self, name, real):
+        """The stand-in for one watched call: it records a released number it is given, then calls the real
+        one. Only an int is a number (os.stat of a path, or fcntl of a file object, is not one)."""
+        def watched(fd, *args, **kwargs):
+            if type(fd) is int and fd in self._released and self.watch \
+                    and self._threading.get_ident() == self._faulting:
+                self.probes.append((name, fd))
+            return real(fd, *args, **kwargs)
+        return watched
+
+    def settle(self):
+        """After the call: confirm each reuser still owns its number, then release it. Returns the losses."""
+        for fd, ident in self._inline:
+            try:
+                st = self._fstat(fd)
+                owned = (st.st_dev, st.st_ino) == ident
+            except OSError:
+                owned = False
+            if owned:
+                self._close(fd)
+            else:
+                self.lost.append((fd, "the inline reuser lost the number"))
+        for worker, state in self._threads:
+            state["go"].set()                             # an unfired arm: the thread exits untouched
+            state["done"].set()
+            worker.join(10)
+            if state["ident"] is not None and not state["owned"]:
+                self.lost.append((state["fd"], "the second thread lost the number"))
+        self._inline, self._threads = [], []
+        return self.lost
+
+    def __enter__(self):
+        os.close = self._fake_close
+        self._stand_ins = []
+        for module, name, real in self._watched:
+            watched = self._watcher(name, real)
+            setattr(module, name, watched)
+            for table in _st_supports(module):
+                if real in table:                         # a capability probe (os.stat in
+                    table.add(watched)                    # os.supports_dir_fd) still finds the call
+                    self._stand_ins.append((table, watched))
+        return self
+
+    def __exit__(self, *exc_info):
+        os.close = self._close
+        for module, name, real in self._watched:
+            setattr(module, name, real)
+        for table, watched in self._stand_ins:
+            table.discard(watched)
+        return False
+
+
+# The calls _StCloseFault watches, from os and from fcntl, each taking the descriptor number first. Not
+# watched: calls that use a number without inspecting it (read, write, dup, fsync, fchmod, ...), a number
+# passed as dir_fd= to a path call, and a number reached through a wrapping object (os.fdopen, socket).
+_ST_WATCHED = (("stat", "fstat", "fstatvfs", "lseek", "get_inheritable", "isatty"),
+               ("fcntl", "flock", "lockf", "ioctl"))
+
+
+def _st_supports(module):
+    """The capability sets of `module` (os.supports_dir_fd and its kin) a stand-in must join while active."""
+    tables = (getattr(module, name, None) for name in ("supports_dir_fd", "supports_fd",
+                                                        "supports_follow_symlinks", "supports_effective_ids"))
+    return [table for table in tables if isinstance(table, set)]
+
+
+def _st_fcntl():
+    """The fcntl module, or None where it does not exist (it is POSIX-only): there nothing can call
+    fcntl.fcntl, flock, lockf or ioctl, so there is nothing to watch there, and the fcntl probe flip (F)
+    is not run."""
+    try:
+        import fcntl
+    except ImportError:
+        return None
+    return fcntl
+
+
+def _st_fd_table():
+    """The open descriptors below 1024 and the file each names, so a leak is found even when its number
+    is reused by a different file."""
+    table = {}
+    for fd in range(1024):
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            continue
+        table[fd] = (st.st_dev, st.st_ino)
+    return table
+
+
+def _st_close_run(call, masking, expect, watch=True):
+    """Run one vector: call(fault) drives the site with the fault active. Returns its problems, each
+    "TAG: detail": NOFIRE (the fault did not fire on an open descriptor), REUSE (the descriptor that took
+    the released number no longer owns it: the number was closed again), PROBE (the faulting thread closed
+    the released number, or inspected it by a call _ST_WATCHED names, after the failed close; checked only
+    while `watch`),
+    LEAK (a descriptor the call opened is still open), MASKED (the injected close error replaced the in-flight
+    exception), SILENT (a normal-path failing close did not raise), WRONG (any other outcome). `masking` is
+    True where an exception is in flight, False on a normal path whose close error must raise, and None on
+    a quiet teardown path that must swallow it. Empty means green."""
+    before = _st_fd_table()
+    fault = _StCloseFault(watch)
+    raised = None
+    try:
+        with fault:
+            call(fault)
+    except Exception as exc:  # noqa: BLE001  every outcome is classified below
+        raised = exc
+    lost = fault.settle()
+    after = _st_fd_table()
+    problems = []
+    if len(fault.fired) != 1 or fault.fired[0] is None:
+        problems.append("NOFIRE: injected close failures {}".format(fault.fired))
+    if lost:
+        problems.append("REUSE: a released number was closed again under its new owner {}".format(lost))
+    if fault.probes:
+        problems.append("PROBE: a released number was touched again {}".format(fault.probes))
+    # A deliberately leaked number is reported and left open: the harness records no opens, so it cannot
+    # prove the number is still the tested call's own. Another thread may have reused it (a released
+    # number included) through os.open, builtin open() or any other route, so closing it could close
+    # someone else's descriptor (#378 P1).
+    leaked = sorted(fd for fd, ident in after.items() if before.get(fd) != ident)
+    if leaked:
+        problems.append("LEAK: descriptor(s) {} survived the failing close".format(leaked))
+    if masking is None:
+        if raised is not None:
+            problems.append("WRONG: expected the quiet close to swallow its error, got {!r}".format(raised))
+    elif masking:
+        if raised is fault.err:
+            problems.append("MASKED: the injected close error replaced the in-flight exception")
+        elif raised is None or not expect(raised):
+            problems.append("WRONG: expected the in-flight exception, got {!r}".format(raised))
+    elif raised is None:
+        problems.append("SILENT: the failing normal-path close did not raise")
+    elif raised is not fault.err:
+        problems.append("WRONG: expected the injected close error, got {!r}".format(raised))
+    return problems
+
+
+def _st_close_check(ns, vectors):
+    """Run each vector green, then under each flip it names, requiring the flip turn it red by its own
+    assertion alone. `ns` is the namespace whose close helpers the sites resolve at call time. A vector is
+    (label, masking, flips, call, expect). The flips: A, _close_fd_yielding replaced by
+    _close_fd_propagating, so every site is back to propagating (red: MASKED); B, the helper always quiet
+    (red: SILENT); C, the caller-frame check removed (red: SILENT); R (RECLOSE), the pre-P1 bodies of
+    _close_fd_propagating and _close_fd_quietly put back, which fstat the number after a failed close and
+    close it again when it looks open (red: REUSE alone, so this leg runs with the PROBE watch off); P, an
+    fstat probe after the failed close with no second close (red: PROBE); F, the same probe made with
+    fcntl.fcntl(fd, F_GETFD) (red: PROBE; run where fcntl exists); S, _close_fd_quietly replaced by
+    the propagating close, so a cleanup loop stops at the first failing close (red: LEAK and WRONG).
+    Returns (failures, runs)."""
+    prop = ns.get("_close_fd_propagating")
+
+    def quiet(fd):
+        try:
+            prop(fd)
+        except OSError:
+            pass
+
+    def frameless(fd):
+        if sys.exc_info()[2] is None:
+            prop(fd)
+            return
+        try:
+            prop(fd)
+        except OSError:
+            pass
+
+    def reclose(swallow):
+        def body(fd):
+            try:
+                os.close(fd)
+                return
+            except OSError as exc:
+                first = exc
+            try:
+                os.fstat(fd)
+            except OSError:
+                if swallow:
+                    return
+                raise first
+            try:
+                os.close(fd)                              # the retry close(2) warns against
+            except OSError:
+                pass
+            if not swallow:
+                raise first
+        return body
+
+    def probe(swallow, touch=lambda fd: os.fstat(fd)):
+        def body(fd):
+            try:
+                os.close(fd)
+                return
+            except OSError as exc:
+                first = exc
+            try:
+                touch(fd)
+            except OSError:
+                pass
+            if not swallow:
+                raise first
+        return body
+
+    fcntl = _st_fcntl()
+
+    flips = {"A": ({"_close_fd_yielding": prop}, ("MASKED",), True),
+             "B": ({"_close_fd_yielding": quiet}, ("SILENT",), True),
+             "C": ({"_close_fd_yielding": frameless}, ("SILENT",), True),
+             "R": ({"_close_fd_propagating": reclose(False), "_close_fd_quietly": reclose(True)}, ("REUSE",),
+                   False),
+             "P": ({"_close_fd_propagating": probe(False), "_close_fd_quietly": probe(True)}, ("PROBE",),
+                   True),
+             "F": ({"_close_fd_propagating": probe(False, lambda fd: fcntl.fcntl(fd, fcntl.F_GETFD)),
+                    "_close_fd_quietly": probe(True, lambda fd: fcntl.fcntl(fd, fcntl.F_GETFD))}, ("PROBE",),
+                   True),
+             "S": ({"_close_fd_quietly": prop}, ("LEAK", "WRONG"), True)}
+    failures, runs = [], 0
+    for label, masking, want, call, expect in vectors:
+        if fcntl is None:
+            want = want.replace("F", "")
+        runs += 1
+        got = _st_close_run(call, masking, expect)
+        if got:
+            failures.append("{}: {}".format(label, "; ".join(got)))
+        for flip in want:
+            swaps, tags, watch = flips[flip]
+            real = {name: ns[name] for name in swaps if name in ns}
+            ns.update({name: swaps[name] for name in real})
+            try:
+                red = _st_close_run(call, masking, expect, watch)
+            finally:
+                ns.update(real)
+            runs += 1
+            if not real or tuple(p.split(":")[0] for p in red) != tags:
+                failures.append("{} under flip {}: expected red by {} alone, got {}".format(
+                    label, flip, " and ".join(tags), red or ("green" if real else "no helper to flip")))
+    return failures, runs
+
+
+def _st_helper_vectors(ns):
+    """The helpers' own vectors, calling each close helper through `ns` so a flip applies: the harness's
+    own watch check, the four _close_fd_yielding vectors, then for each helper `ns` defines, V1 (the
+    released number reused inline, once per errno, EINTR and EIO; red under R, P and F) and V2 (reused by a
+    real second thread)."""
+    import errno
+
+    def devnull(fault, **arm):
+        return fault.arm(os.open(os.devnull, os.O_RDONLY), **arm)
+
+    sent = _StSentinel("in flight")
+
+    def mask_finally(fault):
+        fd = devnull(fault)
+        try:
+            raise sent
+        finally:
+            ns["_close_fd_yielding"](fd)
+
+    def mask_except(fault):
+        fd = devnull(fault)
+        try:
+            raise sent
+        except _StSentinel:
+            ns["_close_fd_yielding"](fd)
+            raise
+
+    def normal(fault):
+        ns["_close_fd_yielding"](devnull(fault))
+
+    def inner(fd):
+        ns["_close_fd_yielding"](fd)
+
+    def caller_except(fault):
+        try:
+            raise _StSentinel("handled by the caller")
+        except _StSentinel:
+            inner(devnull(fault))                         # reached normally from the caller's except block
+
+    def direct(name, **arm):
+        def call(fault):
+            ns[name](devnull(fault, **arm))
+        return call
+
+    def watch(fault):
+        """The watch itself: the watched set is exactly every touch below, each on the module it belongs to
+        (an fcntl name on fcntl, never on os), each stand-in answers every capability probe as the real call
+        does, and after a failed close each watched call on the released number is recorded once, under its
+        own name, and os.stat of a path is not; the probes are then cleared and the close error raised, so a
+        watch that drops or misplaces a call, misses one, records a path, or hides a call from
+        os.supports_dir_fd is red by WRONG."""
+        for module, name, real in fault._watched:
+            for table in _st_supports(module):
+                if (getattr(module, name) in table) != (real in table):
+                    raise AssertionError("the stand-in for {} changes a capability probe".format(name))
+        fd = devnull(fault)
+        try:
+            os.close(fd)
+        except OSError as exc:
+            first = exc
+        else:
+            raise AssertionError("the armed close did not fail")
+        fcntl = _st_fcntl()
+        os.stat(os.devnull)
+        touches = ((os, "stat", lambda: os.stat(fd)), (os, "fstat", lambda: os.fstat(fd)),
+                   (os, "fstatvfs", lambda: os.fstatvfs(fd)), (os, "lseek", lambda: os.lseek(fd, 0, os.SEEK_CUR)),
+                   (os, "get_inheritable", lambda: os.get_inheritable(fd)), (os, "isatty", lambda: os.isatty(fd)))
+        if fcntl:
+            touches += ((fcntl, "fcntl", lambda: fcntl.fcntl(fd, fcntl.F_GETFD)),
+                        (fcntl, "flock", lambda: fcntl.flock(fd, fcntl.LOCK_UN)),
+                        (fcntl, "lockf", lambda: fcntl.lockf(fd, fcntl.LOCK_UN)),
+                        (fcntl, "ioctl", lambda: fcntl.ioctl(fd, 0)))
+        watched = sorted((module.__name__, name) for module, name, _real in fault._watched)
+        required = sorted((module.__name__, name) for module, name, _touch in touches if hasattr(module, name))
+        if watched != required:
+            raise AssertionError("the PROBE watch covers {}, expected {}".format(watched, required))
+        expected = []
+        for module, name, touch in touches:
+            if hasattr(module, name):
+                expected.append((name, fd))
+                try:
+                    touch()
+                except OSError:
+                    pass
+        seen, fault.probes[:] = list(fault.probes), []
+        if seen != expected:
+            raise AssertionError("the PROBE watch recorded {}, expected {}".format(seen, expected))
+        raise first
+
+    vectors = (("harness: the PROBE watch records every watched call on a released number", False, "", watch,
+                None),)
+    if "_close_fd_yielding" in ns:
+        vectors += (("helper: finally while an exception unwinds", True, "AR", mask_finally,
+                     lambda e: e is sent),
+                    ("helper: except handler re-raising", True, "AR", mask_except, lambda e: e is sent),
+                    ("helper: normal path", False, "BR", normal, None),
+                    ("helper: normal path under a caller's except", False, "BCR", caller_except, None))
+    for name, masking in (("_close_fd_propagating", False), ("_close_fd_quietly", None),
+                          ("_close_fd_yielding", False)):
+        if name not in ns:
+            continue
+        for errnum in (errno.EINTR, errno.EIO):
+            vectors += (("helper {} V1: {} after the number is released and reused".format(
+                name, errno.errorcode[errnum]), masking, "RPF", direct(name, errnum=errnum), None),)
+        vectors += (("helper {} V2: a second thread takes the released number".format(name), masking, "R",
+                     direct(name, thread=True), None),)
+    return vectors
+
+
+def _st_watch_drop_check():
+    """The watch self-check's own flips: with fcntl.flock, then fcntl.ioctl, dropped from _ST_WATCHED, the
+    watch vector must be red by WRONG alone, so losing either call from the watched set cannot pass
+    unnoticed. Run where fcntl exists (elsewhere there is no fcntl name to drop). Returns (failures, runs)."""
+    if _st_fcntl() is None:
+        return [], 0
+    label, masking, _flips, call, expect = _st_helper_vectors(globals())[0]
+    real = _ST_WATCHED
+    failures, runs = [], 0
+    for dropped in ("flock", "ioctl"):
+        globals()["_ST_WATCHED"] = (real[0], tuple(name for name in real[1] if name != dropped))
+        try:
+            red = _st_close_run(call, masking, expect)
+        finally:
+            globals()["_ST_WATCHED"] = real
+        runs += 1
+        if [problem.split(":")[0] for problem in red] != ["WRONG"]:
+            failures.append("{} with {} dropped from the watch: expected red by WRONG alone, got {}".format(
+                label, dropped, red or "green"))
+    return failures, runs
+
+
+def _st_site_vectors(base):
+    """One representative finally site (_read_at), one except-handler site (_read_contained), and V3, the
+    sibling closes of a contained-walk cleanup loop (_open_dir_contained)."""
+    ns = globals()
+    with open(os.path.join(base, "f"), "wb") as fh:
+        fh.write(b"payload")
+    os.makedirs(os.path.join(base, "s1", "s2", "s3"))
+    sent = _StSentinel("in flight at _read_at")
+
+    def read_at(raise_sent):
+        def call(fault):
+            real = ns["_read_fd"]
+
+            def spy(fd, cap=None):
+                fault.arm(fd)
+                if raise_sent:
+                    raise sent
+                return real(fd, cap=cap)
+            dfd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+            try:                                          # the seam is swapped only where its restore runs
+                ns["_read_fd"] = spy
+                _read_at(dfd, "f", "f")
+            finally:
+                ns["_read_fd"] = real
+                os.close(dfd)
+        return call
+
+    def read_contained_missing(fault):
+        real = ns["_open_parent"]
+
+        def spy(root_fd, relpath):
+            pfd, name = real(root_fd, relpath)
+            return fault.arm(pfd), name
+        dfd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            ns["_open_parent"] = spy
+            _read_contained(dfd, "missing")
+        finally:
+            ns["_open_parent"] = real
+            os.close(dfd)
+
+    def handler_error(e):
+        return (type(e) is JournalError and str(e).startswith("cannot read contained file")
+                and isinstance(e.__context__, FileNotFoundError))
+
+    def siblings(fault):
+        real_open = os.open
+
+        def spy(path, flags, mode=0o777, *, dir_fd=None):
+            fd = real_open(path, flags, mode, dir_fd=dir_fd)
+            if path == "s1" and dir_fd is not None:
+                fault.arm(fd)                             # the FIRST of the three closes the loop makes
+            return fd
+        dfd = real_open(base, os.O_RDONLY | os.O_DIRECTORY)
+        os.open = spy
+        try:
+            os.close(_open_dir_contained(dfd, "s1/s2/s3"))
+        finally:
+            os.open = real_open
+            os.close(dfd)
+
+    return (("site _read_at: finally while an exception unwinds", True, "AR", read_at(True),
+             lambda e: e is sent),
+            ("site _read_at: normal path", False, "BR", read_at(False), None),
+            ("site _read_contained: except handler raising its own JournalError", True, "AR",
+             read_contained_missing, handler_error),
+            ("site _open_dir_contained V3: the first cleanup close fails, the walk completes and its "
+             "siblings still close", None, "RS", siblings, None))
+
+
+def self_test():
+    """The #378 close vectors for the three close helpers (V1, V2), three representative _journal sites,
+    and the sibling closes of a cleanup loop (V3), each green and each red under its flip. Returns 0 clean,
+    1 a failure, 2 cannot-evaluate."""
+    import shutil
+    import tempfile
+    try:
+        base = tempfile.mkdtemp(prefix="aiqt-journal-selftest-")
+    except OSError as exc:
+        print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
+        return 2
+    try:
+        vectors = _st_helper_vectors(globals()) + _st_site_vectors(base)
+        failures, runs = _st_close_check(globals(), vectors)
+        drop_failures, drop_runs = _st_watch_drop_check()
+        failures, runs = failures + drop_failures, runs + drop_runs
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+    if failures:
+        print("JOURNAL SELF-TEST: FAIL ({} of {} close-vector runs failed)".format(len(failures), runs))
+        for f in failures:
+            print("  FAILED: {}".format(f))
+        return 1
+    print("JOURNAL SELF-TEST: PASS ({} close vectors, {} runs including each flip leg red)".format(
+        len(vectors), runs))
+    return 0
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
+    sys.exit("usage: _journal.py --self-test")

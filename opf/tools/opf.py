@@ -132,12 +132,821 @@ def _bootstrap():
         return EXIT_MALFORMED
     return EXIT_OK
 
+# F-SELFTEST-NO-MAIN: the one entry a module that binds self_test must carry, matched by AST structure (so
+# spacing, quoting, parentheses and comments do not matter). _ENTRY_TEST is the only accepted test of the entry
+# block (that operand order only); _ENTRY_STATEMENT must be that block's first statement, with nothing else in
+# its body and no else. Any argument handling a module has beyond exactly `--self-test` follows it.
+_ENTRY_TEST = '__name__ == "__main__"'
+_ENTRY_STATEMENT = 'if sys.argv[1:] == ["--self-test"]:\n    sys.exit(self_test())\n'
+
+
+def _module_scope(tree, classes=False):
+    """Yield every node of a parsed module that runs in the module's own scope. Function, lambda and class
+    bodies (their own scopes) are skipped; decorators, defaults, annotations, bases and comprehension
+    iterables, which the module scope evaluates, are kept. A comprehension or generator expression is walked
+    as a for statement is, except that a plain name its targets bind (a tuple, list or starred one included)
+    is the comprehension's own and is skipped: an attribute or subscript target (`sys.exit`, `sys.argv[1:]`)
+    is kept, as are its element and conditions (a walrus there binds the enclosing scope). With `classes`,
+    class bodies are walked too: a class body runs when its class statement does (one inside a function is
+    still skipped)."""
+    import ast
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            stack += node.decorator_list + [node.args] + ([node.returns] if node.returns else [])
+        elif isinstance(node, ast.ClassDef):
+            stack += node.decorator_list + node.bases + node.keywords + (node.body if classes else [])
+        elif isinstance(node, ast.Lambda):
+            stack.append(node.args)
+        elif isinstance(node, ast.comprehension):
+            stack += [node.iter] + node.ifs
+            targets = [node.target]
+            while targets:
+                target = targets.pop()
+                if isinstance(target, (ast.Tuple, ast.List)):
+                    targets += target.elts
+                elif isinstance(target, ast.Starred):
+                    targets.append(target.value)
+                elif not isinstance(target, ast.Name):
+                    stack.append(target)
+        else:
+            stack += ast.iter_child_nodes(node)
+
+
+def _binds(node, name):
+    """Return how many times one module-scope node binds `name` (0 when it does not): once for a def, async
+    def or class so named, for each Name stored or deleted (an assignment, augmented, annotated, for, with,
+    walrus or del target, tuple targets included, or a type-alias name), for each alias of an import or
+    from-import that binds it (`import a as self_test, b as self_test` is two; a star import counts, as it
+    may), and for an except, match or match-rest name. A `global` binds nothing by itself; _self_test_entry_gap
+    counts each `name` a `global` names, found anywhere with ast.walk."""
+    import ast
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return int(node.name == name)
+    if isinstance(node, ast.Name):
+        return int(node.id == name and isinstance(node.ctx, (ast.Store, ast.Del)))
+    if isinstance(node, ast.Import):
+        return sum((alias.asname or alias.name.partition(".")[0]) == name for alias in node.names)
+    if isinstance(node, ast.ImportFrom):
+        return sum((alias.asname or alias.name) in (name, "*") for alias in node.names)
+    if isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+        return int(node.name == name)
+    if isinstance(node, ast.MatchMapping):
+        return int(node.rest == name)
+    return 0
+
+
+# The only methods of `sys.argv` a statement before the entry may call: each reads the list and changes
+# nothing. A call of ANY other attribute of it there (`sys.argv.<name>(...)`, a dunder such as __init__ or
+# __setitem__ included) is an argv change, whatever the method does. This is the read-only set; no list of
+# the methods that mutate is kept.
+_ARGV_READERS = frozenset(("count", "index", "copy", "__len__", "__getitem__", "__contains__", "__iter__"))
+
+
+def _main_tests(tree):
+    """Return, in line order, a (line, node) pair for every test of `__name__` against "__main__" that runs at
+    import: each if, while, conditional expression, and/or operation, comprehension condition or match at
+    module scope or in a class body (_module_scope with classes) whose test (an and/or's operands, a
+    comprehension's conditions, a match's subject and cases) mentions both the name `__name__` and the string
+    "__main__" anywhere inside it, however they are combined. A test inside another counted test is not
+    counted again."""
+    import ast
+
+    def mentions(parts):
+        nodes = [sub for part in parts for sub in ast.walk(part)]
+        return (any(isinstance(sub, ast.Name) and sub.id == "__name__" for sub in nodes)
+                and any(isinstance(sub, ast.Constant) and type(sub.value) is str and sub.value == "__main__"
+                        for sub in nodes))
+
+    tests, inside = [], set()
+    for node in _module_scope(tree, classes=True):
+        if id(node) in inside:
+            continue
+        if isinstance(node, (ast.If, ast.While, ast.IfExp)):
+            parts = [node.test]
+        elif isinstance(node, ast.BoolOp):
+            parts = node.values
+        elif isinstance(node, ast.comprehension):
+            parts = node.ifs
+        elif isinstance(node, ast.Match):
+            parts = [node.subject] + [part for case in node.cases for part in (case.pattern, case.guard) if part]
+        else:
+            continue
+        if mentions(parts):
+            tests.append((parts[0].lineno if isinstance(node, ast.comprehension) else node.lineno, node))
+            inside.update(id(sub) for part in parts for sub in ast.walk(part))
+    return sorted(tests, key=lambda test: test[0])
+
+
+def _stores(statements):
+    """Return (node, name, attribute) for each store to or delete of an attribute or subscript in `statements`
+    (top-level ones), at module scope or in a class body (an assignment, augmented or annotated assignment,
+    del, or for, with or comprehension target). Following the target's attributes, subscripts and calls
+    inward, `name` is the name it starts from, or None when it starts from any other expression (a list,
+    tuple, conditional expression or walrus, say), and `attribute` the first attribute taken of where it
+    starts, or None when there is none: `sys.modules[__name__].self_test` is through sys and modules,
+    `__builtins__["len"]` is through __builtins__ and None, and `[sys][0].exit` is through None and exit."""
+    import ast
+    found = []
+    for statement in statements:
+        for node in _module_scope(statement, classes=True):
+            if not (isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.ctx, (ast.Store, ast.Del))):
+                continue
+            part, attribute = node, None
+            while isinstance(part, (ast.Attribute, ast.Subscript, ast.Call)):
+                if isinstance(part, ast.Attribute):
+                    attribute = part.attr
+                part = part.func if isinstance(part, ast.Call) else part.value
+            found.append((node, part.id if isinstance(part, ast.Name) else None, attribute))
+    return found
+
+
+# The attributes of sys, besides argv, that a store or delete through (_stores) before the entry may not be made
+# through: modules holds every loaded module (the running one included), and __dict__ is sys's own namespace.
+_SYS_THROUGH = ("modules", "__dict__")
+
+
+def _sys_change(statements):
+    """Return (node, attribute, through) for the first node, by position, in `statements` (top-level ones), at
+    module scope or in a class body, that changes the sys module, or a value reached through it, through the
+    name sys: a store to, delete of or augmented assignment to any attribute of it (`sys.<attribute>`, an
+    assignment, augmented or annotated assignment, del, or for, with or comprehension target), any such store
+    or delete through argv or one of _SYS_THROUGH (_stores: `sys.argv[1:]`, `sys.modules[__name__].self_test`,
+    `sys.__dict__["exit"]`), or a call of any attribute of `sys.argv` outside _ARGV_READERS. `attribute` is
+    the attribute of sys the change is made to or through, and `through` is True for a store or delete through
+    one of _SYS_THROUGH (a change to argv, or through it, is argv's). A store through any other attribute
+    (`sys.path[:] = saved`) is not counted. None when there is none."""
+    import ast
+
+    def is_argv(node):
+        return (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "sys"
+                and node.attr == "argv")
+
+    found = [(node, attribute, attribute in _SYS_THROUGH and not direct)
+             for node, name, attribute in _stores(statements) if name == "sys" and attribute is not None
+             for direct in [isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)]
+             if direct or attribute == "argv" or attribute in _SYS_THROUGH]
+    found += [(node, "argv", False) for statement in statements for node in _module_scope(statement, classes=True)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+              and node.func.attr not in _ARGV_READERS and is_argv(node.func.value)]
+    return min(found, key=lambda change: (change[0].lineno, change[0].col_offset), default=None)
+
+
+# The names a store or delete through (_stores) before the entry may not be spelled from: builtins and
+# __builtins__ hold the builtins the module's code reads, and __main__ is the running module's own namespace.
+_NAMESPACE_ROOTS = ("builtins", "__builtins__", "__main__")
+
+
+def _namespace_store(statements):
+    """Return (node, name) for the first store or delete, by position, in `statements` (top-level ones), at
+    module scope or in a class body, through one of _NAMESPACE_ROOTS (_stores: `builtins.len = None`,
+    `__builtins__["len"] = None`, `__main__.self_test = int`), or None when there is none."""
+    found = [(node, name) for node, name, _attribute in _stores(statements) if name in _NAMESPACE_ROOTS]
+    return min(found, key=lambda store: (store[0].lineno, store[0].col_offset), default=None)
+
+
+def _self_test_or_expression_store(statements):
+    """Return (node, name) for the first store or delete, by position, in `statements` (top-level ones), at
+    module scope or in a class body, whose target (_stores) starts from the name self_test
+    (`self_test.__code__ = ...`, `self_test.__new__ = ...`; `name` is "self_test") or from an expression rather
+    than a name (`[sys][0].exit = print`, `(s := sys).exit = print`; `name` is None), or None when there is
+    none. The rule is conservative: such a store is counted whatever it reaches."""
+    found = [(node, name) for node, name, _attribute in _stores(statements) if name in (None, "self_test")]
+    return min(found, key=lambda store: (store[0].lineno, store[0].col_offset), default=None)
+
+
+def _unconditional_binding(statements):
+    """Return the last of `statements` (top-level ones) that binds self_test UNCONDITIONALLY, or None: a def,
+    async def or class named self_test, an import or from-import binding it (a star import counts), or an
+    assignment, or annotated assignment with a value, storing it. A top-level try's body runs, so its statements
+    count (recursively); a binding only inside if, for, while, with, match, an except handler, a try's else or
+    finally, or a function does not."""
+    import ast
+    found = None
+    for node in statements:
+        if isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try))):
+            found = _unconditional_binding(node.body) or found
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom)):
+            found = node if _binds(node, "self_test") else found
+        elif isinstance(node, ast.Assign):
+            found = node if any(_binds(part, "self_test") for target in node.targets
+                                for part in ast.walk(target)) else found
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            found = node if _binds(node.target, "self_test") else found
+    return found
+
+
+def _self_test_entry_gap(tree):
+    """Return (exposes, reason) for one parsed module. `exposes` is whether it binds self_test at module scope
+    by any form _binds counts, or by a `global self_test` anywhere (a function can bind it so). An exposing
+    module's `reason` is None only when exactly one test of `__name__` against "__main__" runs at import
+    (_main_tests: an if, while, conditional expression, and/or, comprehension condition or match, at module
+    scope or in a class body, whose test mentions the name `__name__` and the string "__main__"), that test is
+    an `if` that is the module's last top-level statement, tests exactly _ENTRY_TEST and has no else, the
+    module imports sys at top level, the block's first statement is _ENTRY_STATEMENT, the block binds
+    self_test nowhere, the module has exactly one binding of self_test, counted by name occurrence (each
+    binding _binds counts in a module-scope node, so every alias of one import, and each self_test a `global`
+    anywhere names, is one), a statement before the block makes that binding unconditionally
+    (_unconditional_binding), when it is a def it is neither an async def nor one whose own body (not a nested
+    function, lambda or class) yields, and that own body has at least one `return <expression>` and no bare
+    `return` or `return None`, the module has no star import at module scope (one may bind `__name__`, sys or
+    self_test), it binds `__name__` nowhere at module scope (counted the same way, the block included), every
+    module-scope binding of sys (and each sys a `global` anywhere names) is a plain `import sys`, it binds
+    `__builtins__` nowhere at module scope (counted as `__name__` is), no statement before the block changes
+    sys through the name sys (_sys_change: a store to, delete of or augmented assignment to any
+    `sys.<attribute>`, a store or delete through `sys.modules` or `sys.__dict__`, or an argv change), none
+    stores to or deletes through `builtins`, `__builtins__` or `__main__` (_namespace_store), and none stores
+    to or deletes through the name self_test or through a target that starts from an expression rather than
+    a name (_self_test_or_expression_store); otherwise it names the first rule broken."""
+    import ast
+
+    def bindings_of(name, imported=False):
+        # The line of each binding of `name` _binds counts at module scope and of each `global` naming it;
+        # with `imported`, an alias of a plain `import <name>` (no `as`) is not counted.
+        plain = lambda node: sum(alias.name == name and alias.asname is None for alias in node.names) if (
+            imported and isinstance(node, ast.Import)) else 0
+        return [node.lineno for node in _module_scope(tree) for _ in range(_binds(node, name) - plain(node))] + [
+            node.lineno for node in ast.walk(tree) if isinstance(node, ast.Global) for each in node.names
+            if each == name]
+
+    bindings = bindings_of("self_test")
+    if not bindings:
+        return False, None
+    tests = _main_tests(tree)
+    if not tests:
+        return True, 'it has no `if __name__ == "__main__":` block'
+    if len(tests) > 1:
+        return True, "{} tests of `__name__` against \"__main__\" run at import (lines {}); exactly one is " \
+                     "allowed".format(len(tests), ", ".join(str(line) for line, _test in tests))
+    line, block = tests[0]
+    if not any(node is block for node in tree.body):
+        return True, "its `__main__` test (line {}) is nested in another statement".format(line)
+    if not isinstance(block, ast.If):
+        return True, "its `__main__` test (line {}) is a `{}` statement, not an `if`".format(
+            line, type(block).__name__.lower())
+    if ast.dump(block.test) != ast.dump(ast.parse(_ENTRY_TEST, mode="eval").body):
+        return True, "its `__main__` block (line {}) does not test exactly `{}`".format(block.lineno, _ENTRY_TEST)
+    if block.orelse:
+        return True, "its `__main__` block (line {}) has an else".format(block.lineno)
+    if tree.body[-1] is not block:
+        return True, "a top-level statement follows its `__main__` block (line {})".format(block.lineno)
+    if not any(isinstance(node, ast.Import) and any(alias.name == "sys" and alias.asname is None
+                                                    for alias in node.names) for node in tree.body):
+        return True, "it does not `import sys` at top level"
+    entry = ast.dump(ast.parse(_ENTRY_STATEMENT).body[0])
+    if ast.dump(block.body[0]) != entry:
+        if any(ast.dump(statement) == entry for statement in block.body[1:]):
+            return True, "the canonical `--self-test` statement is not the first in its `__main__` block"
+        return True, "its `__main__` block starts with `{}`, not the canonical `--self-test` statement".format(
+            ast.unparse(block.body[0]).splitlines()[0][:60])
+    if any(_binds(node, "self_test") for node in _module_scope(block)):
+        return True, "its `__main__` block (line {}) binds self_test".format(block.lineno)
+    if len(bindings) > 1:
+        return True, "self_test has {} bindings at module scope (lines {}); exactly one binding is allowed".format(
+            len(bindings), ", ".join(str(lineno) for lineno in sorted(bindings)))
+    binding = _unconditional_binding(tree.body[:-1])
+    if binding is None:
+        return True, "self_test is bound only conditionally (inside a compound statement other than a try " \
+                     "body, or by a function's `global`), never unconditionally before its `__main__` block"
+    if isinstance(binding, ast.AsyncFunctionDef):
+        return True, "its self_test (line {}) is an `async def`: the call returns a coroutine, so the " \
+                     "suite never runs".format(binding.lineno)
+    if isinstance(binding, ast.FunctionDef) and any(isinstance(node, (ast.Yield, ast.YieldFrom)) for statement
+                                                    in binding.body for node in _module_scope(statement)):
+        return True, "its self_test (line {}) is a generator (its body yields): the call returns a " \
+                     "generator, so the suite never runs".format(binding.lineno)
+    if isinstance(binding, ast.FunctionDef):
+        returns = [node for statement in binding.body for node in _module_scope(statement)
+                   if isinstance(node, ast.Return)]
+        empty = [node.lineno for node in returns if node.value is None
+                 or (isinstance(node.value, ast.Constant) and node.value.value is None)]
+        if empty:
+            return True, "its self_test (line {}) returns None (a bare `return` or `return None`, line {}): " \
+                         "the required return shape is a `return <expression>`".format(
+                             binding.lineno, min(empty))
+        if not returns:
+            return True, "its self_test (line {}) lacks the required return shape: no `return <expression>` " \
+                         "in its own scope".format(binding.lineno)
+    stars = [node.lineno for node in _module_scope(tree) if isinstance(node, ast.ImportFrom)
+             and any(alias.name == "*" for alias in node.names)]
+    if stars:
+        return True, "it has a star import (line {}): a star import may bind `__name__`, `sys` or " \
+                     "`self_test`".format(min(stars))
+    renames = bindings_of("__name__")
+    if renames:
+        return True, "it binds `__name__` at module scope (line {}), so its `__main__` test no longer " \
+                     "tells a run from an import".format(min(renames))
+    rebinds = bindings_of("sys", imported=True)
+    if rebinds:
+        return True, "it binds `sys` other than by `import sys` (line {}), so the entry may not reach the sys " \
+                     "module".format(min(rebinds))
+    shadows = bindings_of("__builtins__")
+    if shadows:
+        return True, "it binds `__builtins__` at module scope (line {}), so the builtins its code reads may not " \
+                     "be Python's".format(min(shadows))
+    change = _sys_change(tree.body[:-1])
+    if change is not None and change[2]:
+        return True, "it stores through `sys.{}` (line {}) before its `__main__` block, so a module or value " \
+                     "the entry reaches may not be the one it names".format(change[1], change[0].lineno)
+    if change is not None:
+        return True, "it changes `sys.{}` (line {}) before its `__main__` block, so the entry may not see " \
+                     "`--self-test` or exit with self_test's result".format(change[1], change[0].lineno)
+    store = _namespace_store(tree.body[:-1])
+    if store is not None:
+        return True, "it stores through `{}` (line {}) before its `__main__` block, so a builtin or a global " \
+                     "the entry uses may not be the one it names".format(store[1], store[0].lineno)
+    store = _self_test_or_expression_store(tree.body[:-1])
+    if store is not None and store[1] == "self_test":
+        return True, "it stores to or deletes through `self_test` (line {}) before its `__main__` block, so " \
+                     "the self_test the entry calls may not be the one it binds".format(store[0].lineno)
+    if store is not None:
+        return True, "it stores to or deletes through an expression, not a name (line {}), before its " \
+                     "`__main__` block; the guard does not follow such a target".format(store[0].lineno)
+    return True, None
+
+
+def _self_test_entry_gaps(directory, required=()):
+    """Check the F-SELFTEST-NO-MAIN class STATICALLY: no module code is executed. Returns (gaps, exposers):
+    `exposers` is the set of *.py names directly in `directory` that bind self_test at module scope, and `gaps`
+    maps a name to why it fails. Every exposer must carry the one canonical entry, exactly:
+
+        if __name__ == "__main__":
+            if sys.argv[1:] == ["--self-test"]:
+                sys.exit(self_test())
+            ...  # any other argument handling the module has
+
+    as its last top-level statement, with that operand order, sys imported at top level, the inner `if` holding
+    nothing else and no else, no other test of `__name__` against "__main__" that runs at import (an if, while,
+    conditional expression, and/or, comprehension condition or match, at module scope or in a class body, whose
+    test mentions both), exactly one module-scope binding of self_test counted by name occurrence (each alias
+    of an import or from-import, each assignment, for, with, walrus or del target, each def, class, except or
+    match name, a star import, and each self_test a `global` anywhere names, is one), that binding made
+    unconditionally by a statement before the block (a top-level def, class, import, from-import or
+    assignment, or one in a top-level try body), the block itself binding it nowhere, a def'd self_test
+    neither async nor a generator and with at least one `return <expression>` and no bare `return` or
+    `return None` in its own body, no module-scope star import, no module-scope binding of `__name__` or
+    `__builtins__`, no module-scope binding of sys but a plain `import sys`, no statement before the block
+    changing sys through the name sys (a store to, delete of or augmented assignment to any `sys.<attribute>`,
+    a store or delete through `sys.modules` or `sys.__dict__`, or an argv change), none storing to or
+    deleting through `builtins`, `__builtins__` or `__main__`, and none storing to or deleting through the
+    name self_test or through a target that starts from an expression rather than a name
+    (_self_test_entry_gap gives the rules and each reason). It is a gap too when a *.py entry is not a
+    regular file or cannot be read or parsed, when a `required` name is not found binding self_test, and when
+    no module binds it at all. The listing is os.listdir, so a missing or unreadable directory is a gap, not
+    an empty scan; it is not recursive, so _vendor/ is not scanned.
+
+    Guarantee. The guard checks the static shape of the self_test binding and of the entry, and nothing else.
+    The forms it catches are exactly these. self_test has exactly one binding at module scope, counted by name
+    occurrence (each alias of an import or from-import, each Name stored or deleted, each def, class, except or
+    match name, a star import, and each self_test a `global` anywhere names, is one), made unconditionally
+    before the entry (a try-body binding counts even if an earlier statement there raises), and the block
+    binds it nowhere. The entry is the single canonical one: the module's last statement and the only test of
+    `__name__` against "__main__" that runs at import in a counted form (an if, while, conditional expression,
+    and/or, comprehension condition or match, at module scope or in a class body, whose test mentions the name
+    `__name__` and the string "__main__"). The module has no star import at module scope (a star import may
+    bind `__name__`, sys or self_test, so it is a gap whatever it binds). `__name__` is bound nowhere at module
+    scope by any of the counted forms (`__name__ = "helper"`, `from os import __name__`,
+    `import os as __name__`, `del __name__`, a `global __name__` anywhere; a class-body `__name__` is the
+    class's own and is not counted), and neither is `__builtins__` (`__builtins__ = {}`). sys is imported at
+    top level, and every module-scope binding of it, and each sys a `global` names, is a plain `import sys`
+    (`sys = None` or `import os as sys` is a gap). No statement before the entry, at module scope or in a class
+    body, stores to, deletes or augments any attribute of sys spelled `sys.<attribute>` (`sys.exit = print`,
+    `sys.stdout = None`, `del sys.argv`), stores to or deletes anything through `sys.argv`, `sys.modules` or
+    `sys.__dict__` (`sys.argv[1:] = []`, `sys.modules[__name__].self_test = int`,
+    `sys.__dict__["exit"] = print`), calls any attribute of sys.argv (`sys.argv.<name>(...)`) outside the
+    read-only _ARGV_READERS (count, index, copy, __len__, __getitem__, __contains__, __iter__), or stores to or
+    deletes anything through the name builtins, `__builtins__` or `__main__` (`builtins.len = None`,
+    `__builtins__["len"] = None`, `__main__.self_test = int`), or stores to or deletes anything through the
+    name self_test itself (`self_test.__code__ = ...`, `self_test.__defaults__ = ...`, a class self_test's
+    `self_test.__new__ = ...`, `del self_test.__kwdefaults__`). A store through a name is one whose target,
+    followed back through its attributes, subscripts and calls, is spelled from that name (_stores). A store
+    or delete before the entry whose target, so followed, starts from anything other than a plain name is a
+    gap whatever it reaches (`[sys][0].exit = print`, `(sys,)[0].modules[__name__].self_test = int`,
+    `(sys if sys else None).argv[1:] = []`, `(s := sys).exit = print`): the guard does not follow such a
+    target, so it counts every one, a harmless one included. Those rules read a comprehension or generator
+    expression as they read a for statement: an attribute or subscript target
+    (`[None for sys.exit in [print]]`, `[None for sys.argv[1:] in [[]]]`) is a store, a walrus in one binds
+    the enclosing scope (`[(__name__ := "x") for _ in "x"]`), and only a plain name target is the
+    comprehension's own and not counted. When the binding is a def it is a plain function: not async; its own
+    body, not a nested function, lambda or class, yields nothing and holds at least one `return <expression>`
+    and no bare `return` or `return None`; its decorators are not inspected.
+
+    Residual. Everything else that changes, at run time, what a name the entry uses means (sys, sys.argv,
+    sys.exit, self_test, `__name__`, a builtin, or the module namespace) is outside the guard. The families:
+    reflective stores (setattr or getattr then a store, `setattr(self_test, "__code__", ...)`,
+    `globals()["self_test"] = int`, `globals().update(...)`, `vars(...)`, a namespace's `__dict__` reached
+    other than through sys, builtins, `__builtins__` or `__main__`, and a store through any attribute of sys
+    other than argv, modules and __dict__, which the guard does not count: `sys.path[:] = saved` is one);
+    dynamic binding (a module `__getattr__`, importlib or `__import__`, a binding made where the guard does not
+    look); exec, eval and compile; aliasing (`import sys as s` then `s.exit = print`, `(s := sys)` then a later
+    `s.exit = print`, `import builtins as b` then `b.len = None`, `import __main__ as m` then
+    `m.self_test = int`, `run = self_test` then `run.__code__ = ...`, `from sys import argv`, `argv = sys.argv`,
+    `modules = sys.modules`, a method taken from sys.argv and called later, another module's reference to
+    sys, `import os` then `os.sys.exit = print` say, and a function's `__globals__` or `__builtins__`,
+    `helper.__globals__["sys"] = None` say); and calls into other code that
+    runs before the entry (a function, a decorator, a method, one on an attribute of sys other than argv
+    included, `sys.stdout.close()` say, a method reached through a class, `sys.argv.__class__.clear(sys.argv)`
+    say, a store spelled from a name through a call, `holder()[0].exit = print`
+    say, which the guard counts as through that name, or another module's import-time code). Nor does it
+    catch a statement that ends the run before the entry or never returns (a top-level sys.exit or os._exit,
+    including one under a `__main__` test it does not count, such as one in a function body or one reached
+    through a held value). For example, _opf_adopt_observe's sys.path setup holds its `__name__` comparison in
+    a name, so its `if` is not counted as a `__main__` test. Nor does it catch exit subversion after the call
+    (an atexit hook, os._exit, a SystemExit handler, a stateful self_test).
+
+    Beyond the return shape above, the guard does not check the value self_test returns at run time, or how
+    sys.exit treats that value. How sys.exit treats a value is platform- and version-dependent, and no rule
+    for it is stated here. Examples, measured on
+    CPython 3.14.4 on Linux x86_64 (examples only, not a rule): `sys.exit(value)` exited 0 for None, 0,
+    False, an int subclass's 512, 256, -256, 2**31, 2**32, 2**32 + 256, 2**63 - 256, -2**63, and the tuples
+    (), (None,), (0,) and (256,); it exited 255 for 2**63, 2**64, 2**100, -2**63 - 256 and -2**64; and it
+    exited 1 for 1, True, (1,), 0.0, [], "", 0j and (0, 0), printing the value first for the last five ("" as
+    an empty line). An imported, assigned or class self_test is not inspected beyond being bound (it may be a
+    callable returning 0, `self_test = int` say), and a def'd self_test is inspected only for the shapes above
+    (one that falls off its end on some path, or returns a value sys.exit treats as success, is not caught). A
+    binding made dynamically is not recognized, so such a module is not an exposer unless it also binds
+    statically.
+
+    Run with --self-test, a module that passes and stays outside the residual calls whatever self_test is
+    bound to and exits with its result: if self_test is unbound there (a try body that raises before binding
+    it) the run exits 1 with NameError, and a non-callable exits 1 with TypeError. It does NOT hold that a
+    module in the residual runs the suite or exits non-zero: it can exit 0 without running it. The residual is
+    a code-review matter: the guard is for an accidental missing or miswired entry. The exact-form rule is
+    conservative: a working entry in any other form is a gap."""
+    import ast
+    gaps, exposers = {}, set()
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError as exc:
+        return {str(directory): "the directory cannot be listed ({})".format(type(exc).__name__)}, exposers
+    for name in names:
+        if not name.endswith(".py"):
+            continue
+        path = os.path.join(str(directory), name)
+        try:
+            regular = stat.S_ISREG(os.lstat(path).st_mode)
+        except OSError as exc:
+            gaps[name] = "it cannot be examined ({})".format(type(exc).__name__)
+            continue
+        if not regular:
+            gaps[name] = "it is not a regular file"
+            continue
+        try:
+            with open(path, "rb") as handle:
+                source = handle.read()
+        except OSError as exc:
+            gaps[name] = "it cannot be read ({})".format(type(exc).__name__)
+            continue
+        try:
+            exposes, reason = _self_test_entry_gap(ast.parse(source, path))
+        except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+            gaps[name] = "it cannot be parsed ({})".format(type(exc).__name__)
+            continue
+        if exposes:
+            exposers.add(name)
+        if reason is not None:
+            gaps[name] = reason
+    for name in required:
+        if name not in exposers and name not in gaps:
+            gaps[name] = "expected to bind self_test, but the scan did not find it"
+    if not exposers:
+        gaps.setdefault(str(directory), "no module in it binds self_test")
+    return gaps, exposers
+
+
+# Registered self-tests that are not a module's own self_test. Each is a suite of this dispatcher itself,
+# defined in this file and run only through `opf.py --self-test`, which main() dispatches; opf.py binds no
+# self_test, so it is not an exposer and these have no module entry to check.
+_ENTRY_FLOOR_EXEMPT = {
+    "opf-watchdog-isolation": "the dispatcher's watchdog isolation suite (_watchdog_isolation_self_test)",
+    "opf-watchdog-regressions": "the dispatcher's watchdog regression suite (_watchdog_regression_self_test)",
+    "opf-aggregator": "this aggregator's own suite (_aggregator_self_test)",
+    "opf-retained-close-offpath": "the dispatcher's off-path released-close sweep (#377, "
+                                  "_retained_close_offpath_self_test)",
+    "opf-close-exc-safe-vectors": "the dispatcher's in-flight-exception close vectors (#377, "
+                                  "_close_exc_safe_vectors_self_test)",
+    "opf-cli": "the dispatcher's command-line suite (_cli_self_test)",
+}
+
+
+def _self_test_floor(registry, directory, exempt):
+    """Derive the scan's required floor from the registry BY MODULE. Returns (required, faults): `required` is
+    the set of *.py names, directly in `directory`, whose module's self_test is a registry entry's callable.
+    A fault is an empty registry; an entry that is not exempt whose callable has no defining module file in
+    `directory`, or is not that module's self_test; an exempt entry not defined in this file; and an exemption
+    naming no registry entry."""
+    registry = tuple(registry)
+    required, faults, labels = set(), [], set()
+    if not registry:
+        faults.append("the self-test registry is empty")
+    for label, fn in registry:
+        labels.add(label)
+        module = sys.modules.get(getattr(fn, "__module__", None))
+        if label in exempt:
+            if module is not sys.modules.get(__name__):
+                faults.append("{}: exempt, but not defined in opf.py".format(label))
+            continue
+        path = getattr(module, "__file__", None)
+        if not path:
+            faults.append("{}: its callable has no defining module file".format(label))
+        elif Path(path).resolve().parent != Path(directory).resolve():
+            faults.append("{}: its module {} is not in {}".format(label, path, directory))
+        elif getattr(module, "self_test", None) is not fn:
+            faults.append("{}: its callable is not {}.self_test".format(label, module.__name__))
+        else:
+            required.add(Path(path).name)
+    for label in sorted(set(exempt) - labels):
+        faults.append("{}: exempt, but no registry entry has that label".format(label))
+    return required, faults
+
+
+# Synthetic modules for the scan's own flips: (name, source, binds self_test, the reason it must be named for,
+# or None for a clean module). Beside these, directory.py is a directory, unreadable.py a mode-0 file (only
+# when not root), absent.py a required name that does not exist (canonical.py and canonical_import.py are
+# required too, so the floor does not over-reject), and absent/ and empty/ are a missing and an empty directory.
+_ENTRY_HEAD = 'import sys\n\n\ndef self_test():\n    return 0\n\n\n'
+_ENTRY_BODY = '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n'
+_ENTRY_MAIN = 'if __name__ == "__main__":\n' + _ENTRY_BODY
+_ENTRY_NONE = 'no `if __name__ == "__main__":` block'
+_ENTRY_FIRST = "not the canonical `--self-test` statement"
+_ENTRY_BLOCK_BINDS = ") binds self_test"
+_ENTRY_CONDITIONAL = "bound only conditionally"
+_ENTRY_GENERATOR = "is a generator"
+_ENTRY_TWO_TESTS = "exactly one is allowed"
+_ENTRY_ARGV = "changes `sys.argv`"
+_ENTRY_REBOUND = "bindings at module scope"
+_ENTRY_NO_RETURN = "no `return <expression>` in its own scope"
+_ENTRY_RETURNS_NONE = "returns None (a bare"
+_ENTRY_NAME = "binds `__name__` at module scope"
+_ENTRY_SYS = "binds `sys` other than by `import sys`"
+_ENTRY_STAR = "a star import may bind `__name__`, `sys` or `self_test`"
+_ENTRY_BUILTINS = "binds `__builtins__` at module scope"
+_ENTRY_SELF_TEST_STORE = "stores to or deletes through `self_test`"
+_ENTRY_EXPRESSION_STORE = "through an expression, not a name"
+_ENTRY_FIXTURES = (
+    ("canonical.py", _ENTRY_HEAD + "def main(argv):\n    return 2\n\n\n" + _ENTRY_MAIN
+     + "    sys.exit(main(sys.argv[1:]))\n", True, None),
+    ("canonical_import.py", "import sys\nfrom _no_such_module import self_test\n\n" + _ENTRY_MAIN, True, None),
+    ("canonical_spaced.py", _ENTRY_HEAD + "if (__name__ == '__main__'):  # entry\n    if sys.argv[1 :] == [\n"
+     "            '--self-test',]:\n        sys.exit(  self_test( ) )\n", True, None),
+    ("plain.py", 'if __name__ == "__main__":\n    raise SystemExit(0)\n', False, None),
+    ("local_only.py", "import holder\n\n\ndef helper():\n    self_test = 1\n    return self_test\n\n\n"
+     "class Holder:\n    self_test = 0\n\n\nholder.self_test = [self_test for self_test in ()]\n"
+     "print(lambda self_test: self_test)\n", False, None),
+    ("no_entry.py", "def self_test():\n    return 0\n", True, _ENTRY_NONE),
+    ("bind_async.py", "async def self_test():\n    return 0\n", True, _ENTRY_NONE),
+    ("bind_class.py", "class self_test:\n    pass\n", True, _ENTRY_NONE),
+    ("bind_assign.py", "self_test = lambda: 0\n", True, _ENTRY_NONE),
+    ("bind_tuple.py", "main, (self_test, *rest) = 1, (2, 3)\n", True, _ENTRY_NONE),
+    ("bind_annotated.py", "self_test: object\n", True, _ENTRY_NONE),
+    ("bind_import.py", "import _no_such_module as self_test\n", True, _ENTRY_NONE),
+    ("bind_from.py", "from _no_such_module import self_test\n", True, _ENTRY_NONE),
+    ("bind_star.py", "from _no_such_module import *\n", True, _ENTRY_NONE),
+    ("bind_try.py", "try:\n    import _no_such_module\nexcept ImportError:\n    def self_test():\n        return 0\n",
+     True, _ENTRY_NONE),
+    ("bind_with.py", "with open(__file__) as self_test:\n    pass\n", True, _ENTRY_NONE),
+    ("bind_for.py", "for self_test in ():\n    pass\n", True, _ENTRY_NONE),
+    ("bind_walrus.py", "if (self_test := len):\n    pass\n", True, _ENTRY_NONE),
+    ("bind_global.py", "def install():\n    global self_test\n    self_test = len\n", True, _ENTRY_NONE),
+    ("bind_del.py", "del self_test\n", True, _ENTRY_NONE),
+    ("not_equal.py", _ENTRY_HEAD + 'if __name__ != "__main__":\n' + _ENTRY_BODY, True, "does not test exactly"),
+    ("reversed.py", _ENTRY_HEAD + 'if "__main__" == __name__:\n' + _ENTRY_BODY, True, "does not test exactly"),
+    ("pass_body.py", _ENTRY_HEAD + 'if __name__ == "__main__":\n    pass\n', True, _ENTRY_FIRST),
+    ("via_main.py", _ENTRY_HEAD + 'def main():\n    return self_test()\n\n\nif __name__ == "__main__":\n'
+     "    sys.exit(main())\n", True, _ENTRY_FIRST),
+    ("drops_result.py", _ENTRY_HEAD + 'if __name__ == "__main__":\n    if sys.argv[1:] == ["--self-test"]:\n'
+     "        self_test()\n", True, _ENTRY_FIRST),
+    ("inner_else.py", _ENTRY_HEAD + _ENTRY_MAIN + "    else:\n        sys.exit(2)\n", True, _ENTRY_FIRST),
+    ("inner_extra.py", _ENTRY_HEAD + 'if __name__ == "__main__":\n    if sys.argv[1:] == ["--self-test"]:\n'
+     '        print("self-test")\n        sys.exit(self_test())\n', True, _ENTRY_FIRST),
+    ("not_first.py", _ENTRY_HEAD + 'if __name__ == "__main__":\n    print("entry")\n' + _ENTRY_BODY, True,
+     "is not the first"),
+    ("two_mains.py", _ENTRY_HEAD + 'if __name__ == "__main__":\n    pass\n' + _ENTRY_MAIN, True,
+     "exactly one is allowed"),
+    ("nested_main.py", _ENTRY_HEAD + "try:\n    " + _ENTRY_MAIN.replace("\n    ", "\n        ")
+     + "except ImportError:\n    pass\n", True, "is nested in another statement"),
+    ("main_else.py", _ENTRY_HEAD + _ENTRY_MAIN + "else:\n    pass\n", True, "has an else"),
+    ("not_last.py", _ENTRY_HEAD + _ENTRY_MAIN + "\n\ndef later():\n    pass\n", True, "follows its"),
+    ("no_sys.py", _ENTRY_HEAD.replace("import sys\n", "") + _ENTRY_MAIN, True, "does not `import sys`"),
+    ("unparseable.py", "def self_test(:\n    return 0\n", False, "cannot be parsed"),
+    ("main_defines.py", "import sys\n\n\n" + _ENTRY_MAIN + "    def self_test():\n        return 0\n", True,
+     _ENTRY_BLOCK_BINDS),
+    ("main_rebinds.py", _ENTRY_HEAD + _ENTRY_MAIN + "    self_test = None\n", True, _ENTRY_BLOCK_BINDS),
+    ("platform_only.py", 'import sys\n\nif sys.platform == "win32":\n    def self_test():\n        return 0\n\n\n'
+     + _ENTRY_MAIN, True, _ENTRY_CONDITIONAL),
+    ("except_only.py", "import sys\n\ntry:\n    import _no_such_module\nexcept ImportError:\n"
+     "    def self_test():\n        return 0\n\n\n" + _ENTRY_MAIN, True, _ENTRY_CONDITIONAL),
+    ("async_def.py", _ENTRY_HEAD.replace("def self_test", "async def self_test") + _ENTRY_MAIN, True,
+     "is an `async def`"),
+    ("generator_def.py", _ENTRY_HEAD.replace("return 0", "yield 0") + _ENTRY_MAIN, True, _ENTRY_GENERATOR),
+    ("generator_from.py", "import sys\n\n\ndef self_test():\n    if sys:\n        yield from ()\n    return 0\n\n\n"
+     + _ENTRY_MAIN, True, _ENTRY_GENERATOR),
+    ("nested_generator.py", "import sys\n\n\ndef self_test():\n    def rows():\n        yield 0\n\n"
+     "    async def feed():\n        yield 0\n\n    class Rows:\n        pull = lambda: (yield)\n\n"
+     "    pull = lambda: (yield)\n    return sum(rows())\n\n\n" + _ENTRY_MAIN, True, None),
+    ("try_import.py", "import sys\n\ntry:\n    from _no_such_module import self_test\nexcept ImportError:\n"
+     "    pass\n\n\n" + _ENTRY_MAIN, True, None),
+    ("tuple_main.py", _ENTRY_HEAD + 'if __name__ in ("__main__",):\n    sys.exit(0)\n\n\n' + _ENTRY_MAIN, True,
+     _ENTRY_TWO_TESTS),
+    ("class_main.py", _ENTRY_HEAD + 'class Entry:\n    if __name__ == "__main__":\n        sys.exit(0)\n\n\n'
+     + _ENTRY_MAIN, True, _ENTRY_TWO_TESTS),
+    ("and_main.py", _ENTRY_HEAD + '__name__ == "__main__" and sys.exit(0)\n' + _ENTRY_MAIN, True, _ENTRY_TWO_TESTS),
+    ("ifexp_main.py", _ENTRY_HEAD + 'sys.exit(0) if __name__ == "__main__" else None\n' + _ENTRY_MAIN, True,
+     _ENTRY_TWO_TESTS),
+    ("while_main.py", _ENTRY_HEAD + 'while __name__ == "__main__":\n    sys.exit(0)\n' + _ENTRY_MAIN, True,
+     _ENTRY_TWO_TESTS),
+    ("match_main.py", _ENTRY_HEAD + 'match __name__:\n    case "__main__":\n        sys.exit(0)\n' + _ENTRY_MAIN,
+     True, _ENTRY_TWO_TESTS),
+    ("comprehension_main.py", _ENTRY_HEAD + '[sys.exit(0) for _ in "x" if __name__ == "__main__"]\n'
+     + _ENTRY_MAIN, True, _ENTRY_TWO_TESTS),
+    ("while_entry.py", _ENTRY_HEAD + 'while __name__ == "__main__":\n' + _ENTRY_BODY, True, "not an `if`"),
+    ("argv_del.py", _ENTRY_HEAD + "del sys.argv[1:]\n\n\n" + _ENTRY_MAIN, True, _ENTRY_ARGV),
+    ("argv_append.py", _ENTRY_HEAD + 'sys.argv.append("--quiet")\n\n\n' + _ENTRY_MAIN, True, _ENTRY_ARGV),
+    ("argv_class.py", _ENTRY_HEAD + 'class Quiet:\n    sys.argv += ["--quiet"]\n\n\n' + _ENTRY_MAIN, True,
+     _ENTRY_ARGV),
+    ("argv_local.py", _ENTRY_HEAD + "def reset():\n    del sys.argv[1:]\n\n\n" + _ENTRY_MAIN
+     + "    sys.argv.pop()\n", True, None),
+    ("two_bindings.py", _ENTRY_HEAD + "def main():\n    return 0\n\n\nself_test = main\n\n\n" + _ENTRY_MAIN, True,
+     _ENTRY_REBOUND),
+    ("star_after_def.py", _ENTRY_HEAD + "from _no_such_module import *\n\n\n" + _ENTRY_MAIN, True,
+     _ENTRY_REBOUND),
+    ("global_rebind.py", _ENTRY_HEAD + "def install():\n    global self_test\n    self_test = int\n\n\n"
+     + _ENTRY_MAIN, True, _ENTRY_REBOUND),
+    ("import_aliases.py", "import sys\nimport _no_such_module as self_test, _no_such_other as self_test\n\n"
+     + _ENTRY_MAIN, True, _ENTRY_REBOUND),
+    ("from_aliases.py", "import sys\nfrom _no_such_module import main as self_test, self_test\n\n" + _ENTRY_MAIN,
+     True, _ENTRY_REBOUND),
+    ("argv_init.py", _ENTRY_HEAD + 'sys.argv.__init__(["opf"])\n\n\n' + _ENTRY_MAIN, True, _ENTRY_ARGV),
+    ("argv_setitem.py", _ENTRY_HEAD + "sys.argv.__setitem__(slice(1, None), [])\n\n\n" + _ENTRY_MAIN, True,
+     _ENTRY_ARGV),
+    ("argv_count.py", _ENTRY_HEAD + 'QUIET = sys.argv.count("x")\n\n\n' + _ENTRY_MAIN, True, None),
+    ("no_return.py", "import sys\n\n\ndef self_test():\n    def suite():\n        return 1\n\n"
+     "    class Suite:\n        def run(self):\n            return 1\n\n    check = lambda: 1\n"
+     "    suite() or check()\n\n\n" + _ENTRY_MAIN, True, _ENTRY_NO_RETURN),
+    ("return_bare.py", "import sys\n\n\ndef self_test():\n    if sys:\n        return\n\n\n" + _ENTRY_MAIN, True,
+     _ENTRY_RETURNS_NONE),
+    ("return_none.py", "import sys\n\n\ndef self_test():\n    if not sys:\n        return 1\n    return None\n\n\n"
+     + _ENTRY_MAIN, True, _ENTRY_RETURNS_NONE),
+    ("return_value.py", "import sys\n\n\ndef self_test():\n    failures = 0\n    if failures:\n        return 1\n"
+     "    return failures\n\n\n" + _ENTRY_MAIN, True, None),
+    ("name_assign.py", _ENTRY_HEAD + '__name__ = "helper"\n\n\n' + _ENTRY_MAIN, True, _ENTRY_NAME),
+    ("name_from.py", _ENTRY_HEAD + "from os import __name__\n\n\n" + _ENTRY_MAIN, True, _ENTRY_NAME),
+    ("name_import.py", _ENTRY_HEAD + "import os as __name__\n\n\n" + _ENTRY_MAIN, True, _ENTRY_NAME),
+    ("name_global.py", _ENTRY_HEAD + "def rename():\n    global __name__\n    del __name__\n\n\n" + _ENTRY_MAIN,
+     True, _ENTRY_NAME),
+    ("name_class.py", _ENTRY_HEAD + 'class Helper:\n    __name__ = "helper"\n\n\n' + _ENTRY_MAIN, True, None),
+    ("sys_rebind.py", _ENTRY_HEAD + "sys = None\n\n\n" + _ENTRY_MAIN, True, _ENTRY_SYS),
+    ("sys_import_as.py", _ENTRY_HEAD + "import os as sys\n\n\n" + _ENTRY_MAIN, True, _ENTRY_SYS),
+    ("sys_reimport.py", _ENTRY_HEAD + "try:\n    import os, sys\nexcept ImportError:\n    pass\n"
+     'sys.path.insert(0, "lib")\n\n\n' + _ENTRY_MAIN, True, None),
+    ("sys_exit_print.py", _ENTRY_HEAD + "sys.exit = print\n\n\n" + _ENTRY_MAIN, True, "changes `sys.exit`"),
+    ("sys_stdout_none.py", _ENTRY_HEAD + "sys.stdout = None\n\n\n" + _ENTRY_MAIN, True, "changes `sys.stdout`"),
+    ("sys_del_attr.py", _ENTRY_HEAD + "class Quiet:\n    del sys.exit\n\n\n" + _ENTRY_MAIN, True,
+     "changes `sys.exit`"),
+    ("sys_augmented.py", _ENTRY_HEAD + 'sys.ps1 += "x"\n\n\n' + _ENTRY_MAIN, True, "changes `sys.ps1`"),
+    ("comp_sys_exit.py", _ENTRY_HEAD + "[None for sys.exit in [print]]\n\n\n" + _ENTRY_MAIN, True,
+     "changes `sys.exit`"),
+    ("comp_argv.py", _ENTRY_HEAD + '[None for sys.argv in [["tool"]]]\n\n\n' + _ENTRY_MAIN, True, _ENTRY_ARGV),
+    ("comp_argv_slice.py", _ENTRY_HEAD + "[None for sys.argv[1:] in [[]]]\n\n\n" + _ENTRY_MAIN, True, _ENTRY_ARGV),
+    ("comp_tuple_target.py", _ENTRY_HEAD + "{0 for (main, *sys.exit) in [(1, print)]}\n\n\n" + _ENTRY_MAIN, True,
+     "changes `sys.exit`"),
+    ("genexp_sys_exit.py", _ENTRY_HEAD + "list(None for sys.exit in [print])\n\n\n" + _ENTRY_MAIN, True,
+     "changes `sys.exit`"),
+    ("class_comp_sys_exit.py", _ENTRY_HEAD + "class Quiet:\n    [None for sys.exit in [print]]\n\n\n"
+     + _ENTRY_MAIN, True, "changes `sys.exit`"),
+    ("comp_walrus_name.py", _ENTRY_HEAD + '[(__name__ := "x") for _ in "x"]\n\n\n' + _ENTRY_MAIN, True,
+     _ENTRY_NAME),
+    ("comp_walrus_sys.py", _ENTRY_HEAD + '[(sys := None) for _ in "x"]\n\n\n' + _ENTRY_MAIN, True, _ENTRY_SYS),
+    ("comp_walrus_self_test.py", _ENTRY_HEAD + '[(self_test := int) for _ in "x"]\n\n\n' + _ENTRY_MAIN, True,
+     _ENTRY_REBOUND),
+    ("comp_local_names.py", _ENTRY_HEAD + '[sys for sys in [1]]\n{0 for (*sys, __name__) in [(1, 2)]}\n'
+     "class Rows:\n    rows = [self_test for self_test in ()]\n\n\n" + _ENTRY_MAIN, True, None),
+    ("star_only.py", "import sys\nfrom _no_such_module import *\n\n\n" + _ENTRY_MAIN, True, _ENTRY_STAR),
+    ("builtins_bind.py", _ENTRY_HEAD + '__builtins__ = {"len": len}\n\n\n' + _ENTRY_MAIN, True, _ENTRY_BUILTINS),
+    ("builtins_store.py", _ENTRY_HEAD + "import builtins\nbuiltins.len = None\n\n\n" + _ENTRY_MAIN, True,
+     "stores through `builtins`"),
+    ("builtins_subscript.py", _ENTRY_HEAD + '__builtins__["len"] = None\n\n\n' + _ENTRY_MAIN, True,
+     "stores through `__builtins__`"),
+    ("main_store.py", _ENTRY_HEAD + "import __main__\n__main__.self_test = int\n\n\n" + _ENTRY_MAIN, True,
+     "stores through `__main__`"),
+    ("sys_modules_store.py", _ENTRY_HEAD + "sys.modules[__name__].self_test = int\n\n\n" + _ENTRY_MAIN, True,
+     "stores through `sys.modules`"),
+    ("sys_dict_store.py", _ENTRY_HEAD + 'sys.__dict__["exit"] = print\n\n\n' + _ENTRY_MAIN, True,
+     "stores through `sys.__dict__`"),
+    ("sys_path_restore.py", _ENTRY_HEAD + "saved = list(sys.path)\nsys.path[:] = saved\n\n\n" + _ENTRY_MAIN, True,
+     None),
+    ("self_test_code.py", _ENTRY_HEAD + "self_test.__code__ = (lambda: 0).__code__\n\n\n" + _ENTRY_MAIN, True,
+     _ENTRY_SELF_TEST_STORE),
+    ("self_test_defaults.py", _ENTRY_HEAD + "class Patch:\n    self_test.__defaults__ = ()\n\n\n" + _ENTRY_MAIN,
+     True, _ENTRY_SELF_TEST_STORE),
+    ("self_test_del.py", _ENTRY_HEAD + "del self_test.__kwdefaults__\n\n\n" + _ENTRY_MAIN, True,
+     _ENTRY_SELF_TEST_STORE),
+    ("self_test_new.py", "import sys\n\n\nclass self_test:\n    pass\n\n\nself_test.__new__ = lambda cls: 0\n\n\n"
+     + _ENTRY_MAIN, True, _ENTRY_SELF_TEST_STORE),
+    ("expression_list.py", _ENTRY_HEAD + "[sys][0].exit = print\n\n\n" + _ENTRY_MAIN, True,
+     _ENTRY_EXPRESSION_STORE),
+    ("expression_tuple.py", _ENTRY_HEAD + "(sys,)[0].modules[__name__].self_test = int\n\n\n" + _ENTRY_MAIN, True,
+     _ENTRY_EXPRESSION_STORE),
+    ("expression_ifexp.py", _ENTRY_HEAD + "(sys if sys else None).argv[1:] = []\n\n\n" + _ENTRY_MAIN, True,
+     _ENTRY_EXPRESSION_STORE),
+    ("expression_walrus.py", _ENTRY_HEAD + "(s := sys).exit = print\n\n\n" + _ENTRY_MAIN, True,
+     _ENTRY_EXPRESSION_STORE),
+    ("expression_comp.py", _ENTRY_HEAD + "[None for [sys][0].exit in [print]]\n\n\n" + _ENTRY_MAIN, True,
+     _ENTRY_EXPRESSION_STORE),
+    ("name_root_store.py", _ENTRY_HEAD + 'rows = {}\nrows[len(rows)] = 0\nrows.copy()["x"] = 1\n\n\n'
+     + _ENTRY_MAIN, True, None),
+)
+
+
+def _self_test_entry_probe(tmp):
+    """Run the scan over the synthetic modules written into `tmp`. Returns a list of the discrepancies: a red
+    case not named, named for another reason, or a clean one named, and any exposure the scan got wrong."""
+    root = Path(tmp)
+    expected = {name: reason for name, _source, _binds, reason in _ENTRY_FIXTURES if reason is not None}
+    expected.update({"directory.py": "not a regular file", "absent.py": "the scan did not find it",
+                     "absent/": "cannot be listed", "empty/": "no module in it binds self_test"})
+    for name, source, _binds, _reason in _ENTRY_FIXTURES:
+        (root / name).write_text(source, encoding="utf-8")
+    (root / "directory.py").mkdir()
+    (root / "empty").mkdir()
+    if hasattr(os, "geteuid") and os.geteuid() != 0:   # chmod cannot make a file unreadable to root
+        (root / "unreadable.py").write_text(_ENTRY_HEAD + _ENTRY_MAIN, encoding="utf-8")
+        (root / "unreadable.py").chmod(0)
+        expected["unreadable.py"] = "cannot be read"
+    try:
+        named, exposers = _self_test_entry_gaps(root, ("canonical.py", "canonical_import.py", "absent.py"))
+    finally:
+        if (root / "unreadable.py").exists():
+            (root / "unreadable.py").chmod(0o600)
+    for label in ("absent/", "empty/"):
+        found = _self_test_entry_gaps(root / label.rstrip("/"))[0]
+        if found:
+            named[label] = "; ".join(found.values())
+    faults = ["{} not named".format(name) for name in sorted(set(expected) - set(named))]
+    faults += ["{} named wrongly ({})".format(name, named[name]) for name in sorted(set(named) - set(expected))]
+    faults += ["{} named for another reason ({})".format(name, named[name]) for name in sorted(expected)
+               if name in named and expected[name] not in named[name]]
+    binders = {name for name, _source, binds, _reason in _ENTRY_FIXTURES if binds}
+    faults += ["{} exposure misjudged".format(name) for name in sorted(binders ^ exposers)]
+    return faults
+
+
+def _self_test_floor_probe(registry, directory, elsewhere):
+    """Flip the registry floor: each synthetic registry must yield its fault, and every module the real
+    registry requires must be named when the scan runs over `elsewhere`, a directory that lacks them. Returns
+    a list of the discrepancies."""
+    misses = []
+    required = _self_test_floor(registry, directory, _ENTRY_FLOOR_EXEMPT)[0]
+    external = next(label for label, _fn in registry if label not in _ENTRY_FLOOR_EXEMPT)
+    cases = (
+        ("empty registry", (), _ENTRY_FLOOR_EXEMPT, "the self-test registry is empty"),
+        ("empty iterator registry", iter(()), _ENTRY_FLOOR_EXEMPT, "the self-test registry is empty"),
+        ("not a module's self_test", registry + (("synthetic-lambda", lambda: 0),), _ENTRY_FLOOR_EXEMPT,
+         "synthetic-lambda: its callable is not"),
+        ("exempt but external", registry, dict(_ENTRY_FLOOR_EXEMPT, **{external: "synthetic"}),
+         external + ": exempt, but not defined in"),
+        ("stale exemption", registry, dict(_ENTRY_FLOOR_EXEMPT, **{"synthetic-stale": "synthetic"}),
+         "synthetic-stale: exempt, but no registry entry"),
+    )
+    for label, table, exempt, want in cases:
+        if not any(want in fault for fault in _self_test_floor(table, directory, exempt)[1]):
+            misses.append("floor case {!r} not named".format(label))
+    gaps = _self_test_entry_gaps(elsewhere, required)[0]
+    lost = sorted(name for name in required if "the scan did not find it" not in gaps.get(name, ""))
+    if not required or lost:
+        misses.append("registry modules missing from the scan not named: {}".format(
+            ", ".join(lost) or "the registry requires none"))
+    return misses
+
+
 def _aggregator_self_test():
     """Guard the aggregator's fail-closed return-vocabulary check (MAJOR 3). A helper returning a value
     OUTSIDE the {0,1,2} int vocabulary must fail the aggregate CLOSED (a non-zero worst), never be
     admitted as clean because a bool or float compares equal to an allowed int (False == 0, True == 1,
     0.0 == 0). Returns 0 clean, 1 on a failure. Registered below so `opf.py --self-test` exercises it;
-    the store legs did not, letting a helper returning False produce an aggregate exit 0."""
+    the store legs did not, letting a helper returning False produce an aggregate exit 0. It also holds
+    the F-SELFTEST-NO-MAIN class empty by static form (_self_test_entry_gaps, which runs no module code): every
+    module in this directory that binds self_test must carry the canonical `--self-test` entry; the floor
+    (_self_test_floor) requires every module whose self_test is registered below and fails on an empty
+    registry, an empty scan, or a registered callable that is not its module's self_test and not exempt; and
+    the synthetic modules and registries prove each red case is named, for its reason, and no clean one is."""
+    import tempfile
+    if _bootstrap() != EXIT_OK:
+        return EXIT_MALFORMED
+    here = Path(__file__).resolve().parent
+    registry = _self_tests()
+    required, faults = _self_test_floor(registry, here, _ENTRY_FLOOR_EXEMPT)
+    gaps, exposers = _self_test_entry_gaps(here, required)
+    with tempfile.TemporaryDirectory(prefix="opf-entry-scan-") as tmp:
+        missed = _self_test_entry_probe(tmp) + _self_test_floor_probe(registry, here, tmp)
+    if gaps or faults or missed:
+        print("opf aggregator self-test: FAIL (self_test modules without the canonical `--self-test` entry: {}; "
+              "registry floor faults: {}; synthetic probe discrepancies: {})".format(
+                  "; ".join("{} ({})".format(k, v) for k, v in sorted(gaps.items())) or "none",
+                  "; ".join(faults) or "none", "; ".join(missed) or "none"), file=sys.stderr)
+        return EXIT_FINDING
     ok = True
     # A helper returning False (bool, == 0) must NOT aggregate to clean.
     if run_self_tests((("synthetic-false", lambda: False),)) == EXIT_OK:
@@ -155,7 +964,9 @@ def _aggregator_self_test():
         print("opf aggregator self-test: FAIL (fail-closed vocabulary check admitted a bad return)",
               file=sys.stderr)
         return EXIT_FINDING
-    print("opf aggregator self-test: PASS (fail-closed on non-int / out-of-range helper returns)")
+    print("opf aggregator self-test: PASS (fail-closed on non-int / out-of-range helper returns; each of the "
+          "{} self_test modules carries the canonical --self-test entry, {} of them required by the registry)".format(
+              len(exposers), len(required)))
     return EXIT_OK
 
 
@@ -12272,10 +13083,11 @@ def _adopt_read_inputs(path):
             try:
                 _opf_store._close_fd_exc_safe(pfd)
             except OSError:
-                # A failing parent close must not leak the just-opened worksheet fd (round-5 defect 2).
-                # The parent close is a single close (P1: a raising close has released its number,
-                # close(2), so it is never probed or closed again); the propagating error still fails
-                # the read closed below.
+                # A failing parent close must not leak the just-opened worksheet fd (round-5 defect 2)
+                # or the parent fd itself (P1, #378): the parent close is _close_fd_exc_safe's single
+                # os.close (#377) and the worksheet close the journal engine's, and close(2) has released
+                # the number when it reports the error, so it is never touched again; the propagating
+                # error still fails the read closed below.
                 if fd is not None:
                     _opf_adopt_apply._journal._close_fd_quietly(fd)
                 raise
@@ -14165,21 +14977,29 @@ def _close_exc_safe_vectors_self_test():
       body    the body's exception is in flight at the close: that SAME exception object must propagate;
       normal  nothing is in flight: the injected close error must propagate (fail-closed);
       caller  the normal vector run from inside a CALLER's `except` block: the close error must still
-              propagate, since the caller's handled exception is not in flight at the close.
-    Every vector also requires that no descriptor it opened survives. V1, deterministic reuse: where the
-    injected close is one of #377's own helpers, the fault also dup2s an unrelated file onto the freed
-    number before it raises, and two more assertions hold: REUSE, that descriptor is still open with its
-    own (st_dev, st_ino); PROBE, the number sees no further os.close and no os.fstat. A site whose
-    injected close is _journal's own helper (_JOURNAL_ROUTED) gets the release-then-raise without the
-    reuse, since _journal's P1 bodies are #378's. Four flips then re-run every vector and must turn
+              propagate, since the caller's handled exception is not in flight at the close;
+      quiet   a teardown close that swallows by design: the call must complete without the close error.
+    Every vector also requires that no descriptor it opened survives. V1, deterministic reuse, on every
+    vector: the fault also dup2s an unrelated file onto the freed number before it raises, and two more
+    assertions hold: REUSE, that descriptor is still open with its own (st_dev, st_ino); PROBE, the number
+    sees no further os.close and no os.fstat. A run whose reuse setup failed (the unrelated file never
+    reached the number) is red by REUSE, never a pass. Five flips then re-run the vectors and must turn
     exactly their own vectors red, each by that vector's own assertion: MASK (every close helper always
     propagating) the body vectors; SWALLOW (always quiet) the normal and caller vectors; CALLER-FRAME
     (#377 fix 1's any-exception test in place of the calling-frame test, in both helpers, the ExitStack
-    callback and the descriptor stack's close) the caller vectors; and RECLOSE (the pre-P1
-    fstat-then-reclose recovery put back in #377's helpers) every V1 vector, by REUSE (PROBE may fail
-    with it; nothing else may). V2 then drives each #377 helper, the descriptor stack and
-    _opf_check._close_fd_quietly with a real second thread that takes the freed number before the close
-    raises: that thread must still own it, and RECLOSE must turn each V2 vector red the same way.
+    callback and the descriptor stack's close) the caller vectors; RECLOSE (the pre-P1 fstat-then-reclose
+    recovery put back in #377's helpers, in _journal's _close_fd_quietly and _close_fd_propagating, and in
+    _opf_check._close_fd_quietly) every V1 vector, by REUSE (PROBE may fail with it; nothing else may);
+    and PROBE (#378's P flip: the same helpers making one close, then an fstat of the number when it
+    fails, never a second close) every V1 vector, by PROBE alone. The six sites #377 routes through
+    _journal's helpers (_opf_adopt_observe._open_directory's except, _opf_views._render_resolved_store's
+    product-root refusal, both closes in _opf_views._restore_preimages' finally,
+    _opf_write_guard.lease_held_message and opf._init_repo) carry the same V1 vectors; all but
+    _open_directory run unflipped, under RECLOSE and under PROBE only (MASK, SWALLOW and CALLER-FRAME name
+    #377's own helpers, which those sites do not call). V2 then drives each #377 helper, the descriptor
+    stack and _opf_check._close_fd_quietly with a real second thread that takes the freed number before
+    the close raises: that thread must still own it, and RECLOSE (by REUSE) and PROBE (by PROBE alone) must
+    turn each V2 vector red. Last, a forced reuse-setup failure must turn a V1 row red by REUSE.
     Returns 0 clean, 1 on a failing check, 2 on a harness error."""
     import contextlib
     import errno
@@ -14196,7 +15016,8 @@ def _close_exc_safe_vectors_self_test():
     real_open, real_dup, real_close, real_fstat, real_read = os.open, os.dup, os.close, os.fstat, os.read
     ANY = object()
     state = types.SimpleNamespace(opened=[], target=None, injected=None, err=errno.EIO, reuse=False,
-                                  number=None, closes=0, probes=0, unrelated=None, want=None)
+                                  number=None, closes=0, probes=0, unrelated=None, want=None,
+                                  break_reuse=False)
 
     def propagating(fd):
         """A P1 propagating close (the MASK and CALLER-FRAME stand-in): one os.close, its error raised."""
@@ -14229,6 +15050,23 @@ def _close_exc_safe_vectors_self_test():
         tb = sys.exc_info()[2]
         reclose(fd, tb is not None and tb.tb_frame is sys._getframe(1))
 
+    def probe(fd, quiet):
+        """PROBE (#378's P flip): one os.close, then an fstat of the number when it fails, never a second
+        close; the error rule is the helper's own, so the flip is red by PROBE alone."""
+        try:
+            os.close(fd)
+            return
+        except OSError as exc:
+            first = exc
+        with contextlib.suppress(OSError):
+            os.fstat(fd)
+        if not quiet:
+            raise first
+
+    def probe_exc_safe(fd):
+        tb = sys.exc_info()[2]
+        probe(fd, tb is not None and tb.tb_frame is sys._getframe(1))
+
     class _Body(BaseException):
         """The body's in-flight exception; a BaseException, so no site handler maps it."""
 
@@ -14257,8 +15095,12 @@ def _close_exc_safe_vectors_self_test():
             real_close(fd)                    # RELEASED first, as close(2) does on Linux
             state.injected = OSError(state.err, "injected released-close failure")
             if state.reuse:
-                os.dup2(state.unrelated, fd)  # V1: an unrelated file takes the freed number
-                state.number = fd
+                try:                          # V1: an unrelated file takes the freed number
+                    os.dup2(-1 if state.break_reuse else state.unrelated, fd)
+                except OSError:
+                    pass                      # the reuse setup failed: p1_fails reports it, never a pass
+                else:
+                    state.number = fd
             raise state.injected
         real_close(fd)
 
@@ -14267,22 +15109,36 @@ def _close_exc_safe_vectors_self_test():
             state.probes += 1                 # an fstat probe of the injected number (PROBE)
         return real_fstat(fd, *args, **kwargs)
 
+    def holds_unrelated(fd):
+        """Whether fd still names the unrelated file a V1 fault put on it (only then is it closed here)."""
+        try:
+            now = real_fstat(fd)
+        except OSError:
+            return False
+        return (now.st_dev, now.st_ino) == (state.want.st_dev, state.want.st_ino)
+
     def p1_fails():
-        """The REUSE and PROBE failures of the run just made; releases the reused number."""
+        """The REUSE and PROBE failures of the run just made; releases the reused number. A run that asked
+        for reuse whose unrelated file never reached the injected number is red by REUSE: without it the
+        REUSE and PROBE assertions have nothing to observe, so the row proves nothing."""
         fails = []
         if state.number is None:
+            if state.reuse:
+                fails.append("reuse: the reuse setup failed (no unrelated file was put on the injected "
+                             "number{})".format("" if state.injected is not None else "; nothing fired"))
             return fails
         if state.closes or state.probes:
             fails.append("probe: the injected number saw {} more close(s) and {} fstat(s)".format(
                 state.closes, state.probes))
-        try:
-            now = real_fstat(state.number)
-        except OSError:
-            fails.append("reuse: the unrelated descriptor on the reused number was closed")
-        else:
-            if (now.st_dev, now.st_ino) != (state.want.st_dev, state.want.st_ino):
+        if not holds_unrelated(state.number):
+            try:
+                real_fstat(state.number)
+            except OSError:
+                fails.append("reuse: the unrelated descriptor on the reused number was closed")
+            else:                             # another file holds the number now: never closed here
                 fails.append("reuse: the reused number no longer holds the unrelated file")
-            real_close(state.number)
+        else:
+            real_close(state.number)          # still the unrelated file this run put there
         return fails
 
     def run(call, reuse=False, err=errno.EIO):
@@ -14304,8 +15160,8 @@ def _close_exc_safe_vectors_self_test():
             state.target = None
         left = []
         for fd in sorted(set(state.opened)):
-            if fd == state.number:            # graded by REUSE, never as a survivor
-                continue
+            if fd == state.number and holds_unrelated(fd):
+                continue                      # the unrelated file: graded by REUSE, never as a survivor
             try:
                 real_fstat(fd)
             except OSError:
@@ -14555,25 +15411,100 @@ def _close_exc_safe_vectors_self_test():
                 real_close(root)
         return call
 
+    def c_views_render_root_refused(body):
+        def call():
+            real_root = _opf_store._open_root_fd
+            calls = []
+
+            def open_root(path):
+                calls.append(path)
+                if len(calls) == 2:           # the product root: refused, so its handler closes the store fd
+                    arm()
+                    raise FileNotFoundError(errno.ENOENT, "self-test: product root refused")
+                return real_root(path)
+            with mock.patch.object(_opf_store, "_open_root_fd", open_root):
+                code = _opf_views._render_resolved_store(tmp, res, True)
+            if code != _opf_views.EXIT_CANNOT_EVALUATE:
+                raise RuntimeError("the refused product root returned {!r}".format(code))
+        return call
+
+    def c_views_restore(which):
+        """_restore_preimages with the `which`-th root it opens armed: 1, the store root; 2, the product root."""
+        def case(body):
+            def call():
+                real_root = _opf_store._open_root_fd
+                opened = []
+
+                def open_root(path):
+                    fd = real_root(path)
+                    opened.append(fd)
+                    if len(opened) == which:
+                        arm(fd)
+                    return fd
+                with mock.patch.object(_opf_store, "_open_root_fd", open_root):
+                    failed = _opf_views._restore_preimages(tmp, res, {})
+                if failed:
+                    raise RuntimeError("the empty rollback reported {!r}".format(failed))
+            return call
+        return case
+
+    def c_write_guard_lease_held(body):
+        def call():
+            parent = dirfd(tmp)
+            try:
+                with then_arm(os, "open", None):  # the lease open arms its own close
+                    message = _opf_write_guard.lease_held_message(parent, "held.toml", "m/held.toml", "render")
+            finally:
+                real_close(parent)
+            if "held by 'vector'" not in message:
+                raise RuntimeError("the held-lease message lost its holder ({!r})".format(message))
+        return call
+
+    def c_opf_init_repo(body):
+        def call():
+            real_nofollow = _opf_store._open_dir_nofollow
+
+            def nofollow(path):
+                fd = real_nofollow(path)
+                arm(fd)                       # only the repository-root probe's close is injected
+                return fd
+            with mock.patch.object(_opf_store, "_open_dir_nofollow", nofollow):
+                _init_repo(repo)
+        return call
+
+    # (site, case, vector kinds, the flips it runs under: None for every flip).
+    every = ("body", "normal", "caller")
+    journal_flips = (None, "RECLOSE", "PROBE")
     cases = (
-        ("_opf_store._immediate_subdirs finally", c_store_subdirs, True),
-        ("_opf_store.load_manifest finally", c_store_load_manifest, True),
-        ("_opf_views._render_resolved_store two-close finally", c_views_render, True),
-        ("_opf_views._write_contained temp-file finally", c_views_write_temp, True),
-        ("_opf_adopt_apply._default_store_present_without_manifest finally", c_adopt_apply_probe, True),
-        ("_opf_adopt_apply.run_adopt_transaction product-root finally", c_adopt_apply_transaction, True),
-        # Its normal path returns the fd unclosed, so it has a body vector only.
-        ("_opf_adopt_observe._open_directory except", c_adopt_observe_open_directory, False),
-        ("_opf_adopt_observe._put descriptor-stack exit callback", c_adopt_observe_put, True),
-        ("_opf_adopt_observe._quarantine with-stack exit callback", c_adopt_observe_quarantine, True),
-        ("_opf_changelog._load_inputs finally", c_changelog, True),
-        ("_opf_absorb._load_done finally", c_absorb, True),
-        ("_opf_observe._worktree_open_succeeds finally", c_observe, True),
-        ("_opf_write_guard.read_lease_payload finally", c_write_guard_read, True),
-        ("_opf_write_guard.acquire_lease payload-fd finally", c_write_guard_acquire, True),
-        ("check_opf_prompt_pack._read_regular finally", c_prompt_pack, True),
-        ("opf._init_same_root finally", c_opf_same_root, True),
-        ("opf._init_create finally", c_opf_init_create, True),
+        ("_opf_store._immediate_subdirs finally", c_store_subdirs, every, None),
+        ("_opf_store.load_manifest finally", c_store_load_manifest, every, None),
+        ("_opf_views._render_resolved_store two-close finally", c_views_render, every, None),
+        ("_opf_views._write_contained temp-file finally", c_views_write_temp, every, None),
+        ("_opf_adopt_apply._default_store_present_without_manifest finally", c_adopt_apply_probe, every, None),
+        ("_opf_adopt_apply.run_adopt_transaction product-root finally", c_adopt_apply_transaction, every, None),
+        # Its normal path returns the fd unclosed, so it has a body vector only. Its close is
+        # _journal._close_fd_quietly (#377 routes it there); MASK covers it as the journal helper propagating.
+        ("_opf_adopt_observe._open_directory except", c_adopt_observe_open_directory, ("body",), None),
+        ("_opf_adopt_observe._put descriptor-stack exit callback", c_adopt_observe_put, every, None),
+        ("_opf_adopt_observe._quarantine with-stack exit callback", c_adopt_observe_quarantine, every, None),
+        ("_opf_changelog._load_inputs finally", c_changelog, every, None),
+        ("_opf_absorb._load_done finally", c_absorb, every, None),
+        ("_opf_observe._worktree_open_succeeds finally", c_observe, every, None),
+        ("_opf_write_guard.read_lease_payload finally", c_write_guard_read, every, None),
+        ("_opf_write_guard.acquire_lease payload-fd finally", c_write_guard_acquire, every, None),
+        ("check_opf_prompt_pack._read_regular finally", c_prompt_pack, every, None),
+        ("opf._init_same_root finally", c_opf_same_root, every, None),
+        ("opf._init_create finally", c_opf_init_create, every, None),
+        # The other five closes #377 routes through _journal's helpers: four quiet teardown closes
+        # (_journal._close_fd_quietly) and _init_repo's normal-path probe close (_journal._close_fd_propagating).
+        ("_opf_views._render_resolved_store product-root refusal", c_views_render_root_refused, ("quiet",),
+         journal_flips),
+        ("_opf_views._restore_preimages finally, store-root close", c_views_restore(1), ("quiet",),
+         journal_flips),
+        ("_opf_views._restore_preimages finally, product-root close", c_views_restore(2), ("quiet",),
+         journal_flips),
+        ("_opf_write_guard.lease_held_message finally", c_write_guard_lease_held, ("quiet",), journal_flips),
+        ("opf._init_repo repository-root probe close", c_opf_init_repo, ("normal", "caller"), journal_flips),
     )
 
     def chain(exc):
@@ -14602,6 +15533,9 @@ def _close_exc_safe_vectors_self_test():
         elif kind == "body":
             if got is not getattr(body, "want", body):
                 fails.append("body: the in-flight exception was replaced (got {!r})".format(got))
+        elif kind == "quiet":
+            if got is not None:
+                fails.append("quiet: the teardown close did not complete quietly (got {!r})".format(got))
         elif all(e is not state.injected for e in chain(got)):
             fails.append("{}: the close error was not raised (got {!r})".format(kind, got))
         if left:
@@ -14706,8 +15640,9 @@ def _close_exc_safe_vectors_self_test():
             fails.append("reuse: the second thread's descriptor was closed")
         else:
             if (now.st_dev, now.st_ino) != (seen.want.st_dev, seen.want.st_ino):
-                fails.append("reuse: the second thread's number no longer holds its file")
-            real_close(fd)
+                fails.append("reuse: the second thread's number no longer holds its file")   # never closed here
+            else:
+                real_close(fd)                # still the second thread's file
         return fails
 
     flips = (
@@ -14728,15 +15663,23 @@ def _close_exc_safe_vectors_self_test():
                      (check_opf_prompt_pack, "_close_fd_exc_safe", reclose_exc_safe),
                      (_opf_store, "_close_fd_on_exit",
                       lambda fd, exc_type, exc, tb: reclose(fd, exc is not None)),
-                     (_opf_check, "_close_fd_quietly", lambda fd: reclose(fd, True)))),
+                     (_opf_check, "_close_fd_quietly", lambda fd: reclose(fd, True)),
+                     (journal, "_close_fd_quietly", lambda fd: reclose(fd, True)),
+                     (journal, "_close_fd_propagating", lambda fd: reclose(fd, False)))),
+        ("PROBE", ((_opf_store, "_close_fd_exc_safe", probe_exc_safe),
+                   (check_opf_prompt_pack, "_close_fd_exc_safe", probe_exc_safe),
+                   (_opf_store, "_close_fd_on_exit", lambda fd, exc_type, exc, tb: probe(fd, exc is not None)),
+                   (_opf_check, "_close_fd_quietly", lambda fd: probe(fd, True)),
+                   (journal, "_close_fd_quietly", lambda fd: probe(fd, True)),
+                   (journal, "_close_fd_propagating", lambda fd: probe(fd, False)))),
     )
     # The one assertion each flip must break, per vector kind; every other vector must stay green.
     reds = {None: {}, "MASK": {"body": "body"}, "SWALLOW": {"normal": "normal", "caller": "caller"},
             "CALLER-FRAME": {"caller": "caller"}}
-    # RECLOSE breaks REUSE (PROBE may break with it) on every V1 vector, and leaves the _JOURNAL_ROUTED
-    # vectors green: their injected close is _journal's own helper, whose P1 body is #378's.
-    reds["RECLOSE"] = dict(body="reuse", normal="reuse", caller="reuse")
-    _JOURNAL_ROUTED = frozenset(("_opf_adopt_observe._open_directory except",))
+    # RECLOSE breaks REUSE (PROBE may break with it) on every V1 vector, the journal-routed sites' included
+    # (the flip puts the pre-P1 body back in _journal's helpers too); PROBE breaks PROBE alone on every one.
+    reds["RECLOSE"] = dict(body="reuse", normal="reuse", caller="reuse", quiet="reuse")
+    reds["PROBE"] = dict(body="probe", normal="probe", caller="probe", quiet="probe")
     failures = []
     checks = 0
     try:
@@ -14745,18 +15688,32 @@ def _close_exc_safe_vectors_self_test():
         (tmp / "lease").write_bytes(b"payload")
         (tmp / "big").write_bytes(b"x" * 64)
         (tmp / "unrelated").write_bytes(b"unrelated")
+        (tmp / "held.toml").write_bytes(
+            b'holder = "vector"\noperation = "render"\nacquired_at = "2026-01-01T00:00:00Z"\n')
+        # The journal-routed sites resolve the helpers a flip patches through this one _journal module.
+        if _opf_views._journal is not journal or _opf_adopt_observe.store._journal is not journal:
+            raise RuntimeError("a journal-routed site does not resolve the patched _journal module")
+        repo = tmp / "repo"
+        repo.mkdir()
+        git = _opf_observe._git_path()
+        made = None if git is None else _opf_observe._run_git(
+            git, repo, ["-c", "init.templateDir=", "-c", "init.defaultBranch=main", "init", "-q"])
+        if made is None or not made.completed or made.rc != 0:
+            raise RuntimeError("the fixture worktree could not be initialized ({})".format(
+                "git not found" if made is None else made.err))
         state.unrelated = real_open(str(tmp / "unrelated"), os.O_RDONLY)
         state.want = real_fstat(state.unrelated)
         for flip, patches in flips:
             with contextlib.ExitStack() as patched:
                 for obj, name, value in patches:
                     patched.enter_context(mock.patch.object(obj, name, value))
-                for site, case, has_normal in cases:
-                    reuse = site not in _JOURNAL_ROUTED
-                    for kind in ("body", "normal", "caller") if has_normal else ("body",):
+                for site, case, kinds, only in cases:
+                    if only is not None and flip not in only:
+                        continue
+                    for kind in kinds:
                         for err in (errno.EINTR, errno.EIO):
-                            fails = vector(kind, case, reuse, err)
-                            wanted = None if flip == "RECLOSE" and not reuse else reds[flip].get(kind)
+                            fails = vector(kind, case, True, err)
+                            wanted = reds[flip].get(kind)
                             ok = graded(fails, wanted, flip)
                             checks += 1
                             if not ok:
@@ -14765,20 +15722,35 @@ def _close_exc_safe_vectors_self_test():
                             print("  {} {} {} {} [{}]: {}".format(
                                 "PASS" if ok else "FAIL", flip or "unflipped", kind, errno.errorcode[err],
                                 site, "; ".join(fails) if fails else "green"))
-        for flip in (None, "RECLOSE"):
+        for flip in (None, "RECLOSE", "PROBE"):
             with contextlib.ExitStack() as patched:
                 for obj, name, value in dict(flips)[flip]:
                     patched.enter_context(mock.patch.object(obj, name, value))
                 for name, helper, propagates in v2_helpers:
                     for err in (errno.EINTR, errno.EIO):
                         fails = second_thread(helper, propagates, err)
-                        ok = graded(fails, "reuse" if flip else None, flip)
+                        ok = graded(fails, {"RECLOSE": "reuse", "PROBE": "probe"}.get(flip), flip)
                         checks += 1
                         if not ok:
                             failures.append((flip or "unflipped", "V2", errno.errorcode[err], name, fails))
                         print("  {} {} V2 {} [{}]: {}".format(
                             "PASS" if ok else "FAIL", flip or "unflipped", errno.errorcode[err], name,
                             "; ".join(fails) if fails else "green"))
+        # A V1 row whose reuse setup fails (the unrelated file never reaches the number: here dup2 is handed
+        # an invalid source) must be red by REUSE, never pass because REUSE and PROBE had nothing to observe.
+        for err in (errno.EINTR, errno.EIO):
+            state.break_reuse = True
+            try:
+                fails = vector("body", c_store_subdirs, True, err)
+            finally:
+                state.break_reuse = False
+            ok = any(f.startswith("reuse:") for f in fails)
+            checks += 1
+            if not ok:
+                failures.append(("forced-reuse-setup-failure", "body", errno.errorcode[err],
+                                 "_opf_store._immediate_subdirs finally", fails))
+            print("  {} forced-reuse-setup-failure body {} [_opf_store._immediate_subdirs finally]: {}".format(
+                "PASS" if ok else "FAIL", errno.errorcode[err], "; ".join(fails) if fails else "green"))
     except Exception as exc:  # noqa: BLE001  a fixture that cannot be built is a harness error, never a pass
         print("opf close exc-safe vectors self-test: harness error ({!r})".format(exc), file=sys.stderr)
         return EXIT_MALFORMED
@@ -14817,6 +15789,7 @@ def _self_tests():
     ("opf-adopt-apply", _opf_adopt_apply.self_test),
     ("opf-fuzz", _opf_fuzz.self_test),
     ("opf-check", _opf_check.self_test),
+    ("opf-journal", _opf_store._journal.self_test),   # #378: the _close_fd_yielding vectors
     ("opf-watchdog-isolation", _watchdog_isolation_self_test),
     ("opf-watchdog-regressions", _watchdog_regression_self_test),
     ("opf-aggregator", _aggregator_self_test),

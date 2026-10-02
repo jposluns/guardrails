@@ -94,7 +94,11 @@ def _close_fd_exc_safe(fd):
 
 
 def _read_regular(path, limit, what):
-    """Exact bytes of a regular file, never following a final symlink, bounded by limit."""
+    """Exact bytes of a regular file, never following a final symlink, bounded by limit. The file object is
+    made with closefd=False, so it never closes fd (not when os.fdopen fails after creating its raw file and
+    closes that file, nor when a dropped object is collected); the finally's close is the one close of fd
+    on every path, so who closes fd is never in doubt (P1, #378). That close is _close_fd_exc_safe's (#377):
+    a failing close never replaces an exception in flight here, and fails closed on the normal path."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     except OSError as exc:
@@ -106,12 +110,10 @@ def _read_regular(path, limit, what):
                  CANNOT_EVALUATE)
         _require(st.st_size <= limit, what + "-bound", what + " exceeds the size bound",
                  CANNOT_EVALUATE)
-        with os.fdopen(fd, "rb") as handle:
-            fd = None
+        with os.fdopen(fd, "rb", closefd=False) as handle:
             data = handle.read(limit + 1)
     finally:
-        if fd is not None:
-            _close_fd_exc_safe(fd)
+        _close_fd_exc_safe(fd)
     _require(len(data) <= limit, what + "-bound", what + " exceeds the size bound", CANNOT_EVALUATE)
     return data
 
@@ -335,7 +337,85 @@ def _snapshot(root):
                 if p.is_file() and not p.is_symlink())
 
 
+def _close_vectors(tmp):
+    """#378 P1: _read_regular's finally makes the only close of its descriptor, on the normal path, when
+    os.fdopen refuses before creating anything, and when os.fdopen fails after its raw file exists (io.open
+    then closes that file). Each vector fails that close after its number is released to a reuser (the
+    shared opf/tools/_journal.py close harness, loaded from its sibling FILE by explicit path so this runs
+    under `python3 -I`). The close is _close_fd_exc_safe's (#377): where the refusal is in flight (the two
+    fdopen failures) its close error is dropped and the refusal propagates (masking), and on the normal path
+    the close error propagates. Green is no problem at all. The wrapping-failure vector is also run against
+    the pre-fix body (fdopen taking fd, `fd = None` as the with body's first statement) and must be red by
+    NOFIRE alone: the failed wrapper's own close released fd first, so the finally's close was a second
+    close. Returns the failures."""
+    import importlib.util
+    import inspect
+    spec = importlib.util.spec_from_file_location("_prompt_pack_close_harness",
+                                                  Path(__file__).resolve().parent / "_journal.py")
+    harness = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(harness)
+    member = Path(tmp) / "close-member.md"
+    member.write_bytes(b"member\n")
+    sent = harness._StSentinel("in flight at _read_regular")
+
+    def read(mode, site=None):
+        def call(fault):
+            real = os.fdopen
+
+            def spy(fd, *args, **kwargs):
+                fault.arm(fd)
+                if mode == "refused":
+                    raise sent
+                handle = real(fd, *args, **kwargs)
+                if mode == "wrap":
+                    handle.close()                # as io.open closes the raw file of a wrapper that failed
+                    raise sent
+                return handle
+            os.fdopen = spy
+            try:
+                (site or _read_regular)(member, MAX_MEMBER_BYTES, "member")
+            finally:
+                os.fdopen = real
+        return call
+
+    failures = []
+    def in_flight(exc):
+        return exc is sent
+
+    for label, mode, masking, expect in (("refused", "refused", True, in_flight),
+                                         ("raw file exists", "wrap", True, in_flight),
+                                         ("normal path", "read", False, None)):
+        got = harness._st_close_run(read(mode), masking, expect)
+        if got:
+            failures.append("close vector _read_regular ({}): expected green, got {}".format(label, got))
+    source = inspect.getsource(_read_regular)
+    new = ('        with os.fdopen(fd, "rb", closefd=False) as handle:\n'
+           "            data = handle.read(limit + 1)\n    finally:\n        _close_fd_exc_safe(fd)\n")
+    old = ('        with os.fdopen(fd, "rb") as handle:\n            fd = None\n'
+           "            data = handle.read(limit + 1)\n    finally:\n        if fd is not None:\n"
+           "            _close_fd_exc_safe(fd)\n")
+    if source.count(new) != 1:
+        return failures + ["close vector _read_regular revert: target found {} times".format(source.count(new))]
+    reverted = dict(globals())
+    exec(compile(source.replace(new, old), __file__, "exec"), reverted)
+    red = harness._st_close_run(read("wrap", reverted["_read_regular"]), True, in_flight, False)
+    if [problem.split(":")[0] for problem in red] != ["NOFIRE"]:
+        failures.append("close vector _read_regular under the pre-fix fdopen ownership: expected red by NOFIRE "
+                        "alone, got {}".format(red or "green"))
+    return failures
+
+
 def self_test():
+    """Run the vectors behind main()'s cannot-evaluate backstop, so the canonical `--self-test` entry maps an
+    exception escaping them to exit 2 exactly as `main(["--self-test"])` does."""
+    try:
+        return _self_test_vectors()
+    except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false 0
+        print("check_opf_prompt_pack: cannot evaluate: unexpected error ({!r})".format(exc), file=sys.stderr)
+        return 2
+
+
+def _self_test_vectors():
     """0 every vector returned its exact status and guard, 1 a discriminator failed, 2 harness error."""
     failures = []
     count = 0
@@ -422,6 +502,11 @@ sys.exit(0)
                     print("{} {}: {}".format("PASS" if ok else "FAIL", name, detail))
                     if not ok:
                         failures.append(name + ": " + detail)
+            close_failures = _close_vectors(tmp)
+            count += 4
+            print("{} close-vectors: {}".format("FAIL" if close_failures else "PASS",
+                                                "; ".join(close_failures) or "3 green, 1 pre-fix red"))
+            failures.extend(close_failures)
         count += 1
         if compute_digest("1.0.0", []) != "sha256:" + _sha(b"opf.prompt-pack/v1\nversion 1.0.0\n"):
             failures.append("digest-definition")
@@ -456,4 +541,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(self_test())
     sys.exit(main())
