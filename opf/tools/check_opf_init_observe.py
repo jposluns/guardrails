@@ -7,7 +7,6 @@ created. Filesystem/operation fixture families remain separate PR4 obligations.
 The harness accepts source text without a reconciled repository review target;
 reversal reports identify the measured candidate content digest only.
 """
-import argparse
 import hashlib
 import pathlib
 import sys
@@ -496,18 +495,26 @@ def shared_tests(module, capture_source, run_source, *, reversals):
               "candidate_sha256=" + digest)
 
 
-if __name__ == "__main__":
+def _self_test(reversals):
     import ast
     import _opf_observe
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--self-test", action="store_true")
-    parser.add_argument("--red-on-revert", action="store_true")
-    args = parser.parse_args()
     here = pathlib.Path(__file__).parent
     source = here.joinpath("_opf_init_observe.py").read_text(encoding="utf-8")
-    run(source, reversals=args.red_on_revert)
+    run(source, reversals=reversals)
     shared_source = here.joinpath("_opf_observe.py").read_text(encoding="utf-8")
     functions = {node.name: ast.get_source_segment(shared_source, node) + "\n"
                  for node in ast.parse(shared_source).body if isinstance(node, ast.FunctionDef)}
     shared_tests(_opf_observe, functions["_capture_bounded"], functions["_run_git"],
-                 reversals=args.red_on_revert)
+                 reversals=reversals)
+    return 0
+
+
+# The self-test runs only for an exact argument list: `--self-test`, or `--self-test --red-on-revert` as the
+# runners call it. Any other list exits 2 (no argparse, so no prefix abbreviation such as `--self-t`).
+if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        sys.exit(_self_test(False))
+    if sys.argv[1:] == ["--self-test", "--red-on-revert"]:
+        sys.exit(_self_test(True))
+    sys.stderr.write("usage: python3 -I -B check_opf_init_observe.py --self-test [--red-on-revert]\n")
+    sys.exit(2)

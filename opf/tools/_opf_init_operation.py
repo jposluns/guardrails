@@ -3813,7 +3813,7 @@ def _view_tests(base, env, ok, signal):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] in ("--self-test", "--selftest"):
+    if sys.argv[1:] == ["--self-test"]:
         sys.exit(_run_self_test())
     if len(sys.argv) == 7 and sys.argv[1] == "--selftest-child":
         sys.exit(_child_main(sys.argv[2:]))

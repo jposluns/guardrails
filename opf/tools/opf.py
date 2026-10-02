@@ -1044,14 +1044,25 @@ def _self_test_floor_probe(registry, directory, elsewhere):
 
 
 # The live-mode dispatchers a `__main__` tail falls through to (`sys.exit(<def>(...))`) run self_test only for
-# an exact argument list from a closed set: exactly `--self-test`, or a variant declared here that a runner
-# calls. Every other list below names the self-test and must be refused (exit 2, a stderr line, no PASS).
+# an exact argument list from a closed set: exactly `--self-test`, or a variant declared here. So does every
+# other module whose source compares against a `--self-test` string (_argv_self_test_compare), whatever its
+# self-test function is called. This table is the single declaration of the variants: each must be called
+# by a runner (_dispatch_runner_forms) or by the module's own source, and every form a runner calls with
+# `--self-test` must be exactly `--self-test` or declared here. Every other list below names the self-test and
+# must be refused (exit 2, a stderr line, no PASS).
 _DISPATCH_VARIANTS = {
     "check_opf_record.py": (["--self-test", "--red-on-revert"],),
     "_opf_adopt_observe.py": (["--self-test", "--vectors-only"],),
     "_opf_pack_manifest.py": (["--self-test", "--vectors-only"],),
+    "check_opf_init_observe.py": (["--self-test", "--red-on-revert"],),
+    "check_opf_init_p0.py": (["--self-test", "--red-on-revert"], ["--self-test", "--vectors-only"]),
 }
 _DISPATCH_REFUSED = (["--self-test", "extra"], ["--selftest"], ["--self-t"], ["extra", "--self-test"])
+_DISPATCH_FLAGS = ("--self-test", "--selftest")
+# The runners whose `--self-test` forms the table is reconciled against, relative to the repository root two
+# levels above this directory; this directory's own run_all_checks.sh is required, the others are read when
+# present (a standalone opf copy carries only its own).
+_DISPATCH_RUNNERS = ("tools/run_all_checks.sh", ".github/workflows/quality.yml")
 _DISPATCH_STUB = (
     "import os, sys\n"
     "sys.argv = sys.argv[1:]\n"
@@ -1059,39 +1070,182 @@ _DISPATCH_STUB = (
     "module = __import__(os.path.basename(sys.argv[0])[:-3])\n"
     "module.self_test = lambda **kwargs: print('DISPATCHED', sorted(kwargs.items())) or 0\n"
     "sys.exit(module.main())\n")
+# For a module that binds no self_test: run it as `__main__` with a profile hook that, at the first call of a
+# function the exact `--self-test` branches dispatch (_dispatch_targets), prints its bool arguments and ends
+# the child before the suite runs.
+_DISPATCH_REACH_STUB = (
+    "import os, runpy, sys\n"
+    "path, targets = os.path.realpath(sys.argv[1]), sys.argv[2].split(',')\n"
+    "sys.argv = [path] + sys.argv[3:]\n"
+    "sys.path.insert(0, os.path.dirname(path))\n"
+    "def hook(frame, event, arg):\n"
+    "    code = frame.f_code\n"
+    "    if event == 'call' and code.co_name in targets and code.co_filename == path:\n"
+    "        print('DISPATCHED', sorted((k, v) for k, v in frame.f_locals.items() if isinstance(v, bool)),\n"
+    "              flush=True)\n"
+    "        os._exit(0)\n"
+    "sys.setprofile(hook)\n"
+    "runpy.run_path(path, run_name='__main__')\n"
+    "sys.setprofile(None)\n"
+    "print('NOT DISPATCHED')\n")
+
+
+def _argv_self_test_compare(tree):
+    """Whether a parsed module compares against a `--self-test` or `--selftest` string: a comparison with such
+    a literal as an operand or an element of a list, tuple or set operand (`sys.argv[1:] == ["--self-test"]`,
+    `"--self-test" in sys.argv`, `sys.argv[1] in ("--self-test", "--selftest")`), or an add_argument call
+    naming one (an argparse parser, which also accepts a prefix such as `--self-t`)."""
+    import ast
+
+    def flag(node):
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            return any(flag(element) for element in node.elts)
+        return isinstance(node, ast.Constant) and node.value in _DISPATCH_FLAGS
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Compare) and any(flag(operand) for operand in [node.left] + node.comparators):
+            return True
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "add_argument" and any(flag(arg) for arg in node.args)):
+            return True
+    return False
+
+
+def _dispatch_targets(tree):
+    """The names of the functions called in the bodies of the module's exact `--self-test` branches: each
+    `if <argument list> == ["--self-test", ...]:` (`sys.argv[1:]`, or a name holding a copy of it)."""
+    import ast
+    targets = set()
+    for node in ast.walk(tree):
+        test = node.test if isinstance(node, ast.If) else None
+        if not (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq)
+                and isinstance(test.comparators[0], ast.List) and test.comparators[0].elts
+                and isinstance(test.comparators[0].elts[0], ast.Constant)
+                and test.comparators[0].elts[0].value == "--self-test"):
+            continue
+        targets.update(call.func.id for statement in node.body for call in ast.walk(statement)
+                       if isinstance(call, ast.Call) and isinstance(call.func, ast.Name))
+    return targets
+
+
+def _dispatch_guard(tree):
+    """Whether the module refuses every argument list outside a closed set of literal lists naming
+    `--self-test`: an `if <argument list> not in ([...], ["--self-test"], ...):` (check_opf_init.py runs one
+    suite for `[]` and `--self-test`, so it has no separate self-test branch to reach)."""
+    import ast
+    for node in ast.walk(tree):
+        test = node.test if isinstance(node, ast.If) else None
+        if (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.NotIn)
+                and isinstance(test.comparators[0], (ast.Tuple, ast.List)) and test.comparators[0].elts
+                and all(isinstance(each, ast.List) and all(isinstance(item, ast.Constant)
+                                                           and isinstance(item.value, str) for item in each.elts)
+                        for each in test.comparators[0].elts)
+                and any(item.value == "--self-test" for each in test.comparators[0].elts for item in each.elts)):
+            return True
+    return False
+
+
+def _dispatch_runner_forms(directory, names):
+    """Map each module in `names` to the argument lists naming `--self-test` that the runners pass it: this
+    directory's run_all_checks.sh and each _DISPATCH_RUNNERS file present under the repository root. A line is
+    split as a shell word list; the arguments after a token naming the module run to the first shell operator
+    or redirection. Returns (forms, misses)."""
+    import shlex
+    forms, misses = {}, []
+    root = Path(directory).resolve().parent.parent
+    paths = [Path(directory, "run_all_checks.sh")] + [root / rel for rel in _DISPATCH_RUNNERS
+                                                       if (root / rel).is_file()]
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            misses.append("runner {} cannot be read ({})".format(path.name, type(exc).__name__))
+            continue
+        for line in text.splitlines():
+            try:
+                words = shlex.split(line, comments=True)
+            except ValueError:
+                words = line.split()
+            for at, word in enumerate(words):
+                name = word.rsplit("/", 1)[-1]
+                if name not in names:
+                    continue
+                args = []
+                for each in words[at + 1:]:
+                    if each in ("|", "||", "&&", ";", "&") or each.startswith((">", "<", "2>", "1>")):
+                        break
+                    args.append(each)
+                if "--self-test" in args:
+                    forms.setdefault(name, set()).add(tuple(args))
+    return forms, misses
 
 
 def _self_test_dispatch_probe(directory, tmp):
-    """Run each live-mode exposer in `directory` (its `__main__` block ends `sys.exit(<name>(...))`) as a child
-    with every _DISPATCH_REFUSED list: each must exit 2 with a stderr line and no PASS text. Each declared
-    variant must still reach self_test: a child imports the module, stubs self_test, and calls main() with
-    it. Returns a list of the discrepancies, including a live-mode set that is empty or lacks a module that
-    declares a variant."""
+    """Run each module in `directory` that reaches a self-test from its argument list as a child with every
+    _DISPATCH_REFUSED list: each must exit 2 with a stderr line and no PASS text. Those modules are each
+    live-mode exposer (its `__main__` block ends `sys.exit(<name>(...))`) and each module whose source compares
+    against a `--self-test` string (_argv_self_test_compare), whatever its self-test function is called; this
+    module is the host and is not run. Each declared variant must still reach the self-test: for an exposer a
+    child imports the module, stubs self_test, and calls main() with it; for a module that binds no self_test,
+    `--self-test` and each declared variant run under _DISPATCH_REACH_STUB, which must see a function its
+    exact `--self-test` branches call (_dispatch_targets) entered, a declared variant with a True argument and
+    `--self-test` alone with none; a module with no such branch must hold a closed-set guard (_dispatch_guard)
+    and declare no variant, and its runner gates show that its suite runs. The table is reconciled with _dispatch_runner_forms. Returns a list of the
+    discrepancies, including a probed set that is empty or lacks a module that declares a variant."""
     import ast
     import concurrent.futures
     import subprocess
     import _optlevel
-    live = []
-    for name in sorted(os.listdir(str(directory))):
-        if not name.endswith(".py"):
-            continue
-        tree = _optlevel.parse(Path(directory, name).read_bytes(), name)
+    live, compares, sources = [], {}, {}
+    names = sorted(name for name in os.listdir(str(directory)) if name.endswith(".py"))
+    for name in names:
+        source = Path(directory, name).read_bytes()
+        tree = _optlevel.parse(source, name)
         exposes, reason = _self_test_entry_gap(tree)
         last = tree.body[-1].body[-1] if exposes and reason is None else None
         if (isinstance(last, ast.Expr) and isinstance(last.value, ast.Call) and last.value.args
                 and isinstance(last.value.args[0], ast.Call) and isinstance(last.value.args[0].func, ast.Name)):
             live.append(name)
-    misses = ["live-mode dispatcher {} not found".format(name)
-              for name in sorted(set(_DISPATCH_VARIANTS) - set(live))]
+        elif not exposes and name != Path(__file__).name and _argv_self_test_compare(tree):
+            compares[name] = sorted(_dispatch_targets(tree))
+            sources[name] = source.decode("utf-8", "replace")
+    probed = sorted(set(live) | set(compares))
+    misses = ["self-test dispatcher {} not found".format(name)
+              for name in sorted(set(_DISPATCH_VARIANTS) - set(probed))]
     if not live:
         misses.append("no live-mode dispatcher found")
-    runs = [(name, argv, None) for name in live for argv in _DISPATCH_REFUSED]
+    if not compares:
+        misses.append("no module that binds no self_test compares against `--self-test`")
+    misses += ["{} compares against `--self-test` but neither an exact `<argument list> == [\"--self-test\", ...]` "
+               "branch calls a function nor an `<argument list> not in ([...], ...)` guard refuses the rest".format(
+                   name) for name, targets in sorted(compares.items())
+               if not targets and not _dispatch_guard(_optlevel.parse(sources[name].encode("utf-8"), name))]
+    forms, runner_misses = _dispatch_runner_forms(directory, set(probed))
+    misses += runner_misses
+    misses += ["{} declares a variant but has no exact `--self-test` branch to reach".format(name)
+               for name, targets in sorted(compares.items()) if not targets and name in _DISPATCH_VARIANTS]
+    for name, called in sorted(forms.items()):
+        declared = {tuple(argv) for argv in _DISPATCH_VARIANTS.get(name, ())} | {("--self-test",)}
+        misses += ["a runner calls {} {} but that form is not declared in _DISPATCH_VARIANTS".format(
+            name, list(argv)) for argv in sorted(called - declared)]
+    for name, variants in sorted(_DISPATCH_VARIANTS.items()):
+        own = sources.get(name)
+        if own is None and Path(directory, name).is_file():
+            own = Path(directory, name).read_text(encoding="utf-8", errors="replace")
+        misses += ["declared variant {} {} is called by no runner and not by the module itself".format(
+            name, argv) for argv in variants
+            if tuple(argv) not in forms.get(name, set()) and " ".join(argv) not in (own or "")]
+    runs = [(name, argv, None) for name in probed for argv in _DISPATCH_REFUSED]
     runs += [(name, argv, _DISPATCH_STUB) for name, variants in sorted(_DISPATCH_VARIANTS.items())
-             for argv in variants]
+             if name in live for argv in variants]
+    runs += [(name, argv, _DISPATCH_REACH_STUB) for name, targets in sorted(compares.items()) if targets
+             for argv in (["--self-test"],) + tuple(_DISPATCH_VARIANTS.get(name, ()))]
 
     def child(run):
         name, argv, stub = run
         command = [sys.executable, "-I", "-B"] + (["-c", stub] if stub else []) + [str(Path(directory, name))]
+        if stub is _DISPATCH_REACH_STUB:
+            command.append(",".join(compares[name]))
         command += argv
         try:
             proc = subprocess.run(command, cwd=tmp, capture_output=True, text=True, timeout=120,
@@ -1099,9 +1253,11 @@ def _self_test_dispatch_probe(directory, tmp):
         except (OSError, subprocess.SubprocessError) as exc:
             return "{} {}: child failed to run ({})".format(name, argv, type(exc).__name__)
         if stub:
-            if proc.returncode != 0 or "DISPATCHED" not in proc.stdout or "True" not in proc.stdout:
-                return "{} {}: the declared variant did not reach self_test (rc {})".format(
-                    name, argv, proc.returncode)
+            variant = argv != ["--self-test"]
+            if proc.returncode != 0 or "DISPATCHED" not in proc.stdout or "NOT DISPATCHED" in proc.stdout \
+                    or ("True" in proc.stdout) != variant:
+                return "{} {}: the {} did not reach the self-test as declared (rc {})".format(
+                    name, argv, "declared variant" if variant else "exact `--self-test`", proc.returncode)
         elif proc.returncode != 2 or "PASS" in proc.stdout + proc.stderr or not proc.stderr.strip():
             return "{} {}: not refused (rc {}, want 2 with a stderr line and no PASS)".format(
                 name, argv, proc.returncode)
