@@ -4673,10 +4673,11 @@ def self_test(vectors_only=False):
     #   exit 1. A slot leaked before it is released and fails its row
     #   INVALID, exit 1. Main ran the sweep regardless; a slot still held
     #   then made it raise, losing that row and every later row: exit 2.
-    # - A blocked run makes its row INVALID, naming each check it failed
-    #   among those main applies that do not read the observation, or else
-    #   CANNOT-EVALUATE: exit 1. Main evaluated that run beside the live
-    #   worker.
+    # - A blocked unmutated run makes its row INVALID, naming each check it
+    #   failed among those main applies that do not read the observation,
+    #   or else CANNOT-EVALUATE; a blocked mutant run makes it
+    #   CANNOT-EVALUATE unless the normal run failed: exit 1. Main evaluated
+    #   that run beside the live worker.
     # - A resolver worker alive before the first case is a setup
     #   CANNOT-EVALUATE: exit 2. Main had no such check.
     # - _resolver_stub_bound turns exit 0 into 2 when a resolver worker
@@ -4685,12 +4686,14 @@ def self_test(vectors_only=False):
     #   vector that could not evaluate. Main had no such vectors.
     # - A fixture server error, a product-tree change or a sys.path change
     #   during the retained-slot wait or the settle_resolvers join that
-    #   follows a run now counts in that run's checks (recorded evaluates
-    #   the server errors, the product snapshot and sys.path after both
-    #   waits): on the normal run it fails the row INVALID, exit 1; on an
-    #   evaluated mutant run it counts as the mutation detected; a blocked
-    #   mutant run is not a detection. Main evaluated them right after the
-    #   call, before either wait, so it missed changes made during them.
+    #   follows a run is now seen (recorded evaluates the server errors,
+    #   the product snapshot and sys.path after both waits): on the normal
+    #   run it fails the row INVALID, exit 1; on an evaluated mutant run it
+    #   counts as the mutation detected, so the row can pass (exit 0 where
+    #   main exited 1); on a blocked mutant run it changes nothing: that
+    #   run's checks are not read, so it is neither a detection nor a
+    #   failure. Main evaluated them right after the call, before either
+    #   wait, so it missed changes made during them.
     SELF_TEST_ROSTER = tuple(executed)
     print(json.dumps({"opf_adopt_observe_tests": executed}, sort_keys=True))
     for name, failures in vector_results:
