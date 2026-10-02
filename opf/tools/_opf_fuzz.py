@@ -23,7 +23,7 @@ structural guard. It asserts for every combination:
       malformed registered_kinds never admits a kind the built-in set rejects; a malformed id-collection
       never reads as no-deletion / no-loss; a malformed counters map never certifies an id clean).
 
-Run standalone (`python3 -I -B opf/tools/_opf_fuzz.py`) or as the `opf-fuzz` leg of `opf.py --self-test`.
+Run standalone (`python3 -I -B opf/tools/_opf_fuzz.py --self-test`) or as the `opf-fuzz` leg of `opf.py --self-test`.
 Returns 0 clean, 1 on a failed assertion, 2 on a harness/fail-closed error. Judged on returned
 status/finding VALUES and on raised exception TYPES, never by grepping output (the isolate-verifiers rule).
 """
@@ -1111,4 +1111,5 @@ def self_test():
 if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:
         sys.exit(self_test())
-    sys.exit(self_test())
+    print("usage: _opf_fuzz.py --self-test (also the opf-fuzz leg of opf.py --self-test)", file=sys.stderr)
+    sys.exit(2)

@@ -60,7 +60,7 @@ _SUBSET = [
     ("opf-init-operation-selftest", "_opf_init_operation.py", ["--self-test"]),
     ("opf-init-p0-selftest", "check_opf_init_p0.py", ["--self-test", "--red-on-revert"]),
     ("opf-init-observe-selftest", "check_opf_init_observe.py", ["--self-test", "--red-on-revert"]),
-    ("commonmark-headings-selftest", "selftest_commonmark_headings.py", []),
+    ("commonmark-headings-selftest", "selftest_commonmark_headings.py", ["--self-test"]),
     ("commonmark-conformance", "selftest_commonmark_conformance.py", []),
 ]
 

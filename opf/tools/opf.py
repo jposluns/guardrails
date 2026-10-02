@@ -329,6 +329,56 @@ def _unconditional_binding(statements):
     return found
 
 
+def _entry_tail_gap(tree, block):
+    """Return the reason the statements after the canonical `--self-test` statement in `block` (the module's
+    `__main__` block, in the parsed module `tree`) let another argument reach self_test or exit unchecked, or
+    None. That tail must be non-empty and name self_test nowhere, and it must be exactly the refusal the
+    library modules use, `print("usage: ...", file=sys.stderr)` (one str constant starting "usage: " and only
+    the keyword file=sys.stderr) then `sys.exit(2)` and nothing else, or a live mode whose last statement is
+    `sys.exit(<name>(...))` for a <name> a top-level def binds (`sys.exit(main())`). What that def does is
+    not inspected."""
+    import ast
+    tail = block.body[1:]
+    if not tail:
+        return "its `__main__` block (line {}) ends with the canonical `--self-test` statement, so any other " \
+               "argument falls through and exits 0; it must go on to refuse (`print(\"usage: ...\", " \
+               "file=sys.stderr)` then `sys.exit(2)`) or end with `sys.exit(<def>(...))`".format(block.lineno)
+    named = [node.lineno for statement in tail for node in ast.walk(statement)
+             if isinstance(node, ast.Name) and node.id == "self_test"]
+    if named:
+        return "its `__main__` block (line {}) names self_test after the canonical `--self-test` statement " \
+               "(line {}), so an argument other than exactly `--self-test` can run the suite".format(
+                   block.lineno, min(named))
+
+    def exits(statement):
+        # The call inside a statement `sys.exit(<one argument>)`, or None.
+        call = statement.value if isinstance(statement, ast.Expr) else None
+        if not (isinstance(call, ast.Call) and ast.dump(call.func) == ast.dump(ast.parse("sys.exit").body[0].value)
+                and len(call.args) == 1 and not call.keywords):
+            return None
+        return call.args[0]
+
+    if len(tail) == 2 and isinstance(tail[0], ast.Expr) and isinstance(tail[0].value, ast.Call):
+        usage = tail[0].value
+        code = exits(tail[1])
+        if (isinstance(usage.func, ast.Name) and usage.func.id == "print" and len(usage.args) == 1
+                and isinstance(usage.args[0], ast.Constant) and isinstance(usage.args[0].value, str)
+                and usage.args[0].value.startswith("usage: ") and len(usage.keywords) == 1
+                and usage.keywords[0].arg == "file"
+                and ast.dump(usage.keywords[0].value) == ast.dump(ast.parse("sys.stderr").body[0].value)
+                and isinstance(code, ast.Constant) and type(code.value) is int and code.value == 2):
+            return None
+    code = exits(tail[-1])
+    if isinstance(code, ast.Call) and isinstance(code.func, ast.Name):
+        if any(isinstance(node, ast.FunctionDef) and node.name == code.func.id for node in tree.body[:-1]):
+            return None
+        return "its `__main__` block (line {}) ends with `sys.exit({}(...))`, but {} is not a top-level def".format(
+            block.lineno, code.func.id, code.func.id)
+    return "its `__main__` block (line {}) does not follow the canonical `--self-test` statement with exactly " \
+           "a refusal (`print(\"usage: ...\", file=sys.stderr)` then `sys.exit(2)`) or a last statement " \
+           "`sys.exit(<def>(...))`".format(block.lineno)
+
+
 def _self_test_entry_gap(tree):
     """Return (exposes, reason) for one parsed module. `exposes` is whether it binds self_test at module scope
     by any form _binds counts, or by a `global self_test` anywhere (a function can bind it so). An exposing
@@ -348,9 +398,10 @@ def _self_test_entry_gap(tree):
     `__builtins__` nowhere at module scope (counted as `__name__` is), no statement before the block changes
     sys through the name sys (_sys_change: a store to, delete of or augmented assignment to any
     `sys.<attribute>`, a store or delete through `sys.modules` or `sys.__dict__`, or an argv change), none
-    stores to or deletes through `builtins`, `__builtins__` or `__main__` (_namespace_store), and none stores
+    stores to or deletes through `builtins`, `__builtins__` or `__main__` (_namespace_store), none stores
     to or deletes through the name self_test or through a target that starts from an expression rather than
-    a name (_self_test_or_expression_store); otherwise it names the first rule broken."""
+    a name (_self_test_or_expression_store), and the block's statements after the canonical one are a usage
+    refusal or a live-mode dispatch (_entry_tail_gap); otherwise it names the first rule broken."""
     import ast
 
     def bindings_of(name, imported=False):
@@ -455,7 +506,7 @@ def _self_test_entry_gap(tree):
     if store is not None:
         return True, "it stores to or deletes through an expression, not a name (line {}), before its " \
                      "`__main__` block; the guard does not follow such a target".format(store[0].lineno)
-    return True, None
+    return True, _entry_tail_gap(tree, block)
 
 
 def _self_test_entry_gaps(directory, required=()):
@@ -466,9 +517,12 @@ def _self_test_entry_gaps(directory, required=()):
         if __name__ == "__main__":
             if sys.argv[1:] == ["--self-test"]:
                 sys.exit(self_test())
-            ...  # any other argument handling the module has
+            print("usage: <module>.py --self-test", file=sys.stderr)   # a module with no live mode
+            sys.exit(2)
 
-    as its last top-level statement, with that operand order, sys imported at top level, the inner `if` holding
+    or, for a module with a live mode, the same block whose statements after the canonical one name self_test
+    nowhere and end with `sys.exit(<def>(...))` for a top-level def (`sys.exit(main())`), as its last
+    top-level statement, with that operand order, sys imported at top level, the inner `if` holding
     nothing else and no else, no other test of `__name__` against "__main__" that runs at import (an if, while,
     conditional expression, and/or, comprehension condition or match, at module scope or in a class body, whose
     test mentions both), exactly one module-scope binding of self_test counted by name occurrence (each alias
@@ -659,7 +713,9 @@ def _self_test_floor(registry, directory, exempt):
 # required too, so the floor does not over-reject), and absent/ and empty/ are a missing and an empty directory.
 _ENTRY_HEAD = 'import sys\n\n\ndef self_test():\n    return 0\n\n\n'
 _ENTRY_BODY = '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n'
-_ENTRY_MAIN = 'if __name__ == "__main__":\n' + _ENTRY_BODY
+_ENTRY_REFUSE = '    print("usage: fixture.py --self-test", file=sys.stderr)\n    sys.exit(2)\n'
+_ENTRY_MAIN = 'if __name__ == "__main__":\n' + _ENTRY_BODY + _ENTRY_REFUSE
+_ENTRY_OPEN = 'if __name__ == "__main__":\n' + _ENTRY_BODY
 _ENTRY_NONE = 'no `if __name__ == "__main__":` block'
 _ENTRY_FIRST = "not the canonical `--self-test` statement"
 _ENTRY_BLOCK_BINDS = ") binds self_test"
@@ -676,12 +732,17 @@ _ENTRY_STAR = "a star import may bind `__name__`, `sys` or `self_test`"
 _ENTRY_BUILTINS = "binds `__builtins__` at module scope"
 _ENTRY_SELF_TEST_STORE = "stores to or deletes through `self_test`"
 _ENTRY_EXPRESSION_STORE = "through an expression, not a name"
+_ENTRY_TAIL_SELF_TEST = "names self_test after the canonical `--self-test` statement"
+_ENTRY_TAIL_EMPTY = "ends with the canonical `--self-test` statement"
+_ENTRY_TAIL_SHAPE = "does not follow the canonical `--self-test` statement with exactly"
+_ENTRY_TAIL_DISPATCH = "is not a top-level def"
 _ENTRY_FIXTURES = (
-    ("canonical.py", _ENTRY_HEAD + "def main(argv):\n    return 2\n\n\n" + _ENTRY_MAIN
+    ("canonical.py", _ENTRY_HEAD + "def main(argv):\n    return 2\n\n\n" + _ENTRY_OPEN
      + "    sys.exit(main(sys.argv[1:]))\n", True, None),
     ("canonical_import.py", "import sys\nfrom _no_such_module import self_test\n\n" + _ENTRY_MAIN, True, None),
     ("canonical_spaced.py", _ENTRY_HEAD + "if (__name__ == '__main__'):  # entry\n    if sys.argv[1 :] == [\n"
-     "            '--self-test',]:\n        sys.exit(  self_test( ) )\n", True, None),
+     "            '--self-test',]:\n        sys.exit(  self_test( ) )\n    print( 'usage: x' ,file = sys.stderr )\n"
+     "    sys.exit( 2 )  # refuse\n", True, None),
     ("plain.py", 'if __name__ == "__main__":\n    raise SystemExit(0)\n', False, None),
     ("local_only.py", "import holder\n\n\ndef helper():\n    self_test = 1\n    return self_test\n\n\n"
      "class Holder:\n    self_test = 0\n\n\nholder.self_test = [self_test for self_test in ()]\n"
@@ -709,7 +770,7 @@ _ENTRY_FIXTURES = (
      "    sys.exit(main())\n", True, _ENTRY_FIRST),
     ("drops_result.py", _ENTRY_HEAD + 'if __name__ == "__main__":\n    if sys.argv[1:] == ["--self-test"]:\n'
      "        self_test()\n", True, _ENTRY_FIRST),
-    ("inner_else.py", _ENTRY_HEAD + _ENTRY_MAIN + "    else:\n        sys.exit(2)\n", True, _ENTRY_FIRST),
+    ("inner_else.py", _ENTRY_HEAD + _ENTRY_OPEN + "    else:\n        sys.exit(2)\n", True, _ENTRY_FIRST),
     ("inner_extra.py", _ENTRY_HEAD + 'if __name__ == "__main__":\n    if sys.argv[1:] == ["--self-test"]:\n'
      '        print("self-test")\n        sys.exit(self_test())\n', True, _ENTRY_FIRST),
     ("not_first.py", _ENTRY_HEAD + 'if __name__ == "__main__":\n    print("entry")\n' + _ENTRY_BODY, True,
@@ -757,8 +818,8 @@ _ENTRY_FIXTURES = (
     ("argv_append.py", _ENTRY_HEAD + 'sys.argv.append("--quiet")\n\n\n' + _ENTRY_MAIN, True, _ENTRY_ARGV),
     ("argv_class.py", _ENTRY_HEAD + 'class Quiet:\n    sys.argv += ["--quiet"]\n\n\n' + _ENTRY_MAIN, True,
      _ENTRY_ARGV),
-    ("argv_local.py", _ENTRY_HEAD + "def reset():\n    del sys.argv[1:]\n\n\n" + _ENTRY_MAIN
-     + "    sys.argv.pop()\n", True, None),
+    ("argv_local.py", _ENTRY_HEAD + "def reset():\n    del sys.argv[1:]\n\n\n" + _ENTRY_OPEN
+     + "    sys.argv.pop()\n    sys.exit(reset())\n", True, None),
     ("two_bindings.py", _ENTRY_HEAD + "def main():\n    return 0\n\n\nself_test = main\n\n\n" + _ENTRY_MAIN, True,
      _ENTRY_REBOUND),
     ("star_after_def.py", _ENTRY_HEAD + "from _no_such_module import *\n\n\n" + _ENTRY_MAIN, True,
@@ -848,6 +909,29 @@ _ENTRY_FIXTURES = (
      _ENTRY_EXPRESSION_STORE),
     ("name_root_store.py", _ENTRY_HEAD + 'rows = {}\nrows[len(rows)] = 0\nrows.copy()["x"] = 1\n\n\n'
      + _ENTRY_MAIN, True, None),
+    ("tail_self_test.py", _ENTRY_HEAD + _ENTRY_OPEN + "    sys.exit(self_test())\n", True, _ENTRY_TAIL_SELF_TEST),
+    ("tail_raise.py", _ENTRY_HEAD + _ENTRY_OPEN + "    raise SystemExit(self_test())\n", True,
+     _ENTRY_TAIL_SELF_TEST),
+    ("tail_recheck.py", _ENTRY_HEAD + _ENTRY_OPEN + '    if len(sys.argv) > 1 and sys.argv[1] == "--self-test":\n'
+     '        sys.exit(self_test())\n    sys.exit("usage: x")\n', True, _ENTRY_TAIL_SELF_TEST),
+    ("tail_main_alias.py", _ENTRY_HEAD + _ENTRY_OPEN + "    main = self_test\n    sys.exit(main())\n", True,
+     _ENTRY_TAIL_SELF_TEST),
+    ("tail_empty.py", _ENTRY_HEAD + _ENTRY_OPEN, True, _ENTRY_TAIL_EMPTY),
+    ("tail_exit_one.py", _ENTRY_HEAD + _ENTRY_OPEN + '    print("usage: x", file=sys.stderr)\n    sys.exit(1)\n',
+     True, _ENTRY_TAIL_SHAPE),
+    ("tail_stdout.py", _ENTRY_HEAD + _ENTRY_OPEN + '    print("usage: x")\n    sys.exit(2)\n', True,
+     _ENTRY_TAIL_SHAPE),
+    ("tail_exit_string.py", _ENTRY_HEAD + _ENTRY_OPEN + '    sys.exit("usage: x")\n', True, _ENTRY_TAIL_SHAPE),
+    ("tail_exit_name.py", "import sys\n\nEXIT_MALFORMED = 2\n\n\n" + _ENTRY_HEAD[len("import sys\n\n\n"):]
+     + _ENTRY_OPEN + '    print("usage: x", file=sys.stderr)\n    sys.exit(EXIT_MALFORMED)\n', True, _ENTRY_TAIL_SHAPE),
+    ("tail_no_usage.py", _ENTRY_HEAD + _ENTRY_OPEN + '    print("x", file=sys.stderr)\n    sys.exit(2)\n', True,
+     _ENTRY_TAIL_SHAPE),
+    ("tail_after_refusal.py", _ENTRY_HEAD + _ENTRY_MAIN + '    print("unreached")\n', True, _ENTRY_TAIL_SHAPE),
+    ("tail_bare_exit.py", _ENTRY_HEAD + _ENTRY_OPEN + "    sys.exit()\n", True, _ENTRY_TAIL_SHAPE),
+    ("tail_dispatch_import.py", "import sys\nfrom _no_such_module import main\n\n\n"
+     + _ENTRY_HEAD[len("import sys\n\n\n"):] + _ENTRY_OPEN + "    sys.exit(main())\n", True, _ENTRY_TAIL_DISPATCH),
+    ("tail_dispatch.py", _ENTRY_HEAD + "def render(argv):\n    return len(argv)\n\n\n" + _ENTRY_OPEN
+     + "    argv = sys.argv[1:]\n    sys.exit(render(argv))\n", True, None),
 )
 
 

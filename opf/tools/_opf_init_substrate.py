@@ -2597,6 +2597,5 @@ def self_test_isolated():
 if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:
         sys.exit(self_test())
-    if len(sys.argv) > 1 and sys.argv[1] == "--self-test":
-        sys.exit(self_test())
-    sys.exit("usage: _opf_init_substrate.py --self-test")
+    print("usage: _opf_init_substrate.py --self-test (a library module; no live mode)", file=sys.stderr)
+    sys.exit(2)
