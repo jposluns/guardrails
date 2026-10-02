@@ -314,9 +314,13 @@ Each case runs on its own copy of that template; the root is removed in a finall
       that does not parse refuses a decide with every byte untouched, never skipped (flip, applied to
       each of the three: restore the active-only read, under which A refuses, B publishes and the
       source gate refuses on C-DECISION-CHAINS with no current resolution, and the third publishes and
-      the final doctor cannot evaluate the archive). The decisions register's other two types are
-      driven end to end: a maintainer files a
-      maintainer_decision linking exemplifies PP-1, doctor VALID and listed with its link, and an
+      the final doctor cannot evaluate the archive). The supersedes target checks read the same record
+      set, each case its own test: superseding a decided chain head rotated to the archive lands doctor
+      VALID, and a second successor for a resolution an archived decision already supersedes refuses at
+      the chain-head check, before the chain rule runs, with every byte untouched (flip, applied to each
+      of the two: restore the active-only target read, under which the archived head is no record and
+      the fork reaches the chain rule). The decisions register's other two types are driven end to end:
+      a maintainer files a maintainer_decision linking exemplifies PP-1, doctor VALID and listed with its link, and an
       assistant distils a preference_pattern to active/proposed that the maintainer ratifies and then
       retires, doctor VALID (flip: the planner drops the requested links, which only the independent
       oracle refuses); the same ruling filed by an assistant refuses with every byte untouched in its own
@@ -1908,6 +1912,43 @@ def flip_t72_archive():
     """Restore the active-only read: the chain rule judges the planned index alone, never the archive."""
     return patch.object(record, "_chain_records", lambda ctx, rows: [
         opf_check._make_rec(r, record.PENDING_DECISION, "active") for r in rows if isinstance(r, dict)])
+
+
+def t72_archived_head(fx):
+    """QA4 MINOR-3. PD-2 decided superseding PD-1, then PD-2, the chain's head, rotated to the archive:
+    doctor VALID. PD-3 decided with --supersedes PD-2 finds the archived head through the chain rule's
+    record set, so it lands and the doctor stays VALID, PD-3 the chain's one current resolution."""
+    root = fx.case("t72-archived-head")
+    with ticking():
+        _decided(fx, root, "which layout", 1)
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        step(fx, root, _supersede("PD-2", "PD-1"), "PD-2 supersedes PD-1")
+        _rotate(fx, root, "PD-2")
+        step(fx, root, _pd_create("which layout, third") + MAINTAINER, "PD-3")
+        step(fx, root, _supersede("PD-3", "PD-2"), "PD-3 supersedes the archived PD-2")
+        rec = row(root, "PD-3", PD_INDEX)
+        assert rec["status"] == "decided" and rec["links"] == [{"rel": "supersedes", "id": "PD-2"}], rec
+        doctor_valid(fx.env, root)
+
+
+def t72_archived_fork(fx):
+    """PD-2 decided superseding PD-1 and rotated to the archive, PD-1 still active: a second successor for
+    PD-1 would fork the chain, and the chain-head check, reading the archive, refuses it before the chain
+    rule runs, with every byte untouched."""
+    root = fx.case("t72-archived-fork")
+    with ticking():
+        _decided(fx, root, "which layout", 1)
+        step(fx, root, _pd_create("which layout, again") + MAINTAINER, "PD-2")
+        step(fx, root, _supersede("PD-2", "PD-1"), "PD-2 supersedes PD-1")
+        _rotate(fx, root, "PD-2")
+        step(fx, root, _pd_create("which layout, third") + MAINTAINER, "PD-3")
+        refused_before_chain_rule(fx.env, root, _supersede("PD-3", "PD-1"), "already superseded by PD-2")
+
+
+def flip_t72_archived_target():
+    """Restore the active-only target read: the target checks see the active index alone, so the archived
+    head is no record and an archived superseder is missed."""
+    return patch.object(record, "_target_rows", lambda ctx, operand: record._index_rows(operand))
 
 
 PATTERN = ["create", "--type", "preference_pattern", "--field", "context=layout choices", "--field",
@@ -5162,6 +5203,8 @@ TESTS = (
     ("T72-decide-archived-resolution", t72_archived_resolution, flip_t72_archive),
     ("T72-decide-archived-successor", t72_archived_successor, flip_t72_archive),
     ("T72-decide-unreadable-archive", t72_unreadable_archive, flip_t72_archive),
+    ("T72-supersedes-archived-head", t72_archived_head, flip_t72_archived_target),
+    ("T72-supersedes-archived-fork", t72_archived_fork, flip_t72_archived_target),
     ("T72-register-ruling-and-pattern", t72_register, flip_t72_links),
     ("T72-register-assistant-ruling", t72_assistant_ruling, flip_t72_trust),
 )

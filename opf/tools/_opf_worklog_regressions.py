@@ -567,8 +567,12 @@ def _entry_point_census(check):
                 boundaries.add(caller)
     # Every member has a public-entry case below, except the explicitly named
     # archive loader: it has no manifest contract and retains F1 archive cases.
+    # The doctor's archive walk (archived_records) reads no manifest either: its
+    # caller passes the manifest-derived inputs, so its entry case below is its
+    # own first intake, the archive worklog, judged against the doctor's walk.
     check("F2f-public-entry-census", boundaries == {
         "_opf_absorb.evaluate", "_opf_changelog.evaluate", "_opf_check.validate_store",
+        "_opf_check.archived_records",
         "_opf_views.plan_views", "_opf_worklog.load_worklog", "_opf_worklog.load_worklog_at",
         "_opf_worklog.load_archive_worklog_at"})
 
@@ -655,6 +659,43 @@ def _entry_point_regressions(check):
             check("F2f-reachable-active-" + caller, LEGACY in reads)
             if caller == "doctor":
                 check("F2f-reachable-archive-doctor", ARCHIVE in reads)
+
+    # The archive walk's public entry (opf record's pre-publication chain rule):
+    # each archive worklog intake fault reaches the caller as exactly the doctor's
+    # own C-ARCHIVE-ENUM attribution for that store, the archive worklog is read,
+    # and the active worklog never is.
+    archive_faults = (
+        ("healthy", None, None),
+        ("missing", "absent", None),
+        ("malformed", b"not TOML [", "cannot read m/archive/2026/worklog.toml: cannot parse "
+         "m/archive/2026/worklog.toml (Expected '=' after a key in a key/value pair (at line 1, column 5))"),
+        ("unreadable", PermissionError("fixture unreadable"), "cannot read m/archive/2026/worklog.toml: "
+         "cannot read m/archive/2026/worklog.toml (fixture unreadable)"))
+    for name, raw, message in archive_faults:
+        with _Fixture() as fx:
+            _manifest_readers(fx)
+            if raw == "absent":
+                del fx.files[ARCHIVE]
+            elif raw is not None:
+                fx.files[ARCHIVE] = raw
+            types = _opf_check._authoritative_types(
+                _opf_check._enabled_modules(fx.manifest), fx.manifest.get("types"))
+            reads = []
+
+            def read(fd, rel, **kwargs):
+                reads.append(fx.path(fd, rel))
+                return fx.read(fd, rel, **kwargs)
+
+            with patch.object(_journal, "_read_contained", side_effect=read):
+                _recs, problems = _opf_check.archived_records(fx.fd, M, types, frozenset(), None)
+            doctor = _opf_check.validate_store(fx.res).by_check.get("C-ARCHIVE-ENUM", [])
+            label = "F2f-entry-archive-walk-" + name
+            check(label + "-doctor-attribution", problems == doctor)
+            if message is not None:
+                check(label + "-diagnostic", message in problems)
+            check(label + "-archive-read", (ARCHIVE in reads) == (raw != "absent"))
+            check(label + "-no-active-read", not any(
+                path == LEGACY or path.startswith(M + "/worklog/") for path in reads))
 
 
 def _doctor_snapshot_regressions(check):

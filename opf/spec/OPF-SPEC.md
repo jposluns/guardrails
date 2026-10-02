@@ -1087,12 +1087,16 @@ history is a new clean record linking back (section 8.6). Its subcommands:
   then appends the `supersedes` link (section 8.5) to the record's `links`. Before anything is
   written, the superseded record MUST be another pending_decision at unqualified `decided`,
   schema-valid, and the head of its chain (no pending_decision already links `supersedes` to it),
-  and its own chain MUST NOT lead back to the superseding record. `transition` MUST refuse the link
-  on every other transition, a `/proposed` landing included, because the doctor counts a
-  `supersedes` link from a proposal too and would then find the superseded chain without a current
-  resolution. Every transition that lands a pending_decision at unqualified `decided`, with or
-  without a supersession, MUST then apply the doctor's chain rule (section 8.5) to the planned index
-  before anything is written: the chain the record belongs to afterwards, a connected component over
+  and its own chain MUST NOT lead back to the superseding record. These target checks MUST read the
+  same records as the chain rule below, the active index together with every archived record
+  (section 12), so a decided, schema-valid chain head rotated to the archive can be superseded, and
+  an archived pending_decision that already supersedes the target or leads back to the superseding
+  record is counted. `transition` MUST refuse the link on every other transition, a `/proposed`
+  landing included, because the doctor counts a `supersedes` link from a proposal too and would
+  then find the superseded chain without a current resolution. Every transition that lands a
+  pending_decision at unqualified `decided`, with or without a supersession, MUST then apply the
+  doctor's chain rule (section 8.5) to the planned index together with every archived record before
+  anything is written: the chain the record belongs to afterwards, a connected component over
   `supersedes` links in either direction, MUST have exactly one current effective resolution. So
   `transition` also refuses to decide a record that a pending_decision not at unqualified `decided`
   already supersedes when no other member of its chain is a current resolution, and a supersession

@@ -30,22 +30,23 @@ answer is often not its decider), and `decided_at` is the operation's clock valu
 the bundle; a rejection of `decided/proposed` removes it with `proposed_from` (an open decision carries
 none of it).
 A transition that lands a pending_decision at unqualified `decided` (a maintainer's `open -> decided`, or a
-maintainer's ratification of `decided/proposed`) may supersede the current resolution of a chain in the
-same act: --supersedes PD-n appends the `supersedes` link to the record's `links` (spec 8.5). Before
-anything is planned further, the target must be a pending_decision seated once in the index, schema-valid,
-at unqualified `decided` (so never the record itself, which is not yet decided), and the head of its chain
-(no pending_decision already links `supersedes` to it, so the chain never forks), and its own chain must
-not lead back to the record (no cycle). --supersedes is refused on every other transition, a `/proposed`
-landing included: the doctor counts a `supersedes` link from a proposal too, so it would leave the
+maintainer's ratification of `decided/proposed`) may supersede the current resolution of a chain in the same
+act: --supersedes PD-n appends the `supersedes` link to the record's `links` (spec 8.5). Before anything is
+planned further, the target must be a pending_decision seated once in the index or the archive, schema-valid,
+at unqualified `decided` (so never the record itself, which is not yet decided), and the head of its chain (no
+pending_decision already links `supersedes` to it, so the chain never forks), and its own chain must not lead
+back to the record (no cycle); these target checks read the chain rule's record set below, so a decided chain
+head rotated to the archive can be superseded. --supersedes is refused on every other transition, a
+`/proposed` landing included: the doctor counts a `supersedes` link from a proposal too, so it would leave the
 superseded chain with no current resolution. Every landing at unqualified `decided`, with or without
---supersedes, then recomputes the doctor's own chain rule (_opf_check.decision_chains, C-DECISION-CHAINS)
-over the planned index: the chain the record belongs to afterwards must have exactly one current effective
-resolution, or the transition refuses with every byte untouched. That also refuses the decide of a record
-already superseded by a pending_decision that is not decided when no other member of its chain is current,
-and a link the target checks pass that still leaves its chain with none. The rule reads the records the
-doctor's chain check reads, the planned index and every archived record through the doctor's own archive
-walk (_opf_check.archived_records), so a chain member rotated to the archive (spec 12) is judged before
-anything is written, and an archive input that is missing, unreadable or malformed refuses with every
+--supersedes, then recomputes the doctor's own chain rule (_opf_check.decision_chains, C-DECISION-CHAINS) over
+the planned index and every archived record: the chain the record belongs to afterwards must have exactly one
+current effective resolution, or the transition refuses with every byte untouched. That also refuses the
+decide of a record already superseded by a pending_decision that is not decided when no other member of its
+chain is current, and a link the target checks pass that still leaves its chain with none. The rule reads the
+records the doctor's chain check reads, the planned index and every archived record through the doctor's own
+archive walk (_opf_check.archived_records), so a chain member rotated to the archive (spec 12) is judged
+before anything is written, and an archive input that is missing, unreadable or malformed refuses with every
 byte untouched, never skipped.
 `done-with-receipt` is maintainer-only (any other actor is refused before the store is touched): it moves an
 `active` or `done/proposed` backlog item to `done` and mints the one-to-one `done` receipt, linked
@@ -932,6 +933,29 @@ def _require_acyclic(rows, rid, target, rel):
                 pending.append(link.get("id"))
 
 
+def _target_rows(ctx, operand):
+    """The rows the --supersedes target checks read: the active index, then every archived pending_decision,
+    the record set the chain rule reads (_chain_records, through the doctor's own archive walk), so a chain
+    head rotated to the archive (spec 12) is found, and a defective archive refuses here too, never
+    skipped (spec 8.8)."""
+    return [rec.body for rec in _chain_records(ctx, _index_rows(operand))
+            if rec.rtype == PENDING_DECISION and isinstance(rec.body, dict)]
+
+
+def _locate_target(operand, rows, target):
+    """The one row of `rows` (_target_rows) carrying `target`, and where it is seated (the active index, or
+    the archive), or a refusal (absent, or seated more than once)."""
+    hits = [r for r in rows if isinstance(r, dict) and r.get("id") == target]
+    if not hits:
+        raise RecordError("{} is not a record in {} or among the archived pending_decision records; "
+                          "fail-closed".format(target, operand.rel))
+    if len(hits) > 1:
+        raise RecordError("{} is seated {} times in {} and the archive (a duplicate id, spec 8.2); "
+                          "fail-closed".format(target, len(hits), operand.rel))
+    active = any(r is hits[0] for r in _index_rows(operand))
+    return hits[0], operand.rel if active else "the archive"
+
+
 def _require_valid_target(trow, ctx, target, rel):
     """The superseded row is trusted only once it is schema-valid as a pending_decision: the same check the
     record being changed gets (_require_valid_current), applied to the target (its own seam, so the record
@@ -941,20 +965,21 @@ def _require_valid_target(trow, ctx, target, rel):
 
 def _supersession_link(req, ctx, operand, rid):
     """The `supersedes` link a decision landing unqualified `decided` appends (--supersedes, spec 8.5), or
-    None without the option. Checked before publication: the target is a pending_decision seated once in
-    this index (_locate), schema-valid as a pending_decision before it is trusted (_require_valid_target),
-    at unqualified `decided` (_require_superseded_decided), the head of its chain (_require_chain_head),
-    and not a record whose chain leads back to this one (_require_acyclic). The planned chain as a whole is
-    checked after the row is planned (_require_one_current_resolution)."""
+    None without the option. Checked before publication, over the active index and every archived
+    pending_decision (_target_rows, the chain rule's record set): the target is a pending_decision seated
+    once there (_locate_target), schema-valid as a pending_decision before it is trusted
+    (_require_valid_target), at unqualified `decided` (_require_superseded_decided), the head of its chain
+    (_require_chain_head), and not a record whose chain leads back to this one (_require_acyclic). The
+    planned chain as a whole is checked after the row is planned (_require_one_current_resolution)."""
     target = req.values.get("--supersedes")
     if target is None:
         return None
-    trow = _locate(operand, target)
-    _require_valid_target(trow, ctx, target, operand.rel)
+    rows = _target_rows(ctx, operand)
+    trow, where = _locate_target(operand, rows, target)
+    _require_valid_target(trow, ctx, target, where)
     _require_superseded_decided(trow, target)
-    rows = _index_rows(operand)
-    _require_chain_head(rows, target, operand.rel)
-    _require_acyclic(rows, rid, target, operand.rel)
+    _require_chain_head(rows, target, where)
+    _require_acyclic(rows, rid, target, where)
     return {"rel": SUPERSEDES, "id": target}
 
 
@@ -968,10 +993,10 @@ def _chain_records(ctx, rows):
     archived, problems = _opf_check.archived_records(ctx.root_fd, ctx.machine_rel, ctx.types, ctx.vendors,
                                                      ctx.import_status, homes=ctx.homes)
     if problems:
-        raise RecordError("the archive does not pass the doctor's own archive walk ({}), so the chain rule "
-                          "cannot judge this decide over the records the doctor reads (the planned index and "
-                          "every archived record; spec 8.8, 12). Nothing written; fail-closed".format(
-                              "; ".join(problems)))
+        raise RecordError("the archive does not pass the doctor's own archive walk ({}), so this decide is "
+                          "refused: the doctor's archive validation fails, and publication is withheld (the "
+                          "chain rule reads the planned index and every archived record; spec 8.8, 12). "
+                          "Nothing written; fail-closed".format("; ".join(problems)))
     return [_opf_check._make_rec(r, PENDING_DECISION, "active") for r in rows if isinstance(r, dict)] + archived
 
 
