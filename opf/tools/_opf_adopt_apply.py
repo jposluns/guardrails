@@ -103,6 +103,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _journal              # noqa: E402
 import _opf_adopt as schema  # noqa: E402
 import _opf_store as store   # noqa: E402
+import _optlevel             # noqa: E402
 from _opf_emit import EmitError, emit_checked  # noqa: E402
 
 KIND = "adoption"
@@ -1134,10 +1135,12 @@ def _self_test_checks():
     check("dispatch-malformed-row-invalid", dispatch(dict(op="create-file", path="a/b")).status == INVALID)
 
     # round 3: the module introduction must name the LIVE status surface (`opf adopt status` reads both
-    # adoption homes through this module) instead of calling the module dead code.
+    # adoption homes through this module) instead of calling the module dead code. The introduction is read
+    # from the source, so the check does not depend on the interpreter level.
+    intro = _optlevel.source_docstring(__file__) or ""
     check("module-intro-names-the-live-status-surface",
-          "dead code" not in (__doc__ or "") and "opf adopt status" in (__doc__ or "")
-          and "the CLI verb remain" not in (__doc__ or ""))
+          "dead code" not in intro and "opf adopt status" in intro
+          and "the CLI verb remain" not in intro)
 
     # 1: run identity. The homes grammar and the schema's shipped grammar agree on every vector; the mint
     # validates its own output; the import family and traversal spellings are refused.

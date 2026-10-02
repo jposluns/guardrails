@@ -69,6 +69,8 @@ except ModuleNotFoundError:
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _git_fixture_env  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "opf" / "tools"))
+import _optlevel  # noqa: E402  level-0 parses for the mutants, shared with opf/tools
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
@@ -879,7 +881,8 @@ def _roster_checks():
     def add_local(command):
         # Keep the exact terminal summary last so each fixture reaches its own guard.
         summary = 'if [ "$failed" -ne 0 ]; then\n'
-        assert local_text.count(summary) == 1
+        if local_text.count(summary) != 1:  # explicit, not an assert: python -O strips asserts
+            raise AssertionError("the runner's terminal summary is not unique")
         return local_text.replace(summary, command + "\n" + summary, 1)
 
     def refusal():
@@ -1055,14 +1058,15 @@ def _system_pin_probe(base, lifecycle):
 
 def _system_pin_checks(base):
     import types
-    tree = ast.parse(Path(_git_fixture_env.__file__).read_text(encoding="utf-8"))
+    # Level 0 parse and compile: the mutant must not follow -O/-OO.
+    tree = _optlevel.parse(Path(_git_fixture_env.__file__).read_text(encoding="utf-8"))
     assignments = [node for node in ast.walk(tree) if isinstance(node, ast.Assign)
                    and any(ast.unparse(t) == "os.environ['PATH']" for t in node.targets)]
     if len(assignments) != 1:
         raise ValueError("cannot uniquely mutate lifecycle PATH installation")
-    assignments[0].value = ast.parse('saved.get("PATH", os.defpath)', mode="eval").body
+    assignments[0].value = _optlevel.parse('saved.get("PATH", os.defpath)', mode="eval").body
     mutant = types.ModuleType("fixture_path_mutant")
-    exec(compile(ast.fix_missing_locations(tree), "<path-removal-mutant>", "exec"),
+    exec(compile(ast.fix_missing_locations(tree), "<path-removal-mutant>", "exec", optimize=0),
          mutant.__dict__)
     pins, restored = _system_pin_probe(base, _git_fixture_env.fixture_git_lifecycle)
     check("env/lifecycle-system-pins", pins, (0, ["1", os.devnull]))
@@ -1380,7 +1384,7 @@ def _manifest_extra_setup_failures():
     the actual expressions catches removal of their check_returncode calls.
     This bounded probe does not simulate the rest of the generator's self-test.
     """
-    tree = ast.parse((ROOT / "tools" / "gen_manifest.py").read_text(encoding="utf-8"))
+    tree = _optlevel.parse((ROOT / "tools" / "gen_manifest.py").read_text(encoding="utf-8"))
     owners = [n for n in tree.body if isinstance(n, ast.FunctionDef)
               and n.name == "_self_test_main_isolated"]
     for check_id, fixture, operation in (
@@ -1406,7 +1410,7 @@ def _manifest_extra_setup_failures():
                 return subprocess.CompletedProcess(args, 1)
             try:
                 exec(compile(ast.Module(body=expressions, type_ignores=[]),
-                             "<fixture-setup-probe>", "exec"),
+                             "<fixture-setup-probe>", "exec", optimize=0),
                      {"_git": failed_git, fixture: Path("/unused-fixture")})
             except subprocess.CalledProcessError:
                 refused = True
@@ -1571,7 +1575,7 @@ def _opf_lifecycle_graph_checks():
     expected_names = "derivable lifecycle graph"
     expected_denial = "named wrapper bypass"
     try:
-        tree = ast.parse(_LIFECYCLE_GRAPH_FIXTURE)
+        tree = _optlevel.parse(_LIFECYCLE_GRAPH_FIXTURE)
         module = "lifecycle_fixture"
         entry = "self_test"
         delegates = _opf_lifecycle_delegates({module: tree})
@@ -1583,7 +1587,7 @@ def _opf_lifecycle_graph_checks():
                 node.name = "body_without_a_suffix"
             elif isinstance(node, ast.Name) and node.id == delegate:
                 node.id = "body_without_a_suffix"
-        renamed.body.append(ast.parse("def unrelated_isolated(): pass").body[0])
+        renamed.body.append(_optlevel.parse("def unrelated_isolated(): pass").body[0])
         expected_names = dict(delegates)
         expected_names[module, entry] = (module, "body_without_a_suffix")
         names = _opf_lifecycle_delegates({module: renamed})

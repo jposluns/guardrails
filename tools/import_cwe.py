@@ -474,13 +474,21 @@ def _expect_fail(label, fn):
     raise SystemExit("SELF-TEST FAIL: {} should have failed closed".format(label))
 
 
+def _expect(condition, message=None):
+    """A self-test verdict that python -O and -OO cannot strip, unlike an assert statement."""
+    if not condition:
+        if message is None:
+            raise AssertionError
+        raise AssertionError(message)
+
+
 def self_test():
     # Happy path: 3 live (Draft/Stable/Usable), Category/View/Deprecated/Obsolete excluded, sorted.
     _v, _d, rows, total, breakdown = _parse_weaknesses(_fixture(), min_elements=1)
     codes = [c for _n, c, _t in rows]
-    assert codes == ["CWE-1", "CWE-59", "CWE-363"], codes
-    assert total == 5, total
-    assert breakdown == {"Deprecated": 1, "Draft": 1, "Obsolete": 1, "Stable": 1, "Usable": 1}, breakdown
+    _expect(codes == ["CWE-1", "CWE-59", "CWE-363"], codes)
+    _expect(total == 5, total)
+    _expect(breakdown == {"Deprecated": 1, "Draft": 1, "Obsolete": 1, "Stable": 1, "Usable": 1}, breakdown)
     print("  ok (happy path): 3 live rows, natural-sorted, non-live and non-Weakness excluded")
 
     _expect_fail("absurdly small extraction (namespace mismatch proxy)",
@@ -534,10 +542,10 @@ def self_test():
                  lambda: _reconcile_count(944, 969, 111))
     # off-by-one: a published figure equal to active-1 must not reconcile
     _expect_fail("off-by-one published count", lambda: _reconcile_count(3, 5, 2))
-    assert _reconcile_count(944, 969, 944).startswith("active"), "944 must read as active"
-    assert _reconcile_count(944, 969, 969).startswith("total"), "969 must read as total"
+    _expect(_reconcile_count(944, 969, 944).startswith("active"), "944 must read as active")
+    _expect(_reconcile_count(944, 969, 969).startswith("total"), "969 must read as total")
     # published-count parser: one unambiguous match required
-    assert _published_count('<b>Total Weaknesses: </b> <span class="red">944</span>') == 944
+    _expect(_published_count('<b>Total Weaknesses: </b> <span class="red">944</span>') == 944)
     _expect_fail("no published count", lambda: _published_count("<html>nothing</html>"))
     _expect_fail("contradictory published counts",
                  lambda: _published_count('Total Weaknesses: <span>944</span>'
@@ -562,8 +570,8 @@ def self_test():
                expected_total=5, expected_active=3, expected_published=3,
                expected_retrieved="2026-04-30", min_elements=1)
         _out_text = _out.read_text(encoding="utf-8")
-        assert _out.is_file() and 'catalogue = "subset"' in _out_text
-        assert _out_text.count("[[id]]") == 3, "happy path should vendor all three mapped fixtures"
+        _expect(_out.is_file() and 'catalogue = "subset"' in _out_text)
+        _expect(_out_text.count("[[id]]") == 3, "happy path should vendor all three mapped fixtures")
         print("  ok (render happy path): fixture rendered as a subset and loader-verified")
         # subset filter: a narrower mapped set vendors only the cited weaknesses, nothing more.
         _out_sub = _stage / "cwe-sub.toml"
@@ -571,9 +579,9 @@ def self_test():
                expected_total=5, expected_active=3, expected_published=3,
                expected_retrieved="2026-04-30", min_elements=1)
         _sub_text = _out_sub.read_text(encoding="utf-8")
-        assert _sub_text.count("[[id]]") == 1 and 'code = "CWE-59"' in _sub_text, "only CWE-59 vendored"
-        assert 'code = "CWE-1"' not in _sub_text and 'code = "CWE-363"' not in _sub_text, "unmapped dropped"
-        assert "1 vendored (cross-mapped subset)" in _sub_text, "header states the vendored count"
+        _expect(_sub_text.count("[[id]]") == 1 and 'code = "CWE-59"' in _sub_text, "only CWE-59 vendored")
+        _expect('code = "CWE-1"' not in _sub_text and 'code = "CWE-363"' not in _sub_text, "unmapped dropped")
+        _expect("1 vendored (cross-mapped subset)" in _sub_text, "header states the vendored count")
         # a mapped id absent from the parsed catalogue is a hard fail-closed abort, never a silent drop.
         _expect_fail("render fails closed on a mapped id absent from the catalogue",
                      lambda: render(_stage, _stage / "cwe-missing.toml", mapped_ids={"CWE-59", "CWE-99999"},
@@ -583,13 +591,13 @@ def self_test():
         # forged bytes vs the REAL pinned sha -> rejected, no output written
         _expect_fail("render rejects staged bytes against the pinned sha",
                      lambda: render(_stage, _stage / "forged.toml"))
-        assert not (_stage / "forged.toml").exists(), "no output on pin rejection"
+        _expect(not (_stage / "forged.toml").exists(), "no output on pin rejection")
         # wrong pinned active count -> rejected before any write; destination sentinel preserved
         _dest = _stage / "dest.toml"; _dest.write_text("SENTINEL", encoding="utf-8")
         _expect_fail("render fails closed on a count mismatch",
                      lambda: render(_stage, _dest, expected_xml_sha256=_sha256(_xml),
                                     expected_total=5, expected_active=999, min_elements=1))
-        assert _dest.read_text(encoding="utf-8") == "SENTINEL", "destination preserved on count rejection"
+        _expect(_dest.read_text(encoding="utf-8") == "SENTINEL", "destination preserved on count rejection")
         # loader-stage rejection AFTER the candidate write -> atomic replace must not touch the destination
         _dest2 = _stage / "dest2.toml"; _dest2.write_text("KEEP", encoding="utf-8")
         global _verify_with_loader
@@ -603,8 +611,8 @@ def self_test():
                                         expected_xml_sha256=_sha256(_xml),
                                         expected_total=5, expected_active=3, expected_published=3,
                                         expected_retrieved="2026-04-30", min_elements=1))
-            assert _dest2.read_text(encoding="utf-8") == "KEEP", "destination preserved on loader rejection"
-            assert not list(_stage.glob(".cwe-candidate-*.toml")), "candidate cleaned up on failure"
+            _expect(_dest2.read_text(encoding="utf-8") == "KEEP", "destination preserved on loader rejection")
+            _expect(not list(_stage.glob(".cwe-candidate-*.toml")), "candidate cleaned up on failure")
         finally:
             _verify_with_loader = _orig_vwl
         print("  ok (render adversarial): pin, count, and loader rejections all fail closed and preserve the destination")
@@ -619,9 +627,9 @@ def self_test():
                expected_total=5, expected_active=3, expected_published=3,
                expected_retrieved="2026-04-30", min_elements=1)
         _r = _outf.read_text(encoding="utf-8")
-        assert 'edition = "4.20"' in _r and "9.99-FORGED" not in _r, "forged edition must not ship"
-        assert _sha256(_xml) in _r and "deadbeef" not in _r, "forged xml sha must not ship"
-        assert "-42" not in _r and "BOGUS" not in _r and "999" not in _r, "forged counts/reading must not ship"
+        _expect('edition = "4.20"' in _r and "9.99-FORGED" not in _r, "forged edition must not ship")
+        _expect(_sha256(_xml) in _r and "deadbeef" not in _r, "forged xml sha must not ship")
+        _expect("-42" not in _r and "BOGUS" not in _r and "999" not in _r, "forged counts/reading must not ship")
         print("  ok (metadata authoritative): a forged sidecar's version/sha/counts never reach the render")
         # a non-ISO retrieved fails closed (blocks a TOML string breakout through that field)
         _inj = dict(_prov); _inj["retrieved"] = "2026-01-01\"\ninjected = \"x"

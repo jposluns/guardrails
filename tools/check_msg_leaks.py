@@ -207,6 +207,14 @@ def main(argv):
         return 2
 
 
+def _expect(condition, message=None):
+    """A self-test verdict that python -O and -OO cannot strip, unlike an assert statement."""
+    if not condition:
+        if message is None:
+            raise AssertionError
+        raise AssertionError(message)
+
+
 def self_test():
     """In-memory fail-cases; no network or live git needed. Exercises the scanner, the channel builder, the
     SHA/field validation, the push semantics, and the denylist-metadata hardening. Uses a synthetic denylist
@@ -217,21 +225,21 @@ def self_test():
     maxn = 3
     forty = "a" * 40
     # 1. clean channels -> no findings
-    assert scan_channels([("PR title/body", "a normal title\n\nnormal body")], hashes, maxn) == []
+    _expect(scan_channels([("PR title/body", "a normal title\n\nnormal body")], hashes, maxn) == [])
     # 2. structural hit reported without echoing the value
     priv = "192.168.1.99"  # leak-allow: a synthetic RFC1918 fixture the structural path must flag
     f = scan_channels([("commit abc1234", "fix networking on " + priv)], hashes, maxn)
-    assert f == ["commit abc1234: private IP (192.168/16)"], f
-    assert priv not in " ".join(f), "must not echo the matched value (only the class label)"
+    _expect(f == ["commit abc1234: private IP (192.168/16)"], f)
+    _expect(priv not in " ".join(f), "must not echo the matched value (only the class label)")
     # 3. codename hash hit across the title/body boundary (composed blob catches it; separate would not)
     ch = channels_for_pr({"pull_request": {"title": "ship alpha", "body": "bravo landed",
                                            "head": {"ref": "feat/x"}}}, [])
-    assert scan_channels(ch, hashes, maxn) == ["PR title/body: internal codename (hash match)"]
+    _expect(scan_channels(ch, hashes, maxn) == ["PR title/body: internal codename (hash match)"])
     # 4. leak-allow is NOT honored here
-    assert scan_channels([("commit d", "10.0.0.1 leak-allow")], hashes, maxn) == ["commit d: private IP (10/8)"]
+    _expect(scan_channels([("commit d", "10.0.0.1 leak-allow")], hashes, maxn) == ["commit d: private IP (10/8)"])
     # 5. null body is valid empty text
-    assert ("PR title/body", "t\n\n") in channels_for_pr(
-        {"pull_request": {"title": "t", "body": None, "head": {"ref": "r"}}}, [])
+    _expect(("PR title/body", "t\n\n") in channels_for_pr(
+        {"pull_request": {"title": "t", "body": None, "head": {"ref": "r"}}}, []))
     # 6. fail-closed: malformed PR field shapes
     for bad in ({"pull_request": {"title": "t", "head": {"ref": "r"}}},              # no body
                 {"pull_request": {"title": "t", "body": "b"}},                       # no head.ref
@@ -241,7 +249,7 @@ def self_test():
                 {}):
         try:
             channels_for_pr(bad, [])
-            assert False, "expected FailClosed for {}".format(bad)
+            raise AssertionError("expected FailClosed for {}".format(bad))
         except FailClosed:
             pass
     # 7. fail-closed: a revision field that is not a 40-hex SHA (caught before git is ever called)
@@ -256,18 +264,18 @@ def self_test():
                      ("push", {"before": _ZERO_SHA, "after": forty})):     # branch creation -> fail closed
         try:
             gather_channels(name, ev)
-            assert False, "expected FailClosed for {} {}".format(name, ev)
+            raise AssertionError("expected FailClosed for {} {}".format(name, ev))
         except FailClosed:
             pass
     # 8. branch deletion (after == zero): no channels, no git call, no exception
     channels, phase = gather_channels("push", {"before": forty, "after": _ZERO_SHA})
-    assert channels == [] and phase == "post-merge", (channels, phase)
+    _expect(channels == [] and phase == "post-merge", (channels, phase))
     # 9. unknown event kind fails closed - including a name that merely PREFIXES "pull_request"
     for kind in ("issues", "pull_request_review", "pull_request_typo"):
         try:
             gather_channels(kind, {"pull_request": {"base": {"sha": forty}, "head": {"sha": forty, "ref": "r"},
                                                     "title": "t", "body": None}})
-            assert False, "expected FailClosed for unsupported event kind {}".format(kind)
+            raise AssertionError("expected FailClosed for unsupported event kind {}".format(kind))
         except FailClosed:
             pass
     # 10. denylist-metadata hardening (load_denylist): malformed maxn / trailing tokens fail closed
@@ -278,18 +286,18 @@ def self_test():
             (root / "tools" / "leak-hashes.txt").write_text(text, encoding="utf-8")
             return c.load_denylist(root)
     h = "0" * 64
-    assert denylist("# maxn 0\n" + h + "\n")[2], "maxn 0 must be rejected (would disable the codename layer)"
-    assert denylist("# maxn 3 extra\n" + h + "\n")[2], "a trailing token on the maxn directive must be rejected"
-    assert denylist("# maxn nope\n" + h + "\n")[2], "a non-integer maxn must be rejected"
-    assert denylist(h + " plaintext\n")[2], "a trailing token on a hash line must be rejected"
+    _expect(denylist("# maxn 0\n" + h + "\n")[2], "maxn 0 must be rejected (would disable the codename layer)")
+    _expect(denylist("# maxn 3 extra\n" + h + "\n")[2], "a trailing token on the maxn directive must be rejected")
+    _expect(denylist("# maxn nope\n" + h + "\n")[2], "a non-integer maxn must be rejected")
+    _expect(denylist(h + " plaintext\n")[2], "a trailing token on a hash line must be rejected")
     hs, mx, bad = denylist("# maxn 2\n" + h + "\n")
-    assert bad == [] and mx == 2 and h in hs, (bad, mx, hs)
-    assert denylist("# maxn 3\n# maxn 1\n" + h + "\n")[2], "a duplicate/contradictory maxn must be rejected"
-    assert denylist("# maxn 101\n" + h + "\n")[2], "an over-cap maxn (>100) must be rejected"
-    assert denylist("# maxn " + "9" * 5000 + "\n" + h + "\n")[2], "an oversized maxn must be rejected, not crash"
+    _expect(bad == [] and mx == 2 and h in hs, (bad, mx, hs))
+    _expect(denylist("# maxn 3\n# maxn 1\n" + h + "\n")[2], "a duplicate/contradictory maxn must be rejected")
+    _expect(denylist("# maxn 101\n" + h + "\n")[2], "an over-cap maxn (>100) must be rejected")
+    _expect(denylist("# maxn " + "9" * 5000 + "\n" + h + "\n")[2], "an oversized maxn must be rejected, not crash")
     try:
         json.loads('{"x": NaN}', parse_constant=_reject_json_constant)
-        assert False, "a non-JSON constant (NaN) must be rejected by strict event parsing"
+        raise AssertionError("a non-JSON constant (NaN) must be rejected by strict event parsing")
     except ValueError:
         pass
     print("SELF-TEST PASS: scanner reuse, composed title/body boundary catch, no-echo, and leak-allow "
