@@ -44,10 +44,15 @@ gen_manifest.py at build time).
   heading is all core. The gate DERIVES each row's layer from its span and the heading, and the stored
   `layer` field must agree, so moving text without updating the inventory fails, and so does updating the
   inventory without moving the text. A span that includes the heading line crosses the layers and fails.
-  Every paragraph below the heading (a run of non-blank lines) must overlap at least one registered
-  clause span of that rule: unregistered text may not move into the detail layer. A missing, non-string,
-  or unknown `layer` value is malformed input (exit 2); a disagreement, a crossing span, or an
-  unregistered detail paragraph is a finding (exit 1).
+  Every non-blank line below the heading must lie inside a registered clause span of that rule (line by
+  line, not paragraph overlap): unregistered text may not move into the detail layer. A span that starts
+  on a frontmatter line fails whatever its layer. Rule sources are read with gen_rules.read_rule_source
+  and decode_rule_source (raw bytes, UTF-8, no newline translation), and the heading is located with
+  gen_rules.detail_heading_line, so this gate refuses (exit 2) every layout gen_rules refuses: a CR byte,
+  a second, near-miss, setext, blockquoted, or listed heading naming Detail, one inside a fenced code
+  block or an HTML comment, and an unclosed fence or comment. A missing, non-string, or unknown `layer`
+  value is also malformed input (exit 2); a disagreement, a crossing span, a frontmatter span, or an
+  unregistered detail line is a finding (exit 1).
 
 LEGS (all run at the default step-1 invocation; none needs a manifest):
   ID SCHEME (7.1):      every rule corpus-id under rules-dir appears in the inventory; every clause-id is
@@ -61,7 +66,8 @@ LEGS (all run at the default step-1 invocation; none needs a manifest):
                         file. Zero or more than one occurrence, an untight occurrence, an empty
                         canonical-text, or a digest disagreement is a FAIL. The stored layer must
                         equal the layer derived from the span (see LAYER).
-  DETAIL COVERAGE:      every paragraph below a rule's `## Detail` heading overlaps a registered clause.
+  DETAIL COVERAGE:      every non-blank line below a rule's `## Detail` heading lies in a registered
+                        clause span of that rule.
   CUMULATIVE-MAX (7.1): each ordinal newly assigned this release (a born row at the newest release in the
                         register) strictly EXCEEDS the cumulative maximum ordinal EVER used for that
                         corpus-id, taken from the register's born rows (which persist for dead ids too), so
@@ -119,8 +125,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
 from check_versions import _parse as _semver  # noqa: E402  reuse the shipped bare-SemVer parser
-from gen_rules import parse_source, CID_RE, detail_heading_line  # noqa: E402  reuse the frontmatter parser,
-#                                     the corpus-id regex, and the one `## Detail` heading locator
+from gen_rules import (parse_source, CID_RE, detail_heading_line, body_first_line,  # noqa: E402  reuse the
+                       decode_rule_source, read_rule_source)  # frontmatter parser, the corpus-id regex, the
+#                      `## Detail` heading locator, and the one way to read a rule source
 
 ORDINAL_RE = re.compile(r"^[1-9][0-9]*$")  # unpadded positive decimal: no leading zero, no sign, no zero
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")  # the source-digest syntax: 64 lowercase hex characters
@@ -543,11 +550,13 @@ def _span_content(text, start, end):
     return "\n".join(lines[start - 1:end])
 
 
-def _heading_of(decoded, source_path):
-    """The `## Detail` heading line of a decoded rule source, or None. A source whose heading cannot be
-    located (two headings, a near-miss heading, a malformed frontmatter) is malformed input: GateError."""
+def _layout_of(raw, source_path):
+    """(first body line, `## Detail` heading line or None) of a rule source's raw bytes, decoded the way
+    gen_rules decodes it. A source with a CR byte or whose heading cannot be located (a refused layout, a
+    malformed frontmatter) is malformed input: GateError."""
     try:
-        return detail_heading_line(decoded, source_path)
+        decoded = decode_rule_source(raw, source_path)
+        return body_first_line(decoded, source_path), detail_heading_line(decoded, source_path)
     except ValueError as exc:
         raise GateError("cannot derive clause layers from {} ({})".format(source_path, exc))
 
@@ -564,34 +573,34 @@ def derived_layer(heading, start, end):
 
 
 def check_detail_coverage(rows, rule_sources):
-    """DETAIL COVERAGE: for each rule source with a `## Detail` heading, every paragraph below the heading
-    (a maximal run of non-blank lines) must overlap the span of at least one inventory row of that rule's
-    corpus-id. Returns finding strings; an unreadable or malformed source is a GateError."""
+    """DETAIL COVERAGE: for each rule source with a `## Detail` heading, every non-blank line below the
+    heading must lie inside the span of at least one inventory row of that rule's corpus-id. Returns one
+    finding per run of consecutive uncovered lines; an unreadable or malformed source is a GateError."""
     findings = []
     for corpus, src in sorted(rule_sources.items()):
         try:
-            text = src.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
+            raw = src.read_bytes()
+        except OSError as exc:
             raise GateError("cannot read rule source {} ({})".format(src, exc))
-        heading = _heading_of(text, str(src))
+        _first_body, heading = _layout_of(raw, str(src))
         if heading is None:
             continue
         spans = [(row.get("start-line"), row.get("end-line")) for row in rows if row.get("corpus-id") == corpus]
         spans = [(s, e) for s, e in spans if isinstance(s, int) and isinstance(e, int)]
-        lines = text.split("\n")
-        number, paragraphs = heading + 1, []
-        while number <= len(lines):
-            if lines[number - 1].strip():
-                p_start = number
-                while number <= len(lines) and lines[number - 1].strip():
-                    number += 1
-                paragraphs.append((p_start, number - 1))
-            number += 1
-        for p_start, p_end in paragraphs:
-            if not any(s <= p_end and p_start <= e for s, e in spans):
-                findings.append("{}: detail paragraph at lines {} to {} overlaps no registered clause; register "
-                                "it in the inventory before it moves below the '## Detail' heading"
-                                .format(src, p_start, p_end))
+        lines = read_rule_source(src).split("\n")
+        uncovered = []
+        for number in range(heading + 1, len(lines) + 1):
+            if not lines[number - 1].strip():
+                continue
+            if not any(s <= number <= e for s, e in spans):
+                if uncovered and uncovered[-1][1] == number - 1:
+                    uncovered[-1][1] = number
+                else:
+                    uncovered.append([number, number])
+        for u_start, u_end in uncovered:
+            findings.append("{}: detail lines {} to {} lie inside no registered clause span; register them in "
+                            "the inventory before they move below the '## Detail' heading"
+                            .format(src, u_start, u_end))
     return findings
 
 
@@ -653,18 +662,18 @@ def check_rows(root, rows, manifest_sources, rule_sources, rules_dir):
             try:
                 raw = abs_path.read_bytes()
             except FileNotFoundError:
-                digest_cache[source_path] = ("missing", None, None, None)
+                digest_cache[source_path] = ("missing", None, None, None, None)
             except OSError as exc:  # a permission or I/O error is environmental: fail closed
                 raise GateError("{}: cannot read source file {} ({})".format(where, source_path, exc))
             else:
                 try:
                     decoded = raw.decode("utf-8")
                 except UnicodeDecodeError:
-                    digest_cache[source_path] = ("non-utf8", None, None, None)
+                    digest_cache[source_path] = ("non-utf8", None, None, None, None)
                 else:
-                    digest_cache[source_path] = ("ok", hashlib.sha256(raw).hexdigest(), decoded,
-                                                 _heading_of(decoded, source_path))
-        status, digest, decoded, heading = digest_cache[source_path]
+                    digest_cache[source_path] = (("ok", hashlib.sha256(raw).hexdigest(), decoded)
+                                                 + _layout_of(raw, source_path))
+        status, digest, decoded, first_body, heading = digest_cache[source_path]
         if status == "missing":
             findings.append("{}: source file {} does not exist".format(where, source_path))
             continue
@@ -707,6 +716,9 @@ def check_rows(root, rows, manifest_sources, rule_sources, rules_dir):
                                     "start-line and end on end-line (window not tight) in {}"
                                     .format(where, source_path))
         if window is not None:
+            if start < first_body:
+                findings.append("{}: span (lines {} to {}) touches the frontmatter (lines 1 to {}) of {}; a "
+                                "clause is body text".format(where, start, end, first_body - 1, source_path))
             derived = derived_layer(heading, start, end)
             if derived is None:
                 findings.append("{}: span (lines {} to {}) crosses the '## Detail' heading at line {} of {}"
@@ -933,6 +945,8 @@ def _run_quiet(runner=None, **kwargs):
 
 # The layer cases: (name, body lines after the H1, [(ordinal, first line index, last line index, layer)],
 # expected exit). Line indices are 0-based into the body lines; a clause's canonical-text is those lines.
+# A first and last index of "fm" places the clause on the frontmatter's corpus-id line instead, and the
+# cr-byte case ends the H1 line with a CR byte.
 _DETAIL_BODY = ["core obligation", "", "## Detail", "", "detail obligation"]
 _LAYER_CASES = (
     ("layer-derived-pass", _DETAIL_BODY, [(1, 0, 0, "core"), (2, 4, 4, "detail")], 0),
@@ -945,6 +959,16 @@ _LAYER_CASES = (
     ("two-detail-headings", _DETAIL_BODY + ["", "## Detail", "", "more detail"],
      [(1, 0, 0, "core"), (2, 4, 4, "detail"), (3, 8, 8, "detail")], 2),
     ("no-heading-detail-row", ["core obligation"], [(1, 0, 0, "detail")], 1),
+    ("partial-detail-paragraph", _DETAIL_BODY + ["unregistered second line"],
+     [(1, 0, 0, "core"), (2, 4, 4, "detail")], 1),
+    ("frontmatter-core-span", ["core obligation"], [(1, "fm", "fm", "core"), (2, 0, 0, "core")], 1),
+    ("fenced-heading", ["core obligation", "", "```", "## Detail", "```", "", "detail obligation"],
+     [(1, 0, 0, "core"), (2, 6, 6, "core")], 2),
+    ("comment-heading", ["core obligation", "", "<!--", "## Detail", "-->", "", "detail obligation"],
+     [(1, 0, 0, "core"), (2, 6, 6, "core")], 2),
+    ("setext-heading", ["core obligation", "", "Detail", "---", "", "detail obligation"],
+     [(1, 0, 0, "core"), (2, 5, 5, "core")], 2),
+    ("cr-byte", ["core obligation"], [(1, 0, 0, "core")], 2),
 )
 # Red on revert: each guard put back to its pre-fix form in a scratch copy of this module, loaded through
 # importlib (never exec), must turn its case from the expected exit to the reverted exit.
@@ -953,27 +977,39 @@ _LAYER_REVERTS = (
     ("layer-disagreement", "elif derived != layer:", "elif False:", "layer-disagrees", 0),
     ("layer-crossing", '        return "detail"\n    return None\n', '        return "detail"\n    return "core"\n',
      "layer-crosses-heading", 0),
-    ("detail-coverage", "if not any(s <= p_end and p_start <= e for s, e in spans):", "if False:",
-     "unregistered-detail-paragraph", 0),
+    ("detail-coverage", "_first_body, heading = _layout_of(raw, str(src))\n        if heading is None:",
+     "_first_body, heading = _layout_of(raw, str(src))\n        if True:", "unregistered-detail-paragraph", 0),
     ("detail-coverage-wiring", "findings += check_detail_coverage(rows, rule_corpus_ids)", "pass",
      "unregistered-detail-paragraph", 0),
     ("layer-vocabulary", "if layer not in LAYERS:", "if False:", "layer-unknown", 1),
     ("heading-located", "derived = derived_layer(heading, start, end)", "derived = derived_layer(None, start, end)",
      "layer-derived-pass", 1),
+    ("line-level-coverage", "if not any(s <= number <= e for s, e in spans):", "if False:",
+     "partial-detail-paragraph", 0),
+    ("frontmatter-span", "if start < first_body:", "if False:", "frontmatter-core-span", 0),
 )
+# The CR refusal lives in the shared gen_rules.decode_rule_source; its revert loads gen_rules with that guard
+# removed and patches this module's two rule-source readers to the reverted ones for the one case.
+_CR_REVERT = ('if b"\\r" in raw:', "if False:", "cr-byte", 0)
 
 
 def _layer_case(base, name):
     """Write the named layer case as a one-rule genesis corpus under base. Returns its root."""
     _name, body, clauses, _expected = next(c for c in _LAYER_CASES if c[0] == name)
     lines, line_of = _rule_lines("cdetl1", body)
+    if name == "cr-byte":
+        lines[6] += "\r"
     digest = _sha_of(lines)
     rows, born = [], [("cdetl1", "1.1.0")]
     for ordinal, first, last, layer in clauses:
         clause_id = "cdetl1.{}".format(ordinal)
+        if first == "fm":
+            start, end, text = 2, 2, lines[1]
+        else:
+            start, end, text = line_of[first], line_of[last], "\n".join(body[first:last + 1])
         rows.append(dict([("clause-id", clause_id), ("corpus-id", "cdetl1"),
-                          ("source-path", ".aiqt/core/rules/cdetl1.md"), ("start-line", line_of[first]),
-                          ("end-line", line_of[last]), ("canonical-text", "\n".join(body[first:last + 1])),
+                          ("source-path", ".aiqt/core/rules/cdetl1.md"), ("start-line", start),
+                          ("end-line", end), ("canonical-text", text),
                           ("source-digest", digest), ("layer", layer)]))
         born.append((clause_id, "1.1.0"))
     return _write_corpus(base / name, dict(cdetl1=lines), rows, born, [], [])
@@ -1193,6 +1229,28 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
                 if got != reverted_exit:
                     failures.append("revert {}: with the guard removed, case {} expected exit {} (the guard "
                                     "is what catches it), got {}".format(label, case, reverted_exit, got))
+            old, new, case, reverted_exit = _CR_REVERT
+            gr_source = (Path(__file__).resolve().parent / "gen_rules.py").read_text(encoding="utf-8")
+            if gr_source.count(old) != 1:
+                failures.append("revert cr-byte: the fixed text must occur exactly once in gen_rules.py")
+            else:
+                import importlib.util
+                gr_path = revert_base / "gen_rules_reverted_cr_byte.py"
+                gr_path.write_text(gr_source.replace(old, new, 1), encoding="utf-8")
+                spec = importlib.util.spec_from_file_location(gr_path.stem, gr_path)
+                gr_mutant = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(gr_mutant)
+                saved = {k: globals()[k] for k in ("decode_rule_source", "parse_source", "read_rule_source")}
+                try:
+                    globals().update(decode_rule_source=gr_mutant.decode_rule_source,
+                                     parse_source=gr_mutant.parse_source,
+                                     read_rule_source=gr_mutant.read_rule_source)
+                    got = _run_quiet(**_paths(_layer_case(revert_base / "cr-byte", case), genesis=True))
+                finally:
+                    globals().update(saved)
+                if got != reverted_exit:
+                    failures.append("revert cr-byte: with the shared CR guard removed, case {} expected exit {}, "
+                                    "got {}".format(case, reverted_exit, got))
 
             # The same corpus with the DEFERRED manifest leg armed and a matching manifest is clean; a
             # mismatching manifest fails; the default invocation reads no manifest at all.
@@ -1714,10 +1772,10 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
               "clause-id fails closed (exit 2, the hardened load_prev_ids), a successor-id already retired "
               "at an earlier release is a resurrection through the register (exit 1), and a same-release "
               "pass-through fold is permitted (exit 0)); and the clause layer: {} layer case(s) hold "
-              "(derived pass, stored-layer disagreement, crossing span, unregistered detail paragraph, "
-              "missing or unknown layer, two headings, detail row with no heading) and {} guard revert(s) "
-              "each go red"
-              .format(core, len(_LAYER_CASES), len(_LAYER_REVERTS)))
+              "(derived pass, stored-layer disagreement, crossing span, unregistered detail paragraph or "
+              "line, missing or unknown layer, two headings, detail row with no heading, frontmatter span, "
+              "fenced, commented, or setext heading, CR byte) and {} guard revert(s) each go red"
+              .format(core, len(_LAYER_CASES), len(_LAYER_REVERTS) + 1))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the end-to-end fixture cases were SKIPPED (no writable temp "
               "directory), so those invariants are UNVERIFIED this run".format(core))

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "df4b85d81f19179e5ebf0df5f5c4bbd5181a340a1cc12e68d6c19fd5ec8823fc"
+tree-sha256 = "723e08fea43c4dace1dad60fd4835f81fe97d5c7e9946db357afcd6d3bb1973d"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -117,7 +117,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2867
-sha256 = "8539cda47ef860baa6605e3cf5c0681972c5e62c66704a17674b6ad0a0e8aff1"
+sha256 = "e2df7803259ae1b014d415ab1c710a3f98d064cf01932d43cc93e906f21a4602"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -3196,8 +3196,8 @@ sha256 = "87a4f9c429d1fb01d8a3836ab8d55c93846106037224992b21e01611d87e1a73"
 
 [[sources]]
 path = "tools/check_clauses.py"
-bytes = 110812
-sha256 = "a78822005534c8f29deb843462345d81d519fda48879bdb2a2cd0be8fefe8f87"
+bytes = 115091
+sha256 = "980f17c111eb16ea4d9bac30539400f1f1783d3401f4174ec55bf9b2d98ab782"
 
 [[sources]]
 path = "tools/check_crosswalk.py"
@@ -3331,8 +3331,8 @@ sha256 = "91fa470bab48c2b3601e0be2124420524c996b1cd8e8f3a1bed294b54703efc1"
 
 [[sources]]
 path = "tools/check_release_delta.py"
-bytes = 194684
-sha256 = "3de22b7dca174f8ed5a3dd881cf420d4f42060b28ec727e2a73d17910e02fb1f"
+bytes = 200909
+sha256 = "3f90491c4e41eccada79ef9ee2fe114e30136d7f14484b1fc9fe0c6a1468b231"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
@@ -3491,8 +3491,8 @@ sha256 = "2f91e677d1eaf446d6f4f33b754cd6a6d80cd58888a49e8784e9d4898e38c175"
 
 [[sources]]
 path = "tools/gen_rules.py"
-bytes = 27250
-sha256 = "5e8e9d65f8c3617fd82e1ecd20b8daba27c1acb3be729b61ded4c5667c30f489"
+bytes = 37715
+sha256 = "2e77205d2d9299fd5f17470af020a81d1c8bff063ef41693c2a475e3690cb6c7"
 
 [[sources]]
 path = "tools/gen_secret_patterns.py"

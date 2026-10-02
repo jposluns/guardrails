@@ -7,22 +7,36 @@ coded CIA+P). The updater's write root is `.aiqt/core/`; CI runs this in --check
 silently drift (including orphaned generated files with no source). Vendored `external/` trees are untouched.
 
 RULE SOURCE FORMAT (the two-layer split; this step parses and validates it, and moves no text yet):
-  A source may hold at most one visible heading line that reads exactly `## Detail`. The text above it is
-  the CORE layer and the text below it is the DETAIL layer. The heading is a plain Markdown heading, never
-  an HTML comment, because Claude Code strips comments and a hidden marker would hide text silently. Two
-  optional frontmatter keys go with it, on aiqt non-apex and security rules only (the apex never splits):
+  A rule source is read from its raw bytes as UTF-8 with no newline translation, and a source holding
+  any CR byte is refused (check_clauses reads it the same way, through read_rule_source and
+  decode_rule_source, so both tools number lines alike). A source may hold at most one body line that
+  reads exactly `## Detail`, at column 0, outside any fenced code block and outside any HTML comment. The
+  text above it is the CORE layer and the text below it is the DETAIL layer. Two optional frontmatter
+  keys go with it, on aiqt non-apex and security rules only (the apex never splits):
     detail-trigger: <a short phrase naming the operation>   required when the heading exists
     detail-reason:  <one line recording the must-fire review> optional when the heading exists
-  Either key without the heading is refused. So are a second `## Detail` heading, a heading that names
-  Detail in another form (another level, another case, a plural, or trailing text), an empty detail
-  layer, and a key value that is not a non-empty string. A violation is a malformed source (exit 2). The
-  heading is matched on every body line, inside a fenced code block too, so a fenced copy is refused
-  rather than skipped. The generated read tree is still the whole source, byte for byte; the separate
-  detail output and its pointer sentence come in a later step.
+  Each of these is refused as a malformed source (exit 2, naming the file and, for a line, its number):
+    - either key without the heading, a missing detail-trigger with it, or a key value that is not a
+      non-empty string;
+    - a second `## Detail` line;
+    - a `## Detail` line, or any other line that names Detail as a heading, inside a fenced code block
+      (backtick or tilde, three or more, indented up to 3 spaces) or inside an HTML comment (from `<!--`
+      to the next `-->`, across lines): such a line is never the split and never skipped;
+    - a fenced code block or an HTML comment that is still open at the end of the source;
+    - an ATX heading line that names Detail in another form (another level, case, plural, spacing, or
+      trailing text), at any indent, and also behind blockquote (`>`) or list item (`-`, `*`, `+`, `1.`,
+      `1)`) markers;
+    - a setext heading naming Detail: a line reading `Detail` or `Details` (any case, any indent, with
+      or without trailing text) directly followed by a line of `=` or `-` characters;
+    - an empty core layer or an empty detail layer, where a layer is empty when it holds nothing but
+      blank lines and HTML comments.
+  The generated read tree is still the whole source, byte for byte; the separate detail output and its
+  pointer sentence come in a later step.
   gen_rules.py           regenerate .claude/rules/{aiqt,security}/
   gen_rules.py --check   fail (exit 1) on drift; exit 2 on a malformed source or a read/write failure
-  gen_rules.py --self-test  assert an invalid-UTF-8 generated target fails closed (exit 2), and that each
-                            malformed detail layout is refused, with a red-on-revert flip per guard
+  gen_rules.py --self-test  assert an invalid-UTF-8 generated target fails closed (exit 2), that each
+                            listed detail layout case gets its expected exit, and that each guard in
+                            the revert table, put back in a scratch copy, changes its case's exit
 """
 import os
 import re
@@ -65,11 +79,16 @@ SEQ_KEYS = {"secondary"} | MAP_KEYS
 SLUG_RE = re.compile(r'^[a-z0-9]+(-[a-z0-9]+)*$')
 CID_RE = re.compile(r'^[a-z0-9]{6,}$')
 # The two-layer split (see RULE SOURCE FORMAT above). DETAIL_HEADING is matched as a whole line. Any other
-# heading line that names Detail (another level, case, plural, or trailing text) is refused rather than
-# read as core, so a near miss can never leave the author believing text was split when it was not.
+# heading line that names Detail (the forms listed there) is refused rather than read as core, so a near
+# miss can never leave the author believing text was split when it was not.
 DETAIL_HEADING = "## Detail"
 DETAIL_KEYS = {"detail-trigger", "detail-reason"}
 _NEAR_DETAIL_RE = re.compile(r'^\s{0,3}#{1,6}\s*details?\b', re.IGNORECASE)
+_CONTAINER_RE = re.compile(r'^[ \t]*(?:>|[-*+](?=[ \t])|\d{1,9}[.)](?=[ \t]))[ \t]*')
+_SETEXT_TEXT_RE = re.compile(r'^[ \t]*details?\b', re.IGNORECASE)
+_SETEXT_UNDERLINE_RE = re.compile(r'^ {0,3}(?:=+|-+)[ \t]*$')
+_FENCE_OPEN_RE = re.compile(r'^ {0,3}(`{3,}|~{3,})(.*)$')
+_FENCE_CLOSE_RE = re.compile(r'^ {0,3}(`{3,}|~{3,})[ \t]*$')
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
@@ -119,8 +138,23 @@ def _value(v):
     return v
 
 
+def decode_rule_source(raw, name):
+    """A rule source's text from its raw bytes: UTF-8 with no newline translation. Raises ValueError on
+    a CR byte (LF line endings only, as check_byte_canon requires) and on invalid UTF-8 (a
+    UnicodeDecodeError, itself a ValueError). check_clauses decodes rule sources through this too."""
+    if b"\r" in raw:
+        raise ValueError("{}: line {}: holds a CR byte; a rule source uses LF line endings only".format(
+            name, raw.count(b"\n", 0, raw.index(b"\r")) + 1))
+    return raw.decode("utf-8")
+
+
+def read_rule_source(path):
+    """Read one rule source the one way both gen_rules and check_clauses read it (see decode_rule_source)."""
+    return decode_rule_source(path.read_bytes(), path.name)
+
+
 def parse_source(path):
-    text = path.read_text(encoding="utf-8")
+    text = read_rule_source(path)
     if not text.startswith("---\n"):
         raise ValueError("{}: no frontmatter".format(path.name))
     end = text.find("\n---\n", 4)
@@ -208,33 +242,104 @@ def derive(fm, name, allowed_origins=("pack",)):
     raise ValueError("{}: unknown family '{}'".format(name, family))
 
 
-def detail_heading_line(text, name):
-    """The 1-based line number of the single `## Detail` heading in a rule source's body, or None when the
-    source has none. Raises ValueError on a missing or unterminated frontmatter, a second heading, or a
-    heading line that names Detail in any other form. check_clauses derives each clause's layer from it."""
+def body_first_line(text, name):
+    """The 1-based number of the first body line, the line after the frontmatter's closing `---`. Raises
+    ValueError on a missing or unterminated frontmatter (the same frontmatter end parse_source uses)."""
     if not text.startswith("---\n"):
         raise ValueError("{}: no frontmatter".format(name))
-    close = text.find("\n---\n", 4)  # the same frontmatter end parse_source uses
+    close = text.find("\n---\n", 4)
     if close == -1:
         raise ValueError("{}: unterminated frontmatter".format(name))
-    first_body = text.count("\n", 0, close + 5) + 1
-    found = None
+    return text.count("\n", 0, close + 5) + 1
+
+
+def _scan_body(text, name):
+    """Each body line as (number, line, hidden, visible): hidden is "a fenced code block" or "an HTML
+    comment" when the line starts inside one, else None; visible is the line with HTML comment text
+    removed (a fenced line is visible as it stands). Raises ValueError on a fence or a comment still open
+    at the end of the source."""
+    first_body = body_first_line(text, name)
+    out, fence, comment = [], None, None  # fence: (char, length, opening line); comment: opening line
     for number, line in enumerate(text.split("\n")[first_body - 1:], first_body):
+        if fence is not None:
+            out.append((number, line, "a fenced code block", line))
+            close = _FENCE_CLOSE_RE.match(line)
+            if close and close.group(1)[0] == fence[0] and len(close.group(1)) >= fence[1]:
+                fence = None
+            continue
+        hidden = None if comment is None else "an HTML comment"
+        if comment is None:
+            opening = _FENCE_OPEN_RE.match(line)
+            if opening and not (opening.group(1)[0] == "`" and "`" in opening.group(2)):
+                fence = (opening.group(1)[0], len(opening.group(1)), number)
+                out.append((number, line, None, line))
+                continue
+        visible, pos = [], 0
+        while True:
+            if comment is not None:
+                end = line.find("-->", pos)
+                if end == -1:
+                    break
+                comment, pos = None, end + 3
+            else:
+                start = line.find("<!--", pos)
+                if start == -1:
+                    visible.append(line[pos:])
+                    break
+                visible.append(line[pos:start])
+                comment, pos = number, start + 4
+        out.append((number, line, hidden, "".join(visible)))
+    if fence is not None:
+        raise ValueError("{}: line {}: fenced code block is never closed".format(name, fence[2]))
+    if comment is not None:
+        raise ValueError("{}: line {}: HTML comment is never closed".format(name, comment))
+    return out
+
+
+def _names_detail(line):
+    """True when the line, read as an ATX heading at any indent and behind any blockquote or list item
+    markers, names Detail (any level, case, plural, spacing, or trailing text)."""
+    while True:
+        container = _CONTAINER_RE.match(line)
+        if not container:
+            break
+        line = line[container.end():]
+    return bool(_NEAR_DETAIL_RE.match(line.lstrip(" \t")))
+
+
+def detail_heading_line(text, name):
+    """The 1-based line number of the single `## Detail` heading in a rule source's body, or None when the
+    source has none. Raises ValueError on each refused layout that RULE SOURCE FORMAT lists, other than
+    the frontmatter keys and empty layers (check_detail). check_clauses derives each clause's layer from
+    it."""
+    scanned = _scan_body(text, name)
+    found = None
+    for index, (number, line, hidden, _visible) in enumerate(scanned):
+        if hidden is not None:
+            if line == DETAIL_HEADING or _names_detail(line):
+                raise ValueError("{}: line {}: heading {!r} names Detail inside {}; it is never the split "
+                                 "and never skipped".format(name, number, line, hidden))
+            continue
         if line == DETAIL_HEADING:
             if found is not None:
                 raise ValueError("{}: more than one '{}' heading (lines {} and {})".format(
                     name, DETAIL_HEADING, found, number))
             found = number
-        elif _NEAR_DETAIL_RE.match(line):
+        elif _names_detail(line):
             raise ValueError("{}: line {}: heading {!r} names Detail but is not exactly '{}'".format(
+                name, number, line, DETAIL_HEADING))
+        elif (_SETEXT_TEXT_RE.match(line) and index + 1 < len(scanned) and scanned[index + 1][2] is None
+              and _SETEXT_UNDERLINE_RE.match(scanned[index + 1][1])):
+            raise ValueError("{}: line {}: setext heading {!r} names Detail but is not exactly '{}'".format(
                 name, number, line, DETAIL_HEADING))
     return found
 
 
 def check_detail(text, fm, name):
     """Validate the two-layer split of one source: the detail keys go with exactly one `## Detail` heading,
-    detail-trigger is required with it, each key is a non-empty string, and the detail layer is not empty.
-    Returns the heading's line number, or None. Raises ValueError (a malformed source) on any violation."""
+    detail-trigger is required with it, each key is a non-empty string, and neither layer is empty (blank
+    lines and HTML comments only). Returns the heading's line number, or None. Raises ValueError (a
+    malformed source) on any violation."""
     heading = detail_heading_line(text, name)
     if heading is None:
         present = sorted(k for k in DETAIL_KEYS if k in fm)
@@ -246,7 +351,10 @@ def check_detail(text, fm, name):
     for key in sorted(DETAIL_KEYS & set(fm)):
         if not isinstance(fm[key], str) or not fm[key].strip():
             raise ValueError("{}: {} must be a non-empty string".format(name, key))
-    if not "\n".join(text.split("\n")[heading:]).strip():
+    scanned = _scan_body(text, name)
+    if not "".join(visible for number, _l, _h, visible in scanned if number < heading).strip():
+        raise ValueError("{}: the core layer above '{}' is empty".format(name, DETAIL_HEADING))
+    if not "".join(visible for number, _l, _h, visible in scanned if number > heading).strip():
         raise ValueError("{}: the '{}' layer is empty".format(name, DETAIL_HEADING))
     return heading
 
@@ -267,7 +375,7 @@ def load_corpus(src_dir):
     for src in sorted(md_files):
         fm = parse_source(src)
         rel = derive(fm, src.name)
-        check_detail(src.read_text(encoding="utf-8"), fm, src.name)
+        check_detail(read_rule_source(src), fm, src.name)
         cid = str(fm["corpus-id"])
         if cid in seen_ids:
             raise ValueError("{}: corpus-id {} already used by {}".format(src.name, cid, seen_ids[cid]))
@@ -368,53 +476,112 @@ A minimal rule so the reconcile has one desired target to read.
 _RULE_REL = "aiqt/10-QUALI-gen-rules-selftest-target.md"
 
 # The two-layer split cases: (name, frontmatter key lines, body after the core paragraph, expected exit).
+# _CASE_FRAME overrides the family lines or the core text of a case; every other case is an aiqt rule
+# whose core is an H1 and one paragraph.
 _DETAIL_SRC = """---
 corpus-id: selfd1
 origin: pack
-family: aiqt
-tier: 10
-facet: QUALI
-slug: gen-rules-selftest-detail
+{family}slug: gen-rules-selftest-detail
 {keys}---
-# Gen-rules detail self-test rule
-
-Core text.
-{body}"""
-_DETAIL_REL = "aiqt/10-QUALI-gen-rules-selftest-detail.md"
+{core}{body}"""
+_AIQT_FAMILY = "family: aiqt\ntier: 10\nfacet: QUALI\n"
+_CORE = "# Gen-rules detail self-test rule\n\nCore text.\n"
 _TRIGGER = "detail-trigger: writing a self-test fixture\n"
 _REASON = "detail-reason: self-test only, no must-fire clause moves\n"
 _DETAIL_BODY = "\n## Detail\n\nDetail text.\n"
 _DETAIL_CASES = (
     ("detail-with-trigger", _TRIGGER + _REASON, _DETAIL_BODY, 0),
+    ("security-detail", _TRIGGER, _DETAIL_BODY, 0),
+    ("fenced-code-detail", _TRIGGER, "\n## Detail\n\n```\ncode\n```\n", 0),
+    ("closed-fence-and-comment", "", "\n```text\ncode\n```\n\n~~~~\ncode\n~~~~\n\n<!--\nnote\n-->\n", 0),
     ("detail-without-trigger", _REASON, _DETAIL_BODY, 2),
     ("trigger-without-detail", _TRIGGER, "", 2),
     ("reason-without-detail", _REASON, "", 2),
     ("two-detail-headings", _TRIGGER, _DETAIL_BODY + "\n## Detail\n\nMore detail.\n", 2),
     ("near-miss-heading", "", "\n### Detail\n\nDetail text.\n", 2),
+    ("near-miss-lowercase", "", "\n## detail\n\nDetail text.\n", 2),
+    ("near-miss-two-spaces", "", "\n##  Detail\n\nDetail text.\n", 2),
+    ("near-miss-colon", "", "\n## Detail:\n\nDetail text.\n", 2),
+    ("near-miss-plural", "", "\n## Details\n\nDetail text.\n", 2),
+    ("indented-heading", "", "\n    ## Detail\n\nDetail text.\n", 2),
+    ("blockquote-heading", "", "\n> ## Detail\n\nDetail text.\n", 2),
+    ("list-item-heading", "", "\n- ## Detail\n\nDetail text.\n", 2),
+    ("ordered-list-heading", "", "\n1. ## Detail\n\nDetail text.\n", 2),
+    ("setext-heading", "", "\nDetail\n------\n\nDetail text.\n", 2),
+    ("setext-heading-h1", "", "\ndetails\n===\n\nDetail text.\n", 2),
+    ("backtick-fenced-heading", _TRIGGER, "\n```\n## Detail\n```\n\nDetail text.\n", 2),
+    ("tilde-fenced-heading", _TRIGGER, "\n   ~~~~\n## Detail\n~~~~~\n\nDetail text.\n", 2),
+    ("fenced-near-miss", "", "\n````md\n## Details\n````\n", 2),
+    ("comment-heading", _TRIGGER, "\n<!--\n## Detail\n-->\n\nDetail text.\n", 2),
+    ("comment-near-miss", "", "\n<!-- a note\n### Detail\n-->\n", 2),
+    ("unterminated-fence", "", "\n```\ncode\n", 2),
+    ("unterminated-comment", "", "\n<!-- note\n", 2),
+    ("cr-byte", "", "\nCore line two.\r\n", 2),
+    ("empty-core", _TRIGGER, _DETAIL_BODY, 2),
     ("empty-detail", _TRIGGER, "\n## Detail\n", 2),
+    ("comment-only-detail", _TRIGGER, "\n## Detail\n\n<!-- nothing -->\n\n", 2),
     ("non-string-trigger", "detail-trigger: [writing]\n", _DETAIL_BODY, 2),
 )
+_CASE_FRAME = {
+    "security-detail": {"family": "family: security\nfacet: SECI\n"},
+    "empty-core": {"core": "<!-- no visible core -->\n"},
+}
 # Red on revert: each guard put back to its pre-fix form in a scratch copy of this module, loaded through
-# importlib, must then ACCEPT (exit 0) the case it exists to refuse. (name, fixed text, reverted text, case)
+# importlib, must then turn its case to the reverted exit (0 for a guard that refuses, 2 for the security
+# keyset that admits the detail keys). (name, fixed text, reverted text, case, exit with the guard reverted)
+_NEAR_RE_FIXED = "_NEAR_DETAIL_RE = re.compile(r'^\\s{0,3}#{1,6}\\s*details?\\b', re.IGNORECASE)"
+_NEAR_RE_NARROW = "_NEAR_DETAIL_RE = re.compile(r'^#{3}\\s*Detail\\b')"
 _DETAIL_REVERTS = (
-    ("missing-trigger", 'if "detail-trigger" not in fm:', "if False:", "detail-without-trigger"),
-    ("orphan-keys", "        if present:\n", "        if False:\n", "trigger-without-detail"),
-    ("second-heading", "if found is not None:", "if False:", "two-detail-headings"),
-    ("near-miss", "elif _NEAR_DETAIL_RE.match(line):", "elif False:", "near-miss-heading"),
-    ("empty-layer", 'if not "\\n".join(text.split("\\n")[heading:]).strip():', "if False:", "empty-detail"),
+    ("missing-trigger", 'if "detail-trigger" not in fm:', "if False:", "detail-without-trigger", 0),
+    ("orphan-keys", "        if present:\n", "        if False:\n", "trigger-without-detail", 0),
+    ("second-heading", "if found is not None:", "if False:", "two-detail-headings", 0),
+    ("near-miss", "elif _names_detail(line):", "elif False:", "near-miss-heading", 0),
+    ("near-miss-lowercase", _NEAR_RE_FIXED, _NEAR_RE_NARROW, "near-miss-lowercase", 0),
+    ("near-miss-two-spaces", _NEAR_RE_FIXED, _NEAR_RE_NARROW, "near-miss-two-spaces", 0),
+    ("near-miss-colon", _NEAR_RE_FIXED, _NEAR_RE_NARROW, "near-miss-colon", 0),
+    ("near-miss-plural", _NEAR_RE_FIXED, _NEAR_RE_NARROW, "near-miss-plural", 0),
+    ("any-indent", 'return bool(_NEAR_DETAIL_RE.match(line.lstrip(" \\t")))',
+     "return bool(_NEAR_DETAIL_RE.match(line))", "indented-heading", 0),
+    ("blockquote-marker", "container = _CONTAINER_RE.match(line)", "container = None", "blockquote-heading", 0),
+    ("list-marker", "container = _CONTAINER_RE.match(line)", "container = None", "list-item-heading", 0),
+    ("ordered-list-marker", "container = _CONTAINER_RE.match(line)", "container = None",
+     "ordered-list-heading", 0),
+    ("setext", "elif (_SETEXT_TEXT_RE.match(line)", "elif (False", "setext-heading", 0),
+    ("fence-hidden", 'out.append((number, line, "a fenced code block", line))',
+     "out.append((number, line, None, line))", "backtick-fenced-heading", 0),
+    ("tilde-fence", "_FENCE_OPEN_RE = re.compile(r'^ {0,3}(`{3,}|~{3,})(.*)$')",
+     "_FENCE_OPEN_RE = re.compile(r'^ {0,3}(`{3,})(.*)$')", "tilde-fenced-heading", 0),
+    ("comment-hidden", 'hidden = None if comment is None else "an HTML comment"', "hidden = None",
+     "comment-heading", 0),
+    ("fence-unterminated", "    if fence is not None:\n        raise", "    if False:\n        raise",
+     "unterminated-fence", 0),
+    ("comment-unterminated", "    if comment is not None:\n        raise", "    if False:\n        raise",
+     "unterminated-comment", 0),
+    ("cr-byte", 'if b"\\r" in raw:', "if False:", "cr-byte", 0),
+    ("empty-core", 'if not "".join(visible for number, _l, _h, visible in scanned if number < heading).strip():',
+     "if False:", "empty-core", 0),
+    ("empty-layer", 'if not "".join(visible for number, _l, _h, visible in scanned if number > heading).strip():',
+     "if False:", "empty-detail", 0),
+    ("comment-only-layer",
+     'if not "".join(visible for number, _l, _h, visible in scanned if number > heading).strip():',
+     'if not "".join(_l for number, _l, _h, visible in scanned if number > heading).strip():',
+     "comment-only-detail", 0),
     ("non-string-value", "if not isinstance(fm[key], str) or not fm[key].strip():", "if False:",
-     "non-string-trigger"),
-    ("corpus-wiring", 'check_detail(src.read_text(encoding="utf-8"), fm, src.name)', "pass",
-     "detail-without-trigger"),
+     "non-string-trigger", 0),
+    ("corpus-wiring", "check_detail(read_rule_source(src), fm, src.name)", "pass", "detail-without-trigger", 0),
+    ("security-detail-keys", '_check_keys(fm, BASE_KEYS | {"facet", "secondary"} | MAP_KEYS | DETAIL_KEYS, name)',
+     '_check_keys(fm, BASE_KEYS | {"facet", "secondary"} | MAP_KEYS, name)', "security-detail", 2),
 )
 
 
 def _detail_case_root(base, name):
     """A synthetic corpus holding the one rule of the named detail case. Returns the case root."""
     _case, keys, body, _expected = next(c for c in _DETAIL_CASES if c[0] == name)
+    frame = dict(dict(family=_AIQT_FAMILY, core=_CORE), **_CASE_FRAME.get(name, {}))
     src = base / name / ".aiqt" / "core" / "rules"
     src.mkdir(parents=True)
-    (src / "gen-rules-selftest-detail.md").write_text(_DETAIL_SRC.format(keys=keys, body=body), encoding="utf-8")
+    (src / "gen-rules-selftest-detail.md").write_bytes(
+        _DETAIL_SRC.format(keys=keys, body=body, **frame).encode("utf-8"))
     return base / name
 
 
@@ -483,8 +650,8 @@ def self_test_main():
             if got != expected:
                 failures.append("detail case {}: expected exit {}, got {!r}".format(name, expected, got))
             elif expected == 0:
-                generated = root / ".claude" / "rules" / _DETAIL_REL
                 source = root / ".aiqt" / "core" / "rules" / "gen-rules-selftest-detail.md"
+                generated = root / ".claude" / "rules" / derive(parse_source(source), source.name)
                 if not generated.is_file() or generated.read_bytes() != source.read_bytes():
                     failures.append("detail case {}: the generated file is not the source byte for byte"
                                     .format(name))
@@ -492,16 +659,16 @@ def self_test_main():
                     failures.append("detail case {}: --check after generation expected exit 0".format(name))
         revert_base = tmp / "reverted"
         revert_base.mkdir()
-        for label, old, new, case in _DETAIL_REVERTS:
+        for label, old, new, case, reverted_exit in _DETAIL_REVERTS:
             try:
                 mutant = _load_reverted(revert_base, label, old, new)
             except AssertionError as exc:
                 failures.append(str(exc))
                 continue
             got = run_quiet(_detail_case_root(revert_base / label, case), check=False, runner=mutant.run)
-            if got != 0:
-                failures.append("revert {}: with the guard removed, case {} expected exit 0 (the guard is "
-                                "what refuses it), got {!r}".format(label, case, got))
+            if got != reverted_exit:
+                failures.append("revert {}: with the guard removed, case {} expected exit {} (the guard is "
+                                "what decides it), got {!r}".format(label, case, reverted_exit, got))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
