@@ -413,15 +413,17 @@ def _measured(fn, root):
     """`fn(root)`, or the string "GateError" when it fails closed."""
     try:
         return fn(root)
-    except Exception as exc:  # the mutant namespace carries its own GateError class
+    except Exception as exc:  # the mutant module carries its own GateError class
         if type(exc).__name__ == "GateError":
             return "GateError"
         raise
 
 
-def _mutant(old, new):
-    """A namespace executing the production prefix of this file with `old` replaced by `new` exactly
-    once. A boundary or target that does not match exactly once is a harness error (exit 2)."""
+def _mutant(tmp, old, new):
+    """A module loaded from the production prefix of this file with `old` replaced by `new` exactly once,
+    written under the fixture directory `tmp` and loaded with importlib. A boundary or target that does
+    not match exactly once is a harness error (exit 2)."""
+    import importlib.util
     source = Path(__file__).read_text(encoding="utf-8")
     if source.count(MUTATION_BOUNDARY) != 1:
         print("SELF-TEST HARNESS ERROR: the mutation boundary is not unique", file=sys.stderr)
@@ -431,9 +433,17 @@ def _mutant(old, new):
         print("SELF-TEST HARNESS ERROR: revert target {!r} does not match exactly once".format(old),
               file=sys.stderr)
         sys.exit(2)
-    namespace = {"__name__": "check_instruction_budget_mutant", "__file__": __file__}
-    exec(compile(production.replace(old, new, 1), __file__, "exec"), namespace)
-    return namespace
+    path = Path(tempfile.mkdtemp(prefix="mutant-", dir=str(tmp))) / "check_instruction_budget_mutant.py"
+    path.write_bytes(production.replace(old, new, 1).encode("utf-8"))
+    spec = importlib.util.spec_from_file_location("check_instruction_budget_mutant", path)
+    mutant = importlib.util.module_from_spec(spec)
+    # The prefix puts its own directory on sys.path; restore it so the scratch copy never shadows tools/.
+    saved = list(sys.path)
+    try:
+        spec.loader.exec_module(mutant)
+    finally:
+        sys.path[:] = saved
+    return mutant
 
 
 def _expected_check_ids():
@@ -537,11 +547,11 @@ def self_test(report_path=None):
         check("exit/import-escaping-repo-2", _quiet(run, escape), 2)
 
         # Red on revert: each fix put back in a mutant copy of the production code must turn its case red.
-        unstripped = _mutant("body = text[m.end():]", "body = text")
+        unstripped = _mutant(tmp, "body = text[m.end():]", "body = text")
         check("revert/frontmatter-removal-red",
-              (_measured(measure, front)["rules"], _measured(unstripped["measure"], front)["rules"]), (5, 27))
-        lenient = _mutant('if m["pack"] > ratchet:', 'if m["pack"] > ratchet + 1:')
-        check("revert/ratchet-comparison-red", (_quiet(run, over), _quiet(lenient["run"], over)), (1, 0))
+              (_measured(measure, front)["rules"], _measured(unstripped.measure, front)["rules"]), (5, 27))
+        lenient = _mutant(tmp, 'if m["pack"] > ratchet:', 'if m["pack"] > ratchet + 1:')
+        check("revert/ratchet-comparison-red", (_quiet(run, over), _quiet(lenient.run, over)), (1, 0))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
