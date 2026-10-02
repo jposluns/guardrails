@@ -1,0 +1,15 @@
+# .aiqt/core/instruction-budget.toml: the instruction-budget ratchet, read by tools/check_instruction_budget.py.
+#
+# PACK is what the pack makes Claude Code load in every session: every unconditional .claude/rules/**/*.md
+# file plus the RULES-INDEX managed block of CLAUDE.md and its @imports, counted in UTF-16 code units after
+# frontmatter and HTML comments are removed. The gate fails when PACK exceeds `ratchet`.
+#
+#   ratchet              the PACK figure enforced today, set to the figure measured when the gate landed.
+#                        Lower it as the pack shrinks; raise it only with a reviewed reason.
+#   ceiling              the target PACK figure; reported, not enforced.
+#   claude-code-version  the Claude Code build whose loading behaviour the gate models.
+#   binary-sha256        the SHA-256 of that build's binary.
+ratchet = 112222
+ceiling = 90000
+claude-code-version = "2.1.287"
+binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"

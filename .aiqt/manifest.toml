@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "dada4b7d54a7e4bfdb6528b1a8830c1e7bfd9c63541dcb3a61127a89c3699237"
+tree-sha256 = "4d61adbfa06ba1f0ee5fb9334facb523a407b92de31952b24d1b0e95ec5c502c"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 231662
-sha256 = "b271f39bec8a01dda79b3109405a627e90f1d0495895e24db47d5e40c03879e5"
+bytes = 233902
+sha256 = "de032ff83f1423c5399a77e1e8e66ac3ca415e784e87d9f3e6e4d4387d1670dc"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -83,6 +83,11 @@ sha256 = "3588274f3532e89b94b167cd99e9855733d93c25152c21011a510a750123f8c5"
 path = ".aiqt/core/id-history.toml"
 bytes = 36734
 sha256 = "a1bc7ccc3a08c1e19e20e89e567f5e7a56cccc802b655966e1f9f404da6dcb4a"
+
+[[sources]]
+path = ".aiqt/core/instruction-budget.toml"
+bytes = 990
+sha256 = "25890fce1329ee49b4d45c12902ba28fc28f6faa10acd9e94034afbc45e55c82"
 
 [[sources]]
 path = ".aiqt/core/migration/crosswalk-schema.toml"
@@ -786,8 +791,8 @@ sha256 = "6f6e4138a0b526f6a0aafe2be62d29d57437f9d6c538480e9740e4190dc1f76b"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 299011
-sha256 = "b7797fa971494c58cf30b9b92c12e51562373492f2fd5adbb9a19a30fde24f6b"
+bytes = 299069
+sha256 = "82f879918edc9ad1016827ef43d82677e3607f071229c3d16ed1ec771100f211"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2231,8 +2236,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 41165
-sha256 = "0d057503d1658045a5d021589b360ca6ce294f28f1800e7366f49723e03c23c5"
+bytes = 41258
+sha256 = "073a7f749f2a2eb346ca7ca920ca5a21182df3913a13a3ac5992c29e020b5a96"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2296,8 +2301,8 @@ sha256 = "001c5c3f13e7a7b0bc8c283ca1770545d7ba27cb734eff6517b6c03a868225ee"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 175815
-sha256 = "5109871947e1c7379fc81ebb5d23d2e69002b4b2e4fb897e62d2ddbfea3a5fbf"
+bytes = 175844
+sha256 = "a209a6da72cf65ede7ccf72b2a0851ebe0bda5e2495372d6f6da466c08beaa8e"
 
 [[sources]]
 path = "GEMINI.md"
@@ -2316,8 +2321,8 @@ sha256 = "aaf972bbdd8b8520076c1bb6f9d701fab580ed6fd34a91c2ba125d39d463aa11"
 
 [[sources]]
 path = "README.md"
-bytes = 2961
-sha256 = "68c58a0a2af9e5c5b36fc21b24745ba134e2ef09fd1761ff340c99cba57ae3b8"
+bytes = 3737
+sha256 = "55cf2d222be7ea4c12ede0e7d77d5687333bf39e3f4beaaf51742ee2deb785d7"
 
 [[sources]]
 path = "RELEASING.md"
@@ -3036,8 +3041,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 223098
-sha256 = "e2801bd1f85fd2730cb614e2145971478d9698bee0acc99f4f057dbbf1a37f13"
+bytes = 223127
+sha256 = "9fbc12d06505b77fe6da8d54c90ba9bead29b445c99c82211bd7a07f1e16cbba"
 
 [[sources]]
 path = "site/evidence.html"
@@ -3233,6 +3238,11 @@ sha256 = "e2f2c3b6ab36591186f9f81f26a94063bb8752ef7ebf9945f088f48fe4e8e429"
 path = "tools/check_install_page.py"
 bytes = 35619
 sha256 = "6be34b5b3fe9f61750b0f006ee4dd01afeb4a45b7dc630ae6183e71d789e3e9e"
+
+[[sources]]
+path = "tools/check_instruction_budget.py"
+bytes = 29537
+sha256 = "cd650171c6f5b17569c1f2088ac3c9aac55158d83c55e75efd927d624bf49bcc"
 
 [[sources]]
 path = "tools/check_internal_names.py"
@@ -3561,8 +3571,8 @@ sha256 = "1a48d3d00bf6ae80f69b735ec017bbf41731c3cece76dac7781912c21925c35b"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 18091
-sha256 = "4f9251ee023b52b2b05b5fe440ae56579e6eb35fbd418a77df6daadecd64733e"
+bytes = 18401
+sha256 = "3c9e0ccb362986fce351015122d769058e83c7935fb57be91e38f7d25683a6a2"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
@@ -3576,8 +3586,8 @@ sha256 = "c42cfe6ea421a511c3f34f268716511f0c403f7541770105951ba9ffc1cf5a07"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 22153
-sha256 = "3b9b66e7ccd9dc3748923f187f86a84601650cca59bc46817b7a7e488c487e01"
+bytes = 23286
+sha256 = "bd6fded36b0475896caa2a919facfb0786426731b733187dc0655053986ddb99"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

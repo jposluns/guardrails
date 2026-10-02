@@ -168,6 +168,8 @@ run_gate "install-page-selftest" python3 -I -B tools/check_install_page.py --sel
 run_gate "install-page" python3 -I -B tools/check_install_page.py
 run_gate "sized-instructions-selftest" python3 -I -B tools/check_sized_instructions.py --self-test
 run_gate "sized-instructions" python3 -I -B tools/check_sized_instructions.py
+run_gate "instruction-budget-selftest" python3 -I -B tools/check_instruction_budget.py --self-test
+run_gate "instruction-budget" python3 -I -B tools/check_instruction_budget.py
 run_gate "notice-drift"    python3 -I -B tools/gen_notice.py --check
 run_gate "claude-drift"    python3 -I -B tools/gen_claude.py --check
 run_gate "adapters-drift"  python3 -I -B tools/gen_adapters.py --check
@@ -185,6 +187,7 @@ run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execut
 run_gate "orch-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
 run_gate "ci-status-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
 run_gate "git-fixture-env-selftest" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-selftest
+run_gate "instruction-budget-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite instruction-budget-selftest
 run_gate "record-drift-selftest" python3 -I -B tools/check_record_drift.py --self-test
 run_gate "record-drift"          python3 -I -B tools/check_record_drift.py
 run_gate "record-sections-selftest" python3 -I -B tools/check_record_sections.py --self-test

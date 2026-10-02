@@ -612,3 +612,36 @@ expected-check-ids = [
   "leak/imported-gitdir-poison-fixture-green",
   "leak/imported-gitdir-poison-caller-unchanged",
 ]
+
+[[suite]]
+id = "instruction-budget-selftest"
+runner = "tools/check_instruction_budget.py"
+expected-check-ids = [
+  # ---------- counting ----------
+  "count/frontmatter-and-blank-line-removed",
+  "count/html-comment-removed",
+  "count/bmp-character-one-unit",
+  "count/astral-character-two-units",
+  # ---------- scope: which rule files load unconditionally ----------
+  "scope/paths-double-star-counted",
+  "scope/paths-trailing-double-star-stripped-counted",
+  "scope/paths-src-excluded",
+  # ---------- imports and the two totals ----------
+  "import/managed-block-import-followed",
+  "totals/session-adds-outside-block",
+  # ---------- exit codes ----------
+  "exit/at-ratchet-0",
+  "exit/one-over-ratchet-1",
+  "exit/rules-index-import-1",
+  "exit/agents-import-1",
+  "exit/unreadable-rule-file-2",
+  "exit/invalid-utf8-rule-file-2",
+  "exit/unterminated-frontmatter-2",
+  "exit/malformed-frontmatter-line-2",
+  "exit/malformed-budget-2",
+  "exit/missing-managed-block-markers-2",
+  "exit/import-escaping-repo-2",
+  # ---------- red on revert ----------
+  "revert/frontmatter-removal-red",
+  "revert/ratchet-comparison-red",
+]

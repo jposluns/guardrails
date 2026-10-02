@@ -29,6 +29,19 @@ The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
 - **A standards crosswalk**: mappings from the rules to published control catalogues, for teams that report
   against a framework.
 
+## Keep the always loaded instructions small
+
+Claude Code reads some files into every session before you type anything: for this pack, the rule files
+under `.claude/rules/` and the AIQT block in `CLAUDE.md`. A shipped gate measures that text and fails if
+the pack's share grows.
+
+Keep everything Claude Code loads at the start of a session under 120,000 characters in total. That floor
+covers more than this pack: your own files under `~/.claude/`, such as `~/.claude/CLAUDE.md` and any rules
+there, count too, so add them to the pack's figure when you check your setup.
+
+Do not load `AGENTS.md` into Claude Code as well, whether through the instructionFiles setting or an
+import in `CLAUDE.md`. It carries the same rules as `.claude/rules/`, so every rule would load twice.
+
 ## Better with every release
 
 AIQT catches the mistakes that align to the rules and process we have built so far, and improves with every

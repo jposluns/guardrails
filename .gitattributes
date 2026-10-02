@@ -15,6 +15,7 @@
 .aiqt/core/hooks/manifest.toml text eol=lf
 .aiqt/core/hooks/scripts/aiqt_hooks.py text eol=lf
 .aiqt/core/id-history.toml text eol=lf
+.aiqt/core/instruction-budget.toml text eol=lf
 .aiqt/core/migration/crosswalk-schema.toml text eol=lf
 .aiqt/core/order.toml text eol=lf
 .aiqt/core/ownership.toml text eol=lf
@@ -649,6 +650,7 @@ tools/check_gensrc_failclose.py text eol=lf
 tools/check_git_option_table.py text eol=lf
 tools/check_hooks_preview.py text eol=lf
 tools/check_install_page.py text eol=lf
+tools/check_instruction_budget.py text eol=lf
 tools/check_internal_names.py text eol=lf
 tools/check_leaks.py text eol=lf
 tools/check_license_qualification.py text eol=lf
