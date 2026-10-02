@@ -1772,9 +1772,39 @@ def _watchdog_completion_case(mode):
                        "os.setsid() if pid == 0 else None; "
                        "name = 'descendant' if pid == 0 else 'subject'; "
                        "scratch = Path(" + repr(directory) + ", name + '.tmp'); "
-                       "scratch.write_text(str(os.getpid())); "
+                       "scratch.write_text(str(os.getpid()), encoding='ascii'); "
                        "scratch.rename(Path(" + repr(directory) + ", name)); "  # atomic: never a partial PID
                        "time.sleep(60)")
+            # Writer half, checked on the subject text: every write call
+            # (write_text, write_bytes, touch, open) targets a '.tmp' name, and
+            # one rename after the last write moves that name to one without
+            # '.tmp'. Residual: writes through os.open, os.write, exec or a
+            # shell are not seen.
+            import ast
+            tree = ast.parse(subject.replace(repr(directory), "directory"))  # TMPDIR-blind
+            bound = {target.id: ast.unparse(node.value) for node in ast.walk(tree)
+                     if isinstance(node, ast.Assign) for target in node.targets
+                     if isinstance(target, ast.Name)}
+            def target(node):
+                return bound.get(node.id, "") if isinstance(node, ast.Name) else ast.unparse(node)
+            calls = sorted((node for node in ast.walk(tree) if isinstance(node, ast.Call)),
+                           key=lambda node: (node.lineno, node.col_offset))
+            writes, renames = [], []
+            for node in calls:
+                if isinstance(node.func, ast.Name) and node.func.id == "open" and node.args:
+                    writes.append(target(node.args[0]))
+                elif isinstance(node.func, ast.Attribute):
+                    if node.func.attr in ("write_text", "write_bytes", "touch", "open"):
+                        writes.append(target(node.func.value))
+                    elif node.func.attr in ("rename", "replace") and node.args:
+                        renames.append((len(writes), target(node.func.value), target(node.args[0])))
+            assert writes and all(".tmp" in path for path in writes), writes
+            assert [(after, source) for after, source, dest in renames
+                    if ".tmp" not in dest] == [(len(writes), writes[-1])], renames
+
+            class Cancelled(RuntimeError):
+                """The nested-cancel stimulus; no other error may stand in for it."""
+
             real_wait = emit._fixture_wait
             observed = []
 
@@ -1786,7 +1816,7 @@ def _watchdog_completion_case(mode):
                         pids = []
                     observed.extend(pids)
                     if pids and mode == "nested-cancel":
-                        raise RuntimeError("cancel with nested subject running")
+                        raise Cancelled("cancel with nested subject running")
                 return real_wait(pid, flags)
 
             # Marker-race control: a marker that exists but is still empty (created,
@@ -1798,7 +1828,7 @@ def _watchdog_completion_case(mode):
             for path in markers:
                 path.unlink()
             with patch.object(emit, "_fixture_wait", observe):
-                refuses(subprocess.TimeoutExpired if mode == "nested-timeout" else RuntimeError,
+                refuses(subprocess.TimeoutExpired if mode == "nested-timeout" else Cancelled,
                         lambda: emit.run_status_owned(
                             [*command[:4], subject], fixture_id="tree/" + mode,
                             process_fixture=True, timeout=2))
