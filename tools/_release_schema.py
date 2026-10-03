@@ -635,7 +635,10 @@ def _substitution_free_env():
     dropping a GIT_ variable can at most make a read FAIL (a refusal), never substitute bytes. Then
     exactly the two pins are set: GIT_NO_REPLACE_OBJECTS=1 disables refs/replace/* object substitution
     and GIT_GRAFT_FILE pinned to os.devnull disables <GIT_DIR>/info/grafts parent rewriting,
-    belt-and-braces with the --no-replace-objects argv option the launches also pass. `git cat-file
+    belt-and-braces with the --no-replace-objects argv option the launches also pass. The launches also
+    pin core.fsmonitor=false (QA round 5): a repo-config fsmonitor program is attacker-chosen code that a
+    worktree-scanning git call runs; these object reads scan no worktree, so the pin is defence in
+    depth that keeps a future funneled call from running it. `git cat-file
     --batch` follows refs/replace/* by default AND echoes the REQUESTED oid over the substituted body,
     so the batch protocol check alone cannot catch a replacement; the pins plus the per-object re-hash
     (_assert_object_hash) can."""
@@ -671,6 +674,7 @@ def _cat_file_batch_typed(root, shas):
         return {}
     try:
         proc = subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",
+                               "-c", "core.fsmonitor=false",
                                "-C", str(root), "cat-file", "--batch"],
                               input=("\n".join(uniq) + "\n").encode("ascii"), capture_output=True,
                               env=_substitution_free_env())
@@ -763,6 +767,7 @@ def _resolve_commit_oid(root, commit):
         return commit
     try:
         proc = subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",
+                               "-c", "core.fsmonitor=false",
                                "-C", str(root), "rev-parse", "--verify", "--quiet",
                                str(commit) + "^{object}"],
                               capture_output=True, env=_substitution_free_env())

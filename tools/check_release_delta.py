@@ -37,6 +37,14 @@ RELEASING steps 6a/6b; see _post_release_head); whole-surface delta otherwise, w
 strictly increase over the newest row); --repin --target V (10.4 adopter mode, rollback branch keyed on the
 pin-history match plus wholesale target validation plus recorded authorization); --self-test.
 
+Launch (QA round 5, D-397-REEXEC-FROM-COMMITTED): a plain run re-executes the COMMITTED copy of this
+gate. Stage 1 (the launched file: standard library only, no checkout import, no sys.path change)
+materializes HEAD's committed tree through a verified re-hashing walk and re-executes
+tools/check_release_delta.py from that materialization under -I -B with a fresh pycache prefix; stage 2
+routes every branch from COMMITTED records and judges the post-release branch over committed objects
+exclusively, while the genesis and delta branches judge the checkout by design. The launched file
+itself is checkout code: an attacker who controls it controls the launch (the disclosed residual).
+
 Exit: 0 clean / genesis / NOT APPLICABLE legs; 1 a real finding (an under-claimed bump, a rowless
 change, an unconsumed or wrong row, a register incompleteness); 2 malformed or unreadable input
 (a predecessor artifact, the dispositions record, a stale renderer declaration, a git failure).
@@ -52,6 +60,186 @@ try:
     import tomllib
 except ModuleNotFoundError:  # Python < 3.11
     sys.exit("error: check_release_delta.py requires Python 3.11+ (tomllib).")
+
+
+# ===== STAGE 1: re-execute the COMMITTED gate (QA round 5; orchestrator decision ====================
+# D-397-REEXEC-FROM-COMMITTED). Round 5 demonstrated that vetting checkout code from INSIDE a process
+# that already imported it cannot close the class: an untracked shadow module imported later (an
+# untracked tools/tempfile.py), a crafted __pycache__ .pyc behind a byte-identical .py, and a
+# repo-config core.fsmonitor hook that plants a file mid-run each flipped a refusal to exit 0 under
+# the exact CI launch. So the gate stops vetting the checkout from inside it: when launched as a plain
+# run (no options), this block, which imports NOTHING from the checkout and makes NO sys.path change
+# (standard library only), resolves HEAD through the pinned git funnel below, materializes HEAD's
+# COMMITTED tree into a fresh private directory through a verified re-hashing walk, and re-executes
+# the COMMITTED copy of this gate from that directory under -I -B -X pycache_prefix=<fresh empty dir>,
+# passing the repository and the materialized tree as explicit arguments. Stage 2 (the committed copy)
+# then routes every branch from committed records (see run()).
+#
+# DISCLOSED RESIDUAL (inherent): this launched file is ITSELF checkout code; an attacker who controls
+# the checkout copy of this file, the interpreter binary, or the launching process controls the launch
+# and can fabricate any verdict, and no file can vet its own launch. What the re-execution closes is
+# everything AFTER the launch: no other checkout file (no shadow module, no planted .pyc, no sibling
+# tool, no routing record) participates in the verdict. A launch without -P/-I additionally leaves the
+# few stdlib imports above this block shadowable by files planted beside this one; CI launches with
+# -I, which keeps the script directory off sys.path.
+
+def _stage1_git(repo, args, input_bytes=None):
+    """The stage-1 pinned git funnel: the inherited GIT_* environment scrubbed; replace objects,
+    grafts, the commit-graph cache and core.fsmonitor all disabled on EVERY call (QA round-5
+    reproduction (c): a repo-config fsmonitor hook is attacker-chosen code and must never run
+    mid-gate; plumbing object reads apply no clean/smudge filter)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["GIT_GRAFT_FILE"] = os.devnull
+    return subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",
+                           "-c", "core.fsmonitor=false",
+                           "-C", repo, *args], capture_output=True, env=env, input=input_bytes)
+
+
+def _stage1_is_oid(sv):
+    return isinstance(sv, str) and len(sv) in (40, 64) and all(c in "0123456789abcdef" for c in sv)
+
+
+def _stage1_objects(repo, oids):
+    """{oid: (type, body)} via one pinned `git cat-file --batch`, EVERY returned body re-hashed
+    against the id that requested it (the stage-1 twin of _release_schema's typed batch reader,
+    duplicated here because stage 1 may import nothing from the checkout). ValueError on any protocol
+    or re-hash failure (mapped to exit 2 by the caller)."""
+    import hashlib
+    uniq = list(dict.fromkeys(oids))
+    if not uniq:
+        return {}
+    proc = _stage1_git(repo, ["cat-file", "--batch"],
+                       input_bytes=("\n".join(uniq) + "\n").encode("ascii"))
+    if proc.returncode != 0:
+        raise ValueError("git cat-file --batch failed: "
+                         + proc.stderr.decode("utf-8", "replace").strip()[:200])
+    out, i, result = proc.stdout, 0, {}
+    for want in uniq:
+        nl = out.find(b"\n", i)
+        if nl == -1:
+            raise ValueError("truncated cat-file header for " + want)
+        parts = out[i:nl].decode("ascii", "replace").split(" ")
+        i = nl + 1
+        if (len(parts) != 3 or parts[0] != want
+                or parts[1] not in ("blob", "commit", "tree", "tag") or not parts[2].isdigit()):
+            raise ValueError("malformed cat-file header for {}: {!r}".format(want, parts))
+        otype, size = parts[1], int(parts[2])
+        body = out[i:i + size]
+        if len(body) != size or out[i + size:i + size + 1] != b"\n":
+            raise ValueError("short cat-file body for " + want)
+        algo = hashlib.sha1 if len(want) == 40 else hashlib.sha256
+        if algo(otype.encode("ascii") + b" " + str(size).encode("ascii") + b"\x00"
+                + body).hexdigest() != want:
+            raise ValueError("git object {} re-hash mismatch in the stage-1 walk; a tampered "
+                             "loose object or object-store overlay substituted the "
+                             "bytes".format(want))
+        result[want] = (otype, body)
+        i += size + 1
+    if i != len(out):
+        raise ValueError("{} trailing byte(s) after the last requested object".format(
+            len(out) - i))
+    return result
+
+
+def _stage1_materialize(repo, commit_oid, dest):
+    """Write the committed tree at commit_oid into dest from verified objects only: the commit, every
+    tree, and every blob re-hashed against the id that named it; symlinks, gitlinks and unknown modes
+    refused; blob modes preserved."""
+    otype, body = _stage1_objects(repo, [commit_oid])[commit_oid]
+    if otype != "commit":
+        raise ValueError("object {} is a {}, not a commit".format(commit_oid, otype))
+    first = body.split(b"\n", 1)[0]
+    tree = first[5:].decode("ascii", "replace") if first.startswith(b"tree ") else ""
+    if not _stage1_is_oid(tree):
+        raise ValueError("commit {} carries no well-formed tree header".format(commit_oid))
+    entries, stack = [], [(tree, "")]
+    while stack:
+        tree_oid, prefix = stack.pop()
+        otype, body = _stage1_objects(repo, [tree_oid])[tree_oid]
+        if otype != "tree":
+            raise ValueError("object {} is a {}, not a tree".format(tree_oid, otype))
+        oid_len, i = len(tree_oid) // 2, 0
+        while i < len(body):
+            sp = body.find(b" ", i)
+            nul = body.find(b"\x00", sp + 1) if sp != -1 else -1
+            if sp == -1 or nul == -1 or len(body) < nul + 1 + oid_len:
+                raise ValueError("malformed tree object " + tree_oid)
+            mode = body[i:sp].decode("ascii", "replace")
+            name = body[sp + 1:nul].decode("utf-8")
+            child = body[nul + 1:nul + 1 + oid_len].hex()
+            i = nul + 1 + oid_len
+            if not name or "/" in name or name in (".", ".."):
+                raise ValueError("bad tree entry name in " + tree_oid)
+            if mode == "40000":
+                stack.append((child, prefix + name + "/"))
+            elif mode in ("100644", "100755"):
+                entries.append((mode, child, prefix + name))
+            else:
+                raise ValueError("unsupported mode {} at {} (symlinks and gitlinks are "
+                                 "refused)".format(mode, prefix + name))
+    blobs = _stage1_objects(repo, [c for _m, c, _p in entries])
+    dest_root = os.path.realpath(dest)
+    for mode, child, path in entries:
+        target = os.path.realpath(os.path.join(dest, path))
+        if target != dest_root and not target.startswith(dest_root + os.sep):
+            raise ValueError("path {!r} escapes the materialization root".format(path))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as fh:
+            fh.write(blobs[child][1])
+        os.chmod(target, 0o755 if mode == "100755" else 0o644)
+
+
+def _stage1_main():
+    """Returns the final exit code, or None to fall through to the single-stage checkout gate (no
+    committed state exists: not a git repository, or an unborn branch; there is then no committed
+    revision to certify and no attested release to defend, and the genesis and delta branches judge
+    the checkout by design)."""
+    import shutil
+    import tempfile
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    proc = _stage1_git(repo, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
+    if proc.returncode != 0:
+        return None
+    head = proc.stdout.decode("ascii", "replace").strip()
+    if not _stage1_is_oid(head):
+        print("error: stage-1 re-execution: git rev-parse HEAD returned no full object id; "
+              "fail-closed", file=sys.stderr)
+        return 2
+    tmp = tempfile.mkdtemp(prefix="aiqt-release-delta-stage2-")
+    try:
+        tree_dir = os.path.join(tmp, "tree")
+        pyc_dir = os.path.join(tmp, "pyc")
+        os.mkdir(tree_dir)
+        os.mkdir(pyc_dir)
+        try:
+            _stage1_materialize(repo, head, tree_dir)
+        except (ValueError, OSError, KeyError, UnicodeDecodeError) as exc:
+            print("error: stage-1 re-execution: cannot materialize HEAD's committed tree ({}); "
+                  "fail-closed".format(exc), file=sys.stderr)
+            return 2
+        gate = os.path.join(tree_dir, "tools", "check_release_delta.py")
+        if not os.path.isfile(gate):
+            print("error: stage-1 re-execution: HEAD's committed tree carries no "
+                  "tools/check_release_delta.py; the committed revision must carry the gate that "
+                  "judges it; fail-closed", file=sys.stderr)
+            return 2
+        try:
+            child = subprocess.run([sys.executable, "-I", "-B", "-X", "pycache_prefix=" + pyc_dir,
+                                    gate, "--stage2-repo", repo, "--stage2-tree", tree_dir])
+        except OSError as exc:
+            print("error: stage-1 re-execution: cannot launch the committed gate ({}); "
+                  "fail-closed".format(exc), file=sys.stderr)
+            return 2
+        return child.returncode
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+if __name__ == "__main__" and sys.argv[1:] == []:
+    _stage1_rc = _stage1_main()
+    if _stage1_rc is not None:
+        sys.exit(_stage1_rc)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml            # noqa: E402
@@ -138,7 +326,8 @@ def _substitution_free_env():
 
 def _git(root, args, binary=False):
     """THE substitution-free read funnel for every git read this gate makes (rev-parse, cat-file, show,
-    ls-tree, the status advisory, worktree list; _git_raw is its diff-tree/merge-base twin): replace
+    ls-tree, the ls-tree/diff-index --cached/ls-files drift advisory, worktree list; _git_raw is its
+    diff-tree/merge-base twin): replace
     objects are disabled (--no-replace-objects AND GIT_NO_REPLACE_OBJECTS=1), commit grafts are disabled
     (GIT_GRAFT_FILE pinned to os.devnull), and the commit-graph cache is never read (core.commitGraph
     pinned false, so ancestry and parent answers come from the recorded commit objects, never from a
@@ -147,9 +336,14 @@ def _git(root, args, binary=False):
     unpinned `git log` parent output, so no self-test coverage is claimed for this one pin). A replace ref or graft that substitutes another blob, tree, or parent
     chain for HEAD or the release commit therefore cannot alter any byte this gate judges (QA round-3
     codex R3-1 / claude F1). _release_schema's raw materialization (ls-tree + cat-file --batch) carries
-    the SAME pins, so every committed byte the verdict consumes is substitution-free."""
+    the SAME pins, so every committed byte the verdict consumes is substitution-free. core.fsmonitor is
+    pinned false on every call (QA round 5, reproduction (c)): a repo-config fsmonitor program is
+    attacker-chosen code. No funneled call reads working-tree content through git (`git status` and
+    `git diff-index HEAD` would also run clean filters, and status the post-index-change hook; see
+    _warn_checkout_drift)."""
     try:
         return subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",
+                               "-c", "core.fsmonitor=false",
                                "-C", str(root), *args],
                               capture_output=True, text=not binary, env=_substitution_free_env())
     except OSError as exc:
@@ -636,8 +830,9 @@ def _renderer_freshness(root, label):
         # -B: never write bytecode into the target tree (round-6 finding 1). gen_renderers imports the
         # tree's own renderer modules; a .pyc left in `root`/tools/__pycache__ could be captured by a
         # later index build and perturb a manifest SOURCES comparison.
-        proc = subprocess.run([sys.executable, "-B", str(root / "tools" / "gen_renderers.py"), "--check",
-                               "--root", str(root)], capture_output=True)
+        proc = subprocess.run([sys.executable, "-I", "-B", "-X", _child_pycache_x(),
+                               str(root / "tools" / "gen_renderers.py"), "--check", "--root",
+                               str(root)], capture_output=True)
     except OSError as exc:
         raise GateError("{} renderer freshness could not launch ({}); fail-closed".format(label, exc))
     if proc.returncode != 0:
@@ -821,10 +1016,13 @@ def _git_raw(root, args):
     the inherited GIT_* environment out of both). DISCLOSED RESIDUAL (QA round-4): diff-tree and
     merge-base read tree and intermediate commit objects internally without a per-object re-hash; the
     tree objects of BOTH endpoint commits are independently re-hashed by the verified reads and full
-    materializations in the same run, so a forged tree still fails the run, but a forged INTERMEDIATE
-    ancestry commit object is not re-hashed by this gate."""
+    materializations in the same run, so a forged tree still fails the run; and QA round-5 claude m1 added a parent-chain
+    walk from HEAD to the release commit through RE-HASHED commit objects (_assert_head_ancestry), so
+    a forged INTERMEDIATE ancestry commit object is refused too. merge-base and diff-tree stay
+    refusal-capable conveniences, never the accepting authority for ancestry."""
     try:
         return subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",
+                               "-c", "core.fsmonitor=false",
                                "-C", str(root), *args],
                               capture_output=True, env=_substitution_free_env())
     except OSError as exc:
@@ -832,14 +1030,51 @@ def _git_raw(root, args):
 
 
 def _assert_head_ancestry(root, commit):
-    """HEAD must DESCEND from the newest release row's commit_sha (QA round-2 codex 4 / claude m4): an
-    unrelated head (e.g. an orphan commit carrying an identical tree) must never be certified as the
-    post-release state of a release it does not contain. Raw (no replace objects, no grafts)."""
+    """HEAD must DESCEND from the newest release row's commit_sha (QA round-2 codex 4 / claude m4),
+    established by walking the parent chain from HEAD to the release commit EXCLUSIVELY through
+    RE-HASHED commit objects (QA round-5 claude m1: git merge-base reads intermediate commit objects
+    without verifying them, so a forged loose object for an intermediate commit could graft an
+    unrelated head onto the release; the verified walk refuses it with a re-hash mismatch). The
+    funneled merge-base runs first as a cheap refusal (and keeps the graft/replace pins exercised); it
+    is never the accepting authority."""
     proc = _git_raw(root, ["merge-base", "--is-ancestor", commit, "HEAD"])
     if proc.returncode != 0:
         raise GateError("post-release head: the newest release row's commit_sha {} is not an ancestor of "
                         "HEAD; the head does not descend from the release it claims; fail-closed".format(
                             commit))
+    head_oid = _rev_parse(root, "HEAD^{commit}")
+    seen, frontier = set(), [head_oid]
+    while frontier:
+        oid = frontier.pop()
+        if oid == commit:
+            return
+        if oid in seen:
+            continue
+        seen.add(oid)
+        if len(seen) > 1048576:
+            raise GateError("post-release head: the verified ancestry walk from HEAD exceeded 1048576 "
+                            "commits without reaching {}; fail-closed".format(commit))
+        try:
+            otype, body = _release_schema.verified_object(root, oid)
+        except SchemaError as exc:
+            raise GateError("post-release head ancestry: {}".format(exc))
+        if otype != "commit":
+            raise GateError("post-release head ancestry: object {} is a {}, not a commit; "
+                            "fail-closed".format(oid, otype))
+        for line in body.split(b"\n\n", 1)[0].split(b"\n"):
+            if line.startswith(b"parent "):
+                try:
+                    parent = line[7:].decode("ascii")
+                except UnicodeDecodeError:
+                    raise GateError("post-release head ancestry: commit {} carries a non-ASCII "
+                                    "parent header; fail-closed".format(oid))
+                if not _release_schema.OBJECTID_RE.fullmatch(parent):
+                    raise GateError("post-release head ancestry: commit {} parent {!r} is not a "
+                                    "full object id; fail-closed".format(oid, parent))
+                frontier.append(parent)
+    raise GateError("post-release head: the newest release row's commit_sha {} is not reachable from "
+                    "HEAD through re-hashed commit objects; the head does not descend from the release "
+                    "it claims; fail-closed".format(commit))
 
 
 def _assert_only_post_release_paths(changed):
@@ -898,21 +1133,62 @@ def _warn_checkout_drift(root):
     HEAD's COMMITTED objects exclusively: every byte it reads comes through the substitution-free funnel
     over committed objects, and the manifest freshness/integrity legs run over a raw materialization of
     HEAD's committed tree, so the index, the working tree, checkout filters, and untracked files cannot
-    change the verdict. This helper only prints a stderr note when `git status --porcelain=v1 -z
-    --untracked-files=all` reports entries, as a courtesy to a maintainer whose checkout drifted from
-    the revision the verdict certifies. It is explicitly NOT a cleanliness guarantee, which is exactly
-    why it does not gate: porcelain status cannot see an index entry carrying assume-unchanged or
-    skip-worktree, an executable-bit change under core.filemode=false, an untracked file hidden by
-    .git/info/exclude or a .gitignore, or a working-tree file whose clean-filter output equals the
-    indexed blob (codex R3-3's three reproductions). A status failure is likewise only a note."""
-    proc = _git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], binary=True)
-    if proc.returncode != 0:
-        print("post-release advisory: git status failed; checkout drift from the certified revision is "
+    change the verdict. This helper only prints a stderr note when a tracked file's checkout bytes do
+    not re-hash to HEAD's blob id (computed HERE in Python from `git ls-tree -r -z HEAD`), when `git
+    diff-index --cached --name-only -z HEAD` reports a staged change, or when `git ls-files -z --others
+    --exclude-standard` reports untracked files, as a courtesy to a maintainer whose checkout drifted
+    from the revision the verdict certifies. It is explicitly NOT a cleanliness guarantee, which
+    is exactly why it does not gate: it cannot see an index entry carrying assume-unchanged or
+    skip-worktree, an executable-bit change under core.filemode=false, or an untracked file hidden by
+    .git/info/exclude or a .gitignore (codex R3-3's reproductions), and it compares raw bytes, so a
+    checkout whose smudge filter or line-ending conversion rewrote a file is reported as drift. A git
+    failure is likewise only a note.
+    WHY NO WORKTREE-COMPARING GIT CALL (QA round 5, reproduction (c) and its siblings): `git status`
+    refreshes the index, so it RUNS repo-configured code mid-gate: the core.fsmonitor program, the clean
+    filter of any stat-dirty tracked file (a filter.<driver>.clean named by .gitattributes or
+    .git/info/attributes), and the post-index-change hook when it writes the refreshed index; -c
+    core.fsmonitor=false stops only the first. `git diff-index HEAD` (no --cached) also runs the clean
+    filter on a racily clean file. So git here only lists objects and paths (ls-tree, diff-index
+    --cached, ls-files --others), none of which reads working-tree content, and the content comparison
+    is done in Python (the self-test case "(R5 filter/hook)" plants all three and fails if any runs)."""
+    import hashlib
+    import stat
+    proc_t = _git(root, ["ls-tree", "-r", "-z", "--full-tree", "HEAD"], binary=True)
+    proc_s = _git(root, ["diff-index", "--cached", "--name-only", "-z", "HEAD"], binary=True)
+    proc_u = _git(root, ["ls-files", "-z", "--others", "--exclude-standard"], binary=True)
+    if proc_t.returncode != 0 or proc_s.returncode != 0 or proc_u.returncode != 0:
+        print("post-release advisory: a git listing failed; checkout drift from the certified revision is "
               "unknown (the verdict reads committed objects only)", file=sys.stderr)
         return
-    if proc.stdout.strip(b"\0"):
-        entries = sorted(rec[3:].decode("utf-8", "replace")
-                         for rec in proc.stdout.split(b"\0") if len(rec) > 3)
+    entries = set(rec.decode("utf-8", "replace")
+                  for rec in (proc_s.stdout + b"\0" + proc_u.stdout).split(b"\0") if rec)
+    for rec in proc_t.stdout.split(b"\0"):
+        meta, tab, path_b = rec.partition(b"\t")
+        fields = meta.split(b" ")
+        if not tab or len(fields) != 3 or fields[1] != b"blob":
+            continue
+        path_s = path_b.decode("utf-8", "replace")
+        want = fields[2].decode("ascii", "replace")
+        try:
+            # lstat first: a tracked path replaced by a FIFO, device or symlink is drift, never read
+            # (a blocking read would hang the gate).
+            q = root / os.fsdecode(path_b)
+            mode_ = os.lstat(q).st_mode
+            if fields[0] == b"120000" and stat.S_ISLNK(mode_):
+                data = os.fsencode(os.readlink(q))
+            elif fields[0] != b"120000" and stat.S_ISREG(mode_):
+                data = q.read_bytes()
+            else:
+                entries.add(path_s)
+                continue
+        except (OSError, ValueError):
+            entries.add(path_s)
+            continue
+        algo = hashlib.sha1 if len(want) == 40 else hashlib.sha256
+        if algo(b"blob " + str(len(data)).encode("ascii") + b"\0" + data).hexdigest() != want:
+            entries.add(path_s)
+    entries = sorted(entries)
+    if entries:
         print("post-release advisory: the index, working tree, or untracked files differ from HEAD "
               "({} entr{}, e.g. {}); the verdict certifies the COMMITTED revision only, never this "
               "checkout".format(len(entries), "y" if len(entries) == 1 else "ies", entries[:5]),
@@ -974,7 +1250,9 @@ def _gate_module_files():
     this file itself), never a hand list (QA round-4 codex R4-1 / claude m3): any module whose resolved
     __file__ lies under the pack root that owns this gate is included, so a new import is covered the
     moment it lands. Returns (pack root, sorted file paths)."""
-    pack = repo_root().resolve()
+    # The pack root is the parent of this file's tools directory in BOTH the checkout and the
+    # stage-2 materialized tree (which carries no .git for repo_root() to find; QA round 5).
+    pack = Path(__file__).resolve().parent.parent
     files = {Path(__file__).resolve()}
     for mod in list(sys.modules.values()):
         f = getattr(mod, "__file__", None)
@@ -1003,7 +1281,10 @@ def _assert_gate_code_matches_head(root, head_oid):
     patch of this very function) can run arbitrary code and fabricate any verdict; no in-process
     self-comparison can defend a process against its own launcher. What this check closes is the
     demonstrated R4-1 class: an in-place checkout edit changing the verdict of an otherwise honest
-    launch. CI runs the gate on a fresh clone, where the checkout and HEAD coincide."""
+    launch. CI runs the gate on a fresh clone, where the checkout and HEAD coincide. QA round 5
+    (D-397-REEXEC-FROM-COMMITTED): under the two-stage launch this check runs INSIDE the committed
+    copy (stage 2), where it pins the stage-2 materialized modules to the judged HEAD; the
+    launch-control residual concentrates entirely in the stage-1 launched file."""
     pack, files = _gate_module_files()
     for q in files:
         rel = q.relative_to(pack).as_posix()
@@ -1085,10 +1366,11 @@ def _post_release_head(root, prev_row, release_rows, head_version):
     materialization of HEAD's committed tree, NEVER the working tree (QA round-3 codex R3-1/R3-2/R3-3,
     claude F1/F2/F3). The working tree, the index and its flags (assume-unchanged, skip-worktree,
     core.filemode=false), checkout clean/smudge filters, and exclude rules therefore cannot make a bad
-    committed state print POST-RELEASE. The records run() loads from the checkout before branching here
-    can at most prevent this branch from running (fail-closed exit 2) or route it to the stricter delta
-    branch; every one of them is re-read below from HEAD's committed bytes and cross-checked, so a
-    divergent checkout is caught, never certified.
+    committed state print POST-RELEASE. QA round-5 (claude M1): run() ROUTES into this branch
+    from HEAD's COMMITTED records alone, and this branch reads NO checkout record at all (the drift
+    advisory prints, never gates), so a divergent checkout can neither prevent this branch from
+    running, steer it, nor be certified by it; the committed copies are still re-read below and
+    cross-checked against the routing reads as defence in depth.
 
     EXACTNESS of the coverage table (QA round-3 claude F5): "rejected" above means rejected at the
     RECORD level, not the byte level. Exactly three byte-level variants that the pre-row gate rejected
@@ -1115,6 +1397,13 @@ def _post_release_head(root, prev_row, release_rows, head_version):
     and every funneled read scrubs the inherited GIT_* environment and re-hashes each commit, tree, and
     blob it consumes against the requesting id (_release_schema), so a decoy GIT_DIR, an
     object-directory overlay, or an overwritten loose object cannot substitute a judged byte.
+
+    QA round-5 (D-397-REEXEC-FROM-COMMITTED): a plain launch re-executes the COMMITTED copy of this
+    gate from a verified materialization of HEAD (stage 1), so no checkout Python file beyond the
+    launched file itself (an untracked shadow module, a crafted __pycache__ .pyc, a planted sibling)
+    participates in this branch; every child validator launches under -I -B with a fresh pycache
+    prefix (_child_pycache_x); and the launched file remains the disclosed residual, because
+    nothing can vet its own launch.
     Returns (sorted changed paths, replayed-release findings)."""
     commit = prev_row["commit_sha"]
     head_oid = _rev_parse(root, "HEAD^{commit}")
@@ -1292,6 +1581,28 @@ def _disposition_findings(events, rows, head_version):
 
 # --- genesis structural validation (single-home validators, never re-implemented) -------------------
 
+_CHILD_PYCACHE = [None]
+
+
+def _child_pycache_x():
+    """The `-X pycache_prefix=<dir>` value for EVERY Python child this gate launches (QA round-5 claude
+    M2): a process-lifetime FRESH, empty pycache directory so a crafted pre-existing __pycache__ .pyc
+    cannot be READ behind a byte-identical .py (-B alone only stops WRITES; QA round-5 reproduction (b)).
+    The children launch with a LITERAL sys.executable head and inline -I -B flags (so the
+    launcher-isolation and maintenance-pin scans resolve the interpreter and its isolation statically):
+    -I makes the child ignore PYTHONPATH, the user site and sitecustomize (round 5 reproduced a
+    sitecustomize reached through an inherited PYTHONPATH flipping a child validator refusal to exit 0
+    even though the gate ran under -I), and -B writes no bytecode into any judged tree."""
+    if _CHILD_PYCACHE[0] is None:
+        import atexit
+        import shutil
+        import tempfile
+        d = tempfile.mkdtemp(prefix="aiqt-release-delta-pyc-")
+        atexit.register(lambda: shutil.rmtree(d, ignore_errors=True))
+        _CHILD_PYCACHE[0] = d
+    return "pycache_prefix=" + _CHILD_PYCACHE[0]
+
+
 def _validate_via_tool(root, script, args, what, tools_root=None):
     """Run a single-home validator as a subprocess and raise GateError (exit 2) on any nonzero exit
     OR a launch failure, so a structural violation OR a cannot-evaluate fails this gate closed rather than
@@ -1313,8 +1624,8 @@ def _validate_via_tool(root, script, args, what, tools_root=None):
         # BYTES capture (round-5 finding 3): a child emitting invalid UTF-8 must not crash the gate; the
         # returncode is interpreted, and the diagnostic tail is decoded with replacement. -B keeps the child
         # from writing bytecode (round-6 finding 1 hermeticity), so no generated .pyc can enter a tree index.
-        proc = subprocess.run([sys.executable, "-B", str(script_path), *args],
-                              capture_output=True)
+        proc = subprocess.run([sys.executable, "-I", "-B", "-X", _child_pycache_x(),
+                               str(script_path), *args], capture_output=True)
     except OSError as exc:
         raise GateError("{}: cannot launch {} ({}); fail-closed".format(what, script, exc))
     if proc.returncode != 0:
@@ -1383,8 +1694,78 @@ def _genesis_structural(root):
 
 # --- run --------------------------------------------------------------------------------------------
 
+def _head_commit_or_none(root):
+    """HEAD's commit id through the pinned funnel, or None when no committed state exists (not a git
+    repository, or an unborn branch). Routing uses this to decide whether there IS a committed state
+    to certify: a repository carrying an attested release row necessarily has a resolvable HEAD, so
+    an unresolvable HEAD never diverts a committed post-release state to a checkout-judged branch."""
+    try:
+        return _rev_parse(root, "HEAD^{commit}")
+    except GateError:
+        return None
+
+
+def _committed_post_release_state(root, head_oid):
+    """The post-release ROUTING predicate over HEAD's COMMITTED objects ONLY (QA round-5 claude M1):
+    (release rows, head version) when the committed releases record carries rows and the committed
+    changelog's newest version EQUALS the newest row's version; None when the committed state is
+    genesis- or delta-shaped. No checkout byte participates, so reverting the checkout copies of the
+    routing records to the release state can no longer route a post-release head into the genesis or
+    delta branch. With committed rows present, an unreadable or malformed committed routing record is
+    cannot-evaluate (GateError, exit 2), never a silent fall-through to a checkout-judged branch."""
+    rows = _strict(_release_schema.strict_releases, _show_toml(root, head_oid, RELEASES_REL),
+                   "HEAD " + RELEASES_REL)
+    if not rows:
+        return None
+    try:
+        cl = tomllib.loads(_show(root, head_oid, CHANGELOG_REL).decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError) as exc:
+        raise GateError("HEAD {} does not parse: {}".format(CHANGELOG_REL, exc))
+    rel = cl.get("release", [])
+    if not isinstance(rel, list) or not rel or not isinstance(rel[-1], dict):
+        raise GateError("HEAD {}: no [[release]] tables to read the committed head version "
+                        "from".format(CHANGELOG_REL))
+    head_version = rel[-1].get("version")
+    if not isinstance(head_version, str) or _parse(head_version) is None:
+        raise GateError("HEAD {}: latest release version {!r} is malformed".format(
+            CHANGELOG_REL, head_version))
+    if head_version != rows[-1]["version"]:
+        return None
+    return rows, head_version
+
+
 def run(root):
     try:
+        # BRANCH ROUTING FROM COMMITTED OBJECTS ONLY (QA round-5 claude M1; orchestrator decision
+        # D-397-REEXEC-FROM-COMMITTED): whether the post-release branch runs is decided from HEAD's
+        # COMMITTED copies of the routing records (the release rows and the changelog head version),
+        # read through the verified funnel, never from the checkout.
+        head_oid_route = _head_commit_or_none(root)
+        pr_state = (_committed_post_release_state(root, head_oid_route)
+                    if head_oid_route is not None else None)
+        if pr_state is not None:
+            release_rows, head_version = pr_state
+            prev_row = release_rows[-1]
+            # Anchor the attested predecessor exactly as the checkout branches do (round-7 finding 2).
+            _anchor_predecessor(root, prev_row)
+            changed, pr_findings = _post_release_head(root, prev_row, release_rows, head_version)
+            if pr_findings:
+                print("FAIL: {} release-delta finding(s) (post-release replay of the newest attested "
+                      "release against its own predecessor)".format(len(pr_findings)))
+                for f in pr_findings:
+                    print("  " + f)
+                return 1
+            print("release-delta: POST-RELEASE (head version {} equals the newest attested release row {}; "
+                  "the head differs from its commit_sha only in the post-release paths {}, and the attested "
+                  "release itself re-passes the pre-row gate against its own predecessor); no delta "
+                  "computed".format(head_version, prev_row["tag"], changed or "(none)"))
+            return 0
+        # GENESIS / DELTA CONTRACT (stated plainly; QA round 5): the two branches below JUDGE THE
+        # CHECKOUT BY DESIGN. Their subject is the candidate surface in the working tree, and their
+        # verdict certifies that checkout; CI runs them on a fresh clone where the checkout equals
+        # HEAD. Only the post-release branch above certifies a COMMITTED revision, which is why its
+        # routing and every byte it judges come from committed objects alone, and why a plain launch
+        # re-executes the COMMITTED gate copy (stage 1) before any of this runs.
         release_rows = load_release_rows(root)
         head_manifest = _load(root, MANIFEST_REL)
         # Strict-validate the manifest BEFORE branching genesis/delta (round-3 finding 1): a bad
@@ -1395,9 +1776,9 @@ def run(root):
         # Profiles/groups (2.6 arm-or-fail-closed): the real diff leg is not built. While the artifact is
         # ABSENT the leg is legitimately NOT APPLICABLE; the moment it SHIPS a gate that cannot diff it must
         # FAIL CLOSED, never silently pass a change on the profile surface (VC-4 QA #4). Checked in BOTH
-        # genesis and delta modes. On the POST-RELEASE branch this checkout lstat is an ADDITIONAL refusal
-        # only: the deciding input there is the COMMITTED trees (_assert_profiles_absent_committed, QA
-        # round-4 claude M1), so deleting the checkout copy of a shipped artifact cannot flip the verdict. lstat (round-5 finding 5): the path existing as ANY tree entry, including
+        # genesis and delta modes. The POST-RELEASE branch returns above and never reaches this lstat: its
+        # decision is taken from the COMMITTED trees alone (_assert_profiles_absent_committed, QA round-4
+        # claude M1; round 5 removed every checkout read from that branch). lstat (round-5 finding 5): the path existing as ANY tree entry, including
         # a symlink or a broken/loop symlink, means the artifact has shipped -> fail-closed. ONLY a genuine
         # FileNotFoundError establishes absence; any other OSError is cannot-evaluate.
         try:
@@ -1452,22 +1833,16 @@ def run(root):
             raise GateError("head manifest release-version {!r} != changelog head version {!r}; the "
                             "surface is inconsistent".format(head_manifest.get("release-version"),
                                                              head_version))
-        # Post-release head (RELEASING steps 6a/6b): the head version EQUALS the newest attested row. Accepted
-        # only when nothing but the post-release paths changed from that row's commit; otherwise exit 2. A
-        # head version BELOW the row, or any non-equal non-increase, still fails at _claimed_rank.
+        # The post-release branch is entered ONLY through the committed routing above (QA round-5
+        # claude M1). A checkout whose records claim the post-release state (a head version equal to
+        # the newest attested row) while HEAD's COMMITTED records do not is never certified from
+        # checkout inputs: refuse. Refusal-only: this can never accept a state the committed routing
+        # rejected, and a head version BELOW the row still fails at _claimed_rank.
         if head_version == prev_row["version"]:
-            changed, pr_findings = _post_release_head(root, prev_row, release_rows, head_version)
-            if pr_findings:
-                print("FAIL: {} release-delta finding(s) (post-release replay of the newest attested "
-                      "release against its own predecessor)".format(len(pr_findings)))
-                for f in pr_findings:
-                    print("  " + f)
-                return 1
-            print("release-delta: POST-RELEASE (head version {} equals the newest attested release row {}; "
-                  "the head differs from its commit_sha only in the post-release paths {}, and the attested "
-                  "release itself re-passes the pre-row gate against its own predecessor); no delta "
-                  "computed".format(head_version, prev_row["tag"], changed or "(none)"))
-            return 0
+            raise GateError("the checkout claims the post-release state (head version {} equals the "
+                            "newest attested release row) but HEAD's COMMITTED records do not; the "
+                            "post-release branch routes from committed objects only; commit the "
+                            "post-release records".format(head_version))
         claimed = _claimed_rank(prev_row["version"], head_version)
         # Strict-validate the consumed records on BOTH the predecessor object and the head object BEFORE any
         # delta computation (round-2 findings 1/4): a duplicate or incomplete clause row, a malformed
@@ -3216,6 +3591,350 @@ def _post_release_e2e(tmp, failures, only=None):
                     failures.append("{}: expected exit 2 with rc=7 from the materialized committed "
                                     "copy (got rc={}: {})".format(labelV, proc_v.returncode,
                                                                    out_v.strip()[-300:]))
+
+    # ---- QA round 5 (D-397-REEXEC-FROM-COMMITTED): launch re-execution and committed routing --------
+    # The launch-attack cases drive the EXACT CI launch (python3 -I -B tools/check_release_delta.py) so
+    # the stage-1 re-execution of the COMMITTED gate copy is itself under test, not the in-process
+    # run(). They use a DEDICATED fresh fixture (immune to any prior case's state) carrying a STALE
+    # committed post-release state (a release row with no manifest regeneration), whose HONEST verdict
+    # is exit 2 at the head-manifest-freshness leg. A baseline run with NO attack is asserted first, so
+    # the discriminator target is proven valid; then each attack must leave that verdict unchanged.
+    # With the round-5 fix reverted each attack flips to exit 0 (verified out-of-tree; see report).
+    labelR5 = "(R5 launch) the stage-1 committed re-execution and committed routing"
+    if _sel("(R5 "):
+        r5 = _extract_to("post-release-r5")
+        if r5 is None or not _pin_fixture_version(r5, failures):
+            return False
+        r5_base_cl = ('[[release]]\nversion = "0.9.0"\n\n[[release]]\nversion = "1.0.0"\n\n'
+                      '[release.artifacts]\nsbom = "sha256:0000"\n')
+        (r5 / CHANGELOG_REL).write_text(r5_base_cl, encoding="utf-8")
+        _g(r5, "add", "-A")
+        if not _regen_fixture_manifest(r5, "post-release-r5 base", failures, env):
+            return False
+        for a_ in (("add", "-A"), ("commit", "-q", "--no-verify", "-m", "release 1.0.0"),
+                   ("tag", "-a", "v1.0.0", "-m", "1.0.0")):
+            if _g(r5, *a_).returncode != 0:
+                failures.append("fixture setup (R5): could not build the dedicated repo")
+                return False
+        r5_commit1 = _gout(r5, "rev-parse", "HEAD")
+        r5_tobj = _gout(r5, "rev-parse", "refs/tags/v1.0.0")
+        r5_row = "format-version = 1\n\n" + _row_text("1.0.0", "v1.0.0", r5_tobj, r5_commit1)
+
+        def _r5_stale():
+            # Reset to the release commit and append the row WITHOUT regenerating the manifest, so the
+            # committed state is stale (honest exit 2 at head manifest freshness). Returns True on a
+            # clean committed stale state whose baseline verdict is the expected exit 2.
+            for a_ in (("reset", "-q", "--hard", r5_commit1), ("clean", "-q", "-fdx")):
+                _g(r5, *a_)
+            (r5 / RELEASES_REL).write_text(r5_row, encoding="utf-8")
+            return _commit_all(r5, "R5 stale state")
+
+        def _cli5(label_, extra_env=None):
+            env_ = dict(env)
+            env_.update(extra_env or {})
+            try:
+                proc_ = subprocess.run(
+                    [sys.executable, "-I", "-B", str(r5 / "tools" / "check_release_delta.py")],
+                    cwd=str(r5), capture_output=True, env=env_, timeout=1500)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                failures.append("fixture setup ({}): could not run the R5 gate CLI "
+                                "({})".format(label_, exc))
+                return None, ""
+            return proc_.returncode, (proc_.stdout + proc_.stderr).decode("utf-8", "replace")
+
+        def _cli5_expect(label_, want_rc, want_msg, extra_env=None):
+            rc_, out_ = _cli5(label_, extra_env)
+            if rc_ is None:
+                return
+            if rc_ != want_rc or want_msg not in out_:
+                failures.append("{}: expected exit {} with {!r} under the CI launch "
+                                "(got rc={}: {})".format(label_, want_rc, want_msg, rc_,
+                                                                      out_.strip()[-300:]))
+
+        # BASELINE: the stale committed state, no attack, must be exit 2 at head manifest freshness.
+        # This proves the discriminator target for every attack below (and that stage 1/stage 2 and the
+        # committed routing reach that leg over the committed revision).
+        if _r5_stale():
+            _cli5_expect(labelR5 + " baseline (stale, no attack)", 2, "head manifest freshness")
+
+        _FAKE_PASS = "release-delta: POST-RELEASE"
+        _SHADOW = ("import os\n"
+                   "print(" + repr(_FAKE_PASS + " (R5 planted module, must never run)") + ")\n"
+                   "os._exit(0)\n")
+
+        label5a = "(R5 shadow) an untracked tools/tempfile.py shadow module never runs"
+        if _sel(label5a) and _r5_stale():
+            # Reproduction (a): the pre-fix gate imported the CHECKOUT tools/ first, so this untracked
+            # shadow of a lazily imported stdlib module faked a pass and exited 0. Stage 2 runs from the
+            # materialized COMMITTED tree (no untracked file), so the shadow never loads.
+            (r5 / "tools" / "tempfile.py").write_text(_SHADOW, encoding="utf-8")
+            try:
+                _cli5_expect(label5a, 2, "head manifest freshness")
+            finally:
+                tp = r5 / "tools" / "tempfile.py"
+                if tp.exists():
+                    tp.unlink()
+
+        label5b = "(R5 pyc) a crafted __pycache__ .pyc behind a byte-identical .py never loads"
+        if _sel(label5b) and _r5_stale():
+            # Reproduction (b): a crafted UNCHECKED_HASH .pyc for a gate module, planted in the CHECKOUT
+            # tools/__pycache__ while the .py stays byte-identical to HEAD. A checkout-running gate under
+            # -B still READS an existing .pyc; stage 2 runs from the materialized committed tree under -X
+            # pycache_prefix=<fresh dir>, so the checkout .pyc is never consulted.
+            import importlib.util as _ilu
+            import py_compile as _pyc
+            src_dir = tmp / "r5-pyc-src"
+            src_dir.mkdir(exist_ok=True)
+            src = src_dir / "_release_schema.py"
+            src.write_text("import os\n"
+                           "print(" + repr(_FAKE_PASS + " (R5 crafted pyc, must never load)") + ")\n"
+                           "os._exit(0)\n", encoding="utf-8")
+            cfile = _ilu.cache_from_source(str(src))
+            ok_pyc = True
+            try:
+                _pyc.compile(str(src), cfile=cfile,
+                             invalidation_mode=_pyc.PycInvalidationMode.UNCHECKED_HASH)
+            except (OSError, _pyc.PyCompileError, ValueError) as exc:
+                failures.append("fixture setup ({}): could not build the crafted .pyc "
+                                "({})".format(label5b, exc))
+                ok_pyc = False
+            if ok_pyc:
+                co_pyc = r5 / "tools" / "__pycache__"
+                co_pyc.mkdir(parents=True, exist_ok=True)
+                planted = co_pyc / Path(cfile).name
+                planted.write_bytes(Path(cfile).read_bytes())
+                try:
+                    _cli5_expect(label5b, 2, "head manifest freshness")
+                finally:
+                    if planted.exists():
+                        planted.unlink()
+
+        label5c = "(R5 fsmonitor) a repo-config core.fsmonitor hook neither runs nor flips the verdict"
+        if _sel(label5c) and _r5_stale():
+            # Reproduction (c): a repo-config fsmonitor program that, when a worktree-scanning git call
+            # runs it, plants tools/tempfile.py AND touches a marker. Every funneled git call now pins
+            # core.fsmonitor=false, so the hook never runs (marker absent); the verdict stays exit 2.
+            marker = r5 / "tools" / "r5-fsmon-ran.marker"
+            hook = tmp / "fsmon-plant.sh"
+            hook.write_text("#!/bin/sh\n"
+                            ": > " + str(marker) + "\n"
+                            ": > " + str(r5 / "tools" / "tempfile.py") + "\n"
+                            "exit 1\n", encoding="utf-8")
+            hook.chmod(0o755)
+            _g(r5, "config", "core.fsmonitor", str(hook))
+            try:
+                _cli5_expect(label5c, 2, "head manifest freshness")
+                if marker.exists():
+                    failures.append("{}: the core.fsmonitor hook RAN under the gate launch; the "
+                                    "core.fsmonitor=false pin is not effective".format(label5c))
+            finally:
+                _g(r5, "config", "--unset-all", "core.fsmonitor")
+                for p_ in (marker, r5 / "tools" / "tempfile.py"):
+                    if p_.exists():
+                        p_.unlink()
+
+        label5f = ("(R5 filter/hook) a repo-config clean filter and post-index-change hook never run "
+                   "under the drift advisory")
+        if _sel(label5f) and _r5_stale():
+            # Sibling of reproduction (c): `git status` refreshes the index, so it runs the clean filter
+            # of a stat-dirty tracked file and, when it writes the refreshed index, the post-index-change
+            # hook; core.fsmonitor=false stops neither. The drift advisory therefore reads diff-index and
+            # ls-files only. Untracked repo-local config: .git/info/attributes names the filter for every
+            # path, core.hooksPath names a hook directory, and a tracked file is made stat-dirty with
+            # identical content. Neither marker may appear and the verdict stays exit 2.
+            m_filter = tmp / "r5-filter-ran.marker"
+            m_hook = tmp / "r5-hook-ran.marker"
+            hooks_dir = tmp / "r5-hooks"
+            hooks_dir.mkdir(exist_ok=True)
+            (hooks_dir / "post-index-change").write_text(
+                "#!/bin/sh\n: > " + str(m_hook) + "\n", encoding="utf-8")
+            (hooks_dir / "post-index-change").chmod(0o755)
+            info_attr = r5 / ".git" / "info" / "attributes"
+            info_attr.parent.mkdir(parents=True, exist_ok=True)
+            info_attr.write_text("* filter=r5plant\n", encoding="utf-8")
+            _g(r5, "config", "filter.r5plant.clean", "sh -c ': > " + str(m_filter) + "; cat'")
+            _g(r5, "config", "core.hooksPath", str(hooks_dir))
+            dirty = r5 / CHANGELOG_REL
+            st_ = dirty.stat()
+            os.utime(dirty, ns=(st_.st_atime_ns, st_.st_mtime_ns + 5 * 10 ** 9))
+            for m_ in (m_filter, m_hook):
+                if m_.exists():
+                    m_.unlink()
+            try:
+                _cli5_expect(label5f, 2, "head manifest freshness")
+                for m_, what_ in ((m_filter, "clean filter"), (m_hook, "post-index-change hook")):
+                    if m_.exists():
+                        failures.append("{}: the repo-config {} RAN under the gate launch; the drift "
+                                        "advisory must not refresh the index".format(label5f, what_))
+            finally:
+                _g(r5, "config", "--unset-all", "filter.r5plant.clean")
+                _g(r5, "config", "--unset-all", "core.hooksPath")
+                for p_ in (info_attr, m_filter, m_hook):
+                    if p_.exists():
+                        p_.unlink()
+
+        label5p = "(R5 PYTHONPATH) an inherited PYTHONPATH sitecustomize never reaches a child"
+        if _sel(label5p) and _r5_stale():
+            # Reproduction M2: a sitecustomize on PYTHONPATH that exits 0 when a validator child runs.
+            # The gate runs under -I, but the pre-fix child launches dropped that isolation; every child
+            # now launches under -I, so PYTHONPATH and sitecustomize are ignored and the verdict stays
+            # exit 2.
+            site_dir = tmp / "r5-sitecustomize"
+            site_dir.mkdir(exist_ok=True)
+            (site_dir / "sitecustomize.py").write_text(
+                "import os, sys\n"
+                "_a0 = sys.argv[0] if sys.argv else ''\n"
+                "if _a0.endswith(('gen_manifest.py', 'check_manifest.py', 'gen_renderers.py',\n"
+                "                 'check_clauses.py')):\n"
+                "    os._exit(0)\n", encoding="utf-8")
+            _cli5_expect(label5p, 2, "head manifest freshness",
+                         extra_env={"PYTHONPATH": str(site_dir)})
+
+        label5r = "(R5 routing) checkout routing records reverted to the release judged from committed"
+        if _sel(label5r) and _r5_stale():
+            # Reproduction M1: with the committed state stale (honest exit 2), the CHECKOUT copies of the
+            # routing records (releases.toml, changelog.toml) are reverted to the release commit's
+            # genesis-shaped bytes. The pre-fix router read the checkout and branched to GENESIS/DELTA
+            # (exit 0); committed routing reads HEAD's committed records and still routes POST-RELEASE,
+            # so the stale committed manifest is still caught (exit 2 head manifest freshness).
+            for rel in (RELEASES_REL, CHANGELOG_REL):
+                _g(r5, "checkout", r5_commit1, "--", rel)
+            try:
+                _cli5_expect(label5r, 2, "head manifest freshness")
+            finally:
+                _g(r5, "checkout", "HEAD", "--", RELEASES_REL, CHANGELOG_REL)
+
+        label5s = "(R5 stage) the accepted committed state re-executes the committed copy and passes"
+        if _sel(label5s):
+            # Positive control: a clean one-row attestation state (manifest regenerated), through the
+            # EXACT CI launch, must re-execute the committed gate copy (stage 1) and print POST-RELEASE
+            # exit 0. A stage-1 materialization or re-exec regression surfaces here as a non-zero exit.
+            for a_ in (("reset", "-q", "--hard", r5_commit1), ("clean", "-q", "-fdx")):
+                _g(r5, *a_)
+            (r5 / RELEASES_REL).write_text(r5_row, encoding="utf-8")
+            if _regen_fixture_manifest(r5, "post-release-r5 accepted", failures, env) \
+                    and _commit_all(r5, "R5 accepted state"):
+                _cli5_expect(label5s, 0, "release-delta: POST-RELEASE")
+
+
+    # ---- QA round-5 claude m2: the per-object re-hash covers a commit, tree and tag, not only a blob -
+    # The round-4 (R4 loose) case forged only a BLOB. verified_object re-hashes EVERY object type it
+    # reads through cat-file --batch (git does not verify --batch bodies), so a tampered loose commit,
+    # tree or tag must raise SchemaError "re-hash mismatch". These assert verified_object DIRECTLY (the
+    # read path the materialization and ancestry walk use), so the re-hash is the sole catcher: a mutant
+    # that re-hashes only blobs returns the tampered body with no error and each case fails (verified
+    # out-of-tree).
+    labelFA = "(R5 forged ancestry) a forged INTERMEDIATE commit object never grafts HEAD onto the release"
+    if _sel(labelFA):
+        # QA round-5 claude m1: release commit R; an orphan commit O carrying R's tree; HEAD H whose
+        # parent is O. The loose object for O is then overwritten (filename kept) with O's body plus
+        # `parent R`, so merge-base (which reads O unverified) answers "R is an ancestor of HEAD". The
+        # verified parent-chain walk re-hashes O and must refuse; with the walk removed this passes.
+        import zlib as _zlib_a
+        anc = tmp / "r5-ancestry"
+        anc.mkdir(exist_ok=True)
+
+        def _ga(*a_):
+            return subprocess.run(["git", "-C", str(anc), *a_], capture_output=True, env=env)
+
+        _ga("init", "-q")
+        (anc / "f.txt").write_text("release\n", encoding="utf-8")
+        _ga("add", "-A")
+        _ga("commit", "-q", "--no-verify", "-m", "release")
+        a_rel = _gout(anc, "rev-parse", "HEAD")
+        a_tree = _gout(anc, "rev-parse", "HEAD^{tree}")
+        a_orphan = subprocess.run(["git", "-C", str(anc), "commit-tree", a_tree, "-m", "orphan"],
+                                  capture_output=True, text=True, env=env).stdout.strip()
+        a_head = subprocess.run(["git", "-C", str(anc), "commit-tree", a_tree, "-p", a_orphan,
+                                 "-m", "head"], capture_output=True, text=True, env=env).stdout.strip()
+        _ga("reset", "-q", "--hard", a_head)
+        q_ = anc / ".git" / "objects" / a_orphan[:2] / a_orphan[2:]
+        if not q_.is_file() or len(a_head) != len(a_rel):
+            failures.append("fixture setup ({}): the orphan commit is not loose".format(labelFA))
+        else:
+            body_ = subprocess.run(["git", "-C", str(anc), "cat-file", "commit", a_orphan],
+                                   capture_output=True, env=env).stdout
+            hdr_, sep_, msg_ = body_.partition(b"\n\n")
+            forged_ = hdr_.replace(b"\n", b"\nparent " + a_rel.encode("ascii") + b"\n", 1) + sep_ + msg_
+            q_.chmod(0o644)
+            q_.write_bytes(_zlib_a.compress(b"commit " + str(len(forged_)).encode("ascii") + b"\x00"
+                                            + forged_, 9))
+            q_.chmod(0o444)
+            _release_schema._VERIFIED_OBJECT_CACHE.pop(a_orphan, None)
+            mb_ = _git_raw(anc, ["merge-base", "--is-ancestor", a_rel, "HEAD"])
+            if mb_.returncode != 0:
+                failures.append("fixture setup ({}): the forged parent did not graft for merge-base, so "
+                                "the case would not discriminate".format(labelFA))
+            else:
+                try:
+                    _assert_head_ancestry(anc, a_rel)
+                    failures.append("{}: the forged intermediate commit was accepted as ancestry; the "
+                                    "verified parent-chain walk did not refuse".format(labelFA))
+                except GateError as exc:
+                    if "re-hash mismatch" not in str(exc):
+                        failures.append("{}: expected a re-hash mismatch, got: {}".format(labelFA, exc))
+            _release_schema._VERIFIED_OBJECT_CACHE.pop(a_orphan, None)
+
+    labelFC = "(R5 forged commit) a tampered loose COMMIT object fails the per-object re-hash"
+    labelFT = "(R5 forged tree) a tampered loose TREE object fails the per-object re-hash"
+    labelFG = "(R5 forged tag) a tampered loose annotated TAG object fails the per-object re-hash"
+    labelFB = "(R5 forged blob) a tampered loose BLOB object fails the per-object re-hash"
+    if any(_sel(x) for x in (labelFC, labelFT, labelFG, labelFB)):
+        import zlib as _zlib5
+
+        def _loose_path(repo_, oid_):
+            return repo_ / ".git" / "objects" / oid_[:2] / oid_[2:]
+
+        def _raw_object(repo_, oid_):
+            t_ = _gout(repo_, "cat-file", "-t", oid_)
+            b_ = subprocess.run(["git", "-C", str(repo_), "cat-file", t_, oid_],
+                                capture_output=True).stdout
+            return t_, b_
+
+        def _forge_one(label_, oid_, miss_):
+            # Tamper the loose object at oid_ (same declared type, one appended byte), keeping the
+            # FILENAME = the original id, then assert verified_object re-hashes and refuses. The
+            # verified-object cache is cleared around the probe so a prior clean read cannot mask it.
+            q_ = _loose_path(repo, oid_)
+            if not q_.is_file():
+                failures.append("fixture setup ({}): {}".format(label_, miss_))
+                return
+            t_, b_ = _raw_object(repo, oid_)
+            saved_ = q_.read_bytes()
+            _release_schema._VERIFIED_OBJECT_CACHE.pop(oid_, None)
+            q_.chmod(0o644)
+            q_.write_bytes(_zlib5.compress(t_.encode("ascii") + b" "
+                                           + str(len(b_) + 1).encode("ascii") + b"\x00" + b_ + b"\n", 9))
+            q_.chmod(0o444)
+            try:
+                _release_schema.verified_object(repo, oid_)
+                failures.append("{}: verified_object accepted a tampered {} object; the "
+                                "per-object re-hash did not refuse".format(label_, t_))
+            except _release_schema.SchemaError as exc:
+                if "re-hash mismatch" not in str(exc):
+                    failures.append("{}: expected a re-hash mismatch, got: {}".format(
+                        label_, exc))
+            finally:
+                q_.chmod(0o644)
+                q_.write_bytes(saved_)
+                q_.chmod(0o444)
+                _release_schema._VERIFIED_OBJECT_CACHE.pop(oid_, None)
+
+        _reset_case()
+        _write(RELEASES_REL, row)
+        if _regen_fixture_manifest(repo, "post-release forged-object base", failures, env) \
+                and _commit_all(repo, "post-release forged-object base"):
+            if _sel(labelFC):
+                _forge_one(labelFC, _gout(repo, "rev-parse", "HEAD"), "HEAD commit is not loose")
+            if _sel(labelFT):
+                _forge_one(labelFT, _gout(repo, "rev-parse", "HEAD:.aiqt"), "subtree is not loose")
+            if _sel(labelFG):
+                _forge_one(labelFG, _gout(repo, "rev-parse", "refs/tags/v1.0.0"),
+                           "tag object is not loose")
+            if _sel(labelFB):
+                _forge_one(labelFB, _gout(repo, "rev-parse", "HEAD:" + RELEASES_REL),
+                           "release-row blob is not loose")
+
     return True
 
 
@@ -3504,15 +4223,23 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
         pass
 
     # --- repin / self-test mode resolution (VC-4 QA #9) ------------------------------------------
-    def _opts(self_test=False, repin=False, target=None):
-        return {"self_test": self_test, "repin": repin, "target": target}
+    def _opts(self_test=False, repin=False, target=None, stage2_repo=None, stage2_tree=None):
+        return {"self_test": self_test, "repin": repin, "target": target,
+                "stage2_repo": stage2_repo, "stage2_tree": stage2_tree}
     _cases = [(_opts(), "run"),
               (_opts(self_test=True), "self-test"),
               (_opts(repin=True, target="1.0.0"), "repin"),
               (_opts(target="1.0.0"), "error"),               # --target without --repin never runs
               (_opts(repin=True), "error"),                   # --repin without --target is incomplete
               (_opts(repin=True, target="1.0.0", self_test=True), "error"),   # mixed with --self-test
-              (_opts(target="1.0.0", self_test=True), "error")]
+              (_opts(target="1.0.0", self_test=True), "error"),
+              # stage-2 re-execution mode (QA round 5): BOTH internal args resolve to 'stage2'; either
+              # alone, or mixed with another mode, is 'error'.
+              (_opts(stage2_repo="/r", stage2_tree="/t"), "stage2"),
+              (_opts(stage2_repo="/r"), "error"),
+              (_opts(stage2_tree="/t"), "error"),
+              (_opts(stage2_repo="/r", stage2_tree="/t", self_test=True), "error"),
+              (_opts(stage2_repo="/r", stage2_tree="/t", repin=True, target="1.0.0"), "error")]
     for opts, want in _cases:
         got = _resolve_mode(opts)
         if got != want:
@@ -4183,7 +4910,17 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                       "re-hash, a committed profiles artifact with the checkout copy deleted, a gate "
                       "import diverging from the committed HEAD copy, and the materialized committed "
                       "tree running its OWN validator copies) each refuse exit 2, and a skipped "
-                      "archive/extract/build coverage set now FAILS the self-test; and the replayed "
+                      "archive/extract/build coverage set now FAILS the self-test; the QA round-5 "
+                      "launch cases over a dedicated fixture (stage-1 re-execution of the committed "
+                      "gate copy, with an untracked tools/tempfile.py shadow, a crafted __pycache__ "
+                      ".pyc, a repo-config core.fsmonitor hook, and a repo-config clean filter and "
+                      "post-index-change hook each left inert at exit 2, the "
+                      "checkout routing records reverted to the release still routed POST-RELEASE "
+                      "from committed objects, an inherited PYTHONPATH/sitecustomize ignored by "
+                      "every -I child, and the accepted state re-executing to exit 0) and the "
+                      "per-object re-hash refusing a forged commit, tree and tag (not only a blob), "
+                      "and the verified ancestry walk refusing a forged intermediate commit, "
+                      "each hold; and the replayed "
                       "pre-row gate "
                       "(round-2 B1: an undispositioned later release exits 1 after its row lands, with its "
                       "pre-row control; a malformed genesis tree exits 2) holds) hold") if post_ran else \
@@ -4205,7 +4942,8 @@ def _parse_args(argv):
     """Parse argv, REJECTING any DUPLICATE option (round-7 finding 7): a repeated flag or value option is a
     conflicting/ambiguous invocation and returns None -> exit 2 BEFORE dispatch, matching release-build's
     seen-option discipline. Returns the opts dict, or None on an unknown or duplicate option."""
-    opts = {"self_test": False, "repin": False, "target": None}
+    opts = {"self_test": False, "repin": False, "target": None,
+            "stage2_repo": None, "stage2_tree": None}
     seen = set()
     i = 0
     while i < len(argv):
@@ -4224,6 +4962,15 @@ def _parse_args(argv):
             seen.add(arg)
             opts["target"] = argv[i + 1]
             i += 2
+        elif arg in ("--stage2-repo", "--stage2-tree") and i + 1 < len(argv):
+            # The INTERNAL stage-2 re-execution arguments (set by stage 1, never by hand): the judged
+            # repository and the verified materialization of its HEAD this copy runs from.
+            if arg in seen:
+                print("error: duplicate option {}".format(arg), file=sys.stderr)
+                return None
+            seen.add(arg)
+            opts["stage2_repo" if arg == "--stage2-repo" else "stage2_tree"] = argv[i + 1]
+            i += 2
         else:
             print("usage: check_release_delta.py [--repin --target V] | --self-test (no option may be "
                   "repeated)", file=sys.stderr)
@@ -4235,8 +4982,14 @@ def _resolve_mode(opts):
     """Classify an option set into exactly one dispatch mode BEFORE any work runs, so a mixed or incomplete
     invocation can never fall through to a real run (VC-4 QA #9). Any invocation touching the repin family
     (--repin or --target) resolves to 'repin' (the fail-closed 10.4 stub) or 'error', never 'run' or
-    'self-test'. Returns one of: 'self-test', 'run', 'repin', 'error'."""
+    'self-test'. Returns one of: 'self-test', 'run', 'repin', 'stage2', 'error'."""
     repin_family = opts["repin"] or opts["target"] is not None
+    if opts["stage2_repo"] is not None or opts["stage2_tree"] is not None:
+        # The internal stage-2 mode: BOTH arguments are required and no other mode may be mixed in.
+        if (opts["stage2_repo"] is not None and opts["stage2_tree"] is not None
+                and not opts["self_test"] and not repin_family):
+            return "stage2"
+        return "error"
     if opts["self_test"]:
         return "error" if repin_family else "self-test"
     if repin_family:
@@ -4255,6 +5008,16 @@ def main():
               "--target without --repin, a --repin without --target, or a repin option combined with "
               "--self-test is a mixed or incomplete mode and is rejected fail-closed", file=sys.stderr)
         return 2
+    if mode == "stage2":
+        # Stage 2 of the re-execution (QA round 5, D-397-REEXEC-FROM-COMMITTED): this process IS the
+        # committed copy, launched by stage 1 from a verified materialization of HEAD's tree. Sanity:
+        # the running gate file must live under the named tree; then judge the named repository.
+        tree = Path(opts["stage2_tree"]).resolve()
+        if tree not in Path(__file__).resolve().parents:
+            print("error: --stage2-tree does not contain the running gate file; the stage-2 copy "
+                  "must run from the materialized committed tree; fail-closed", file=sys.stderr)
+            return 2
+        return run(Path(opts["stage2_repo"]).resolve())
     if mode == "self-test":
         return self_test_main()
     if mode == "repin":
