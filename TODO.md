@@ -54,7 +54,6 @@ Fix errors and prevent their recurrence. Worked first.
 | --- | --- | --- | --- |
 | OPF-HOMES-ACTIVATION-CHECKLIST | Partly done | Work needed before OPF switches to its second layout for where store files live (OPF tools still write to the first layout): the remaining fixes, then a full end-to-end test (H, M) | `[public]` `[tooling]` |
 | MODE-CANONICAL-SOURCE | Partly done | Hooks that depend on the operating mode read both a configured canonical mode file and the session record, and treat the mode as unattended when either says so (reading one configured file already works) (H, S) | `[public]` `[tooling]` |
-| STAMP-ONELINE | In progress (#391) | The stamp-truth-stop preview hook prints one-line messages (at most 100 characters) with no duplicate copy on standard error (M, S) | `[public]` `[tooling]` |
 | FIX-MAIN-UNCOND | In progress (#385) | OPF tool self-tests run only for the exact self-test argument (M, M) | `[public]` `[tooling]` |
 | FVC-FIXES | In progress (#387) | Fix three confirmed defects: an upgrade could hide a failure to release its lock, the generator of migration mapping files could leave a file open when a write failed, and the guard for generated files was documented as refusing in fewer cases than it does (M, S) | `[public]` `[tooling]` |
 | REQ-OPF-IMPORT-DECISIONS | Not started | OPF adoption splits a mixed decisions register into pending and decided records, preserving history (H, M) | `[public]` `[tooling]` |
