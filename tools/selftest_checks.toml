@@ -656,6 +656,10 @@ expected-check-ids = [
   "exit/paths-nested-brace-2",
   "exit/paths-unbalanced-brace-2",
   "exit/paths-escape-2",
+  "exit/paths-yaml11-typed-value-2",
+  "exit/paths-yaml11-typed-item-2",
+  "scope/paths-realistic-globs-conditional",
+  "exit/paths-flow-question-mark-2",
   # ---------- imports and the two totals ----------
   "import/managed-block-import-followed",
   "import/rule-file-import-counted",

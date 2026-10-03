@@ -50,7 +50,9 @@ plain ASCII keys and one-line string values; an `@` import that is not plain ASC
 through a symlink; an import target it cannot read; a case variant of `CLAUDE.md`, `.claude/CLAUDE.md`,
 or `.claude/rules/` (such as `.claude/claude.md`), which a case-insensitive file system loads; and an
 HTML comment on the same line as an `@` that starts an import, since Claude Code removes the comment and
-can join an import path across it. An `@` inside a word, such as an email address in a comment, is fine.
+can join an import path across it. An `@` inside a word, such as an email address in a comment, is exempt
+from that comment check, except where it forms a Windows 8.3 short name import such as `name@HOST~1`,
+which the gate refuses though Claude Code does not import it (a disclosed over-refusal).
 Within that grammar it counts every HTML comment except a whole line comment with blank lines around it.
 It follows each `@` it reads as possibly naming a file, even one in a code span, and the imports of a rule
 file scoped with `paths:`, which Claude Code loads in every session. Either total can be higher than what

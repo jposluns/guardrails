@@ -57,16 +57,22 @@ character in the Basic Multilingual Plane is one unit, an astral character such 
       string or a flat one-line flow sequence of such strings as its value, or `key:` followed by `- item`
       lines at one indent, each holding one such string (`key:` with no item reads as null). A string is
       double quoted with no backslash, single quoted with no inner quote, or plain: it starts with no YAML
-      indicator character and holds no `: ` or ` #` (in a flow sequence no comma, bracket, or brace
-      either; a quoted string there may hold a comma, and a flow sequence splits only on the commas
-      outside quotes). A nested list, a flow mapping, an escape, a multi-line value, an unknown or
-      duplicate key, or any other line exits 2.
+      indicator character and holds no `: ` or ` #` (in a flow sequence no comma, bracket, brace, or `?`
+      either, as PyYAML ends a flow plain scalar at `?`; a quoted string there may hold a comma, and a
+      flow sequence splits only on the commas outside quotes). A nested list, a flow mapping, an escape,
+      a multi-line value, an unknown or duplicate key, or any other line exits 2.
   SCOPE. A file whose frontmatter has a `paths:` key is conditional and its own body is not counted (its
       imports are, as IMPORTS states), unless its globs load everywhere, and only when every entry is a
       string glob: a typed `paths:` value or entry, one YAML would read as null, a boolean, a number, a
       mapping, an alias, a tag, or a block scalar, exits 2 (the loader drops a scope it cannot read as
-      strings and loads the file everywhere). The value (a string, or each entry of a list) is normalized in
-      the loader's order: split on the commas outside braces, each piece trimmed, one level of
+      strings and loads the file everywhere). That is an allowlist, not a list of typed forms: a quoted
+      entry is a string, and a plain entry is accepted only when every character is a letter, a digit, or
+      one of `_ . / * ? [ ] { } ! , @ + -` and it holds a `/`, `*`, `?`, `[` or `{`, or a letter, a `.`
+      and a letter in a row (`README.md`) (PLAIN_GLOB_RE). No null, boolean, integer, float, timestamp,
+      merge or value form of the YAML 1.1 types or the YAML 1.2 core schema holds either, so no resolver
+      of either version can type it; every other plain entry (`2026-10-03`, `0b101`, `1:20`, `src`)
+      exits 2, a known over-refusal that quoting avoids. The value (a string, or each entry of a list) is
+      normalized in the loader's order: split on the commas outside braces, each piece trimmed, one level of
       brace alternation `{a,b}` expanded, one trailing `/**` stripped, and empty globs dropped. The file
       is unconditional, and counted, when no glob is left or every glob is `**` (so `**`, `**/**`, `/**`,
       `**,`, ` ** `, `{**,**}`, and `["**", "/**"]`). A glob the normalizer cannot read (nested braces, an
@@ -88,7 +94,8 @@ character in the Basic Multilingual Plane is one unit, an astral character such 
       the start of a line, after whitespace, or right after a comment closer `-->`) on a line that also
       holds `<!--` or `-->`, or followed by `<!--` with only whitespace between them, exits 2 naming the
       line; the gate refuses the construct rather than model the join. An `@` inside a word, such as the
-      one in an email address (`<!-- owner: ops@example.com -->`), begins no import and is not refused.
+      one in an email address (`<!-- owner: ops@example.com -->`), begins no import and is exempt from this
+      check (but not from the 8.3 short name refusal in IMPORTS, a disclosed over-refusal).
   IMPORTS. Every `@` in a rule file, in the managed block, in an imported file, and, for SESSION, in the
       whole CLAUDE.md is an import candidate. That includes a conditional rule file: the loader reads every
       rule file with its whole import tree in every session and then drops only the entries that carry their
@@ -296,10 +303,12 @@ CANDIDATE_RE = re.compile(r"(?:\\ |\S)+")
 DELIMITERS = "*_`)]}>,.;:!?\"'"
 CUT_BEFORE = DELIMITERS + "<[({\\"
 MARKDOWN_ESCAPE_RE = re.compile(r"\\([!-/:-@\[-`{-~ ])")
-YAML_TYPED_RE = re.compile(
-    r"(?:null|Null|NULL|~|true|True|TRUE|false|False|FALSE|yes|Yes|YES|no|No|NO|on|On|ON|off|Off|OFF|y|Y|n|N)"
-    r"|[-+]?(?:\d[\d_]*(?:\.\d*)?(?:[eE][-+]?\d+)?|\.\d+(?:[eE][-+]?\d+)?|0x[0-9a-fA-F_]+|0o[0-7_]+"
-    r"|\.(?:inf|Inf|INF|nan|NaN|NAN))")
+# The only plain `paths:` entry the gate accepts (_plain_string): characters from this class, and a `/`,
+# `*`, `?`, `[` or `{`, or a letter, `.` and letter in a row. None of the null, boolean, integer, float,
+# timestamp, merge or value forms of YAML 1.1 or the YAML 1.2 core schema holds any of them (their only
+# `.` follows a digit, a sign, `_`, another `.` or nothing), so no resolver of either version reads it as
+# anything but a string. An allowlist: a typed form left off a denylist would load the rule everywhere.
+PLAIN_GLOB_RE = re.compile(r"(?=.*(?:[/*?\[{]|[A-Za-z]\.[A-Za-z]))[A-Za-z0-9_./*?\[\]{}!,@+-]+")
 # The strict line reader: a plain key (letters, digits, `_`, `-`) at column 0, a colon, and a space before
 # any value; a `- item` line indented with spaces only.
 KEY_RE = re.compile(r"([A-Za-z0-9_-]+):(?: +(.*))?")
@@ -324,9 +333,10 @@ OFF_GRAMMAR_CATEGORIES = frozenset(("Cc", "Cf", "Cn", "Zl", "Zp", "Zs"))
 # The frontmatter keys the grammar admits: those tools/gen_rules.py writes, plus `paths` and `description`.
 FRONTMATTER_KEYS = frozenset(gen_rules.BASE_KEYS | gen_rules.SEQ_KEYS
                              | set(("apex", "tier", "facet", "paths", "description")))
-# A plain scalar may not start with a YAML indicator character; a plain flow element may not hold these.
+# A plain scalar may not start with a YAML indicator character; a plain flow element may not hold these
+# (PyYAML ends a flow plain scalar at `?` and rejects the block, so a loader may too).
 PLAIN_FIRST = "-?:,[]{}#&*!|>'\"%@`"
-FLOW_FORBIDDEN = "[]{},"
+FLOW_FORBIDDEN = "[]{},?"
 
 
 class GateError(Exception):
@@ -615,14 +625,16 @@ def _flow_split(inner):
 
 
 def _plain_string(tok, where):
-    """GateError unless the `paths:` token `tok` is a YAML string: quoted, or a plain scalar YAML would not
-    read as null, a boolean, a number, a mapping, an alias, a tag, or a block scalar. The loader drops a
-    scope it cannot read as strings, so such a value is cannot-evaluate, never a conditional file."""
+    """GateError unless the `paths:` token `tok` is a YAML string under every YAML 1.1 and 1.2 resolver:
+    quoted, or a plain scalar that starts with no PLAIN_FIRST character and matches PLAIN_GLOB_RE whole.
+    Anything else (a null, a boolean, a number, a timestamp, a mapping, an alias, a tag, a block scalar,
+    or a plain string the allowlist does not cover) is cannot-evaluate, never a conditional file: the
+    loader drops a scope it cannot read as strings and loads the file everywhere."""
     if tok[:1] in ("\"", "'"):
         return
-    if (not tok or tok[0] in "{}&*!|>%@`#," or YAML_TYPED_RE.fullmatch(tok)
-            or ": " in tok or tok.endswith(":") or " #" in tok):
-        raise GateError("{}: `paths:` value {!r} is not a string glob; cannot evaluate".format(where, tok))
+    if not tok or tok[0] in PLAIN_FIRST or not PLAIN_GLOB_RE.fullmatch(tok):
+        raise GateError("{}: `paths:` value {!r} is not a string glob a YAML 1.1 or 1.2 resolver cannot type "
+                        "(PLAIN_GLOB_RE; quote it); cannot evaluate".format(where, tok))
 
 
 def path_globs(fm, where):
@@ -1583,6 +1595,28 @@ def self_test(report_path=None):
                                        "paths: src/**\ndescription: caf" + chr(0xE9))):
             typed = _tree(tmp / ("typed-" + case), rules={"a.md": "---\n" + scope + "\n---\n" + "X" * 100})
             check(check_id, _quiet(run, typed), 2)
+        # A plain entry is held to an allowlist (PLAIN_GLOB_RE), not a list of typed forms: the YAML 1.1
+        # binary, base-60 and timestamp forms a denylist missed exit 2, as a value and as a list item,
+        # while realistic globs, plain or quoted, stay conditional.
+        yaml11 = ("2026-10-03", "0b101", "1:20", "2026-10-03T10:00:00Z", "190:20:30")
+        for check_id, case, lead in (("exit/paths-yaml11-typed-value-2", "value", "paths: "),
+                                     ("exit/paths-yaml11-typed-item-2", "item", "paths:\n  - src/**\n  - ")):
+            check(check_id, [_quiet(run, _tree(tmp / "yaml11-{}-{}".format(case, i),
+                                               rules={"a.md": "---\n" + lead + v + "\n---\n" + "X" * 100}))
+                             for i, v in enumerate(yaml11)], [2] * len(yaml11))
+        globs = ("paths: src/**/*.py", 'paths: "*.md"', "paths: docs/**", "paths: tools/check_*.py",
+                 "paths: README.md", 'paths:\n  - "*.md"\n  - docs/**', "paths: [src/**/*.py, tools/check_*.py]",
+                 "paths: src/a?.md", 'paths: ["src/a?.md"]')
+        got = []
+        for i, scope in enumerate(globs):
+            m = _measured(measure, _tree(tmp / "glob-{}".format(i),
+                                         rules={"a.md": "---\n" + scope + "\n---\n" + "X" * 100}))
+            got.append(m if isinstance(m, str) else (m["rules"], m["rule_files"], m["conditional_files"]))
+        check("scope/paths-realistic-globs-conditional", got, [(0, 0, 1)] * len(globs))
+        # PyYAML ends a flow plain scalar at `?` and rejects the block, so a plain flow element holding one
+        # exits 2 (FLOW_FORBIDDEN); quoted, or as a block value, it is read above.
+        flowq = _tree(tmp / "flow-question", rules={"a.md": "---\npaths: [src/a?.md]\n---\n" + "X" * 100})
+        check("exit/paths-flow-question-mark-2", _quiet(run, flowq), 2)
         src = _tree(tmp / "src", rules={"a.md": '---\npaths: ["src/**"]\n---\nabc\n', "b.md": "xy\n",
                                         "c.md": '---\npaths: "{src,lib}/**"\n---\nabc\n'})
         m = _measured(measure, src)
@@ -2077,7 +2111,9 @@ def self_test(report_path=None):
                                      "SCOPE grammar", "resolved path", "case variant", "preamble",
                                      "not the name the link gives it", "pinned build only", "8.3 short name",
                                      "later loader build", "right after an inline token",
-                                     "differ only in case", "not a regular file") if phrase not in doc]
+                                     "differ only in case", "not a regular file",
+                                     "an allowlist, not a list of typed forms", "YAML 1.2 core schema")
+               if phrase not in doc]
               + [phrase for phrase in ("never missed", "never under", "OVER-COUNT BY CONSTRUCTION", "not dropped")
                  if phrase in doc], [])
 
@@ -2126,7 +2162,8 @@ def self_test(report_path=None):
               ([_quiet(run, r) for r in ascii_cases], [_quiet(no_ascii.run, r) for r in ascii_cases]),
               ([2, 2], [0, 0]))
         scalar_cases = [tmp / "typed-nested-item", tmp / "typed-flow-map"]
-        no_scalar = _off(tmp, "_scalar_ok")
+        # The `paths:` allowlist (_plain_string) refuses the `[]` item too, so it is removed with the grammar.
+        no_scalar = _off(tmp, "_scalar_ok", "_plain_string")
         check("revert/frontmatter-scalar-red",
               ([_quiet(run, r) for r in scalar_cases], [_quiet(no_scalar.run, r) for r in scalar_cases]),
               ([2, 2], [0, 0]))
