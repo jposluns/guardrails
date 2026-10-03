@@ -1051,7 +1051,8 @@ def _self_test_floor_probe(registry, directory, elsewhere):
 # variant) and the bare live or gate run, `()`. _self_test_dispatch_probe reconciles the table with every
 # invocation of these modules in the runners (_dispatch_runner_forms) and runs every module but this host with
 # each refused form. No module is chosen by reading its source: a module with a `__main__` block that the table
-# does not name is itself a probe failure.
+# does not name is itself a probe failure. These are fast pre-checks; _self_test_runtime_probe, which runs every
+# *.py module here with each refused form and judges only its behaviour, is the authority.
 _DISPATCH_LIBRARY = (("--self-test",),)
 _DISPATCH_LIVE = ((), ("--self-test",))
 _DISPATCH_FORMS = dict(
@@ -1065,8 +1066,8 @@ _DISPATCH_FORMS = dict(
     **{name: _DISPATCH_LIVE for name in (
         "check_opf_doctor.py", "check_opf_drift.py", "check_opf_homes.py", "check_opf_init.py",
         "check_opf_init_contract.py", "check_opf_prompt_pack.py", "check_opf_upgrade.py")},
-    **{name: ((),) for name in (
-        "_opf_views.py", "_opf_absorb.py", "_opf_changelog.py", "selftest_commonmark_conformance.py")},
+    **{name: ((),) for name in ("_opf_views.py", "_opf_absorb.py", "_opf_changelog.py")},
+    **{"selftest_commonmark_conformance.py": ((), ("--interpreters", "python3"))},
     **{"_opf_adopt_observe.py": (("--self-test",), ("--self-test", "--vectors-only")),
        "_opf_pack_manifest.py": (("--self-test",), ("--self-test", "--vectors-only")),
        "check_opf_init_observe.py": (("--self-test",), ("--self-test", "--red-on-revert")),
@@ -1079,6 +1080,8 @@ _DISPATCH_UNRUN = {
     ("_opf_views.py", ()): "the `opf render` engine; run bare it renders the current directory, as the verb does",
     ("_opf_absorb.py", ()): "the `opf absorb` engine; run bare it absorbs the current directory, as the verb does",
     ("_opf_changelog.py", ()): "the changelog gates; run bare they check the current directory",
+    ("selftest_commonmark_conformance.py", ("--interpreters", "python3")): "the documented optional matrix "
+    "facility (module docstring); each word after --interpreters names an interpreter, `python3` stands for any",
 }
 _DISPATCH_REFUSED = (["--self-test", "extra"], ["--selftest"], ["--self-t"], ["extra", "--self-test"])
 # Also refused by every module: the subcommand spellings, and the bare run where the table declares none.
@@ -1245,7 +1248,8 @@ def _self_test_dispatch_probe(directory, tmp, table=None, unrun=None, runners=_D
     variant with neither route is a miss. Returns the list of discrepancies. Residuals: the hook sees Python
     function entries in this process only (a suite run in a child process, or as module top-level code, is
     seen only through the exit, stdout and stderr tests), a trigger needing a value other than "1" or a name
-    built at run time, and argument lists outside the forms tried."""
+    built at run time, and argument lists outside the forms tried. A fast pre-check that names a cause:
+    _self_test_runtime_probe, which runs every module whatever its source holds, is the authority."""
     import ast
     import concurrent.futures
     import subprocess
@@ -1453,6 +1457,198 @@ def _self_test_dispatch_escape_probe(tmp):
     return faults
 
 
+# The runtime probe (_self_test_runtime_probe), the authority over the refusal: each module runs at most this
+# many seconds per form.
+_RUNTIME_TIMEOUT = 60
+
+
+def _runtime_snapshot(top):
+    """Map each path under `top` (relative; `.git` pruned; symlinks not followed) to its file type, size and
+    modification time."""
+    import stat
+    snap = {}
+    for base, dirs, files in os.walk(str(top)):
+        dirs[:] = sorted(each for each in dirs if each != ".git")
+        for name in dirs + files:
+            path = os.path.join(base, name)
+            try:
+                st = os.lstat(path)
+            except OSError:
+                continue
+            snap[os.path.relpath(path, str(top))] = (stat.S_IFMT(st.st_mode), st.st_size, st.st_mtime_ns)
+    return snap
+
+
+def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None, timeout=_RUNTIME_TIMEOUT):
+    """The authority over the self-test argument refusal, by behaviour: run EVERY *.py module in `directory`,
+    this host included (`names`, when given, restricts the set; only _self_test_runtime_escape_probe's mutant
+    passes it), as `python3 -I -B <module> <form>` for each _DISPATCH_REFUSED and _DISPATCH_REFUSED_WORDS form
+    and the empty argument list (unless `table`, default _DISPATCH_FORMS, declares a bare run of it). Each run
+    has a fresh empty cwd, HOME and TMPDIR under `tmp`, stdin closed, a `timeout` second limit and an
+    environment of PATH (os.defpath), HOME, TMPDIR and LC_ALL=C.UTF-8 only. A form passes only if the module
+    refuses it (exit 2, nothing on stdout, and on stderr one line, or for this host exactly its usage text) or
+    does nothing (exit 0, nothing on stdout or stderr), and in both cases leaves its cwd, HOME and TMPDIR empty
+    and `tree` unchanged (default: the repository root two levels above `directory` when it holds `.git`, else
+    `directory`; compared by _runtime_snapshot). Anything else (output, a write, another exit status, a
+    timeout, a failure to start) is a discrepancy naming the module and the form. The tree is compared once
+    around the whole parallel run; when it changed, every run is repeated one at a time to name the writer.
+    The static checks (_self_test_entry_gaps, _entry_tail_gap, _self_test_dispatch_probe) are fast pre-checks
+    that name a cause; this probe decides. Residuals: it sees only the forms it tries, so behaviour gated on
+    any other argument list (a longer or differently spelled one), an environment variable, the date, the
+    network or a file outside its fresh directories is unseen; a module that runs a suite silently, writes
+    nothing it can see and exits 0 or 2 passes; a write outside the fresh directories and `tree`, or one that
+    restores a file's size and modification time, is unseen; and a write by another process during the run
+    may be blamed on a module. Returns the list of discrepancies."""
+    import concurrent.futures
+    import shutil
+    import subprocess
+    import tempfile
+    table = _DISPATCH_FORMS if table is None else table
+    directory = Path(directory).resolve()
+    if tree is None:
+        tree = directory.parent.parent if (directory.parent.parent / ".git").exists() else directory
+    host = Path(__file__).name
+    modules = sorted(name for name in os.listdir(str(directory))
+                     if name.endswith(".py") and (names is None or name in names))
+    if names is None and not modules:
+        return ["no *.py module found in {}".format(directory)]
+    runs = [(name, argv) for name in modules for argv in list(_DISPATCH_REFUSED) + list(_DISPATCH_REFUSED_WORDS)
+            + ([[]] if () not in table.get(name, ()) else [])]
+    usage = (str(__doc__) + "\n").encode("utf-8")
+
+    def child(run):
+        name, argv = run
+        box = tempfile.mkdtemp(prefix="run-", dir=str(tmp))
+        try:
+            fresh = [os.path.join(box, each) for each in ("cwd", "home", "tmp")]
+            for each in fresh:
+                os.mkdir(each)
+            env = dict(PATH=os.defpath, HOME=fresh[1], TMPDIR=fresh[2], LC_ALL="C.UTF-8")
+            try:
+                proc = subprocess.run([sys.executable, "-I", "-B", str(directory / name)] + argv, cwd=fresh[0],
+                                      env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                return "{} {}: timed out after {} s".format(name, argv, timeout)
+            except (OSError, subprocess.SubprocessError) as exc:
+                return "{} {}: failed to run ({})".format(name, argv, type(exc).__name__)
+            written = [os.path.basename(each) for each in fresh if os.listdir(each)]
+        finally:
+            shutil.rmtree(box, ignore_errors=True)
+        if written:
+            return "{} {}: wrote into its fresh {}".format(name, argv, " and ".join(written))
+        refused = proc.returncode == 2 and not proc.stdout and (
+            len(proc.stderr.splitlines()) == 1 or name == host and proc.stderr == usage)
+        if not (refused or proc.returncode == 0 and not proc.stdout and not proc.stderr):
+            return "{} {}: neither refused nor idle (rc {}, {} bytes of stdout, {} lines of stderr; want " \
+                   "exit 2 with one stderr line, or exit 0 with no output)".format(
+                       name, argv, proc.returncode, len(proc.stdout), len(proc.stderr.splitlines()))
+        return None
+
+    def changed_since(before):
+        after = _runtime_snapshot(tree)
+        return sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
+
+    before = _runtime_snapshot(tree)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        misses = [miss for miss in pool.map(child, runs) if miss]
+    changed = changed_since(before)
+    if changed:
+        misses.append("{} changed during the runtime probe ({})".format(tree, ", ".join(changed[:8])))
+        for run in runs:
+            before = _runtime_snapshot(tree)
+            child(run)
+            changed = changed_since(before)
+            if changed:
+                misses.append("{} {}: changed {} ({})".format(run[0], run[1], tree, ", ".join(changed[:8])))
+    return misses
+
+
+_RUNTIME_USAGE = '    print("usage: fixture --self-test", file=sys.stderr)\n    sys.exit(2)\n'
+_RUNTIME_EXIT_TAIL = ('def cases():\n    print("SUITE RAN")\n\n\ndef main():\n'
+                      '    print("usage: fixture --self-test", file=sys.stderr)\n    return 2\n\n\n'
+                      'if __name__ == "__main__":\n')
+# The runtime probe's fixtures (name, source, the phrase its discrepancy must hold, or None for a passing
+# module): the reviewers' reproductions the static checks miss, run as files. None but clean_lib.py binds
+# self_test or compares an argument list with a `--self-test` list literal, so the static selection is it alone.
+_RUNTIME_FIXTURES = (
+    ("clean_lib.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n' + _RUNTIME_USAGE, None),
+    ("idle_lib.py", "import sys\n\nVALUE = len(sys.argv)\n", None),
+    ("var_guard.py", 'import sys\n\n\ndef cases():\n    print("TEST VECTOR EXECUTED")\n    return 0\n\n\n'
+     'IS_MAIN = __name__ == "__main__"\nif IS_MAIN:\n    sys.exit(cases())\n', "neither refused nor idle"),
+    ("built_flag.py", 'import sys\n\nFLAG = "--self" + "-test"\n\n\ndef cases():\n'
+     '    print("TEST VECTOR EXECUTED", file=sys.stderr)\n    return 0\n\n\nif __name__ == "__main__":\n'
+     "    if sys.argv[1:] == [FLAG]:\n        sys.exit(cases())\n    if sys.argv[1:2] == [FLAG]:\n        cases()\n"
+     + _RUNTIME_USAGE, "['--self-test', 'extra']: neither refused nor idle"),
+    ("suite_name.py", 'import sys\n\n\ndef run_checks():\n    print("CHECKS RAN")\n    return 0\n\n\n'
+     'if __name__ == "__main__":\n    if "--self-test" in sys.argv[1:]:\n        sys.exit(run_checks())\n'
+     + _RUNTIME_USAGE, "neither refused nor idle"),
+    ("toplevel.py", 'import sys\n\n\ndef _vectors():\n    print("VECTOR 1 ok")\n\n\n'
+     'if sys.argv[1:2] == ["--selftest"]:\n    _vectors()\n', "['--selftest']: neither refused nor idle"),
+    ("alias_main.py", "import sys\n\nimport __main__ as _me\n\n\n" + _RUNTIME_EXIT_TAIL.replace(
+        'if __name__ == "__main__":\n', '_me.main = cases\nif __name__ == "__main__":\n')
+     + "    sys.exit(main())\n", "neither refused nor idle"),
+    ("exit_call.py", "import sys\n\n\ndef _pre():\n    sys.exit(0)\n\n\n" + _RUNTIME_EXIT_TAIL
+     + "    cases()\n    _pre()\n    sys.exit(main())\n", "neither refused nor idle"),
+    ("exit_alias.py", "import sys\nfrom sys import exit as leave\n\n\n" + _RUNTIME_EXIT_TAIL
+     + "    cases()\n    leave(0)\n    sys.exit(main())\n", "neither refused nor idle"),
+    ("exit_builtins.py", "import builtins\nimport sys\n\n\n" + _RUNTIME_EXIT_TAIL
+     + "    cases()\n    builtins.exit(0)\n    sys.exit(main())\n", "neither refused nor idle"),
+    ("exit_sysalias.py", "import sys\n\n_s = sys\n\n\n" + _RUNTIME_EXIT_TAIL
+     + "    cases()\n    _s.exit(0)\n    sys.exit(main())\n", "neither refused nor idle"),
+    ("exit_execv.py", "import os\nimport sys\n\n\n" + _RUNTIME_EXIT_TAIL
+     + '    os.execv(sys.executable, [sys.executable, "-I", "-B", "-c", "print(1)"])\n    sys.exit(main())\n',
+     "neither refused nor idle"),
+    ("writes_cwd.py", 'import sys\n\nopen("left.txt", "w").close()\nif __name__ == "__main__":\n'
+     + _RUNTIME_USAGE, "wrote into its fresh cwd"),
+    ("writes_tree.py", "import os\nimport sys\n\n"
+     'open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "left.txt"), "w").close()\n'
+     'if __name__ == "__main__":\n' + _RUNTIME_USAGE, "writes_tree.py ['--self-test', 'extra']: changed"),
+    ("sleeps.py", 'import sys\nimport time\n\nif sys.argv[1:] == ["--selftest"]:\n    time.sleep(60)\n',
+     "['--selftest']: timed out"),
+)
+
+
+def _self_test_runtime_escape_probe(tmp):
+    """Run _self_test_runtime_probe over a synthetic tree in `tmp` holding _RUNTIME_FIXTURES: the reviewers'
+    reproductions the static checks miss (a variable-guarded main, a constructed flag, a differently named
+    suite, top-level vectors with no `__main__` block, `main` rebound through an alias of the module, and
+    each early-exit spelling: a helper calling sys.exit, `from sys import exit as leave`, builtins.exit, an
+    alias of sys, os.execv), a write into the fresh cwd, a write into the tree and a timeout. Each red module
+    must be named for its reason and the passing ones not at all. Then the mutant: the same probe restricted
+    to the modules the static checks select (_self_test_entry_gap exposes, or _dispatch_targets is non-empty)
+    must name none of them, so the breadth of the probe, not the static selection, is what catches them. The
+    modules are files run as children; nothing is passed to exec or eval. Returns a list of the
+    discrepancies."""
+    import _optlevel
+    directory = Path(tmp, "tree", "opf", "tools")
+    os.makedirs(str(directory))
+    os.makedirs(str(Path(tmp, "boxes")))
+    selected = set()
+    for name, source, _want in _RUNTIME_FIXTURES:
+        (directory / name).write_text(source, encoding="utf-8")
+        tree = _optlevel.parse(source.encode("utf-8"), name)
+        if _self_test_entry_gap(tree)[0] or _dispatch_targets(tree):
+            selected.add(name)
+    table = {name: _DISPATCH_LIBRARY for name, _source, _want in _RUNTIME_FIXTURES}
+    found = _self_test_runtime_probe(directory, str(Path(tmp, "boxes")), table=table, timeout=5)
+    faults = []
+    for name, _source, want in _RUNTIME_FIXTURES:
+        mine = [miss for miss in found if miss.startswith(name + " ")]
+        if want is None and mine:
+            faults.append("passing runtime fixture {} named ({})".format(name, mine[0]))
+        elif want is not None and not any(want in miss for miss in mine):
+            faults.append("runtime fixture {} not caught for its reason ({!r}; got {})".format(
+                name, want, "; ".join(mine) or "nothing"))
+    if selected != {"clean_lib.py"}:
+        faults.append("the static selection of the runtime fixtures is {}, not clean_lib.py alone".format(
+            sorted(selected)))
+    restricted = _self_test_runtime_probe(directory, str(Path(tmp, "boxes")), table=table, names=selected,
+                                          timeout=5)
+    faults += ["the probe restricted to the static selection still names {}".format(miss) for miss in restricted]
+    return faults
+
+
 def _aggregator_self_test():
     """Guard the aggregator's fail-closed return-vocabulary check (MAJOR 3). A helper returning a value
     OUTSIDE the {0,1,2} int vocabulary must fail the aggregate CLOSED (a non-zero worst), never be
@@ -1477,6 +1673,10 @@ def _aggregator_self_test():
         missed += _self_test_dispatch_probe(here, tmp)
     with tempfile.TemporaryDirectory(prefix="opf-entry-escape-") as tmp:
         missed += _self_test_dispatch_escape_probe(tmp)
+    with tempfile.TemporaryDirectory(prefix="opf-entry-runtime-") as tmp:
+        missed += _self_test_runtime_probe(here, tmp)
+    with tempfile.TemporaryDirectory(prefix="opf-entry-runtime-escape-") as tmp:
+        missed += _self_test_runtime_escape_probe(tmp)
     if gaps or faults or missed:
         print("opf aggregator self-test: FAIL (self_test modules without the canonical `--self-test` entry: {}; "
               "registry floor faults: {}; synthetic probe discrepancies: {})".format(

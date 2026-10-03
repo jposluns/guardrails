@@ -14,13 +14,15 @@ it must preserve original frame bytes and bind their new location through a rece
 import contextlib
 import os
 import stat
+import sys
 from pathlib import Path
 
-import _journal
-import _opf_emit
-import _opf_init_substrate
-import _opf_oplock
-import _opf_store
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _journal  # noqa: E402
+import _opf_emit  # noqa: E402
+import _opf_init_substrate  # noqa: E402
+import _opf_oplock  # noqa: E402
+import _opf_store  # noqa: E402
 
 
 def _check_ordinary_ops(ops):
