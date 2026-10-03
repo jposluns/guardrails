@@ -49,13 +49,11 @@ gen_manifest.py at build time).
   on a frontmatter line fails whatever its layer. Rule sources are read with gen_rules.read_rule_source
   and decode_rule_source (raw bytes, UTF-8, no newline translation), and the heading is located with
   gen_rules.detail_heading_line, so this gate refuses (exit 2) every layout gen_rules refuses: a CR byte,
-  a second `## Detail` line, one without a blank line above it, a line above the split outside the
-  gen_rules PLAIN PREFIX grammar (a fence, an HTML comment or block, a block quote, indented code, a
-  nested list, a setext underline, a heading with markup), any other body line whose visible text
-  reads Detail (a near miss, a setext heading, or a heading inside a container), and any body line
-  outside the gen_rules PLAIN BODY rules (a heading whose text is not plain, a setext underline under
-  possible paragraph text, raw HTML outside a whole-line comment, a link reference definition below the
-  split). A missing, non-string,
+  a frontmatter line starting with `#`, a second `## Detail` line, one without a blank line above it, a
+  body with no title line, any body line outside the gen_rules BODY GRAMMAR (blank, the one `# ` title
+  line first, the `## Detail` split, or a plain prose line; so no fence, HTML, block quote, list,
+  indented code, setext underline, thematic break, link reference definition or other heading), and any
+  other body line whose visible text reads Detail. A missing, non-string,
   or unknown `layer` value is also malformed input (exit 2); a disagreement, a crossing span, a frontmatter span, or an
   unregistered detail line is a finding (exit 1).
 
@@ -983,7 +981,7 @@ _LAYER_CASES = (
     ("link-heading", ["core obligation", "", "## [Detail](https://example.test)", "", "detail obligation"],
      [(1, 0, 0, "core"), (2, 4, 4, "core")], 2),
     ("heading-then-rule", ["core obligation", "", "Detail is discussed here.", "# Another heading", "---"],
-     [(1, 0, 0, "core")], 0),
+     [(1, 0, 0, "core")], 2),
     ("split-after-text", ["core obligation", "## Detail", "", "detail obligation"],
      [(1, 0, 0, "core"), (2, 3, 3, "detail")], 2),
     ("r4-setext-dash-space", ["core obligation", "", "Detail", "- ", "", "later obligation"],
@@ -996,6 +994,13 @@ _LAYER_CASES = (
     ("r4-zwsp-heading", ["core obligation", "", "## De\u200btail"], [(1, 0, 0, "core")], 2),
     ("r5-multiline-html-heading", ["core obligation", "", "<h2>De<span", 'title="x">tail</span></h2>'],
      [(1, 0, 0, "core")], 2),
+    # QA round 6 (D-392-ENUMERATED-BODY-GRAMMAR): a fenced comment opener, an ordered item not starting at
+    # 1 above a setext underline, and a `## Detail` line in the frontmatter are all refused.
+    ("r6-fenced-comment", ["core obligation", "", "```", "<!--", "```", "Deta<span", 'class="x">il</span>', "---",
+                           "Hidden.", "-->"], [(1, 0, 0, "core")], 2),
+    ("r6-ordered-setext", ["core obligation", "", "Detail[](x '", "2. # y')", "---", "Hidden."],
+     [(1, 0, 0, "core")], 2),
+    ("r6-frontmatter-heading", ["core obligation"], [(1, 0, 0, "core")], 2),
 )
 # Red on revert: each guard put back to its pre-fix form in a scratch copy of this module, loaded through
 # importlib (never exec), must turn its case from the expected exit to the reverted exit.
@@ -1015,29 +1020,33 @@ _LAYER_REVERTS = (
      "partial-detail-paragraph", 0),
     ("frontmatter-span", "if start < first_body:", "if False:", "frontmatter-core-span", 0),
 )
-# The CR refusal, the near-miss refusal, the blank line above the split and the PLAIN PREFIX grammar live
-# in the shared gen_rules reader and heading locator; each revert loads gen_rules with that guard removed
-# and patches this module's rule source readers and heading locator to the reverted ones for the one case.
-# A guard given as a tuple is reverted together with the others in it: since D-392-PLAIN-BODY a case the
-# PLAIN BODY check also refuses reverts that check (_BODY_REVERT) with the guard it names.
-# (name, fixed text in gen_rules.py, reverted text, case, exit with the guard reverted)
-_BODY_REVERT = ("body_problem = _plain_body_problem(lines, number, first, comment_end)", "body_problem = None")
+# The CR refusal, the near-miss refusal, the blank line above the split, the BODY GRAMMAR and the
+# frontmatter `#` refusal live in the shared gen_rules reader and heading locator; each revert loads
+# gen_rules with that guard removed and patches this module's rule source readers and heading locator to
+# the reverted ones for the one case. A guard given as a tuple is reverted together with the others in it:
+# a case the BODY GRAMMAR prose line check also refuses reverts that check (_BODY_REVERT) with the guard
+# it names. (name, fixed text in gen_rules.py, reverted text, case, exit with the guard reverted)
+_BODY_REVERT = ("problem = _prose_problem(line)", "problem = None")
+_TITLE_TEXT_REVERT = ("if not line[2:].strip() or not set(line[2:]) <= _HEADING_TEXT:", "if False:")
 _SHARED_REVERTS = (
-    ("cr-byte", ('if b"\\r" in raw:', _BODY_REVERT[0]), ("if False:", _BODY_REVERT[1]), "cr-byte", 0),
-    ("near-miss-setext", ("elif _names_detail(line):", _BODY_REVERT[0]), ("elif False:", _BODY_REVERT[1]),
+    ("cr-byte", ('if b"\\r" in raw:', _TITLE_TEXT_REVERT[0]), ("if False:", _TITLE_TEXT_REVERT[1]), "cr-byte", 0),
+    ("near-miss-setext", ("if _names_detail(line):", _BODY_REVERT[0]), ("if False:", _BODY_REVERT[1]),
      "setext-heading", 0),
-    ("near-miss-container-setext", ("elif _names_detail(line):", _BODY_REVERT[0]),
-     ("elif False:", _BODY_REVERT[1]), "blockquote-setext-heading", 0),
-    ("near-miss-link", ("elif _names_detail(line):", _BODY_REVERT[0]), ("elif False:", _BODY_REVERT[1]),
+    ("near-miss-container-setext", ("if _names_detail(line):", _BODY_REVERT[0]),
+     ("if False:", _BODY_REVERT[1]), "blockquote-setext-heading", 0),
+    ("near-miss-link", ("if _names_detail(line):", _BODY_REVERT[0]), ("if False:", _BODY_REVERT[1]),
      "link-heading", 0),
-    ("near-miss-r4-setext", ("elif _names_detail(line):", _BODY_REVERT[0]), ("elif False:", _BODY_REVERT[1]),
+    ("near-miss-r4-setext", ("if _names_detail(line):", _BODY_REVERT[0]), ("if False:", _BODY_REVERT[1]),
      "r4-setext-dash-space", 0),
     ("blank-before", 'if found > first and lines[found - 2] != "":', "if False:", "split-after-text", 0),
-    ("plain-prefix-html", ("problem = _plain_prefix_problem(lines, first, found)", _BODY_REVERT[0]),
-     ("problem = None", _BODY_REVERT[1]), "html-wrapped-heading", 0),
-    ("plain-body-html", "if _RAW_HTML_RE.search(line):", "if False:", "r5-multiline-html-heading", 0),
-    ("plain-prefix-fence", "problem = _plain_prefix_problem(lines, first, found)", "problem = None",
-     "list-fence-heading", 0),
+    ("grammar-html", _BODY_REVERT[0], _BODY_REVERT[1], "html-wrapped-heading", 0),
+    ("grammar-multiline-html", _BODY_REVERT[0], _BODY_REVERT[1], "r5-multiline-html-heading", 0),
+    ("grammar-fence", _BODY_REVERT[0], _BODY_REVERT[1], "list-fence-heading", 0),
+    ("grammar-second-heading", _BODY_REVERT[0], _BODY_REVERT[1], "heading-then-rule", 0),
+    ("r6-fenced-comment", _BODY_REVERT[0], _BODY_REVERT[1], "r6-fenced-comment", 0),
+    ("r6-ordered-setext", _BODY_REVERT[0], _BODY_REVERT[1], "r6-ordered-setext", 0),
+    ("r6-frontmatter-heading", "        if not line:\n            continue\n",
+     '        if not line or line.startswith("#"):\n            continue\n', "r6-frontmatter-heading", 0),
 )
 
 
@@ -1047,6 +1056,8 @@ def _layer_case(base, name):
     lines, line_of = _rule_lines("cdetl1", body)
     if name == "cr-byte":
         lines[6] += "\r"
+    if name == "r6-frontmatter-heading":
+        lines[2] = "## Detail"  # in place of `origin: pack`, so every line number stays put
     digest = _sha_of(lines)
     rows, born = [], [("cdetl1", "1.1.0")]
     for ordinal, first, last, layer in clauses:
@@ -1828,8 +1839,8 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
               "(derived pass, stored-layer disagreement, crossing span, unregistered detail paragraph or "
               "line, missing or unknown layer, two headings, detail row with no heading, frontmatter span, "
               "fenced, commented, HTML-wrapped, setext, blockquote setext, list-fenced or linked heading, "
-              "heading then thematic break, split after text, the QA round-4 reproductions, the QA round-5 "
-              "multi-line HTML heading, CR byte) and {} guard "
+              "a second heading, split after text, the QA round-4 reproductions, the QA round-5 "
+              "multi-line HTML heading, the QA round-6 reproductions, CR byte) and {} guard "
               "revert(s) each go red"
               .format(core, len(_LAYER_CASES), len(_LAYER_REVERTS) + len(_SHARED_REVERTS)))
     else:

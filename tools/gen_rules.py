@@ -10,64 +10,39 @@ RULE SOURCE FORMAT (the two-layer split; this step parses and validates it, and 
   A rule source is read from its raw bytes as UTF-8 with no newline translation, and a source holding
   any CR byte is refused (check_clauses reads it the same way, through read_rule_source and
   decode_rule_source, so both tools number lines alike). The split is the one body line that reads
-  exactly `## Detail` (column 0, no trailing whitespace) with a blank line, or the start of the body,
-  directly above it. The text above it is the CORE layer and the text below it is the DETAIL layer. Two
+  exactly `## Detail` (column 0, no trailing whitespace) with a blank line directly above it. The text above it is the CORE layer and the text below it is the DETAIL layer. Two
   optional frontmatter keys go with it, on aiqt non-apex and security rules only (the apex never splits):
     detail-trigger: <a short phrase naming the operation>   required when the split exists
     detail-reason:  <one line recording the must-fire review> optional when the split exists
-  PLAIN PREFIX (decision D-392-PLAIN-PREFIX): the split is accepted only when nothing above it can change
-  how it renders, so this reader models no Markdown container at all. Every body line above the split
-  must be one of:
+  BODY GRAMMAR (decision D-392-ENUMERATED-BODY-GRAMMAR): this reader models no Markdown. Every body line
+  must be one of these shapes, chosen so that a CommonMark renderer can build no block from the body
+  other than ATX headings and paragraphs, so its rendered headings are exactly its title line and its
+  `## Detail` line by construction:
     - a blank line (empty);
-    - a paragraph text line: its first character is an ASCII letter, an ASCII digit, an opening
-      parenthesis, a double or single quote, or a backtick; it holds no tab, no `<`, and no fence
-      marker (three backticks or three tildes); and it does not start like an ordered list item
-      (digits, then `.` or `)`, then a space or the end of the line);
-    - an ATX heading at column 0: one to six `#`, one space, and non-blank text holding none of
-      [ < & ~ * _, a backslash or a backtick, and no tab;
-    - a list item at column 0 (`- `, `* `, or digits then `. `) whose text is a paragraph text line,
-      and a continuation line of that item indented by exactly the width of its marker, whose text is
-      a paragraph text line.
-  Anything else above the split (a fence, indented code, a block quote, a nested list, raw HTML, an
-  HTML comment, a setext underline, a table, a thematic break) is refused, naming the line.
+    - the title line, which is the first non-blank body line and the only one: `# ` and non-blank text
+      that is printable ASCII (0x20 to 0x7E) holding none of [ ] < > & ~ * _, a backslash or a
+      backtick (`(` and `)` are allowed, decision D-392-PLAIN-BODY-UNBLOCK: with no `[` no link or
+      image can form);
+    - the split line, exactly `## Detail`, at most once;
+    - a prose line: printable ASCII (0x20 to 0x7E) holding no `<`, `[`, `]` or backslash; its first
+      character is none of a space, a tab, # > - + * = ~ | < [ ! _ and `:`, and it does not start
+      with three backticks (a fence) or like an ordered list item (digits, then `.` or `)`, then a
+      space or the end of the line). A single leading backtick is allowed (a code span; the live
+      corpus starts two lines with one), and so are `>`, `|`, `_` and `&` after the first character.
+  The frontmatter carries no heading either: a frontmatter line that starts with `#` (a YAML comment,
+  shown as a heading by a renderer that does not read frontmatter) is refused.
   Each of these is refused as a malformed source (exit 2, naming the file and, for a line, its number):
     - either key without the split, a missing detail-trigger with it, or a key value that is not a
       non-empty string;
     - a second `## Detail` line;
-    - a `## Detail` line without a blank line (or the start of the body) directly above it;
-    - a line above the split outside the PLAIN PREFIX grammar;
+    - a `## Detail` line without a blank line directly above it;
+    - a body with no title line, and a body line outside the BODY GRAMMAR;
     - anywhere in the body, any other line whose visible text reads `detail` or `details`: the visible
       text is the line with HTML entities decoded, NFKC-normalized, invisible (format) characters,
       leading blockquote and list item markers, HTML tags and link targets dropped, then only its
-      letters and digits kept, case-folded. This is a per-line check: it refuses a one-line near miss
-      (another level, case, plural, spacing, emphasis, link, entity or invisible character, a setext
-      heading's text line, a heading inside a fence, comment, HTML block, block quote or list item), and
-      the PLAIN BODY rules below refuse every heading or HTML construct it cannot read on one line;
-    - PLAIN BODY (decision D-392-PLAIN-BODY): this reader does not model what a heading renders as, so
-      every heading-capable construct anywhere in the body must be plain:
-        * an ATX heading line (zero to three spaces, after any leading block quote or list item
-          markers, then one to six `#` and a space, a tab or the end of the line) whose text is
-          not printable ASCII (0x20 to 0x7E), is blank, or holds any of [ ] < > & ~ * _, a backslash
-          or a backtick (`(` and `)` are allowed, decision D-392-PLAIN-BODY-UNBLOCK: with no `[` no link
-          or image can form, so a parenthesis cannot change what the heading renders);
-        * a setext underline (after any leading `>` markers and whitespace, a run of only `=` or only
-          `-`, then optional spaces or tabs) directly under a line that is not blank after its `>`
-          markers and whitespace are removed, unless that line, after its leading block quote and list
-          item markers are removed, cannot be paragraph text by construction: an ATX heading line, a
-          thematic break of `*` or `_`, a bare fence marker line (three or more backticks or tildes and
-          optional trailing spaces, no info string), or the last line of an allowed HTML comment;
-        * raw HTML: a `<` followed by an ASCII letter, `/`, `?` or `!`, anywhere outside an allowed
-          HTML comment. An allowed HTML comment starts at column 0 of a line with `<!--` and ends at the
-          end of the same or a later line with the first `-->` after it (or is the whole-line `<!-->` or
-          `<!--->`), with nothing else on those lines. The live corpus holds no comment; the shapes stay
-          allowed because an author's note to a reviewer is a whole-line comment, and a whole-line
-          comment is an HTML block that ends on its own last line, so it cannot hide or join a heading;
-        * in the detail layer, a link reference definition, refused as any line below the split that
-          holds `]:` (a definition there would change how the core renders on its own; a definition
-          that starts above the split ends above it, since a label holds no blank line);
-    - an empty core layer (blank lines only) or an empty detail layer (blank lines and HTML comments
-      only).
-  A source with no `## Detail` line and no line whose visible text reads Detail is not read further.
+      letters and digits kept, case-folded (a title or prose line such as `# Details` or `DETAIL.`);
+    - an empty detail layer (blank lines only).
+  Every body is read in full, with or without the split.
   gen_rules.py           regenerate .claude/rules/{aiqt,security}/
   gen_rules.py --check   fail (exit 1) on drift; exit 2 on a malformed source or a read/write failure
   gen_rules.py --self-test  assert an invalid-UTF-8 generated target fails closed (exit 2), that each
@@ -77,7 +52,6 @@ RULE SOURCE FORMAT (the two-layer split; this step parses and validates it, and 
 import html
 import os
 import re
-import string
 import sys
 import unicodedata
 from pathlib import Path
@@ -126,23 +100,11 @@ _DETAIL_NAMES = {"detail", "details"}
 _CONTAINER_RE = re.compile(r'^[ \t]*(?:>|[-*+](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$))[ \t]*')
 _TAG_RE = re.compile(r'<[^>]*>')
 _LINK_TAIL_RE = re.compile(r'\][ \t]*(?:\([^)]*\)|\[[^\]]*\])')
-# The PLAIN PREFIX grammar of the lines above the split (see RULE SOURCE FORMAT above).
-_PLAIN_START = frozenset(string.ascii_letters + string.digits + "(\"'`")
-_PLAIN_HEADING_RE = re.compile(r'^#{1,6} (.*)$')
-_PLAIN_ITEM_RE = re.compile(r'^(?:[-*]|\d{1,9}\.) ')
-_LIST_LIKE_RE = re.compile(r'^\d{1,9}[.)](?:[ \t]|$)')
-_HEADING_MARKUP = frozenset("[<&\\~*_`")
-# An HTML comment, for the empty detail layer test only (`<!-->` and `<!--->` are whole comments).
-_COMMENT_RE = re.compile(r'<!--(?:-?>|[\s\S]*?-->)')
-# The PLAIN BODY rules (see RULE SOURCE FORMAT above).
-_ATX_RE = re.compile(r'^ {0,3}#{1,6}(?=[ \t]|$)(.*)$')
+# The BODY GRAMMAR (see RULE SOURCE FORMAT above).
 _HEADING_TEXT = frozenset(map(chr, range(0x20, 0x7f))) - frozenset("[]<>&\\~*_`")
-_UNDERLINE_RE = re.compile(r'^(?:[ \t]*>)*[ \t]*(?:=+|-+)[ \t]*$')
-_QUOTE_PREFIX_RE = re.compile(r'^(?:[ \t]*>)*[ \t]*')
-_NOT_PARAGRAPH_RE = re.compile(
-    r'^ {0,3}(?:#{1,6}(?:[ \t]|$)|([*_])(?:[ \t]*\1){2,}[ \t]*$|(?:`{3,}|~{3,})[ \t]*$)')
-_RAW_HTML_RE = re.compile(r'<[A-Za-z/?!]')
-_WHOLE_COMMENT_RE = re.compile(r'<!--(?:>|->|[\s\S]*?-->)')
+_PROSE_TEXT = frozenset(map(chr, range(0x20, 0x7f))) - frozenset("<[]\\")
+_PROSE_START = frozenset(" \t#>-+*=~|<[!_:")
+_ORDERED_RE = re.compile(r'^[0-9]+[.)](?: |$)')
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
@@ -217,8 +179,11 @@ def parse_source(path):
     fm = {}
     for line in text[4:end].splitlines():
         line = line.strip()
-        if not line or line.startswith("#"):
+        if not line:
             continue
+        if line.startswith("#"):
+            raise ValueError("{}: frontmatter line {!r} starts with '#' (a YAML comment is refused: a "
+                             "renderer that does not read frontmatter shows it as a heading)".format(path.name, line))
         if ":" not in line:
             raise ValueError("{}: bad frontmatter line {!r}".format(path.name, line))
         key, val = line.split(":", 1)
@@ -331,134 +296,69 @@ def _names_detail(line):
     return _visible_text(line) in _DETAIL_NAMES
 
 
-def _comment_end(lines, number):
-    """The 1-based number of the last line of the allowed HTML comment that starts at line number, or 0
-    when no allowed comment starts there (see PLAIN BODY in RULE SOURCE FORMAT)."""
-    if not lines[number - 1].startswith("<!--"):
-        return 0
-    rest = "\n".join(lines[number - 1:])
-    comment = _WHOLE_COMMENT_RE.match(rest)
-    if comment is None or rest[comment.end():comment.end() + 1] not in ("", "\n"):
-        return 0
-    return number + rest.count("\n", 0, comment.end())
-
-
-def _plain_body_problem(lines, number, first, comment_end):
-    """What makes body line number (1-based) a heading-capable construct outside the PLAIN BODY rules, or
-    None. comment_end is the last line of the allowed HTML comment that ends nearest above it, or 0."""
-    line = lines[number - 1]
-    heading = _ATX_RE.match(_uncontained(line))
-    if heading and (not heading.group(1).strip() or not set(heading.group(1)) <= _HEADING_TEXT):
-        return ("a heading whose text is not plain (printable ASCII, not blank, none of "
-                "[ ] < > & ~ * _, a backslash or a backtick)")
-    if _UNDERLINE_RE.match(line) and number > first and _QUOTE_PREFIX_RE.sub("", lines[number - 2]):
-        if comment_end != number - 1 and not _NOT_PARAGRAPH_RE.match(_uncontained(lines[number - 2])):
-            return "a setext underline directly under a line that can be paragraph text"
-    if _RAW_HTML_RE.search(line):
-        return "raw HTML outside a whole-line HTML comment"
+def _title_problem(line):
+    """None when line is the BODY GRAMMAR title line, else what makes it not one."""
+    if not line.startswith("# "):
+        return "the first non-blank body line is the title line, '# ' and its text"
+    if not line[2:].strip() or not set(line[2:]) <= _HEADING_TEXT:
+        return ("the title text is printable ASCII, not blank, and holds none of [ ] < > & ~ * _, a "
+                "backslash or a backtick")
     return None
 
 
-def _plain_text_problem(text):
-    """None when text is a PLAIN PREFIX paragraph text line, else what makes it not one."""
-    if not text or text[0] not in _PLAIN_START:
-        return "a text line starts with an ASCII letter, a digit, a parenthesis, a quote or a backtick"
-    if "\t" in text:
-        return "it holds a tab"
-    if "<" in text:
-        return "it holds '<'"
-    if "```" in text or "~~~" in text:
-        return "it holds a fence marker"
-    if _LIST_LIKE_RE.match(text):
-        return "it starts like an ordered list item that is not a plain one"
-    return None
-
-
-def _plain_prefix_problem(lines, first, split):
-    """(line number, reason) of the first of lines first to split - 1 (1-based) outside the PLAIN PREFIX
-    grammar, or None when every one is in it."""
-    indent = None  # the text column of the list item a continuation line may continue
-    for number in range(first, split):
-        line = lines[number - 1]
-        if line == "":
-            continue
-        if line[0] == " ":
-            if indent is None:
-                return number, "an indented line outside a list item"
-            if line[:indent] != " " * indent:
-                return number, "a continuation line is indented by exactly its item's marker width"
-            text = line[indent:]
-        else:
-            heading = _PLAIN_HEADING_RE.match(line)
-            item = _PLAIN_ITEM_RE.match(line)
-            if heading:
-                indent = None
-                if not heading.group(1).strip():
-                    return number, "a heading has text"
-                if set(heading.group(1)) & _HEADING_MARKUP or "\t" in line:
-                    return number, "a heading holds no link, markup, entity, escape or code character and no tab"
-                continue
-            if item:
-                indent = item.end()
-                text = line[indent:]
-            else:
-                indent = None
-                text = line
-        problem = _plain_text_problem(text)
-        if problem is not None:
-            return number, problem
+def _prose_problem(line):
+    """None when line is a BODY GRAMMAR prose line, else what makes it not one."""
+    if line[0] in _PROSE_START or line.startswith("```"):
+        return "a prose line starts with no space, tab, block marker or fence"
+    if _ORDERED_RE.match(line):
+        return "a prose line does not start like an ordered list item"
+    if not set(line) <= _PROSE_TEXT:
+        return "a prose line is printable ASCII holding no '<', '[', ']' or backslash"
     return None
 
 
 def detail_heading_line(text, name):
     """The 1-based line number of the single accepted `## Detail` split in a rule source's body, or None
     when the source has none. Raises ValueError on each refused layout that RULE SOURCE FORMAT lists,
-    other than the frontmatter keys and empty layers (check_detail). check_clauses derives each clause's
-    layer from it."""
+    other than the frontmatter keys and the empty detail layer (check_detail). check_clauses derives each
+    clause's layer from it."""
     first = body_first_line(text, name)
     lines = text.split("\n")
-    found = None
-    comment_end = 0
+    title = found = None
     for number in range(first, len(lines) + 1):
         line = lines[number - 1]
-        if line == DETAIL_HEADING:
+        if line == "":
+            continue
+        if title is None:
+            title, problem = number, _title_problem(line)
+        elif line == DETAIL_HEADING:
             if found is not None:
                 raise ValueError("{}: more than one '{}' line (lines {} and {})".format(
                     name, DETAIL_HEADING, found, number))
             found = number
-        elif _names_detail(line):
+            continue
+        else:
+            problem = _prose_problem(line)
+        if _names_detail(line):
             raise ValueError("{}: line {}: {!r} reads as Detail but is not the split line '{}'".format(
                 name, number, line, DETAIL_HEADING))
-        if number <= comment_end:
-            continue
-        if _comment_end(lines, number):
-            comment_end = _comment_end(lines, number)
-            continue
-        body_problem = _plain_body_problem(lines, number, first, comment_end)
-        if body_problem is not None:
-            raise ValueError("{}: line {}: {!r} is outside the plain-body rules ({})".format(
-                name, number, line, body_problem))
-        if found is not None and "]:" in line:
-            raise ValueError("{}: line {}: {!r} below the '{}' split holds ']:' (a link reference "
-                             "definition is refused in the detail layer)".format(name, number, line, DETAIL_HEADING))
+        if problem is not None:
+            raise ValueError("{}: line {}: {!r} is outside the body grammar ({})".format(
+                name, number, line, problem))
+    if title is None:
+        raise ValueError("{}: the body has no title line ('# ' and its text)".format(name))
     if found is None:
         return None
     if found > first and lines[found - 2] != "":
         raise ValueError("{}: line {}: the '{}' split needs a blank line directly above it".format(
             name, found, DETAIL_HEADING))
-    problem = _plain_prefix_problem(lines, first, found)
-    if problem is not None:
-        raise ValueError("{}: line {}: {!r} above the '{}' split is outside the plain-prefix grammar ({}); "
-                         "the split is accepted only when nothing above it can change how it renders".format(
-                             name, problem[0], lines[problem[0] - 1], DETAIL_HEADING, problem[1]))
     return found
 
 
 def check_detail(text, fm, name):
     """Validate the two-layer split of one source: the detail keys go with exactly one `## Detail` split,
-    detail-trigger is required with it, each key is a non-empty string, and neither layer is empty (the
-    core blank lines only, the detail blank lines and HTML comments only). Returns the split's line
-    number, or None. Raises ValueError (a malformed source) on any violation."""
+    detail-trigger is required with it, each key is a non-empty string, and the detail layer is not
+    blank lines only (the core always holds the title line). Returns the split's line number, or None. Raises ValueError (a malformed source) on any violation."""
     heading = detail_heading_line(text, name)
     if heading is None:
         present = sorted(k for k in DETAIL_KEYS if k in fm)
@@ -471,9 +371,7 @@ def check_detail(text, fm, name):
         if not isinstance(fm[key], str) or not fm[key].strip():
             raise ValueError("{}: {} must be a non-empty string".format(name, key))
     lines = text.split("\n")
-    if not "".join(lines[body_first_line(text, name) - 1:heading - 1]).strip():
-        raise ValueError("{}: the core layer above '{}' is empty".format(name, DETAIL_HEADING))
-    if not _COMMENT_RE.sub("", "\n".join(lines[heading:])).strip():
+    if not "\n".join(lines[heading:]).strip():
         raise ValueError("{}: the '{}' layer is empty".format(name, DETAIL_HEADING))
     return heading
 
@@ -608,11 +506,13 @@ _CORE = "# Gen-rules detail self-test rule\n\nCore text.\n"
 _TRIGGER = "detail-trigger: writing a self-test fixture\n"
 _REASON = "detail-reason: self-test only, no must-fire clause moves\n"
 _DETAIL_BODY = "\n## Detail\n\nDetail text.\n"
+_R6_FENCED_COMMENT = "\n```\n<!--\n```\nDeta<span\nclass=\"x\">il</span>\n---\nHidden.\n-->\n"
+_R6_ORDERED_SETEXT = "\nDetail[](x '\n2. # y')\n---\nHidden.\n"
 _DETAIL_CASES = (
     ("detail-with-trigger", _TRIGGER + _REASON, _DETAIL_BODY, 0),
     ("security-detail", _TRIGGER, _DETAIL_BODY, 0),
-    ("fenced-code-detail", _TRIGGER, "\n## Detail\n\n```\ncode\n```\n", 0),
-    ("closed-fence-and-comment", "", "\n```text\ncode\n```\n\n~~~~\ncode\n~~~~\n\n<!--\nnote\n-->\n", 0),
+    ("fenced-code-detail", _TRIGGER, "\n## Detail\n\n```\ncode\n```\n", 2),
+    ("closed-fence-and-comment", "", "\n```text\ncode\n```\n\n~~~~\ncode\n~~~~\n\n<!--\nnote\n-->\n", 2),
     ("detail-without-trigger", _REASON, _DETAIL_BODY, 2),
     ("trigger-without-detail", _TRIGGER, "", 2),
     ("reason-without-detail", _REASON, "", 2),
@@ -637,7 +537,7 @@ _DETAIL_CASES = (
     ("comment-near-miss", "", "\n<!-- a note\n### Detail\n-->\n", 2),
     ("unterminated-fence", _TRIGGER, "\n```\ncode\n" + _DETAIL_BODY, 2),
     ("unterminated-comment", _TRIGGER, "\n<!-- note\n" + _DETAIL_BODY, 2),
-    ("no-split-unterminated-fence", "", "\n```\ncode\n", 0),
+    ("no-split-unterminated-fence", "", "\n```\ncode\n", 2),
     ("cr-byte", "", "\nCore line two.\r\n", 2),
     ("empty-core", _TRIGGER, _DETAIL_BODY, 2),
     ("comment-only-core", _TRIGGER, _DETAIL_BODY, 2),
@@ -675,11 +575,11 @@ _DETAIL_CASES = (
     ("invisible-before-marker", "", "\n\u200b10. Detail\n", 2),
     ("plain-setext", _TRIGGER, "\nOverview\n===\n" + _DETAIL_BODY, 2),
     ("no-split-setext", "", "\nOverview\n===\n\nTail.\n", 2),
-    ("heading-then-rule", "", "\nDetail is discussed here.\n# Another heading\n---\n", 0),
-    ("blank-then-rule", "", "\nDetail is discussed here.\n\n---\n", 0),
-    ("fence-then-rule", "", "\n```\nDetail is here\n```\n---\n", 0),
-    ("comment-then-rule", "", "\n<!-- Detail is here -->\n---\n", 0),
-    ("rule-then-rule", "", "\nText.\n\n***\n---\n", 0),
+    ("heading-then-rule", "", "\nDetail is discussed here.\n# Another heading\n---\n", 2),
+    ("blank-then-rule", "", "\nDetail is discussed here.\n\n---\n", 2),
+    ("fence-then-rule", "", "\n```\nDetail is here\n```\n---\n", 2),
+    ("comment-then-rule", "", "\n<!-- Detail is here -->\n---\n", 2),
+    ("rule-then-rule", "", "\nText.\n\n***\n---\n", 2),
     ("list-fence", _TRIGGER, "\n- a\n\n  ```\nx\n```\n## Detail\n\nDetail text.\n", 2),
     ("list-fence-comment", _TRIGGER, "\n- a\n\n  ```\nx\n<!--\n```\n## Detail\n\nDetail text.\n-->\n", 2),
     ("list-comment", _TRIGGER, "\n- a\n\n  <!--\n```\n-->\n## Detail\n\nDetail text.\n```\n```\n", 2),
@@ -722,14 +622,18 @@ _DETAIL_CASES = (
     ("r5-cyrillic-e", "", "\n## D\u0435tail\n\nTail.\n", 2),
     ("r5-detail-reference-definition", _TRIGGER,
      "\n## Detail\n\n[the policy]: https://example.test/p\n\nDetail text.\n", 2),
-    # D-392-PLAIN-BODY-UNBLOCK: a heading with parentheses and no bracket is plain, in either layer.
-    ("r5-paren-heading", "", "\n# The principle (highest precedence)\n\nTail.\n", 0),
-    ("r5-paren-heading-split", _TRIGGER, "\n## Scope (core)\n" + _DETAIL_BODY + "\n### Notes (a)(b) ()\n", 0),
-    # The PLAIN PREFIX grammar: one case per rule (each exits 2), and two layouts it admits (exit 0).
-    ("plain-prefix-ok", _TRIGGER, "\n## Scope\n\nText with (parens), 'quotes' and `code`.\n\"Quoted\" start."
-     "\n2024 was a year.\n" + _DETAIL_BODY, 0),
+    # D-392-PLAIN-BODY-UNBLOCK: a title with parentheses and no bracket is plain, with or without the split
+    # (the title is set by _CASE_FRAME). Since D-392-ENUMERATED-BODY-GRAMMAR no other heading is allowed.
+    ("r5-paren-heading", "", "", 0),
+    ("r5-paren-heading-split", _TRIGGER, _DETAIL_BODY, 0),
+    ("r5-paren-subheading", _TRIGGER, "\n## Scope (core)\n" + _DETAIL_BODY + "\n### Notes (a)(b) ()\n", 2),
+    # Before D-392-ENUMERATED-BODY-GRAMMAR these two exited 0; a sub-heading and a list are now refused,
+    # and the prose shapes the live corpus uses are admitted (exit 0).
+    ("plain-prefix-ok", _TRIGGER, "\nText with (parens), 'quotes' and `code`.\n\"Quoted\" start.\n2024 was a year."
+     "\n`GIT_`-prefixed text, a > b, a | b, snake_case & co, 1.5 and 2.\n" + _DETAIL_BODY, 0),
     ("plain-list-ok", _TRIGGER, "\n- item one\n  continued\n* item two\n1. item three\n   continued\n\n"
-     "10. item four\n    continued\n" + _DETAIL_BODY, 0),
+     "10. item four\n    continued\n" + _DETAIL_BODY, 2),
+    ("plain-subheading", _TRIGGER, "\n## Scope\n" + _DETAIL_BODY, 2),
     ("plain-blank-before", _TRIGGER, "\nCore line two.\n## Detail\n\nDetail text.\n", 2),
     ("plain-start-plus", _TRIGGER, "\n+ item\n" + _DETAIL_BODY, 2),
     ("plain-start-quote", _TRIGGER, "\n> quoted\n" + _DETAIL_BODY, 2),
@@ -739,7 +643,7 @@ _DETAIL_CASES = (
     ("plain-tab", _TRIGGER, "\nCore\ttext.\n" + _DETAIL_BODY, 2),
     ("plain-lt", _TRIGGER, "\nCore a < b.\n" + _DETAIL_BODY, 2),
     ("plain-fence-marker", _TRIGGER, "\n```\ncode\n```\n" + _DETAIL_BODY, 2),
-    ("plain-tilde-marker", _TRIGGER, "\nText ~~~ more.\n" + _DETAIL_BODY, 2),
+    ("plain-tilde-marker", _TRIGGER, "\nText ~~~ more.\n" + _DETAIL_BODY, 0),  # not at the line start: no fence
     ("plain-list-paren", _TRIGGER, "\n1) item\n" + _DETAIL_BODY, 2),
     ("plain-nested-ordered", _TRIGGER, "\n- a\n  1. nested\n" + _DETAIL_BODY, 2),
     ("plain-heading-empty", _TRIGGER, "\n## \n" + _DETAIL_BODY, 2),
@@ -755,69 +659,141 @@ _DETAIL_CASES = (
     ("plain-indented-code", _TRIGGER, "\n    code\n" + _DETAIL_BODY, 2),
     ("plain-item-indent", _TRIGGER, "\n10. a\n  bcde\n" + _DETAIL_BODY, 2),
     ("plain-item-text", _TRIGGER, "\n- > quoted\n" + _DETAIL_BODY, 2),
+    # QA round 6: both blockers and the frontmatter finding exit 2 (D-392-ENUMERATED-BODY-GRAMMAR).
+    ("r6-fenced-comment", "", _R6_FENCED_COMMENT, 2),
+    ("r6-fenced-comment-split", _TRIGGER, _DETAIL_BODY + _R6_FENCED_COMMENT, 2),
+    ("r6-fenced-comment-refdef", _TRIGGER, _DETAIL_BODY + "\n```\n<!--\n```\n[the policy]: https://example.test/p\n-->\n",
+     2),
+    ("r6-fenced-hangul", "", "\n```\n<!--\n```\n## Detail\u3164\n-->\n", 2),
+    ("r6-ordered-setext", "", _R6_ORDERED_SETEXT, 2),
+    ("r6-ordered-setext-split", _TRIGGER, _DETAIL_BODY + _R6_ORDERED_SETEXT, 2),
+    ("r6-ordered-break-setext", "", "\nPara\n2. ***\n---\n", 2),
+    ("r6-ordered-fence-setext", "", "\nPara\n2. ```\n---\n", 2),
+    ("r6-ordered-paren-setext", "", "\nPara\n10) # x\n===\n", 2),
+    ("r6-frontmatter-heading", "## Detail\n", "", 2),
+    ("r6-frontmatter-indented-comment", "  # a note\n", "", 2),
+    # The BODY GRAMMAR: one case per refused shape (each exits 2); a grammar-title case sets its title
+    # through _CASE_FRAME.
+    ("grammar-no-title", "", "", 2),
+    ("grammar-title-not-first", "", "", 2),
+    ("grammar-title-no-space", "", "", 2),
+    ("grammar-title-blank", "", "", 2),
+    ("grammar-title-lbracket", "", "", 2),
+    ("grammar-title-rbracket", "", "", 2),
+    ("grammar-title-lt", "", "", 2),
+    ("grammar-title-gt", "", "", 2),
+    ("grammar-title-amp", "", "", 2),
+    ("grammar-title-backslash", "", "", 2),
+    ("grammar-title-tilde", "", "", 2),
+    ("grammar-title-star", "", "", 2),
+    ("grammar-title-underscore", "", "", 2),
+    ("grammar-title-backtick", "", "", 2),
+    ("grammar-title-non-ascii", "", "", 2),
+    ("grammar-title-detail", "", "", 2),
+    ("grammar-second-title", "", "\n# Second title\n", 2),
+    ("grammar-start-space", "", "\n Text.\n", 2),
+    ("grammar-start-tab", "", "\n\tText.\n", 2),
+    ("grammar-start-gt", "", "\n> Quoted.\n", 2),
+    ("grammar-start-dash", "", "\n-x\n", 2),
+    ("grammar-start-plus", "", "\n+x\n", 2),
+    ("grammar-start-star", "", "\n*x*\n", 2),
+    ("grammar-start-equals", "", "\n=x\n", 2),
+    ("grammar-start-tilde", "", "\n~x\n", 2),
+    ("grammar-start-pipe", "", "\n| a | b |\n", 2),
+    ("grammar-start-lt", "", "\n<x\n", 2),
+    ("grammar-start-lbracket", "", "\n[x\n", 2),
+    ("grammar-start-bang", "", "\n!x\n", 2),
+    ("grammar-start-underscore", "", "\n___\n", 2),
+    ("grammar-start-colon", "", "\n:-- | --:\n", 2),
+    ("grammar-start-fence", "", "\n```\n", 2),
+    ("grammar-ordered-dot", "", "\n1. Item.\n", 2),
+    ("grammar-ordered-paren", "", "\n2) Item.\n", 2),
+    ("grammar-ordered-bare", "", "\n3.\n", 2),
+    ("grammar-lt", "", "\nText a < b.\n", 2),
+    ("grammar-lbracket", "", "\nText [a.\n", 2),
+    ("grammar-rbracket", "", "\nText a].\n", 2),
+    ("grammar-backslash", "", "\nText a \x5c b.\n", 2),
+    ("grammar-tab", "", "\nText\ta.\n", 2),
+    ("grammar-non-ascii", "", "\nCaf\u00e9.\n", 2),
 )
 _CASE_FRAME = {
     "security-detail": {"family": "family: security\nfacet: SECI\n"},
     "empty-core": {"core": ""},
     "comment-only-core": {"core": "<!-- no visible core -->\n"},
     "r5-detail-reference-definition": {"core": "# Gen-rules detail self-test rule\n\nSee [the policy].\n"},
+    "r5-paren-heading": {"core": "# The principle (highest precedence)\n\nCore text.\n"},
+    "r5-paren-heading-split": {"core": "# The principle (highest precedence)\n\nCore text.\n"},
+    "grammar-title-not-first": {"core": "Core text.\n\n# Gen-rules detail self-test rule\n\nCore text.\n"},
+    "grammar-title-no-space": {"core": "#Title\n\nCore text.\n"},
+    "grammar-title-blank": {"core": "#  \n\nCore text.\n"},
+    "grammar-title-lbracket": {"core": "# See [x\n\nCore text.\n"},
+    "grammar-title-rbracket": {"core": "# See x]\n\nCore text.\n"},
+    "grammar-title-lt": {"core": "# a < b\n\nCore text.\n"},
+    "grammar-title-gt": {"core": "# a > b\n\nCore text.\n"},
+    "grammar-title-amp": {"core": "# Fish & chips\n\nCore text.\n"},
+    "grammar-title-backslash": {"core": "# a \x5c b\n\nCore text.\n"},
+    "grammar-title-tilde": {"core": "# ~~Old~~\n\nCore text.\n"},
+    "grammar-title-star": {"core": "# *Key*\n\nCore text.\n"},
+    "grammar-title-underscore": {"core": "# _Key_\n\nCore text.\n"},
+    "grammar-title-backtick": {"core": "# `key`\n\nCore text.\n"},
+    "grammar-title-non-ascii": {"core": "# Caf\u00e9\n\nCore text.\n"},
+    "grammar-title-detail": {"core": "# Details\n\nCore text.\n"},
+    "grammar-no-title": {"core": "\n"},
+    "r6-fenced-comment-refdef": {"core": "# Gen-rules detail self-test rule\n\nSee [the policy].\n"},
 }
 # Red on revert: each guard put back to its pre-fix form in a scratch copy of this module, loaded through
-# importlib, must then turn its case to the reverted exit (0 for a guard that refuses, 2 for the security
-# keyset that admits the detail keys). A guard pair given as tuples is reverted together, for a case two
-# independent guards each refuse. (name, fixed text, reverted text, case, exit with the guard reverted)
-_NEAR_GUARD = "elif _names_detail(line):"
+# importlib, must then turn its case to the reverted exit (0 for a guard that refuses, 2 for a shape the
+# grammar admits). A guard pair given as tuples is reverted together, for a case two independent guards
+# each refuse. (name, fixed text, reverted text, case, exit with the guard reverted)
+_NEAR_GUARD = "if _names_detail(line):"
 _BLANK_GUARD = 'if found > first and lines[found - 2] != "":'
-_PLAIN_GUARD = "problem = _plain_prefix_problem(lines, first, found)"
-_BOTH_FIXED = (_BLANK_GUARD, _PLAIN_GUARD)
-_BOTH_REVERTED = ("if False:", "problem = None")
 _VIS_NORMAL = 'text = unicodedata.normalize("NFKC", html.unescape(line))'
 _VIS_FORMAT = 'text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")'
 _VIS_DROP = 'text = _LINK_TAIL_RE.sub("", _TAG_RE.sub("", _uncontained(text)))'
 _VIS_KEEP = 'return "".join(ch for ch in text if ch.isalnum()).casefold()'
-_START_GUARD = "if not text or text[0] not in _PLAIN_START:"
-_MARKUP_FIXED = '_HEADING_MARKUP = frozenset("[<&\\\\~*_`")'
-_BODY_GUARD = "body_problem = _plain_body_problem(lines, number, first, comment_end)"
-_HEADING_GUARD = "if heading and (not heading.group(1).strip() or not set(heading.group(1)) <= _HEADING_TEXT):"
-_SETEXT_GUARD = 'if _UNDERLINE_RE.match(line) and number > first and _QUOTE_PREFIX_RE.sub("", lines[number - 2]):'
-_HTML_GUARD = "if _RAW_HTML_RE.search(line):"
+_BODY_GUARD = "problem = _prose_problem(line)"
 _TEXT_FIXED = '_HEADING_TEXT = frozenset(map(chr, range(0x20, 0x7f))) - frozenset("[]<>&\\\\~*_`")'
+_START_FIXED = '_PROSE_START = frozenset(" \\t#>-+*=~|<[!_:")'
+_CHARS_FIXED = '_PROSE_TEXT = frozenset(map(chr, range(0x20, 0x7f))) - frozenset("<[]\\\\")'
+# The BODY GRAMMAR guards, each a (fixed text, reverted text) pair.
+_PROSE = (_BODY_GUARD, "problem = None")
+_TITLE = ("title, problem = number, _title_problem(line)", "title, problem = number, None")
+_NEAR = (_NEAR_GUARD, "if False:")
+_BLANK = (_BLANK_GUARD, "if False:")
+_SECOND = ("if found is not None:", "if False:")
+_NOTITLE = ("    if title is None:\n        raise", "    if False:\n        raise")
+_FM = ("        if not line:\n            continue\n", '        if not line or line.startswith("#"):\n            continue\n')
+_FENCE = (' or line.startswith("```")', "")
+_ORDERED = ("if _ORDERED_RE.match(line):", "if False:")
+_CHARS = ("if not set(line) <= _PROSE_TEXT:", "if False:")
+_TSTART = ('if not line.startswith("# "):', "if False:")
+_TTEXT = ("if not line[2:].strip() or not set(line[2:]) <= _HEADING_TEXT:", "if False:")
+_TEXT_WIDE = (_TEXT_FIXED, _TEXT_FIXED.replace("0x7f", "0x110000"))
+
+
+def _without(fixed, ch):
+    """The guard pair that drops ch from the quoted character set of the constant line fixed."""
+    at = fixed.index('("')
+    return fixed, fixed[:at] + fixed[at:].replace(ch, "", 1)
+
+
+def _revert(label, case, *guards):
+    """A revert entry for case that removes each of the given guard pairs together (reverted exit 0)."""
+    return label, tuple(g[0] for g in guards), tuple(g[1] for g in guards), case, 0
+
+
 _DETAIL_REVERTS = (
     ("missing-trigger", 'if "detail-trigger" not in fm:', "if False:", "detail-without-trigger", 0),
     ("orphan-keys", "        if present:\n", "        if False:\n", "trigger-without-detail", 0),
     ("second-heading", "if found is not None:", "if False:", "two-detail-headings", 0),
-    ("cr-byte", 'if b"\\r" in raw:', "if False:", "cr-byte", 0),
-    ("empty-core", 'if not "".join(lines[body_first_line(text, name) - 1:heading - 1]).strip():', "if False:",
-     "empty-core", 0),
-    ("empty-layer", 'if not _COMMENT_RE.sub("", "\\n".join(lines[heading:])).strip():', "if False:",
+    _revert("cr-byte", "cr-byte", ('if b"\\r" in raw:', "if False:"), _CHARS),  # a CR is also not printable ASCII
+    ("empty-layer", 'if not "\\n".join(lines[heading:]).strip():', "if False:",
      "empty-detail", 0),
-    ("comment-only-layer", 'if not _COMMENT_RE.sub("", "\\n".join(lines[heading:])).strip():',
-     'if not "\\n".join(lines[heading:]).strip():', "comment-only-detail", 0),
-    ("empty-comment-form", "(?:-?>|", "(?:", "empty-comment-detail", 0),
     ("non-string-value", "if not isinstance(fm[key], str) or not fm[key].strip():", "if False:",
      "non-string-trigger", 0),
     ("corpus-wiring", "check_detail(read_rule_source(src), fm, src.name)", "pass", "detail-without-trigger", 0),
     ("security-detail-keys", '_check_keys(fm, BASE_KEYS | {"facet", "secondary"} | MAP_KEYS | DETAIL_KEYS, name)',
      '_check_keys(fm, BASE_KEYS | {"facet", "secondary"} | MAP_KEYS, name)', "security-detail", 2),
-    # Rule (2): a line whose visible text reads Detail, anywhere but the accepted split.
-    ("near-miss", _NEAR_GUARD, "elif False:", "near-miss-heading", 0),
-    ("near-miss-setext", _NEAR_GUARD, "elif False:", "setext-heading", 0),
-    ("near-miss-setext-h1", _NEAR_GUARD, "elif False:", "setext-heading-h1", 0),
-    ("near-miss-fenced", _NEAR_GUARD, "elif False:", "fenced-near-miss", 0),
-    ("near-miss-comment", _NEAR_GUARD, "elif False:", "comment-near-miss", 0),
-    ("near-miss-blockquote-setext", _NEAR_GUARD, "elif False:", "blockquote-setext", 0),
-    ("near-miss-list-setext", _NEAR_GUARD, "elif False:", "list-setext", 0),
-    ("near-miss-multiline-setext", _NEAR_GUARD, "elif False:", "multiline-setext", 0),
-    ("near-miss-bold-setext", _NEAR_GUARD, "elif False:", "bold-setext", 0),
-    ("r4-setext-dash-space", _NEAR_GUARD, "elif False:", "r4-setext-dash-space", 0),
-    ("r4-setext-dash-tab", _NEAR_GUARD, "elif False:", "r4-setext-dash-tab", 0),
-    ("r4-quote-setext-dash", _NEAR_GUARD, "elif False:", "r4-quote-setext-dash", 0),
-    ("r4-list-setext-dash", _NEAR_GUARD, "elif False:", "r4-list-setext-dash", 0),
-    ("r4-comment-reopen-setext", _NEAR_GUARD, "elif False:", "r4-comment-reopen-setext", 0),
-    ("r4-wide-ordered-setext-h1", _NEAR_GUARD, "elif False:", "r4-wide-ordered-setext-h1", 0),
-    ("r4-wide-bullet-setext", _NEAR_GUARD, "elif False:", "r4-wide-bullet-setext", 0),
-    ("r4-nested-list-setext", _NEAR_GUARD, "elif False:", "r4-nested-list-setext", 0),
-    ("r4-tab-list-setext", _NEAR_GUARD, "elif False:", "r4-tab-list-setext", 0),
     ("near-miss-plural", '_DETAIL_NAMES = {"detail", "details"}', '_DETAIL_NAMES = {"detail"}',
      "near-miss-plural", 0),
     ("visible-casefold", _VIS_KEEP, 'return "".join(ch for ch in text if ch.isalnum())', "near-miss-uppercase", 0),
@@ -860,119 +836,198 @@ _DETAIL_REVERTS = (
         "ch.isalnum()", 'ch.isalnum() or unicodedata.category(ch) == "Cf"')), "r4-zwsp-inner", 0),
     ("r4-soft-hyphen", (_VIS_FORMAT, _VIS_KEEP), ("text = text", _VIS_KEEP.replace(
         "ch.isalnum()", 'ch.isalnum() or unicodedata.category(ch) == "Cf"')), "r4-soft-hyphen", 0),
-    # Rule (1): the split needs a blank line above it, and every line above it is in the PLAIN PREFIX.
     ("blank-before", _BLANK_GUARD, "if False:", "plain-blank-before", 0),
-    ("plain-wiring", _PLAIN_GUARD, "problem = None", "plain-start-plus", 0),
-    ("plain-html-details", _PLAIN_GUARD, "problem = None", "html-details", 0),
-    ("plain-unterminated-fence", _PLAIN_GUARD, "problem = None", "unterminated-fence", 0),
-    ("plain-unterminated-comment", _PLAIN_GUARD, "problem = None", "unterminated-comment", 0),
-    ("plain-indented-fence-close", _PLAIN_GUARD, "problem = None", "indented-fence-close", 0),
-    ("plain-backtick-info", _PLAIN_GUARD, "problem = None", "backtick-info-not-fence", 0),
-    ("plain-code-span-comment", _PLAIN_GUARD, "problem = None", "code-span-comment-opener", 0),
-    ("plain-empty-comment", _PLAIN_GUARD, "problem = None", "empty-comment", 0),
-    ("plain-setext", _PLAIN_GUARD, "problem = None", "plain-setext", 0),
-    ("plain-blockquote-fence", _PLAIN_GUARD, "problem = None", "blockquote-fence", 0),
-    ("plain-indented-fence", _PLAIN_GUARD, "problem = None", "indented-fence", 0),
-    ("plain-indented-comment", _PLAIN_GUARD, "problem = None", "indented-comment", 0),
-    ("plain-comment-core", _PLAIN_GUARD, "problem = None", "comment-only-core", 0),
-    ("r4-quoted-script-blank", _PLAIN_GUARD, "problem = None", "r4-quoted-script-blank", 0),
-    ("r4-comment-reopen-blank", _PLAIN_GUARD, "problem = None", "r4-comment-reopen-blank", 0),
-    ("both-backtick-fence", _BOTH_FIXED, _BOTH_REVERTED, "backtick-fenced-heading", 0),
-    ("both-tilde-fence", _BOTH_FIXED, _BOTH_REVERTED, "tilde-fenced-heading", 0),
-    ("both-comment", _BOTH_FIXED, _BOTH_REVERTED, "comment-heading", 0),
-    ("both-longer-fence", _BOTH_FIXED, _BOTH_REVERTED, "longer-fence-close", 0),
-    ("both-mixed-fence", _BOTH_FIXED, _BOTH_REVERTED, "mixed-fence-close", 0),
-    ("both-html-pre", _BOTH_FIXED, _BOTH_REVERTED, "html-pre", 0),
-    ("both-html-div", _BOTH_FIXED, _BOTH_REVERTED, "html-div", 0),
-    ("both-html-script", _BOTH_FIXED, _BOTH_REVERTED, "html-script", 0),
-    ("both-html-close-tag", _BOTH_FIXED, _BOTH_REVERTED, "html-close-tag", 0),
-    ("both-html-processing", _BOTH_FIXED, _BOTH_REVERTED, "html-processing", 0),
-    ("both-html-declaration", _BOTH_FIXED, _BOTH_REVERTED, "html-declaration", 0),
-    ("both-list-fence", _BOTH_FIXED, _BOTH_REVERTED, "list-fence", 0),
-    ("both-list-fence-comment", _BOTH_FIXED, _BOTH_REVERTED, "list-fence-comment", 0),
-    ("both-list-comment", _BOTH_FIXED, _BOTH_REVERTED, "list-comment", 0),
-    ("r4-quoted-script", _BOTH_FIXED, _BOTH_REVERTED, "r4-quoted-script", 0),
-    ("r4-comment-reopen", _BOTH_FIXED, _BOTH_REVERTED, "r4-comment-reopen", 0),
-    ("r4-comment-reopen-next", _BOTH_FIXED, _BOTH_REVERTED, "r4-comment-reopen-next", 0),
-    ("plain-start-plus", _START_GUARD, "if not text:", "plain-start-plus", 0),
-    ("plain-start-quote", _START_GUARD, "if not text:", "plain-start-quote", 0),
-    ("plain-start-table", _START_GUARD, "if not text:", "plain-start-table", 0),
-    ("plain-start-rule", _START_GUARD, "if not text:", "plain-start-rule", 0),
-    ("plain-heading-seven", _START_GUARD, "if not text:", "plain-heading-seven", 0),
-    ("plain-tab", 'if "\\t" in text:', "if False:", "plain-tab", 0),
-    ("plain-lt", 'if "<" in text:', "if False:", "plain-lt", 0),
-    ("plain-fence-marker", 'if "```" in text or "~~~" in text:', "if False:", "plain-fence-marker", 0),
-    ("plain-tilde-marker", 'if "```" in text or "~~~" in text:', 'if "```" in text:', "plain-tilde-marker", 0),
-    ("plain-list-paren", "if _LIST_LIKE_RE.match(text):", "if False:", "plain-list-paren", 0),
-    ("plain-nested-ordered", "if _LIST_LIKE_RE.match(text):", "if False:", "plain-nested-ordered", 0),
-    ("plain-heading-empty", "if not heading.group(1).strip():", "if False:", "plain-heading-empty", 0),
-    ("plain-heading-bracket", _MARKUP_FIXED, _MARKUP_FIXED.replace("[", ""), "plain-heading-bracket", 0),
-    ("plain-heading-lt", _MARKUP_FIXED, _MARKUP_FIXED.replace("<", ""), "plain-heading-lt", 0),
-    ("plain-heading-amp", _MARKUP_FIXED, _MARKUP_FIXED.replace("&", ""), "plain-heading-amp", 0),
-    ("plain-heading-backslash", _MARKUP_FIXED, _MARKUP_FIXED.replace("\\\\", ""), "plain-heading-backslash", 0),
-    ("plain-heading-tilde", _MARKUP_FIXED, _MARKUP_FIXED.replace("~", ""), "plain-heading-tilde", 0),
-    ("plain-heading-star", _MARKUP_FIXED, _MARKUP_FIXED.replace("*", ""), "plain-heading-star", 0),
-    ("plain-heading-underscore", _MARKUP_FIXED, _MARKUP_FIXED.replace("*_", "*"), "plain-heading-underscore", 0),
-    ("plain-heading-backtick", _MARKUP_FIXED, _MARKUP_FIXED.replace("`", ""), "plain-heading-backtick", 0),
-    ("plain-heading-tab", 'if set(heading.group(1)) & _HEADING_MARKUP or "\\t" in line:',
-     "if set(heading.group(1)) & _HEADING_MARKUP:", "plain-heading-tab", 0),
-    ("plain-indented-code", 'if indent is None:\n                return number, "an indented line outside a list item"',
-     'if indent is None:\n                indent = len(line) - len(line.lstrip(" "))', "plain-indented-code", 0),
-    ("plain-item-indent", 'if line[:indent] != " " * indent:', "if False:", "plain-item-indent", 0),
-    ("plain-item-text", "indent = item.end()\n                text = line[indent:]",
-     'indent = item.end()\n                text = "item"', "plain-item-text", 0),
-    # The PLAIN BODY rules: each QA round 5 case goes to exit 0 with the rules that refuse it reverted, and
-    # each admitted shape goes to exit 2 with its admission reverted.
-    ("r5-balanced-link-heading", _HEADING_GUARD, "if False:", "r5-balanced-link-heading", 0),
-    ("r5-comment-gt-heading", (_HEADING_GUARD, _HTML_GUARD), ("if False:", "if False:"), "r5-comment-gt-heading", 0),
-    ("r5-multiline-html-heading", _HTML_GUARD, "if False:", "r5-multiline-html-heading", 0),
-    ("r5-multiline-comment-setext", (_SETEXT_GUARD, _HTML_GUARD), ("if False:", "if False:"),
-     "r5-multiline-comment-setext", 0),
-    ("r5-multiline-span-setext", (_SETEXT_GUARD, _HTML_GUARD), ("if False:", "if False:"),
-     "r5-multiline-span-setext", 0),
-    ("r5-hangul-filler", _HEADING_GUARD, "if False:", "r5-hangul-filler", 0),
-    ("r5-halfwidth-hangul-filler", _HEADING_GUARD, "if False:", "r5-halfwidth-hangul-filler", 0),
-    ("r5-cyrillic-e", _HEADING_GUARD, "if False:", "r5-cyrillic-e", 0),
     ("r5-paren-heading", _TEXT_FIXED, _TEXT_FIXED.replace("[]", "[]()"), "r5-paren-heading", 2),
     ("r5-paren-heading-split", _TEXT_FIXED, _TEXT_FIXED.replace("[]", "[]()"), "r5-paren-heading-split", 2),
-    ("r5-detail-reference-definition", 'if found is not None and "]:" in line:', "if False:",
-     "r5-detail-reference-definition", 0),
-    ("body-setext", _SETEXT_GUARD, "if False:", "no-split-setext", 0),
-    ("body-comment-admitted", "if _comment_end(lines, number):", "if False:", "closed-fence-and-comment", 2),
-    ("body-comment-above-underline", "if comment_end != number - 1 and not", "if not", "comment-then-rule", 2),
-    ("body-heading-above-underline",
-     "if comment_end != number - 1 and not _NOT_PARAGRAPH_RE.match(_uncontained(lines[number - 2])):",
-     "if comment_end != number - 1:", "heading-then-rule", 2),
-    ("body-fence-above-underline",
-     "if comment_end != number - 1 and not _NOT_PARAGRAPH_RE.match(_uncontained(lines[number - 2])):",
-     "if comment_end != number - 1:", "fence-then-rule", 2),
-    ("body-break-above-underline",
-     "if comment_end != number - 1 and not _NOT_PARAGRAPH_RE.match(_uncontained(lines[number - 2])):",
-     "if comment_end != number - 1:", "rule-then-rule", 2),
+    ("prose-backtick-start", _FENCE[0], ' or line.startswith("`")', "plain-prefix-ok", 2),
+    ("prose-tilde-inside", _FENCE[0], ' or "~~~" in line', "plain-tilde-marker", 2),
+    # Each refusal case below goes to exit 0 with the guards that refuse it removed: the BODY GRAMMAR
+    # (D-392-ENUMERATED-BODY-GRAMMAR) refuses every round-1 to round-6 reproduction.
+    _revert("body-fenced-code-detail", "fenced-code-detail", _PROSE),
+    _revert("body-closed-fence-and-comment", "closed-fence-and-comment", _PROSE),
+    _revert("body-near-miss-heading", "near-miss-heading", _PROSE, _NEAR),
+    _revert("body-near-miss-lowercase", "near-miss-lowercase", _PROSE, _NEAR),
+    _revert("body-near-miss-uppercase", "near-miss-uppercase", _PROSE, _NEAR),
+    _revert("body-near-miss-two-spaces", "near-miss-two-spaces", _PROSE, _NEAR),
+    _revert("body-near-miss-colon", "near-miss-colon", _PROSE, _NEAR),
+    _revert("body-near-miss-plural", "near-miss-plural", _PROSE, _NEAR),
+    _revert("body-indented-heading", "indented-heading", _PROSE, _NEAR),
+    _revert("body-blockquote-heading", "blockquote-heading", _PROSE, _NEAR),
+    _revert("body-list-item-heading", "list-item-heading", _PROSE, _NEAR),
+    _revert("body-ordered-list-heading", "ordered-list-heading", _PROSE, _NEAR),
+    _revert("body-setext-heading", "setext-heading", _PROSE, _NEAR),
+    _revert("body-setext-heading-h1", "setext-heading-h1", _PROSE, _NEAR),
+    _revert("body-backtick-fenced-heading", "backtick-fenced-heading", _PROSE, _BLANK),
+    _revert("body-tilde-fenced-heading", "tilde-fenced-heading", _PROSE, _BLANK),
+    _revert("body-indented-fence-close", "indented-fence-close", _PROSE),
+    _revert("body-fenced-near-miss", "fenced-near-miss", _PROSE, _NEAR),
+    _revert("body-comment-heading", "comment-heading", _PROSE, _BLANK),
+    _revert("body-comment-near-miss", "comment-near-miss", _PROSE, _NEAR),
+    _revert("body-unterminated-fence", "unterminated-fence", _PROSE),
+    _revert("body-unterminated-comment", "unterminated-comment", _PROSE),
+    _revert("body-no-split-unterminated-fence", "no-split-unterminated-fence", _PROSE),
+    _revert("body-comment-only-core", "comment-only-core", _TITLE),
+    _revert("body-comment-only-detail", "comment-only-detail", _PROSE),
+    _revert("body-empty-comment-detail", "empty-comment-detail", _PROSE),
+    _revert("body-longer-fence-close", "longer-fence-close", _PROSE, _BLANK),
+    _revert("body-mixed-fence-close", "mixed-fence-close", _PROSE, _BLANK),
+    _revert("body-backtick-info-not-fence", "backtick-info-not-fence", _PROSE),
+    _revert("body-html-pre", "html-pre", _PROSE, _BLANK),
+    _revert("body-html-div", "html-div", _PROSE, _BLANK),
+    _revert("body-html-script", "html-script", _PROSE, _BLANK),
+    _revert("body-html-details", "html-details", _PROSE),
+    _revert("body-html-close-tag", "html-close-tag", _PROSE, _BLANK),
+    _revert("body-html-processing", "html-processing", _PROSE, _BLANK),
+    _revert("body-html-declaration", "html-declaration", _PROSE, _BLANK),
+    _revert("body-html-heading-near-miss", "html-heading-near-miss", _PROSE, _NEAR),
+    _revert("body-blockquote-setext", "blockquote-setext", _PROSE, _NEAR),
+    _revert("body-list-setext", "list-setext", _PROSE, _NEAR),
+    _revert("body-multiline-setext", "multiline-setext", _PROSE, _NEAR),
+    _revert("body-bold-setext", "bold-setext", _PROSE, _NEAR),
+    _revert("body-bold-near-miss", "bold-near-miss", _PROSE, _NEAR),
+    _revert("body-underscore-near-miss", "underscore-near-miss", _PROSE, _NEAR),
+    _revert("body-backtick-near-miss", "backtick-near-miss", _PROSE, _NEAR),
+    _revert("body-code-span-comment-opener", "code-span-comment-opener", _PROSE),
+    _revert("body-empty-comment", "empty-comment", _PROSE),
+    _revert("body-link-heading", "link-heading", _PROSE, _NEAR),
+    _revert("body-entity-heading", "entity-heading", _PROSE, _NEAR),
+    _revert("body-inline-html-heading", "inline-html-heading", _PROSE, _NEAR),
+    _revert("body-escape-heading", "escape-heading", _PROSE, _NEAR),
+    _revert("body-strikethrough-heading", "strikethrough-heading", _PROSE, _NEAR),
+    _revert("body-link-setext", "link-setext", _PROSE, _NEAR),
+    _revert("body-fullwidth-heading", "fullwidth-heading", _PROSE, _NEAR),
+    _revert("body-invisible-before-marker", "invisible-before-marker", _PROSE, _NEAR),
+    _revert("body-plain-setext", "plain-setext", _PROSE),
+    _revert("body-no-split-setext", "no-split-setext", _PROSE),
+    _revert("body-heading-then-rule", "heading-then-rule", _PROSE),
+    _revert("body-blank-then-rule", "blank-then-rule", _PROSE),
+    _revert("body-fence-then-rule", "fence-then-rule", _PROSE),
+    _revert("body-comment-then-rule", "comment-then-rule", _PROSE),
+    _revert("body-rule-then-rule", "rule-then-rule", _PROSE),
+    _revert("body-list-fence", "list-fence", _PROSE, _BLANK),
+    _revert("body-list-fence-comment", "list-fence-comment", _PROSE, _BLANK),
+    _revert("body-list-comment", "list-comment", _PROSE, _BLANK),
+    _revert("body-blockquote-fence", "blockquote-fence", _PROSE),
+    _revert("body-indented-fence", "indented-fence", _PROSE),
+    _revert("body-indented-comment", "indented-comment", _PROSE),
+    _revert("body-r4-setext-dash-space", "r4-setext-dash-space", _PROSE, _NEAR),
+    _revert("body-r4-setext-dash-tab", "r4-setext-dash-tab", _PROSE, _NEAR),
+    _revert("body-r4-quote-setext-dash", "r4-quote-setext-dash", _PROSE, _NEAR),
+    _revert("body-r4-list-setext-dash", "r4-list-setext-dash", _PROSE, _NEAR),
+    _revert("body-r4-quoted-script", "r4-quoted-script", _PROSE, _BLANK),
+    _revert("body-r4-quoted-script-blank", "r4-quoted-script-blank", _PROSE),
+    _revert("body-r4-comment-reopen", "r4-comment-reopen", _PROSE, _BLANK),
+    _revert("body-r4-comment-reopen-next", "r4-comment-reopen-next", _PROSE, _BLANK),
+    _revert("body-r4-comment-reopen-blank", "r4-comment-reopen-blank", _PROSE),
+    _revert("body-r4-comment-reopen-setext", "r4-comment-reopen-setext", _PROSE, _NEAR),
+    _revert("body-r4-comment-reopen-link", "r4-comment-reopen-link", _PROSE, _NEAR),
+    _revert("body-r4-wide-ordered-setext", "r4-wide-ordered-setext", _PROSE, _NEAR),
+    _revert("body-r4-wide-ordered-setext-h1", "r4-wide-ordered-setext-h1", _PROSE, _NEAR),
+    _revert("body-r4-wide-bullet-setext", "r4-wide-bullet-setext", _PROSE, _NEAR),
+    _revert("body-r4-wide-one-setext", "r4-wide-one-setext", _PROSE, _NEAR),
+    _revert("body-r4-nested-list-setext", "r4-nested-list-setext", _PROSE, _NEAR),
+    _revert("body-r4-tab-list-setext", "r4-tab-list-setext", _PROSE, _NEAR),
+    _revert("body-r4-zwsp-lead", "r4-zwsp-lead", _PROSE, _NEAR),
+    _revert("body-r4-zwsp-inner", "r4-zwsp-inner", _PROSE, _NEAR),
+    _revert("body-r4-soft-hyphen", "r4-soft-hyphen", _PROSE, _NEAR),
+    _revert("body-r5-balanced-link-heading", "r5-balanced-link-heading", _PROSE),
+    _revert("body-r5-comment-gt-heading", "r5-comment-gt-heading", _PROSE),
+    _revert("body-r5-multiline-html-heading", "r5-multiline-html-heading", _PROSE),
+    _revert("body-r5-multiline-comment-setext", "r5-multiline-comment-setext", _PROSE),
+    _revert("body-r5-multiline-span-setext", "r5-multiline-span-setext", _PROSE),
+    _revert("body-r5-hangul-filler", "r5-hangul-filler", _PROSE),
+    _revert("body-r5-halfwidth-hangul-filler", "r5-halfwidth-hangul-filler", _PROSE),
+    _revert("body-r5-cyrillic-e", "r5-cyrillic-e", _PROSE),
+    _revert("body-r5-detail-reference-definition", "r5-detail-reference-definition", _PROSE),
+    _revert("body-r5-paren-subheading", "r5-paren-subheading", _PROSE),
+    _revert("body-plain-list-ok", "plain-list-ok", _PROSE),
+    _revert("body-plain-subheading", "plain-subheading", _PROSE),
+    _revert("body-plain-start-plus", "plain-start-plus", _PROSE),
+    _revert("body-plain-start-quote", "plain-start-quote", _PROSE),
+    _revert("body-plain-start-table", "plain-start-table", _PROSE),
+    _revert("body-plain-start-rule", "plain-start-rule", _PROSE),
+    _revert("body-plain-heading-seven", "plain-heading-seven", _PROSE),
+    _revert("body-plain-tab", "plain-tab", _PROSE),
+    _revert("body-plain-lt", "plain-lt", _PROSE),
+    _revert("body-plain-fence-marker", "plain-fence-marker", _PROSE),
+    _revert("body-plain-list-paren", "plain-list-paren", _PROSE),
+    _revert("body-plain-nested-ordered", "plain-nested-ordered", _PROSE),
+    _revert("body-plain-heading-empty", "plain-heading-empty", _PROSE),
+    _revert("body-plain-heading-bracket", "plain-heading-bracket", _PROSE),
+    _revert("body-plain-heading-lt", "plain-heading-lt", _PROSE),
+    _revert("body-plain-heading-amp", "plain-heading-amp", _PROSE),
+    _revert("body-plain-heading-backslash", "plain-heading-backslash", _PROSE),
+    _revert("body-plain-heading-tilde", "plain-heading-tilde", _PROSE),
+    _revert("body-plain-heading-star", "plain-heading-star", _PROSE),
+    _revert("body-plain-heading-underscore", "plain-heading-underscore", _PROSE),
+    _revert("body-plain-heading-backtick", "plain-heading-backtick", _PROSE),
+    _revert("body-plain-heading-tab", "plain-heading-tab", _PROSE),
+    _revert("body-plain-indented-code", "plain-indented-code", _PROSE),
+    _revert("body-plain-item-indent", "plain-item-indent", _PROSE),
+    _revert("body-plain-item-text", "plain-item-text", _PROSE),
+    _revert("body-r6-fenced-comment", "r6-fenced-comment", _PROSE),
+    _revert("body-r6-fenced-comment-split", "r6-fenced-comment-split", _PROSE),
+    _revert("body-r6-fenced-comment-refdef", "r6-fenced-comment-refdef", _PROSE),
+    _revert("body-r6-fenced-hangul", "r6-fenced-hangul", _PROSE),
+    _revert("body-r6-ordered-setext", "r6-ordered-setext", _PROSE),
+    _revert("body-r6-ordered-setext-split", "r6-ordered-setext-split", _PROSE),
+    _revert("body-r6-ordered-break-setext", "r6-ordered-break-setext", _PROSE),
+    _revert("body-r6-ordered-fence-setext", "r6-ordered-fence-setext", _PROSE),
+    _revert("body-r6-ordered-paren-setext", "r6-ordered-paren-setext", _PROSE),
+    _revert("body-r6-frontmatter-heading", "r6-frontmatter-heading", _FM),
+    _revert("body-r6-frontmatter-indented-comment", "r6-frontmatter-indented-comment", _FM),
+    _revert("body-grammar-no-title", "grammar-no-title", _NOTITLE),
+    _revert("body-grammar-title-not-first", "grammar-title-not-first", _TITLE, _PROSE),
+    _revert("body-grammar-title-no-space", "grammar-title-no-space", _TSTART),
+    _revert("body-grammar-title-blank", "grammar-title-blank", _TTEXT),
+    _revert("body-grammar-title-lbracket", "grammar-title-lbracket", _without(_TEXT_FIXED, "[")),
+    _revert("body-grammar-title-rbracket", "grammar-title-rbracket", _without(_TEXT_FIXED, "]")),
+    _revert("body-grammar-title-lt", "grammar-title-lt", _without(_TEXT_FIXED, "<")),
+    _revert("body-grammar-title-gt", "grammar-title-gt", _without(_TEXT_FIXED, ">")),
+    _revert("body-grammar-title-amp", "grammar-title-amp", _without(_TEXT_FIXED, "&")),
+    _revert("body-grammar-title-backslash", "grammar-title-backslash", _without(_TEXT_FIXED, "\\\\")),
+    _revert("body-grammar-title-tilde", "grammar-title-tilde", _without(_TEXT_FIXED, "~")),
+    _revert("body-grammar-title-star", "grammar-title-star", _without(_TEXT_FIXED, "*")),
+    _revert("body-grammar-title-underscore", "grammar-title-underscore", _without(_TEXT_FIXED, "*_")),
+    _revert("body-grammar-title-backtick", "grammar-title-backtick", _without(_TEXT_FIXED, "`")),
+    _revert("body-grammar-title-non-ascii", "grammar-title-non-ascii", _TEXT_WIDE),
+    _revert("body-grammar-title-detail", "grammar-title-detail", _NEAR),
+    _revert("body-grammar-second-title", "grammar-second-title", _without(_START_FIXED, "#")),
+    _revert("body-grammar-start-space", "grammar-start-space", _without(_START_FIXED, " ")),
+    _revert("body-grammar-start-tab", "grammar-start-tab", _without(_START_FIXED, "\\t"), _CHARS),
+    _revert("body-grammar-start-gt", "grammar-start-gt", _without(_START_FIXED, ">")),
+    _revert("body-grammar-start-dash", "grammar-start-dash", _without(_START_FIXED, "-")),
+    _revert("body-grammar-start-plus", "grammar-start-plus", _without(_START_FIXED, "+")),
+    _revert("body-grammar-start-star", "grammar-start-star", _without(_START_FIXED, "*")),
+    _revert("body-grammar-start-equals", "grammar-start-equals", _without(_START_FIXED, "=")),
+    _revert("body-grammar-start-tilde", "grammar-start-tilde", _without(_START_FIXED, "~")),
+    _revert("body-grammar-start-pipe", "grammar-start-pipe", _without(_START_FIXED, "|")),
+    _revert("body-grammar-start-lt", "grammar-start-lt", _without(_START_FIXED, "<"), _without(_CHARS_FIXED, "<")),
+    _revert("body-grammar-start-lbracket", "grammar-start-lbracket", _without(_START_FIXED, "["), _without(_CHARS_FIXED, "[")),
+    _revert("body-grammar-start-bang", "grammar-start-bang", _without(_START_FIXED, "!")),
+    _revert("body-grammar-start-underscore", "grammar-start-underscore", _without(_START_FIXED, "_")),
+    _revert("body-grammar-start-colon", "grammar-start-colon", _without(_START_FIXED, ":")),
+    _revert("body-grammar-start-fence", "grammar-start-fence", _FENCE),
+    _revert("body-grammar-ordered-dot", "grammar-ordered-dot", _ORDERED),
+    _revert("body-grammar-ordered-paren", "grammar-ordered-paren", _ORDERED),
+    _revert("body-grammar-ordered-bare", "grammar-ordered-bare", _ORDERED),
+    _revert("body-grammar-lt", "grammar-lt", _without(_CHARS_FIXED, "<")),
+    _revert("body-grammar-lbracket", "grammar-lbracket", _without(_CHARS_FIXED, "[")),
+    _revert("body-grammar-rbracket", "grammar-rbracket", _without(_CHARS_FIXED, "]")),
+    _revert("body-grammar-backslash", "grammar-backslash", _without(_CHARS_FIXED, "\\\\")),
+    _revert("body-grammar-tab", "grammar-tab", _CHARS),
+    _revert("body-grammar-non-ascii", "grammar-non-ascii", _CHARS),
 )
-# Since D-392-PLAIN-BODY each of these cases is also refused by a PLAIN BODY rule, so its revert removes
-# the PLAIN BODY check together with the guard it names (the guard alone no longer decides the exit).
-_ALSO_BODY = frozenset((
-    "near-miss-setext", "near-miss-setext-h1", "near-miss-blockquote-setext", "near-miss-list-setext",
-    "near-miss-multiline-setext", "near-miss-bold-setext", "r4-setext-dash-space", "r4-setext-dash-tab",
-    "r4-quote-setext-dash", "r4-list-setext-dash", "r4-comment-reopen-setext", "r4-wide-ordered-setext-h1",
-    "r4-wide-bullet-setext", "r4-nested-list-setext", "r4-tab-list-setext", "visible-bold", "visible-underscore",
-    "visible-backtick", "visible-escape", "visible-strikethrough", "visible-nfkc", "visible-entity", "visible-tag",
-    "visible-html-heading", "visible-link", "visible-link-setext", "r4-comment-reopen-link", "r4-wide-ordered-setext",
-    "r4-wide-one-setext", "r4-zwsp-lead", "r4-zwsp-inner", "r4-soft-hyphen", "plain-html-details",
-    "plain-unterminated-comment", "plain-code-span-comment", "plain-setext", "plain-indented-comment",
-    "r4-quoted-script-blank", "r4-comment-reopen-blank", "both-html-pre", "both-html-div", "both-html-script",
-    "both-html-close-tag", "both-html-processing", "both-html-declaration", "both-list-comment", "r4-quoted-script",
-    "r4-comment-reopen", "r4-comment-reopen-next", "plain-heading-empty", "plain-heading-bracket",
-    "plain-heading-lt", "plain-heading-amp", "plain-heading-backslash", "plain-heading-tilde", "plain-heading-star",
-    "plain-heading-underscore", "plain-heading-backtick", "plain-heading-tab"))
+# Each of these cases is also refused by the BODY GRAMMAR, so its revert removes the prose line check
+# together with the visible-text step it names.
+_ALSO_BODY = frozenset(("near-miss-plural", "visible-casefold", "visible-whitespace", "visible-indent", "visible-punctuation", "visible-blockquote", "visible-list", "visible-bold", "visible-underscore", "visible-backtick", "visible-escape", "visible-strikethrough", "visible-nfkc", "visible-entity", "visible-tag", "visible-html-heading", "visible-link", "visible-link-setext", "r4-comment-reopen-link", "visible-container", "r4-wide-ordered-setext", "r4-wide-one-setext", "visible-format-marker", "r4-zwsp-lead", "r4-zwsp-inner", "r4-soft-hyphen"))
 
 
 def _with_body(revert):
-    """The revert with the PLAIN BODY check reverted as well."""
+    """The revert with the BODY GRAMMAR prose line check reverted as well."""
     label, old, new, case, reverted_exit = revert
     old, new = (old if isinstance(old, tuple) else (old,)), (new if isinstance(new, tuple) else (new,))
-    return label, old + (_BODY_GUARD,), new + ("body_problem = None",), case, reverted_exit
+    return label, old + (_BODY_GUARD,), new + ("problem = None",), case, reverted_exit
 
 
 _DETAIL_REVERTS = tuple(_with_body(r) if r[0] in _ALSO_BODY else r for r in _DETAIL_REVERTS)
