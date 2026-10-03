@@ -41,7 +41,9 @@ an unknown entry), and fails closed on it: such an entry is refused or named, ne
 through or deleted. That holds for every output and for every other input this generator reads: LICENSE,
 skill-source.md, the hooks manifest and the evidence page are each read through the descriptor-anchored reader
 (O_NOFOLLOW on every component, O_NONBLOCK, fstat a regular file with exactly one link), so a hard link at a
-declared output or at one of those four inputs is refused, never read and accepted. The rule corpus is NOT read
+declared output or at one of those four inputs is refused, never read and accepted (so a hard-link-copied
+checkout, made with cp -al, is refused; an input's refusal says to break the link by copying the file and
+moving the copy over it, never to git rm it). The rule corpus is NOT read
 that way: it is read by gen_rules.load_corpus, a shared loader this generator does not change, and then this
 generator's own _rule_body rereads each included rule by plain path (for the source-corpus hash), with no link
 or type check. tools/check_manifest.py refuses a symlinked corpus source (exit 2), but neither it, the loader
@@ -114,20 +116,27 @@ ATTRIBUTION_SOURCE_URL = "https://github.com/jposluns/guardrails"
 # it to site/evidence.html); this gate verifies, it never writes there.
 EVIDENCE_PARTS = ("docs", "evidence.md")
 # Canonical form, judged on the RAW page text (comments and markup included), so the gate never models how a
-# styled form renders. What the counter checks: the phrase 'served from the' with plain whitespace between its
-# words (any case, any whitespace run, so a wrapped line counts) must occur EXACTLY ONCE, and that one occurrence
-# must be the plain canonical sentence 'served from the install page is X.Y.Z' (lower-case, single-spaced,
-# outside an HTML comment) with X.Y.Z the declared version, followed only by the end of the text, whitespace, or
-# a sentence-final '.' that is itself followed by the end of the text, whitespace or '<'. A bare '<' straight
-# after the version is refused. So a second such mention (styled, linked, commented, capitalized or wrapped)
-# fails, a styled, capitalized or wrapped canonical sentence fails, and so do '1.0.6&#45;rc1', '1.0.6.9',
-# '1.0.6-rc1', '**1.0.6**', '1.0.6<span>-rc1</span>' and '1.0.6<!---->-rc1'. Deliberate markup INSIDE the
-# phrase is NOT detected: 'served <em>from</em> the', 'served&nbsp;from the' or 'served *from* the' is not
-# counted as a mention, and the one canonical sentence passes wherever it sits in the raw text (inside a title
-# attribute or a script block too). A forgotten bump leaves the stale plain sentence, which is caught.
+# styled form renders. Scope (D-399-EVIDENCE-SCOPE): the check catches a FORGOTTEN bump, a stale or missing
+# plain sentence; it is not a defence against a deliberately misleading page. What the counter checks: the
+# phrase 'served from the' with plain whitespace between its words (any case, any whitespace run, so a wrapped
+# line counts) must occur EXACTLY ONCE, and that one occurrence must be the plain canonical sentence 'served
+# from the install page is X.Y.Z' (lower-case, single-spaced, not after a '<!--' that no '-->' closes before
+# it) with X.Y.Z the declared version, followed only by the end of the text, a space, tab or newline, or a '.'
+# that is itself followed by the end of the text, a space, tab, newline or '<'. So a second plain-whitespace
+# mention (stale, styled, linked, commented or capitalized) fails; a capitalized, wrapped or commented
+# canonical sentence, or one with markup or an entity between the phrase and the version, fails; and so do
+# '1.0.6&#45;rc1', '1.0.6.9', '1.0.6-rc1', '**1.0.6**', '1.0.6<span>-rc1</span>', '1.0.6<!---->-rc1' and any
+# other character (a non-ASCII space too) straight after the version. Out of scope, NOT detected: deliberate
+# markup or entities around or inside the phrase or the version, for example 'served <b>from</b> the',
+# 'served&nbsp;from the' or 'served *from* the' (not counted as a mention), '1.0.6.<!---->9' or '1.0.6.<b>9</b>'
+# (a '.' then '<' passes whatever follows the '<'), and a styled whole sentence ('<b>The chat skill now served
+# from the install page is 1.0.6.</b>'); the one canonical sentence passes wherever it sits in the raw text
+# (inside a title attribute or a script block too). Known false refusal: the comment test is textual, so a
+# '<!--' earlier on the page inside an attribute value (title="<!--") counts as an open comment and refuses
+# the plain sentence; reword that value.
 _EVIDENCE_MENTION = re.compile(r"served\s+from\s+the", re.I)
 _EVIDENCE_CANON = "served from the install page is "
-_EVIDENCE_VERSION_END = re.compile(r"(?:\Z|\s|\.(?:\Z|\s|<))")
+_EVIDENCE_VERSION_END = re.compile(r"(?:\Z|[ \t\n]|\.(?:\Z|[ \t\n]|<))")
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
@@ -609,7 +618,7 @@ def _open_dir_fd(root_fd, rel_parts, target_rel, create=False):
         raise
 
 
-def _read_output(root_fd, root, path, binary, single_link=False):
+def _read_output(root_fd, root, path, binary, single_link=False, is_input=False):
     """The current content of a generated output (or an input the gate reads: LICENSE, skill-source.md, the
     hooks manifest, the evidence page), or None when absent. Descriptor-anchored: the parent is opened by
     _open_dir_fd from the run's root descriptor and the target with O_NOFOLLOW relative to it, then
@@ -617,7 +626,9 @@ def _read_output(root_fd, root, path, binary, single_link=False):
     parent walk, is refused with OSError (exit 2), never read through (O_NONBLOCK keeps a FIFO at the name
     from blocking the open; it is then refused by the fstat check). With single_link (every declared output,
     every _read_input input and the evidence page) a file with more than one hard link is refused too: its bytes are shared with a name outside this
-    generator's control, so it is never read and accepted as the output."""
+    generator's control, so it is never read and accepted as the output. With is_input (the four inputs) that
+    refusal names the file as an input and says to break the link (copy the file and move the copy over it),
+    never to remove it; an output's refusal names the removal (_remove_hint)."""
     rel = Path(path).relative_to(root)
     parent_fd = _open_dir_fd(root_fd, rel.parts[:-1], rel.as_posix())
     if parent_fd is None:
@@ -635,6 +646,12 @@ def _read_output(root_fd, root, path, binary, single_link=False):
             st = os.fstat(fh.fileno())
             if not stat.S_ISREG(st.st_mode):
                 raise _refusal(rel.as_posix(), rel.as_posix(), "regular file")
+            if single_link and st.st_nlink != 1 and is_input:
+                raise OSError("refusing {0}: it is an input with {1} hard links (its bytes are shared with a name "
+                              "outside this generator's control, as in a hard-link-copied checkout such as cp -al), "
+                              "so it is not read; break the link by copying the file and moving the copy over it "
+                              "(cp {0} {0}.copy, then mv {0}.copy {0}), never git rm it, and rerun".format(
+                                  rel.as_posix(), st.st_nlink))
             if single_link and st.st_nlink != 1:
                 raise OSError("refusing {0}: it has {1} hard links, so it is not read, accepted or written as a "
                               "generated output (remove the other link, or {2}, and rerun)".format(
@@ -651,7 +668,7 @@ def _read_input(root_fd, root, parts):
     non-regular entry at it, or a symlink on its parent walk, is refused (OSError, exit 2), never read through,
     accepted or blocked on. An absent input raises
     FileNotFoundError (exit 2); invalid UTF-8 raises UnicodeDecodeError, a ValueError (exit 2)."""
-    text = _read_output(root_fd, root, root.joinpath(*parts), False, single_link=True)
+    text = _read_output(root_fd, root, root.joinpath(*parts), False, single_link=True, is_input=True)
     if text is None:
         raise FileNotFoundError(errno.ENOENT, "required source is missing", "/".join(parts))
     return text
@@ -999,7 +1016,8 @@ def run_gen(root, check):
         evidence_problem = None
         if check and binary:
             want = zip_versioned_version()
-            text = _read_output(root_fd, root, root.joinpath(*EVIDENCE_PARTS), False, single_link=True)
+            text = _read_output(root_fd, root, root.joinpath(*EVIDENCE_PARTS), False, single_link=True,
+                                is_input=True)
             evidence_problem = evidence_sentence_problem(text, want)
     except (OSError, UnicodeError) as exc:
         # UnicodeError (UnicodeDecodeError) covers the generated-TARGET reads above (the standalone text
@@ -1029,10 +1047,11 @@ def evidence_sentence_problem(text, want):
     canon = _EVIDENCE_CANON + want
     rule = ("docs/evidence.md must mention 'served from the' (counted with plain whitespace between its words) "
             "exactly once, in the one plain canonical sentence '{}' (the declared skill version; lower-case and "
-            "single-spaced on one line, outside any comment, with no markup, link or entity inside it, and the "
-            "version followed only by whitespace, the end of the text or a sentence-final '.' that is itself "
-            "followed by whitespace, '<' or the end; markup inside the phrase itself is not detected)".format(
-                canon))
+            "single-spaced on one line, not after an unclosed '<!--' (one inside an attribute value counts too), "
+            "with no markup, link or entity between the phrase and the version, and the version followed only by "
+            "a space, tab, newline or the end of the text, or by a '.' that is itself followed by one of those or "
+            "'<'). This check catches a stale or missing plain sentence (a forgotten bump); deliberate markup or "
+            "entities around or inside the phrase or the version are out of its scope".format(canon))
     if text is None:
         return "{}, but the page is missing; restore docs/evidence.md".format(rule)
     found = list(_EVIDENCE_MENTION.finditer(text))
@@ -1724,6 +1743,7 @@ def self_test_main():
             for chk in (True, False):
                 code, out = capture(hard, chk)
                 if (code != 2 or "hard links" not in out or INSTRUCTIONS_PARTS[-1] not in out
+                        or "remove it with git rm" not in out or "is an input" in out
                         or outside_h.read_text(encoding="utf-8") != (edit or fresh)
                         or os.lstat(str(instr_h)).st_nlink != 2):
                     failures.append("a hard-linked output ({}) expected exit 2 naming it with both names "
@@ -1763,10 +1783,12 @@ def self_test_main():
         cur_line = "The chat skill now served from the install page is {} under the Apache License 2.0.\n"
         # The canonical-form rule (round-4 QA, both reviews): the raw page must mention 'served from the'
         # exactly once, in the one plain canonical sentence. Each of these is drift (exit 1) naming the page:
-        # a second mention, styled, linked or commented; a styled, capitalized, wrapped or commented current
-        # sentence; and a version followed by anything but whitespace, the end or a sentence-final '.'.
+        # a second mention, styled, linked or commented; a current sentence with markup or an entity between
+        # the phrase and the version, or capitalized, wrapped or commented; and a version followed by anything
+        # but a space, tab, newline, the end or a '.' (markup around the whole sentence is out of scope).
         # Red if the gate reads only the first mention, counts only plain or only lower-case mentions (drops
-        # re.I), strips comments, models rendering, or relaxes the version's end (a bare '<' after it).
+        # re.I), strips comments, models rendering, or relaxes the version's end (a bare '<' or a non-ASCII
+        # space after it).
         bad_pages = (
             ("a second conflicting sentence", cur_line.format(ver) + cur_line.format("0.0.1")),
             ("a second sentence wrapped across lines", cur_line.format(ver)
@@ -1805,6 +1827,8 @@ def self_test_main():
             ("a span-wrapped pre-release suffix", cur_line.format(ver + "<span>-rc1</span>")),
             ("an empty-comment pre-release suffix", cur_line.format(ver + "<!---->-rc1")),
             ("a bold pre-release suffix", cur_line.format(ver + "<b>-rc1</b>")),
+            ("a hair space before a trailing component", cur_line.format(ver + "\u200a.9")),
+            ("a non-breaking space after the version", cur_line.format(ver + "\u00a0")),
         )
         for label, text in bad_pages:
             ev_md.write_text(text, encoding="utf-8")
@@ -1818,7 +1842,7 @@ def self_test_main():
             failures.append("a missing evidence page expected --check exit 1 naming it missing, got {}\n{}".format(
                 code, out))
         # Clean: the one plain canonical sentence, its version followed by a space, the end of the page or a
-        # sentence-final dot (itself followed by whitespace, '<' or the end), including the current page's own
+        # dot (itself followed by a space, tab, newline, '<' or the end), including the current page's own
         # list item.
         page_li = ('      <li><b style="color:var(--ink)">Version:</b> 1.0.5, the chat-assistant Skill. The chat '
                    'skill now served from the install page is {} under the Apache License 2.0.</li>\n')
@@ -1973,7 +1997,8 @@ def self_test_main():
         #     orphan sits in its reserved tree (an ORPHAN SCAN that reopens exits 2); an undeclared entry sits in
         #     its site/downloads (an ALLOW-LIST scan that reopens exits 2); and its evidence page names a stale
         #     version, so a second leg runs --check with the same swap on the now current real tree (the
-        #     EVIDENCE read that reopens reports drift, exit 1).
+        #     EVIDENCE read that reopens reports drift, exit 1). Each leg also asserts the swap ran, so a run that
+        #     bypasses _open_root (and so is never swapped) goes red instead of passing vacuously.
         rp = tmp / "rootpin"
         rp.mkdir()
         _write_fixture(rp, good_src)
@@ -2010,6 +2035,9 @@ def self_test_main():
             code, out = capture(rp, False)
         finally:
             globals()["_open_root"] = real_open_root
+        if not rp_state["done"]:
+            failures.append("the regen never opened its root through _open_root, so the root swap never ran "
+                            "(the root-pin leg proves nothing)\n{}".format(out))
         rp_real = Path(str(rp) + ".real") if rp_state["done"] else rp
         for parts in (INSTRUCTIONS_PARTS, RESERVED_PARTS + ("SKILL.md",)):
             rp_text = rp_real.joinpath(*parts).read_text(encoding="utf-8")
@@ -2039,6 +2067,9 @@ def self_test_main():
             code, out = capture(rp, True)
         finally:
             globals()["_open_root"] = real_open_root
+        if not rp_state["done"]:
+            failures.append("--check never opened its root through _open_root, so the root swap never ran "
+                            "(the root-pin leg proves nothing)\n{}".format(out))
         if code != 0:
             failures.append("with the root pinned once, --check on the current real tree expected exit 0 (red if "
                             "the evidence read or another walk reopens the root by path), got {}\n{}".format(
@@ -2069,8 +2100,9 @@ def self_test_main():
             target.unlink()
             target.write_bytes(original)
         # A hard link at an input (its other name outside the tree) is refused too, in both modes (exit 2, named
-        # with its link count, the zip unchanged), and at the evidence page under --check. Red if an input or
-        # the evidence page is read without single_link.
+        # with its link count, the zip unchanged), and at the evidence page under --check; the refusal names it
+        # an input and says to break the link, never to git rm it. Red if an input or the evidence page is read
+        # without single_link or without is_input (the output message's removal hint).
         for parts, modes in ((LICENSE_PARTS, (True, False)), (SKILL_SRC_PARTS, (True, False)),
                              (IDENTITY_MANIFEST_PARTS, (True, False)), (EVIDENCE_PARTS, (True,))):
             target = inp.joinpath(*parts)
@@ -2079,9 +2111,12 @@ def self_test_main():
             for chk in modes:
                 code, out = capture(inp, chk)
                 if (code != 2 or "hard links" not in out or "/".join(parts) not in out
+                        or "is an input" not in out or "moving the copy over it" not in out
+                        or "remove it with git rm" in out
                         or inp.joinpath(*ZIP_PARTS).read_bytes() != inp_zip):
-                    failures.append("a hard-linked input {} expected exit 2 refusing it with the zip unchanged "
-                                    "(check={}), got {}\n{}".format("/".join(parts), chk, code, out))
+                    failures.append("a hard-linked input {} expected exit 2 refusing it as an input (break the "
+                                    "link, never git rm) with the zip unchanged (check={}), got {}\n{}".format(
+                                        "/".join(parts), chk, code, out))
             outside_hl.unlink()
         # A FIFO at LICENSE is refused at once in both modes, never blocking the run; and a FIFO at one output
         # plus a drifted other output makes a normal run exit 2 having written nothing (the pre-write pass;
@@ -2158,8 +2193,10 @@ def self_test_main():
           "evidence page, are refused (exit 2); a FIFO at "
           "one output plus a drifted other output exits 2 having written nothing; the evidence page must "
           "mention 'served from the' exactly once, in the one plain canonical sentence naming the declared "
-          "version (a second, styled, linked, commented, capitalized or wrapped mention, a longer version, a "
-          "suffix and a missing page are --check drift); a facet-misplaced rule fails closed (exit 2).")
+          "version (a second plain-whitespace mention, a stale, capitalized, wrapped or commented sentence, a "
+          "longer version or suffix straight after the version, and a missing page are --check drift; "
+          "deliberate markup around or inside the phrase or after a '.' is out of scope); a hard-linked input "
+          "is refused as an input (break the link, never git rm); a facet-misplaced rule fails closed (exit 2).")
     return 0
 
 

@@ -42,17 +42,24 @@ signed; the independently published digest is the authenticated reference.
        binary allowed past the portability text scan).
      - d. `.aiqt/core/ownership.toml`: the `[checkout]` `binary` list (the version-numbered zip is a
        tracked binary artefact).
-     - e. `docs/evidence.md`: the install-page sentence must name the new skill version. The page must
-       mention "served from the" exactly once (any case, comments and markup included, counted with plain
-       whitespace between the three words), in the one plain canonical sentence "served from the install
-       page is <version>" on one line, with no markup, link, entity or comment in it, and the version
-       followed only by a space, the line end or a sentence-final `.` (a `<` may follow that `.`, never the
-       version itself, so `1.0.6<b>-rc1</b>` is refused). `gen_skill.py --check` verifies that sentence
-       against the declared skill version and reports any other plain-whitespace mention (styled, linked,
-       commented, capitalized or a second sentence), a stale or missing sentence, or a missing page as
-       drift. Deliberate markup or an entity inside the phrase itself (`served <b>from</b> the`,
-       `served&nbsp;from the`) is not counted as a mention and so is not detected. After editing it, regenerate the site with `python3 tools/gen_site.py` (otherwise
+     - e. `docs/evidence.md`: the install-page sentence must name the new skill version. This check exists
+       to catch a forgotten bump: `gen_skill.py --check` reports a stale or missing plain sentence, or a
+       missing page, as drift. The page must mention "served from the" exactly once (any case, comments and
+       markup included, counted with plain whitespace between the three words), in the one plain canonical
+       sentence "served from the install page is <version>" on one line, lower-case, not inside an HTML
+       comment, with no markup, link or entity between the phrase and the version, and the version followed
+       only by a space, a tab, the line end or a `.` (that `.` followed only by a space, a tab, the line end
+       or `<`; so `1.0.6.9` and `1.0.6<b>-rc1</b>` are refused). A second plain-whitespace mention (stale,
+       styled, linked, commented or capitalized) is drift too. Deliberate markup or entities around or inside
+       the phrase or the version are out of its scope and are not detected, for example `1.0.6.<!---->9`,
+       `served <b>from</b> the`, `served&nbsp;from the` or a whole sentence wrapped in `<b>`. Known false
+       refusal: a `<!--` earlier on the page, even inside an attribute value such as `title="<!--"`, counts
+       as an open comment and refuses the plain sentence; reword that value. After editing it, regenerate the site with `python3 tools/gen_site.py` (otherwise
        `gen_site.py --check` reports `drift: site/evidence.html`).
+   Run the bump in a normal git clone or worktree: `gen_skill.py` refuses (exit 2) any input or output
+   with more than one hard link, so a hard-link-copied checkout (`cp -al`) is refused. For an input
+   (`LICENSE`, `skill-source.md`, the hooks manifest, `docs/evidence.md`) break the link by copying the
+   file and moving the copy over it; never `git rm` an input.
    Then run `python3 tools/gen_skill.py`. The generator never deletes a file: this first run refuses
    (exit 2) and names the stale prior-version `aiqt-skill-<old>.zip`. Remove it yourself with
    `git rm site/downloads/aiqt-skill-<old>.zip`, then rerun `python3 tools/gen_skill.py`, which repacks
