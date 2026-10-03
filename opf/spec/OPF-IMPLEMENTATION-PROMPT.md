@@ -511,31 +511,38 @@ reading, and it blocks activation until the maintainer resolves it.
     parents, and step 14 says how the pre-commit check compares one.
 23. **Same-act supersession of a handoff, and the contribution re-send.** Section 8.5 says "Posting
     a new handoff MUST supersede the previous in the same act". Section 8.4 says "where the type
-    records it, the superseded record's terminal state MUST reflect it". Section 8.8 gives no
-    operation for this: `create` writes "one new record" with an allowed delta of "the new rows
-    appended, the counters advanced", and `transition` changes one record's status. This prompt's
-    reading, the smallest it found consistent with sections 8.4, 8.5 and 8.8: a single writer
-    operation that creates the new handoff linking `supersedes` to its predecessor and moves the
-    predecessor to `superseded`, in one journaled transaction under the full section 8.8 operation
-    sequence; its allowed delta is the `create` delta plus exactly one `transition` delta for the
-    predecessor; the `/proposed` rule applies to the predecessor's move as to any other terminal
-    transition, so an assistant or automation lands `superseded/proposed` with `proposed_from`; and
-    it appends one lifecycle worklog entry per changed record (section 6.2, "one entry per change").
-    Section 8.4 largely answers whether a `superseded/proposed` predecessor satisfies "reflect it":
-    the rule asks for the superseded record's "terminal state", and section 8.4 also says "A
-    `/proposed` status is not terminal: gates and completion claims MUST treat the record as
-    unfinished". This prompt's reading, which follows that text and which the maintainer should
-    confirm: a `superseded/proposed` predecessor does not yet reflect the supersession, and it does
-    once a maintainer ratifies it. The specification does not say what happens when a maintainer
-    rejects it back to `current` while another handoff is `current`; this prompt's reading is that
-    such a rejection refuses before anything is written, since the result would break the
-    one-`current` rule. Ask the maintainer to rule on all of this before you enable the operation.
-    The same-act rule is the handoff's alone. Of a contribution, section 8.5 says only "A re-send
-    MUST be a new record linking `supersedes`; the superseded record records `superseded`", and the
-    contribution table allows `sent` > `superseded`, so the existing `transition` and `create`
-    perform a re-send (step 10). Whether a `superseded/proposed` contribution records the
-    supersession is the same question, and section 8.4 points the same way, so this prompt's
-    reading, until the maintainer rules, is that it does not: only an unqualified `superseded`
+    records it, the superseded record's terminal state MUST reflect it". Section 8.4 also says "A
+    terminal transition performed by an actor whose `kind` is `assistant` or `automation` MUST land
+    with the `/proposed` qualifier" and "A `/proposed` status is not terminal: gates and completion
+    claims MUST treat the record as unfinished". So a `superseded/proposed` predecessor does not
+    reflect the supersession, and a replacement that leaves its predecessor there has not superseded
+    it in the same act; section 8.4 settles that. Section 8.8 gives no operation for the handoff:
+    `create` writes "one new record" with an allowed delta of "the new rows appended, the counters
+    advanced", and `transition` changes one record's status. This prompt's reading, the smallest it
+    found consistent with sections 8.4, 8.5 and 8.8, is the maintainer-performed replacement: a
+    single writer operation, performed by a maintainer actor, that creates the new handoff linking
+    `supersedes` to its predecessor and moves the predecessor to unqualified `superseded`, in one
+    journaled transaction under the full section 8.8 operation sequence. Its allowed delta is the
+    `create` delta plus exactly one `transition` delta for the predecessor, with no `proposed_from`,
+    and it appends one lifecycle worklog entry per changed record (section 6.2, "one entry per
+    change"). The predecessor then holds an unqualified terminal state, not a `/proposed` one, so no
+    ratification or rejection follows. An assistant or automation actor's move of the predecessor
+    would have to land `superseded/proposed`, so that actor cannot complete the supersession in the
+    act. The writer refuses an assistant or automation replacement before anything is written,
+    naming the maintainer-performed replacement as the path. That refusal stands while no operation
+    lets such an actor complete the supersession in the same act; the specification defines none,
+    and its standing authorization covers only a contribution's `sent` (section 8.4). For the same
+    reason, this prompt's reading is that no handoff leaves `current` outside that operation:
+    `transition` refuses a handoff's `current` > `superseded` move for every actor, naming the
+    maintainer-performed replacement, and a plain `create` refuses a handoff while a clean handoff
+    authored by a non-importer actor is `current`. When no such handoff is `current`, any actor may
+    `create` one, since entering `current`, the initial state, is not a terminal transition. Ask the
+    maintainer to rule on this before you enable the operation. The same-act rule is the handoff's
+    alone. Of a contribution, section 8.5 says only "A re-send MUST be a new record linking
+    `supersedes`; the superseded record records `superseded`", and the contribution table allows
+    `sent` > `superseded`, so the existing `transition` and `create` perform a re-send (step 10).
+    Section 8.4 settles whether a `superseded/proposed` contribution records the supersession, for
+    the reason given above for the handoff: it does not, and only an unqualified `superseded`
     records it. That state change is owed only by a predecessor that can still make it. Section 8.4
     says "Where the superseded record is immutable, including every imported record, its recorded
     state MUST stand and the link alone records the supersession". Section 8.6 says that a
@@ -554,19 +561,14 @@ reading, and it blocks activation until the maintainer resolves it.
     immutable history: `create` accepts a same-type `supersedes` link to it whatever state it
     records, checks no state on it and changes nothing on it, and the link discharges no current
     obligation. A fresh store holds no such record, so this case is tested only on synthetic
-    fixtures (step 10). If the maintainer instead rules that `superseded/proposed` records the
-    supersession, `create` also accepts a non-importer predecessor at `superseded/proposed`; this
-    prompt's reading for that case is that a maintainer's rejection of the predecessor back to
-    `sent` then refuses before anything is written while a contribution links `supersedes` to it,
-    since the rejection would leave a re-send superseding a record that no longer records
-    `superseded`. Ratifying first leaves an intermediate state of its own, which this prompt
+    fixtures (step 10). Ratifying first leaves an intermediate state of its own, which this prompt
     discloses: from the predecessor's transition until the re-send is created, a committed
     contribution sits at `superseded`, or at `superseded/proposed` until the ratification, with no
     record linking `supersedes` to it, across two commits and, for an assistant's re-send, for as
     long as the maintainer takes to ratify. Section 8.5 states no same-act rule for a re-send, so
     this prompt's reading is that the validator reports no finding for that state; if the maintainer
-    rules otherwise, a re-send needs a same-act operation like the handoff's, and step 10 follows
-    that ruling.
+    rules otherwise, a re-send needs a same-act operation like the handoff's maintainer-performed
+    replacement, and step 10 follows that ruling.
 24. **Pointer and sync-target agreement for the in-repo default.** Section 11 lists "pointer and
     sync-target agreement (the committed pointer, the manifest's recorded sync target, and the store
     repository's actual remote agree; section 5.6)". In the in-repo default the pointer is
@@ -733,21 +735,34 @@ reading, and it blocks activation until the maintainer resolves it.
       - The reading 1 remedy, for shape B, through the writer on the store at its declared 1.1.0 or
         1.2.0 under open point 21's grading: the maintainer `create`s a new pending_decision PD-4 at
         `open` whose `links` already hold `supersedes` to PD-1, and the change is committed (open
-        point 22). While PD-4 is open the doctor counts its link (section 8.8, "the doctor counts a
-        `supersedes` link from a proposal too"), so PD-3 stays the chain's one current resolution.
-        The maintainer then `transition`s PD-4 to unqualified `decided` with its resolution bundle,
-        appending `supersedes` to PD-3, and the change is committed. PD-3 is a decided, schema-valid
-        chain head, and following `supersedes` links from PD-3 reaches PD-2 and PD-1, never PD-4, so
-        the section 8.8 target checks pass ("its own chain MUST NOT lead back to the superseding
+        point 22). While PD-4 is open the doctor counts its link, since section 8.8 makes the chain
+        "a connected component over `supersedes` links in either direction" and names no status a
+        linking record must hold, and counts a link from a `/proposed` landing too ("the doctor
+        counts a `supersedes` link from a proposal too"); that this covers an `open` record is this
+        prompt's reading. So PD-3 stays the chain's one current resolution. The maintainer then
+        `transition`s PD-4 to unqualified `decided` with its resolution bundle, appending
+        `supersedes` to PD-3, and the change is committed. PD-3 is a decided, schema-valid chain
+        head, and following `supersedes` links from PD-3 reaches PD-2 and PD-1, never PD-4, so the
+        section 8.8 target checks pass ("its own chain MUST NOT lead back to the superseding
         record", which this prompt reads as following the target's `supersedes` links); the chain
         rule then finds one current resolution, PD-4. The retried upgrade finds PD-1 and PD-3 each
         superseded by PD-4, a non-importer record, so PD-4 is the one current resolution and the
-        store reaches VALID. Section 8.8 says `create` writes "one new record of an enabled baseline
-        type, in the type's initial state" and states no restriction on the links it carries; its
-        `supersedes` target checks bind the link a `transition` appends. Reading that as permitting
-        a `supersedes` link at `create` is this prompt's reading; ask the maintainer to confirm it
-        with the ruling. Neither link targets an importer-authored record. This remedy does not
-        apply under reading 2, where shape B needs none.
+        store reaches VALID. This remedy rests on two readings, the one of "its own chain" above and
+        the one of `create` below. Section 8.8 says `create` writes "one new record of an enabled
+        baseline type, in the type's initial state" and states no restriction on the links it
+        carries; its `supersedes` target checks bind the link a `transition` appends. Reading that
+        as permitting a `supersedes` link at `create` is this prompt's reading; ask the maintainer
+        to confirm it with the ruling. Section 8.8 points the same way when it says "So `transition`
+        also refuses to decide a record that a pending_decision not at unqualified `decided` already
+        supersedes", which assumes that a pending_decision not yet decided, such as an `open` one,
+        can carry a `supersedes` link, and only `create` can write it there. If the maintainer
+        chooses reading 1 but reads "its own chain" as the connected component, which already holds
+        PD-4 through its link to PD-1, or rules that `create` may not write a `supersedes` link,
+        under which nothing takes PD-1 out of current authority, since PD-1 is not a chain head
+        while PD-2 links to it, shape B has no writer-performable remedy, which section 9.2 does not
+        allow ("every named remedy MUST be performable through the sanctioned writer"); report that
+        as a blocker of step 8. Neither link targets an importer-authored record. This remedy does
+        not apply under reading 2, where shape B needs none.
       - The reading 2 remedy, for shape A, is the one section 8.6 names, "a new clean decision
         linking back", through the writer on the store at its declared 1.1.0 or 1.2.0 under open
         point 21's grading: the maintainer `create`s a new pending_decision PD-3 at `open`, the
@@ -875,7 +890,13 @@ Implement resolution exactly as sections 4.3 (The pointer), 4.4 (The machine sto
   every immediate subdirectory, including `journals/`, fails closed on a reserved-name match or
   ambiguity, and reads no deeper there (end of section 4.2).
 - `.opf.local.toml` is never committed and is ignored by version control; the committed pointer
-  must be safe to publish (section 4.3).
+  must be safe to publish (section 4.3). Section 4.3 states that but names no check and no writer
+  for it, so this prompt's choice is this: the step 6 validator reports a finding when
+  `.opf.local.toml` is in the product repository's index or at its `HEAD`, which the step 14
+  pre-commit check and the step 13 CI gate therefore block, and your report asks the maintainer to
+  add an ignore rule for it. No OPF operation writes that rule: the only ignore file the
+  specification has init and upgrade render is `.working/.gitignore` (section 4.2), which does not
+  cover the product root.
 
 Acceptance checks:
 
@@ -883,6 +904,8 @@ Acceptance checks:
   exists at the product root.
 - Two subdirectories with valid manifests give cannot-evaluate; renaming the machine
   subdirectory still resolves.
+- With `.opf.local.toml` staged in the product repository, the validator reports a finding naming
+  it; with the file present, untracked and ignored, it reports none for it.
 - A manifest with a mistyped `standard` value is not discovered, and the result is cannot-evaluate,
   not an empty store (section 17, Residual coverage disclosures); its message does not name
   `opf init`. A repository with no pointer and no `.working/` gives the message that names
@@ -994,10 +1017,12 @@ Implement section 8 (Record model) in full for the baseline types.
   allows, and a re-send is a new record linking `supersedes` while the superseded record records
   `superseded`; a `maintainer_decision` takes `actor.kind` `maintainer` (or `importer`, which a
   fresh store never uses). Section 8.8 gives the writer no same-act operation for the handoff
-  supersession; that gap is open point 23. A contribution re-send has no same-act rule and is an
-  ordinary `transition` and `create` (step 10), with a non-importer predecessor ratified first under
-  open point 23's reading; an importer-authored predecessor keeps its recorded state and the link
-  alone records the supersession (sections 8.4 and 8.6).
+  supersession; that gap is open point 23, whose reading is a maintainer-performed replacement and a
+  refusal of an assistant or automation replacement. A contribution re-send has no same-act rule and
+  is an ordinary `transition` and `create` (step 10), with a non-importer predecessor at unqualified
+  `superseded` first, since a `/proposed` status is not terminal (section 8.4; open point 23); an
+  importer-authored predecessor keeps its recorded state and the link alone records the supersession
+  (sections 8.4 and 8.6).
 - **No resurrection and supersession.** A record in an unqualified terminal state never re-enters
   a working state; a revived concern is a new record linking the old one; supersession is a
   `supersedes` link, and where the type records it, the superseded record's terminal state
@@ -1107,6 +1132,8 @@ containment.
   gitignore fallback (section 5.1, Always a git repository). How it treats the views that init
   leaves unstaged, and the files and views that the step 8 upgrade creates and must not stage, is
   open point 20, whose reading names the only exceptions.
+- A tracked `.opf.local.toml` is a finding (step 2; this prompt's choice, not a check the
+  specification names).
 - Transition legality compares the store with the prior committed snapshot (section 8.8, item 7);
   which commit that is, is open point 22, whose reading is the store repository's `HEAD`, read at
   the prior snapshot's path by file name alone, without discovery at `HEAD`: that path is the
@@ -1145,9 +1172,11 @@ containment.
   C-CONTAINMENT recognizing the imported managed leaves and C-LINKS resolving links over both series
   (section 8.3). In your project's fresh store the imported series is empty and no record is
   importer-authored, so they evaluate empty inputs there; your tests still exercise them on
-  throwaway stores, the step 8 fixtures included. Treat a missing imported leaf as a finding:
-  section 4.2 requires init to create every one (this is a reading of that rule, not a check the
-  specification names).
+  throwaway stores, the step 8 fixtures included. A throwaway store at 1.3.0 whose imported series
+  must grade valid uses `import_status = "none"` and a preserved original for each imported record
+  whose `source_sha256` matches, under the reading step 10 labels for its check (a) of re-sends that
+  supersede immutable history. Treat a missing imported leaf as a finding: section 4.2 requires init
+  to create every one (this is a reading of that rule, not a check the specification names).
 - The section 8.6 authority firewall covers "every record whose `actor.kind` is `importer`, in the
   imported series or written into the clean series by the pre-1.3.0 legacy importer", and
   C-IMPORTED-SEGREGATION enforces it over importer-authored records in both series (section 8.6);
@@ -1764,10 +1793,15 @@ Implement section 8.8 (Authoring operations). Subcommands:
   released span and a `detail` that opens with the lifecycle grammar.
 - Handoff supersession: section 8.5 says "Posting a new handoff MUST supersede the previous in the
   same act", and section 8.8 gives no operation for it. Implement it only as open point 23
-  describes, once the maintainer has ruled. Until then, this prompt's reading is that `create`
-  refuses a second `current` handoff rather than posting it in two acts; report that gap, since
-  section 14.1 says enforcement "MUST NOT ship before the writer can perform every operation it
-  forces" (step 14, Ordering).
+  describes, as the maintainer-performed replacement, once the maintainer has ruled. Until then,
+  this prompt's reading is that `create` refuses a second `current` handoff rather than posting it
+  in two acts; report that gap, since section 14.1 says enforcement "MUST NOT ship before the writer
+  can perform every operation it forces" (step 14, Ordering). Once it is implemented, the operation
+  still refuses an assistant or automation actor before anything is written, naming the
+  maintainer-performed replacement as the path, since that actor's move of the predecessor would
+  land `superseded/proposed`, which is not terminal (section 8.4), and the supersession would not
+  complete in the same act. `transition` refuses a handoff's `current` > `superseded` move for every
+  actor, so no handoff leaves `current` outside that operation (open point 23).
 - Contribution re-send: section 8.5 says "A re-send MUST be a new record linking `supersedes`; the
   superseded record records `superseded`", and states no same-act rule for it, so the existing verbs
   perform it: a `transition` of the old contribution from `sent` to `superseded` (an assistant or
@@ -1777,19 +1811,18 @@ Implement section 8.8 (Authoring operations). Subcommands:
   from open point 22. The opposite intermediate state remains, and open point 23 discloses it: until
   the re-send is created, a committed contribution sits at `superseded`, or `superseded/proposed`,
   with no record linking `supersedes` to it, and the validator reports no finding for that (open
-  point 23's reading). Whether a `superseded/proposed` record records the supersession is part of
-  open point 23, and until the maintainer rules, this prompt's reading there is that it does not. So
-  `create` refuses a contribution linking `supersedes` to a clean predecessor authored by a
-  non-importer actor that is not at unqualified `superseded`, naming the remedy, and an assistant's
-  re-send takes one more step before the `create`: a maintainer ratifies the predecessor's
-  `superseded/proposed`, and that ratification is committed. A maintainer's own re-send lands
-  unqualified `superseded` and needs no ratification. If the maintainer rules that
-  `superseded/proposed` records the supersession, follow open point 23 for that ruling instead. The
-  guard is for a predecessor that owes the state change. An importer-authored predecessor, in the
-  imported series or a legacy importer-authored clean record, is immutable history whose recorded
-  state stands (sections 8.4 and 8.6): `create` accepts a same-type `supersedes` link to it whatever
-  state it records, writes nothing to it, and never asks for a ratification that the writer could
-  not perform, since it refuses a transition on such a record (open point 23).
+  point 23's reading). A `superseded/proposed` record does not record the supersession, since a
+  `/proposed` status is not terminal (section 8.4; open point 23). So `create` refuses a
+  contribution linking `supersedes` to a clean predecessor authored by a non-importer actor that is
+  not at unqualified `superseded`, naming the remedy, and an assistant's re-send takes one more step
+  before the `create`: a maintainer ratifies the predecessor's `superseded/proposed`, and that
+  ratification is committed. A maintainer's own re-send lands unqualified `superseded` and needs no
+  ratification. The guard is for a predecessor that owes the state change. An importer-authored
+  predecessor, in the imported series or a legacy importer-authored clean record, is immutable
+  history whose recorded state stands (sections 8.4 and 8.6): `create` accepts a same-type
+  `supersedes` link to it whatever state it records, writes nothing to it, and never asks for a
+  ratification that the writer could not perform, since it refuses a transition on such a record
+  (open point 23).
 - Older stores: step 8 built `create` and `transition` for a store declaring 1.1.0 or 1.2.0, under
   the grading of open point 21, so every remedy of open point 28 was performable before activation.
   Extend the same two subcommands to the 1.3.0 format without changing their older-store
@@ -1840,8 +1873,17 @@ Acceptance checks:
 - A transition that the validator grades as the pending cannot-evaluate renders, exits 0 and
   reports the change as pending until commit; with any other cannot-evaluate in the store, or any
   finding other than a view drift that the verb's own render remedies, the same transition exits 2.
-- While a `current` handoff exists, `create` of another handoff refuses unless the open point 23
-  operation is implemented, and then the old handoff leaves `current` in the same transaction.
+- With no handoff `current`, an assistant's `create` of a handoff lands it at `current` and exits 0.
+  While a `current` handoff exists, a plain `create` of another handoff refuses and writes nothing
+  for every actor, and so does any actor's `transition` of that handoff to `superseded`. Once the
+  open point 23 operation is implemented: a maintainer's replacement of a committed `current`
+  handoff exits 0, and the one transaction leaves the new handoff at `current` linking `supersedes`
+  to the old one, the old one at unqualified `superseded` with no `proposed_from`, exactly one
+  `current` handoff, one lifecycle worklog entry per changed record, and a final validation that
+  reports valid. Killing the process between journal write and publication leaves the store, after
+  reconciliation, at its prestate or at that poststate, never with only one of the two handoffs
+  changed. An assistant's or automation's replacement of the same handoff refuses, names the
+  maintainer-performed replacement, and writes nothing, the old handoff still `current`.
 - An assistant re-send of a `sent` contribution: the assistant's `transition` lands the old record
   at `superseded/proposed` with `proposed_from = "sent"` and exits 0; after the test commits it,
   the assistant's `create` of the new contribution linking `supersedes` to it refuses, names the
@@ -1849,21 +1891,26 @@ Acceptance checks:
   the old record to unqualified `superseded` exits 0; after the test commits it, the same `create`
   lands the new record at `proposed` linking `supersedes` and exits 0; and each operation that exits
   0 appends its own lifecycle worklog entry. A maintainer's re-send, a `transition` to unqualified
-  `superseded`, a commit, then a `create`, exits 0 at each operation. If the maintainer has ruled
-  that `superseded/proposed` records the supersession, the assistant's `create` after the first
-  commit exits 0 instead, with no ratification step, and a maintainer's later rejection of the old
-  record back to `sent` refuses and writes nothing (open point 23); report the ruling with the
-  check.
+  `superseded`, a commit, then a `create`, exits 0 at each operation.
 - Re-sends that supersede immutable history, on synthetic fixtures only, never in your project's
-  store: (a) a store declaring 1.3.0 whose imported series holds a contribution at `acknowledged`;
-  and (b) a committed 1.2.0 fixture holding a synthetic legacy importer-authored clean contribution
-  at `sent`, upgraded by your step 8 upgrade to 1.3.0 and committed. In each, a maintainer's
-  `create` of a new contribution linking `supersedes` to that record lands the new record at
-  `proposed` and exits 0 with its final validation valid; the target's bytes and recorded state are
-  unchanged, and the allowed delta holds no transition delta for it; an assistant's `create` of the
-  same link also exits 0, asking for no ratification; and a maintainer's `transition` of the target
-  to `superseded` refuses as a transition on an importer-authored record and writes nothing
-  (sections 8.4, 8.6 and 8.8; open point 23). Check (b) rests on open point 25's interim reading.
+  store: (a) a store declaring 1.3.0 at `import_status = "none"` whose imported series holds a
+  contribution at `acknowledged`, with its preserved original at the store-relative path its
+  `import.source` names and a `source_sha256` that matches it (section 8.3); and (b) a committed
+  1.2.0 fixture holding a synthetic legacy importer-authored clean contribution at `sent`, upgraded
+  by your step 8 upgrade to 1.3.0 and committed. In each, a maintainer's `create` of a new
+  contribution linking `supersedes` to that record lands the new record at `proposed` and exits 0
+  with its final validation valid; the target's bytes and recorded state are unchanged, and the
+  allowed delta holds no transition delta for it; an assistant's `create` of the same link also
+  exits 0, asking for no ratification; and a maintainer's `transition` of the target to `superseded`
+  refuses as a transition on an importer-authored record and writes nothing (sections 8.4, 8.6 and
+  8.8; open point 23). Check (b) rests on open point 25's interim reading. Using `"none"` in check
+  (a) is this prompt's reading, so that the check does not depend on an adoption receipt, whose
+  format the specification does not give (open point 14): section 11 says "`import_status = "none"`
+  means clean start with no approved migrate-source import" and that a partial or complete status
+  that no adoption receipt or preserved legacy import evidence substantiates "MUST fail closed, as
+  does a missing, unreadable or contradictory input". If the maintainer rules that an imported
+  series under `"none"` is a contradictory input, check (a) waits on open point 14; report the
+  ruling with the check.
 - `done-with-receipt` appends a transition-form entry for the backlog item and a create-form entry
   for the receipt; and after an assistant lands `done/proposed`, `done-with-receipt` before any
   commit refuses and writes nothing, as do a `create` and a `worklog-append` while that transition
@@ -1954,8 +2001,9 @@ nothing rotates, and the step 6 validator already refuses an archive it cannot r
   named `toml`; section 4.2 says "the example name `toml` MUST NOT be hardcoded").
 - Only records in unqualified terminal states, other than worklog records, may rotate, so a
   `/proposed` record stays active. Worklog records rotate only as released, frozen spans. Open
-  records, active blocks, unresolved decisions, the current handoff and the unreleased worklog tail
-  never rotate, and at 1.3.0 the imported series never rotates.
+  records, active blocks, unresolved decisions, unresolved fragments, unexpired waivers, the current
+  handoff and the unreleased worklog tail never rotate (section 12), and at 1.3.0 the imported
+  series never rotates.
 - Each rotation writes that year's `archive.toml`, enumerating every moved ID (and, for the
   worklog, every moved span) and its destination. Counters are untouched. Validation confirms that
   every ID exists in exactly one active or archived location, and coverage gates read active and
@@ -2108,7 +2156,12 @@ platform." Wire all four, not only the platform you run on.
   the handoff operation, the writer cannot post a second handoff, so no deny rule may cover the
   handoff index. The deny hook then does not cover the whole record series, the own-platform
   denial check below and checklist item 17 do not pass, and you claim no conformance until the
-  ruling.
+  ruling. Once it is implemented, a maintainer posts a replacement handoff through the writer, and
+  the writer refuses an assistant's or automation's replacement under section 8.4 (open point 23).
+  This prompt's reading is that a deny rule on the handoff index then forces no operation the writer
+  cannot perform, since the `/proposed` rule of section 8.4, not the deny rule, keeps that actor
+  from completing the supersession; disclose that an assistant or automation cannot replace a
+  handoff.
 - **Residuals to disclose.** Per-clone hook installation and bypass, canonical hand edits, shell or
   interpreter wrapping, same-user tampering, and unverified platform denial (section 14.1), plus
   each platform's own residual, and, under open point 22, that CI does not re-evaluate the
@@ -2127,15 +2180,15 @@ Acceptance checks:
 - For each other platform with a hook, the hook-level probe denies the same two writes and allows
   the sanctioned writer and render paths, and the live probe is reported as run or as not run.
 - The pre-commit check blocks a commit that contains a hand-edited view.
-- Installed as both hooks, the check stops every `git merge` that would conclude without a conflict
-  before it creates a commit, naming `git commit` as the way to conclude it; after that stop the
-  merge result is in the index and `MERGE_HEAD` names the merged commit (or, on a git version that
-  leaves no `MERGE_HEAD`, the message names `git merge --no-commit`). With the merge concluded by
-  `git commit`, the check blocks a merge whose merged branch, committed with the hooks bypassed,
-  carries a hand-edited view; it allows a merge of a branch whose committed writer transitions leave
-  no other defect; and it blocks a merge commit whose result drops a record that either parent holds
-  or lowers a counter below its value in either parent, a `git merge -s ours` of a branch that added
-  a record included.
+- Installed as both hooks, the check stops every `git merge` that would create a merge commit
+  without a conflict before it creates that commit, naming `git commit` as the way to conclude it;
+  after that stop the merge result is in the index and `MERGE_HEAD` names the merged commit (or, on
+  a git version that leaves no `MERGE_HEAD`, the message names `git merge --no-commit`). With the
+  merge concluded by `git commit`, the check blocks a merge whose merged branch, committed with the
+  hooks bypassed, carries a hand-edited view; it allows a merge of a branch whose committed writer
+  transitions leave no other defect; and it blocks a merge commit whose result drops a record that
+  either parent holds or lowers a counter below its value in either parent, a `git merge -s ours` of
+  a branch that added a record included.
 - The pre-commit check allows a commit of a writer transition whose only remaining result is the
   pending cannot-evaluate with its matching lifecycle entry, and blocks the same commit when any
   other cannot-evaluate or any finding is present.
@@ -2216,12 +2269,13 @@ maintainer's ruling on an open point, report the ruling with it.
     init-created sources staged as exact entries; views unstaged; no commit created; final
     validation after the lease removal; a finalization or lock-release failure prevents exit 0.
 12. The record writer enforces the `/proposed` rule, the per-type transition table and rules of
-    section 8.5 (with the handoff supersession as ratified under open point 23, and the contribution
-    re-send as a `transition` and a `create`, a non-importer predecessor ratified first unless the
-    maintainer has ruled otherwise under open point 23, and an importer-authored predecessor left at
-    its recorded state), the resolution and delivery bundles, unqualified `done` only through
-    `done-with-receipt`, the lifecycle worklog entry, the eight-item operation sequence, and exits 0
-    or 2.
+    section 8.5 (with the handoff supersession as the maintainer-performed replacement of open point
+    23, as ratified, completing the supersession in the same act and refusing an assistant or
+    automation replacement, and the contribution re-send as a `transition` and a `create`, a
+    non-importer predecessor at unqualified `superseded` first, and an importer-authored
+    predecessor left at its recorded state), the resolution and delivery bundles, unqualified `done`
+    only through `done-with-receipt`, the lifecycle worklog entry, the eight-item operation
+    sequence, and exits 0 or 2.
 13. Releases freeze worklog spans; the changelog passes range coverage and freeze; no summary was
     published without the maintainer's curation.
 14. The lease, the clean-state check and the integration-base merge rule are enforced.
