@@ -5,10 +5,30 @@ floor of the pack's executable tooling, and every other statement of that floor 
 Legs, in order:
   source         the single source parses, carries exactly its declared keys, and names the decided
                  floor (FLOOR below; a change to either is a reviewed change to both).
-  pins           every `python-version:` interpreter pin in .github/workflows/*.yml and in PIN_FILES
-                 (the shipped adopter CI template and its inline copy) equals the floor; each PIN_FILES
-                 entry must carry at least one pin. The leg is a conservative line model, not a YAML
-                 parser. Every line of a scanned file that contains the text python-version (in any
+  pins           every `python-version:` interpreter pin in .github/workflows/*.yml, in PIN_FILES (the
+                 shipped adopter CI template and its inline copy) and in every local action file (each
+                 action.yml or action.yaml under the tree outside SKIPPED_DIR_NAMES, and the target of
+                 each `uses: ./PATH`) equals the floor; each PIN_FILES entry must carry at least one
+                 pin. A local `uses: ./PATH` with no action file inside the tree is cannot-evaluate.
+                 The leg is a conservative line model, not a YAML parser.
+                 Each scanned workflow or action file (not the inline Python copy) is held, line by
+                 line, to an enumerated plain grammar; any line outside it is cannot-evaluate (exit 2),
+                 naming file and line. The grammar: a blank line; a comment; a `---` that opens the
+                 file; a plain key ([A-Za-z0-9_][A-Za-z0-9_.-]*, no quotes, no spaces), optional spaces
+                 and a colon, then nothing, a plain scalar (no indicator first, no ': '), a one-line
+                 quoted scalar (single-quoted with '' escapes, or double-quoted with no backslash), a
+                 one-line flow sequence or mapping of such scalars (no nesting, plain keys, each once),
+                 or a block scalar indicator (| or > with optional chomping and indentation
+                 indicators), whose body is then skipped only by indentation (each following line that
+                 is blank or more indented than the key, or than the `-` of a `- |` entry); and a `- `
+                 list item holding one of the same. So an explicit key (`?`) and its value line (`:`),
+                 a quoted key or one with a space in it, a double-quoted scalar with a backslash, a
+                 quoted scalar that does not close on its line, a plain scalar continued on the next
+                 line, an anchor, alias, tag or merge key, a nested `- -` sequence, a tab in the
+                 indentation and a later document marker are each cannot-evaluate, and so is a key
+                 repeated at the same indentation in one block mapping (two with: in one step),
+                 compared without regard to case.
+                 Every line of a scanned file that contains the text python-version (in any
                  case) must be one strict pin line (PIN_LINE_RE): optional space indentation, an
                  optional `- ` list marker, the bare key in lower case, optional spaces, a colon, one
                  or more spaces, exactly one plain, single-quoted or double-quoted scalar of
@@ -39,7 +59,7 @@ Legs, in order:
                  line (the nearest earlier line less indented, comment lines skipped) is the step's
                  own with: key. The step runs from its `-` marker line (a with: before the uses: line
                  counts) to the next non-blank line at the same or lesser indentation than that
-                 marker. A uses: line (the key in any case) that is not one plain or quoted literal, a
+                 marker; a comment line, at any column, never ends it. A uses: line (the key in any case) that is not one plain or quoted literal, a
                  line that names setup-python anywhere else (a comment or a flow mapping included),
                  and a setup-python uses: line whose `-` marker the line model cannot find are
                  cannot-evaluate; a python-version-file input is already cannot-evaluate as a line
@@ -77,26 +97,25 @@ the guard leg pins the one canonical form. Each file is compiled whole before it
 interpreter too old to parse a later statement stops with a SyntaxError instead of the refusal; the
 dynamic leg sees a compile failure only on the interpreter running it. The completeness scan walks the
 working tree, not the git index: an untracked stray entrypoint is counted, and a directory named in
-SKIPPED_DIR_NAMES is not walked. The pins leg is a conservative line model, not a YAML parser, and
-that is also its answer to a malformed workflow: a pin can only be set by a line that names the key,
-so a file with no such line has no pin to check (a setup-python step in it is a finding), no line may
-carry a line break character other than newline, every line that names it is held to the strict
-one-line form, the line after it may not continue or nest under it, and a quoted or flow value that
-spans lines in a YAML file stops the leg (exit 2). It recognizes no block scalar, so script text that
-names the key fails closed even where YAML reads it as text, a disclosed over-rejection; what remains
-of the key's spelling is a key spelled through YAML escapes (for example a double-quoted key with
-backslash-u escapes, or an escaped line break inside the key), which no line names as written. The
-rest of what it cannot model and does not refuse is named here: an INPUT_PYTHON-VERSION
-variable whose name is built at run time, not written on a line; a key reached through a YAML
-tag, an alias or a merge key, or a pin value set through an anchor elsewhere in the file, where the
-named line is judged as written; a setup-python step reached through an alias or a merge key, or the
-action run as a fork or copy under another name, which is not seen as a setup-python step; and in the
-non-YAML pin file, a multi-line flow value around a pin. The leg also scans only the files it names. The documentation leg matches the exact phrase, not
+SKIPPED_DIR_NAMES is not walked. The pins leg is a conservative line model, not a YAML parser: it reads
+a workflow or action file only through the enumerated grammar, so a YAML form outside it (an escaped,
+quoted or explicit key, an anchor, alias, tag or merge key, a multi-line quoted or flow value) stops
+the leg (exit 2), never passes. A block scalar's body is skipped by the YAML indentation rule; a reader
+that accepts what the YAML specification rejects (a body line less indented than that rule, for
+example) is not modelled. Every line that names the key is still judged as written, script text
+included, so script text that names it fails closed, a disclosed over-rejection. What remains: the
+inline Python copy is read only by the pin rule, not the grammar, so a multi-line flow value around a
+pin there is not refused; an INPUT_PYTHON-VERSION variable whose name is built at run time, not written
+on a line; the action run as a fork or copy under another name, which is not seen as a setup-python
+step; and a remote action, a remote reusable workflow (owner/repo/.github/workflows/x.yml@ref) and a
+docker:// image, whose content is not in the tree and is not read, so a setup-python step inside one is
+not seen. The leg scans only the files named above. The documentation leg matches the exact phrase, not
 its meaning.
 
 Run this gate isolated: python3 -I -B tools/check_python_floor.py
 """
 import ast
+import importlib.util
 import json
 import os
 import re
@@ -155,6 +174,27 @@ USES_LINE_RE = re.compile(
 WITH_LINE_RE = re.compile(r" *(?:- +)?(?P<key>with) *:(?:[ \t]+#.*|[ \t]*)")
 # A block sequence entry's `-` marker and the spaces after it, up to the entry's first key.
 STEP_MARKER_RE = re.compile(r" *- +(?=[^\s#])")
+# The rules this line model adds to the strict pin rule. The self-test's red-on-revert loads a copy of
+# this gate through importlib, removes one entry, and shows the reproduction that rule refuses passing.
+RULES = frozenset({"grammar", "duplicate-key", "comment-span", "action-files", "local-uses-target"})
+# The enumerated plain grammar of a workflow or action file (_grammar_check). A key line: a plain key,
+# optional spaces, a colon, then nothing or whitespace and the value.
+GRAMMAR_KEY_RE = re.compile(r"(?P<key>[A-Za-z0-9_][A-Za-z0-9_.-]*) *:(?:[ \t]+(?P<value>.*))?")
+# A block scalar indicator with optional chomping and indentation indicators, then an optional comment.
+BLOCK_INDICATOR_RE = re.compile(r"[|>](?:[1-9][+-]?|[+-][1-9]?)?(?:[ \t]+#.*|[ \t]*)")
+# One-line quoted scalars: single-quoted with '' escapes, double-quoted with no backslash at all.
+QUOTED_RE = re.compile(r"'(?:[^']|'')*'|\"[^\"\\]*\"")
+# What may follow a quoted or flow node on its line: whitespace and an optional comment.
+TRAILER_RE = re.compile(r"(?:[ \t]+#.*|[ \t]*)")
+# One entry of a one-line flow node: an optional plain key with its colon, an optional quoted or plain
+# scalar (no nesting), then the separator or the closing bracket.
+FLOW_ENTRY_RE = re.compile(
+    r"[ \t]*(?:(?P<key>[A-Za-z0-9_][A-Za-z0-9_.-]*) *:[ \t]+)?"
+    r"(?P<node>'(?:[^']|'')*'|\"[^\"\\]*\"|[^\s,\[\]{}#'\"][^,\[\]{}#]*?)?[ \t]*(?P<sep>[,\]}])")
+# Characters that may not open a plain scalar (a -, ? or : may, before a non-space).
+PLAIN_INDICATORS = "-?:,[]{}#&*!|>'\"%@`"
+# The action file names of a local action, in the order the runner looks for them.
+ACTION_FILES = ("action.yml", "action.yaml")
 # Not shipped (repo-only CI) or byte-exact vendored third-party code under a provenance manifest.
 EXCLUDED_TREES = (".github/", "opf/tools/_vendor/")
 SKIPPED_DIR_NAMES = {".git", "__pycache__", ".venv", "venv", "node_modules"}
@@ -263,8 +303,14 @@ def pin_findings(root, floor):
     targets = [(WORKFLOWS_REL + "/" + name, False) for name in names
                if name.endswith((".yml", ".yaml"))]
     targets += [(rel, True) for rel in PIN_FILES]
-    findings = []
-    for rel, required in targets:
+    if "action-files" in RULES:
+        targets += [(rel, False) for rel in _action_files(root)]
+    findings, seen = [], set()
+    while targets:
+        rel, required = targets.pop(0)
+        if rel in seen:
+            continue
+        seen.add(rel)
         pins = 0
         yaml_file = rel.endswith((".yml", ".yaml"))
         # pin: (key column, line number) of the last strict pin until the next non-blank line is
@@ -315,6 +361,9 @@ def pin_findings(root, floor):
         if required and not pins:
             findings.append("{}: carries no python-version pin (want {!r})".format(rel, want))
         findings.extend(_setup_python_findings(rel, lines, pin_lines))
+        if yaml_file:
+            _grammar_check(rel, lines)
+            targets += [(target, False) for target in _local_targets(root, rel, lines)]
     return findings
 
 
@@ -372,6 +421,7 @@ def _setup_python_findings(rel, lines, pin_lines):
                     "{}:{}: a setup-python uses: line whose step `-` marker this line model cannot "
                     "find; write the step as a block sequence entry".format(rel, number))
         end = next((fwd for fwd in range(index + 1, len(lines)) if lines[fwd].strip(" \t")
+                    and not ("comment-span" in RULES and lines[fwd].lstrip(" \t").startswith("#"))
                     and _indent(lines[fwd]) <= _indent(lines[dash])), len(lines))
         pinned = False
         for pin_index in range(dash, end):
@@ -388,6 +438,183 @@ def _setup_python_findings(rel, lines, pin_lines):
                 "pin line directly under the step's with:), so the action falls back to another "
                 "interpreter; add python-version: 'X.Y' under its with:".format(rel, number))
     return findings
+
+
+def _plain_scalar(text, flow):
+    """Whether text (its comment removed) is one plain scalar: it does not open with an indicator, and
+    holds no ': ', no trailing colon and, inside a flow node, none of ,[]{}."""
+    if not text or text != text.strip(" \t"):
+        return False
+    if text[0] in PLAIN_INDICATORS and not (text[0] in "-?:" and len(text) > 1 and text[1] not in " \t"):
+        return False
+    if ": " in text or ":\t" in text or text.endswith(":"):
+        return False
+    return not (flow and any(char in text for char in ",[]{}"))
+
+
+def _flow_node(text):
+    """Whether text is one single-line flow sequence or mapping of plain or quoted scalars (no nesting,
+    no escapes; a mapping entry is keyed by a plain key, each key once), then an optional comment."""
+    close, index, keys = "]" if text[0] == "[" else "}", 1, set()
+    while True:
+        entry = FLOW_ENTRY_RE.match(text, index)
+        if entry is None:
+            return False
+        key, node = entry.group("key"), entry.group("node")
+        if close == "]" and key is not None or close != "]" and node is not None and key is None:
+            return False
+        if key is not None:
+            if key.lower() in keys:
+                return False
+            keys.add(key.lower())
+        if node is not None and node[0] not in "'\"" and not _plain_scalar(node.strip(" \t"), True):
+            return False
+        index = entry.end()
+        if entry.group("sep") != ",":
+            return entry.group("sep") == close and TRAILER_RE.fullmatch(text, index) is not None
+
+
+def _value_shape(text):
+    """The shape of the value after `key:` or `- ` (no leading whitespace): "empty", "scalar",
+    "block" (a block scalar indicator) or None, outside the enumerated grammar."""
+    if not text or text.startswith("#"):
+        return "empty"
+    if text[0] in "|>":
+        return "block" if BLOCK_INDICATOR_RE.fullmatch(text) else None
+    if text[0] in "'\"":
+        quoted = QUOTED_RE.match(text)
+        return "scalar" if quoted and TRAILER_RE.fullmatch(text, quoted.end()) else None
+    if text[0] in "[{":
+        return "scalar" if _flow_node(text) else None
+    return "scalar" if _plain_scalar(re.split(r"[ \t]#", text, maxsplit=1)[0].rstrip(" \t"), False) \
+        else None
+
+
+def _grammar_refusal(rel, number, text):
+    """The cannot-evaluate error for a line outside the enumerated grammar; text follows any `- `."""
+    if text.startswith("?"):
+        what = "an explicit key (a line led by ?)"
+    elif text.startswith(":"):
+        what = "the value line of an explicit key (a line led by :)"
+    elif text.startswith(("---", "...")):
+        what = "a document marker after the start of the file"
+    elif text == "-" or text.startswith(("- ", "-\t")):
+        what = "a nested block sequence on one line"
+    elif text.startswith("<<"):
+        what = "a merge key"
+    elif text[:1] in "'\"" and re.match(r"('[^']*'|\"[^\"]*\") *:(?:[ \t]|$)", text):
+        what = "a quoted key"
+    elif "\\" in text and "\"" in text:
+        what = "a double-quoted scalar with a backslash escape"
+    elif re.match(r"(?:[&*!]|[^:]*:[ \t]+[&*!])", text):
+        what = "an anchor, an alias or a tag"
+    elif re.match(r"[^:'\"#]* [^:'\"#]*:(?:[ \t]|$)", text):
+        what = "a key with a space in it"
+    elif re.search(r"(?:^|[ \t\[{,:])['\"]", text):
+        what = "a quoted scalar that does not close on its line"
+    else:
+        what = "a line outside the enumerated plain grammar"
+    return CannotEvaluate(
+        "{}:{}: {}; this line model reads only plain keys, one-line plain, quoted or flow values, "
+        "and block scalars skipped by indentation, so it cannot evaluate the file".format(
+            rel, number, what))
+
+
+def _grammar_check(rel, lines):
+    """Hold every line of a workflow or action file to the enumerated plain grammar (module docstring):
+    a block scalar's body is skipped only by indentation, a document marker may only open the file, and
+    a key repeated in one block mapping is refused. Any other line is cannot-evaluate."""
+    body, stack, started = None, [], False
+    for index, line in enumerate(lines):
+        number, content = index + 1, line.lstrip(" ")
+        indent = len(line) - len(content)
+        if body is not None:
+            if not content.strip(" \t") or indent > body:
+                continue
+            body = None
+        if not content.strip(" \t") or content.startswith("#"):
+            continue
+        if "grammar" in RULES and content.startswith("\t"):
+            raise CannotEvaluate("{}:{}: a tab in the indentation; this line model cannot evaluate "
+                                 "the file".format(rel, number))
+        if content.startswith("---") and TRAILER_RE.fullmatch(content, 3) and not started:
+            started = True
+            continue
+        started = True
+        column, text, item = indent, content, False
+        if text == "-" or text.startswith("- "):
+            item, text = True, text[1:].lstrip(" ")
+            column = len(line) - len(text)
+            while "duplicate-key" in RULES and stack and stack[-1][0] > indent:
+                stack.pop()
+            if not text or text.startswith("#"):
+                continue
+            if "grammar" in RULES and (text == "-" or text.startswith(("- ", "-\t"))):
+                raise _grammar_refusal(rel, number, text)
+        key = GRAMMAR_KEY_RE.fullmatch(text)
+        if key is not None:
+            name = key.group("key").lower()
+            while "duplicate-key" in RULES and stack and (stack[-1][0] > column
+                                                          or item and stack[-1][0] == column):
+                stack.pop()
+            if "duplicate-key" in RULES and stack and stack[-1][0] == column:
+                if name in stack[-1][1]:
+                    raise CannotEvaluate(
+                        "{}:{}: the key {} repeats line {} in the same mapping; YAML readers "
+                        "keep one of the two or reject the file, so this line model cannot evaluate "
+                        "it".format(rel, number, key.group("key"), stack[-1][1][name]))
+                stack[-1][1][name] = number
+            elif "duplicate-key" in RULES:
+                stack.append((column, {name: number}))
+            shape = _value_shape(key.group("value") or "")
+        else:
+            shape = _value_shape(text) if item else None
+        if shape is None and "grammar" in RULES:
+            raise _grammar_refusal(rel, number, text)
+        if shape == "block":
+            body = column if key is not None else indent
+
+
+def _action_files(root):
+    """Every local action file (ACTION_FILES) under root, outside SKIPPED_DIR_NAMES, repo-relative."""
+    def _fail(exc):
+        raise CannotEvaluate("cannot walk the tree for action files: {}".format(exc))
+
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root, onerror=_fail):
+        dirnames[:] = sorted(name for name in dirnames if name not in SKIPPED_DIR_NAMES)
+        rel_dir = Path(dirpath).relative_to(root).as_posix()
+        found += [(name if rel_dir == "." else rel_dir + "/" + name) for name in sorted(filenames)
+                  if name in ACTION_FILES]
+    return found
+
+
+def _local_targets(root, rel, lines):
+    """The files that the local `uses: ./PATH` lines of a scanned file run: PATH itself when it names a
+    .yml or .yaml file (a local reusable workflow), else PATH/action.yml or PATH/action.yaml. A local
+    path outside the tree or with no such file is cannot-evaluate."""
+    base, found = root.resolve(), []
+    for index, line in enumerate(lines):
+        match = USES_LINE_RE.fullmatch(line)
+        value = None if match is None else next(
+            group for group in match.group("plain", "single", "double") if group is not None)
+        if value is None or not value.startswith("./"):
+            continue
+        path = (base / value).resolve()
+        inside = path == base or base in path.parents
+        if inside and value.endswith((".yml", ".yaml")):
+            candidates = [path] if path.is_file() else []
+        else:
+            candidates = [path / name for name in ACTION_FILES if inside and (path / name).is_file()]
+        if not candidates:
+            if "local-uses-target" in RULES:
+                raise CannotEvaluate(
+                    "{}:{}: uses: {} names a local path with no action file inside this tree; "
+                    "this gate cannot evaluate the step it runs".format(rel, index + 1, value))
+            continue
+        if "action-files" in RULES:
+            found += [candidate.relative_to(base).as_posix() for candidate in candidates]
+    return found
 
 
 def _names(line, token):
@@ -881,15 +1108,13 @@ def _self_test_cases(base):
         "      - run: echo done"), pin_quote=""))
     check("pins/block-scalar-pin-finding",
           (code, _has(lines, "quality.yml:8: python-version '3.12' differs")), (1, True))
-    # An explicit-key entry whose value is a quoted scalar over several lines: the text inside it
-    # is no block scalar header, and the real pin after it is judged. The step runs another action,
-    # since this line model cannot find the `-` marker of a setup-python step across that scalar.
+    # An explicit-key entry whose value is a quoted scalar over several lines is outside the grammar.
     code, lines = evaluate(_fixture(base, files={WORKFLOWS_REL + "/attack.yml": (
         "name: attack\non: push\njobs:\n  q:\n    runs-on: ubuntu-latest\n    steps:\n"
         "      - ? name\n        : \"start\nfake: |\n          end\"\n"
         "        uses: actions/setup-other@v5\n        with:\n          python-version: '3.12'\n")}))
-    check("pins/explicit-key-quoted-value-finding",
-          (code, _has(lines, "attack.yml:13: python-version '3.12' differs")), (1, True))
+    check("pins/explicit-key-quoted-value-cannot-evaluate",
+          (code, _has(lines, "attack.yml:7: an explicit key")), (2, True))
     def steps(body):
         return {WORKFLOWS_REL + "/steps.yml": "jobs:\n  q:\n    steps:\n" + body}
 
@@ -934,6 +1159,41 @@ def _self_test_cases(base):
              "steps.yml:4: a setup-python uses: line whose step `-` marker")):
         code, lines = evaluate(_fixture(base, files=steps(body)))
         check(check_id, (code, _has(lines, marker)), (2, True))
+    head = "name: attack\non: push\njobs:\n  q:\n    runs-on: ubuntu-latest\n    steps:\n"
+    outside_grammar = "a line outside the enumerated plain grammar"
+    for check_id, body, marker in (
+            ("grammar/anchor-cannot-evaluate", "      - name: &n x\n", "attack.yml:7: an anchor"),
+            ("grammar/alias-cannot-evaluate", "      - *step\n", "attack.yml:7: an anchor"),
+            ("grammar/tag-cannot-evaluate", "      - name: !!str x\n", "attack.yml:7: an anchor"),
+            ("grammar/merge-key-cannot-evaluate", "      - <<: x\n", "attack.yml:7: a merge key"),
+            ("grammar/mid-file-document-marker-cannot-evaluate", "---\n",
+             "attack.yml:7: a document marker"),
+            ("grammar/unclosed-single-quote-cannot-evaluate", "      - name: 'x\n        y'\n",
+             "attack.yml:7: a quoted or flow value continues past its line"),
+            ("grammar/plain-continuation-cannot-evaluate", "      - name: x\n          y\n",
+             "attack.yml:8: " + outside_grammar),
+            ("grammar/nested-sequence-cannot-evaluate", "      - - run: x\n",
+             "attack.yml:7: a nested block sequence"),
+            ("grammar/tab-indentation-cannot-evaluate", "      - run: x\n\t  shell: bash\n",
+             "attack.yml:8: a tab in the indentation"),
+            ("grammar/nested-flow-cannot-evaluate", "      - run: x\n        env: {A: [1]}\n",
+             "attack.yml:8: " + outside_grammar),
+            ("grammar/escaped-value-cannot-evaluate", "      - run: \"echo \\x41\"\n",
+             "attack.yml:7: a double-quoted scalar with a backslash escape")):
+        code, lines = evaluate(_fixture(base, files={WORKFLOWS_REL + "/attack.yml": head + body}))
+        check(check_id, (code, _has(lines, marker)), (2, True))
+    for check_id, text in (
+            ("grammar/block-scalar-body-skipped-passes", head + "      - run: |\n          ? not a key\n"
+             "          : \"not closed\n        shell: bash\n"),
+            ("grammar/flow-and-quoted-values-pass", head + "      - run: echo \"a\" # c\n"
+             "        env: {A: '1', B: \"x\"}\n        with:\n          args: [a, 'b c']\n"
+             "          note: 'it''s'\n"),
+            ("grammar/leading-document-marker-passes", "---\n" + head + "      - run: x\n")):
+        check(check_id, evaluate(_fixture(base, files={WORKFLOWS_REL + "/attack.yml": text}))[0], 0)
+    code, lines = evaluate(_fixture(base, files={"tools/x/action.yml": (
+        "runs:\n  using: composite\n  steps:\n    - uses: actions/setup-python@v5\n")}))
+    check("pins/unreferenced-action-file-finding",
+          (code, _has(lines, "tools/x/action.yml:4: a step that uses actions/setup-python")), (1, True))
     root = _fixture(base, workflow_pin="python-version: 3.10", template_pin="3.10", pin_quote="")
     check("pins/unquoted-trailing-zero-finding",
           [line for line in pin_findings(root, (3, 10)) if "unquoted" in line],
@@ -1012,6 +1272,7 @@ def _self_test_cases(base):
           evaluate(_fixture(base, source=_source_text(documentation=True)))[0], 2)
 
     _red_on_revert(base, good, declared)
+    _rule_reverts(base)
 
 
 def _gate_run(root, gate_source):
@@ -1064,6 +1325,63 @@ def _red_on_revert(base, good, declared):
     check("revert/dynamic-leg", results["dynamic"], (1, True, 0))
     check("revert/completeness-leg", results["completeness"], (1, True, 0))
     check("revert/documentation-leg", results["documentation"], (1, True, 0))
+
+
+def _rule_reverts(base):
+    """Red-on-revert for each rule of the line model: a reviewer reproduction judged by evaluate() of this
+    gate and of a copy loaded through importlib with that one rule removed from RULES."""
+    copy = base / "python_floor_copy.py"
+    _write(base, copy.name, _read_text(Path(__file__).resolve()))
+    spec = importlib.util.spec_from_file_location("python_floor_copy", copy)
+    attack = WORKFLOWS_REL + "/attack.yml"
+    head = "name: Attack\non: push\njobs:\n  q:\n    runs-on: ubuntu-latest\n    steps:\n"
+    step = "      - uses: actions/setup-python@v5\n"
+    pin = "          python-version: '3.14'\n"
+    escaped_uses = "      - ? uses\n        : \"actions/setup-\\x70ython@v5\"\n"
+    explicit = "attack.yml:7: an explicit key"
+    exercised = set()
+    # (check id, rule, files, exit of the intact gate, its message or None)
+    for check_id, rule, files, want, marker in (
+        ("revert/grammar-codex-explicit-key-name", "grammar", {attack: head + step + (
+            "        ? name\n        : \"start\n        with:\n" + pin + "        end\"\n")},
+         2, "attack.yml:8: an explicit key"),
+        ("revert/grammar-a1-explicit-key-quoted-value", "grammar", {attack: head + step + (
+            "        ? name\n        : \"x\n        with:\n" + pin + "        y\"\n")},
+         2, "attack.yml:8: an explicit key"),
+        ("revert/grammar-a2-spaced-key", "grammar", {attack: head + step + (
+            "        env:\n          MY VAR: \"x\n        with:\n" + pin + "        y\"\n")},
+         2, "attack.yml:9: a key with a space in it"),
+        ("revert/grammar-b1-explicit-uses-key", "grammar",
+         {attack: head + escaped_uses + "      - run: python --version\n"}, 2, explicit),
+        ("revert/grammar-b2-escaped-uses-key", "grammar",
+         {attack: head + "      - \"u\\x73es\": \"actions/setup-\\x70ython@v5\"\n"},
+         2, "attack.yml:7: a quoted key"),
+        ("revert/grammar-b4-escaped-line-break", "grammar", {attack: head + (
+            "      - ? uses\n        : \"actions/setup-\\\n        python@v5\"\n")}, 2, explicit),
+        ("revert/grammar-b5-escaped-pin-key", "grammar", {attack: head + escaped_uses + (
+            "        with:\n          \"python-\\x76ersion\": \"3.12\"\n")}, 2, explicit),
+        ("revert/action-files-c3-composite", "action-files", {
+            attack: head + "      - uses: ./.github/actions/py\n",
+            ".github/actions/py/action.yml": "name: py\nruns:\n  using: composite\n  steps:\n"
+            "    - uses: actions/setup-python@v5\n      with:\n        python-version: '3.12'\n"},
+         1, ".github/actions/py/action.yml:7: python-version '3.12' differs"),
+        ("revert/local-uses-target-missing-action", "local-uses-target",
+         {attack: head + "      - uses: ./.github/actions/absent\n"},
+         2, "attack.yml:7: uses: ./.github/actions/absent names a local path with no action file"),
+        ("revert/comment-span-c22-column-zero-comment", "comment-span",
+         {attack: head + step + "# note\n        with:\n" + pin}, 0, None),
+        ("revert/duplicate-key-c28-two-with", "duplicate-key", {attack: head + step + "        with:\n"
+            + pin + "        with:\n          cache: pip\n"},
+         2, "attack.yml:10: the key with repeats line 8")):
+        exercised.add(rule)
+        root = _fixture(base, files=files)
+        code, lines = evaluate(root)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.RULES = RULES - {rule}
+        check(check_id, (code, marker is None or _has(lines, marker), module.evaluate(root)[0]),
+              (want, True, 1 if want == 0 else 0))
+    check("revert/every-rule-exercised", exercised == RULES, True)
 
 
 def _expected_check_ids():
