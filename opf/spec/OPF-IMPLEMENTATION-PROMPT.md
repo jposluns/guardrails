@@ -395,8 +395,8 @@ reading, and it blocks activation until the maintainer resolves it.
       record confers"). A 1.1.0 store also does not admit `init.toml` (section 9.2: "Base spec 1.2.0
       admits one new managed machine-store file"). The validator reports that `opf upgrade` is
       available as a notice, not as a finding.
-    - On such a store your writer's `create` and `transition`, which step 8 builds for this purpose,
-      run under that grading and the full step 10 operation sequence, and write only that version's
+    - On such a store your writer's `create` and `transition`, which step 8 builds, run under that
+      grading and the full step 10 operation sequence, and write only that version's
       format, never an imported leaf or an imported counter row, so a maintainer can record the
       remedy there and commit it (open point 28 lists the remedies).
     - A 1.0.0 store carries the retired token `devprocess`, which section 17 says "is recognized by
@@ -453,19 +453,21 @@ reading, and it blocks activation until the maintainer resolves it.
     comparison grades no-deletion: every ID that the prior snapshot holds, in each series, worklog
     entries included, must still exist in an active or archived location (section 8.2: "Uniqueness,
     counter high-water, contiguity and no-deletion checks MUST evaluate each series independently";
-    section 13: "Records are never deleted"), and an ID that does not is a finding. When `HEAD` is
-    unborn, established as
-    review register row F07 requires ("Failed resolution is not unborn proof; valid symbolic HEAD
-    and absent target are independently established"), there is no prior snapshot: every record is
-    new and there is no transition to grade, so a valid store right after init reports valid. A
-    `HEAD` that fails to resolve is cannot-evaluate. Two uncommitted transitions of one record would
-    defeat the match below: after an assistant lands `done/proposed` and a maintainer then runs
+    section 13: "Records are never deleted"), and an ID that does not is a finding. It also grades
+    counter monotonicity: every counter value that `counters.toml` holds at the prior snapshot's
+    path must be met by an equal or higher value for the same series and namespace in the snapshot
+    under test (section 8.2), as step 6 describes. When `HEAD` is unborn, established as review
+    register row F07 requires ("Failed resolution is not unborn proof; valid symbolic HEAD and
+    absent target are independently established"), there is no prior snapshot: every record is new
+    and there is no transition to grade, so a valid store right after init reports valid. A `HEAD`
+    that fails to resolve is cannot-evaluate. Two uncommitted transitions of one record would defeat
+    the match below: after an assistant lands `done/proposed` and a maintainer then runs
     `done-with-receipt` before any commit, the validator sees `active -> done` against `HEAD` while
     the verb wrote `done/proposed -> done`. An uncommitted transition of another record would also
     fail a later operation's final validation, which accepts only the record and statuses that
-    operation has just written, and section 8.8 says "Every subcommand runs one operation
-    sequence". Section 8.8, item 5 already refuses most of these cases: "the planned destinations
-    MUST be clean, including ignored files", and `create`, `transition`, `done-with-receipt`,
+    operation has just written, and section 8.8 says "Every subcommand runs one operation sequence".
+    Section 8.8, item 5 already refuses most of these cases: "the planned destinations MUST be
+    clean, including ignored files", and `create`, `transition`, `done-with-receipt`,
     `worklog-append`, the open point 23 handoff operation and the step 8 remedy writer each rewrite
     `worklog.toml` with their worklog entry, so each refuses on that dirty destination while an
     earlier record operation is uncommitted. This prompt's choice extends that refusal only to what
@@ -480,23 +482,22 @@ reading, and it blocks activation until the maintainer resolves it.
     collision candidates", not every file under `.working/`, so this clause still applies to the
     upgrade: it also refuses while any record present at `HEAD` has a working-tree status that
     differs from its status there, even one outside the upgrade's own planned destinations. Init
-    writes no existing store, so this clause never applies to it; a store-writing
-    operation you add later joins the list. The standalone render write mode is explicitly excluded
-    from this additional refusal: it writes only declared views, never a record's index or
-    `worklog.toml`, and step 6 requires it to proceed over the one pending cannot-evaluate that the
-    rule for the other gates below accepts (one named record and its from and to statuses, matched
-    by the writer's lifecycle entry in the snapshot under test, since a standalone render cannot
-    know what the verb wrote), so extending this clause to render would make that step 6 acceptance
-    test impossible to pass. Render still takes the step 7 lease like any operation that writes the
-    store (section 5.7 names `render` in its reconciliation list); when render runs nested inside
-    another operation's own sequence, it runs under that operation's already-held lease rather than
-    taking a second one. The refusal comes after section 8.8, item 1 ("Resolve the store, then any
-    interrupted authoring transaction MUST be reconciled first") and before any other write, so
-    recovery from a crash runs first, and a reconciled change is then the earlier change to commit.
-    This prompt's choice for the other gates:
-    a gate accepts a cannot-evaluate only when the validator reports it as this pending kind, naming
-    one record and its from and to statuses, and the snapshot under test carries, in the unreleased
-    worklog tail and absent from `HEAD`, the writer's lifecycle entry
+    writes no existing store, so this clause never applies to it; a store-writing operation you add
+    later joins the list. The standalone render write mode is explicitly excluded from this
+    additional refusal: it writes only declared views, never a record's index or `worklog.toml`, and
+    step 6 requires it to proceed over the one pending cannot-evaluate that the rule for the other
+    gates below accepts (one named record and its from and to statuses, matched by the writer's
+    lifecycle entry in the snapshot under test, since a standalone render cannot know what the verb
+    wrote), so extending this clause to render would make that step 6 acceptance test impossible to
+    pass. Render still takes the step 7 lease like any operation that writes the store (section 5.7
+    names `render` in its reconciliation list); when render runs nested inside another operation's
+    own sequence, it runs under that operation's already-held lease rather than taking a second one.
+    The refusal comes after section 8.8, item 1 ("Resolve the store, then any interrupted authoring
+    transaction MUST be reconciled first") and before any other write, so recovery from a crash runs
+    first, and a reconciled change is then the earlier change to commit. This prompt's choice for
+    the other gates: a gate accepts a cannot-evaluate only when the validator reports it as this
+    pending kind, naming one record and its from and to statuses, and the snapshot under test
+    carries, in the unreleased worklog tail and absent from `HEAD`, the writer's lifecycle entry
     `opf-record transition <ID> <from> -> <to>` for exactly that record and those statuses; never a
     finding and never any other cannot-evaluate. The render write mode alone also proceeds over view
     drift, which rendering itself remedies (step 6); that is not an acceptance of the drift, and the
@@ -505,8 +506,9 @@ reading, and it blocks activation until the maintainer resolves it.
     cannot-evaluate a gate tolerates, it proves nothing about the actor, and a canonical hand edit
     that adds a matching entry passes, which is the canonical hand edit residual of section 14.1.
     Under this reading CI, which checks a committed revision, compares it with itself, so the
-    pending cannot-evaluate cannot arise there and CI does not re-evaluate the transitions or
-    deletions inside the commits it checks (step 13).
+    pending cannot-evaluate cannot arise there and CI does not re-evaluate the transitions,
+    deletions or counter decrements inside the commits it checks (step 13). A merge commit has two
+    parents, and step 14 says how the pre-commit check compares one.
 23. **Same-act supersession of a handoff.** Section 8.5 says "Posting a new handoff MUST supersede
     the previous in the same act". Section 8.4 says "where the type records it, the superseded
     record's terminal state MUST reflect it". Section 8.8 gives no operation for this: `create`
@@ -526,8 +528,19 @@ reading, and it blocks activation until the maintainer resolves it.
     operation. The same-act rule is the handoff's alone. Of a contribution, section 8.5 says only "A
     re-send MUST be a new record linking `supersedes`; the superseded record records `superseded`",
     and the contribution table allows `sent` > `superseded`, so the existing `transition` and
-    `create` perform a re-send (step 10). Whether a `superseded/proposed` contribution reflects the
-    supersession is the same open question; ask the maintainer to rule on it too.
+    `create` perform a re-send (step 10). Whether a `superseded/proposed` contribution records the
+    supersession is the same open question; ask the maintainer to rule on it too. Until the ruling,
+    this prompt's reading is that it does not: section 8.4 says "A `/proposed` status is not
+    terminal: gates and completion claims MUST treat the record as unfinished", so only an
+    unqualified `superseded` records it. Under that reading, `create` refuses a contribution that
+    links `supersedes` to a contribution whose status is not unqualified `superseded`, naming the
+    remedy, which is a maintainer's ratification of the predecessor, committed (open point 22),
+    before the re-send is created. If the maintainer instead rules that `superseded/proposed`
+    records the supersession, `create` also accepts a predecessor at `superseded/proposed`; this
+    prompt's reading for that case is that a maintainer's rejection of the predecessor back to
+    `sent` then refuses before anything is written while a contribution links `supersedes` to it,
+    since the rejection would leave a re-send superseding a record that no longer records
+    `superseded`.
 24. **Pointer and sync-target agreement for the in-repo default.** Section 11 lists "pointer and
     sync-target agreement (the committed pointer, the manifest's recorded sync target, and the store
     repository's actual remote agree; section 5.6)". In the in-repo default the pointer is
@@ -567,20 +580,19 @@ reading, and it blocks activation until the maintainer resolves it.
       legacy importer-authored clean records without `created_at` are cannot-evaluate pending this
       point. These checks depend on the interim reading: in step 4, the check that such a record is
       graded under the ordinary schema; in step 6, the receipt-withdrawal check and the
-      decision-chain check; and in step 8, the `"none"` fixture holding an importer-authored backlog
-      item, the repair route, the decision-chain repair and the receipt route from a 1.0.0 fixture
-      (which also waits on the 1.0.0 base field names below). The two decision-chain checks apply
-      only under open point 28's first reading; under its alternative, the two opposite tests of
-      open point 28, in steps 6 and 10, depend on the interim reading in their place. If the
-      maintainer rules that the seam takes these records too, those checks join the step 8 group
-      that waits on this point and are graded as the ruling says.
+      decision-chain check; in step 8, the `"none"` fixture holding an importer-authored backlog
+      item, the repair route, the decision-chain check and the receipt route from a 1.0.0 fixture
+      (which also waits on the 1.0.0 base field names below); and in step 10, the decision-chain
+      refusal check. If the maintainer rules that the seam takes these records too, those checks
+      join the step 8 group that waits on this point and are graded as the ruling says.
     - The state of a run in a legacy import or ingest location. Step 8, "An unresolved legacy
       import", lists the locations the specification names: the retained legacy staging home
       `.working/imports/` (sections 4.2 and 4.4), the typed staging homes under `.working/staging/`
       (sections 4.2 and 14.1), evidence under `.working/imported/` (sections 4.2, 9.2 and 14.1), the
       preserved legacy run evidence home and how a store records it (section 14.1), the legacy
-      import report `.working/IMPORT-REPORT.md` (section 4.2) and `legacy_fragment` records
-      (sections 8.1 and 9.2). No pinned source gives the layout or format of a run in any of them,
+      import report `.working/IMPORT-REPORT.md` (section 4.2), the journal homes under
+      `.working/journals/` (section 4.2) and `legacy_fragment` records (sections 8.1 and 9.2). No
+      pinned source gives the layout or format of a run in any of them,
       how to tell a resolved run from an unresolved one, or whether a `quarantined` fragment is an
       unresolved import. Reserving a name against discovery, or recognizing that a run is present
       (section 4.2, "The existing staged-plan presence test"), does not answer that, and section 11
@@ -642,56 +654,38 @@ reading, and it blocks activation until the maintainer resolves it.
     sections 8.5 and 8.6:
     - A ratified `done` backlog item whose only receipt is legacy importer-authored fails the clean
       receipt obligation. The remedy is the open point 26 `maintainer_decision`, through `create`.
-    - A pending_decision supersession chain that holds a clean decision authored by a non-importer
-      actor, and whose only candidate for its current effective resolution is a legacy
-      importer-authored decision, fails the chain rule: section 8.6 says "An importer-authored
-      decision MUST NOT be treated as the current effective resolution of a clean
-      `pending_decision` chain", and section 8.5 says "exactly one current effective resolution
-      MUST exist per chain". Section 8.6 gives the remedy: "resolving such a chain now MUST take a
-      new clean decision linking back". This prompt's reading of how the writer performs it: the
-      maintainer `create`s a new pending_decision, commits it (open point 22), then `transition`s it
-      from `open` to unqualified `decided` with its resolution bundle, appending a `supersedes` link
-      to the importer-authored decision at the head of the chain (section 8.8). Section 8.8 says the
-      clean-series subcommands "MUST also refuse an importer-authored record as their operand"; this
-      prompt reads the supersession target as an input that `transition` reads, not as its operand,
-      since `transition` rewrites only the record it decides. If the maintainer rules that the
-      target is an operand, the specification names no writer-performable remedy for this chain:
-      report that as a blocker of step 8. A chain whose members are all importer-authored is
-      history by this reading and imposes no current obligation. The specification supports
-      another reading, which the maintainer should weigh before ratifying this one: section 8.6
-      also says "an importer-authored record MUST NOT discharge a required supersession", so the
-      importer-authored decision's `supersedes` link discharges nothing, the maintainer-authored
-      decision it targets stays the chain's current effective resolution, and the chain is valid.
-      The section 8.6 wording for clean-to-imported links, a same-type `supersedes` that "records
-      historical continuation without discharging a current supersession obligation", points the
-      same way, though it governs links into the imported series. Under that reading the chain
-      leaves no finding, and the repair is not offered, since a new decision linking `supersedes` to
-      the importer-authored head would then leave the chain with two current resolutions, which the
-      section 8.8 chain rule refuses. Every requirement of this prompt that exists only for the
-      decision-chain case then drops out, and this is the full list: the step 6 decision-chain
-      check; the step 8 decision-chain refusal and its end-to-end repair check; the step 8 remedy
-      writer's duty to author and decide the new pending_decision; the decision-chain part of the
-      step 10 check that re-runs the step 8 remedy-writer checks; the decision-chain repair route of
-      checklist item 10; and the decision-chain checks that open point 25 names. Report each of them
-      as not applicable under the ratified alternative of open point 28, citing the ruling: that
-      outcome is neither passed nor not run, and it does not withhold the conformance claim. The
-      step 8 `create` and `transition` are built under either reading, since the receipt route and
-      step 10 use them. Under the first reading, report each of them as passed, failed or not run in
-      the usual way. Under the alternative reading, build the opposite tests the first reading has
-      no room for, both on a store declaring 1.3.0 that holds the same chain shape (a
-      maintainer-authored decided pending_decision superseded by an importer-authored decided
-      pending_decision at the chain head): in step 6, the validator reports the chain valid, never a
-      finding; and in step 10, the writer's chain rule (section 8.8) refuses a new
-      maintainer-authored decision that links `supersedes` to the importer-authored head, since that
-      would leave the chain with two current resolutions. The writer test belongs to step 10, not
-      step 8: on a store declaring 1.1.0 or 1.2.0, open point 21's grading leaves out the section
-      8.6 firewall, so the importer-authored head is the chain's one current resolution there, and
-      the step 8 writer would accept the same decision. Under the first reading, report these two
-      opposite tests as not applicable, citing the ruling, in the same way. The step 8 fixture
-      bullet "a fixture whose pending_decision chain needs the open point 28 repair" is itself
-      conditioned on the first reading; under the alternative, build the same chain shape as a
-      fixture that upgrades to 1.3.0 with the validator reporting valid and no repair offered,
-      instead.
+    - A pending_decision supersession chain keeps its current resolution where the firewall leaves
+      one. Section 8.6 says "an importer-authored record MUST NOT discharge a required
+      supersession", "An importer-authored decision MUST NOT be treated as the current effective
+      resolution of a clean `pending_decision` chain", and that every current-state join "MUST
+      evaluate only clean records authored by non-importer actors". So where a maintainer-authored
+      decided pending_decision is superseded by a legacy importer-authored decided pending_decision
+      at the head of the chain, the importer-authored `supersedes` link discharges nothing, the
+      maintainer-authored decision stays the chain's one current effective resolution (section 8.5:
+      "exactly one current effective resolution MUST exist per chain"), the validator reports the
+      chain valid, and the upgrade offers no repair for it. A reading under which that link removes
+      the maintainer-authored decision from current authority would let importer-authored history
+      decide current state, which the firewall forbids, so this prompt does not offer it. A new
+      maintainer-authored decision linking `supersedes` to the importer-authored head would leave
+      the chain with two current resolutions, which the section 8.8 chain rule refuses. That
+      refusal is tested in step 10, not step 8: on a store declaring 1.1.0 or 1.2.0, open point 21's
+      grading leaves out the section 8.6 firewall, so the importer-authored head is the chain's one
+      current resolution there, and the step 8 writer accepts the same decision. The section 8.6
+      wording for clean-to-imported links, a same-type `supersedes` that "records historical
+      continuation without discharging a current supersession obligation", points the same way,
+      though it governs links into the imported series. A chain whose members are all
+      importer-authored is history and imposes no current obligation.
+    - One chain shape follows from the reading above and is not settled by the specification. Since
+      a pre-1.3.0 store grades the importer-authored head as current, a maintainer may have recorded
+      there a further decided pending_decision linking `supersedes` to that head. After the upgrade,
+      the earlier maintainer-authored decision and the later one are then both current resolutions,
+      and the chain fails the section 8.5 rule. This prompt finds no writer-performable remedy in
+      the specification: `decided` is a terminal state (section 8.5), and section 8.8 lets a
+      transition append one `supersedes` link, to a chain head only, so no new decision retires
+      both. This prompt's reading: the validator reports such a chain at 1.3.0 as a finding, and the
+      upgrade refuses before any write, naming the chain and this open point, with no remedy named.
+      Ask the maintainer to rule on its remedy; until the ruling, a store holding such a chain
+      cannot complete the upgrade.
     - A backlog item that leaves the actionability join, a block that stops granting a stop, and a
       record that stops being the current handoff or another current state leave no finding by
       this reading: those joins are derived when they are read, and section 8.5 allows "at most one"
@@ -699,7 +693,7 @@ reading, and it blocks activation until the maintainer resolves it.
 
     If your validator grades any other withdrawal below VALID, name it, its remedy and the writer
     operation that performs it, and ask the maintainer to rule before step 8 passes. Ask the
-    maintainer to ratify this list and both readings above.
+    maintainer to ratify this list and the readings above.
 
 ## The store you are building
 
@@ -912,7 +906,8 @@ Implement section 8 (Record model) in full for the baseline types.
   record records `superseded`; a `maintainer_decision` takes `actor.kind` `maintainer` (or
   `importer`, which a fresh store never uses). Section 8.8 gives the writer no same-act operation
   for the handoff supersession; that gap is open point 23. A contribution re-send has no same-act
-  rule and is an ordinary `transition` and `create` (step 10).
+  rule and is an ordinary `transition` and `create` (step 10), with the predecessor ratified first
+  under open point 23's reading.
 - **No resurrection and supersession.** A record in an unqualified terminal state never re-enters
   a working state; a revived concern is a new record linking the old one; supersession is a
   `supersedes` link, and where the type records it, the superseded record's terminal state
@@ -1008,8 +1003,8 @@ Acceptance checks, over stores the test builds:
 ### Step 6: the validator (`opf doctor`)
 
 Implement the integrity layer of section 11 (Enforcement posture). Its roster: schema validity of
-what exists; ID uniqueness across active, archive and staging; counter monotonicity (every ID within
-its counter); bidirectional index reconciliation; transition legality and no
+what exists; ID uniqueness across active, archive and staging; counter monotonicity (two checks,
+below); bidirectional index reconciliation; transition legality and no
 resurrection; the all-or-none resolution bundle; byte drift for every deterministic view, `VERSION`
 included; worklog span tiling and frozen coverage digests; changelog range coverage; changelog
 freeze; archive integrity; the tracked-store requirement against the resolved store; pointer and
@@ -1040,6 +1035,19 @@ containment.
   specification does not define contiguity beyond the release spans of section 6.1 ("Spans MUST be
   contiguous"); this prompt's reading is that the span tiling check carries it, and it is yours to
   confirm with the maintainer.
+- Counter monotonicity is two checks, each run per series and per namespace (section 8.2). The
+  bounds check: every ID lies within its counter (section 5.7 says doctor "checks store-wide ID
+  uniqueness and that every ID lies within its counter"). The monotonicity check: section 8.2 says
+  `counters.toml` "MUST hold independent monotonic high-water values per series and namespace" and
+  "Counters MUST NOT be reset", which no single snapshot can show, since a lowered counter can still
+  lie above every ID. So the validator also compares each counter with its value in the prior
+  committed snapshot, read as transition legality reads it (open point 22): a value lower than
+  there, or a counter row that the prior snapshot holds and the snapshot under test lacks, is a
+  finding naming its series and namespace. A row absent from the prior snapshot, such as an imported
+  counter row that the step 8 upgrade adds at zero, has no prior value to compare, and neither has
+  any row when `counters.toml` is absent at the prior snapshot's path, as an absent index file holds
+  no prior records (open point 22); with no prior snapshot there is nothing to compare; and a prior
+  `counters.toml` that cannot be read or parsed is cannot-evaluate.
 - View drift uses the step 5 renderer for every declared deterministic view and projection,
   `VERSION` included (sections 10.5 and 11).
 - The four imported-series checks named in section 8.3 (C-IMPORTED-SCHEMA, C-IMPORTED-IDS,
@@ -1097,19 +1105,16 @@ Acceptance checks, each as an automated test over a throwaway store the test bui
 - The no-store mode exits 2 on a repository with no store.
 - A valid store in a repository whose `HEAD` is unborn produces valid; a `HEAD` reference that
   does not resolve produces cannot-evaluate.
-- This check and the next two rest on open point 25's interim reading. In a 1.3.0 store, a
+- This check and the next rest on open point 25's interim reading. In a 1.3.0 store, a
   maintainer-authored backlog item at ratified `done` whose only receipt is importer-authored is a
   finding, and an importer-authored `active` block does not make its scoped
   item non-actionable; adding a maintainer-authored clean `maintainer_decision` linking `corrects`
   to that item, in the form of open point 26, makes the validator report valid.
 - In a 1.3.0 store, a pending_decision chain in which a maintainer-authored decided record is
-  superseded by an importer-authored decided record at the chain head is a finding (this prompt's
-  first reading in open point 28; under its alternative this check is reported as not applicable, as
-  open point 28 says); adding a maintainer-authored clean pending_decision at unqualified `decided`
-  that links `supersedes` to that head makes the validator report valid.
-- Under open point 28's alternative reading, the same 1.3.0 chain, without the added decision, makes
-  the validator report valid, never a finding (the opposite test of open point 28; under its first
-  reading this check is reported as not applicable, as open point 28 says).
+  superseded by an importer-authored decided record at the chain head makes the validator report
+  valid, never a finding, since the maintainer-authored record stays the chain's current effective
+  resolution (open point 28); the same chain with a further maintainer-authored decided record that
+  links `supersedes` to the importer-authored head is a finding.
 - Given a committed store declaring 1.2.0, and a working tree that declares 1.3.0 and adds, unstaged
   and not ignored, exactly the empty imported leaves of the section 9.2 delta, with the imported
   counter rows at zero and the views rendered, the tracked-store check passes (open point 20). It
@@ -1121,6 +1126,12 @@ Acceptance checks, each as an automated test over a throwaway store the test bui
   1.3.0, transition legality reads the prior snapshot by path and file name (open point 22) and
   grades no record as changed; changing one record's status in the working tree is then graded
   against its status in `HEAD`.
+- With a committed store whose `BI` counter is 100 while its highest `BI` ID is `BI-90`, lowering
+  that counter to 99 in the working tree, with the views re-rendered, is a counter-monotonicity
+  finding naming the clean `BI` counter, though every ID still lies within it; lowering instead
+  only the `"imported:BI"` row, from a committed value the test sets, is a finding naming that
+  imported row alone; removing a counter row that `HEAD` holds is a finding; and raising a counter
+  is not a counter-monotonicity finding.
 - With a committed store, removing a record's row from its index, or an entry from `worklog.toml`,
   in the working tree, with the views re-rendered, is a finding; the same terminal record's row
   moved by the test into an archive file that `archive.toml` enumerates is not (no deletion).
@@ -1153,21 +1164,32 @@ under that operation's already-held lease and does not take a second one.
   state". This prompt's reading makes it a property of each store path, not of the repository: a
   store path is in mid-merge state while the git index holds an unmerged entry (a conflict stage)
   for it. A merge in progress whose store paths carry no conflict markers and no unmerged entries
-  therefore passes the check, so a merge whose store paths have been resolved, for example by taking
-  the integration base's version of the conflicted store files (below), is not refused merely
-  because the merge is not yet concluded, and the step 14 pre-commit check can run when that merge
-  is committed. Section 5.7's reconciliation list names `doctor` and `render` beside the writing
-  operations, so this prompt's reading is that the clean-state check (no conflict markers, no
-  mid-merge state) applies to them too, even though neither takes the lease that a writing
-  operation does except for render's own write mode, covered above. Both readings, the per-path
-  meaning of mid-merge state and this scope, are this prompt's, not settled by a quoted rule beyond
-  the list itself, and are yours to confirm with the maintainer.
+  therefore passes the check, so a merge that conflicted only outside the store does not by itself
+  make an operation refuse. A merge that conflicted on a store path is not resolved in place: it
+  takes the integration-base route below. Section 5.7's reconciliation list names `doctor` and
+  `render` beside the writing operations, so this prompt's reading is that the clean-state check (no
+  conflict markers, no mid-merge state) applies to them too, even though neither takes the lease
+  that a writing operation does except for render's own write mode, covered above. Both readings,
+  the per-path meaning of mid-merge state and this scope, are this prompt's, not settled by a quoted
+  rule beyond the list itself, and are yours to confirm with the maintainer.
 - The lease (`lease.toml`, present only while held, carrying the holder, the operation and a
   clock-read acquisition time) is never seized from a live holder and is reconciled on resume or
   close. Whether it is committed, and its field names, is open point 12.
-- Store files are never hand-merged: after a merge conflict on a store path, take the integration
-  base's version of the conflicted files and redo the authoring operation, which claims the next ID
-  afresh. Never resolve an ID collision by lowering a counter or reusing an ID.
+- Store files are never hand-merged: after a merge conflict on a store path, "take the integration
+  base's version of the conflicted store files and redo the authoring operation on that base, which
+  claims the next ID afresh" (section 5.7). Never resolve an ID collision by lowering a counter or
+  reusing an ID. This prompt's reading of "on that base": the redo runs on a commit whose store is
+  the integration base's, never inside the conflicted merge. Abandon the merge
+  (`git merge --abort`), then start a branch from the integration base, or rebase the branch onto it
+  with the branch's store changes left out, and redo each of the branch's authoring operations there
+  through the writer, committing each as open point 22 requires. Concluding the conflicted merge
+  with the base's version of the conflicted store files and redoing afterwards is not this route.
+  The redo cannot run inside the merge: its planned destinations then differ from `HEAD`, so section
+  8.8, item 5 ("the planned destinations MUST be clean") and open point 22 refuse. And the step 14
+  merge check compares a merge commit with each parent, so a record that the branch holds and the
+  taken files drop is reported as deleted. Whether that route also satisfies section 5.7 is the
+  maintainer's to rule; until then your tooling does not offer it, and the clean-state refusal on an
+  unmerged store path names the route above.
 - If you later relocate the store, `opf migrate`, `opf sync` and the provider registry
   (sections 5.4, 5.5 and 5.6) apply in full, including the behind, ahead and divergent rules. They
   are outside this prompt's minimum; do not relocate without implementing them.
@@ -1177,8 +1199,8 @@ Acceptance checks:
 - Taking the lease while it is held refuses and changes nothing; a leftover lease from a dead run
   is released only through reconciliation, never seized.
 - A conflict marker in a store file, or an unmerged index entry for a store path, makes the
-  clean-state check refuse; during a merge in progress whose store paths carry neither, the check
-  passes.
+  clean-state check refuse, naming the integration-base route; during a merge in progress whose
+  store paths carry neither, the check passes.
 - The standalone render write mode refuses and writes nothing while the lease is held by another
   run; render nested inside a writer operation proceeds under that operation's held lease without
   taking a second one.
@@ -1202,8 +1224,8 @@ sections 4, 9 and 9.2, in throwaway repositories:
 - a 1.1.0 fixture, with the `[opf]` base table and `spec_version = "1.1.0"`;
 - 1.2.0 fixtures, with `spec_version = "1.2.0"`, no imported leaves and no imported counter rows;
 - fixtures holding synthetic legacy importer-authored clean records, one of them without
-  `created_at` (step 4), a fixture whose pending_decision chain needs the open point 28 repair, and
-  fixtures at `import_status = "partial"` and `"complete"`;
+  `created_at` (step 4), fixtures holding the two pending_decision chain shapes of open point 28,
+  and fixtures at `import_status = "partial"` and `"complete"`;
 - for the pre-write unresolved-import check, fixtures that follow its rule location by location (the
   bullet "An unresolved legacy import" below): for each location it lists, a 1.2.0 fixture holding
   one synthetic entry there (a run directory holding one file; for `.working/IMPORT-REPORT.md`, the
@@ -1292,12 +1314,13 @@ in your fixtures until it is resolved; the remedy writer below refuses to author
   of open point 21, whose intermediate upgrade the maintainer commits before the writer runs. The
   step 6 validator and the upgrade accept the `maintainer_decision` in the form of open point 26.
 - **The remedy writer.** The upgrade is not tested until its remedies have been performed and the
-  upgrade retried, and those remedies go through the sanctioned writer, so build the part of the
-  step 10 writer they need now: `opf record create` and `opf record transition`, for a store
-  declaring 1.1.0 or 1.2.0 only, graded as open point 21 says. `create` authors the open point 26
-  `maintainer_decision` and, under open point 28's first reading, the new pending_decision of that
-  point, which `transition` then decides. Give both every rule section 8.8 states for them, as step
-  10 describes: the `/proposed` landing and the `proposed_from` write, restore and removal; the
+  upgrade retried, and those remedies go through the sanctioned writer, so build part of the step 10
+  writer now: `opf record create` and `opf record transition`, for a store declaring 1.1.0 or 1.2.0
+  only, graded as open point 21 says. `create` authors the open point 26 `maintainer_decision`, the
+  one remedy open point 28 names. No named remedy needs `transition`; building it here is this
+  prompt's choice, so that step 10 extends one writer and a remedy that a maintainer's ruling on
+  open point 28 adds can go through it. Give both every rule section 8.8 states for them, as step 10
+  describes: the `/proposed` landing and the `proposed_from` write, restore and removal; the
   pending_decision resolution bundle with an explicit `decided_by` and a clock-read `decided_at`;
   the `supersedes` append and its target checks over the active index together with every archived
   record, and the chain rule over the planned index together with every archived record (section
@@ -1380,18 +1403,23 @@ in your fixtures until it is resolved; the remedy writer below refuses to author
     of section 8.1, which section 9.2 keeps readable. Whether a `quarantined` fragment is an
     unresolved import is part of open point 25, and the LF schema already makes such a record
     cannot-evaluate until then.
-  - `journals/<kind>/`, which section 4.2 names "reserved recovery state" for the closed kind
-    vocabulary `import`, `ingest`, `adoption`, `layout`, `preview`, `record`. This prompt leaves
-    `journals/` out of the rule above on purpose, as its own choice. Section 4.2 says doctor "MUST
-    NOT consult a journal to decide partial status" and "Containment and doctor exclude journals and
-    make no recovery claim"; those rules bind doctor and containment, not the upgrade, so they do
-    not forbid the upgrade from inspecting a journal, and this choice does not rest on them. Its
-    reason is that section 4.2 says "Journals are machine-local even after completion; a clone
-    without them cannot recover those transactions": a journal frame is recovery state for a
-    transaction on one system, not a durable record of a run's resolution, so this choice reads none
-    as evidence of a run's state either way. Whether an `import` or `ingest` journal entry should
-    instead count as a run under the rule above, the same as a staging or imported-evidence entry,
-    is the maintainer's to rule; until ruled, this prompt's choice is that it does not.
+  - `.working/journals/`, whose `journals/<kind>/` section 4.2 calls "reserved recovery state" for
+    the closed kind vocabulary `import`, `ingest`, `adoption`, `layout`, `preview`, `record`. The
+    check counts every entry under `.working/journals/`, which is this prompt's choice, made for the
+    reason it counts every other entry under `.working/staging/`: the check cannot show that such an
+    entry holds no import state. Section 4.2's "Journals are machine-local even after completion"
+    sits beside the managed ignore block that lists `/journals/` and that "Homes-2 init and upgrade
+    MUST render", so it belongs to homes 2. Of a store under pre-1.3.0 tooling, as every origin
+    store of this upgrade was, section 4.2 says "the homes-2 names are ordinary store paths there,
+    graded, detected, and dispositioned exactly as before", and section 5.1 makes "An untracked or
+    ignored `.working/` tree" a hard failure, so in a homes-1 origin store a journal entry is a
+    store path, not machine-local data. Section 4.2 also says doctor "MUST NOT consult a journal to
+    decide partial status" and "Containment and doctor exclude journals and make no recovery claim";
+    those rules bind doctor and containment, not this pre-write check of the upgrade, so the check
+    treats a journal entry like any other entry under the rule above. Your own tooling writes no
+    journal there (open point 11). Whether journal entries, or those of some kinds, should instead
+    be left out of the check is the maintainer's to rule; until ruled, this prompt's choice is that
+    every entry counts.
 
   If you find another location that the specification names for legacy import or ingest state, add
   it to this list, give it fixtures under the same rule, and ask the maintainer to ratify the
@@ -1431,9 +1459,9 @@ Acceptance checks, over synthetic fixtures the test builds:
   backlog item upgrades with that item named in the report. Using `"none"` here is this prompt's
   choice, so that these tests do not depend on substantiating a completed import, whose evidence
   format is open point 25; the specification does not say which status a pre-1.3.0 store with
-  importer-authored records carries. This check, the two repair checks and the 1.0.0 receipt route
-  below still rest on open point 25's interim reading of the deferral seam; if the maintainer
-  rules otherwise, they wait on that point.
+  importer-authored records carries. This check, the repair route, the decision-chain check and the
+  1.0.0 receipt route below still rest on open point 25's interim reading of the deferral seam; if
+  the maintainer rules otherwise, they wait on that point.
 - The repair route, end to end: a 1.2.0 fixture whose maintainer-authored ratified `done` backlog
   item has as its only receipt a synthetic importer-authored `done` record refuses before any
   write, naming the record and the remedy. On that unchanged fixture, your step 8 `create`, run
@@ -1442,20 +1470,12 @@ Acceptance checks, over synthetic fixtures the test builds:
   same `create` run as an assistant refuses. The test commits the decision, retries the upgrade,
   and the upgrade reaches 1.3.0 with the validator reporting valid and the item named in the
   report.
-- The decision-chain repair, end to end (this prompt's first reading in open point 28; under its
-  alternative this check is reported as not applicable, as open point 28 says): a committed 1.2.0
-  fixture in which a maintainer-authored decided pending_decision is superseded by a synthetic
-  importer-authored decided pending_decision at the head of the chain refuses before any write,
-  naming the chain and the remedy. On that fixture, your step 8 `create`, run as a maintainer,
-  records a new pending_decision at `open` and exits 0; the test commits it; your step 8
-  `transition`, run as a maintainer, moves it to unqualified `decided` with its resolution bundle
-  and a `supersedes` link to the importer-authored head, and exits 0, reporting any pending
-  cannot-evaluate as pending until commit; the test commits it; and the retried upgrade reaches
-  1.3.0 with the validator reporting valid and the importer-authored decision named in the report.
-  The same `transition` run as an assistant with the `supersedes` link refuses and writes nothing,
-  since section 8.8 refuses the link on a `/proposed` landing, and a `transition` run before the
-  `create` is committed refuses on its dirty planned destinations (section 8.8, item 5) and writes
-  nothing.
+- The decision chains of open point 28: a committed 1.2.0 fixture in which a maintainer-authored
+  decided pending_decision is superseded by a synthetic importer-authored decided pending_decision
+  at the head of the chain upgrades to 1.3.0 with no repair offered, the validator reporting valid
+  and the importer-authored decision named in the report. The same fixture with a further
+  maintainer-authored decided pending_decision linking `supersedes` to that head refuses before
+  any write, naming the chain and open point 28, and writes nothing.
 - The receipt route from a 1.0.0 fixture: the composed upgrade refuses before any write and names
   the staged route; `opf upgrade --to 1.2.0` reaches 1.2.0 with the validator reporting valid and
   nothing staged; a `create` of the decision run now refuses on its dirty planned destinations and
@@ -1639,8 +1659,14 @@ Implement section 8.8 (Authoring operations). Subcommands:
   assistant or automation lands `superseded/proposed`), a commit, then a `create` of the new
   contribution linking `supersedes` to it. Doing the transition first is this prompt's choice, so
   that no intermediate state links `supersedes` to a record that is not yet `superseded`; the
-  commit between them follows from open point 22. Whether a
-  `superseded/proposed` record reflects the supersession is part of open point 23.
+  commit between them follows from open point 22. Whether a `superseded/proposed` record records
+  the supersession is part of open point 23, and until the maintainer rules, this prompt's reading
+  there is that it does not. So `create` refuses a contribution linking `supersedes` to a
+  predecessor that is not at unqualified `superseded`, naming the remedy, and an assistant's
+  re-send takes one more step before the `create`: a maintainer ratifies the predecessor's
+  `superseded/proposed`, and that ratification is committed. A maintainer's own re-send lands
+  unqualified `superseded` and needs no ratification. If the maintainer rules that
+  `superseded/proposed` records the supersession, follow open point 23 for that ruling instead.
 - Older stores: step 8 built `create` and `transition` for a store declaring 1.1.0 or 1.2.0, under
   the grading of open point 21, so every remedy of open point 28 was performable before activation.
   Extend the same two subcommands to the 1.3.0 format without changing their older-store
@@ -1693,23 +1719,29 @@ Acceptance checks:
   finding other than a view drift that the verb's own render remedies, the same transition exits 2.
 - While a `current` handoff exists, `create` of another handoff refuses unless the open point 23
   operation is implemented, and then the old handoff leaves `current` in the same transaction.
-- An assistant re-send of a `sent` contribution, a `transition`, a commit, then a `create`, lands
-  the old record at `superseded/proposed` with `proposed_from = "sent"` and the new one at
-  `proposed` linking `supersedes`, each with its own lifecycle worklog entry, and each operation
-  exits 0.
+- An assistant re-send of a `sent` contribution: the assistant's `transition` lands the old record
+  at `superseded/proposed` with `proposed_from = "sent"` and exits 0; after the test commits it,
+  the assistant's `create` of the new contribution linking `supersedes` to it refuses, names the
+  ratification remedy and writes nothing (open point 23's reading); a maintainer's ratification of
+  the old record to unqualified `superseded` exits 0; after the test commits it, the same `create`
+  lands the new record at `proposed` linking `supersedes` and exits 0; and each operation that exits
+  0 appends its own lifecycle worklog entry. A maintainer's re-send, a `transition` to unqualified
+  `superseded`, a commit, then a `create`, exits 0 at each operation. If the maintainer has ruled
+  that `superseded/proposed` records the supersession, the assistant's `create` after the first
+  commit exits 0 instead, with no ratification step, and a maintainer's later rejection of the old
+  record back to `sent` refuses and writes nothing (open point 23); report the ruling with the
+  check.
 - `done-with-receipt` appends a transition-form entry for the backlog item and a create-form entry
   for the receipt; and after an assistant lands `done/proposed`, `done-with-receipt` before any
   commit refuses and writes nothing, as do a `create` and a `worklog-append` while that transition
   is uncommitted.
-- After step 10's extensions, every step 8 check that uses the remedy writer, the decision-chain
-  repair included under open point 28's first reading, still passes; under its alternative, the
-  decision-chain part is reported as not applicable, as open point 28 says.
-- Under open point 28's alternative reading, on a store declaring 1.3.0 whose pending_decision chain
-  has a maintainer-authored decided record superseded by an importer-authored decided record at the
-  chain head, with a new maintainer-authored pending_decision at `open` committed, a maintainer's
-  `transition` of that new record to unqualified `decided` with a `supersedes` link to the
-  importer-authored head refuses and writes nothing (the opposite test of open point 28; under its
-  first reading this check is reported as not applicable, as open point 28 says).
+- After step 10's extensions, every step 8 check that uses the remedy writer still passes.
+- On a store declaring 1.3.0 whose pending_decision chain has a maintainer-authored decided record
+  superseded by an importer-authored decided record at the chain head, with a new
+  maintainer-authored pending_decision at `open` committed, a maintainer's `transition` of that new
+  record to unqualified `decided` with a `supersedes` link to the importer-authored head refuses and
+  writes nothing, since the chain would then hold two current resolutions (open point 28; this
+  check rests on open point 25's interim reading).
 - With an assistant's `done/proposed` transition of a backlog item left uncommitted and every other
   file, `worklog.toml` and the views included, committed, a `create` of a finding refuses and writes
   nothing, though none of its planned destinations is dirty (open point 22).
@@ -1826,10 +1858,10 @@ later release", so reproducing the recipe alone does not meet that check.
   that needs history and cannot read it is cannot-evaluate (exit 2), never a pass.
 - Transition legality in CI: under open point 22's reading the prior committed snapshot of a
   checked-out revision is that revision itself, so the writer's pending cannot-evaluate does not
-  arise in CI, and CI does not re-evaluate the transitions or deletions inside the commits it
-  checks; disclose that as a residual (step 14). If you choose to compare with an earlier commit
-  instead, such as the merge base, label that your choice and accept the pending cannot-evaluate
-  only on the terms of open point 22.
+  arise in CI, and CI does not re-evaluate the transitions, deletions or counter decrements inside
+  the commits it checks; disclose that as a residual (step 14). If you choose to compare with an
+  earlier commit instead, such as the merge base, label that your choice and accept the pending
+  cannot-evaluate only on the terms of open point 22.
 - Run, over the checked-out revision, and stop at the first failure: the validator in its
   no-store-fails mode; the identity check; then the render drift check.
 - The identity check compares the resolved store's identity with expected values pinned in the CI
@@ -1864,6 +1896,19 @@ platform." Wire all four, not only the platform you run on.
   item 7 lets the validator grade cannot-evaluate "until the change is committed", so the hook
   accepts that pending cannot-evaluate on the terms of open point 22 (this prompt's choice) and
   blocks on every finding and every other cannot-evaluate.
+- **Merge commits.** git runs the `pre-commit` hook from `git commit` only; a merge that `git merge`
+  concludes without a conflict runs the `pre-merge-commit` hook instead (githooks(5)), and that is
+  the case section 5.7 leaves to doctor: "A merge that resolves without a conflict yet duplicates an
+  ID is caught by `opf doctor`". So install the same check as the `pre-merge-commit` hook too.
+  Open point 22 compares with `HEAD`, which in a merge commit is the first parent alone, so it
+  would grade the merged branch's committed changes as this commit's. This prompt's choice for a
+  merge commit, which the check recognizes by running as `pre-merge-commit`, or as `pre-commit`
+  while the git directory holds `MERGE_HEAD` (a conflicted merge concluded by `git commit`): run
+  the no-deletion check and the counter comparison against each parent in turn, so every ID that
+  either parent holds must survive and no counter may fall below its value in either parent; skip
+  transition legality, so the pending cannot-evaluate does not arise; and run every other check as
+  for any other commit. Confirm both hook names and `MERGE_HEAD` against the documentation of the
+  git version you support, and disclose that a merge commit's status changes are not graded.
 - **Instructions, on every platform (this prompt's choice).** Section 14.1 requires instructions
   only "on a platform without verifiable denial"; adding them on every platform, beside any deny
   hook, is this prompt's choice. Add OPF working rules to each platform's instructions file
@@ -1912,8 +1957,9 @@ platform." Wire all four, not only the platform you run on.
 - **Residuals to disclose.** Per-clone hook installation and bypass, canonical hand edits, shell or
   interpreter wrapping, same-user tampering, and unverified platform denial (section 14.1), plus
   each platform's own residual, and, under open point 22, that CI does not re-evaluate the
-  transitions or deletions inside the commits it checks. Copy the relevant residuals of section 17
-  into your project's documentation as well.
+  transitions, deletions or counter decrements inside the commits it checks, and that the merge
+  check above does not grade a merge commit's status changes. Copy the relevant residuals of section
+  17 into your project's documentation as well.
 
 Acceptance checks:
 
@@ -1926,6 +1972,11 @@ Acceptance checks:
 - For each other platform with a hook, the hook-level probe denies the same two writes and allows
   the sanctioned writer and render paths, and the live probe is reported as run or as not run.
 - The pre-commit check blocks a commit that contains a hand-edited view.
+- Installed as both hooks, the check blocks a `git merge` that concludes without a conflict when the
+  merged branch, committed with the hooks bypassed, carries a hand-edited view; it allows a
+  conflict-free merge of a branch whose committed writer transitions leave no other defect; and it
+  blocks a merge commit, whether `git merge` or `git commit` concludes it, whose result drops a
+  record that either parent holds or lowers a counter below its value in either parent.
 - The pre-commit check allows a commit of a writer transition whose only remaining result is the
   pending cannot-evaluate with its matching lifecycle entry, and blocks the same commit when any
   other cannot-evaluate or any finding is present.
@@ -1965,10 +2016,8 @@ Then write the conformance report described in the checklist below.
 ## Final conformance checklist
 
 Report each item as passed, failed or not run, with the evidence (a command and its output, or a
-test name). Any failed or not-run item means you do not claim conformance. The one other outcome,
-not applicable, is for a part of an item that this prompt makes conditional on the open point 28
-ruling: under the alternative reading, the decision-chain route; under the first reading, the
-opposite tests of open point 28. Report it citing the ruling; it is neither passed nor not run.
+test name). Any failed or not-run item means you do not claim conformance. Where a check follows a
+maintainer's ruling on an open point, report the ruling with it.
 
 1. The pinned sources were fetched and each SHA-256 matched this prompt's table.
 2. No code from `jposluns/guardrails` is imported, vendored, copied or called at run time.
@@ -1985,10 +2034,10 @@ opposite tests of open point 28. Report it citing the ruling; it is neither pass
 7. Every file under the machine store is lowercase; every generated deliverable is uppercase and
    carries the section 10.3 header (the projection as a TOML comment block; `CHANGELOG.md` and the
    init-written `.working/README.md` excepted, and `VERSION` as ratified under open point 8).
-8. The validator runs the full section 11 roster plus the section 8.2 no-deletion check per series,
-   the imported-series checks and the homes-1 control-area registration, exits 0, 1 or 2 as step 6
-   describes, and fails closed on unreadable input; its tracked-store check admits unstaged files
-   only on the terms of open point 20.
+8. The validator runs the full section 11 roster, with counter monotonicity as both step 6 checks,
+   plus the section 8.2 no-deletion check per series, the imported-series checks and the homes-1
+   control-area registration, exits 0, 1 or 2 as step 6 describes, and fails closed on unreadable
+   input; its tracked-store check admits unstaged files only on the terms of open point 20.
 9. Renders are byte-reproducible and the drift check catches a one-byte edit; the render write
    mode, the pre-commit check and the writer accept the pending cannot-evaluate of section 8.8,
    item 7 only on the terms of step 6, step 10 and open point 22, and accept no other
@@ -1996,19 +2045,19 @@ opposite tests of open point 28. Report it citing the ruling; it is neither pass
    verb's own render remedy by rendering.
 10. The upgrade to 1.3.0 of step 8, from 1.0.0, 1.1.0 and 1.2.0, with the completed-legacy-import
     route, the receipt repair route (from 1.2.0, and from 1.0.0 with the intermediate upgrade
-    committed before the writer runs) and, under open point 28's first reading, the decision-chain
-    repair route performed end to end (under its alternative, that route is reported as not
-    applicable, citing the ruling), and the pre-write unresolved-import check over every location
-    and `import_status` value of step 8, is implemented and passed every step 8 check on synthetic
-    fixtures before initialization and the record writer accepted the 1.3.0 format (section 4.2);
-    every detail of open point 25 is resolved, and no step 8 check was left not run.
+    committed before the writer runs) performed end to end, the decision-chain cases of open point
+    28, and the pre-write unresolved-import check over every location and `import_status` value of
+    step 8, is implemented and passed every step 8 check on synthetic fixtures before initialization
+    and the record writer accepted the 1.3.0 format (section 4.2); every detail of open point 25 is
+    resolved, and no step 8 check was left not run.
 11. Initialization implements `opf.init.coupled/v1` (this prompt's scope choice; see "Choices to
     make before you start"): exit 0 only on fresh observations, with the exact success sentence;
     init-created sources staged as exact entries; views unstaged; no commit created; final
     validation after the lease removal; a finalization or lock-release failure prevents exit 0.
 12. The record writer enforces the `/proposed` rule, the per-type transition table and rules of
     section 8.5 (with the handoff supersession as ratified under open point 23, and the contribution
-    re-send as a `transition` and a `create`),
+    re-send as a `transition` and a `create`, the predecessor ratified first unless the maintainer
+    has ruled otherwise under open point 23),
     the resolution and delivery bundles, unqualified `done` only through `done-with-receipt`, the
     lifecycle worklog entry, the eight-item operation sequence, and exits 0 or 2.
 13. Releases freeze worklog spans; the changelog passes range coverage and freeze; no summary was
@@ -2019,7 +2068,8 @@ opposite tests of open point 28. Report it citing the ruling; it is neither pass
     identity check against the pinned identity, and the render check, with the 0, 1, 2 status
     rule, and no step can pass by failing.
 17. Each of Claude Code, Codex, Gemini CLI and Cursor is covered, with per-platform evidence of a
-    verified deny hook or a disclosed instructional fallback; the pre-commit check is installed;
+    verified deny hook or a disclosed instructional fallback; the pre-commit check is installed as
+    both the `pre-commit` and the `pre-merge-commit` hook;
     the section 14.1 residuals are disclosed; and the maintainer's attestation of server-side
     branch protection is recorded apart from the local probe results.
 18. Every open point you filled is listed with your choice and its ratification status.
