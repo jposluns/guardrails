@@ -17,7 +17,11 @@ Outputs (all under the reserved site/downloads/aiqt/ subtree, plus the standalon
   site/downloads/aiqt/provenance.md   human-readable provenance for the same facts
   site/downloads/aiqt-instructions.txt  the same body wrapped in the no-Skills-feature preamble
   site/downloads/aiqt-skill.zip       the public download, packed deterministically from that SKILL.md
-  site/downloads/aiqt-skill-1.0.5.zip the version-numbered copy the site links to (byte-identical alias)
+  site/downloads/aiqt-skill-1.0.6.zip the version-numbered copy the site links to (byte-identical alias)
+
+Latest only (D-SKILL-LATEST-ONLY): only the current skill version is served, so exactly one version-numbered
+aiqt-skill-<version>.zip may sit under site/downloads, named for the skill meta version. A normal run removes
+any older one it wrote before; --check reports a stale or missing one as drift (exit 1).
 
   gen_skill.py            regenerate every output
   gen_skill.py --check    fail (exit 1) on drift; exit 2 on a malformed source or an unknown corpus-id
@@ -59,9 +63,12 @@ ZIP_PARTS = ("site", "downloads", "aiqt-skill.zip")       # a standalone named B
 # "latest" alias, kept byte-identical to the version-numbered copy so a direct link never breaks across
 # releases. The site links to the version-numbered copy; both are written from the same bytes, so
 # gen_skill --check (which compares each to disk) keeps the two byte-identical.
-ZIP_VERSIONED_PARTS = ("site", "downloads", "aiqt-skill-1.0.5.zip")  # the version-numbered copy the site
+ZIP_VERSIONED_PARTS = ("site", "downloads", "aiqt-skill-1.0.6.zip")  # the version-numbered copy the site
 # links to. The literal version here is tied to the skill meta version (skill-source.md) by a fail-closed
 # assertion in build_outputs, so a skill bump that forgets to update this name fails closed.
+# Skill version policy: the skill is versioned on its own today (skill 1.0.6 under pack release 1.0.5). From
+# the 1.1.1 pack release on, the skill version equals the pack version; the check that mirrors the two lands
+# with the 1.1.1 cut, not here.
 SKILL_SRC_PARTS = (".aiqt", "core", "skill", "skill-source.md")
 CORPUS_PARTS = (".aiqt", "core", "rules")
 # The single canonical operator-identity source (the same file the hooks generator and the portability
@@ -93,7 +100,7 @@ GENSRC_OUTPUTS = (
      "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
                  ".aiqt/core/hooks/manifest.toml", "LICENSE"),
      "regenerate": "python3 tools/gen_skill.py"},
-    {"target": "site/downloads/aiqt-skill-1.0.5.zip", "kind": "file",
+    {"target": "site/downloads/aiqt-skill-1.0.6.zip", "kind": "file",
      "sources": (".aiqt/core/skill/skill-source.md", ".aiqt/core/rules/",
                  ".aiqt/core/hooks/manifest.toml", "LICENSE"),
      "regenerate": "python3 tools/gen_skill.py"},
@@ -362,7 +369,7 @@ def render_skill(data):
 
 
 def versioned_zip_basename(version):
-    """The version-numbered download filename for a skill version, e.g. 'aiqt-skill-1.0.5.zip'. This is the
+    """The version-numbered download filename for a skill version, e.g. 'aiqt-skill-1.0.6.zip'. This is the
     shared SHAPE helper: it spells the filename PATTERN in one place, so the build-time match assertion, the
     install-page block (gen_install.py), and any other caller derive the name the same way. It is NOT the
     single source of the concrete versioned name: that name is spelled as a literal in several spots (the
@@ -371,6 +378,23 @@ def versioned_zip_basename(version):
     Those literals are kept consistent by the fail-closed version-match assertion in build_outputs plus the
     bump checklist, not by true single-sourcing."""
     return "aiqt-skill-{}.zip".format(version)
+
+
+def is_versioned_zip(filename):
+    """True for a version-numbered skill zip basename ('aiqt-skill-<v>.zip'). The stable alias aiqt-skill.zip
+    has no version segment, so it does not match. The one matcher the orphan-clean and the latest-only check
+    share, so the two can never disagree on what counts as a versioned zip."""
+    return filename.startswith("aiqt-skill-") and filename.endswith(".zip")
+
+
+def versioned_zips(downloads_dir):
+    """The sorted version-numbered skill zip basenames directly under downloads_dir (top level only; the
+    reserved aiqt/ subtree is not a download location). An absent dir has none; an unreadable one raises
+    OSError, which run_gen surfaces as exit 2, so an I/O error can never read as latest-only clean."""
+    if not dir_present(downloads_dir):
+        return []
+    return sorted(fn for fn in os.listdir(downloads_dir)
+                  if is_versioned_zip(fn) and os.path.isfile(os.path.join(downloads_dir, fn)))
 
 
 def zip_versioned_version():
@@ -583,11 +607,26 @@ def run_gen(root, check):
             for dirpath, _dirs, filenames in os.walk(downloads_dir, onerror=_raise):
                 _dirs[:] = []  # top level only: do not descend into the reserved aiqt/ subtree
                 for fn in sorted(filenames):
-                    if fn.startswith("aiqt-skill-") and fn.endswith(".zip") and fn != current_versioned:
+                    if is_versioned_zip(fn) and fn != current_versioned:
                         stale = Path(dirpath) / fn
                         drift.append("orphan " + stale.relative_to(root).as_posix())
                         if not check:
                             stale.unlink()
+        # Latest-only (D-SKILL-LATEST-ONLY): exactly one version-numbered skill zip is served, and it is the
+        # one named for the skill meta version (build_outputs has already asserted ZIP_VERSIONED_PARTS spells
+        # that version). On --check a stale extra or a missing current copy is drift (exit 1); after a normal
+        # run the regen and orphan-clean above must have left exactly that one, else the run fails closed.
+        if binary:
+            found = versioned_zips(downloads_dir)
+            if found != [current_versioned]:
+                msg = ("latest-only: expected exactly one versioned skill zip under site/downloads, {} (the "
+                       "declared skill version), found {}: {}".format(
+                           current_versioned, len(found), ", ".join(found) or "none"))
+                if check:
+                    drift.append(msg)
+                else:
+                    print("error: " + msg)
+                    return 2
         for name, content in sorted(reserved_map.items()):
             target = reserved_dir / name
             current = target.read_text(encoding="utf-8") if target.exists() else None
@@ -638,7 +677,8 @@ def main():
 #   5. an invalid-UTF-8 reserved target fails closed (exit 2), not a raw UnicodeDecodeError traceback:
 #      guards the widened (OSError, UnicodeError) reconcile arm (F-154),
 #   6. a stale version-numbered download zip (aiqt-skill-0.0.0.zip) is flagged as drift on --check
-#      (exit 1) and removed on a normal regen, while the alias and the current versioned copy are kept.
+#      (exit 1) and removed on a normal regen, while the alias and the current versioned copy are kept,
+#   7. the latest-only check names a stale extra and a missing current versioned zip (exit 1 each).
 
 _APEX = """---
 corpus-id: prjint1
@@ -947,6 +987,34 @@ def self_test_main():
         if code != 0:
             failures.append("after removing the stale zip, --check expected exit 0 (clean), got {}\n{}".format(
                 code, out))
+
+        # 9. Latest-only (D-SKILL-LATEST-ONLY): --check names the count of versioned zips, so a stale extra
+        #    (two present) and a missing current copy (none present) each read as latest-only drift (exit 1),
+        #    and a tree with exactly the current one is clean. Removing the latest-only check makes the two
+        #    red legs fail here (the orphan drift alone does not carry the latest-only finding).
+        latest = tmp / "latest"
+        latest.mkdir()
+        _write_fixture(latest, good_src)
+        capture(latest, False)
+        found = versioned_zips(latest.joinpath(*ZIP_PARTS[:-1]))
+        if found != [ZIP_VERSIONED_PARTS[-1]]:
+            failures.append("a clean tree must hold exactly the current versioned zip, got {}".format(found))
+        extra = latest.joinpath(*ZIP_PARTS[:-1]) / "aiqt-skill-0.0.1.zip"
+        extra.write_bytes(b"PK\x03\x04 stale prior-version zip bytes")
+        code, out = capture(latest, True)
+        if code != 1 or "latest-only" not in out or "found 2" not in out:
+            failures.append("a stale extra versioned zip expected latest-only drift (exit 1, found 2), got "
+                            "{}\n{}".format(code, out))
+        extra.unlink()
+        latest.joinpath(*ZIP_VERSIONED_PARTS).unlink()
+        code, out = capture(latest, True)
+        if code != 1 or "latest-only" not in out or "found 0" not in out:
+            failures.append("a missing current versioned zip expected latest-only drift (exit 1, found 0), "
+                            "got {}\n{}".format(code, out))
+        code, out = capture(latest, False)
+        if code != 0 or versioned_zips(latest.joinpath(*ZIP_PARTS[:-1])) != [ZIP_VERSIONED_PARTS[-1]]:
+            failures.append("regen expected to restore exactly the current versioned zip, got {}\n{}".format(
+                code, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -958,7 +1026,8 @@ def self_test_main():
     print("SELF-TEST PASS: well-formed source round-trips clean (SKILL.md and the zips); an unknown "
           "corpus-id, an invalid-UTF-8 target, and a version/zip-literal mismatch each fail closed (exit 2); "
           "a drifted SKILL.md, an orphan reserved output, and a stale version-numbered download zip are "
-          "caught (exit 1, the stale zip removed on regen while the alias and current copy are kept); a "
+          "caught (exit 1, the stale zip removed on regen while the alias and current copy are kept); the "
+          "latest-only check names a stale extra and a missing current versioned zip (exit 1); a "
           "facet-misplaced rule fails closed (exit 2).")
     return 0
 
