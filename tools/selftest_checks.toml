@@ -764,4 +764,14 @@ expected-check-ids = [
   "exit/imported-file-scope-grammar-2",
   "revert/imported-file-scope-grammar-red",
   "doc/budget-source-pack-description",
+  # ---------- round 6: resolved header paths, case variants of the fixed names ----------
+  "count/symlinked-rule-file-header-resolved-path",
+  "count/symlinked-rule-dir-header-resolved-path",
+  "count/symlinked-claude-md-header-resolved-path",
+  "revert/symlinked-header-resolved-path-red",
+  "exit/case-variant-root-claude-md-2",
+  "exit/case-variant-dot-claude-dir-2",
+  "exit/case-variant-dot-claude-md-2",
+  "exit/case-variant-rules-dir-2",
+  "revert/case-variant-red",
 ]

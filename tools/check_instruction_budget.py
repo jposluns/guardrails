@@ -30,6 +30,11 @@ character in the Basic Multilingual Plane is one unit, an astral character such 
       repository, a symlink loop, and a directory reached a second time through a symlink exit 2. A
       leading frontmatter block is removed (FRONTMATTER_RE below, first match only; its trailing `\\s*`
       also takes the blank line after the closing fence), then HTML comments as COMMENTS states.
+  FIXED NAMES. The loader opens CLAUDE.md, `.claude/CLAUDE.md`, and `.claude/rules/` by those exact
+      names, and on a case-insensitive file system a case variant of any of them (`claude.md`,
+      `.Claude/`, `.claude/claude.md`, `.claude/Rules/`) is what it opens or walks. A case variant of
+      CLAUDE.md or `.claude` at the repository root, or of CLAUDE.md or `rules` in `.claude/`, exits 2,
+      whether or not the canonical name is there too.
   FRONTMATTER. The block FRONTMATTER_RE matches, with the closing `---` at the start of a line and only
       spaces after it, and every character of the block and its fences printable ASCII. Blank lines and
       `#` lines at column 0 are skipped. Every other line is `key: value` with a key from FRONTMATTER_KEYS
@@ -112,9 +117,16 @@ character in the Basic Multilingual Plane is one unit, an astral character such 
       (an unconditional rule file, CLAUDE.md, `.claude/CLAUDE.md`, and every import target; not a
       conditional rule file, whose own body is not loaded) counts a modelled header: that fixed text, the
       type suffix the pinned loader writes for a project file, the colon, the blank-line separators, and the
-      file's path RELATIVE to the repository root (as the gate names it). The loader writes the absolute
-      path; the machine-specific root prefix before the relative path is not counted, so the figure is the
-      same on every machine. The headers are counted into both totals and printed as their own part.
+      file's path RELATIVE to the repository root. That path is the one the loader writes: the resolved
+      path (every symlink resolved, a symlinked rule file or one under a symlinked rule directory
+      included), relative to the resolved repository root, not the name the link gives it. For CLAUDE.md
+      and `.claude/CLAUDE.md`, which the loader opens by a fixed name, the gate has not established
+      whether it writes that name or the resolved path, so it counts the longer of the two. The loader
+      writes the absolute path; the machine-specific root prefix before the relative path is not counted,
+      so the figure is the same on every machine. Once per session, before the first file, the loader also
+      writes a fixed preamble (`Codebase and user instructions are shown below. ...`); it is a constant,
+      not counted, so any growth in what loads still shows in both totals. The headers are counted into
+      both totals and printed as their own part.
 
 Two totals are reported separately:
 
@@ -159,9 +171,13 @@ AGENTS.md or other file loaded through the instructionFiles setting rather than 
 files in other directories (above the repository root or below it), or CLAUDE.local.md; skills, hooks,
 tool definitions, or the system prompt; or loading by a Claude Code version other than the one pinned in
 the budget source. Of each loaded file's header (`Contents of <absolute path> (project instructions,
-checked into the codebase):`, HEADERS) it counts the fixed text and the path relative to the repository
-root, but not the machine-specific absolute root prefix the loader writes before that path, so the header
-is undercounted by that prefix's length for every loaded file. The loader's own 120,000-character check
+checked into the codebase):`, HEADERS) it counts the fixed text and the file's resolved path relative to
+the resolved repository root (the longer of that and its fixed name for CLAUDE.md and
+`.claude/CLAUDE.md`), but not the machine-specific absolute root prefix the loader writes before that
+path. So each header is undercounted by that prefix's length, and by nothing else only as far as the
+loader writes the resolved path, as the pinned build's rule walker does (the gate's loader model, not a
+proof). The loader's once-per-session preamble (HEADERS) is not counted either. The loader's own
+120,000-character check
 sums file contents only, so both totals, which include the headers, read a little high against that
 floor. The count is UTF-16 code units, not tokens, so it tracks size, not model cost.
 
@@ -276,6 +292,19 @@ def header_units(rel):
     """The units of the modelled header before a loaded file: HEADER_FIXED plus `rel`, its path relative
     to the repository root. The machine-specific absolute root prefix the loader writes is not counted."""
     return utf16_units(HEADER_FIXED) + utf16_units(rel)
+
+
+def loaded_rel(path, real_root):
+    """The path the loader writes in the header of the file `path`: its resolved path (every symlink
+    resolved), relative to the resolved repository root `real_root`, never the name a link gives it."""
+    return Path(os.path.relpath(os.path.realpath(path), real_root)).as_posix()
+
+
+def fixed_name_header(root, real_root, rel):
+    """The header units of the file the loader opens by the fixed name `rel` (CLAUDE.md,
+    `.claude/CLAUDE.md`): the longer of `rel` and its loaded_rel, since which one the loader writes for these
+    is not established."""
+    return max(header_units(rel), header_units(loaded_rel(root / rel, real_root)))
 
 
 def comment_spans(text):
@@ -676,6 +705,7 @@ def measure_rules(root):
     imports of a conditional file load in every session."""
     total = counted = conditional = headers = 0
     origins = []
+    real_root = os.path.realpath(root)
     for path in rule_files(root):
         where = path.relative_to(root).as_posix()
         text = read_text(path, where)
@@ -690,7 +720,7 @@ def measure_rules(root):
                 origins.append(origin)  # its body is not counted; its imports load in every session
                 continue
         total += counted_units(body)
-        headers += header_units(where)
+        headers += header_units(loaded_rel(path, real_root))  # the resolved path, not the link's name
         counted += 1
         origins.append(origin)
     return total, counted, conditional, origins, headers
@@ -854,7 +884,7 @@ def follow_imports(root, origins, findings):
             for target in targets:
                 if target in seen:
                     continue
-                rel = Path(os.path.relpath(target, real_root)).as_posix()
+                rel = loaded_rel(target, real_root)
                 try:
                     text = read_text(Path(target), rel)
                 except GateError as exc:
@@ -868,6 +898,26 @@ def follow_imports(root, origins, findings):
                 seen[target] = (counted_units(body), header_units(rel))
                 pending.append((body, os.path.dirname(target), rel, _body_line(text, body)))
     return seen
+
+
+def _case_variants(root):
+    """GateError when a case variant of a name the loader opens by a fixed name (CLAUDE.md and `.claude` at
+    the root; CLAUDE.md and `rules` in `.claude/`) sits beside it: on a case-insensitive file system the
+    loader opens or walks the variant, which the gate, reading the canonical name, does not measure."""
+    for parent, names in (("", (CLAUDE_REL, ".claude")), (".claude", ("CLAUDE.md", "rules"))):
+        directory = root / parent
+        try:
+            entries = os.listdir(directory)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise GateError("cannot list {} ({}); cannot evaluate".format(parent or ".", exc))
+        for name in sorted(entries):
+            for canonical in names:
+                if name != canonical and name.casefold() == canonical.casefold():
+                    raise GateError("{}: a case variant of {}, which the loader opens on a case-insensitive "
+                                    "file system and the gate does not measure; ambiguous, cannot "
+                                    "evaluate".format(os.path.join(parent, name), os.path.join(parent, canonical)))
 
 
 def _dot_claude(root, real_root):
@@ -893,6 +943,7 @@ def _dot_claude(root, real_root):
 def measure(root):
     """Both totals and their parts. Banned imports reached from the rule files, `.claude/CLAUDE.md`, and
     the managed block are returned as findings; every cannot-evaluate condition raises GateError."""
+    _case_variants(root)
     rules, counted, conditional, origins, rule_headers = measure_rules(root)
     claude = read_text(root / CLAUDE_REL, CLAUDE_REL)
     _check_characters(claude, CLAUDE_REL)
@@ -910,7 +961,8 @@ def measure(root):
     dot = _dot_claude(root, real_root)
     dot_units = sum(counted_units(text) for text, _, _, _ in dot)
     # Every loaded file carries a header: the rule files counted, CLAUDE.md, .claude/CLAUDE.md, each import.
-    file_headers = rule_headers + header_units(CLAUDE_REL) + sum(header_units(where) for _, _, where, _ in dot)
+    file_headers = rule_headers + sum(fixed_name_header(root, real_root, where)
+                                      for where in [CLAUDE_REL] + [where for _, _, where, _ in dot])
     # Claude Code follows imports in rule files as in CLAUDE.md, so theirs count into both totals.
     pack_seen = follow_imports(
         root, origins + dot + [(block, claude_base, CLAUDE_REL, claude.count("\n", 0, start) + 1)], findings)
@@ -1436,6 +1488,44 @@ def self_test(report_path=None):
         os.symlink("real", str(twice / RULES_REL / "alias"))
         code, err = _stderr_of(run, twice)
         check("exit/rule-dir-reached-twice-ambiguous-2", (code, "ambiguous" in err), (2, True))
+        # A header names the resolved path, as the loader writes it, not the link's name: lengthening the
+        # target of a symlinked rule file or rule directory by 200 characters grows PACK by exactly 200, and
+        # so does lengthening the target of a symlinked CLAUDE.md or .claude/CLAUDE.md (the longer of its
+        # fixed name and that path).
+        linked_packs = dict()
+        for case, n in (("short", 1), ("long", 201)):
+            filelink = _tree(tmp / ("hdr-file-" + case), extra=_files("docs/" + "x" * n + ".txt", "X" * 1000))
+            os.symlink(os.path.join("..", "..", "docs", "x" * n + ".txt"), str(filelink / RULES_REL / "a.md"))
+            dirlink = _tree(tmp / ("hdr-dir-" + case), extra=_files("docs/" + "d" * n + "/b.md", "X" * 1000))
+            os.symlink(os.path.join("..", "..", "docs", "d" * n), str(dirlink / RULES_REL / "sub"))
+            claudelink = _tree(tmp / ("hdr-claude-" + case), extra=_files("c" * n + "/keep", ""))
+            os.rename(str(claudelink / CLAUDE_REL), str(claudelink / ("c" * n) / CLAUDE_REL))
+            os.symlink(os.path.join("c" * n, CLAUDE_REL), str(claudelink / CLAUDE_REL))
+            dotlink = _tree(tmp / ("hdr-dot-" + case), extra=_files("e" * (n + 7) + "/CLAUDE.md", "X"))
+            os.symlink(os.path.join("..", "e" * (n + 7), "CLAUDE.md"), str(dotlink / DOT_CLAUDE_REL))
+            linked_packs[case] = [_measured(measure, r)["pack"] for r in (filelink, dirlink, claudelink, dotlink)]
+        short, long_ = linked_packs["short"], linked_packs["long"]
+        check("count/symlinked-rule-file-header-resolved-path", (short[0], long_[0] - short[0]),
+              (1000 + _hdr("docs/x.txt", "CLAUDE.md"), 200))
+        check("count/symlinked-rule-dir-header-resolved-path", (short[1], long_[1] - short[1]),
+              (1000 + _hdr("docs/d/b.md", "CLAUDE.md"), 200))
+        check("count/symlinked-claude-md-header-resolved-path",
+              (short[2], long_[2] - short[2], short[3], long_[3] - short[3]),
+              (_hdr("c/CLAUDE.md"), 200, 1 + _hdr("CLAUDE.md", "eeeeeeee/CLAUDE.md"), 200))
+        # A case variant of a name the loader opens by a fixed name exits 2: a case-insensitive file system
+        # opens or walks it, and the gate, reading the canonical name, would not measure it.
+        variants = []
+        for check_id, case, extra in (("exit/case-variant-root-claude-md-2", "root-claude", _files("claude.md", "X")),
+                                      ("exit/case-variant-dot-claude-dir-2", "dot-dir",
+                                       _files(".Claude/CLAUDE.md", "X")),
+                                      ("exit/case-variant-dot-claude-md-2", "dot-claude",
+                                       _files(".claude/claude.md", "X")),
+                                      ("exit/case-variant-rules-dir-2", "rules-dir",
+                                       _files(".claude/Rules/b.md", "X"))):
+            variant = _tree(tmp / ("case-" + case), rules=_files("a.md", "a"), extra=extra)
+            variants.append(variant)
+            code, err = _stderr_of(run, variant)
+            check(check_id, (code, "case variant" in err), (2, True))
 
         # The enumerated grammar: a character outside it anywhere in a measured file, a non-ASCII import
         # token, a `..` component or a symlink on an import path, and a directory or unreadable target exit 2;
@@ -1533,7 +1623,8 @@ def self_test(report_path=None):
                                      "a banned name there exits 1", "not a proof", "its own body is not counted",
                                      "begins an import token", "Contents of", ".claude/CLAUDE.md",
                                      "RELATIVE to the repository root", "root prefix", "inside a word",
-                                     "SCOPE grammar") if phrase not in doc]
+                                     "SCOPE grammar", "resolved path", "case variant", "preamble",
+                                     "not the name the link gives it") if phrase not in doc]
               + [phrase for phrase in ("never missed", "never under", "OVER-COUNT BY CONSTRUCTION", "not dropped")
                  if phrase in doc], [])
 
@@ -1543,7 +1634,8 @@ def self_test(report_path=None):
         budget_doc = " ".join(line.lstrip("# ") for line in budget_doc.split("\n") if line.startswith("#"))
         check("doc/budget-source-pack-description",
               [phrase for phrase in (".claude/CLAUDE.md", "conditional", "header", "relative to the repository",
-                                     "whole-line HTML comment") if phrase not in budget_doc]
+                                     "whole-line HTML comment", "resolved path", "predates header counting")
+               if phrase not in budget_doc]
               + [phrase for phrase in ("after frontmatter and HTML comments are removed",) if phrase in budget_doc],
               [])
 
@@ -1634,6 +1726,19 @@ def self_test(report_path=None):
         no_rebuild = _mutant(tmp, "(1 if rebuilt else 0)", "0")
         check("revert/rebuilt-newline-red",
               (_measured(measure, lexer)["rules"], _measured(no_rebuild.measure, lexer)["rules"]), (22, 21))
+        link_named = _mutant(tmp, "headers += header_units(loaded_rel(path, real_root))",
+                             "headers += header_units(where)")
+        fixed_named = _mutant(tmp, "return max(header_units(rel), header_units(loaded_rel(root / rel, real_root)))",
+                              "return header_units(rel)")
+        growth = []
+        for mutant, kind in ((link_named, "file"), (link_named, "dir"), (fixed_named, "claude"), (fixed_named, "dot")):
+            growth.append(_measured(mutant.measure, tmp / ("hdr-" + kind + "-long"))["pack"]
+                          - _measured(mutant.measure, tmp / ("hdr-" + kind + "-short"))["pack"])
+        check("revert/symlinked-header-resolved-path-red",
+              ([b - a for a, b in zip(short, long_)], growth), ([200] * 4, [0] * 4))
+        no_case = _off(tmp, "_case_variants")
+        check("revert/case-variant-red",
+              ([_quiet(run, r) for r in variants], [_quiet(no_case.run, r) for r in variants]), ([2] * 4, [0] * 4))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1666,7 +1771,8 @@ def self_test(report_path=None):
           "every red-on-revert flip turning red, a conditional rule file's imports counted to any depth, an "
           "HTML comment beside an @ that begins an import exit 2 and an email address in a comment pass, "
           "quoted commas in a flow list read, .claude/CLAUDE.md and its imports counted, a modelled header "
-          "counted per loaded file, an imported file's scope held to the grammar, and the budget source "
+          "counted per loaded file naming its resolved path, case variants of the fixed names exit 2, an "
+          "imported file's scope held to the grammar, and the budget source "
           "describing PACK); execution set "
           "reconciled against tools/selftest_checks.toml".format(len(EXECUTED)))
     return 0
