@@ -12729,7 +12729,7 @@ def _cmd_import(rest):
 
 
 def _parse_unoptimized(source):
-    """ast.parse(source) unoptimized on every supported Python (3.11+): optimize=0 where ast.parse has
+    """ast.parse(source) unoptimized on any Python this can run under: optimize=0 where ast.parse has
     that parameter (3.13+), plain ast.parse before, which is equivalent because before 3.13 ast.parse
     never runs the AST optimizer, so it strips no docstring even under python -O or -OO. A bytes
     `source` is decoded as the interpreter decodes a source file, honouring a PEP 263 coding
