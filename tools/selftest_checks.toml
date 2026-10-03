@@ -633,6 +633,9 @@ expected-check-ids = [
   "config/absent-invariants",
   "config/read-from-base-not-checkout",
   "config/read-from-base-invariants",
+  # ---------- the base fetch writes no ref the author owns ----------
+  "fetch/refmap-keeps-local-branches",
+  "fetch/refmap-invariants",
   # ---------- the default dry run ----------
   "dry/would-merge",
   "dry/changes-nothing",
@@ -672,11 +675,13 @@ expected-check-ids = [
   "discover/ambiguous-worktree-invariants",
   "discover/branch-mismatch",
   "discover/branch-renamed-before-commit",
+  "discover/closed-pr-refused",
   "discover/branch-invariants",
   # ---------- unsupported branch names refused before any work ----------
   "refuse/bad-branch-name-plus",
   "refuse/bad-branch-name-at",
   "refuse/bad-branch-name-before-any-work",
+  "refuse/bad-branch-name-check-ref-format",
   "refuse/bad-branch-name-invariants",
   # ---------- the forbidden-push argv predicates, agreeing and exact ----------
   "audit/push-f",
@@ -718,6 +723,7 @@ expected-check-ids = [
   "refuse/generated-delete-conflict-invariants",
   "refuse/generated-symlink",
   "refuse/generated-symlink-parent",
+  "refuse/generated-symlink-realpath",
   "refuse/generated-symlink-invariants",
   "refuse/hooks-never-run",
   "refuse/commit-parents-probe",
@@ -731,14 +737,19 @@ expected-check-ids = [
   "push/remote-changed-invariants",
   "push/unknown-keeps-marker-changes-nothing",
   "push/unknown-rerun-already-pushed",
+  "push/unknown-remote-still-unreadable",
   "push/unknown-invariants",
   "push/observer-timeout-indeterminate",
   "push/observer-timeout-rerun-already-pushed",
   "push/observer-timeout-invariants",
   "push/rewound-branch-refused",
+  "push/moved-during-fetch-refused",
   "push/rewound-invariants",
   "push/timeout-observed-delivered",
   "push/timeout-invariants",
+  "push/inflight-timeout-push-unknown",
+  "push/inflight-rerun-already-pushed",
+  "push/inflight-invariants",
   # ---------- interruption and marker reconciliation ----------
   "idem/kill-after-commit-one-push",
   "idem/kill-after-push-already-pushed",
@@ -758,9 +769,20 @@ expected-check-ids = [
   # ---------- clean-filter and eol/autocrlf: validated bytes are the pushed bytes ----------
   "filter/clean-filter-pushed-correctly",
   "filter/pushed-bytes-probe",
+  "filter/pushed-bytes-same-size-probe",
+  "filter/pushed-bytes-symlink-probe",
   "filter/invariants",
-  "filter/eol-attribute-pushed-correctly",
+  "filter/eol-attribute-refused-not-pushed",
+  "filter/scratch-hooks-path-pinned",
   "filter/eol-invariants",
+  # ---------- the candidate must also pass in a NORMAL fresh checkout ----------
+  "fresh/eol-crlf-refused",
+  "fresh/eol-crlf-untouched",
+  "fresh/autocrlf-refused",
+  "fresh/invariants",
+  # ---------- base-side renames never falsely refused ----------
+  "fixpoint/base-rename-pushed",
+  "fixpoint/base-rename-invariants",
   # ---------- whole-run fail-closed causes ----------
   "run/lock-held-exit2",
   "run/lock-held-touches-nothing",
@@ -768,10 +790,17 @@ expected-check-ids = [
   "run/fetch-failure-exit2",
   "run/fetch-failure-touches-nothing",
   "run/fetch-failure-invariants",
+  # ---------- no leaked private checkout: early refusals and real signals ----------
+  "scratch/clone-failure-removed",
+  "scratch/setup-failure-removed",
+  "scratch/leak-invariants",
+  "signal/sigterm-cleans-up",
+  "signal/sighup-cleans-up",
   # ---------- CLI ----------
   "cli/bad-argument-exit2",
   "cli/bare-is-self-test",
   "cli/live-needs-option",
+  "cli/pr-non-ascii-digit-usage",
   "cli/not-a-repo-exit2",
   "cli/invariants",
 ]

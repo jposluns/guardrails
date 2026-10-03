@@ -18,13 +18,26 @@ the caller's injected (and deliberately poisoned) git configuration, and require
 remote, and its outcome depends on the remote's state (exit 2 while the base tip carries no
 config, then gh and the open PRs once it does). Live runs still read the operator's global and
 system git configuration, unchanged (the threat model below trusts them); a credential helper
-configured there keeps working for the fetch and the push.
+configured there keeps working for the base fetch, which runs in the repository. Transport,
+plainly: the PR-branch fetch and the push run FROM THE PRIVATE CLONE to the URL that
+`git remote get-url <remote>` reports, so the repository's LOCAL transport settings do not apply
+to them: a local remote.<remote>.pushurl, a local credential helper, a local core.sshCommand and
+local http.* settings are all ignored there (global and system settings still apply). The base
+fetch passes --refmap=, so the repository's configured remote.<remote>.fetch mappings are ignored
+for it and it writes exactly refs/remotes/<remote>/<base> and FETCH_HEAD, never a ref under
+refs/heads/ (a configured mapping onto a local branch cannot rewind a branch the author owns,
+even on a dry run).
 
 The tool NEVER mutates the author's working tree, index, HEAD or any local branch: that capability
 was removed, not guarded (decision D-390-PRIVATE-WORKTREE). Per open PR, in PR-number order, every
 merge, conflict resolution, regeneration, check and commit happens in a PRIVATE scratch checkout
 the run creates for that PR (a --shared clone of the repository, detached at the PR's remote head)
-and removes in a finally; checkout filters, text/eol/autocrlf conversion, ident expansion, the
+and removes in a finally entered as soon as the directory exists, so a failure in the clone or in
+the scratch setup cannot leak it; a SIGTERM or SIGHUP during a live run is converted into that same
+cleanup (the in-flight git or generator child process is killed and reaped by the interrupted
+subprocess call, the scratch is removed, the lock is released) and the process then exits with the
+conventional killed-by-signal status (an inherited SIG_IGN disposition, as under nohup, is left
+alone); checkout filters, text/eol/autocrlf conversion, ident expansion, the
 working-tree encoding, hooks (core.hooksPath pinned to the null device) and fsmonitor are disabled
 there for every git call. The author's worktree is only READ: the run locates the worktree that has
 the PR branch checked out and re-confirms, against a fresh gh view, that it still names the same
@@ -44,14 +57,21 @@ runs the check commands, proves nothing outside the generated set differs from t
 then proves that EVERY blob of the validated tree is byte-identical to the private-checkout file
 the checks read (what was validated is what is pushed; a clean filter or autocrlf transform cannot
 smuggle unvalidated bytes), commits with `git commit-tree` against that validated tree (no commit
-hook runs), verifies the new commit's first parent is the exact PR head this run validated and that
-the head is an ancestor of the new commit, and pushes from the private checkout with an exact-value
+hook runs), verifies the new commit's first parent is the exact PR head this run validated (which
+by itself makes that head an ancestor of the new commit), checks the candidate in a SECOND, normal
+private checkout (the committed attributes and the operator's global and system configuration
+honoured, no local configuration carried over, hooks disabled) and refuses normal-checkout-failed
+when any declared check fails there (regeneration with conversions disabled must not publish a
+commit whose own fresh checkout fails its generators), and pushes from the private checkout with an
+exact-value
 compare-and-set (--force-with-lease=refs/heads/<branch>:<the head this run validated>, a 40- or
 64-hex object id, which can only narrow what a plain push would accept) to the PR's own head
 branch, so a branch rewound, advanced or deleted since the validation is refused by the remote,
 never overwritten. One observer reads the remote after every push attempt, a timed-out or failed
 one included; a push whose outcome cannot be observed (a push timeout, an observer timeout, an
-unreadable remote) is INDETERMINATE: a small marker is kept so the retry can classify it, and
+unreadable remote, and a timed-out push with the remote still at the old head, which may still be
+in flight in the remote's receive-pack) is INDETERMINATE: a small marker is kept so the retry can
+classify it, and
 nothing else changes anywhere. There is no rollback machinery, because nothing local is mutated and
 so there is nothing to roll back.
 
@@ -92,6 +112,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -134,6 +155,18 @@ GIT_AUDIT = []
 
 class FailClosed(Exception):
     """The whole run stops before touching anything (exit 2)."""
+
+
+class _Signalled(BaseException):
+    """A SIGTERM or SIGHUP during a live run, converted into an exception so the run unwinds
+    through its own finallys: the in-flight git or generator child is killed and reaped by the
+    interrupted subprocess.run, the private scratch checkout is removed, the lock is released.
+    main() then re-raises the signal under the default disposition, so the process exits with the
+    conventional killed-by-signal status."""
+
+    def __init__(self, signum):
+        BaseException.__init__(self, signum)
+        self.signum = signum
 
 
 class Refuse(Exception):
@@ -366,8 +399,10 @@ def guard_check_exit(code, command, err):
 
 def guard_fixpoint(wt):
     """After regenerate, add and check: nothing unstaged or unmerged (regenerate-not-fixpoint) and
-    no untracked file (undeclared-write)."""
-    out = _git(wt, "status", "--porcelain=v2", "-z", "--untracked-files=all")[1]
+    no untracked file (undeclared-write). --no-renames keeps a base-side rename as separate add
+    and delete records: a rename record's ORIGINAL path arrives as its own NUL-separated field,
+    which this parser would misread as a record of its own and falsely refuse."""
+    out = _git(wt, "status", "--porcelain=v2", "-z", "--no-renames", "--untracked-files=all")[1]
     for entry in [e.decode("utf-8", "replace") for e in out.split(b"\0") if e]:
         if entry.startswith("? "):
             raise Refuse("undeclared-write", "untracked file %s" % entry[2:])
@@ -463,15 +498,42 @@ def guard_pushed_bytes(scratch, tree):
 
 def guard_commit_parents(scratch, old, new):
     """Refuse commit-mismatch unless the new commit's FIRST parent is exactly the PR head this run
-    validated and that head is an ancestor of the new commit: the exact-value lease is then a pure
-    narrowing of a plain push (never a rewind), and a rewritten or parentless commit is never
-    pushed."""
+    validated: a parent is by definition an ancestor, so this alone makes the exact-value lease a
+    pure narrowing of a plain push (never a rewind), and a rewritten or parentless commit is never
+    pushed (the former separate is-ancestor re-check was implied by this one and was removed as
+    dead code)."""
     parents = _git_text(scratch, "rev-list", "--parents", "-n", "1", new).split()[1:]
     if not parents or parents[0] != old:
         raise Refuse("commit-mismatch", "first parent %s is not the validated head %s" % (
             parents[0] if parents else "(none)", old))
-    if _git(scratch, "merge-base", "--is-ancestor", old, new, ok=None)[0] != 0:
-        raise Refuse("commit-mismatch", "the validated head is not an ancestor of the new commit")
+
+
+def guard_fresh_checkout(ctx, scratch, new):
+    """Refuse normal-checkout-failed unless the candidate commit also passes every declared check
+    in a SECOND, normal private checkout: a fresh --shared clone of the private checkout with the
+    committed attributes and the operator's global and system configuration honoured, no local
+    configuration carried over, and hooks disabled. The conversion-free private checkout proves
+    the stored bytes are the validated bytes; this proves the commit is also correct the way every
+    consumer will materialize it (a committed eol=crlf attribute or an operator core.autocrlf=true
+    would otherwise turn a passing PR into a pushed commit whose own fresh checkout fails its
+    generators)."""
+    fresh_root = tempfile.mkdtemp(prefix="merge-train-fresh-")
+    SCRATCHES.append(fresh_root)
+    try:
+        fresh = os.path.join(fresh_root, "co")
+        _git(scratch, "clone", "--quiet", "--shared", "--no-checkout", str(scratch), fresh)
+        for key, value in (("core.hooksPath", os.devnull), ("core.fsmonitor", "false")):
+            _git(fresh, "config", key, value)
+        _git(fresh, "checkout", "--quiet", "--detach", new, timeout=ctx["cmd_timeout"])
+        for command in ctx["cfg"]["generated"]["check"]:
+            code, _out, err = _run_external(command, fresh, ctx["cmd_timeout"],
+                                            dict(PYTHONDONTWRITEBYTECODE="1"))
+            if code != 0:
+                raise Refuse("normal-checkout-failed",
+                             "%s exited %s in a fresh normal checkout of the candidate: %s" % (
+                                 " ".join(command), code, err.strip()[:300]))
+    finally:
+        shutil.rmtree(fresh_root, ignore_errors=True)
 
 
 def guard_push_lease(branch, old):
@@ -527,6 +589,7 @@ GUARDS = dict([
     ("pushed-bytes", guard_pushed_bytes),
     ("commit-parents", guard_commit_parents),
     ("commit-tree", guard_commit_tree),
+    ("fresh-checkout", guard_fresh_checkout),
     ("push-lease", guard_push_lease),
     ("push-indeterminate", guard_push_indeterminate),
 ])
@@ -626,18 +689,17 @@ def _snapshot(wt):
 SCRATCHES = []
 
 
-def _scratch_checkout(ctx):
-    """The PRIVATE scratch checkout for one PR: a --shared clone of the repository (the object
+def _scratch_checkout(ctx, scratch_root):
+    """The PRIVATE scratch checkout for one PR, created INSIDE scratch_root, a directory the
+    caller made and already covers with its finally (so a failure in the clone or in the
+    scratch-setup guard cannot leak the directory): a --shared clone of the repository (the object
     store is reused; nothing of the author's checkout is written), with every conversion and hook
-    disabled by the scratch-setup guard. Returns (checkout path, directory to remove in the
-    caller's finally). The author's worktree is never written: no merge, checkout, add, commit or
-    reset ever runs there."""
-    scratch_root = tempfile.mkdtemp(prefix="merge-train-scratch-")
-    SCRATCHES.append(scratch_root)
+    disabled by the scratch-setup guard. Returns the checkout path. The author's worktree is never
+    written: no merge, checkout, add, commit or reset ever runs there."""
     scratch = os.path.join(scratch_root, "co")
     _git(ctx["root"], "clone", "--quiet", "--shared", "--no-checkout", str(ctx["root"]), scratch)
     _guard("scratch-setup")(scratch)
-    return scratch, scratch_root
+    return scratch
 
 
 def _snapshot_diff(before, after):
@@ -701,14 +763,18 @@ def _push_and_observe(ctx, scratch, old, new):
     validated), then one observer over the remote. A push whose outcome is unknown (a timeout, a
     launch failure) and an observation failure of ANY kind, an observer timeout included, are
     INDETERMINATE: the marker is kept and nothing changes anywhere; nothing local exists to roll
-    back."""
+    back. A push that raised AND left the remote still at the old head is ALSO indeterminate, not
+    push-rejected: the remote's receive-pack may still be running (a slow pre-receive hook) and
+    the push can land after this run reports, so the marker is kept for the retry to classify."""
     branch = ctx["branch"]
+    indeterminate = False
     try:
         _git(scratch, "push", "--porcelain", "--no-follow-tags",
              *_guard("push-lease")(branch, old), "--", ctx["remote_url"],
              "%s:refs/heads/%s" % (new, branch), ok=None, timeout=ctx["net_timeout"])
     except Refuse as exc:
         _guard("push-indeterminate")(exc)
+        indeterminate = True
     observed = _remote_head(ctx)
     if observed == new:
         _remove_marker(ctx["git_dir"])
@@ -716,6 +782,10 @@ def _push_and_observe(ctx, scratch, old, new):
     if observed is None:
         raise Refuse("push-unknown",
                      "remote unreadable after the push; the marker is kept, nothing changed")
+    if indeterminate and observed == old:
+        raise Refuse("push-unknown",
+                     "the push timed out with the remote still at the old head; it may still be "
+                     "in flight, so the marker is kept")
     _remove_marker(ctx["git_dir"])
     status = "push-rejected" if observed == old else "remote-changed"
     raise Refuse(status, "remote at %s" % (observed or "(absent)"))
@@ -793,8 +863,10 @@ def _process_pr(ctx, apply):
             remote, view.get("headRefOid"), ctx["head_oid"]))
     old = ctx["head_oid"]
     ctx["old"] = old
-    scratch, scratch_root = _scratch_checkout(ctx)
+    scratch_root = tempfile.mkdtemp(prefix="merge-train-scratch-")
+    SCRATCHES.append(scratch_root)
     try:
+        scratch = _scratch_checkout(ctx, scratch_root)
         _git(scratch, "fetch", "--no-tags", "--", ctx["remote_url"],
              "refs/heads/" + ctx["branch"], timeout=ctx["net_timeout"])
         if _git_text(scratch, "rev-parse", "FETCH_HEAD^0") != old:
@@ -858,6 +930,7 @@ def _merge_commit_push(ctx, scratch, old, base):
                     timeout=ctx["cmd_timeout"])
     _guard("commit-tree")(scratch, new, validated_tree)
     _guard("commit-parents")(scratch, old, new)
+    _guard("fresh-checkout")(ctx, scratch, new)
     _write_marker(ctx["git_dir"], dict(pr=ctx["pr"], branch=ctx["branch"], old=old, new=new))
     return _push_and_observe(ctx, scratch, old, new)
 
@@ -875,7 +948,22 @@ def run_train(root, apply=False, only=None):
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             return 2, reports, "another merge train holds %s" % LOCK_NAME
-        return _run_locked(Path(top), apply, only or set(), reports)
+
+        def _to_exception(signum, _frame):
+            raise _Signalled(signum)
+
+        previous = dict()
+        try:
+            # SIGTERM and SIGHUP become _Signalled, so the per-PR finally removes the private
+            # scratch checkout and the interrupted subprocess call kills and reaps its child; an
+            # inherited SIG_IGN disposition (nohup) is respected and left in place.
+            for signum in (signal.SIGTERM, signal.SIGHUP):
+                if signal.getsignal(signum) != signal.SIG_IGN:
+                    previous[signum] = signal.signal(signum, _to_exception)
+            return _run_locked(Path(top), apply, only or set(), reports)
+        finally:
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
 
 
 def _run_locked(root, apply, only, reports):
@@ -883,7 +971,13 @@ def _run_locked(root, apply, only, reports):
     # requires the config to name that same remote and base.
     remote, base = "origin", "main"
     try:
-        _git(root, "fetch", "--no-tags", "--", remote,
+        # --refmap= suppresses the repository's configured remote.<remote>.fetch mappings for this
+        # fetch, so the explicit command-line refspec is the ONLY ref mapping applied: a configured
+        # mapping onto a local branch (remote.origin.fetch=+refs/heads/main:refs/heads/<saved>)
+        # would otherwise be applied opportunistically and rewind a branch the author owns, even on
+        # a dry run. What this fetch still writes in the author's repository: exactly
+        # refs/remotes/<remote>/<base> and FETCH_HEAD, nothing under refs/heads/.
+        _git(root, "fetch", "--no-tags", "--refmap=", "--", remote,
              "+refs/heads/%s:refs/remotes/%s/%s" % (base, remote, base), timeout=GIT_TIMEOUT)
         base_sha = _git_text(root, "rev-parse", "--verify",
                              "refs/remotes/%s/%s^0" % (remote, base))
@@ -971,7 +1065,8 @@ def _parse_args(argv):
         elif arg == "--repo" and i + 1 < len(argv):
             i += 1
             opts["repo"] = argv[i]
-        elif arg == "--pr" and i + 1 < len(argv) and argv[i + 1].isdigit() and int(argv[i + 1]):
+        elif (arg == "--pr" and i + 1 < len(argv) and argv[i + 1].isascii()
+                and argv[i + 1].isdigit() and int(argv[i + 1])):
             i += 1
             opts["prs"].append(int(argv[i]))
         else:
@@ -1003,7 +1098,12 @@ def main(argv=None):
               "--apply | [--self-test [--red-on-revert]] | --execution-report ABS_PATH",
               file=sys.stderr)
         return 2
-    rc, reports, fatal = run_train(opts["repo"], opts["apply"], set(opts["prs"]))
+    try:
+        rc, reports, fatal = run_train(opts["repo"], opts["apply"], set(opts["prs"]))
+    except _Signalled as sig:
+        signal.signal(sig.signum, signal.SIG_DFL)
+        os.kill(os.getpid(), sig.signum)
+        return 128 + sig.signum
     for report in reports:
         print(json.dumps(report, sort_keys=True))
         print("%s PR #%d %s: %s%s" % (_now(), report["pr"], report["branch"], report["result"],
@@ -1070,6 +1170,8 @@ elif args[:2] == ["pr", "view"]:
         json.dump(state, handle)
     pr = [p for p in state["prs"] if str(p["number"]) == number][0]
     view = dict(headRefName=pr["headRefName"], headRefOid=pr["headRefOid"], state="OPEN")
+    if number in state.get("closed", []):
+        view["state"] = "CLOSED"
     rename_after = state.get("rename_after", dict()).get(number)
     if rename_after is not None and calls[number] > rename_after:
         view["headRefName"] = "renamed/branch"
@@ -1571,6 +1673,13 @@ def case_branch(tmp):
     check("discover/branch-renamed-before-commit",
           (_result(reports, 1), _snapshot_diff(before, _snapshot(wt)), fx.pushes()),
           ("branch-mismatch", [], []))
+    # Pin branch-match's state check alone: gh reports the same branch but the PR is CLOSED.
+    fx.set_gh(closed=["1"])
+    before = _snapshot(wt)
+    rc, reports, _fatal = fx.run(apply=True)
+    check("discover/closed-pr-refused",
+          (rc, _result(reports, 1), _snapshot_diff(before, _snapshot(wt)), fx.pushes()),
+          (1, "branch-mismatch", [], []))
     check("discover/branch-invariants", _invariants(fx), [])
 
 
@@ -1603,6 +1712,14 @@ def case_badname(tmp):
           (worked, fx.pushes(), [_snapshot_diff(b, _snapshot(p)) for b, p in zip(befores, trees)],
            [_has_marker(p) for p in trees]),
           ([], [], [[], []], [False, False]))
+    # Pin the check-ref-format line alone: feat/x.lock satisfies the lease character set but git
+    # refuses it, so only the check-ref-format call can catch it.
+    try:
+        _guard("branch-name")(fx.main, "feat/x.lock")
+        got = "accepted"
+    except Refuse as refusal:
+        got = refusal.status
+    check("refuse/bad-branch-name-check-ref-format", got, "bad-branch-name")
     check("refuse/bad-branch-name-invariants", _invariants(fx), [])
 
 
@@ -1847,7 +1964,32 @@ def case_push_unknown(tmp):
     check("push/unknown-rerun-already-pushed",
           (rc, _result(reports, 1), _has_marker(wt), len(fx.pushes())),
           (0, "already-pushed", False, 1))
-    check("push/unknown-invariants", _invariants(fx), [])
+    # Pin reconcile's unreadable-remote branch alone: a marker is present and the reconcile
+    # ls-remote times out; the run must refuse push-unknown and keep the marker bytes.
+    fx2 = _fixture(tmp, "push-unknown-reconcile")
+    wt2 = _stale_pr(fx2)
+    old2 = fx2.remote_ref("feat/x")
+    git_dir2 = _git_dir(wt2)
+    _write_marker(git_dir2, dict(pr=1, branch="feat/x", old=old2, new="f" * 40))
+    marker_path = Path(git_dir2) / MARKER_NAME
+    marker_bytes = marker_path.read_bytes()
+    real_run = subprocess.run
+
+    def no_ls_remote(argv, **kwargs):
+        if "ls-remote" in argv:
+            raise subprocess.TimeoutExpired(argv, kwargs.get("timeout") or 1)
+        return real_run(argv, **kwargs)
+
+    subprocess.run = no_ls_remote
+    try:
+        rc, reports, _fatal = fx2.run(apply=True)
+    finally:
+        subprocess.run = real_run
+    check("push/unknown-remote-still-unreadable",
+          (rc, _result(reports, 1), marker_path.exists(),
+           marker_path.read_bytes() == marker_bytes),
+          (1, "push-unknown", True, True))
+    check("push/unknown-invariants", _invariants(fx, fx2), [])
 
 
 def case_generated_delete(tmp):
@@ -1966,7 +2108,30 @@ def case_rewind(tmp):
           (rc, _result(reports, 1), fx.remote_ref("feat/x"),
            _snapshot_diff(before, _snapshot(wt)), _has_marker(wt)),
           (1, "remote-changed", parent, [], False))
-    check("push/rewound-invariants", _invariants(fx), [])
+    # Pin the FETCH_HEAD^0 re-check alone: the remote head moves AFTER the ls-remote agreement but
+    # BEFORE the private checkout's fetch, which then delivers the new head; the run must refuse
+    # pr-head-moved instead of validating a head the remote no longer carries.
+    global _scratch_checkout
+    fx2 = _fixture(tmp, "rewind-fetch")
+    wt2 = _stale_pr(fx2)
+    old2 = fx2.remote_ref("feat/x")
+    other2 = fx2.foreign_commit(old2)
+    real_scratch = _scratch_checkout
+
+    def moving_scratch(ctx, scratch_root):
+        _git(fx2.remote, "update-ref", "refs/heads/feat/x", other2, old2)
+        return real_scratch(ctx, scratch_root)
+
+    _scratch_checkout = moving_scratch
+    try:
+        rc, reports, _fatal = fx2.run(apply=True)
+    finally:
+        _scratch_checkout = real_scratch
+    check("push/moved-during-fetch-refused",
+          (rc, _result(reports, 1), "during the fetch" in _reason(reports, 1),
+           fx2.remote_ref("feat/x"), _has_marker(wt2)),
+          (1, "pr-head-moved", True, other2, False))
+    check("push/rewound-invariants", _invariants(fx, fx2), [])
 
 
 def case_timeout(tmp):
@@ -2027,6 +2192,23 @@ def case_symlink(tmp):
     except Refuse as refusal:
         got = refusal.status
     check("refuse/generated-symlink-parent", got, "generated-symlink")
+    # The realpath branch is TOCTOU defence in depth behind the per-component islink loop: pin it
+    # alone by simulating the race (islink reports False while the path still resolves outside).
+    probe2 = Path(tmp) / "symlink-real"
+    (probe2 / "real").mkdir(parents=True)
+    outside2 = Path(tmp) / "symlink-outside"
+    outside2.mkdir()
+    os.symlink(str(outside2), str(probe2 / "gen"))
+    real_islink = os.path.islink
+    os.path.islink = lambda _path: False
+    try:
+        _guard("generated-confined")(probe2, ["gen/digest.txt"])
+        got = "accepted"
+    except Refuse as refusal:
+        got = refusal.status
+    finally:
+        os.path.islink = real_islink
+    check("refuse/generated-symlink-realpath", got, "generated-symlink")
     check("refuse/generated-symlink-invariants", _invariants(fx), [])
 
 
@@ -2112,26 +2294,61 @@ def case_filter(tmp):
     except Refuse as refusal:
         got = refusal.status
     check("filter/pushed-bytes-probe", got, "commit-mismatch")
+    # Pin BYTE equality, not length: a divergence that keeps the file length must still refuse.
+    (probe / "src" / "a.txt").write_text(NINE.replace("l1", "L1"), encoding="utf-8")
+    try:
+        _guard("pushed-bytes")(probe, tree)
+        got = "accepted"
+    except Refuse as refusal:
+        got = refusal.status
+    check("filter/pushed-bytes-same-size-probe", got, "commit-mismatch")
+    # Pin the symlink branch alone: a correct symlink (readlink equals the committed target) must
+    # be ACCEPTED; without the branch the guard would read the linked file's bytes and refuse.
+    (probe / "src" / "a.txt").write_text(NINE, encoding="utf-8")
+    os.symlink("src/a.txt", str(probe / "lnk"))
+    _git(probe, "add", "--", "lnk")
+    tree2 = _git_text(probe, "write-tree")
+    try:
+        _guard("pushed-bytes")(probe, tree2)
+        got = "accepted"
+    except Refuse as refusal:
+        got = "%s: %s" % (refusal.status, refusal.reason)
+    check("filter/pushed-bytes-symlink-probe", got, "accepted")
     check("filter/invariants", _invariants(fx), [])
 
 
 def case_eol(tmp):
-    # An eol/text attribute in the PR (the autocrlf reproduction): with conversions disabled in the
-    # private checkout the materialized bytes equal the stored blob, the regenerated digest is
-    # computed over those same bytes, and the pushed source blob is exactly the PR's LF content.
-    # With the scratch-setup guard reverted, the CRLF materialization diverges from the blob and
-    # the every-path byte guard refuses the commit instead of pushing it.
+    # An eol/text attribute on a digested source file: with conversions disabled in the private
+    # checkout the regenerated digest covers the RAW blob bytes, so a NORMAL checkout of the
+    # candidate (attribute honoured, CRLF materialization) would fail the declared check; the
+    # fresh-checkout guard refuses it before the push with a distinct status. With the
+    # scratch-setup guard reverted, the CRLF materialization instead diverges from the blob inside
+    # the private checkout and the every-path byte guard refuses commit-mismatch: the named check
+    # here goes red either way.
     fx = _fixture(tmp, "eol")
     wt = fx.add_pr(1, "feat/x", dict([
         ("src/b.txt", "bravo\n"), (".gitattributes", "src/b.txt text eol=crlf\n")]))
+    old = fx.remote_ref("feat/x")
     fx.advance_main(dict([("src/c.txt", "charlie\n")]))
     before = _snapshot(wt)
     rc, reports, _fatal = fx.run(apply=True)
-    new = fx.remote_ref("feat/x")
-    blob = _git(fx.remote, "cat-file", "blob", new + ":src/b.txt")[1] if new else b""
-    check("filter/eol-attribute-pushed-correctly",
-          (rc, _result(reports, 1), blob, _snapshot_diff(before, _snapshot(wt))),
-          (0, "pushed", b"bravo\n", []))
+    check("filter/eol-attribute-refused-not-pushed",
+          (rc, _result(reports, 1), fx.remote_ref("feat/x"), _has_marker(wt),
+           _snapshot_diff(before, _snapshot(wt)), fx.pushes()),
+          (1, "normal-checkout-failed", old, False, [], []))
+    # Pin the scratch-setup hooksPath line alone: a hook in the private checkout's OWN .git/hooks
+    # must never fire there (the suite pins the global config, so this is the one hook source a
+    # case can still place).
+    probe = Path(tmp) / "eol-hooks-probe"
+    _git(fx.base, "clone", "--quiet", "--shared", "--no-checkout", str(fx.main), str(probe))
+    fired = Path(tmp) / "eol-hook-fired"
+    hook = probe / ".git" / "hooks" / "post-checkout"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text("#!/bin/sh\n: > '%s'\nexit 0\n" % fired, encoding="utf-8")
+    hook.chmod(0o755)
+    _guard("scratch-setup")(probe)
+    _git(probe, "checkout", "--quiet", "--detach", fx.remote_ref("main"))
+    check("filter/scratch-hooks-path-pinned", fired.exists(), False)
     check("filter/eol-invariants", _invariants(fx), [])
 
 
@@ -2205,6 +2422,11 @@ def case_cli(tmp):
           (_mode(["--dry-run"]), _mode(["--apply"])[0], _mode(["--pr", "7"])[0],
            _mode(["--dry-run", "--apply"])),
           (("live", dict(apply=False, repo=".", prs=[])), "live", "live", ("usage", None)))
+    # --pr takes ASCII digits only: str.isdigit accepts U+00B2 (which int() then refuses, a crash)
+    # and int() accepts U+0661 (ARABIC-INDIC ONE, silently 1); both must be plain usage errors.
+    check("cli/pr-non-ascii-digit-usage",
+          (_mode(["--pr", "\u00b2"]), _mode(["--pr", "\u0661"]), _mode(["--pr", "7"])[0]),
+          (("usage", None), ("usage", None), "live"))
     plain = Path(tmp) / "not-a-repo"
     plain.mkdir()
     audit = len(GIT_AUDIT)
@@ -2212,6 +2434,250 @@ def case_cli(tmp):
     check("cli/not-a-repo-exit2", (rc, reports, bool(fatal)), (2, [], True))
     # No remote exists here, so of the per-case invariants only the argv audit applies.
     check("cli/invariants", [a for a in GIT_AUDIT[audit:] if _audit_violation(a)], [])
+
+
+
+def case_refmap(tmp):
+    # codex round-3 blocker: with remote.origin.fetch mapping remote heads onto LOCAL branches,
+    # even a dry run's base fetch rewound refs/heads/author-saved in the author's repository. The
+    # base fetch passes --refmap= so only its explicit refspec applies: it writes
+    # refs/remotes/origin/main and FETCH_HEAD, never a ref the author owns.
+    fx = _fixture(tmp, "refmap")
+    wt = _stale_pr(fx)
+    head = _git_text(fx.main, "rev-parse", "HEAD")
+    unique = _git_text(fx.main, "commit-tree", head + "^{tree}", "-p", head, "-m",
+                       "author saved work", extra_env=FIXTURE_IDENT)
+    _git(fx.main, "branch", "author-saved", unique)
+    _git(fx.main, "config", "remote.origin.fetch", "+refs/heads/main:refs/heads/author-saved")
+    before = _snapshot(wt)
+    try:
+        rc, reports, _fatal = fx.run()
+    finally:
+        _git(fx.main, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+    check("fetch/refmap-keeps-local-branches",
+          (rc, _result(reports, 1), _git_text(fx.main, "rev-parse", "refs/heads/author-saved"),
+           _snapshot_diff(before, _snapshot(wt))),
+          (0, "would-merge", unique, []))
+    check("fetch/refmap-invariants", _invariants(fx), [])
+
+
+def case_leak(tmp):
+    # A refusal while the private checkout is still being CREATED (the clone itself, or the
+    # scratch-setup guard) must still remove the scratch directory: the per-PR finally starts
+    # right after mkdtemp, not after the first successful git call.
+    fx = _fixture(tmp, "leak-clone")
+    wt = _stale_pr(fx)
+    before = _snapshot(wt)
+    made = len(SCRATCHES)
+    real_run = subprocess.run
+
+    def clone_timeout(argv, **kwargs):
+        if "clone" in argv and "--shared" in argv:
+            raise subprocess.TimeoutExpired(argv, kwargs.get("timeout") or 1)
+        return real_run(argv, **kwargs)
+
+    subprocess.run = clone_timeout
+    try:
+        rc, reports, _fatal = fx.run(apply=True)
+    finally:
+        subprocess.run = real_run
+    created = SCRATCHES[made:]
+    check("scratch/clone-failure-removed",
+          (rc, _result(reports, 1), len(created), [p for p in created if os.path.exists(p)],
+           _snapshot_diff(before, _snapshot(wt))),
+          (1, "git-failed", 1, [], []))
+    fx2 = _fixture(tmp, "leak-setup")
+    wt2 = _stale_pr(fx2)
+    before2 = _snapshot(wt2)
+    made = len(SCRATCHES)
+    saved = GUARDS["scratch-setup"]
+
+    def fail_setup(_scratch):
+        raise Refuse("git-failed", "injected scratch-setup failure")
+
+    GUARDS["scratch-setup"] = fail_setup
+    try:
+        rc, reports, _fatal = fx2.run(apply=True)
+    finally:
+        GUARDS["scratch-setup"] = saved
+    created = SCRATCHES[made:]
+    check("scratch/setup-failure-removed",
+          (rc, _result(reports, 1), len(created), [p for p in created if os.path.exists(p)],
+           _snapshot_diff(before2, _snapshot(wt2))),
+          (1, "git-failed", 1, [], []))
+    check("scratch/leak-invariants", _invariants(fx, fx2), [])
+
+
+def case_signal(tmp):
+    # A real SIGTERM or SIGHUP mid-regenerate, against a REAL tool subprocess with a case-private
+    # TMPDIR: the handler converts the signal into the normal cleanup (the regenerate child is
+    # killed and reaped, the scratch is removed, the lock is released) and the process exits with
+    # the conventional killed-by-signal status. The tool runs as a subprocess, so the fixture
+    # invariant recorder does not apply here; the remote is asserted directly.
+    for signum, check_id in ((signal.SIGTERM, "signal/sigterm-cleans-up"),
+                             (signal.SIGHUP, "signal/sighup-cleans-up")):
+        name = "sig%d" % signum
+        fx = _fixture(tmp, name)
+        wt = _stale_pr(fx)
+        old = fx.remote_ref("feat/x")
+        probe_dir = Path(tmp) / (name + "-tmp")
+        probe_dir.mkdir()
+        pid_file = probe_dir / "sleeper.pid"
+        text = _read_text(fx.main / CONFIG_PATH)
+        plain = 'regenerate = [["%s", "-I", "-B", "tools/gen.py"]]' % sys.executable
+        sleeper = ('regenerate = [["%s", "-I", "-B", "tools/gen.py"], ["%s", "-c", "import os,'
+                   " time; open(os.environ['SIG_PID_FILE'],'w').write(str(os.getpid()));"
+                   ' time.sleep(120)"]]') % (sys.executable, sys.executable)
+        fx.write(fx.main, CONFIG_PATH, text.replace(plain, sleeper))
+        _git(fx.main, "commit", "-q", "-am", "sleeping regenerate", extra_env=FIXTURE_IDENT)
+        _git(fx.main, "push", "-q", "origin", "main")
+        before = _snapshot(wt)
+        env = dict(os.environ)
+        env.update(TMPDIR=str(probe_dir), SIG_PID_FILE=str(pid_file),
+                   FAKE_GH_STATE=str(fx.state), PATH=str(fx.bin) + os.pathsep + fx.path)
+        proc = subprocess.Popen([sys.executable, "-I", "-B", str(Path(__file__).resolve()),
+                                 "--repo", str(fx.main), "--apply"], cwd=str(fx.base), env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        deadline = time.time() + 120
+        while time.time() < deadline and not pid_file.exists() and proc.poll() is None:
+            time.sleep(0.1)
+        started = pid_file.exists()
+        proc.send_signal(signum)
+        try:
+            rc = proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            rc = proc.wait()
+        proc.stdout.close()
+        proc.stderr.close()
+        sleeper_dead = None
+        if started:
+            sleeper_pid = int(pid_file.read_text(encoding="utf-8"))
+            for _ in range(100):
+                try:
+                    os.kill(sleeper_pid, 0)
+                except ProcessLookupError:
+                    sleeper_dead = True
+                    break
+                except PermissionError:
+                    break
+                time.sleep(0.1)
+            else:
+                sleeper_dead = False
+                try:
+                    os.kill(sleeper_pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        leftovers = [p for p in os.listdir(str(probe_dir)) if p.startswith("merge-train-")]
+        common = _git_text(fx.main, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        with open(os.path.join(common, LOCK_NAME), "a+") as holder:
+            try:
+                fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                lock_free = True
+                fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                lock_free = False
+        check(check_id,
+              (started, rc, sleeper_dead, leftovers, lock_free, _has_marker(wt),
+               fx.remote_ref("feat/x"), _snapshot_diff(before, _snapshot(wt))),
+              (True, -signum, True, [], True, False, old, []))
+
+
+def case_crlf(tmp):
+    # codex round-3 finding 3, first reproduction: a committed `text eol=crlf` attribute with the
+    # digest generated over the CRLF worktree bytes. The PR's own fresh checkout passes; the
+    # train's conversion-free regeneration would rewrite the digest over the RAW (LF) bytes, so a
+    # normal checkout of the candidate would fail its own check: refused before the push.
+    fx = _fixture(tmp, "crlf")
+    wt = fx.add_pr(1, "feat/x", dict([
+        ("src/b.txt", "bravo\r\n"), (".gitattributes", "src/b.txt text eol=crlf\n")]))
+    old = fx.remote_ref("feat/x")
+    fresh = Path(tmp) / "crlf-before"
+    _git(fx.base, "clone", "--quiet", "--no-local", str(fx.remote), str(fresh))
+    _git(fresh, "checkout", "--quiet", "feat/x")
+    check_before = subprocess.run([sys.executable, "-I", "-B", "tools/gen.py", "--check"],
+                                  cwd=str(fresh), env=_clean_env(), timeout=60).returncode
+    fx.advance_main(dict([("src/c.txt", "charlie\n")]))
+    before = _snapshot(wt)
+    rc, reports, _fatal = fx.run(apply=True)
+    check("fresh/eol-crlf-refused", (check_before, rc, _result(reports, 1)),
+          (0, 1, "normal-checkout-failed"))
+    check("fresh/eol-crlf-untouched",
+          (_snapshot_diff(before, _snapshot(wt)), fx.remote_ref("feat/x"), fx.pushes(),
+           _has_marker(wt), [p for p in SCRATCHES if os.path.exists(p)]),
+          ([], old, [], False, []))
+    # Second reproduction: an operator-global core.autocrlf=true. The suite's HOME is the scrubbed
+    # scratch home, so the case may own its .gitconfig for the run's duration; the private
+    # checkout pins the conversions off, but the fresh NORMAL checkout honours the global setting,
+    # materializes CRLF, fails the check, and the candidate is refused.
+    fx2 = _fixture(tmp, "autocrlf")
+    wt2 = _stale_pr(fx2)
+    old2 = fx2.remote_ref("feat/x")
+    gitconfig = Path(os.environ["HOME"]) / ".gitconfig"
+    gitconfig.write_text("[core]\n\tautocrlf = true\n", encoding="utf-8")
+    try:
+        rc, reports, _fatal = fx2.run(apply=True)
+    finally:
+        try:
+            os.unlink(str(gitconfig))
+        except FileNotFoundError:
+            pass
+    check("fresh/autocrlf-refused",
+          (rc, _result(reports, 1), fx2.remote_ref("feat/x"), _has_marker(wt2), fx2.pushes()),
+          (1, "normal-checkout-failed", old2, False, []))
+    check("fresh/invariants", _invariants(fx, fx2), [])
+
+
+def case_latepush(tmp):
+    # claude round-3 F3: the push times out while the remote's pre-receive hook is still running.
+    # The observer then sees the OLD head, but the push is still in flight and can land after the
+    # report: the result must be push-unknown with the marker KEPT, never push-rejected.
+    fx = _fixture(tmp, "latepush")
+    wt = _stale_pr(fx)
+    old = fx.remote_ref("feat/x")
+    text = _read_text(fx.main / CONFIG_PATH).replace(
+        "network_timeout_seconds = 60", "network_timeout_seconds = 3")
+    fx.write(fx.main, CONFIG_PATH, text)
+    _git(fx.main, "commit", "-q", "-am", "short network timeout", extra_env=FIXTURE_IDENT)
+    _git(fx.main, "push", "-q", "origin", "main")
+    hook = fx.remote / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nsleep 6\nexit 0\n", encoding="utf-8")
+    hook.chmod(0o755)
+    before = _snapshot(wt)
+    rc, reports, _fatal = fx.run(apply=True)
+    marker = _read_marker(_git_dir(wt)) or dict()
+    check("push/inflight-timeout-push-unknown",
+          (rc, _result(reports, 1), marker.get("old"), bool(marker.get("new")),
+           _snapshot_diff(before, _snapshot(wt))),
+          (1, "push-unknown", old, True, []))
+    deadline = time.time() + 30
+    while time.time() < deadline and fx.remote_ref("feat/x") != marker.get("new"):
+        time.sleep(0.5)
+    hook.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    rc, reports, _fatal = fx.run(apply=True)
+    check("push/inflight-rerun-already-pushed",
+          (rc, _result(reports, 1), fx.remote_ref("feat/x") == marker.get("new"),
+           _has_marker(wt)),
+          (0, "already-pushed", True, False))
+    check("push/inflight-invariants", _invariants(fx), [])
+
+
+def case_rename(tmp):
+    # claude round-3 F4: a base-side `git mv utils/a.py utils/b.py`. With rename detection on,
+    # the status parser would misread the rename record's original path (its own NUL-separated
+    # field, here starting with "u") as a record and falsely refuse the PR; --no-renames keeps it
+    # as separate add and delete records and the PR pushes.
+    fx = _fixture(tmp, "rename")
+    fx.write(fx.main, "utils/a.py", "A = 1\n")
+    fx.commit(fx.main, "add utils")
+    _git(fx.main, "push", "-q", "origin", "main")
+    fx.add_pr(1, "feat/x", dict([("src/b.txt", "bravo\n")]))
+    _git(fx.main, "mv", "--", "utils/a.py", "utils/b.py")
+    fx.commit(fx.main, "rename utils")
+    _git(fx.main, "push", "-q", "origin", "main")
+    rc, reports, _fatal = fx.run(apply=True)
+    check("fixpoint/base-rename-pushed", (rc, _result(reports, 1)), (0, "pushed"))
+    check("fixpoint/base-rename-invariants", _invariants(fx), [])
 
 
 CASES = dict([
@@ -2225,7 +2691,8 @@ CASES = dict([
     ("observer", case_observer), ("symlink", case_symlink), ("tamper", case_tamper),
     ("filter", case_filter), ("eol", case_eol), ("lock-held", case_lock_held),
     ("fetch-failure", case_fetch_failure), ("state-mismatch", case_state_mismatch),
-    ("cli", case_cli),
+    ("cli", case_cli), ("refmap", case_refmap), ("leak", case_leak), ("signal", case_signal),
+    ("crlf", case_crlf), ("latepush", case_latepush), ("rename", case_rename),
 ])
 
 
@@ -2255,6 +2722,7 @@ REVERTS = dict([
     ("pushed-bytes", (_noop, "filter")),
     ("commit-parents", (_noop, "tamper")),
     ("commit-tree", (_noop, "tamper")),
+    ("fresh-checkout", (_noop, "crlf")),
     ("push-lease", (lambda branch, old: [], "rewind")),
     ("push-indeterminate", (_reraise, "timeout")),
 ])
