@@ -82,8 +82,9 @@ character in the Basic Multilingual Plane is one unit, an astral character such 
       holding `<!--` that does not end in a newline counts one unit more: the loader then rebuilds it from
       its Markdown lexer's tokens, which can add a final newline (a blockquote closing the file).
       The loader removes a comment before it looks for imports, so a comment can join an import path
-      across it (`@docs/big<!---->.md` loads docs/big.md). The loader reads an `@` as an import only at the
-      start of the text or after whitespace. A measured file holding an `@` that begins an import token (at
+      across it (`@docs/big<!---->.md` loads docs/big.md). The loader reads an `@` as an import at the start
+      of a Markdown text token or after whitespace, and a text token also begins right after an inline token
+      (`*see*@x`, `<b>@x</b>`). A measured file holding an `@` that begins an import token (at
       the start of a line, after whitespace, or right after a comment closer `-->`) on a line that also
       holds `<!--` or `-->`, or followed by `<!--` with only whitespace between them, exits 2 naming the
       line; the gate refuses the construct rather than model the join. An `@` inside a word, such as the
@@ -111,13 +112,16 @@ character in the Basic Multilingual Plane is one unit, an astral character such 
       component (two files or directories that differ only in case, the exact-case one included), the path
       exits 2: which one a case-insensitive file system holds is ambiguous. Two directories that differ
       only in case exit 2 even when the next component names an entry of only one of them: such a file
-      system merges them, and the gate does not model what a merged directory's files then load. In an
-      import that begins at the start of a line or after whitespace (_import_start), a component of the
-      Windows 8.3 short name shape (one to six characters other than `.`, a `~` and a number from 1, and
-      an optional extension of one to three characters, as in `PAYLOA~1.MD` or `A~VERY~1.MD`) exits 2: on
-      NTFS with short names enabled it can open a long-named file the gate cannot identify. Prose such as
-      `git diff @~1`, `npm i lodash@~4.17.21` or `git reset --hard HEAD@{1}~1` (an `@` inside a word,
-      which the loader does not read as an import) holds no such import and passes. Each target is
+      system merges them, and the gate does not model what a merged directory's files then load. In every
+      candidate, whatever precedes its `@` (an `@` right after an inline token, as in `*see*@PAYLOA~1.MD`,
+      begins an import too), a component of the Windows 8.3 short name shape (one to six characters other
+      than `.`, a `~` and a number from 1, and an optional extension of one to three characters, as in
+      `PAYLOA~1.MD` or `A~VERY~1.MD`) exits 2: on NTFS with short names enabled it can open a long-named
+      file the gate cannot identify. The one exemption is a run the loader's own path filter drops whatever
+      precedes the `@` (_loader_rejects): one that starts with none of `./`, `~/`, `/` and not with a
+      letter, a digit, `.`, `_` or `-`. That filter was read from a later loader build (2.1.288) than the
+      pinned one, not from the pinned build. So prose such as `git diff @~1`, `npm i lodash@~4.17.21`,
+      `git reset --hard HEAD@{1}~1` or `git diff @{u}~1` passes. Each target is
       counted once, recursively through imported files to any depth (a cycle ends), held to the grammar,
       its frontmatter and comments removed as for a counted rule file. An imported file's frontmatter is
       held to the FRONTMATTER grammar and its `paths:` value to the SCOPE grammar (a typed value, nested
@@ -182,8 +186,9 @@ KNOWN OVER-COUNTS, by design (each can make PACK or SESSION higher than what the
   - An import inside a code span, a fenced code block, or an HTML comment spread over lines (on a line
     holding neither `<!--` nor `-->`) is counted although the loader skips it, and
     a banned name there exits 1.
-  - Every target is followed without the loader's own path filter and to any depth, and two prefixes of
-    one candidate that name two files both count.
+  - Every target is followed without the loader's own path filter (which only exempts a run from the
+    8.3 short name refusal) and to any depth, and two prefixes of one candidate that name two files both
+    count.
   - A rule file reached under two names counts twice, and the unit added for a text holding `<!--` with
     no final newline counts whether or not the loader's rebuild adds it.
   - Each loaded file's header counts a joining blank line, though the loader writes one fewer than the
@@ -211,8 +216,9 @@ neither (an NTFS upcase table that differs from this Python's Unicode data, for 
 two names the gate reads as distinct, which is not modelled. A short name set by hand outside the 8.3
 shape is not recognised. Two directories that differ only in case on a path the gate resolves exit 2 even
 where the next component names an entry of only one of them, so a layout a case-insensitive file system
-would load unambiguously can be refused (a known over-refusal). Prose that puts `@` after whitespace before
-a short-name-shaped run, such as `git diff @{u}~1`, is read as an import and exits 2 (another). The loader's own
+would load unambiguously can be refused (a known over-refusal). An `@` inside a word before a run the
+loader's path filter keeps and a short-name-shaped component, such as `name@HOST~1`, exits 2 though the
+loader does not read it as an import (another). The loader's own
 120,000-character check
 sums file contents only, so both totals, which include the headers, read a little high against that
 floor. The count is UTF-16 code units, not tokens, so it tracks size, not model cost.
@@ -304,6 +310,9 @@ VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
 # a `~` and a number, and an optional extension of one to three characters; on NTFS it can open a long-named
 # file. Prose such as `git diff @~1` or `npm i lodash@~4.17.21` holds no such component.
 SHORT_NAME_RE = re.compile(r"[^.]{1,6}~[1-9][0-9]{0,5}(?:\.[^.]{1,3})?")
+# The start of an import run the loader's own path filter keeps (_loader_rejects), as read from a later
+# loader build (2.1.288) than the pin: `./`, `~/`, `/`, or a letter, digit, `.`, `_` or `-`.
+LOADER_PATH_RE = re.compile(r"\./|~/|/|[a-zA-Z0-9._-]")
 # The most symlinks _resolve_checked follows for one path (the Linux limit); one more is a loop.
 MAX_HOPS = 40
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -439,9 +448,18 @@ def _check_characters(text, where):
 def _import_start(text, pos):
     """True when the `@` at `pos` begins an import token: at the start of `text` or a line, after
     whitespace, or right after a comment closer `-->` (with the comment removed, what came before it may be
-    whitespace). The loader reads an `@` as an import only at the start of the text or after whitespace, so
-    an `@` inside a word, such as the one in an email address, begins none."""
+    whitespace). An `@` inside a word, such as the one in an email address, begins none. The loader also
+    starts a text token, where an `@` begins an import, right after an inline token (`*see*@x`), which this
+    does not model; the 8.3 short name refusal does not use it (_loader_rejects)."""
     return pos == 0 or text[pos - 1] in " \t\r\n" or text[pos - 3:pos] == "-->"
+
+
+def _loader_rejects(run):
+    """True when the loader's own path filter drops the import run `run` whatever precedes its `@`: it
+    starts with none of `./`, `~/`, `/` and not with a letter, digit, `.`, `_` or `-` (LOADER_PATH_RE), as
+    `{1}~1` in `HEAD@{1}~1`, `{u}~1` in `git diff @{u}~1` and `~1` in `git diff @~1` do. The filter was
+    read from a later loader build (2.1.288) than the pin."""
+    return not LOADER_PATH_RE.match(run)
 
 
 def _check_comment_joins(text, where):
@@ -701,9 +719,9 @@ def _same_name(a, b):
 
 
 def _case_collision(names, where):
-    """GateError when two of `names` (entries of one directory, or paths of entries of directories a
-    case-insensitive file system merges) have final components that can name one entry (_same_name): such a
-    file system holds only one of them, and which one is ambiguous."""
+    """GateError when two of `names` (the entries of one directory, by name or by path from the
+    repository root) have final components that can name one entry (_same_name): a case-insensitive file
+    system holds only one of them, and which one is ambiguous."""
     seen = ({}, {})
     for name in sorted(names):
         for table, key in zip(seen, _fold_keys(os.path.basename(name))):
@@ -1001,11 +1019,11 @@ def _case_walk(parts, base, where, token):
     return _regular(entry, mode, where, token)
 
 
-def resolve_candidate(path, base, where, token, starts_import=True):
+def resolve_candidate(path, base, where, token, kept=True):
     """The regular file `path` names relative to `base` (the real directory of the importing file, as the
     loader resolves it), or None when it is genuinely absent or holds only dot components, found by
     _case_walk. GateError for a `..` component, a Windows 8.3 short name component (SHORT_NAME_RE) when
-    `starts_import` (the `@` begins an import, _import_start; one inside a word the loader ignores), a
+    `kept` (the loader's path filter keeps the run whatever precedes its `@`, _loader_rejects), a
     symlink at any component, an entry that cannot be listed or read, a directory or other entry that is
     not a regular file, and two or more entries matching one component case-insensitively."""
     parts = [part for part in path.split("/") if part not in ("", ".")]
@@ -1015,7 +1033,7 @@ def resolve_candidate(path, base, where, token, starts_import=True):
         raise GateError("{}: import @{} has a `..` component; whether the loader resolves it before or after "
                         "a symlink is ambiguous; outside the enumerated grammar, cannot evaluate".format(
                             where, token))
-    if starts_import and any(SHORT_NAME_RE.fullmatch(part) for part in parts):
+    if kept and any(SHORT_NAME_RE.fullmatch(part) for part in parts):
         raise GateError("{}: import @{} has a Windows 8.3 short name component (such as PAYLOA~1.MD); on NTFS it "
                         "can open a long-named file the gate cannot identify; ambiguous, cannot "
                         "evaluate".format(where, token))
@@ -1051,7 +1069,7 @@ def follow_imports(root, origins, findings):
             for path in candidate_paths(run):
                 if os.path.basename(path.rstrip("/")).casefold() in BANNED_FOLDED:
                     banned = True
-                target = resolve_candidate(path, base, here, run, _import_start(source, pos))
+                target = resolve_candidate(path, base, here, run, not _loader_rejects(run))
                 if target is not None and target not in targets:
                     targets.append(target)
             if any(os.path.basename(t).casefold() in BANNED_FOLDED for t in targets):
@@ -1826,10 +1844,35 @@ def self_test(report_path=None):
                            extra=_files("docs/a~very-long-payload.md", big_b))
         code, err = _stderr_of(run, tilde_base)
         check("exit/short-name-tilde-in-base-2", (code, "8.3 short name" in err), (2, True))
-        # An `@` inside a word begins no import, so git's reflog ancestry in prose passes.
+        # The loader's path filter drops a run starting with `{`, so git's reflog ancestry in prose passes.
         in_word = [_tree(tmp / "in-word-reflog", outside="Undo with `git reset --hard HEAD@{1}~1` first.\n"),
                    _tree(tmp / "in-word-rule", rules=_files("a.md", "Then `git reset --hard HEAD@{1}~1`.\n"))]
         check("exit/in-word-at-not-short-name-0", [_quiet(run, r) for r in in_word], [0, 0])
+        # The loader starts a text token right after an inline token, so an `@` there begins an import and
+        # a short name in it exits 2 (N1 to N8: emphasis, HTML, a code span, a link, strong, underscore
+        # emphasis, an escape, and a conditional rule file).
+        long_md, long_txt = _files("docs/payload-long-name.md", big_b), _files(
+            ".claude/rules/sub/payload-long-name.txt", big_b, ".claude/rules/payload-long-name.txt", big_b)
+        after_inline = [
+            _tree(tmp / "inline-em", block="\n*see*@docs/PAYLOA~1.MD\n", extra=long_md),
+            _tree(tmp / "inline-html", block="\n<b>@docs/PAYLOA~1.MD</b> x\n", extra=long_md),
+            _tree(tmp / "inline-code", block="\n`x`@docs/PAYLOA~1.MD\n", extra=long_md),
+            _tree(tmp / "inline-link", block="\n[l](u)@docs/PAYLOA~1.MD\n", extra=long_md),
+            _tree(tmp / "inline-strong", rules=_files("a.md", "Read **this**@sub/PAYLOA~1.TXT now.\n"),
+                  extra=long_txt),
+            _tree(tmp / "inline-dot-claude", extra=_files(".claude/CLAUDE.md", "_x_@PAYLOA~1.MD\n",
+                                                          ".claude/payload-long-name.md", big_b)),
+            _tree(tmp / "inline-escape", rules=_files("a.md", "\\*@PAYLOA~1.TXT\n"), extra=long_txt),
+            _tree(tmp / "inline-conditional", rules=_files("a.md", '---\npaths: ["src/**"]\n---\n*e*@PAYLOA~1.TXT\n'),
+                  extra=long_txt)]
+        check("exit/short-name-after-inline-token-2",
+              [(lambda got: (got[0], "8.3 short name" in got[1]))(_stderr_of(run, r)) for r in after_inline],
+              [(2, True)] * 8)
+        # Both git prose forms the loader's path filter drops pass, in plain prose and after an inline token.
+        git_prose = [_tree(tmp / "git-reflog-prose", rules=_files("a.md", "Undo with git reset --hard HEAD@{1}~1 first.\n")),
+                     _tree(tmp / "git-upstream-prose", block="\nCompare with git diff @{u}~1 before pushing.\n"),
+                     _tree(tmp / "git-reflog-strong", outside="Then **HEAD**@{1}~1 again.\n")]
+        check("exit/git-prose-loader-filter-0", [_quiet(run, r) for r in git_prose], [0, 0, 0])
         # A case collision on a symlink met on the way to a target (Link.txt beside link.txt), which the
         # fully resolved path no longer shows, exits 2 at every entry point the loader resolves.
         hop_collisions = []
@@ -2033,6 +2076,7 @@ def self_test(report_path=None):
                                      "RELATIVE to the repository root", "root prefix", "inside a word",
                                      "SCOPE grammar", "resolved path", "case variant", "preamble",
                                      "not the name the link gives it", "pinned build only", "8.3 short name",
+                                     "later loader build", "right after an inline token",
                                      "differ only in case", "not a regular file") if phrase not in doc]
               + [phrase for phrase in ("never missed", "never under", "OVER-COUNT BY CONSTRUCTION", "not dropped")
                  if phrase in doc], [])
@@ -2166,10 +2210,10 @@ def self_test(report_path=None):
         check("revert/fifo-read-never-blocks-red",
               (_blocks(read_text, fifo / RULES_REL / "a.md"), _blocks(blocking.read_text, fifo / RULES_REL / "a.md")),
               (False, True))
-        no_short = _mutant(tmp, "    if starts_import and any(SHORT_NAME_RE.fullmatch(part) for part in parts):\n",
+        no_short = _mutant(tmp, "    if kept and any(SHORT_NAME_RE.fullmatch(part) for part in parts):\n",
                            "    if False:\n")
         check("revert/windows-short-name-red", (_quiet(run, shortname), _quiet(no_short.run, shortname)), (2, 0))
-        any_tilde = _mutant(tmp, "if starts_import and any(SHORT_NAME_RE.fullmatch(part)",
+        any_tilde = _mutant(tmp, "if kept and any(SHORT_NAME_RE.fullmatch(part)",
                             "if any(SHORT_NAME_RE.search(part)",
                             'SHORT_NAME_RE = re.compile(r"[^.]{1,6}~[1-9][0-9]{0,5}(?:\\.[^.]{1,3})?")',
                             'SHORT_NAME_RE = re.compile(r"~\\d", re.ASCII)')
@@ -2179,9 +2223,17 @@ def self_test(report_path=None):
         no_tilde_base = _mutant(tmp, 'SHORT_NAME_RE = re.compile(r"[^.]{1,6}~', 'SHORT_NAME_RE = re.compile(r"[^.~]{1,6}~')
         check("revert/short-name-tilde-in-base-red", (_quiet(run, tilde_base), _quiet(no_tilde_base.run, tilde_base)),
               (2, 0))
-        every_at = _mutant(tmp, "    if starts_import and any(SHORT_NAME_RE", "    if any(SHORT_NAME_RE")
+        every_at = _mutant(tmp, "    if kept and any(SHORT_NAME_RE", "    if any(SHORT_NAME_RE")
         check("revert/in-word-at-not-short-name-red",
               ([_quiet(run, r) for r in in_word], [_quiet(every_at.run, r) for r in in_word]), ([0, 0], [2, 2]))
+        check("revert/git-prose-loader-filter-red",
+              ([_quiet(run, r) for r in git_prose], [_quiet(every_at.run, r) for r in git_prose]),
+              ([0, 0, 0], [2, 2, 2]))
+        whitespace_only = _mutant(tmp, "resolve_candidate(path, base, here, run, not _loader_rejects(run))",
+                                  "resolve_candidate(path, base, here, run, _import_start(source, pos))")
+        check("revert/short-name-after-inline-token-red",
+              ([_quiet(run, r) for r in after_inline], [_quiet(whitespace_only.run, r) for r in after_inline]),
+              ([2] * 8, [0] * 8))
         final_only = _mutant(tmp, "        if len(found) > 1:\n",
                              "        if len(found) > 1 and not all(stat.S_ISLNK(mode) for _, mode in found):\n")
         check("revert/case-collision-on-symlink-hop-red",
@@ -2252,7 +2304,8 @@ def self_test(report_path=None):
           "counted per loaded file naming its resolved path, case variants of the fixed names exit 2, case "
           "ambiguity at any import component, at every symlink hop and in case-colliding rule entries exit 2 "
           "and two directories differing only in case exit 2 on every resolved path while non-rule entries pass, "
-          "upper and NFD folds collide, `@~1` and in-word `@` prose pass and a `~` in a short name's base exits 2, "
+          "upper and NFD folds collide, `@~1`, `@{{u}}~1` and in-word `@` prose pass while a short name after an inline "
+          "token exits 2 and a `~` in a short name's base exits 2, "
           "CLAUDE.md, .claude/CLAUDE.md and the budget source checked before they are opened, a non-regular rule "
           "file and a Windows 8.3 short name import exit 2 and no read blocking, an "
           "imported file's scope held to the grammar, and the budget source "
