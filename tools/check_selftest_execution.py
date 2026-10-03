@@ -981,7 +981,9 @@ def main(argv=None):
         if not (root / ".git").exists():
             _cannot("cannot confirm the gate's own repo root (no .git at {})".format(root))
             return 2
-        return run_suite(root, argv[1])
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
+        return run_suite(precheck_special_files(root), argv[1])
     print("usage: check_selftest_execution.py --suite <id> | --self-test", file=sys.stderr)
     return 2
 

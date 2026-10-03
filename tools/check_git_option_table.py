@@ -694,7 +694,9 @@ def main(argv=None):
         return self_test()
     try:
         root = args.root if args.root is not None else Path(__file__).resolve().parent.parent
-        return run(root)
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
+        return run(precheck_special_files(root))
     except (OSError, RuntimeError) as exc:
         print("ERROR: git-option-table cannot evaluate: {}".format(exc), file=sys.stderr)
         return 2

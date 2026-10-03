@@ -39,6 +39,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_leaks import load_denylist, scan_text  # noqa: E402  shared denylist + scanner (single source)
+from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
 
 ROOT = Path(__file__).resolve().parents[1]
 _ZERO_SHA = "0" * 40
@@ -197,6 +198,7 @@ def run(event_name, event):
 def main(argv):
     if "--self-test" in argv:
         return self_test()
+    precheck_special_files(ROOT)
     try:
         event_name = os.environ.get("GITHUB_EVENT_NAME", "")
         if not event_name:

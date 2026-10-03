@@ -365,6 +365,40 @@ def self_test_main():
         return _self_test_main_isolated()
 
 
+def _precheck_copies_problems(gen_text, opf_text):
+    """D-400-SPECIAL-FILE-PRECHECK: precheck_special_files in tools/_gen_common.py and its copy in
+    opf/tools/_containment.py (the standalone OPF pack may not import tools/) must stay identical: the
+    function with its docstring set aside, and the module tables _PRECHECKED_ROOTS and _SPECIAL_KINDS,
+    compared as parsed trees. Returns the problems, empty when the two copies are in step."""
+    import ast
+
+    def parts(text):
+        found = {}
+        for node in ast.parse(text).body:
+            if isinstance(node, ast.FunctionDef) and node.name == "precheck_special_files":
+                body = node.body
+                if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                        and isinstance(body[0].value.value, str):
+                    body = body[1:]
+                found[node.name] = ast.dump(node.args) + ast.dump(ast.Module(body=body, type_ignores=[])) \
+                    + "".join(ast.dump(d) for d in node.decorator_list)
+            elif isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                    and isinstance(node.targets[0], ast.Name) \
+                    and node.targets[0].id in ("_PRECHECKED_ROOTS", "_SPECIAL_KINDS"):
+                found[node.targets[0].id] = ast.dump(node.value)
+        return found
+
+    gen, opf = parts(gen_text), parts(opf_text)
+    problems = []
+    for name in ("precheck_special_files", "_PRECHECKED_ROOTS", "_SPECIAL_KINDS"):
+        if name not in gen or name not in opf:
+            problems.append("{} missing from {}".format(
+                name, " and ".join(w for w, p in (("_gen_common", gen), ("_containment", opf)) if name not in p)))
+        elif gen[name] != opf[name]:
+            problems.append("{} differs".format(name))
+    return problems
+
+
 def _self_test_main_isolated():
     import io
     import shutil
@@ -736,6 +770,42 @@ def _self_test_main_isolated():
                 finally:
                     (tree / rel).unlink()
                     (tree / rel).write_bytes(saved)
+            # (p) D-400-SPECIAL-FILE-PRECHECK follow-up: the gates that find their root on their own run the
+            #     same precheck on that root. One stray FIFO that no tool reads makes each exit 2 naming it;
+            #     each run is bounded by the subprocess timeout, the alarm on a child. MUTATION: making
+            #     precheck_special_files a no-op, or dropping its call from one of these gates, lets that
+            #     gate run on (another exit, or no mention of the FIFO).
+            stray = tree / ".aiqt" / "stray-precheck.fifo"
+            os.mkfifo(stray)
+            try:
+                for cmd in (["check_ci_parity.py"], ["check_msg_leaks.py"], ["check_python_floor.py"],
+                            ["check_portability.py"], ["check_selftest_execution.py", "--suite", "demo"],
+                            ["check_hooks_preview.py"], ["check_python_launcher_isolation.py"],
+                            ["check_git_option_table.py"], ["check_record_sections.py"]):
+                    try:
+                        proc = subprocess.run([sys.executable, "-I", "-B", str(tree / "tools" / cmd[0]),
+                                               *cmd[1:]], cwd=tree, capture_output=True, text=True, timeout=30)
+                        got, err = proc.returncode, proc.stderr
+                    except subprocess.TimeoutExpired:
+                        got, err = "hung", ""
+                    if got != 2 or str(stray) not in err:
+                        failures.append("D-400-SPECIAL-FILE-PRECHECK: a stray FIFO in the tree expected {} to "
+                                        "exit 2 naming it, got {!r}".format(" ".join(cmd), got))
+            finally:
+                stray.unlink()
+
+        # (q) The OPF copy of the precheck (opf/tools/_containment.py) stays identical to _gen_common's, and a
+        #     one-token change to the copy is caught.
+        here = Path(__file__).resolve().parents[1]
+        gen_text = (here / "tools" / "_gen_common.py").read_text(encoding="utf-8")
+        opf_text = (here / "opf" / "tools" / "_containment.py").read_text(encoding="utf-8")
+        problems = _precheck_copies_problems(gen_text, opf_text)
+        if problems:
+            failures.append("D-400-SPECIAL-FILE-PRECHECK: the two precheck copies differ: {}".format(
+                "; ".join(problems)))
+        if not _precheck_copies_problems(gen_text, opf_text.replace("raise SystemExit(2)", "raise SystemExit(1)", 1)):
+            failures.append("D-400-SPECIAL-FILE-PRECHECK: a changed exit code in the OPF precheck copy was not "
+                            "caught by the copy comparison")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -754,7 +824,9 @@ def _self_test_main_isolated():
           "check_manifest independently rejects an output at git index mode 100755 (exit 2, F-236); a "
           "FIFO at a SOURCES member, a TOML record, or load_toml is refused (exit 2) inside an alarm, never a "
           "hang; reconcile refuses a symlinked or directory target (exit 2); and a FIFO at any of six tree "
-          "paths makes six gates exit 2 by name at the repo_root() special-file precheck")
+          "paths makes six gates exit 2 by name at the repo_root() special-file precheck; a stray FIFO makes the "
+          "nine gates that find their root on their own exit 2 by name; and the OPF copy of the precheck "
+          "matches _gen_common's (a changed copy is caught)")
     return 0
 
 

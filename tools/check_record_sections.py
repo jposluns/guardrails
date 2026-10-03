@@ -1344,10 +1344,12 @@ def main(argv=None):
     args = _parser().parse_args(argv)
     if args.self_test:
         return self_test()
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
+    requested = Path(args.root) if args.root else Path(__file__).resolve().parents[1]
+    precheck_special_files(requested)
     try:
-        root = (_repository_root(Path(args.root))
-                if args.root else
-                _repository_root(Path(__file__).resolve().parents[1]))
+        root = _repository_root(requested)
         config_path = _contained_config_path(
             root, args.config or CONFIG_REL)
     except GateError as exc:

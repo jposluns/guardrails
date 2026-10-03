@@ -1454,6 +1454,8 @@ def _self_test_cases(base):
 
 def _gate_run(root, gate_source):
     _write(root, "tools/check_python_floor.py", gate_source)
+    # The default entry imports precheck_special_files from its sibling (D-400-SPECIAL-FILE-PRECHECK).
+    _write(root, "tools/_gen_common.py", _read_text(Path(__file__).resolve().parent / "_gen_common.py"))
     try:
         proc = subprocess.run(
             [sys.executable, "-I", "-B", str(root / "tools" / "check_python_floor.py")], cwd=root,
@@ -1658,7 +1660,9 @@ def self_test(report_path=None):
 
 def main(argv):
     if not argv:
-        code, lines = evaluate(ROOT)
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
+        code, lines = evaluate(precheck_special_files(ROOT))
         for line in lines:
             print(line, file=sys.stderr if code == 2 else sys.stdout)
         return code

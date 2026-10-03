@@ -4479,6 +4479,9 @@ def main(argv=None):
     if args.self_test:
         return self_test()
 
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _gen_common import precheck_special_files  # noqa: E402  D-400-SPECIAL-FILE-PRECHECK
+    precheck_special_files(ROOT)
     report = run_paths(LOCAL_PATH, CI_PATH)
     print(render(report))
     return report.code

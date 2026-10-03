@@ -17,6 +17,7 @@ MUST, MUST NOT, SHOULD or MAY is red unless the registry marks it descriptive (_
 the lint reads the registry marker, not the meaning, so a requirement wrongly marked descriptive
 stays green; review of registry changes catches that.
 """
+import os
 import re
 import sys
 import tempfile
@@ -24,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _opf_store as store  # noqa: E402
+import _containment  # noqa: E402  precheck_special_files (D-400-SPECIAL-FILE-PRECHECK)
 
 SPEC = Path(__file__).resolve().parents[1] / "spec" / "OPF-SPEC.md"
 
@@ -2623,6 +2625,28 @@ def _self_test_vectors():
                   not any(f.startswith("spec " + s + " missing contract") for f in contract_findings(m)))
         check("keyword-revert-spec-" + section + "-" + old, lambda p=pin, m=mutated, s=section:
               len(p) == 1 and "spec {} missing contract: {}".format(s, p[0]) in contract_findings(m))
+    # D-400-SPECIAL-FILE-PRECHECK: a copy of the opf/ subtree whose spec is a FIFO with no writer makes the
+    # default entry exit 2 naming it, bounded by the subprocess timeout (the alarm on a child). MUTATION:
+    # dropping the _containment.precheck_special_files call leaves SPEC.read_text blocked until the timeout.
+    if hasattr(os, "mkfifo"):
+        import shutil
+        import subprocess
+
+        def fifo_spec_refused():
+            with tempfile.TemporaryDirectory() as scratch:
+                tree = Path(scratch) / "opf"
+                shutil.copytree(SPEC.parents[1], tree, symlinks=True,
+                                ignore=shutil.ignore_patterns("__pycache__"))
+                spec = tree / SPEC.relative_to(SPEC.parents[1])
+                spec.unlink()
+                os.mkfifo(spec)
+                try:
+                    proc = subprocess.run([sys.executable, "-I", "-B", str(tree / "tools" / "check_opf_homes.py")],
+                                          cwd=scratch, capture_output=True, text=True, timeout=30)
+                except subprocess.TimeoutExpired:
+                    return False
+                return proc.returncode == 2 and str(spec) in proc.stderr
+        check("special-file-precheck-fifo-spec", fifo_spec_refused)
     for failure in failures:
         print("FAIL: " + failure)
     print("OPF-HOMES SELF-TEST: {} ({} checks)".format("FAILED" if failures else "OK", checked))
@@ -2637,6 +2661,7 @@ def main(argv=None):
         if args:
             print("check_opf_homes: unexpected arguments", file=sys.stderr)
             return 2
+        _containment.precheck_special_files(SPEC.parents[1])
         findings = contract_findings(SPEC.read_text(encoding="utf-8")) + keyword_findings()
         for finding in findings:
             print("check_opf_homes: " + finding)

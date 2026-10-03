@@ -46,6 +46,7 @@ from _opf_adopt import (  # noqa: E402
     VALID, INVALID, CANNOT_EVALUATE, _DIGEST_RE, _is_contained_filepath,
 )
 from _semver import _parse as _parse_version  # noqa: E402
+import _containment  # noqa: E402  precheck_special_files (D-400-SPECIAL-FILE-PRECHECK)
 
 PACK_FORMAT = "opf.prompt-pack/v1"
 MANIFEST_NAME = "pack.toml"
@@ -459,7 +460,9 @@ def _self_test_vectors():
                     failures.append("unreadable-subdirectory: {!r}".format(got))
 
             # Use a child timeout so a blocking open is a failed check, never a hung self-test.
-            # Probe member reads directly: the walk's earlier refusal must not mask a lost open guard.
+            # Probe member reads directly: the walk's earlier refusal must not mask a lost open guard. For the
+            # same reason the manifest probe bypasses main()'s special-file precheck (patched to a pass-through),
+            # so the FIFO reaches the manifest open guard itself.
             probe = """\
 import sys
 from pathlib import Path
@@ -468,6 +471,7 @@ import check_opf_prompt_pack as gate
 path, what = Path(sys.argv[2]), sys.argv[3]
 if what == "manifest":
     gate.DEFAULT_PACK_DIR = path.parent
+    gate._containment.precheck_special_files = lambda root: root
     sys.exit(gate.main([]))
 try:
     gate._read_regular(path, gate.MAX_MEMBER_BYTES, what)
@@ -529,7 +533,7 @@ def main(argv=None):
         if args:
             print("usage: check_opf_prompt_pack.py [--self-test]", file=sys.stderr)
             return 2
-        status, guard, detail = validate_pack(DEFAULT_PACK_DIR)
+        status, guard, detail = validate_pack(_containment.precheck_special_files(DEFAULT_PACK_DIR))
         if status == VALID:
             print("OPF PROMPT PACK: VALID ({})".format(detail))
         else:

@@ -72,11 +72,25 @@ def precheck_special_files(root):
     routing every reader of the tree through the non-blocking reader one by one. Runs once per process per
     root (cached); returns root so a caller can wrap the expression that computes it.
 
-    Callers: repo_root() on its real-repository path (the .git ancestor), and every gate that accepts an
-    explicit --root, on that root. The shared reader (read_source_bytes) stays on the corpus and manifest
-    paths as defence in depth. Out of scope: a special file created after this walk (a concurrent writer),
-    a vanished entry (skipped), and a tool that bypasses both repo_root() and --root (listed as uncovered
-    in the change record)."""
+    opf/tools/_containment.py carries a copy for the standalone OPF pack, which may not import this module
+    (check_opf_standalone_closure). The two copies behave identically: check_manifest's self-test requires
+    the two functions (docstrings aside) and their two module tables to stay identical.
+
+    Covered: repo_root() on its real-repository path (the .git ancestor), so each tool that finds its root
+    through it; each gate that accepts an explicit --root, on that root; and, on the root each already uses
+    and before any read, the gates that find their root on their own: check_ci_parity, check_msg_leaks,
+    check_python_floor, check_portability, check_selftest_execution (--suite), check_hooks_preview,
+    check_python_launcher_isolation, check_git_option_table and check_record_sections. The OPF copy covers
+    check_opf_homes (the opf/ subtree) and check_opf_prompt_pack (its pack directory).
+    Not covered, with reasons: check_branch_root (it reads no working-tree file, only the object database
+    through git, and is documented as liftable with no repository-local helper); check_release_cut (its
+    working-tree reads go through working_blob, a non-blocking no-follow open that refuses a non-regular
+    file); the other OPF entry points (opf.py and the check_opf_* gates act on an adopter's store, and
+    opf/tools/run_all_checks.sh runs them only as --self-test on scratch fixtures); the adopter tools whose
+    --root is a product repository (doctor, migrate, pin); helpers that are not gates on this repository
+    and library modules with no entry point; the Path.cwd() fallback of repo_root() when no .git ancestor
+    exists; a special file created after this walk (a concurrent writer); and a vanished entry (skipped).
+    The shared reader (read_source_bytes) stays on the corpus and manifest paths as defence in depth."""
     root = Path(root)
     key = os.path.abspath(root)
     if key in _PRECHECKED_ROOTS:
