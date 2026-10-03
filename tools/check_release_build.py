@@ -2328,7 +2328,8 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
                             # outside ALLOWED_ATTESTATION_DELTA -> post-tag exit 1 naming changelog.toml.
                             # Mutation: adding changelog.toml to ALLOWED_ATTESTATION_DELTA turns (i) green.
                             # (ii) The documented order: the tag-key commit on top of the attestation commit
-                            # passes the tag-monotonicity gate against the attestation commit as its base.
+                            # passes the tag-monotonicity gate against the attestation commit as its base,
+                            # ARMED (one tagged release verified); deleting the referenced tag is exit 2.
                             tagged_changelog = '[[release]]\nversion = "1.0.0"\ntag = "v1.0.0"\n'
                             a_row = subprocess.run(["git", "-C", str(ac), "show", a_oid + ":" + RELEASES_REL],
                                                    capture_output=True, text=True, env=ge).stdout
@@ -2366,12 +2367,27 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
                                 mono = subprocess.run(
                                     ["python3", str(ac / "tools" / "check_version_monotonicity.py"),
                                      "--base", a_oid], cwd=str(ac), capture_output=True, text=True, env=ge)
-                                if mono.returncode != 0:
+                                if (mono.returncode != 0 or "tag-monotonicity: PASS (1 tagged release(s) "
+                                                            "verified)" not in mono.stdout):
                                     failures.append("(release order) the tag-key commit on top of the attestation "
                                                     "commit (RELEASING step 6b) must pass "
-                                                    "check_version_monotonicity --base <attestation commit>, "
-                                                    "exit 0 (got rc={}: {})".format(
+                                                    "check_version_monotonicity --base <attestation commit> "
+                                                    "ARMED, exit 0 with 'tag-monotonicity: PASS (1 tagged "
+                                                    "release(s) verified)' (got rc={}: {})".format(
                                                         mono.returncode, (mono.stdout + mono.stderr).strip()))
+                                # Negative control: the same commit with the referenced tag deleted is exit 2.
+                                # The tag object stays in the object store, so update-ref restores the ref.
+                                subprocess.run(["git", "-C", str(ac), "tag", "-d", "v1.0.0"],
+                                               capture_output=True, env=ge)
+                                mono_neg = subprocess.run(
+                                    ["python3", str(ac / "tools" / "check_version_monotonicity.py"),
+                                     "--base", a_oid], cwd=str(ac), capture_output=True, text=True, env=ge)
+                                subprocess.run(["git", "-C", str(ac), "update-ref", "refs/tags/v1.0.0", a_tobj],
+                                               capture_output=True, env=ge)
+                                if mono_neg.returncode != 2:
+                                    failures.append("(release order) with the referenced tag v1.0.0 deleted, the "
+                                                    "tag-key commit must fail check_version_monotonicity exit 2 "
+                                                    "(got rc={})".format(mono_neg.returncode))
                             subprocess.run(["git", "-C", str(ac), "reset", "-q", "--hard", a_oid],
                                            capture_output=True, env=ge)
 
@@ -2671,7 +2687,11 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent pr
               "attestation commit not descending from the tagged candidate is exit 1 (#4), --pre-tag rejects "
               "an already-tagged candidate (#5), and the tag kind/peel/chronology are taken from the RECORDED "
               "immutable tag_object_sha, never a re-read of the mutable ref (#6)), plus the archive-based "
-              "post-tag digest-mismatch and chronology-forge cases on a full pack tree) hold".format(core))
+              "post-tag digest-mismatch and chronology-forge cases on a full pack tree); and the release-"
+              "order cases (RELEASING steps 6a/6b: a changelog tag-key commit before the attestation row "
+              "makes post-tag exit 1 naming changelog.toml, the tag-key commit after the attestation commit "
+              "passes check_version_monotonicity ARMED with one tagged release verified, and the same commit "
+              "with the referenced tag deleted is exit 2) hold".format(core))
     else:
         print("SELF-TEST PASS (PARTIAL): {}; the git-level cases were SKIPPED (git or a writable temp "
               "directory unavailable), so those paths are UNVERIFIED this run".format(core))

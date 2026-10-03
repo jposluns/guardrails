@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "669cc23f6b4fbe90b489acf0349ef74319cee7b492b98d36184d130fc275fdfc"
+tree-sha256 = "7563899cde3da90854434f8eac06026c6d2a4e1cfcb6543a3a460a8edd47bbf7"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2321,8 +2321,8 @@ sha256 = "68c58a0a2af9e5c5b36fc21b24745ba134e2ef09fd1761ff340c99cba57ae3b8"
 
 [[sources]]
 path = "RELEASING.md"
-bytes = 8468
-sha256 = "1fa386f5e1864b8dd6f2b888cf5a69f19bdff89cbebf333158ac307a19598812"
+bytes = 9439
+sha256 = "ffc8578fcc88096c04c6b9c4423f59b815222a7284c4669420fb195ee6eb3e17"
 
 [[sources]]
 path = "ROADMAP.md"
@@ -2356,8 +2356,8 @@ sha256 = "79f4539151ecb22ab0bca929f9d0ec7b6efc2541dd8da708b259ea8642d3ec5a"
 
 [[sources]]
 path = "changelog.toml"
-bytes = 1602
-sha256 = "ddbe345aebd16f9c3fef22a469d1968683052132e68334c884a6d97fda24529b"
+bytes = 1612
+sha256 = "ea5d62211d98b021db16de6f34d8db3f50a3ac8ac077547fa09515dfc9e899d2"
 
 [[sources]]
 path = "disclosure.toml"
@@ -3321,8 +3321,8 @@ sha256 = "064d47416f70f46adb0a0aeb6eba0934c7e4dc4cc547ca62f8068458cbdf6cd1"
 
 [[sources]]
 path = "tools/check_release_build.py"
-bytes = 189808
-sha256 = "1d5afce3645ba37e75f9addf4cd85e1d10e91f7a31c35b56062f0b7c7c2481a0"
+bytes = 191815
+sha256 = "5f535322753a783b2eaf839a6b3653b02bf6f6608175d3587e6cda86c3b2fb32"
 
 [[sources]]
 path = "tools/check_release_cut.py"
@@ -3331,8 +3331,8 @@ sha256 = "91fa470bab48c2b3601e0be2124420524c996b1cd8e8f3a1bed294b54703efc1"
 
 [[sources]]
 path = "tools/check_release_delta.py"
-bytes = 194684
-sha256 = "3de22b7dca174f8ed5a3dd881cf420d4f42060b28ec727e2a73d17910e02fb1f"
+bytes = 208109
+sha256 = "1f84cdd6366a2f14fa1c477b4ab5e5dfa2680cf1178bf93347380a693ec1930a"
 
 [[sources]]
 path = "tools/check_rule_placement.py"

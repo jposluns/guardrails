@@ -23,7 +23,10 @@ signed; the independently published digest is the authenticated reference.
    --check` compares each to disk, so they cannot diverge). The
    release-metadata edits prescribed below (the recorded digests, the evidence fields, the attestation
    row with its regenerated branch-integrity artifacts, and the tag key) are the only changes permitted
-   after this point.
+   after this point. For the genesis (first recorded) release, the freeze pull request also carries the
+   `demonstration` file that the step 5b first-pin evidence references: the gate resolves that reference
+   in the candidate tree, so the file must be committed before the freeze. Its content is not defined
+   here; it remains open under the first-release-evidence item.
 
    Skill version bump checklist. The skill is independently versioned. The concrete version-numbered
    filename `aiqt-skill-<version>.zip` is spelled as a literal in four places, kept consistent by a
@@ -66,11 +69,12 @@ signed; the independently published digest is the authenticated reference.
    `bash tools/run_all_checks.sh` must be green end to end. Steps 3, 4, and 5 land as one pull request,
    merged on green. Main stays frozen from this merge until step 6a has merged.
    - 5b. Pre-tag check. Run `python3 tools/check_release_build.py --pre-tag --candidate-sha <full step 5
-     merge SHA> --qa-path <QA object> --qa-sha256 <its SHA-256> --first-pin --evidence <evidence file>`
-     and require exit 0. The QA object and the evidence file live in the maintainer QA store, outside the
-     tree. The first-pin evidence is required for the genesis release (no `[[release]]` row yet in
-     `.aiqt/core/releases.toml`) even without `--first-pin`, and the gate accepts `--evidence` only
-     together with `--first-pin`.
+     merge SHA> --qa-path <QA object> --qa-sha256 <its SHA-256>` and require exit 0. For the genesis
+     (first recorded) release only, that is, while `.aiqt/core/releases.toml` has no `[[release]]` row,
+     add `--first-pin --evidence <evidence file>`: both are required there, and the gate accepts
+     `--evidence` only together with `--first-pin`. Later releases omit both. The QA object and the
+     evidence file live in the maintainer QA store, outside the tree. The evidence's `demonstration`
+     reference must resolve in the candidate tree, so that file is committed before the freeze (step 1).
 6. Tag. The release tag is `vX.Y.Z`, where `X.Y.Z` is the release's `changelog.toml` version (for a
    release at version X.Y.Z, the tag is exactly `vX.Y.Z`); the tag-monotonicity gate requires exactly this
    `v` + version form. Apply the annotated tag to the step 5 merge commit checked in step 5b and push it.
@@ -80,12 +84,17 @@ signed; the independently published digest is the authenticated reference.
      run `python3 tools/gen_manifest.py`, which regenerates `.aiqt/manifest.toml`,
      `.aiqt/release/root.txt`, and `.aiqt/release/announce-snippet.txt`. Commit only those four files.
      `python3 tools/check_release_build.py --post-tag --attestation-commit <full attestation commit SHA>
-     --qa-path <QA object>` must exit 0 before the merge. Merge without rewriting the gated commit (no
+     --qa-path <QA object>` must exit 0 before the merge, and the release-delta gate
+     (`python3 tools/check_release_delta.py`) must exit 0 with its `release-delta: POST-RELEASE` status
+     line, which it prints only when the head changes nothing but the post-release paths from the
+     tagged commit. Merge without rewriting the gated commit (no
      squash or rebase), so the commit post-tag certified lands unchanged and its parent stays the tagged
      commit.
    - 6b. Tag key. Only after 6a has merged, record `tag = "vX.Y.Z"` in that release's `changelog.toml`
      entry, run `python3 tools/gen_manifest.py`, and land both through a separate pull request, merged on
-     green before step 7. The tag-monotonicity check arms from the recorded changelog `tag` key, not from
+     green before step 7. On that pull request `python3 tools/check_release_delta.py` must again exit 0
+     with `release-delta: POST-RELEASE`; in `changelog.toml` it accepts only the newest release's
+     `tag = "vX.Y.Z"` key. The tag-monotonicity check arms from the recorded changelog `tag` key, not from
      the git tag alone, so pushing the git tag without landing the recorded key on the protected branch
      leaves that check dormant.
    - Why the order is fixed. Post-tag allows the attestation commit to change only the release row and
