@@ -1,9 +1,9 @@
 +++
 title = "Learn more about AIQT"
-description = "Go deeper on AIQT: the standard itself, seeing it in action, how it works, where it is going, and the evidence behind it."
+description = "Go deeper on AIQT: the standard itself, AIQT in action, how it works, where it is going, and the evidence behind it."
 canonical = "https://aiqt.ai/learn"
 og-title = "Learn more about AIQT"
-og-description = "Go deeper on AIQT: the standard itself, seeing it in action, how it works, where it is going, and the evidence behind it."
+og-description = "Go deeper on AIQT: the standard itself, AIQT in action, how it works, where it is going, and the evidence behind it."
 og-url = "https://aiqt.ai/learn"
 sidebar-active = "learn"
 +++
