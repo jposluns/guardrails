@@ -227,7 +227,7 @@ carrying agent_id (a subagent's stop). The worker skip writes one warning line t
 stdout, so worker output is not distorted, and on exit 0 stderr reaches only the host's debug log, so the
 skip is logged, not shown); that line is at most 100 characters.
 
-MESSAGES (round 33; round 34; round 35). Every message is ONE physical line: no newline and no carriage
+MESSAGES (round 33; round 34; round 35; round 36). Every message is ONE physical line: no newline and no carriage
 return. The block reason's CORE is never shortened and never dropped: BLOCK_PREFIX unchanged (the recovery
 marker that block_cycles counts), then the FIRST violation in report order (the final message first, in line
 order with its elapsed footer last, then earlier messages oldest first), whether it is a timestamp, a status
@@ -238,14 +238,17 @@ violations) whenever K > 0. Then extras in this order, each added only while the
 soft cap of MSG_CAP (200) characters (an extra that does not fit is SKIPPED, never cut, and the later,
 shorter ones are still tried): the remedy "; run `date`, `date -u`" (or "; run `date -u`" when only that
 fits); when a violation is a time AHEAD of the clock, the future-fact hint "; a genuine future time: put it
-in a `code span` or after 'due'" (or a shorter form); and "; UTC now ...". A core longer than the soft cap
+in a `code span` or after 'due'" (or a shorter form); when the true elapsed is known and an elapsed-footer
+violation is not the claim shown (it is behind "+K more"), "; elapsed now HH:MM" (round 36: the true session
+elapsed, which `date` does not give, so the footer can be corrected in the same cycle); and "; UTC now ...".
+A core longer than the soft cap
 is sent whole, with no extras. Every systemMessage is one line: a capped or fail-open allow counts the
 unresolved claims and names the first the same way, its literal whole; the busy note is fixed text. stderr
 gets at most ONE diagnostic line (the kind, the claim count, the true UTC, elapsed, and the first violation
 in full, never cut), never a copy of the systemMessage. The true local time, the violations after the
 first, and the full remedy text are not sent: the remedy's `date` reads the local time (convert a
-local-zone stamp from it), the count says how many violations remain, and the full remedy
-lives here. Every date-time with an explicit
+local-zone stamp from it), the count says how many violations remain (a hidden footer's correction value is
+the "elapsed now" extra when it fits), and the full remedy lives here. Every date-time with an explicit
 zone in prose must not be ahead of when it was written; a [bracketed] stamp that starts the first status line
 must also be recent (an unbracketed leading date is history); the LAST elapsed footer outside code and quotes
 must match the lease. A genuine FUTURE time mid-line (a deadline, an expiry, a planned run) is allowed only
@@ -1909,12 +1912,22 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
         return None
     diagnose("block")
     # round 35: ONE line; the never-shortened core (BLOCK_PREFIX, the first violation's literal whole in a code
-    # span, its compact offset, the unresolved count), then the remedy, the future-fact hint and UTC now, each
-    # only while the line stays within the soft cap
+    # span, its compact offset, the unresolved count), then the remedy, the future-fact hint, the true elapsed
+    # (round 36) and UTC now, each only while the line stays within the soft cap
     more = f"; +{total - 1} more" if total > 1 else ""
     ahead = any(not v.startswith('"') and " min AHEAD" in v for v in bad)
-    return _fit(_claim_line(BLOCK_PREFIX, claim) + more, [REMEDY, HINT if ahead else "", f"; UTC now {utc}"],
+    # round 36: a wrong footer that is not the claim shown would otherwise get no correction value until a
+    # later block; `date` gives the time, not the elapsed
+    first = next((i for i, v in enumerate(bad) if _first_claim([v]) is not None), None)
+    hidden_footer = el is not None and any(_is_footer(v) for i, v in enumerate(bad) if i != first)
+    return _fit(_claim_line(BLOCK_PREFIX, claim) + more,
+                [REMEDY, HINT if ahead else "", f"; elapsed now {el}" if hidden_footer else "", f"; UTC now {utc}"],
                 MSG_CAP)
+
+
+def _is_footer(v):
+    """Whether the violation string `v` is an elapsed-footer violation."""
+    return v.startswith('"') and '" (last elapsed footer in ' in v
 
 
 def _first_claim(bad):
@@ -1928,7 +1941,7 @@ def _first_claim(bad):
                 lit, rest = v[len(kind):].split(" in ", 1)
                 off = rest.split(": ", 1)[1].split(" of when", 1)[0] if ": " in rest else ""
                 return lit, _short_off(off)
-        if v.startswith('"') and '" (last elapsed footer in ' in v:
+        if _is_footer(v):
             lit, rest = v[1:].split('" (last elapsed footer in ', 1)
             true_el, _, off = rest.partition("true elapsed when written was ")[2].partition(" (")
             return lit, f"{_short_off(off.rstrip(')'))}, true {true_el}"
@@ -4766,6 +4779,34 @@ def _self_test():
             # the hint is skipped, never cut, when it does not fit; the shorter form is tried first
             self.assertEqual(_fit("x" * 150, [HINT], MSG_CAP), "x" * 150 + HINT[1])
             self.assertEqual(_fit("x" * 170, [HINT], MSG_CAP), "x" * 170)
+
+        # -- round 36 (claude-opus-5-5 QA round 3 of round 35) --
+        def test_r36_hidden_footer_gets_true_elapsed(self):
+            # claude minor F1: a timestamp shown first hid a wrong footer behind "+1 more" with no true elapsed, so
+            # the footer could be corrected only after a later block
+            r = self.final("[2026-09-23T18:30:00Z] done\nSession elapsed 09:00")
+            self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `2026-09-23T18:30:00Z` +45m; +1 more; run `date`"), r)
+            self.assertIn("; elapsed now 03:27", r)
+            self.assertLessEqual(len(r), MSG_CAP)
+            # placed before UTC now when both fit
+            r = self.final("[2026-09-23T10:00Z] x\nSession elapsed 09:00")
+            self.assertTrue(r.endswith("; elapsed now 03:27; UTC now 2026-09-23T17:45:00Z"), r)
+            # not added when the footer is the claim shown (it already carries `true HH:MM`), nor with no footer
+            self.assertNotIn("elapsed now", self.final("x\nSession elapsed 09:00"))
+            self.assertNotIn("elapsed now", self.final("2099-01-01T00:00Z 2099-01-02T00:00Z"))
+            # an earlier message's wrong footer behind the final message's timestamp also gets it
+            ents = [self.user("go"), self.asst("x\nSession elapsed 09:00")]
+            r = self.ev(ents, last_assistant_message="[2026-09-23T18:30:00Z] done")
+            self.assertIn("; +1 more", r)
+            self.assertIn("; elapsed now 03:27", r)
+            # skipped, never cut, when it does not fit; UTC now (shorter) is still tried
+            self.assertEqual(_fit("x" * 185, ["; elapsed now 03:27", "; UTC now 2026"], MSG_CAP),
+                             "x" * 185 + "; UTC now 2026")
+            self.assertTrue(_is_footer('"Session elapsed 09:00" (last elapsed footer in x): true elapsed when written '
+                                       'was 03:27 (333 min AHEAD)'))
+            self.assertFalse(_is_footer("timestamp 2099-01-01T00:00Z in x: 5 min AHEAD of when it was written"))
+            doc = " ".join(__doc__.split())
+            self.assertIn('"; elapsed now HH:MM" (round 36', doc)
 
         def test_r35_every_message_one_line_never_cut(self):
             # the requirement: no multi-line hook text; the first rejected timestamp and the diagnostic whole
