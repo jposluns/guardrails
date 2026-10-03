@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "e113dbcdd4f18eaa8aa93d2e91b62510927388213cccfd7eb1ab161c361a7b24"
+tree-sha256 = "bbb33ce46c9624c46ad788b6828234ff8ae8524beda7d3d1ae5b1411e4484ff9"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -122,7 +122,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2867
-sha256 = "37837ace480d8d3c9a58c7af6380f98e5d4adfbfe8a28c34191dca1fd6d4ce7c"
+sha256 = "9cb522a40030da0a94d2f8264722f8c7b23a1d5d05487fe092c35244e8b1d32f"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -2386,8 +2386,8 @@ sha256 = "48ce5a41ca2d7798185d08a1f4a08c828bbbe4849e9686ccb226184f69492628"
 
 [[sources]]
 path = "docs/evidence.md"
-bytes = 5300
-sha256 = "0c558a49dc27448fae675c409d20e5ed3637aa5aa1a9e5be0cf4ecfb0fb2d54f"
+bytes = 5388
+sha256 = "2808107ba1c7e766ab0be6db6966f222f488aa39403c754b0760bdac1942f741"
 
 [[sources]]
 path = "docs/examples.md"
@@ -3046,8 +3046,8 @@ sha256 = "e2801bd1f85fd2730cb614e2145971478d9698bee0acc99f4f057dbbf1a37f13"
 
 [[sources]]
 path = "site/evidence.html"
-bytes = 9152
-sha256 = "37b5e7aa3c4dae19fa1430b28fe2530abbf3a8f94228490dd59af3c539e0a56b"
+bytes = 9240
+sha256 = "ea121479c808124e9bc34bd9af0577cb8ae8fc82d8a2abf0aa757a6f1d95eba8"
 
 [[sources]]
 path = "site/examples.html"
@@ -3516,8 +3516,8 @@ sha256 = "99c16ff5708470fb2580288d592513d1206c4284976fa7b61307758a38c39bcd"
 
 [[sources]]
 path = "tools/gen_skill.py"
-bytes = 53858
-sha256 = "86313c601e94903f168d40cd914af4b60b4437f96fb65ad684c16166bf29a0a4"
+bytes = 65813
+sha256 = "4b6b0c0e59972ab6f84f2c79f1bc3f1aa22f0582e273e825e0b3b0935d8758fe"
 
 [[sources]]
 path = "tools/gen_worker_pack.py"

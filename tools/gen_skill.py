@@ -20,8 +20,12 @@ Outputs (all under the reserved site/downloads/aiqt/ subtree, plus the standalon
   site/downloads/aiqt-skill-1.0.6.zip the version-numbered copy the site links to (byte-identical alias)
 
 Latest only (D-SKILL-LATEST-ONLY): only the current skill version is served, so exactly one version-numbered
-aiqt-skill-<version>.zip may sit under site/downloads, named for the skill meta version. A normal run removes
-any older one it wrote before; --check reports a stale or missing one as drift (exit 1).
+aiqt-skill-<version>.zip may sit under site/downloads, named for the skill meta version. The generator never
+deletes a file there: a stale versioned zip, any other aiqt-skill* entry (a backup, a case variant), or a
+symlink, directory or special file at a skill zip name fails closed, naming the entry for the maintainer to
+remove with git rm (a normal run exits 2 before writing anything; --check exits 1). Every output is written
+through a temporary file in the same directory and os.replace, and a symlink or non-regular file at an output
+path (or a symlinked parent directory) is refused, so a write never lands outside the repository.
 
   gen_skill.py            regenerate every output
   gen_skill.py --check    fail (exit 1) on drift; exit 2 on a malformed source or an unknown corpus-id
@@ -32,7 +36,9 @@ import io
 import json
 import os
 import re
+import stat
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -380,21 +386,133 @@ def versioned_zip_basename(version):
     return "aiqt-skill-{}.zip".format(version)
 
 
+# A versioned skill zip is exactly 'aiqt-skill-<MAJOR>.<MINOR>.<PATCH>.zip' (strict, case-sensitive).
+_VERSIONED_ZIP = re.compile(r"^aiqt-skill-[0-9]+\.[0-9]+\.[0-9]+\.zip$")
+# Any entry whose stem starts 'aiqt-skill' or 'aiqt_skill' in any letter case is a skill-download name the
+# latest-only scan owns: it must be the alias or the current versioned zip, else it is refused.
+_SKILL_ENTRY = re.compile(r"^aiqt[-_]skill", re.IGNORECASE)
+
+
 def is_versioned_zip(filename):
-    """True for a version-numbered skill zip basename ('aiqt-skill-<v>.zip'). The stable alias aiqt-skill.zip
-    has no version segment, so it does not match. The one matcher the orphan-clean and the latest-only check
-    share, so the two can never disagree on what counts as a versioned zip."""
-    return filename.startswith("aiqt-skill-") and filename.endswith(".zip")
+    """True for a version-numbered skill zip basename, strictly 'aiqt-skill-<MAJOR>.<MINOR>.<PATCH>.zip'.
+    The stable alias aiqt-skill.zip has no version segment, so it does not match. A backup, a 'v' prefix, a
+    case variant or a suffix (aiqt-skill-backup.zip, AIQT-skill-1.0.5.zip, aiqt-skill-1.0.5.ZIP) does not
+    match either; latest_only_problems refuses those as unrecognised skill entries."""
+    return _VERSIONED_ZIP.match(filename) is not None
+
+
+def _is_regular(path):
+    """lstat path (never following a link): None when absent, True for a regular file, False for a symlink,
+    a directory or a special file. Other OSErrors propagate so an unreadable entry fails closed."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    return stat.S_ISREG(st.st_mode)
 
 
 def versioned_zips(downloads_dir):
-    """The sorted version-numbered skill zip basenames directly under downloads_dir (top level only; the
-    reserved aiqt/ subtree is not a download location). An absent dir has none; an unreadable one raises
-    OSError, which run_gen surfaces as exit 2, so an I/O error can never read as latest-only clean."""
+    """The sorted version-numbered skill zip basenames directly under downloads_dir that are REGULAR files by
+    lstat (top level only; the reserved aiqt/ subtree is not a download location). An absent dir has none; an
+    unreadable one raises OSError, which run_gen surfaces as exit 2."""
     if not dir_present(downloads_dir):
         return []
     return sorted(fn for fn in os.listdir(downloads_dir)
-                  if is_versioned_zip(fn) and os.path.isfile(os.path.join(downloads_dir, fn)))
+                  if is_versioned_zip(fn) and _is_regular(os.path.join(downloads_dir, fn)))
+
+
+def latest_only_problems(downloads_dir, current_versioned, require_current):
+    """Latest-only (D-SKILL-LATEST-ONLY) scan of the top level of downloads_dir, by lstat, never following a
+    link. The only skill entries allowed are the alias aiqt-skill.zip and current_versioned, each a regular
+    file. Every other entry whose stem matches aiqt-skill (any letter case, '-' or '_') is a problem, never
+    skipped and never deleted: a stale versioned zip, an unrecognised name (a backup, a case variant), or a
+    symlink, directory or special file at any such name. require_current adds a missing current versioned zip
+    as a problem (--check; a normal run writes it). Returns a list of messages, empty when clean; an
+    unreadable dir raises OSError (exit 2)."""
+    problems = []
+    if dir_present(downloads_dir):
+        alias = ZIP_PARTS[-1]
+        for fn in sorted(os.listdir(downloads_dir)):
+            if not _SKILL_ENTRY.match(fn):
+                continue
+            regular = _is_regular(os.path.join(downloads_dir, fn))
+            if regular is None:  # vanished between listdir and lstat: nothing there to judge
+                continue
+            if not regular:
+                problems.append("{} is a symlink, directory or special file, not a regular file (refused; "
+                                "remove it with git rm site/downloads/{})".format(fn, fn))
+            elif fn in (alias, current_versioned):
+                continue
+            elif is_versioned_zip(fn):
+                problems.append("{} is a stale versioned zip; only {} is served (remove it with git rm "
+                                "site/downloads/{})".format(fn, current_versioned, fn))
+            else:
+                problems.append("{} is not a recognised skill download name; only {} and {} may sit here "
+                                "(remove it with git rm site/downloads/{})".format(
+                                    fn, alias, current_versioned, fn))
+    if require_current and _is_regular(os.path.join(str(downloads_dir), current_versioned)) is None:
+        problems.append("the current versioned zip {} is missing (found 0; run tools/gen_skill.py)".format(
+            current_versioned))
+    return problems
+
+
+def _refuse_link_path(root, path, want_dir=False):
+    """Fail closed (OSError) if path, or any directory between root and path, is a symlink or not the
+    expected kind (a directory for a parent, a regular file for the target, or a directory when want_dir),
+    checked by lstat. Absent
+    components are fine (a normal run creates them as real directories). So no output read or write ever
+    goes through a link to somewhere outside the repository."""
+    rel = Path(path).relative_to(root)
+    cur = Path(root)
+    for i, part in enumerate(rel.parts):
+        cur = cur / part
+        try:
+            st = os.lstat(cur)
+        except FileNotFoundError:
+            return
+        last = i == len(rel.parts) - 1 and not want_dir
+        if not (stat.S_ISREG(st.st_mode) if last else stat.S_ISDIR(st.st_mode)):
+            raise OSError("refusing {}: {} is a symlink or not a {}, so it is not written or read through "
+                          "(remove it with git rm and rerun)".format(
+                              rel.as_posix(), cur.relative_to(root).as_posix(),
+                              "regular file" if last else "directory"))
+
+
+def _read_output(root, path, binary):
+    """The current content of a generated output, or None when absent. lstat first: a symlink or non-regular
+    file at the path (or a symlinked parent) is refused with OSError (exit 2), never read through."""
+    _refuse_link_path(root, path)
+    if not os.path.lexists(path):
+        return None
+    return path.read_bytes() if binary else path.read_text(encoding="utf-8")
+
+
+def _write_output(root, path, content):
+    """Write a generated output without following a link: refuse a symlink or non-regular file at the path
+    (or a symlinked parent) by lstat, write a temporary file in the same directory, then os.replace it over
+    the target (a rename replaces the directory entry and never writes through a link). Text keeps
+    Path.write_text's newline handling; the mode follows the umask like a fresh write."""
+    _refuse_link_path(root, path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _refuse_link_path(root, path)
+    fd, tmp = tempfile.mkstemp(prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        if isinstance(content, bytes):
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(content)
+        else:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(content)
+        mask = os.umask(0)
+        os.umask(mask)
+        os.chmod(tmp, 0o666 & ~mask)
+        os.replace(tmp, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp)  # this run's own temporary file only, never an output or a user file
+        except OSError:
+            pass
+        raise
 
 
 def zip_versioned_version():
@@ -577,66 +695,53 @@ def run_gen(root, check):
         print("error: {}".format(exc))
         return 2
     try:
+        # Latest-only (D-SKILL-LATEST-ONLY), run FIRST, before any write: exactly one version-numbered skill
+        # zip is served, named for the skill meta version (build_outputs has already asserted
+        # ZIP_VERSIONED_PARTS spells it), beside the alias. The generator never deletes here: a stale
+        # versioned zip, an unrecognised aiqt-skill* entry, or a non-regular entry at such a name is named for
+        # the maintainer to git rm. On --check that (or a missing current copy) is drift (exit 1); a normal
+        # run fails closed (exit 2) before touching any output. An extra entry is not an output, so the byte
+        # comparison below never sees it: this scan is the only detection for it.
+        downloads_dir = root.joinpath(*ZIP_PARTS[:-1])
+        problems = latest_only_problems(downloads_dir, ZIP_VERSIONED_PARTS[-1], check and bool(binary))
+        if problems:
+            msg = ("latest-only: expected exactly one versioned skill zip under site/downloads, {} (the "
+                   "declared skill version), beside {}: {}".format(
+                       ZIP_VERSIONED_PARTS[-1], ZIP_PARTS[-1], "; ".join(problems)))
+            if not check:
+                print("error: " + msg)
+                return 2
+            # --check reports this alone (exit 1) before reading any output, so a link at an output name
+            # is named here rather than surfacing as the read refusal below.
+            print("drift: " + msg)
+            print("remove each named entry with git rm, then run tools/gen_skill.py")
+            return 1
         for path, content in standalone:
-            current = path.read_text(encoding="utf-8") if path.exists() else None
+            current = _read_output(root, path, False)
             if current != content:
                 drift.append(path.relative_to(root).as_posix())
                 if not check:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(content, encoding="utf-8")
+                    _write_output(root, path, content)
         # Named binary outputs (the download zip) reconcile on bytes, so a stale or hand-swapped archive
         # is caught by the same drift gate as the text surfaces.
         for path, content in binary:
-            current = path.read_bytes() if path.exists() else None
+            current = _read_output(root, path, True)
             if current != content:
                 drift.append(path.relative_to(root).as_posix())
                 if not check:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(content)
-        # Orphan-clean stale version-numbered download zips. A prior-version aiqt-skill-<old>.zip left in
-        # site/downloads after a version bump is a stale shipped surface, so it is removed on a normal run
-        # and reported as drift on --check (exit 1). The stable alias aiqt-skill.zip (no version segment, so
-        # it does not match the aiqt-skill-*.zip shape) and the CURRENT ZIP_VERSIONED_PARTS copy are kept.
-        # The scan fails closed on an unreadable downloads dir (os.walk onerror=raise), mirroring the
-        # reserved-subtree orphan scan below, so an I/O error can never conceal a stale zip. Top level only:
-        # version-numbered zips live directly under site/downloads (the reserved aiqt/ subtree is scanned
-        # separately below).
-        downloads_dir = root.joinpath(*ZIP_PARTS[:-1])
-        current_versioned = ZIP_VERSIONED_PARTS[-1]
-        if dir_present(downloads_dir):
-            for dirpath, _dirs, filenames in os.walk(downloads_dir, onerror=_raise):
-                _dirs[:] = []  # top level only: do not descend into the reserved aiqt/ subtree
-                for fn in sorted(filenames):
-                    if is_versioned_zip(fn) and fn != current_versioned:
-                        stale = Path(dirpath) / fn
-                        drift.append("orphan " + stale.relative_to(root).as_posix())
-                        if not check:
-                            stale.unlink()
-        # Latest-only (D-SKILL-LATEST-ONLY): exactly one version-numbered skill zip is served, and it is the
-        # one named for the skill meta version (build_outputs has already asserted ZIP_VERSIONED_PARTS spells
-        # that version). On --check a stale extra or a missing current copy is drift (exit 1); after a normal
-        # run the regen and orphan-clean above must have left exactly that one, else the run fails closed.
-        if binary:
-            found = versioned_zips(downloads_dir)
-            if found != [current_versioned]:
-                msg = ("latest-only: expected exactly one versioned skill zip under site/downloads, {} (the "
-                       "declared skill version), found {}: {}".format(
-                           current_versioned, len(found), ", ".join(found) or "none"))
-                if check:
-                    drift.append(msg)
-                else:
-                    print("error: " + msg)
-                    return 2
+                    _write_output(root, path, content)
         for name, content in sorted(reserved_map.items()):
             target = reserved_dir / name
-            current = target.read_text(encoding="utf-8") if target.exists() else None
+            current = _read_output(root, target, False)
             if current != content:
                 drift.append((reserved_dir / name).relative_to(root).as_posix())
                 if not check:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text(content, encoding="utf-8")
+                    _write_output(root, target, content)
         # Orphan scan over the reserved subtree ONLY (it is 100% generated). A generated file with no
         # backing output (a stale SKILL.md, a leftover references/*.md) is an orphan and is removed.
+        # The reserved dir itself (and every parent) must be a real directory by lstat: os.walk follows a
+        # symlinked top, so a link here would let the orphan removal below reach outside the repository.
+        _refuse_link_path(root, reserved_dir, want_dir=True)
         if dir_present(reserved_dir):
             for dirpath, _dirs, filenames in os.walk(reserved_dir, onerror=_raise):
                 for fn in sorted(filenames):
@@ -676,9 +781,12 @@ def main():
 #   4. an orphan file in the reserved output subtree is detected (exit 1),
 #   5. an invalid-UTF-8 reserved target fails closed (exit 2), not a raw UnicodeDecodeError traceback:
 #      guards the widened (OSError, UnicodeError) reconcile arm (F-154),
-#   6. a stale version-numbered download zip (aiqt-skill-0.0.0.zip) is flagged as drift on --check
-#      (exit 1) and removed on a normal regen, while the alias and the current versioned copy are kept,
-#   7. the latest-only check names a stale extra and a missing current versioned zip (exit 1 each).
+#   6. a stale versioned zip or any other aiqt-skill* entry is never deleted: a normal run fails closed
+#      (exit 2, writing nothing) and --check exits 1, each naming the entry for git rm,
+#   7. the latest-only scan refuses by lstat a symlink, directory or dangling link at a skill zip name
+#      (including the current one) and names a missing current versioned zip (exit 1),
+#   8. no write goes through a symlinked output or a symlinked reserved directory (exit 2, the outside
+#      file unchanged).
 
 _APEX = """---
 corpus-id: prjint1
@@ -958,63 +1066,155 @@ def self_test_main():
             failures.append("skill version mismatched to the versioned-zip literal expected exit 2, "
                             "got {}\n{}".format(code, out))
 
-        # 8. A stale version-numbered download zip (aiqt-skill-0.0.0.zip) beside the current one is reported
-        #    as drift on --check (exit 1) and removed on a normal regen, while the stable alias and the
-        #    current versioned copy are kept. Start from a clean tree, drop a stale zip, then check and
-        #    regenerate. Removing the orphan-clean scan makes this leg fail (the stale zip survives).
-        stalezip = tmp / "stalezip"
-        stalezip.mkdir()
-        _write_fixture(stalezip, good_src)
-        capture(stalezip, False)  # generate a clean tree first
-        downloads = stalezip.joinpath(*ZIP_PARTS[:-1])
-        stale = downloads / "aiqt-skill-0.0.0.zip"
-        stale.write_bytes(b"PK\x03\x04 stale prior-version zip bytes")
-        code, out = capture(stalezip, True)
-        if code != 1 or "orphan" not in out or "aiqt-skill-0.0.0.zip" not in out:
-            failures.append("stale versioned zip expected --check exit 1 naming the orphan, got {}\n{}".format(
-                code, out))
-        code, out = capture(stalezip, False)  # regen removes it
-        if code != 0 or stale.exists():
-            failures.append("regen expected to remove the stale versioned zip, got exit {} (present={})\n{}"
-                            .format(code, stale.exists(), out))
-        # The alias and the current versioned copy are kept, and --check is clean again.
-        alias = stalezip.joinpath(*ZIP_PARTS)
-        current = stalezip.joinpath(*ZIP_VERSIONED_PARTS)
-        if not alias.exists() or not current.exists():
-            failures.append("orphan-clean must keep the alias and the current versioned zip (alias={}, "
-                            "current={})".format(alias.exists(), current.exists()))
-        code, out = capture(stalezip, True)
-        if code != 0:
-            failures.append("after removing the stale zip, --check expected exit 0 (clean), got {}\n{}".format(
-                code, out))
+        # 8. The generator never deletes a file under site/downloads. A stale versioned zip, or any other
+        #    aiqt-skill* entry (a user's backup or notes zip, a case or separator variant, a 'v' or 'latest'
+        #    name, a suffixed copy), fails closed: a normal run exits 2 BEFORE writing anything (a drifted
+        #    instructions file stays drifted), --check exits 1, each names the entry and git rm, and the
+        #    entry is kept byte for byte. Removing the latest-only scan makes this leg fail (nothing else
+        #    sees an extra entry); removing its normal-run exit-2 path makes the exit-2 assertion fail.
+        foreign = ("aiqt-skill-0.0.0.zip", "aiqt-skill-backup.zip", "aiqt-skill-notes.zip",
+                   "AIQT-skill-1.0.5.zip", "aiqt-skill-1.0.5.ZIP", "aiqt_skill-1.0.5.zip",
+                   "aiqt-skill-latest.zip", "aiqt-skill-v1.0.5.zip", "aiqt-skill-1.0.5.zip.bak")
+        for i, fn in enumerate(foreign):
+            fx = tmp / "foreign{}".format(i)
+            fx.mkdir()
+            _write_fixture(fx, good_src)
+            capture(fx, False)  # generate a clean tree first
+            entry = fx.joinpath(*ZIP_PARTS[:-1]) / fn
+            entry.write_bytes(b"USER OWNED - NOT GENERATED")
+            instr = fx.joinpath(*INSTRUCTIONS_PARTS)
+            instr.write_text("local edit\n", encoding="utf-8")
+            code, out = capture(fx, False)
+            if (code != 2 or "latest-only" not in out or fn not in out or "git rm" not in out
+                    or entry.read_bytes() != b"USER OWNED - NOT GENERATED"):
+                failures.append("{} must make a normal run fail closed (exit 2, named, git rm, kept), got {} "
+                                "(kept={})\n{}".format(fn, code, entry.exists(), out))
+            if instr.read_text(encoding="utf-8") != "local edit\n":
+                failures.append("{}: a normal run that fails latest-only must write nothing".format(fn))
+            code, out = capture(fx, True)
+            if code != 1 or "latest-only" not in out or fn not in out or not entry.exists():
+                failures.append("{} expected --check exit 1 naming it, got {}\n{}".format(fn, code, out))
+            # The strict MAJOR.MINOR.PATCH pattern: only aiqt-skill-0.0.0.zip reads as a stale versioned zip;
+            # every other name is an unrecognised skill entry. A loosened pattern misreads these.
+            kind = "stale versioned zip" if i == 0 else "not a recognised skill download name"
+            if kind not in out or is_versioned_zip(fn) != (i == 0):
+                failures.append("{} expected to be classed as {!r}, got\n{}".format(fn, kind, out))
 
-        # 9. Latest-only (D-SKILL-LATEST-ONLY): --check names the count of versioned zips, so a stale extra
-        #    (two present) and a missing current copy (none present) each read as latest-only drift (exit 1),
-        #    and a tree with exactly the current one is clean. Removing the latest-only check makes the two
-        #    red legs fail here (the orphan drift alone does not carry the latest-only finding).
+        # 9. Latest-only (D-SKILL-LATEST-ONLY) scans by lstat and refuses (never skips) a non-regular entry
+        #    at a skill zip name; it also names a missing current copy. Each case is red if the scan reverts
+        #    to os.path.isfile (a link to a file passes, a directory is skipped) or drops its lstat filter.
         latest = tmp / "latest"
         latest.mkdir()
         _write_fixture(latest, good_src)
         capture(latest, False)
-        found = versioned_zips(latest.joinpath(*ZIP_PARTS[:-1]))
+        ldl = latest.joinpath(*ZIP_PARTS[:-1])
+        found = versioned_zips(ldl)
         if found != [ZIP_VERSIONED_PARTS[-1]]:
             failures.append("a clean tree must hold exactly the current versioned zip, got {}".format(found))
-        extra = latest.joinpath(*ZIP_PARTS[:-1]) / "aiqt-skill-0.0.1.zip"
-        extra.write_bytes(b"PK\x03\x04 stale prior-version zip bytes")
+        alias_bytes = latest.joinpath(*ZIP_PARTS).read_bytes()
+        cases = (
+            ("directory", "aiqt-skill-0.0.1.zip", lambda p: p.mkdir()),
+            ("symlink to a directory", "aiqt-skill-0.0.1.zip",
+             lambda p: os.symlink(str(latest.joinpath(*RESERVED_PARTS)), str(p))),
+            ("dangling symlink", "aiqt-skill-0.0.1.zip", lambda p: os.symlink(str(tmp / "nowhere"), str(p))),
+            ("symlink to a regular zip", "aiqt-skill-0.0.1.zip",
+             lambda p: os.symlink(str(latest.joinpath(*ZIP_PARTS)), str(p))),
+            ("case-variant directory", "AIQT-Skill-0.0.1.ZIP", lambda p: p.mkdir()),
+        )
+        for label, fn, make in cases:
+            entry = ldl / fn
+            make(entry)
+            for chk, want in ((True, 1), (False, 2)):
+                code, out = capture(latest, chk)
+                if code != want or "not a regular file" not in out or fn not in out:
+                    failures.append("a {} at {} expected exit {} (not a regular file), got {}\n{}".format(
+                        label, fn, want, code, out))
+            if not os.path.lexists(entry):
+                failures.append("a {} at {} must be kept, never deleted".format(label, fn))
+            (entry.rmdir if (entry.is_dir() and not entry.is_symlink()) else entry.unlink)()
+        # The current versioned zip replaced by a symlink to the alias: the scan names it (exit 1 on --check,
+        # not the exit-2 read refusal a scan without lstat would fall through to); a normal run refuses.
+        cur = latest.joinpath(*ZIP_VERSIONED_PARTS)
+        cur.unlink()
+        os.symlink(ZIP_PARTS[-1], str(cur))
         code, out = capture(latest, True)
-        if code != 1 or "latest-only" not in out or "found 2" not in out:
-            failures.append("a stale extra versioned zip expected latest-only drift (exit 1, found 2), got "
-                            "{}\n{}".format(code, out))
-        extra.unlink()
-        latest.joinpath(*ZIP_VERSIONED_PARTS).unlink()
+        if code != 1 or "not a regular file" not in out or ZIP_VERSIONED_PARTS[-1] not in out:
+            failures.append("a symlinked current versioned zip expected --check exit 1 (not a regular file), "
+                            "got {}\n{}".format(code, out))
+        code, out = capture(latest, False)
+        if code != 2 or not cur.is_symlink() or latest.joinpath(*ZIP_PARTS).read_bytes() != alias_bytes:
+            failures.append("a symlinked current versioned zip expected a normal run to refuse (exit 2, link "
+                            "and alias untouched), got {}\n{}".format(code, out))
+        cur.unlink()
         code, out = capture(latest, True)
         if code != 1 or "latest-only" not in out or "found 0" not in out:
             failures.append("a missing current versioned zip expected latest-only drift (exit 1, found 0), "
                             "got {}\n{}".format(code, out))
         code, out = capture(latest, False)
-        if code != 0 or versioned_zips(latest.joinpath(*ZIP_PARTS[:-1])) != [ZIP_VERSIONED_PARTS[-1]]:
+        if code != 0 or versioned_zips(ldl) != [ZIP_VERSIONED_PARTS[-1]]:
             failures.append("regen expected to restore exactly the current versioned zip, got {}\n{}".format(
                 code, out))
+        code, out = capture(latest, True)
+        if code != 0:
+            failures.append("after restoring the current zip, --check expected exit 0, got {}\n{}".format(
+                code, out))
+        if any(n.endswith(".tmp") for n in os.listdir(ldl)):
+            failures.append("a normal run left a temporary file behind: {}".format(sorted(os.listdir(ldl))))
+
+        # 10. No write goes through a link. A symlink at a generated output (the instructions file) or a
+        #     symlinked reserved directory, each pointing at a file or directory OUTSIDE the tree, is refused
+        #     (exit 2 in both modes) and the outside content is unchanged. Reverting _write_output to
+        #     Path.write_text, or dropping the lstat walk, overwrites the outside file and fails here.
+        outside = tmp / "outside"
+        outside.mkdir()
+        victim = outside / "victim.txt"
+        victim.write_bytes(b"precious user data")
+        wl = tmp / "writelink"
+        wl.mkdir()
+        _write_fixture(wl, good_src)
+        capture(wl, False)
+        instr = wl.joinpath(*INSTRUCTIONS_PARTS)
+        instr.unlink()
+        os.symlink(str(victim), str(instr))
+        for chk in (True, False):
+            code, out = capture(wl, chk)
+            if code != 2 or "refusing" not in out or victim.read_bytes() != b"precious user data":
+                failures.append("a symlinked output expected exit 2 with the outside file unchanged (check={}), "
+                                "got {}\n{}".format(chk, code, out))
+        # The writer itself refuses a link (not only the read before it), and leaves no temporary file.
+        try:
+            _write_output(wl, instr, "overwrite attempt\n")
+            failures.append("_write_output must refuse a symlinked target (OSError)")
+        except OSError:
+            pass
+        if victim.read_bytes() != b"precious user data" or not instr.is_symlink():
+            failures.append("_write_output wrote through a symlink to a file outside the tree")
+        instr.unlink()
+        capture(wl, False)
+        # The outside directory holds byte-exact copies of the generated reserved files plus a user file, so
+        # no reserved write is due and only the reserved-dir lstat guard stops the orphan removal from
+        # deleting the user file through the link.
+        rdir = wl.joinpath(*RESERVED_PARTS)
+        outdir = tmp / "outside-reserved"
+        shutil.copytree(str(rdir), str(outdir))
+        user_file = outdir / "user-notes.txt"
+        user_file.write_bytes(b"precious user data")
+        shutil.rmtree(rdir)
+        os.symlink(str(outdir), str(rdir))
+        for chk in (True, False):
+            code, out = capture(wl, chk)
+            if code != 2 or "refusing" not in out or user_file.read_bytes() != b"precious user data":
+                failures.append("a symlinked reserved directory expected exit 2 with the outside tree unchanged "
+                                "(check={}), got {} (user file kept={})\n{}".format(
+                                    chk, code, user_file.exists(), out))
+        # With the corpus absent there are no outputs to read or write, so the reserved-dir guard alone stops
+        # the orphan removal from following the link and deleting every outside file.
+        shutil.rmtree(wl.joinpath(*CORPUS_PARTS))
+        code, out = capture(wl, False)
+        if code != 2 or "refusing" not in out or not user_file.exists():
+            failures.append("an absent corpus with a symlinked reserved directory expected exit 2 with the "
+                            "outside tree unchanged, got {} (user file kept={})\n{}".format(
+                                code, user_file.exists(), out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1025,10 +1225,11 @@ def self_test_main():
         return 1
     print("SELF-TEST PASS: well-formed source round-trips clean (SKILL.md and the zips); an unknown "
           "corpus-id, an invalid-UTF-8 target, and a version/zip-literal mismatch each fail closed (exit 2); "
-          "a drifted SKILL.md, an orphan reserved output, and a stale version-numbered download zip are "
-          "caught (exit 1, the stale zip removed on regen while the alias and current copy are kept); the "
-          "latest-only check names a stale extra and a missing current versioned zip (exit 1); a "
-          "facet-misplaced rule fails closed (exit 2).")
+          "a drifted SKILL.md and an orphan reserved output are caught (exit 1); a stale versioned zip and "
+          "eight other aiqt-skill* entries are kept and named (normal run exit 2 writing nothing, --check "
+          "exit 1); the latest-only scan refuses by lstat a directory, a symlink and a symlinked current zip "
+          "and names a missing current zip; a symlinked output or reserved directory is refused with the "
+          "outside file unchanged (exit 2); a facet-misplaced rule fails closed (exit 2).")
     return 0
 
 
