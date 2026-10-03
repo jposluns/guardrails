@@ -1623,10 +1623,15 @@ def _reap(report, reap_seconds, reap_rounds):
         report["drained"] = False
 
 
+def _emit(report_fd, report):
+    os.write(report_fd, (json.dumps(report) + "\\n").encode("utf-8"))
+
+
 def main():
     signal.signal(signal.SIGCHLD, signal.SIG_DFL)
-    timeout, settle = float(sys.argv[1]), float(sys.argv[2])
-    reap_seconds, reap_rounds = float(sys.argv[3]), int(sys.argv[4])
+    report_fd = int(sys.argv[1])
+    timeout, settle = float(sys.argv[2]), float(sys.argv[3])
+    reap_seconds, reap_rounds = float(sys.argv[4]), int(sys.argv[5])
     report = {"subreaper": False, "enumerable": False, "pidfd": False, "census": None,
               "spawn": None, "timeout": False, "rc": None, "stdout": "", "stderr": "",
               "survivors": [], "drained": True}
@@ -1649,11 +1654,11 @@ def main():
     except (AttributeError, OSError):
         report["pidfd"] = False
     if not (report["subreaper"] and report["enumerable"] and report["pidfd"]):
-        print(json.dumps(report))
+        _emit(report_fd, report)
         return 0
     stdout = stderr = b""
     try:
-        proc = subprocess.Popen(sys.argv[5:], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        proc = subprocess.Popen(sys.argv[6:], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, start_new_session=True)
     except (OSError, subprocess.SubprocessError) as exc:
         report["spawn"] = type(exc).__name__
@@ -1664,7 +1669,12 @@ def main():
         except subprocess.TimeoutExpired:
             report["timeout"] = True
             proc.kill()
-            proc.wait()
+            try:
+                proc.wait(timeout=reap_seconds)
+            except subprocess.TimeoutExpired:
+                report["drained"] = False
+                report["survivors"].append(
+                    "module pid {} did not exit within {}s of SIGKILL".format(proc.pid, reap_seconds))
             for stream in (proc.stdout, proc.stderr):
                 stream.close()
         report["rc"] = proc.returncode
@@ -1676,7 +1686,7 @@ def main():
     except OSError as exc:
         report["enumerable"] = False
         report["census"] = str(exc)
-    print(json.dumps(report))
+    _emit(report_fd, report)
     return 0
 
 
@@ -1748,8 +1758,10 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None,
     import concurrent.futures
     import json
     import shutil
+    import socket
     import subprocess
     import tempfile
+    import threading
     import time
     import _optlevel
     table = _DISPATCH_FORMS if table is None else table
@@ -1787,23 +1799,55 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None,
                        **{_RUNTIME_MARKER: token})
             if spy is not None:
                 spy(name, argv, token)
+            report_r, report_w = socket.socketpair()
             try:
                 proc = subprocess.Popen([sys.executable, "-I", "-B", "-c", _RUNTIME_SUPERVISOR,
-                                         str(timeout), str(_RUNTIME_SETTLE),
+                                         str(report_w.fileno()), str(timeout), str(_RUNTIME_SETTLE),
                                          str(_RUNTIME_REAP_SECONDS), str(_RUNTIME_REAP_ROUNDS),
                                          sys.executable, "-I", "-B",
                                          str(directory / name)] + argv, cwd=fresh[0], env=env,
                                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE, start_new_session=True)
+                                        stderr=subprocess.PIPE, start_new_session=True,
+                                        pass_fds=(report_w.fileno(),))
             except (OSError, subprocess.SubprocessError) as exc:
+                report_r.close()
+                report_w.close()
                 return "{} {}: failed to run ({})".format(name, argv, type(exc).__name__)
+            report_w.close()
+            # The supervisor returns its report ONLY over this socketpair, never over
+            # its stdout: opening a socket end through /proc/<pid>/fd gives ENXIO, so a
+            # concurrent same-uid run cannot reopen another run's report channel and
+            # forge a clean line into it (QA7 claude M1; a pipe, the former channel,
+            # could be reopened that way). Drain the socket in a thread so a large
+            # report cannot deadlock against communicate() draining the stdio pipes.
+            collected = {}
+
+            def drain():
+                parts = []
+                try:
+                    while True:
+                        chunk = report_r.recv(65536)
+                        if not chunk:
+                            break
+                        parts.append(chunk)
+                except OSError:
+                    pass
+                collected["raw"] = b"".join(parts)
+
+            pump = threading.Thread(target=drain)
+            pump.start()
             budget = timeout + _RUNTIME_REAP_SECONDS + 30
             try:
                 sup_out, sup_err = proc.communicate(timeout=budget)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.communicate()
+                report_r.close()
+                pump.join()
                 return "{} {}: the probe supervisor did not finish within {} s".format(name, argv, budget)
+            pump.join()
+            report_r.close()
+            report_raw = collected.get("raw", b"")
             written = []
             for each in fresh:
                 try:
@@ -1817,8 +1861,19 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None,
         if proc.returncode != 0:
             return "{} {}: the probe supervisor failed (rc {}; stderr tail {!r})".format(
                 name, argv, proc.returncode, sup_err[-160:])
+        if sup_out:
+            return "{} {}: the probe supervisor wrote to stdout ({!r}); the report channel is the " \
+                   "socketpair alone".format(name, argv, sup_out[:160])
         try:
-            report = json.loads(sup_out.decode("utf-8"))
+            text = report_raw.decode("utf-8")
+        except ValueError as exc:
+            return "{} {}: the probe supervisor report was not valid UTF-8 ({})".format(
+                name, argv, type(exc).__name__)
+        if text.count("\n") != 1 or not text.endswith("\n"):
+            return "{} {}: the probe supervisor report was not exactly one line ({} newlines, {} bytes)".format(
+                name, argv, text.count("\n"), len(report_raw))
+        try:
+            report = json.loads(text)
             stdout = base64.b64decode(report["stdout"])
             stderr = base64.b64decode(report["stderr"])
             survivors = sorted(set(report["survivors"]))
@@ -1999,6 +2054,54 @@ _RUNTIME_FIXTURES = (
 )
 
 
+def _runtime_supervisor_signal_audit(source):
+    """AST audit of the supervisor source (QA7 codex 3 / claude m1 + codex 2). Returns (signals,
+    unbounded_wait): the sorted names of every call that can signal a process by pid -- os.kill,
+    os.killpg, signal.pthread_kill, any module-alias spelling, and a bare name brought in as
+    `from os import kill` or `from signal import pthread_kill` -- and True when a .wait() call carries
+    no timeout. Every census signal must instead go through a pidfd the supervisor has just proved owns
+    one of its own children, and no wait on the module may be unbounded. A textual scan missed an
+    aliased import; this reads the parse tree."""
+    import ast
+    tree = ast.parse(source)
+    os_mods = set()
+    signal_mods = set()
+    bare = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "os":
+                    os_mods.add(alias.asname or "os")
+                elif alias.name == "signal":
+                    signal_mods.add(alias.asname or "signal")
+        elif isinstance(node, ast.ImportFrom) and node.module == "os":
+            for alias in node.names:
+                if alias.name in ("kill", "killpg"):
+                    bare.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module == "signal":
+            for alias in node.names:
+                if alias.name == "pthread_kill":
+                    bare.add(alias.asname or alias.name)
+    signals = []
+    unbounded_wait = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            base = func.value
+            if isinstance(base, ast.Name):
+                if base.id in os_mods and func.attr in ("kill", "killpg"):
+                    signals.append("{}.{}".format(base.id, func.attr))
+                elif base.id in signal_mods and func.attr == "pthread_kill":
+                    signals.append("{}.{}".format(base.id, func.attr))
+            if func.attr == "wait" and not node.args and not node.keywords:
+                unbounded_wait = True
+        elif isinstance(func, ast.Name) and func.id in bare:
+            signals.append(func.id)
+    return sorted(set(signals)), unbounded_wait
+
+
 def _self_test_runtime_supervisor_unit(tmp):
     """Unit checks over _RUNTIME_SUPERVISOR, loaded as a module from a file private to this check (the
     probe itself passes the source inline with `-c`, so no supervisor file exists at probe time). Pins:
@@ -2012,9 +2115,14 @@ def _self_test_runtime_supervisor_unit(tmp):
     import time
     import types
     faults = []
-    if "os.kill" in _RUNTIME_SUPERVISOR or "killpg" in _RUNTIME_SUPERVISOR:
-        faults.append("the supervisor source holds a numeric kill; every census signal must go through "
-                      "a pidfd it has just proved owns one of its own children")
+    signals, unbounded_wait = _runtime_supervisor_signal_audit(_RUNTIME_SUPERVISOR)
+    if signals:
+        faults.append("the supervisor source can signal a process by pid ({}); every census signal must "
+                      "go through a pidfd it has just proved owns one of its own children".format(
+                          ", ".join(signals)))
+    if unbounded_wait:
+        faults.append("the supervisor waits on the module without a timeout, so a traced or wedged module "
+                      "could stall the run past its deadline")
     if "signal.signal(signal.SIGCHLD, signal.SIG_DFL)" not in _RUNTIME_SUPERVISOR:
         faults.append("the supervisor does not reset SIGCHLD to SIG_DFL, so an inherited SIG_IGN would "
                       "auto-reap its children")
@@ -2029,6 +2137,11 @@ def _self_test_runtime_supervisor_unit(tmp):
 
     def shadow(**overrides):
         copied = {name: getattr(real_os, name) for name in dir(real_os) if not name.startswith("_")}
+        copied.update(overrides)
+        return types.SimpleNamespace(**copied)
+
+    def shadow_for(base_os, **overrides):
+        copied = {name: getattr(base_os, name) for name in dir(base_os) if not name.startswith("_")}
         copied.update(overrides)
         return types.SimpleNamespace(**copied)
 
@@ -2105,6 +2218,10 @@ def _self_test_runtime_supervisor_unit(tmp):
         time.sleep(60)
         os._exit(1)
     remaining.add(child)
+    try:
+        child_fd = os.pidfd_open(child, 0)
+    except OSError:
+        child_fd = None
     real_children = sup._children
     report = {"survivors": [], "drained": True}
     begin = time.monotonic()
@@ -2115,14 +2232,29 @@ def _self_test_runtime_supervisor_unit(tmp):
     finally:
         sup.os = real_os
         sup._children = real_children
-        try:
-            os.kill(child, signal.SIGKILL)
-        except OSError:
-            pass
-        try:
-            os.waitpid(child, 0)
-        except OSError:
-            pass
+        # Clean up the forked child WITHOUT a numeric kill: _reap may already have
+        # reaped it, so signalling its pid could hit an unrelated reused process in a
+        # shared-uid pool (QA7 blocker, lab_infra rule). Signal and reap only through a
+        # pidfd that a waitid(WNOWAIT) still proves is our own un-reaped child; ECHILD
+        # (already reaped) or any waitid error means nothing is signalled.
+        if child_fd is not None:
+            try:
+                try:
+                    os.waitid(os.P_PIDFD, child_fd, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                    proven = True
+                except OSError:
+                    proven = False
+                if proven:
+                    try:
+                        signal.pidfd_send_signal(child_fd, signal.SIGKILL)
+                    except OSError:
+                        pass
+                    try:
+                        os.waitpid(child, 0)
+                    except OSError:
+                        pass
+            finally:
+                os.close(child_fd)
     took = time.monotonic() - begin
     if remaining or not report["drained"] or "pid {}".format(child) not in report["survivors"]:
         faults.append("the reap unit did not drain and report a real child (survivors {}, drained {})"
@@ -2132,6 +2264,165 @@ def _self_test_runtime_supervisor_unit(tmp):
                       "can collect, would block the supervisor past its bound")
     if took > _RUNTIME_REAP_SECONDS + 2:
         faults.append("the reap unit overran its bound ({:.1f} s)".format(took))
+
+    # QA7 codex 3 / claude m1: the waitid(WNOWAIT) ownership proof is load-bearing.
+    # Model a census naming a pid that is NOT our un-reaped child (a forked child
+    # already reaped, so its pidfd answers ECHILD): the committed supervisor must
+    # send it NO signal, and a mutant with the proof removed must try to signal it,
+    # so deleting the proof turns this check red. No real signal is ever delivered:
+    # pidfd_send_signal is shadowed by a recorder in both runs.
+    gone = os.fork()
+    if gone == 0:
+        os._exit(0)
+    try:
+        gone_fd = os.pidfd_open(gone, 0)
+    except OSError:
+        gone_fd = None
+    try:
+        os.waitpid(gone, 0)  # reap it: the pidfd now answers ECHILD, never an un-reaped child
+    except OSError:
+        pass
+    if gone_fd is None:
+        faults.append("could not model a non-child pid for the ownership-proof check")
+    else:
+        sent = []
+
+        def recording_signal(fd, sig):
+            sent.append(sig)
+
+        def fake_census():
+            return {gone}
+
+        def run_reap(module):
+            del sent[:]
+            saved_os = module.os
+            saved_signal = module.signal
+            saved_children = module._children
+            module._children = fake_census
+            module.os = shadow_for(saved_os, pidfd_open=lambda pid, flags=0: os.dup(gone_fd))
+            module.signal = shadow_for(saved_signal, pidfd_send_signal=recording_signal)
+            try:
+                module._reap({"survivors": [], "drained": True}, 0.2, 3)
+            finally:
+                module.os = saved_os
+                module.signal = saved_signal
+                module._children = saved_children
+            return list(sent)
+
+        if run_reap(sup):
+            faults.append("the committed supervisor signalled a pid it could not prove is its own "
+                          "un-reaped child")
+        proof = ("                try:\n"
+                 "                    os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG | os.WNOWAIT)\n"
+                 "                except OSError:\n"
+                 "                    continue\n")
+        if proof not in _RUNTIME_SUPERVISOR:
+            faults.append("the supervisor waitid ownership proof was not found in its expected form, so "
+                          "the ownership-proof mutant check is vacuous")
+        else:
+            mutant_file = base / "_runtime_supervisor_proofless.py"
+            mutant_file.write_text(_RUNTIME_SUPERVISOR.replace(proof, "", 1), encoding="utf-8")
+            mspec = importlib.util.spec_from_file_location(
+                "_runtime_supervisor_proofless", str(mutant_file))
+            mutant = importlib.util.module_from_spec(mspec)
+            mspec.loader.exec_module(mutant)
+            if not run_reap(mutant):
+                faults.append("removing the waitid ownership proof did not change whether a non-child is "
+                              "signalled, so the proof is not pinned by this check")
+        os.close(gone_fd)
+    return faults
+
+
+def _self_test_runtime_report_channel(tmp):
+    """QA7 claude M1: the supervisor returns its report over a socketpair, a channel /proc/<pid>/fd
+    cannot reopen, never over its stdout. Spawn one real supervisor over a socketpair with the module
+    gated open, try BOTH forge routes a concurrent same-uid run would use -- reopen the supervisor's
+    inherited report write-end through /proc/<sup>/fd/<n>, and reopen this reader's own read-end through
+    /proc/self/fd/<n> -- and require both to fail; then require the genuine report to arrive as exactly
+    one JSON line with nothing on the supervisor's stdout. A pipe (the former channel) would let
+    /proc/<pid>/fd reopen it, so reverting the channel to a pipe turns this red. Returns the faults."""
+    import json
+    import socket
+    import subprocess
+    faults = []
+    directory = Path(tmp, "chan", "opf", "tools")
+    os.makedirs(str(directory))
+    gate = Path(tmp, "chan", "gate")
+    module = directory / "gated.py"
+    module.write_text(
+        "import os\nimport time\n\n"
+        "gate = {!r}\n".format(str(gate))
+        + "bound = time.monotonic() + 30\n"
+        "while not os.path.exists(gate):\n"
+        "    if time.monotonic() >= bound:\n        break\n    time.sleep(0.005)\n",
+        encoding="utf-8")
+    report_r, report_w = socket.socketpair()
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-I", "-B", "-c", _RUNTIME_SUPERVISOR,
+             str(report_w.fileno()), "20", str(_RUNTIME_SETTLE),
+             str(_RUNTIME_REAP_SECONDS), str(_RUNTIME_REAP_ROUNDS),
+             sys.executable, "-I", "-B", str(module)],
+            cwd=str(directory),
+            env=dict(PATH=os.defpath, HOME=str(directory), TMPDIR=str(directory),
+                     LC_ALL="C.UTF-8", **{_RUNTIME_MARKER: "chan"}),
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True, pass_fds=(report_w.fileno(),))
+    except (OSError, subprocess.SubprocessError) as exc:
+        report_r.close()
+        report_w.close()
+        return ["the report-channel supervisor failed to start ({})".format(type(exc).__name__)]
+    write_fd = report_w.fileno()
+    read_fd = report_r.fileno()
+    report_w.close()
+    raw = b""
+    try:
+        try:
+            opened = os.open("/proc/{}/fd/{}".format(proc.pid, write_fd), os.O_WRONLY)
+            os.close(opened)
+            faults.append("the supervisor report write-end could be reopened through /proc/<pid>/fd, so "
+                          "a concurrent run could forge its report")
+        except OSError:
+            pass
+        try:
+            opened = os.open("/proc/self/fd/{}".format(read_fd), os.O_RDONLY)
+            os.close(opened)
+            faults.append("the report reader end could be reopened through /proc/<pid>/fd, so a "
+                          "concurrent run could drain or forge the report")
+        except OSError:
+            pass
+        gate.write_text("go", encoding="ascii")
+        parts = []
+        while True:
+            chunk = report_r.recv(65536)
+            if not chunk:
+                break
+            parts.append(chunk)
+        raw = b"".join(parts)
+        try:
+            sup_out, sup_err = proc.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            return faults + ["the report-channel supervisor did not finish"]
+    finally:
+        report_r.close()
+    if sup_out:
+        faults.append("the report-channel supervisor wrote to stdout ({!r})".format(sup_out[:80]))
+    text = raw.decode("utf-8", "replace")
+    if text.count("\n") != 1 or not text.endswith("\n"):
+        faults.append("the report did not arrive as exactly one line ({} newlines, {} bytes)".format(
+            text.count("\n"), len(raw)))
+        return faults
+    try:
+        report = json.loads(text)
+    except ValueError as exc:
+        return faults + ["the report-channel report did not parse ({})".format(type(exc).__name__)]
+    if not (report.get("subreaper") and report.get("enumerable") and report.get("pidfd")):
+        return faults  # a host without containment support is not a channel fault
+    if report.get("rc") != 0:
+        faults.append("the gated module did not exit 0 over the report channel (rc {})".format(
+            report.get("rc")))
     return faults
 
 
@@ -2277,6 +2568,7 @@ def _self_test_runtime_escape_probe(tmp):
         faults.append("with SIGCHLD ignored by the caller, a failing module was not named (got {})"
                       .format("; ".join(ignored[:3]) or "nothing"))
     faults += _self_test_runtime_supervisor_unit(tmp)
+    faults += _self_test_runtime_report_channel(tmp)
     unit = Path(tmp, "snapunit")
     os.makedirs(str(unit / "sub" / ".git"))
     os.makedirs(str(unit / ".git"))
@@ -4075,6 +4367,25 @@ def _watchdog_completion_case(mode):
                 cancel(child, failures)  # close() still kills the receipt subject
                 assert failures, "the flip close was read as clean"
                 await_state(subject, (None, "Z"), "the flip cleanup did not complete")
+
+            # Leg A-iso (QA7 codex 4 vs claude): isolate the parent check. The
+            # positive Flip-A leg disarms the ack, so a removed _fixture_check_parent
+            # could otherwise hide behind the ack EOF on the kill-before-ack race
+            # (the guardian may die before writing the ack). Here the ack is disarmed
+            # but the REAL parent check stays, so an orphaned subject must refuse on
+            # the parent check ALONE: removing that check turns this leg red whatever
+            # the ack schedule, which the ack-enabled leg 1 cannot do deterministically.
+            with patch.object(emit, "_fixture_await_ack", lambda fd: None):
+                child, subject = launch_held()
+                os.kill(child.pid, signal.SIGKILL)
+                await_state(child.pid, ("Z",), "the killed guardian did not exit")
+                release.write_text("go", encoding="ascii")
+                await_state(subject, (None, "Z"), "the orphaned subject kept running")
+                assert not marker.exists(), \
+                    "an orphaned subject ran its callable with the ack disarmed and the parent check live"
+                failures = []
+                cancel(child, failures)
+                assert failures, "a SIGKILLed guardian was read as clean"
 
             # Flip B: without the close-side subject kill, a live subject survives
             # a guardian failure and close() names the surviving pid.
