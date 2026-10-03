@@ -49,6 +49,8 @@ through one journaled publication, then render and require doctor VALID, leaving
 The one exception to doctor VALID is a status change (transition or done-with-receipt): doctor may then
 report only its cannot-evaluate for exactly that record and from/to pair, never a finding, and it keeps
 reporting that cannot-evaluate until the change is committed.
+A contribution's `transition ID sent` from `proposed` takes `--channel S --delivery-ref S` and writes the
+delivery bundle; `transition ID acknowledged` from `sent` takes an optional `--receipt-ref S`.
 `adopt` HAS landed (OPF-ADOPT K9a, the read-only half): `opf adopt plan --inputs FILE [--root DIR]`
 freezes and PRINTS the inert adoption proposal through the adoption planner (_opf_adopt_plan), writing
 nothing -- a VALID plan is a digest-bound PROPOSAL, never permission or readiness to apply (the approval

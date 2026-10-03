@@ -4,7 +4,7 @@
   opf record create --type T --title S --actor KIND[:ID] [--summary S] [--link REL=ID]...
                     [--ref KIND LOCATOR NOTE]... [--field NAME=VALUE]... [--scope ID]... [--root DIR]
   opf record transition ID STATE --actor KIND[:ID] [--reason S] [--decision S --decided-by S]
-                    [--supersedes PD-ID] [--root DIR]
+                    [--supersedes PD-ID] [--channel S --delivery-ref S] [--receipt-ref S] [--root DIR]
   opf record done-with-receipt BI-ID --actor maintainer[:ID] [--summary S] [--root DIR]
   opf record worklog-append --kind K --summary S --actor KIND[:ID] [--detail S] [--link REL=ID]...
                     [--ref KIND LOCATOR NOTE]... [--root DIR]
@@ -48,6 +48,15 @@ records the doctor's chain check reads, the planned index and every archived rec
 archive walk (_opf_check.archived_records), so a chain member rotated to the archive (spec 12) is judged
 before anything is written, and an archive input that is missing, unreadable or malformed refuses with every
 byte untouched, never skipped.
+A contribution's `proposed -> sent`, landing bare or `/proposed`, writes its delivery bundle (spec 8.5, 8.8)
+in the same act: --channel and --delivery-ref are required there and refused on every other transition, and
+the verb writes `delivery = {channel, ref, sent_at}`, `ref` from --delivery-ref (named apart from create's
+three-argument --ref) and `sent_at` the operation's clock value. The send refuses a row that already carries
+`delivery` (a planned delivery at `proposed`, which this verb never writes), so a rejection of
+`sent/proposed` removes the table whole and restores exactly the row the proposal left. --receipt-ref is
+optional and legal only on `sent -> acknowledged`, landing bare or `/proposed`: it adds `receipt_ref` and
+`receipted_at` (the clock value) to `delivery`; the ratification of `acknowledged/proposed` keeps what its
+proposal wrote, and its rejection back to `sent` removes those two keys again.
 `done-with-receipt` is maintainer-only (any other actor is refused before the store is touched): it moves an
 `active` or `done/proposed` backlog item to `done` and mints the one-to-one `done` receipt, linked
 `receipt_of`, in the same transaction (spec 8.5). `transition` never lands a backlog item at unqualified
@@ -76,8 +85,9 @@ record authoring (spec 9.2 is the precedent; spec 8.8 is normative):
      allowed delta, value for value and TYPE for type (the strict _opf_emit._model_equal comparison, so a
      True or 1.0 never reads as 1): the new rows appended, the counters advanced by exactly the claim,
      and for a transition the one named record's `status` and `updated_at` change plus its `proposed_from`
-     write or removal, a pending_decision's resolution bundle write or removal, and the `supersedes` link a
-     decision landing unqualified `decided` appends. The delta is
+     write or removal, a pending_decision's resolution bundle write or removal, a contribution's delivery
+     bundle or receipt write or removal, and the `supersedes` link a decision landing unqualified `decided`
+     appends. The delta is
      derived INDEPENDENTLY of the planner's rows, from a pre-planning copy of the request, the allocation
      result, the clock value, the planned-from bytes, and the schema rules;
   6. the planned-destination cleanliness gate and the single-writer lease (the shared _opf_write_guard
@@ -176,10 +186,17 @@ directory fsync fails, and a record that vanishes, changes identity or bytes, or
 or fsynced during the recovery deletes. A
 transition changes `status` and `updated_at` only, plus `proposed_from` (written when it lands a
 `/proposed` status, removed when it leaves one) and a pending_decision's resolution bundle (written by
-`open -> decided`, removed by the rejection of `decided/proposed`) and the `supersedes` link a decision
-landing unqualified `decided` appends, so a target state that requires further fields (a `sent`
-contribution's delivery bundle) refuses at validate_record; posting a new handoff does not supersede the
-previous one in the same act. The
+`open -> decided`, removed by the rejection of `decided/proposed`), a contribution's delivery bundle
+(written by `proposed -> sent`, removed by the rejection of `sent/proposed`) and its receipt keys (written
+by `sent -> acknowledged` with --receipt-ref, removed by the rejection of `acknowledged/proposed`), and the
+`supersedes` link a decision landing unqualified `decided` appends, so a target state that requires any
+other field refuses at validate_record; posting a new handoff does not supersede the previous one in the
+same act. Three contribution cases stay outside this verb: an assistant or automation send under a
+standing authorization (spec 8.4) still lands `sent/proposed`, since the verb does not read the
+declaration; a planned delivery at `proposed` cannot be written (create takes no `delivery`) and a row
+carrying one refuses the send (the way out is to withdraw that record and create a new contribution,
+whose send writes the bundle); and a contribution, like every record, meets the doctor only after its
+publication (the no-pre-doctor residual above). The
 pre-proposal state a rejection restores is read from the record's own `proposed_from` field, which this
 verb wrote in the same journaled transaction that landed the `/proposed` status: a proposed record without
 the field (proposed outside `transition`, which includes a record `create` landed at a `/proposed` initial
@@ -244,7 +261,8 @@ _NON_STRING_FIELDS = frozenset(("scopes", "delivery"))
 
 _OPTIONS = {
     "create": ("--root", "--type", "--title", "--summary", "--actor", "--link", "--ref", "--field", "--scope"),
-    "transition": ("--root", "--actor", "--reason", "--decision", "--decided-by", "--supersedes"),
+    "transition": ("--root", "--actor", "--reason", "--decision", "--decided-by", "--supersedes", "--channel",
+                   "--delivery-ref", "--receipt-ref"),
     "done-with-receipt": ("--root", "--actor", "--summary"),
     "worklog-append": ("--root", "--kind", "--summary", "--actor", "--detail", "--link", "--ref"),
 }
@@ -270,6 +288,11 @@ PENDING_DECISION = "pending_decision"
 DECISION_BUNDLE = ("decision", "decided_at", "decided_by")
 # The link relation --supersedes appends when a decision lands unqualified `decided` (spec 8.5, 8.6).
 SUPERSEDES = "supersedes"
+CONTRIBUTION = "contribution"
+# The delivery bundle a contribution's `proposed -> sent` writes (spec 8.5, 8.8), and the receipt keys
+# --receipt-ref adds to it on `sent -> acknowledged` (legal only at acknowledged).
+DELIVERY = "delivery"
+RECEIPT_KEYS = ("receipt_ref", "receipted_at")
 # The single-writer journal lock of one publication carries `opf-record.<token>` as its session, and the
 # transaction directory it opens ends `-<hash16>`, the token's first 16 hex digits (_record_run_id): a
 # leftover lock names its own transaction by that token (_txn_of_token).
@@ -842,7 +865,17 @@ def _decides(rtype, cur_state, target):
     return rtype == PENDING_DECISION and cur_state == "open" and target == "decided"
 
 
-def _require_decision_options(req, rid, rtype, cur_state, target):
+def _ratification_note(rtype, writer, written_at, cur_state, cur_qual, target, note):
+    """The refusal clause naming what a ratification keeps, given only when the refused transition IS a
+    ratification (leaving a `/proposed` status for its own state) of a status whose proposal wrote that
+    bundle: the record type that writes it (writer) at one of the states its proposal lands (written_at).
+    Every other refusal, a ratification of any other record type or of a status whose proposal wrote no
+    such bundle (`withdrawn/proposed`, `superseded/proposed`) included, names the legal transition only."""
+    return (note if rtype == writer and cur_state in written_at and cur_qual == "proposed"
+            and target == cur_state else "")
+
+
+def _require_decision_options(req, rid, rtype, cur_state, target, cur_qual):
     """--decision and --decided-by (given together, checked by the parser) are required on a decide and
     refused on every other transition, the ratification of `decided/proposed` included (it keeps the
     bundle its proposal wrote), before anything is planned."""
@@ -853,8 +886,63 @@ def _require_decision_options(req, rid, rtype, cur_state, target):
                           "decider and is never inferred from --actor); fail-closed".format(rid))
     if given and not _decides(rtype, cur_state, target):
         raise RecordError("--decision and --decided-by apply only to a pending_decision's open -> decided, not "
-                          "{} {} -> {} (a ratification keeps the bundle its proposal wrote); "
-                          "fail-closed".format(rid, cur_state, target))
+                          "{} {} -> {}{}; fail-closed".format(rid, cur_state, target, _ratification_note(
+                              rtype, PENDING_DECISION, {"decided"}, cur_state, cur_qual, target,
+                              " (a ratification keeps the bundle its proposal wrote)")))
+
+
+def _sends(rtype, cur_state, target):
+    """The one transition that writes the delivery bundle: a contribution's `proposed -> sent`, landing bare
+    (a maintainer) or `/proposed` (an assistant or automation recording a send)."""
+    return rtype == CONTRIBUTION and cur_state == "proposed" and target == "sent"
+
+
+def _acknowledges(rtype, cur_state, target):
+    """The one transition --receipt-ref may ride: a contribution's `sent -> acknowledged`, landing bare or
+    `/proposed`. The ratification of `acknowledged/proposed` keeps what its proposal wrote."""
+    return rtype == CONTRIBUTION and cur_state == "sent" and target == "acknowledged"
+
+
+def _require_delivery_options(req, rid, rtype, row, cur_state, target, cur_qual):
+    """--channel and --delivery-ref are required on a send and refused on every other transition, the
+    ratification of `sent/proposed` included (it keeps the bundle its proposal wrote); a send refuses a row
+    that already carries `delivery`, so a rejection can remove the table whole. --receipt-ref is legal only
+    on `sent -> acknowledged`. All checked before anything is planned."""
+    given = [opt for opt in ("--channel", "--delivery-ref") if opt in req.values]
+    if _sends(rtype, cur_state, target):
+        if len(given) != 2:
+            raise RecordError("{} proposed -> sent writes the delivery bundle (channel, ref, sent_at; spec "
+                              "8.5), so it requires --channel and --delivery-ref; fail-closed".format(rid))
+        if DELIVERY in row:
+            raise RecordError("{} already carries delivery (a planned delivery at proposed, which this verb "
+                              "never writes); the send writes the bundle whole so a rejection can remove it "
+                              "whole. Nothing written (fail-closed)".format(rid))
+    elif given:
+        raise RecordError("--channel and --delivery-ref apply only to a contribution's proposed -> sent, not "
+                          "{} {} -> {}{}; fail-closed".format(rid, cur_state, target, _ratification_note(
+                              rtype, CONTRIBUTION, {"sent"}, cur_state, cur_qual, target,
+                              " (a ratification keeps the bundle its proposal wrote)")))
+    if "--receipt-ref" in req.values and not _acknowledges(rtype, cur_state, target):
+        raise RecordError("--receipt-ref applies only to a contribution's sent -> acknowledged, not {} "
+                          "{} -> {} (the receipt fields are legal only at acknowledged, spec 8.5{}); "
+                          "fail-closed".format(rid, cur_state, target, _ratification_note(
+                              rtype, CONTRIBUTION, {"sent", "acknowledged"}, cur_state, cur_qual, target,
+                              ", and a ratification keeps what its proposal wrote")))
+
+
+def _delivery_fields(req, ts):
+    """The bundle a send writes: --channel and --delivery-ref verbatim, and the operation's clock value as
+    sent_at."""
+    return {DELIVERY: {"channel": req.values["--channel"], "ref": req.values["--delivery-ref"], "sent_at": ts}}
+
+
+def _rejected_delivery(rtype, cur_state, rejection, row):
+    """The delivery table the rejection of `acknowledged/proposed` returns to `sent` with: the row's own
+    table without the receipt keys its proposing transition may have written (forbidden at `sent`, spec
+    8.5). None on every other transition."""
+    if rejection and rtype == CONTRIBUTION and cur_state == "acknowledged" and isinstance(row.get(DELIVERY), dict):
+        return {key: value for key, value in row[DELIVERY].items() if key not in RECEIPT_KEYS}
+    return None
 
 
 def _resolution_bundle(req, ts):
@@ -867,9 +955,12 @@ def _resolution_bundle(req, ts):
 def _proposal_keys(rtype, cur_state, rejection):
     """The keys leaving a `/proposed` status removes: always proposed_from, and on a rejection also the
     bundle its proposing transition wrote (a pending_decision's `decided/proposed` back to `open`, where
-    the bundle is forbidden, spec 8.5). A ratification keeps the bundle."""
+    the bundle is forbidden, and a contribution's `sent/proposed` back to `proposed`, where `sent_at` is
+    forbidden, spec 8.5). A ratification keeps the bundle."""
     if rejection and rtype == PENDING_DECISION and cur_state == "decided":
         return (PROPOSED_FROM,) + DECISION_BUNDLE
+    if rejection and rtype == CONTRIBUTION and cur_state == "sent":
+        return (PROPOSED_FROM, DELIVERY)
     return (PROPOSED_FROM,)
 
 
@@ -1046,8 +1137,11 @@ def _plan_transition(req, ctx, operand, now):
     pending_decision at unqualified `decided` may also append one `supersedes` link (--supersedes, checked
     by _require_supersedes_landing and _supersession_link), and every such landing, the link or not, must
     leave its chain with exactly one current resolution (_require_one_current_resolution, over the planned
-    index and the archive). The change is `status`, `updated_at`, the
-    `proposed_from` write or removal, that bundle write or removal, and that link append on that one
+    index and the archive). A contribution's `proposed -> sent` writes its delivery bundle (_delivery_fields)
+    and the rejection of `sent/proposed` removes it (_proposal_keys); `sent -> acknowledged` with
+    --receipt-ref adds the receipt keys, and the rejection of `acknowledged/proposed` removes them
+    (_rejected_delivery). The change is `status`, `updated_at`, the
+    `proposed_from` write or removal, those bundle writes or removals, and that link append on that one
     record, plus its own worklog entry."""
     rid, target = req.positionals
     row = _locate(operand, rid)
@@ -1061,7 +1155,8 @@ def _plan_transition(req, ctx, operand, now):
     if parsed is None:
         raise RecordError("{} status {!r} cannot be parsed ({}); fail-closed".format(rid, current, err))
     cur_state, cur_qual = parsed
-    _require_decision_options(req, rid, rtype, cur_state, target)
+    _require_decision_options(req, rid, rtype, cur_state, target, cur_qual)
+    _require_delivery_options(req, rid, rtype, row, cur_state, target, cur_qual)
     kind = req.actor["kind"]
     to_status = _derived_status(kind, spec, cur_state, target)
     _require_receipt_path(rtype, to_status)
@@ -1085,6 +1180,13 @@ def _plan_transition(req, ctx, operand, now):
     fields = {"status": to_status, "updated_at": ts}
     if _decides(rtype, cur_state, target):
         fields.update(_resolution_bundle(req, ts))
+    if _sends(rtype, cur_state, target):
+        fields.update(_delivery_fields(req, ts))
+    if "--receipt-ref" in req.values:
+        fields[DELIVERY] = dict(row.get(DELIVERY, {}), receipt_ref=req.values["--receipt-ref"], receipted_at=ts)
+    rejected = _rejected_delivery(rtype, cur_state, rejection, row)
+    if rejected is not None:
+        fields[DELIVERY] = rejected
     link = _supersession_link(req, ctx, operand, rid)
     if link is not None:
         fields["links"] = [dict(existing) for existing in row.get("links", [])] + [link]
@@ -1309,6 +1411,25 @@ def _expected_delta(req, ctx, raws, now):
             if cur_state == "open" and target == "decided":
                 prior.update({"decision": req.values.get("--decision"), "decided_at": ts,
                               "decided_by": req.values.get("--decided-by")})
+        # The delivery rule (spec 8.5/8.8), derived here on its own, apart from the planner: the rejection
+        # that leaves `sent/proposed` removes the whole `delivery` table (the send never writes into an
+        # existing one), and the rejection that leaves `acknowledged/proposed` removes the two receipt keys
+        # named here; `proposed -> sent`, bare or `/proposed`, writes the table with the three keys named
+        # here, sent_at at the clock value and channel and ref from the request; --receipt-ref adds
+        # receipt_ref from the request and receipted_at at the clock value. Whether an option is legal on
+        # this transition is the planner's refusal and is not judged again here.
+        if spec.name == "contribution":
+            if cur_qual == "proposed" and target != cur_state and cur_state == "sent":
+                prior.pop("delivery", None)
+            if cur_qual == "proposed" and target != cur_state and cur_state == "acknowledged":
+                prior["delivery"] = {key: value for key, value in prior.get("delivery", {}).items()
+                                     if key not in ("receipt_ref", "receipted_at")}
+            if cur_state == "proposed" and target == "sent":
+                prior["delivery"] = {"channel": req.values.get("--channel"),
+                                     "ref": req.values.get("--delivery-ref"), "sent_at": ts}
+            if "--receipt-ref" in req.values:
+                prior["delivery"] = dict(prior.get("delivery", {}), receipt_ref=req.values["--receipt-ref"],
+                                         receipted_at=ts)
         # The supersession rule (spec 8.5/8.8), derived here on its own, apart from the planner:
         # --supersedes appends exactly one link, rel `supersedes` (the literal named here) to the requested
         # id, after the row's prior links, and the worklog entry adds a `supersedes:` detail line and a
@@ -1368,7 +1489,8 @@ def _postcondition(plan, req, ctx, now):
     (the record or receipt, and the operation's own worklog entry), the initial or target status the
     schema rules give, the clock's timestamps, and the claimed ids; for a status change exactly `status`,
     `updated_at`, the `proposed_from` write or removal, a pending_decision's resolution bundle write or
-    removal, and its `supersedes` link append of the one named record; the counters advanced by
+    removal, a contribution's delivery bundle or receipt write or removal, and its `supersedes` link
+    append of the one named record; the counters advanced by
     exactly the claim; nothing else. A stray mutation of an existing record or of a new row, a lost or
     reordered row, a changed schema marker, a status change touching another field or another record, or
     a counter moved by anything but the claim refuses before anything is written, and so does a plan whose
@@ -3185,6 +3307,7 @@ def _self_test_transitions(check, plan, post, full, now):
             needle))
     _self_test_decisions(check, plan, post, full, now)
     _self_test_supersession(check, plan, post, full, now)
+    _self_test_delivery(check, plan, post, full, now)
     _self_test_pending(check)
     _self_test_leftover_lock(check)
 
@@ -3381,6 +3504,174 @@ def _self_test_supersession(check, plan, post, full, now):
         mutate(op)
         check("the postcondition refuses {}".format(label),
               _refuses(lambda argv=argv, p=p, c=c: post(p, c, argv), "postcondition failed"))
+
+
+def _self_test_delivery(check, plan, post, full, now):
+    """The delivery bundle a contribution's `proposed -> sent` writes (bare or `/proposed`), keeps on
+    ratification, and removes on rejection, the receipt keys `sent -> acknowledged` adds and the rejection
+    of `acknowledged/proposed` removes, and its postcondition vectors: a schema-valid but wrong bundle (one
+    the record validation cannot refuse) is refused by the postcondition with the planned-from bytes
+    untouched, and the same bundle passes once the oracle takes delivery from the plan (a pass-through),
+    so each vector stands on the oracle's own delivery rule."""
+    created, earlier = "2026-09-25T00:00:00Z", "2026-09-26T00:00:00Z"
+    ts = _rfc3339(now)
+    counters = dict(full, CN=1, WL=1)
+    sent = dict(channel="pr", ref="peer/repo#128", sent_at=earlier)
+    acked = dict(sent, receipt_ref="peer/repo#128 merged", receipted_at=earlier)
+
+    def cn(status, **kw):
+        # Created a day before its last change, so the creation-snapshot rule (spec 8.4) does not apply.
+        return dict(dict(id="CN-1", type=CONTRIBUTION, status=status, title="t", created_at=created,
+                         updated_at=earlier, actor=dict(kind="maintainer"), recipient="peer-project",
+                         dedup_class="drift-gate", content_digest="sha256:00"), **kw)
+
+    def ratified(row, status):
+        got = dict(row, status=status, updated_at=ts)
+        got.pop(PROPOSED_FROM)
+        return got
+
+    s_argv = ["transition", "CN-1", "sent", "--actor", "assistant:c", "--channel", "pr",
+              "--delivery-ref", "peer/repo#128"]
+    p, c, op = plan(s_argv, rows=[cn("proposed")], counters=counters)
+    check("an assistant send lands sent/proposed with the whole bundle, sent_at at the clock",
+          op.new_model["record"][0] == dict(cn("proposed"), status="sent/proposed", updated_at=ts,
+                                            proposed_from="proposed", delivery=dict(sent, sent_at=ts))
+          and post(p, c, s_argv) is None)
+    filed = cn("sent/proposed", proposed_from="proposed", delivery=dict(sent))
+    r_argv = ["transition", "CN-1", "sent", "--actor", "maintainer"]
+    p, c, op = plan(r_argv, rows=[filed], counters=counters)
+    check("a ratification of sent/proposed keeps the bundle unchanged and removes proposed_from",
+          op.new_model["record"][0] == ratified(filed, "sent") and post(p, c, r_argv) is None)
+    j_argv = ["transition", "CN-1", "proposed", "--actor", "maintainer", "--reason", "not sent yet"]
+    p, c, op = plan(j_argv, rows=[filed], counters=counters)
+    check("a rejection of sent/proposed restores proposed with no bundle and no proposed_from",
+          op.new_model["record"][0] == dict(cn("proposed"), updated_at=ts) and post(p, c, j_argv) is None)
+    a_argv = ["transition", "CN-1", "acknowledged", "--actor", "assistant:c", "--receipt-ref",
+              "peer/repo#128 merged"]
+    p, c, op = plan(a_argv, rows=[cn("sent", delivery=dict(sent))], counters=counters)
+    check("an assistant acknowledgement adds the receipt keys, receipted_at at the clock",
+          op.new_model["record"][0] == cn("acknowledged/proposed", updated_at=ts, proposed_from="sent",
+                                          delivery=dict(acked, receipted_at=ts))
+          and post(p, c, a_argv) is None)
+    ack_filed = cn("acknowledged/proposed", proposed_from="sent", delivery=dict(acked))
+    ar_argv = ["transition", "CN-1", "acknowledged", "--actor", "maintainer"]
+    p, c, op = plan(ar_argv, rows=[ack_filed], counters=counters)
+    check("a ratification of acknowledged/proposed keeps the receipt keys",
+          op.new_model["record"][0] == ratified(ack_filed, "acknowledged") and post(p, c, ar_argv) is None)
+    aj_argv = ["transition", "CN-1", "sent", "--actor", "maintainer", "--reason", "not merged yet"]
+    p, c, op = plan(aj_argv, rows=[ack_filed], counters=counters)
+    check("a rejection of acknowledged/proposed returns to sent without the receipt keys",
+          op.new_model["record"][0] == cn("sent", updated_at=ts, delivery=dict(sent))
+          and post(p, c, aj_argv) is None)
+    module = sys.modules[__name__]
+    oracle = _expected_delta
+
+    def passes_with_planned_delivery(p, c, op, argv):
+        """The postcondition with the oracle's delivery rule reverted to a pass-through: the expected
+        row takes whatever delivery the plan emitted, everything else still derived by the oracle."""
+        def pass_through(req, ctx, raws, now):
+            expected, ids, transition = oracle(req, ctx, raws, now)
+            for rel, model in expected:
+                if rel == op.rel:
+                    for want, got in zip(model["record"], op.new_model["record"]):
+                        want.pop(DELIVERY, None)
+                        if DELIVERY in got:
+                            want[DELIVERY] = copy.deepcopy(got[DELIVERY])
+            return expected, ids, transition
+        module._expected_delta = pass_through
+        try:
+            return post(p, c, argv) is None
+        except RecordError:
+            return False
+        finally:
+            module._expected_delta = oracle
+
+    for label, argv, row, mutate in (
+            ("a send with channel and ref swapped", s_argv, cn("proposed"),
+             lambda d: d.update(channel=d["ref"], ref=d["channel"])),
+            ("a send with a stale sent_at", s_argv, cn("proposed"), lambda d: d.update(sent_at=earlier)),
+            ("a ratification that rewrites the ref", r_argv, filed, lambda d: d.update(ref="peer/repo#129")),
+            ("a ratification that changes receipt_ref", ar_argv, ack_filed,
+             lambda d: d.update(receipt_ref="peer/repo#129 merged")),
+            ("a rejection that changes channel", aj_argv, ack_filed, lambda d: d.update(channel="email")),
+            ("an acknowledgement with a stale receipted_at", a_argv, cn("sent", delivery=dict(sent)),
+             lambda d: d.update(receipted_at=earlier))):
+        p, c, op = plan(argv, rows=[row], counters=counters)
+        before = [o.raw for o in p.operands]
+        mutate(op.new_model["record"][0][DELIVERY])
+        rv = _opf_schema.validate_record(op.new_model["record"][0], expected_type=CONTRIBUTION,
+                                         registered_vendors=c.vendors)
+        check("{} is schema-valid, so only the oracle can refuse it".format(label), rv.status == _opf_store.VALID)
+        check("the postcondition refuses {} with the planned-from bytes untouched".format(label),
+              _refuses(lambda argv=argv, p=p, c=c: post(p, c, argv), "postcondition failed")
+              and [o.raw for o in p.operands] == before)
+        check("red on revert: a pass-through delivery oracle lets {} through".format(label),
+              passes_with_planned_delivery(p, c, op, argv))
+    check("the oracle is restored after the pass-through vectors", module._expected_delta is oracle)
+    # An option refusal says what a ratification keeps only when the refused transition is one (leaving a
+    # `/proposed` status for its own state) of a status whose proposal wrote that bundle: a pending_decision's
+    # decided for the decision options, a contribution's sent for the delivery options, and its sent or
+    # acknowledged for --receipt-ref. Every other refusal, a backlog item's ratification of done/proposed, a
+    # withdrawn/proposed or superseded/proposed ratification and a ratification given another type's options
+    # included, names the legal transition only.
+    bi = dict(id="BI-1", type=BACKLOG, status="open", title="t", created_at=created, updated_at=earlier,
+              actor=dict(kind="maintainer"))
+    bi_done = dict(bi, status="done/proposed", proposed_from="active")
+    bi_ratify = ["transition", "BI-1", "done", "--actor", "maintainer"]
+    pd = dict(id="PD-1", type=PENDING_DECISION, status="decided/proposed", title="t", created_at=created,
+              updated_at=earlier, actor=dict(kind="maintainer"), proposed_from="open", decision="use X",
+              decided_at=earlier, decided_by="the board")
+    pd_withdrawn = dict(pd, status="withdrawn/proposed")
+    for key in DECISION_BUNDLE:
+        pd_withdrawn.pop(key)
+    pd_ratify = ["transition", "PD-1", "decided", "--actor", "maintainer"]
+    cn_withdrawn = cn("withdrawn/proposed", proposed_from="proposed")
+    cn_superseded = cn("superseded/proposed", proposed_from="sent", delivery=dict(sent))
+    send, receipt = s_argv[5:], ["--receipt-ref", "peer/repo#129 merged"]
+    decide = ["--decision", "use Y", "--decided-by", "the board"]
+
+    def refusal(argv, rows):
+        try:
+            plan(argv, rows=rows, counters=dict(counters, BI=1, PD=1))
+        except RecordError as exc:
+            return str(exc)
+        return ""
+
+    for argv, rows, needle, keeps in (
+            (["transition", "BI-1", "active", "--actor", "maintainer"] + send, [bi],
+             "--channel and --delivery-ref apply only", False),
+            (["transition", "CN-1", "withdrawn", "--actor", "maintainer"] + send, [cn("proposed")],
+             "--channel and --delivery-ref apply only", False),
+            (r_argv + send, [filed], "--channel and --delivery-ref apply only", True),
+            (["transition", "CN-1", "withdrawn", "--actor", "maintainer"] + receipt, [cn("proposed")],
+             "--receipt-ref applies only", False),
+            (ar_argv + receipt, [ack_filed], "--receipt-ref applies only", True),
+            (["transition", "BI-1", "active", "--actor", "maintainer"] + decide, [bi],
+             "--decision and --decided-by apply only", False),
+            (bi_ratify + send, [bi_done], "--channel and --delivery-ref apply only", False),
+            (bi_ratify + receipt, [bi_done], "--receipt-ref applies only", False),
+            (bi_ratify + decide, [bi_done], "--decision and --decided-by apply only", False),
+            (pd_ratify + decide, [pd], "--decision and --decided-by apply only", True),
+            (r_argv + receipt, [filed], "--receipt-ref applies only", True),
+            (ar_argv + send, [ack_filed], "--channel and --delivery-ref apply only", False),
+            (["transition", "PD-1", "withdrawn", "--actor", "maintainer"] + decide, [pd_withdrawn],
+             "--decision and --decided-by apply only", False),
+            (["transition", "CN-1", "withdrawn", "--actor", "maintainer"] + send, [cn_withdrawn],
+             "--channel and --delivery-ref apply only", False),
+            (["transition", "CN-1", "withdrawn", "--actor", "maintainer"] + receipt, [cn_withdrawn],
+             "--receipt-ref applies only", False),
+            (["transition", "CN-1", "superseded", "--actor", "maintainer"] + send, [cn_superseded],
+             "--channel and --delivery-ref apply only", False),
+            (["transition", "CN-1", "superseded", "--actor", "maintainer"] + receipt, [cn_superseded],
+             "--receipt-ref applies only", False),
+            (pd_ratify + send, [pd], "--channel and --delivery-ref apply only", False),
+            (pd_ratify + receipt, [pd], "--receipt-ref applies only", False),
+            (r_argv + decide, [filed], "--decision and --decided-by apply only", False),
+            (ar_argv + decide, [ack_filed], "--decision and --decided-by apply only", False)):
+        text = refusal(argv, rows)
+        check("the {} refusal on {} from {} {} the ratification".format(
+            needle, " ".join(argv[1:3]), rows[0]["status"], "names" if keeps else "does not name"),
+            needle in text and ("a ratification keeps" in text) == keeps)
 
 
 def _self_test_pending(check):
