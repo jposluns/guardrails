@@ -7,54 +7,78 @@ else. It does nothing unless the project commits .aiqt/merge-train.toml on its b
   merge_train.py --self-test [--red-on-revert]        hermetic fixture self-test (local bare remote, fake gh)
   merge_train.py --execution-report ABS_PATH          the self-test, also writing the executed check ids
 
-Per open PR, in PR-number order: the worktree on the PR's branch must be idle (no other process with its
-cwd or argv in the worktree, no git operation marker, the optional [busy].probe exits 0; an unreadable
-process table counts as busy) and clean, and local HEAD must equal the remote PR head. With --apply it
-then runs `git merge --no-commit --no-ff <M>` (M is the base tip fetched once per run), takes the base's
-side for conflicted generated paths, refuses any other conflict, refuses a declared generated path that
-is (or sits under) a symlink or resolves outside the worktree, always runs the regenerate commands,
-runs the check commands, proves nothing outside the generated set differs from the automatic merge and
-that every staged generated blob is byte-identical to the worktree file the checks read, re-checks busy
-and branch, commits as the configured maintainer, proves the committed tree is the validated tree, and
-pushes with an exact-value compare-and-set (--force-with-lease=refs/heads/<branch>:<the head this run
-validated>, which can only narrow what a plain push would accept) to the PR's own head branch, so a
-branch rewound, advanced or deleted since the validation is refused by the remote, never overwritten.
-One observer reads the remote after every push attempt, a timed-out or failed one included, before any
-rollback decision; a rollback happens only while the branch still points at this run's own commit.
+The tool NEVER mutates the author's working tree, index, HEAD or any local branch: that capability
+was removed, not guarded (decision D-390-PRIVATE-WORKTREE). Per open PR, in PR-number order, every
+merge, conflict resolution, regeneration, check and commit happens in a PRIVATE scratch checkout
+the run creates for that PR (a --shared clone of the repository, detached at the PR's remote head)
+and removes in a finally; checkout filters, text/eol/autocrlf conversion, ident expansion, the
+working-tree encoding, hooks (core.hooksPath pinned to the null device) and fsmonitor are disabled
+there for every git call. The author's worktree is only READ: the run locates the worktree that has
+the PR branch checked out and re-confirms, against a fresh gh view, that it still names the same
+open PR. That read-only branch-match check is kept because it anchors each PR to one local checkout
+for reporting and refuses a renamed or closed PR; the old busy check and its process scan protected
+in-place mutation and were removed with it, as were the dirty check and the local-position checks.
+The author's local branch ref is NOT fast-forwarded by the tool: after a push the author pulls,
+like after any other remote change.
 
-The config is read from the fetched base tip (`git show <M>:.aiqt/merge-train.toml`), never from a PR
-branch or the checkout. The branch pushed to is the worktree's own symbolic ref, re-confirmed against gh
-before the commit and before the push; the tool takes no branch-name argument. The tool ships with the
-pack; this repository's own .aiqt/merge-train.toml does not (.aiqt/core/ownership.toml excludes it),
-because its presence is what enables the tool. An adopting project commits its own.
+With --apply the run validates the PR head branch name (git check-ref-format --branch plus the
+lease's own character set; an unsupported name is refused as bad-branch-name before any work),
+requires the gh view, the gh list and the remote tip to agree on the PR head, merges the fetched
+base tip M in the private checkout with `git merge --no-commit --no-ff`, takes the base's side for
+conflicted generated paths, refuses any other conflict, refuses a declared generated path that is
+(or sits under) a symlink or resolves outside the checkout, always runs the regenerate commands,
+runs the check commands, proves nothing outside the generated set differs from the automatic merge,
+then proves that EVERY blob of the validated tree is byte-identical to the private-checkout file
+the checks read (what was validated is what is pushed; a clean filter or autocrlf transform cannot
+smuggle unvalidated bytes), commits with `git commit-tree` against that validated tree (no commit
+hook runs), verifies the new commit's first parent is the exact PR head this run validated and that
+the head is an ancestor of the new commit, and pushes from the private checkout with an exact-value
+compare-and-set (--force-with-lease=refs/heads/<branch>:<the head this run validated>, a 40- or
+64-hex object id, which can only narrow what a plain push would accept) to the PR's own head
+branch, so a branch rewound, advanced or deleted since the validation is refused by the remote,
+never overwritten. One observer reads the remote after every push attempt, a timed-out or failed
+one included; a push whose outcome cannot be observed (a push timeout, an observer timeout, an
+unreadable remote) is INDETERMINATE: a small marker is kept so the retry can classify it, and
+nothing else changes anywhere. There is no rollback machinery, because nothing local is mutated and
+so there is nothing to roll back.
+
+The config is read from the fetched base tip (`git show <M>:.aiqt/merge-train.toml`), never from a
+PR branch or the checkout; the [busy] table is still accepted, and ignored, for config
+compatibility. The branch pushed to is the PR's own head branch as gh names it, re-confirmed before
+the push; the tool takes no branch-name argument. The tool ships with the pack; this repository's
+own .aiqt/merge-train.toml does not (.aiqt/core/ownership.toml excludes it), because its presence
+is what enables the tool. An adopting project commits its own.
 
 Stdout carries one JSON line per PR (schema merge-train/1); stderr carries one human line per PR.
 Exit codes: 0 every PR current, pushed, already pushed or (dry run) mergeable; 1 any PR refused or
-skipped; 2 the run failed closed and touched no worktree (no config, malformed config, lock held, gh or
-fetch failure, a possibly truncated PR list, bad arguments); 3 restore-failed (a worktree could not be
-proven back to its pre-run state; the run stops, the state marker is kept, nothing is deleted).
+skipped; 2 the run failed closed and touched nothing (no config, malformed config, lock held, gh or
+fetch failure, a possibly truncated PR list, bad arguments).
 
 THREAT MODEL (cooperative): agents on a single-operator host. The repository's local config, the
-operator's global and system config, hooks and the object store are trusted; the tool guards against
-accidents and odd local state, not hostile repository state. Disclosed residuals: a worker started
-between the last busy check and the commit is not detected (the orchestrator, as sole dispatcher, does
-not dispatch during a train run); the process scan sees only processes of the tool's own uid and
-excludes the tool and its ancestors; fork PRs are refused (fork-pr), not supported; v1 supports the
-remote "origin" and the base "main" only; the regenerate and check commands run the merged tree's copy
-of the generators, which may include the PR's own changes; review_carry is information only.
+operator's global and system config, hooks and the object store are trusted; the tool guards
+against accidents and odd local state, not hostile repository state. Disclosed residuals: fork PRs
+are refused (fork-pr), not supported; v1 supports the remote "origin" and the base "main" only; the
+regenerate and check commands run the merged tree's copy of the generators, which may include the
+PR's own changes; review_carry is information only; the private checkout reuses the repository's
+object store through --shared, the same trust tier as the repository itself.
 
-The tool never force-pushes (no --force, no -f, no + push refspec; the one lease form its own argv
-audit allows is the exact-value --force-with-lease=refs/heads/<branch>:<validated old head>, a pure
-compare-and-set that only narrows what a plain push would accept), rebases, cherry-picks,
-stashes, cleans, runs reset --hard, prunes worktrees, resolves a non-generated conflict, pushes to or
-checks out the base branch, edits PR metadata, or reads an ambient git identity.
+The tool never force-pushes (no --force, no -f, no bundled or abbreviated force, delete, mirror,
+all or prune push option, no + or : push refspec, and no src:dst refspec other than the exact
+<40-or-64-hex>:refs/heads/<branch> form away from the base; the one lease form its own argv audit
+allows is the exact-value --force-with-lease=refs/heads/<branch>:<validated old head>, a pure
+compare-and-set that only narrows what a plain push would accept, because the pushed commit's
+first parent is verified to be that validated head), rebases, cherry-picks, stashes, cleans, runs
+ANY reset, prunes worktrees, resolves a non-generated conflict, pushes to or checks out the base
+branch, edits PR metadata, or reads an ambient git identity.
 """
-import errno
+
+
 import fcntl
 import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -74,8 +98,6 @@ LOCK_NAME = "merge-train.lock"
 PR_LIST_LIMIT = 200
 GIT_TIMEOUT = 120
 OK_RESULTS = ("current", "pushed", "already-pushed", "would-merge")
-OPERATION_MARKERS = ("index.lock", "MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD",
-                     "REVERT_HEAD", "BISECT_LOG")
 GLOB_CHARS = set("*?[]!" + chr(123) + chr(125))
 CONFIG_KEYS = frozenset(("version", "remote", "base", "commit", "generated", "busy", "limits"))
 TABLE_KEYS = dict(commit=frozenset(("name", "email")),
@@ -84,28 +106,30 @@ TABLE_KEYS = dict(commit=frozenset(("name", "email")),
                   limits=frozenset(("command_timeout_seconds", "network_timeout_seconds")))
 REF_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 SHA = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
-# The single push --force* form the argv audit allows: an exact-value compare-and-set lease.
-PUSH_LEASE = re.compile(r"\A--force-with-lease=refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]*:[0-9a-f]{40}\Z")
+# The single push --force* form the argv audit allows: an exact-value compare-and-set lease, with a
+# 40-hex (SHA-1) or 64-hex (SHA-256) validated old head.
+PUSH_LEASE = re.compile(r"\A--force-with-lease=refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]*:"
+                        r"[0-9a-f]{40}([0-9a-f]{24})?\Z")
+# The single src:dst push refspec shape allowed: an exact object id onto a plain head, never main.
+PUSH_SPEC = re.compile(r"\A[0-9a-f]{40}([0-9a-f]{24})?:refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
+FORBIDDEN_PUSH_LONG = ("--force", "--force-with-lease", "--force-if-includes", "--delete",
+                       "--mirror", "--all", "--prune")
 
 # Every argv the tool hands to git, for the self-test's forbidden-operation audit.
 GIT_AUDIT = []
 
 
 class FailClosed(Exception):
-    """The whole run stops before touching any worktree (exit 2)."""
+    """The whole run stops before touching anything (exit 2)."""
 
 
 class Refuse(Exception):
-    """One PR is refused; its worktree is restored and the run continues."""
+    """One PR is refused; its private checkout is discarded and the run continues."""
 
     def __init__(self, status, reason=""):
         Exception.__init__(self, status)
         self.status = status
         self.reason = reason
-
-
-class RestoreFailed(Exception):
-    """A worktree could not be proven back to its snapshot (exit 3)."""
 
 
 def _now():
@@ -122,22 +146,44 @@ def _clean_env(extra=None):
 
 
 def _forbidden(args):
-    """The argv audit enforced on every git call: no force push (the exact-value compare-and-set
-    lease --force-with-lease=refs/heads/<branch>:<sha> is the one allowed --force* form), no + push
-    refspec, no rebase, cherry-pick, stash, clean, gc, worktree prune, and no reset other than
-    reset --keep."""
+    """The argv audit enforced on every git call, kept in exact agreement with the self-test's
+    independently written _audit_violation: no rebase, cherry-pick, stash, clean, gc, worktree
+    prune, and no reset of ANY kind (the tool has nothing local to reset); for push, no force,
+    delete, mirror, all or prune option in long, abbreviated (git accepts unique prefixes) or
+    bundled short form (-uf, -fu), no lease other than the one exact-value compare-and-set form
+    (PUSH_LEASE, 40- or 64-hex), and no refspec other than a plain name or the exact
+    <hex>:refs/heads/<branch> form away from the base (no + force spec, no :delete spec, no
+    src:dst alias). The first non-option word is the repository (a URL may carry a colon)."""
     words = list(args)
-    if words[:1] in (["rebase"], ["stash"], ["clean"], ["cherry-pick"], ["gc"], ["prune"]):
+    if words[:1] in (["rebase"], ["stash"], ["clean"], ["cherry-pick"], ["gc"], ["prune"],
+                     ["reset"]):
         return True
     if words[:2] == ["worktree", "prune"]:
         return True
-    if words[:1] == ["reset"] and "--keep" not in words:
-        return True
-    if words[:1] == ["push"]:
-        for w in words[1:]:
-            if w == "-f" or w.startswith("+"):
-                return True
-            if w.startswith("--force") and not PUSH_LEASE.match(w):
+    if words[:1] != ["push"]:
+        return False
+    specs_only, repo_seen = False, False
+    for w in words[1:]:
+        if w == "--" and not specs_only:
+            specs_only = True
+            continue
+        if not specs_only and w.startswith("-"):
+            if not w.startswith("--"):
+                if any(c in "fd" for c in w[1:]):
+                    return True
+                continue
+            if PUSH_LEASE.match(w):
+                continue
+            stem = w.split("=", 1)[0]
+            for banned in FORBIDDEN_PUSH_LONG:
+                if len(stem) > 2 and (banned.startswith(stem) or stem.startswith(banned)):
+                    return True
+            continue
+        if not repo_seen:
+            repo_seen = True
+            continue
+        if w.startswith("+") or ":" in w:
+            if not PUSH_SPEC.match(w) or w.endswith(":refs/heads/main"):
                 return True
     return False
 
@@ -181,6 +227,7 @@ def _run_external(argv, cwd, timeout, extra_env=None):
 
 
 # ---------------------------------------------------------------- guards (the GUARDS table below)
+
 
 def guard_config_fail_closed(data):
     """Raise FailClosed unless data is a well-formed version-1 merge-train config."""
@@ -258,36 +305,16 @@ def guard_config_source(root, base_sha):
     return out.decode("utf-8", "replace")
 
 
-def guard_busy(wt, git_dir, probe, timeout, own_merge, scan=None):
-    """Refuse busy, busy-unknown or in-progress-operation for a worktree in use. own_merge excuses
-    the MERGE_HEAD of the tool's own recorded merge (the pre-commit re-check). scan is the process
-    scan (wt -> list of users, or None when the table cannot be read); None means _host_scan, the
-    live /proc scan real use runs. It is injected so the self-test decides busy from a fixture, never
-    from whatever else the host runs as the same user."""
-    for name in OPERATION_MARKERS:
-        if name == "MERGE_HEAD" and own_merge:
-            continue
-        if os.path.lexists(os.path.join(git_dir, name)):
-            status = "busy" if name == "index.lock" else "in-progress-operation"
-            raise Refuse(status, "git operation marker %s present" % name)
-    if probe:
-        argv = [arg.replace("{worktree}", str(wt)) for arg in probe]
-        code, _out, err = _run_external(argv, wt, timeout)
-        if code != 0:
-            raise Refuse("busy", "busy probe exited %s: %s" % (code, err.strip()[:200]))
-    users = (scan if scan is not None else _host_scan)(str(wt))
-    if users is None:
-        raise Refuse("busy-unknown", "the process table could not be read")
-    if users:
-        raise Refuse("busy", "process(es) %s use the worktree" % ", ".join(users[:5]))
-
-
-def guard_dirty(wt):
-    """Refuse dirty unless the worktree has no staged, unstaged or untracked change."""
-    out = _git(wt, "status", "--porcelain=v2", "-z", "--untracked-files=all")[1]
-    entries = [e.decode("utf-8", "replace") for e in out.split(b"\0") if e]
-    if entries:
-        raise Refuse("dirty", "; ".join(entries[:5]))
+def guard_branch_name(root, branch):
+    """Refuse bad-branch-name BEFORE any work for a PR head branch name the tool does not support.
+    The name comes from gh: it must satisfy git check-ref-format --branch and the exact-value
+    lease's own character set [A-Za-z0-9._/-] (a name outside it, such as one carrying + or @,
+    cannot be expressed in the one lease form the argv audit allows, so it is refused up front
+    with a named status instead of crashing later)."""
+    if not isinstance(branch, str) or not REF_NAME.match(branch) or ".." in branch:
+        raise Refuse("bad-branch-name", "unsupported PR head branch name %r" % (branch,))
+    if _git(root, "check-ref-format", "--branch", branch, ok=None)[0] != 0:
+        raise Refuse("bad-branch-name", "git check-ref-format refuses %r" % (branch,))
 
 
 def guard_branch_match(wt, branch, gh_view):
@@ -337,125 +364,101 @@ def guard_fixpoint(wt):
             raise Refuse("regenerate-not-fixpoint", "unmerged entry left: %s" % entry[-200:])
 
 
-def guard_push_restore(wt, old, observed, new):
-    """After a rejected or overtaken push, restore the worktree to the old head, but only while the
-    branch still points at this run's own commit (reset --keep keeps every local change and leaves
-    the new commit in the reflog). A branch moved by anyone else since the commit, a concurrent
-    author commit included, is never rewound: Refuse(local-race) keeps the commit, the marker and
-    the moved head exactly as they are."""
-    if observed == new:
-        return
-    if not _guard("push-restore-cas")(wt, new):
-        raise Refuse("local-race", "the local branch no longer points at this run's commit; "
-                     "nothing restored, commit and marker kept")
-    _git(wt, "reset", "--keep", old)
-
-
-def guard_push_restore_cas(wt, new):
-    """True only while HEAD is exactly the commit this run created: the rollback's local
-    compare-and-set."""
-    return _git_text(wt, "rev-parse", "HEAD") == new
-
-
-def guard_abort_on_refusal(wt, git_dir, old):
-    """Undo the tool's OWN merge or commit after a refusal: merge --abort mid-merge, reset --keep to
-    the old head after a commit. A branch that no longer points at the commit this run recorded is
-    never rewound (the restore-failed path reports it instead). Never reset --hard, clean or
-    stash."""
-    if os.path.lexists(os.path.join(git_dir, "MERGE_HEAD")):
-        _git(wt, "merge", "--abort", ok=None)
-    head = _git_text(wt, "rev-parse", "HEAD")
-    if head == old:
-        return
-    marker = _read_marker(git_dir) or dict()
-    if marker.get("phase") == "committed" and head != marker.get("new"):
-        return
-    _git(wt, "reset", "--keep", old, ok=None)
-
-
 def guard_reconcile(ctx, marker):
-    """Reconcile a marker left by an earlier run against git before anything else. Returns None to
-    proceed normally, or a finished partial report (already-pushed, pushed). Raises
-    Refuse(state-mismatch) for a marker that disagrees with git and Refuse(in-progress-operation)
-    for a merge the tool did not start (never aborted). Recovery checks busy FIRST and never
-    discards anything the recorded merge could not have created; the committed-marker re-push
-    re-runs the busy and gh re-checks and re-verifies the recorded validated tree."""
-    wt, git_dir = ctx["wt"], ctx["git_dir"]
-    has_merge = os.path.lexists(os.path.join(git_dir, "MERGE_HEAD"))
+    """A marker records only a push whose outcome this tool could not observe (a push or observer
+    timeout, an unreadable remote): it exists to make the retry safe to CLASSIFY, never to gate
+    anything local, because the tool mutates nothing local. Returns a finished partial report
+    (already-pushed) when the recorded push turns out to have been delivered, or None to proceed
+    with a fresh private checkout (the stale marker is then dropped); raises
+    Refuse(state-mismatch) for a marker naming another PR or branch and Refuse(push-unknown) while
+    the remote is still unreadable (the marker is kept and nothing changes)."""
     if marker is None:
-        if has_merge:
-            raise Refuse("in-progress-operation", "a merge not started by merge-train is in progress")
         return None
-    head = _git_text(wt, "rev-parse", "HEAD")
     if marker.get("pr") != ctx["pr"] or marker.get("branch") != ctx["branch"]:
         raise Refuse("state-mismatch", "the marker names another PR or branch")
-    if marker.get("phase") == "merging" and head == marker.get("old") and has_merge:
-        if _read_text(os.path.join(git_dir, "MERGE_HEAD")).strip() != marker.get("base_sha"):
-            raise Refuse("state-mismatch", "MERGE_HEAD is not the recorded base")
-        _guard("busy")(wt, git_dir, ctx["probe"], ctx["cmd_timeout"], True, ctx["scan"])
-        _guard("reconcile-preserve")(ctx, marker)
-        _git(wt, "merge", "--abort")
-        guard_dirty(wt)
-        _remove_marker(git_dir)
-        return None
-    if marker.get("phase") == "committed" and head == marker.get("new") and not has_merge:
-        remote = _remote_head(ctx)
-        if remote == marker["new"]:
-            _remove_marker(git_dir)
-            return dict(result="already-pushed", old_head=marker["old"], new_head=marker["new"],
-                        reason="an earlier run pushed %s" % marker["new"])
-        if remote == marker["old"]:
-            if marker.get("tree") and _git_text(
-                    wt, "rev-parse", marker["new"] + "^{tree}") != marker["tree"]:
-                raise Refuse("state-mismatch",
-                             "the marker's commit does not carry the validated tree")
-            _guard("resume-recheck")(ctx)
-            ctx["old"] = marker["old"]
-            _run_checks(ctx)
-            return _push_and_observe(ctx, marker["old"], marker["new"])
-        raise Refuse("state-mismatch", "remote at %s, marker old %s new %s" % (
-            remote, marker["old"], marker["new"]))
-    raise Refuse("state-mismatch", "marker phase %r disagrees with git (HEAD %s)" % (
-        marker.get("phase"), head))
+    remote = _remote_head(ctx)
+    if remote is None:
+        raise Refuse("push-unknown",
+                     "the recorded push is still unconfirmed: the remote is unreadable")
+    if remote == marker.get("new"):
+        _remove_marker(ctx["git_dir"])
+        return dict(result="already-pushed", old_head=marker.get("old"),
+                    new_head=marker.get("new"),
+                    reason="an earlier run pushed %s" % marker.get("new"))
+    _remove_marker(ctx["git_dir"])
+    return None
 
 
-def guard_reconcile_preserve(ctx, marker):
-    """Refuse (touching nothing) instead of aborting when the interrupted merge's worktree holds
-    anything the recorded merge could not have created: merge --abort would discard it. Allowed are
-    changes at the declared generated paths and at paths differing between the recorded old head
-    and base (the only paths the tool's own merge, resolution and regeneration touch); an untracked
-    file or a change anywhere else is treated as author work. An author edit INSIDE a merge-touched
-    path is indistinguishable from the merge's own state; the busy check that runs before this
-    guard is the defence for an active author."""
-    wt = ctx["wt"]
-    allowed = set(ctx["generated"])
-    out = _git(wt, "diff", "--name-only", "-z", "--no-color", "--no-ext-diff", "--no-renames",
-               marker["old"], marker["base_sha"])[1]
-    allowed |= set(p.decode("utf-8", "surrogateescape") for p in out.split(b"\x00") if p)
-    out = _git(wt, "status", "--porcelain=v2", "-z", "--untracked-files=all", "--no-renames")[1]
-    foreign = []
-    for entry in [e.decode("utf-8", "surrogateescape") for e in out.split(b"\x00") if e]:
-        if entry[:2] == "? ":
-            path = entry[2:]
-        elif entry[:2] == "1 ":
-            path = entry.split(" ", 8)[8]
-        elif entry[:2] == "u ":
-            path = entry.split(" ", 10)[10]
-        else:
-            path = entry
-        if path not in allowed:
-            foreign.append(path)
-    if foreign:
-        raise Refuse("state-mismatch", "work not from the recorded merge is present; refusing to "
-                     "abort it: %s" % ", ".join(sorted(foreign)[:10]))
+def guard_scratch_setup(scratch):
+    """Disable every content conversion and every hook in the private checkout, so the bytes the
+    regenerate and check commands read are the bytes git stores and pushes: checkout and checkin
+    filters, text/eol/autocrlf conversion, ident expansion and the working-tree encoding are unset
+    for every path (the checkout's own info/attributes outranks any in-tree .gitattributes), hooks
+    are disabled (core.hooksPath pinned to the null device; the commit is made with commit-tree,
+    which runs no hook anyway) and fsmonitor is off."""
+    for key, value in (("core.autocrlf", "false"), ("core.eol", "lf"),
+                       ("core.hooksPath", os.devnull), ("core.fsmonitor", "false")):
+        _git(scratch, "config", key, value)
+    git_dir = _git_text(scratch, "rev-parse", "--path-format=absolute", "--git-dir")
+    info = os.path.join(git_dir, "info")
+    os.makedirs(info, exist_ok=True)
+    with open(os.path.join(info, "attributes"), "w", encoding="utf-8") as handle:
+        handle.write("* -filter -text -eol -crlf -ident -working-tree-encoding\n")
 
 
-def guard_resume_recheck(ctx):
-    """The committed-marker re-push runs the same busy and gh re-checks as a fresh push: the
-    worktree must be idle and the PR still open on the same branch, this run."""
-    view = _gh_view(ctx)
-    _guard("branch-match")(ctx["wt"], ctx["branch"], view)
-    _guard("busy")(ctx["wt"], ctx["git_dir"], ctx["probe"], ctx["cmd_timeout"], False, ctx["scan"])
+def guard_pushed_bytes(scratch, tree):
+    """Refuse commit-mismatch unless EVERY blob of the validated tree is byte-identical to the
+    private-checkout file the regenerate and check commands read (every path, not only generated
+    ones): a content transform between the checkout and the object store (a clean filter,
+    autocrlf, eol or ident conversion) would otherwise push bytes the checks never saw. The
+    checkout bytes are hashed directly against the repository's own object format, with no filter
+    in the path; a symlink must reproduce the committed target; gitlinks carry no bytes and are
+    skipped."""
+    algo = _git_text(scratch, "rev-parse", "--show-object-format")
+    hasher = dict(sha1=hashlib.sha1, sha256=hashlib.sha256).get(algo)
+    if hasher is None:
+        raise Refuse("commit-mismatch", "unknown object format %r" % algo)
+    root = str(scratch)
+    for row in _git(scratch, "ls-tree", "-r", "-z", tree)[1].split(b"\0"):
+        if not row:
+            continue
+        meta, raw = row.split(b"\t", 1)
+        mode, kind, sha = meta.decode("utf-8", "replace").split()
+        if kind != "blob":
+            continue
+        rel = raw.decode("utf-8", "surrogateescape")
+        path = os.path.join(root, rel)
+        if mode == "120000":
+            target = _git(scratch, "cat-file", "blob", sha)[1]
+            try:
+                link = os.readlink(path)
+            except OSError as exc:
+                raise Refuse("commit-mismatch", "%s: %s" % (rel, exc))
+            if os.fsencode(link) != target:
+                raise Refuse("commit-mismatch",
+                             "symlink %s differs from the committed target" % rel)
+            continue
+        try:
+            with open(path, "rb") as handle:
+                data = handle.read()
+        except OSError as exc:
+            raise Refuse("commit-mismatch", "%s unreadable: %s" % (rel, exc))
+        if hasher(b"blob %d\0" % len(data) + data).hexdigest() != sha:
+            raise Refuse("commit-mismatch",
+                         "%s: the checkout bytes differ from the committed blob" % rel)
+
+
+def guard_commit_parents(scratch, old, new):
+    """Refuse commit-mismatch unless the new commit's FIRST parent is exactly the PR head this run
+    validated and that head is an ancestor of the new commit: the exact-value lease is then a pure
+    narrowing of a plain push (never a rewind), and a rewritten or parentless commit is never
+    pushed."""
+    parents = _git_text(scratch, "rev-list", "--parents", "-n", "1", new).split()[1:]
+    if not parents or parents[0] != old:
+        raise Refuse("commit-mismatch", "first parent %s is not the validated head %s" % (
+            parents[0] if parents else "(none)", old))
+    if _git(scratch, "merge-base", "--is-ancestor", old, new, ok=None)[0] != 0:
+        raise Refuse("commit-mismatch", "the validated head is not an ancestor of the new commit")
 
 
 def guard_push_lease(branch, old):
@@ -487,24 +490,6 @@ def guard_generated_confined(wt, generated):
             raise Refuse("generated-symlink", "%s resolves outside the worktree" % rel)
 
 
-def guard_generated_bytes(wt, generated, resolved):
-    """Refuse commit-mismatch when a staged generated blob is not byte-identical to the worktree
-    file the check commands read (a clean filter or similar local transform would otherwise push
-    bytes the checks never saw)."""
-    for path in sorted(generated):
-        if path not in resolved:
-            continue
-        blob = _git(wt, "cat-file", "blob", ":%s" % path)[1]
-        try:
-            with open(os.path.join(str(wt), path), "rb") as handle:
-                worktree = handle.read()
-        except OSError as exc:
-            raise Refuse("commit-mismatch", "%s unreadable: %s" % (path, exc))
-        if blob != worktree:
-            raise Refuse("commit-mismatch",
-                         "staged %s differs from the worktree bytes the checks read" % path)
-
-
 def guard_commit_tree(wt, new, validated_tree):
     """Refuse commit-mismatch when the committed tree is not the validated one (a pre-commit hook
     that edits and restages files would otherwise push content the checks never saw)."""
@@ -513,35 +498,24 @@ def guard_commit_tree(wt, new, validated_tree):
                      "the committed tree is not the validated tree %s" % validated_tree)
 
 
-def guard_snapshot_files(wt):
-    """Every tracked and untracked file INCLUDING ignored ones (no --exclude-standard): the
-    restoration verification must see ignored-file contents too."""
-    return _git(wt, "ls-files", "-z", "--cached", "--others")[1]
-
-
 # Every guard is reached through this table, so --red-on-revert can replace each one in turn.
 GUARDS = dict([
     ("config-fail-closed", guard_config_fail_closed),
     ("config-source", guard_config_source),
-    ("busy", guard_busy),
-    ("dirty", guard_dirty),
+    ("branch-name", guard_branch_name),
     ("branch-match", guard_branch_match),
     ("source-conflict", guard_source_conflict),
     ("regenerate-exit", guard_regenerate_exit),
     ("check-exit", guard_check_exit),
     ("fixpoint", guard_fixpoint),
-    ("push-restore", guard_push_restore),
-    ("abort-on-refusal", guard_abort_on_refusal),
     ("reconcile", guard_reconcile),
-    ("reconcile-preserve", guard_reconcile_preserve),
-    ("resume-recheck", guard_resume_recheck),
+    ("scratch-setup", guard_scratch_setup),
+    ("generated-confined", guard_generated_confined),
+    ("pushed-bytes", guard_pushed_bytes),
+    ("commit-parents", guard_commit_parents),
+    ("commit-tree", guard_commit_tree),
     ("push-lease", guard_push_lease),
     ("push-indeterminate", guard_push_indeterminate),
-    ("push-restore-cas", guard_push_restore_cas),
-    ("generated-confined", guard_generated_confined),
-    ("generated-bytes", guard_generated_bytes),
-    ("commit-tree", guard_commit_tree),
-    ("snapshot-files", guard_snapshot_files),
 ])
 
 
@@ -551,68 +525,13 @@ def _guard(name):
 
 # ---------------------------------------------------------------- helpers
 
+
 def _read_text(path):
     try:
         with open(path, "r", encoding="utf-8") as handle:
             return handle.read()
     except OSError:
         return ""
-
-
-def _process_users(wt, proc="/proc", uid=None):
-    """pid:name of every same-uid process, other than this process and its ancestors, whose cwd is
-    inside wt or whose argv names a path inside wt; None when the process table cannot be read.
-    proc is the process-table root and uid the owner counted as same-uid (None: os.getuid()). Only
-    the self-test passes them: it scans fake tables built in scratch (a scratch entry is owned by the
-    test user, so another uid stands for "this entry belongs to someone else") and so never reads the
-    host /proc. Real use passes neither (see _host_scan)."""
-    if not os.path.isdir(os.path.join(proc, "self")):
-        return None
-    skip = set()
-    pid = os.getpid()
-    while pid > 1 and pid not in skip:
-        skip.add(pid)
-        stat = _read_text(os.path.join(proc, str(pid), "stat"))
-        try:
-            pid = int(stat.rsplit(")", 1)[1].split()[1])
-        except (IndexError, ValueError):
-            break
-    real = os.path.realpath(wt)
-
-    def inside(path):
-        return path == real or path.startswith(real + os.sep)
-
-    users = []
-    if uid is None:
-        uid = os.getuid()
-    try:
-        entries = os.listdir(proc)
-    except OSError:
-        return None
-    for name in entries:
-        if not name.isdigit() or int(name) in skip:
-            continue
-        base = os.path.join(proc, name)
-        try:
-            if os.stat(base).st_uid != uid:
-                continue
-            cwd = os.readlink(os.path.join(base, "cwd"))
-            with open(os.path.join(base, "cmdline"), "rb") as handle:
-                argv = [a.decode("utf-8", "replace") for a in handle.read().split(b"\0") if a]
-        except (FileNotFoundError, ProcessLookupError):
-            continue
-        except OSError:
-            return None
-        if inside(cwd) or any(inside(os.path.realpath(a)) for a in argv if a.startswith("/")):
-            users.append("%s:%s" % (name, os.path.basename(argv[0]) if argv else "?"))
-    return users
-
-
-def _host_scan(wt):
-    """The live process scan real use runs: _process_users over the host /proc as this uid. A
-    module-level name so the self-test can replace it with a stub that raises, proving that no case
-    reads the host process table."""
-    return _process_users(wt)
 
 
 def _read_marker(git_dir):
@@ -645,9 +564,16 @@ def _remove_marker(git_dir):
 
 
 def _remote_head(ctx):
-    """The remote branch tip through ls-remote: a SHA, "" when absent, None when unreadable."""
-    code, out, _err = _git(ctx["wt"], "ls-remote", "--", ctx["remote"],
-                           "refs/heads/" + ctx["branch"], ok=None, timeout=ctx["net_timeout"])
+    """The remote branch tip through ls-remote (run in the repository root, by remote name, so a
+    config change is honoured): a SHA, "" when absent, None when unreadable for ANY reason, a
+    timeout included; the caller treats None as indeterminate, never as a cue to change
+    anything."""
+    try:
+        code, out, _err = _git(ctx["root"], "ls-remote", "--", ctx["remote"],
+                               "refs/heads/" + ctx["branch"], ok=None,
+                               timeout=ctx["net_timeout"])
+    except Refuse:
+        return None
     if code != 0:
         return None
     lines = [line for line in out.decode("utf-8", "replace").splitlines() if line.strip()]
@@ -659,13 +585,13 @@ def _remote_head(ctx):
 
 def _snapshot(wt):
     """HEAD, the symbolic ref, the index entries, the full status with ignored files, and a SHA-256
-    of every tracked and untracked file, ignored files included (a refusal must restore those
-    too)."""
+    of every tracked and untracked file, ignored files included: the self-test's proof that the
+    author's worktree, index and refs are byte-identical across a run."""
     head = _git_text(wt, "rev-parse", "HEAD")
     code, out, _err = _git(wt, "symbolic-ref", "--quiet", "HEAD", ok=None)
     index = _git(wt, "ls-files", "-s", "-z")[1]
     status = _git(wt, "status", "--porcelain=v2", "-z", "--untracked-files=all", "--ignored")[1]
-    files = _guard("snapshot-files")(wt)
+    files = _git(wt, "ls-files", "-z", "--cached", "--others")[1]
     digests = dict()
     for raw in sorted(set(f for f in files.split(b"\0") if f)):
         path = os.path.join(str(wt), raw.decode("utf-8", "surrogateescape"))
@@ -681,6 +607,24 @@ def _snapshot(wt):
             digests[raw] = "error:" + str(exc)
     return dict(head=head, symref=out.strip() if code == 0 else None, index=index, status=status,
                 files=digests)
+
+
+# Every private scratch checkout ever created, for the self-test's removal proof.
+SCRATCHES = []
+
+
+def _scratch_checkout(ctx):
+    """The PRIVATE scratch checkout for one PR: a --shared clone of the repository (the object
+    store is reused; nothing of the author's checkout is written), with every conversion and hook
+    disabled by the scratch-setup guard. Returns (checkout path, directory to remove in the
+    caller's finally). The author's worktree is never written: no merge, checkout, add, commit or
+    reset ever runs there."""
+    scratch_root = tempfile.mkdtemp(prefix="merge-train-scratch-")
+    SCRATCHES.append(scratch_root)
+    scratch = os.path.join(scratch_root, "co")
+    _git(ctx["root"], "clone", "--quiet", "--shared", "--no-checkout", str(ctx["root"]), scratch)
+    _guard("scratch-setup")(scratch)
+    return scratch, scratch_root
 
 
 def _snapshot_diff(before, after):
@@ -731,22 +675,24 @@ def _changed_lines(wt, left, right, generated):
     return files
 
 
-def _run_checks(ctx):
+def _run_checks(ctx, scratch):
     for command in ctx["cfg"]["generated"]["check"]:
-        code, _out, err = _run_external(command, ctx["wt"], ctx["cmd_timeout"],
+        code, _out, err = _run_external(command, scratch, ctx["cmd_timeout"],
                                         dict(PYTHONDONTWRITEBYTECODE="1"))
         _guard("check-exit")(code, command, err)
 
 
-def _push_and_observe(ctx, old, new):
-    """Compare-and-set push of new to the PR's own branch (the exact-value lease makes the remote
-    refuse unless the branch is still at old, the head this run validated), then one observer over
-    the remote. A push whose outcome is unknown (a timeout, a launch failure) is decided by that
-    observer, never by a blind rollback."""
-    wt, branch = ctx["wt"], ctx["branch"]
+def _push_and_observe(ctx, scratch, old, new):
+    """Compare-and-set push of new from the private checkout to the PR's own branch (the
+    exact-value lease makes the remote refuse unless the branch is still at old, the head this run
+    validated), then one observer over the remote. A push whose outcome is unknown (a timeout, a
+    launch failure) and an observation failure of ANY kind, an observer timeout included, are
+    INDETERMINATE: the marker is kept and nothing changes anywhere; nothing local exists to roll
+    back."""
+    branch = ctx["branch"]
     try:
-        _git(wt, "push", "--porcelain", "--no-follow-tags",
-             *_guard("push-lease")(branch, old), "--", ctx["remote"],
+        _git(scratch, "push", "--porcelain", "--no-follow-tags",
+             *_guard("push-lease")(branch, old), "--", ctx["remote_url"],
              "%s:refs/heads/%s" % (new, branch), ok=None, timeout=ctx["net_timeout"])
     except Refuse as exc:
         _guard("push-indeterminate")(exc)
@@ -755,14 +701,15 @@ def _push_and_observe(ctx, old, new):
         _remove_marker(ctx["git_dir"])
         return dict(result="pushed", old_head=old, new_head=new, reason="")
     if observed is None:
-        raise Refuse("push-unknown", "remote unreadable after the push; commit and marker kept")
-    _guard("push-restore")(wt, old, observed, new)
+        raise Refuse("push-unknown",
+                     "remote unreadable after the push; the marker is kept, nothing changed")
     _remove_marker(ctx["git_dir"])
     status = "push-rejected" if observed == old else "remote-changed"
     raise Refuse(status, "remote at %s" % (observed or "(absent)"))
 
 
 # ---------------------------------------------------------------- the run
+
 
 def load_config(root, base_sha):
     text = _guard("config-source")(root, base_sha)
@@ -814,117 +761,96 @@ def _gh_view(ctx):
 
 
 def _process_pr(ctx, apply):
-    """One PR. Returns a partial report; raises Refuse for a refusal and RestoreFailed."""
-    wt, git_dir = ctx["wt"], ctx["git_dir"]
-    marker = _read_marker(git_dir)
+    """One PR, read-only outside the private scratch checkout. Returns a partial report; raises
+    Refuse for a refusal. The author's worktree, index, HEAD and local branch are never written;
+    the only author-side state is the retry marker in the worktree's git dir."""
+    marker = _read_marker(ctx["git_dir"])
     if marker is not None and not apply:
         raise Refuse("state-mismatch", "a merge-train marker is present; rerun with --apply")
     done = _guard("reconcile")(ctx, marker)
     if done is not None:
         return done
     view = _gh_view(ctx)
-    _guard("branch-match")(wt, ctx["branch"], view)
+    _guard("branch-match")(ctx["wt"], ctx["branch"], view)
     remote = _remote_head(ctx)
+    if remote is None:
+        raise Refuse("pr-head-moved", "the remote branch tip could not be read")
     if remote != ctx["head_oid"] or view.get("headRefOid") != ctx["head_oid"]:
         raise Refuse("pr-head-moved", "remote head %s, gh %s, listed %s" % (
             remote, view.get("headRefOid"), ctx["head_oid"]))
-    _guard("busy")(wt, git_dir, ctx["probe"], ctx["cmd_timeout"], False, ctx["scan"])
-    _guard("dirty")(wt)
-    old = _git_text(wt, "rev-parse", "HEAD")
+    old = ctx["head_oid"]
     ctx["old"] = old
-    if old != remote:
-        _git(wt, "fetch", "--no-tags", "--", ctx["remote"], "refs/heads/" + ctx["branch"], ok=None,
-             timeout=ctx["net_timeout"])
-        if _git(wt, "merge-base", "--is-ancestor", old, remote, ok=None)[0] == 0:
-            raise Refuse("worktree-behind", "local %s behind remote %s" % (old, remote))
-        if _git(wt, "merge-base", "--is-ancestor", remote, old, ok=None)[0] == 0:
-            raise Refuse("unpushed-commits", "local %s ahead of remote %s" % (old, remote))
-        raise Refuse("diverged", "local %s, remote %s" % (old, remote))
-    base = ctx["base_sha"]
-    if _git(wt, "merge-base", "--is-ancestor", base, old, ok=None)[0] == 0:
-        return dict(result="current", old_head=old, new_head=None, reason="")
-    if not apply:
-        return dict(result="would-merge", old_head=old, new_head=None,
-                    reason="dry run: would merge %s (rerun with --apply)" % base)
-    before = _snapshot(wt)
-    _write_marker(git_dir, dict(pr=ctx["pr"], branch=ctx["branch"], old=old, base_sha=base,
-                                phase="merging", new=None))
+    scratch, scratch_root = _scratch_checkout(ctx)
     try:
-        return _merge_commit_push(ctx, old, base)
-    except Refuse as refusal:
-        if refusal.status in ("push-unknown", "local-race"):
-            raise
-        if refusal.status not in ("push-rejected", "remote-changed"):
-            _guard("abort-on-refusal")(wt, git_dir, old)
-        diffs = _snapshot_diff(before, _snapshot(wt))
-        if diffs:
-            raise RestoreFailed("%s after %s: %s differ" % (ctx["branch"], refusal.status,
-                                                           ", ".join(diffs[:10])))
-        _remove_marker(git_dir)
-        raise
+        _git(scratch, "fetch", "--no-tags", "--", ctx["remote_url"],
+             "refs/heads/" + ctx["branch"], timeout=ctx["net_timeout"])
+        if _git_text(scratch, "rev-parse", "FETCH_HEAD^0") != old:
+            raise Refuse("pr-head-moved", "the remote head moved during the fetch")
+        if _git(scratch, "merge-base", "--is-ancestor", ctx["base_sha"], old, ok=None)[0] == 0:
+            return dict(result="current", old_head=old, new_head=None, reason="")
+        if not apply:
+            return dict(result="would-merge", old_head=old, new_head=None,
+                        reason="dry run: would merge %s (rerun with --apply)" % ctx["base_sha"])
+        _git(scratch, "checkout", "--quiet", "--detach", old, timeout=ctx["cmd_timeout"])
+        return _merge_commit_push(ctx, scratch, old, ctx["base_sha"])
+    finally:
+        shutil.rmtree(scratch_root, ignore_errors=True)
 
 
-def _merge_commit_push(ctx, old, base):
-    wt, git_dir, generated = ctx["wt"], ctx["git_dir"], ctx["generated"]
+def _merge_commit_push(ctx, scratch, old, base):
+    generated = ctx["generated"]
     ident = dict(GIT_AUTHOR_NAME=ctx["cfg"]["commit"]["name"],
                  GIT_AUTHOR_EMAIL=ctx["cfg"]["commit"]["email"],
                  GIT_COMMITTER_NAME=ctx["cfg"]["commit"]["name"],
                  GIT_COMMITTER_EMAIL=ctx["cfg"]["commit"]["email"])
-    _git(wt, "merge", "--no-commit", "--no-ff", "--no-edit", base, extra_env=ident, ok=None,
+    scratch_git = _git_text(scratch, "rev-parse", "--path-format=absolute", "--git-dir")
+    _git(scratch, "merge", "--no-commit", "--no-ff", "--no-edit", base, extra_env=ident, ok=None,
          timeout=ctx["cmd_timeout"])
-    if not os.path.lexists(os.path.join(git_dir, "MERGE_HEAD")):
+    if not os.path.lexists(os.path.join(scratch_git, "MERGE_HEAD")):
         raise Refuse("git-failed", "the merge did not start")
-    unmerged = _unmerged(wt)
+    unmerged = _unmerged(scratch)
     _guard("source-conflict")(unmerged, generated)
     for path in sorted(unmerged):
         if unmerged[path] != set((1, 2, 3)):
             raise Refuse("generated-delete-conflict", path)
     for path in sorted(unmerged):
-        _git(wt, "checkout", "--theirs", "--", path)
-        _git(wt, "add", "--", path)
-    _guard("generated-confined")(wt, generated)
-    automatic = _index_entries(wt)
+        _git(scratch, "checkout", "--theirs", "--", path)
+        _git(scratch, "add", "--", path)
+    _guard("generated-confined")(scratch, generated)
+    automatic = _index_entries(scratch)
     for command in ctx["cfg"]["generated"]["regenerate"]:
-        code, _out, err = _run_external(command, wt, ctx["cmd_timeout"],
+        code, _out, err = _run_external(command, scratch, ctx["cmd_timeout"],
                                         dict(PYTHONDONTWRITEBYTECODE="1"))
         _guard("regenerate-exit")(code, command, err)
-    _git(wt, "add", "-A", "--", *generated)
-    _run_checks(ctx)
-    _guard("fixpoint")(wt)
-    resolved = _index_entries(wt)
+    _git(scratch, "add", "-A", "--", *generated)
+    _run_checks(ctx, scratch)
+    _guard("fixpoint")(scratch)
+    resolved = _index_entries(scratch)
     hand = sorted(p for p in set(automatic) | set(resolved)
                   if automatic.get(p) != resolved.get(p) and p not in generated)
     if hand:
         raise Refuse("undeclared-write", "paths outside the generated set changed: %s" % (
             ", ".join(hand[:10])))
-    _guard("generated-bytes")(wt, generated, resolved)
-    merge_base = _git_text(wt, "merge-base", old, base)
-    ctx["review_carry"] = (_changed_lines(wt, merge_base, old, generated)
-                           == _changed_lines(wt, base, None, generated))
+    merge_base = _git_text(scratch, "merge-base", old, base)
+    ctx["review_carry"] = (_changed_lines(scratch, merge_base, old, generated)
+                           == _changed_lines(scratch, base, None, generated))
     ctx["regenerated"] = [p for p in sorted(generated) if p in resolved]
-    validated_tree = _git_text(wt, "write-tree")
+    validated_tree = _git_text(scratch, "write-tree")
+    _guard("pushed-bytes")(scratch, validated_tree)
     view = _gh_view(ctx)
-    _guard("busy")(wt, git_dir, ctx["probe"], ctx["cmd_timeout"], True, ctx["scan"])
-    _guard("branch-match")(wt, ctx["branch"], view)
+    _guard("branch-match")(ctx["wt"], ctx["branch"], view)
     title = "Merge %s/%s into %s (merge-train)" % (ctx["remote"], ctx["base"], ctx["branch"])
-    code, _out, err = _git(wt, "commit", "--no-edit", "-m", title, "-m",
-                           "Merge-train: base=%s" % base, extra_env=ident, ok=None,
-                           timeout=ctx["cmd_timeout"])
-    if code != 0:
-        raise Refuse("hook-failed", err.strip()[:300])
-    new = _git_text(wt, "rev-parse", "HEAD")
-    _guard("commit-tree")(wt, new, validated_tree)
-    _write_marker(git_dir, dict(pr=ctx["pr"], branch=ctx["branch"], old=old, base_sha=base,
-                                phase="committed", new=new, tree=validated_tree))
-    view = _gh_view(ctx)
-    _guard("branch-match")(wt, ctx["branch"], view)
-    return _push_and_observe(ctx, old, new)
+    new = _git_text(scratch, "commit-tree", validated_tree, "-p", old, "-p", base,
+                    "-m", title, "-m", "Merge-train: base=%s" % base, extra_env=ident,
+                    timeout=ctx["cmd_timeout"])
+    _guard("commit-tree")(scratch, new, validated_tree)
+    _guard("commit-parents")(scratch, old, new)
+    _write_marker(ctx["git_dir"], dict(pr=ctx["pr"], branch=ctx["branch"], old=old, new=new))
+    return _push_and_observe(ctx, scratch, old, new)
 
 
-def run_train(root, apply=False, only=None, scan=None):
-    """The whole run under the global lock. Returns (exit code, reports, fatal message or None).
-    scan is the busy check's process scan (see guard_busy); None, as in real use, is the live host
-    scan. The self-test injects a fixture scan."""
+def run_train(root, apply=False, only=None):
+    """The whole run under the global lock. Returns (exit code, reports, fatal message or None)."""
     reports = []
     try:
         top = _git_text(root, "rev-parse", "--show-toplevel")
@@ -936,10 +862,10 @@ def run_train(root, apply=False, only=None, scan=None):
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             return 2, reports, "another merge train holds %s" % LOCK_NAME
-        return _run_locked(Path(top), apply, only or set(), reports, scan)
+        return _run_locked(Path(top), apply, only or set(), reports)
 
 
-def _run_locked(root, apply, only, reports, scan=None):
+def _run_locked(root, apply, only, reports):
     # The config lives on the base tip, so v1 fetches the conventional origin/main once, pins M, and
     # requires the config to name that same remote and base.
     remote, base = "origin", "main"
@@ -957,6 +883,7 @@ def _run_locked(root, apply, only, reports, scan=None):
         limits = cfg.get("limits", dict())
         net_timeout = limits.get("network_timeout_seconds", 120)
         cmd_timeout = limits.get("command_timeout_seconds", 900)
+        remote_url = _git_text(root, "remote", "get-url", remote)
         prs = _gh_json(["gh", "pr", "list", "--state", "open", "--base", base, "--json",
                         "number,headRefName,headRefOid,isCrossRepository,baseRefName",
                         "--limit", str(PR_LIST_LIMIT)], root, net_timeout)
@@ -985,8 +912,9 @@ def _run_locked(root, apply, only, reports, scan=None):
         report = dict(schema=SCHEMA, pr=pr["number"], branch=branch, worktree=None, base=base_sha,
                       old_head=None, new_head=None, result=None, reason="", regenerated=[],
                       hand_resolution=False, review_carry=None)
-        ctx = dict(old=None, review_carry=None, regenerated=[], scan=scan)
+        ctx = dict(old=None, review_carry=None, regenerated=[])
         try:
+            _guard("branch-name")(root, branch)
             if len(names[branch]) > 1:
                 raise Refuse("ambiguous-pr", "PRs %s share the branch" % names[branch])
             if pr.get("isCrossRepository") is not False:
@@ -1001,19 +929,13 @@ def _run_locked(root, apply, only, reports, scan=None):
             wt = matches[0]["path"]
             report["worktree"] = wt
             ctx.update(root=root, wt=wt, pr=pr["number"], branch=branch, head_oid=pr["headRefOid"],
-                       remote=remote, base=base, base_sha=base_sha, cfg=cfg, generated=generated,
-                       probe=cfg.get("busy", dict()).get("probe", []), cmd_timeout=cmd_timeout,
-                       net_timeout=net_timeout,
+                       remote=remote, remote_url=remote_url, base=base, base_sha=base_sha, cfg=cfg,
+                       generated=generated, cmd_timeout=cmd_timeout, net_timeout=net_timeout,
                        git_dir=_git_text(wt, "rev-parse", "--path-format=absolute", "--git-dir"))
             report.update(_process_pr(ctx, apply))
         except Refuse as refusal:
             report["result"], report["reason"] = refusal.status, refusal.reason
             report["old_head"] = ctx["old"]
-        except RestoreFailed as exc:
-            report["result"], report["reason"] = "restore-failed", str(exc)
-            report["old_head"] = ctx["old"]
-            reports.append(report)
-            return 3, reports, "restore-failed: %s" % exc
         report["review_carry"] = ctx["review_carry"]
         report["regenerated"] = ctx["regenerated"]
         if report["result"] not in OK_RESULTS:
@@ -1062,8 +984,6 @@ def main(argv=None):
         print("%s merge-train: %s" % (_now(), fatal), file=sys.stderr)
     return rc
 
-
-# ---------------------------------------------------------------- self-test
 
 SUITE_ID = "merge-train-selftest"
 CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"
@@ -1181,30 +1101,47 @@ ZERO = "0" * 40
 
 def _audit_violation(args):
     """The self-test's own forbidden-operation predicate, written apart from _forbidden so that a
-    weakened funnel cannot also blind the audit: no force, mirror, delete or + push refspec, no
-    lease other than the one exact-value refs/heads compare-and-set form, no push to the base, no
-    rebase, cherry-pick, stash, clean, gc, worktree prune, reset --hard or any reset other than
-    reset --keep."""
+    weakened funnel cannot also blind the audit; the two must AGREE on every argv: no rebase,
+    cherry-pick, stash, clean, gc, worktree prune or reset of ANY kind; for push, no force, delete,
+    mirror, all or prune option in long, abbreviated or bundled short form (-uf, -fu), no lease
+    other than the one exact-value refs/heads compare-and-set form (40- or 64-hex), and no refspec
+    other than a plain name or the exact <hex>:refs/heads/<branch> form away from the base (no +
+    force spec, no :delete spec, no src:dst alias). The first non-option word is the repository."""
     words = list(args)
-    if words[:1] in (["rebase"], ["cherry-pick"], ["stash"], ["clean"], ["gc"], ["prune"]):
+    if words[:1] in (["rebase"], ["cherry-pick"], ["stash"], ["clean"], ["gc"], ["prune"],
+                     ["reset"]):
         return True
     if words[:2] == ["worktree", "prune"]:
         return True
-    if words[:1] == ["reset"] and ("--hard" in words or "--keep" not in words):
-        return True
-    if words[:1] == ["push"]:
-        flags = [w for w in words[1:] if w.startswith("-")]
-        specs = [w for w in words[1:] if not w.startswith("-")]
-        exact_lease = re.compile(
-            r"\A--force-with-lease=refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]*:[0-9a-f]{40}\Z")
-        for w in flags:
-            if w in ("-f", "-d"):
+    if words[:1] != ["push"]:
+        return False
+    lease = re.compile(r"\A--force-with-lease=refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]*:"
+                       r"[0-9a-f]{40}([0-9a-f]{24})?\Z")
+    spec = re.compile(r"\A[0-9a-f]{40}([0-9a-f]{24})?:refs/heads/[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
+    specs_only, repo_seen = False, False
+    for w in words[1:]:
+        if w == "--" and not specs_only:
+            specs_only = True
+            continue
+        if not specs_only and w.startswith("-"):
+            if not w.startswith("--"):
+                if any(c in "fd" for c in w[1:]):
+                    return True
+                continue
+            if lease.match(w):
+                continue
+            stem = w.split("=", 1)[0]
+            for banned in ("--force", "--force-with-lease", "--force-if-includes", "--delete",
+                           "--mirror", "--all", "--prune"):
+                if len(stem) > 2 and (banned.startswith(stem) or stem.startswith(banned)):
+                    return True
+            continue
+        if not repo_seen:
+            repo_seen = True
+            continue
+        if w.startswith("+") or ":" in w:
+            if not spec.match(w) or w.endswith(":refs/heads/main"):
                 return True
-            if w.startswith(("--force", "--mirror", "--delete", "--all", "--prune")) \
-                    and not exact_lease.match(w):
-                return True
-        if any(w.startswith(("+", ":")) or w.endswith(":refs/heads/main") for w in specs):
-            return True
     return False
 
 
@@ -1227,9 +1164,6 @@ class Fixture:
         self.prs = []
         self.runs = 0
         self.violations = []
-        # The busy check's process scan for this fixture's runs: no users unless a case says
-        # otherwise, so no verdict depends on the host process table.
-        self.scan = _no_users
         self.gone = self.base / "gone.git"
         gh = self.bin / "gh"
         gh.write_text("#!%s\n%s" % (sys.executable, FAKE_GH), encoding="utf-8")
@@ -1275,7 +1209,7 @@ class Fixture:
         for rel, text in files.items():
             self.write(path, rel, text)
         head = self.commit(path, "pr %d" % number)
-        _git(path, "push", "-q", "origin", "%s:refs/heads/%s" % (branch, branch))
+        _git(path, "push", "-q", "origin", "%s:refs/heads/%s" % (head, branch))
         if detach:
             _git(path, "checkout", "-q", "--detach")
         self.prs.append(dict(number=number, headRefName=branch, headRefOid=head,
@@ -1303,7 +1237,7 @@ class Fixture:
         logged = len(self.log_rows())
         audit = len(GIT_AUDIT)
         try:
-            return run_train(self.main, apply, only, scan=self.scan)
+            return run_train(self.main, apply, only)
         finally:
             attempted = GIT_AUDIT[audit:]
             self.runs += 1
@@ -1372,41 +1306,6 @@ class Fixture:
 def _result(reports, number):
     rows = [r for r in reports if r["pr"] == number]
     return rows[0]["result"] if rows else None
-
-
-def _no_users(_wt):
-    """The fixture process scan: no process uses the worktree."""
-    return []
-
-
-# Fake pids for the scan fixtures: above any Linux pid_max (4194304), so never this process's pid.
-FAKE_PID, FAKE_ANCESTOR = 900000001, 900000002
-HOST_SCAN_CALLS = []
-
-
-def _host_scan_stub(wt):
-    """Replaces _host_scan for the whole self-test: records the call and raises PermissionError,
-    the error an unreadable live /proc entry raises. Every case passing with it in place, and
-    hermetic/host-scan-unused, prove that no verdict depends on the host process table."""
-    HOST_SCAN_CALLS.append(wt)
-    raise PermissionError(errno.EACCES, "the self-test reached the host process scan", wt)
-
-
-def _fake_proc(root, entries):
-    """A fake process table under scratch root: root/self, and per pid a directory holding stat
-    (the parent pid as field 4), a cwd symlink (absent when cwd is None, as for a process that exits
-    mid-scan) and a NUL-separated cmdline. entries maps pid -> (cwd, argv, parent pid)."""
-    root = Path(root)
-    (root / "self").mkdir(parents=True)
-    for pid, (cwd, argv, ppid) in entries.items():
-        base = root / str(pid)
-        base.mkdir()
-        (base / "stat").write_text("%d (%s) S %d 0 0\n" % (pid, os.path.basename(argv[0]), ppid),
-                                   encoding="utf-8")
-        if cwd is not None:
-            os.symlink(str(cwd), str(base / "cwd"))
-        (base / "cmdline").write_bytes(b"".join(a.encode("utf-8") + b"\0" for a in argv))
-    return str(root)
 
 
 def _fixture(tmp, name, probe="[]"):
@@ -1520,21 +1419,25 @@ def case_happy(tmp):
     wt = _stale_pr(fx)
     old = fx.remote_ref("feat/x")
     base = fx.remote_ref("main")
+    before = _snapshot(wt)
     del GIT_AUDIT[:]
     rc, reports, _fatal = fx.run(apply=True)
     report = reports[0] if reports else dict()
     new = fx.remote_ref("feat/x")
     check("apply/pushed", (rc, report.get("result"), report.get("new_head")), (0, "pushed", new))
-    parents = _git_text(wt, "rev-list", "--parents", "-n", "1", new).split()[1:]
+    parents = _git_text(fx.remote, "rev-list", "--parents", "-n", "1", new).split()[1:]
     check("apply/parents-old-then-base", parents, [old, base])
-    fields = _git_text(wt, "log", "-1", "--format=%an <%ae>|%cn <%ce>|%B", new).split("|")
+    fields = _git_text(fx.remote, "log", "-1", "--format=%an <%ae>|%cn <%ce>|%B", new).split("|")
     check("apply/config-identity-no-ai-trailer",
           (fields[0], fields[1], "Co-Authored-By" in fields[2],
            ("Merge-train: base=" + base) in fields[2]),
           ("Train Maintainer <train@example.invalid>", "Train Maintainer <train@example.invalid>",
            False, True))
+    fresh = Path(tmp) / "happy-fresh"
+    _git(fx.base, "clone", "--quiet", "--no-local", str(fx.remote), str(fresh))
+    _git(fresh, "checkout", "--quiet", "feat/x")
     check("apply/generated-fresh",
-          subprocess.run([sys.executable, "-I", "-B", "tools/gen.py", "--check"], cwd=str(wt),
+          subprocess.run([sys.executable, "-I", "-B", "tools/gen.py", "--check"], cwd=str(fresh),
                          env=_clean_env(), timeout=60).returncode, 0)
     check("apply/report-fields",
           (sorted(report), report.get("schema"), report.get("regenerated"),
@@ -1551,7 +1454,12 @@ def case_happy(tmp):
     check("apply/push-leased-to-validated-head",
           (len(tool_pushes), all(("--force-with-lease=refs/heads/feat/x:" + old) in a
                                  for a in tool_pushes)), (1, True))
-    check("apply/marker-removed", os.path.exists(os.path.join(_git_dir(wt), MARKER_NAME)), False)
+    check("apply/marker-removed", _has_marker(wt), False)
+    check("apply/author-worktree-untouched",
+          (_snapshot_diff(before, _snapshot(wt)), _git_text(wt, "rev-parse", "HEAD")), ([], old))
+    check("apply/local-branch-not-fast-forwarded",
+          _git_text(fx.main, "rev-parse", "refs/heads/feat/x"), old)
+    check("apply/scratch-removed", [p for p in SCRATCHES if os.path.exists(p)], [])
     fx.prs[0]["headRefOid"] = new
     fx.set_gh()
     rc2, reports2, _fatal = fx.run(apply=True)
@@ -1637,49 +1545,91 @@ def case_branch(tmp):
     check("discover/branch-invariants", _invariants(fx), [])
 
 
-def case_busy(tmp):
-    # The process using the worktree is an entry of a fake table whose cwd is the worktree, scanned
-    # by the real _process_users; the host process table is never read.
-    fx = _fixture(tmp, "busy")
-    wt = _stale_pr(fx)
-    table = _fake_proc(Path(tmp) / "busy-proc", dict([(FAKE_PID, (wt, ["/bin/sleep", "30"], 1))]))
-    fx.scan = lambda path: _process_users(path, table)
-    try:
-        rc, reports, _fatal = fx.run(apply=True)
-    finally:
-        fx.scan = _no_users
-    check("refuse/busy-process", (rc, _result(reports, 1), fx.pushes()), (1, "busy", []))
-    lock = os.path.join(_git_dir(wt), "index.lock")
-    Path(lock).write_text("", encoding="utf-8")
-    try:
-        rc, reports, _fatal = fx.run(apply=True)
-    finally:
-        os.unlink(lock)
-    check("refuse/busy-index-lock", _result(reports, 1), "busy")
-    probe = json.dumps([sys.executable, "-c", "import sys; sys.exit(1)"])
-    fx2 = _fixture(tmp, "probe", probe=probe)
-    _stale_pr(fx2)
-    rc, reports, _fatal = fx2.run(apply=True)
-    check("refuse/busy-probe", _result(reports, 1), "busy")
-    check("refuse/busy-invariants", _invariants(fx, fx2), [])
+def case_badname(tmp):
+    # Git accepts + and @ in branch names; the lease cannot express them, so the run must refuse
+    # with a named status BEFORE any work: no clone, merge, commit or push is attempted.
+    fx = _fixture(tmp, "badname")
+    trees = []
+    for branch in ("feat/x+plus", "feat/x@at"):
+        number = len(fx.prs) + 1
+        path = fx.base / ("wt-%d" % number)
+        _git(fx.main, "worktree", "add", "-q", "-b", branch, str(path), "main")
+        fx.write(path, "src/extra-%d.txt" % number, "payload\n")
+        head = fx.commit(path, "pr %d" % number)
+        _git(fx.remote, "fetch", "--no-tags", str(fx.main),
+             "refs/heads/%s:refs/heads/%s" % (branch, branch))
+        fx.prs.append(dict(number=number, headRefName=branch, headRefOid=head,
+                           isCrossRepository=False, baseRefName="main"))
+        trees.append(path)
+    fx.set_gh()
+    fx.advance_main(dict([("src/c.txt", "charlie\n")]))
+    befores = [_snapshot(p) for p in trees]
+    audit = len(GIT_AUDIT)
+    rc, reports, _fatal = fx.run(apply=True)
+    worked = [a for a in GIT_AUDIT[audit:] if a[:1] in (
+        ["clone"], ["merge"], ["commit-tree"], ["push"], ["checkout"], ["add"], ["write-tree"])]
+    check("refuse/bad-branch-name-plus", (rc, _result(reports, 1)), (1, "bad-branch-name"))
+    check("refuse/bad-branch-name-at", _result(reports, 2), "bad-branch-name")
+    check("refuse/bad-branch-name-before-any-work",
+          (worked, fx.pushes(), [_snapshot_diff(b, _snapshot(p)) for b, p in zip(befores, trees)],
+           [_has_marker(p) for p in trees]),
+          ([], [], [[], []], [False, False]))
+    check("refuse/bad-branch-name-invariants", _invariants(fx), [])
 
 
-def case_dirty(tmp):
-    fx = _fixture(tmp, "dirty")
-    wt = _stale_pr(fx)
-    fx.write(wt, "src/new.txt", "n\n")
-    before = _snapshot(wt)
-    rc, reports, _fatal = fx.run(apply=True)
-    check("refuse/dirty-untracked", (rc, _result(reports, 1), _snapshot_diff(before, _snapshot(wt))),
-          (1, "dirty", []))
-    os.unlink(os.path.join(str(wt), "src", "new.txt"))
-    fx.write(wt, "src/b.txt", "changed\n")
-    rc, reports, _fatal = fx.run(apply=True)
-    check("refuse/dirty-modified", _result(reports, 1), "dirty")
-    _git(wt, "add", "src/b.txt")
-    rc, reports, _fatal = fx.run(apply=True)
-    check("refuse/dirty-staged", _result(reports, 1), "dirty")
-    check("refuse/dirty-invariants", _invariants(fx), [])
+def case_audit(_tmp):
+    # Pure predicate checks over forbidden and allowed push argv forms: no tool run, no git call.
+    # Both predicates must refuse every forbidden form and accept the one lease shape, and they
+    # must AGREE on every probe.
+    def verdict(args):
+        return (_forbidden(args), _audit_violation(args))
+
+    both = (True, True)
+    neither = (False, False)
+    l40 = "--force-with-lease=refs/heads/feat/x:" + "6" * 40
+    l64 = "--force-with-lease=refs/heads/feat/x:" + "6" * 64
+    probes = []
+
+    def probed(args):
+        probes.append(list(args))
+        return verdict(args)
+
+    check("audit/push-f", probed(["push", "-f", "origin", "x"]), both)
+    check("audit/push-bundled-uf", probed(["push", "-uf", "origin", "x"]), both)
+    check("audit/push-bundled-fu", probed(["push", "-fu", "origin", "x"]), both)
+    check("audit/push-d", probed(["push", "-d", "origin", "x"]), both)
+    check("audit/push-delete", probed(["push", "--delete", "origin", "x"]), both)
+    check("audit/push-delete-abbrev", probed(["push", "--dele", "origin", "x"]), both)
+    check("audit/push-mirror", probed(["push", "--mirror", "origin"]), both)
+    check("audit/push-mirror-abbrev", probed(["push", "--mirr", "origin"]), both)
+    check("audit/push-all", probed(["push", "--all", "origin"]), both)
+    check("audit/push-prune", probed(["push", "--prune", "origin", "x"]), both)
+    check("audit/push-force-bare", probed(["push", "--force", "origin", "x"]), both)
+    check("audit/push-force-abbrev", probed(["push", "--forc", "origin", "x"]), both)
+    check("audit/push-force-if-includes",
+          probed(["push", "--force-if-includes", l40, "origin", "x"]), both)
+    check("audit/push-lease-bare", probed(["push", "--force-with-lease", "origin", "x"]), both)
+    check("audit/push-lease-short-sha",
+          probed(["push", "--force-with-lease=refs/heads/feat/x:6666", "origin", "x"]), both)
+    check("audit/push-lease-plus-branch",
+          probed(["push", "--force-with-lease=refs/heads/feat/x+y:" + "6" * 40, "origin", "x"]),
+          both)
+    check("audit/push-plus-refspec",
+          probed(["push", "--", "origin", "+feat/x:refs/heads/feat/x"]), both)
+    check("audit/push-colon-refspec", probed(["push", "--", "origin", ":refs/heads/feat/x"]), both)
+    check("audit/push-src-other-refspec",
+          probed(["push", "--", "origin", "feat/x:refs/heads/other"]), both)
+    check("audit/push-to-base-refspec",
+          probed(["push", "--", "origin", ("6" * 40) + ":refs/heads/main"]), both)
+    check("audit/reset-refused", probed(["reset", "--keep", "6" * 40]), both)
+    check("audit/lease-40-allowed",
+          probed(["push", "--porcelain", "--no-follow-tags", l40, "--", "origin",
+                  ("6" * 40) + ":refs/heads/feat/x"]), neither)
+    check("audit/lease-64-allowed",
+          probed(["push", "--porcelain", "--no-follow-tags", l64, "--", "origin",
+                  ("6" * 64) + ":refs/heads/feat/x"]), neither)
+    check("audit/predicates-agree",
+          [a for a in probes if _forbidden(a) != _audit_violation(a)], [])
 
 
 def case_conflict(tmp):
@@ -1725,20 +1675,19 @@ def _refusal_run(tmp, name, env_key=None, failing_check=False, seen=None):
 
 
 def case_regen(tmp):
+    # Every generator fault happens in the PRIVATE checkout: the refusal is exit 1 and the author's
+    # worktree is untouched by construction; there is no restore-failed state left to reach.
     seen = []
-    rc, result, _reason, restored = _refusal_run(tmp, "regen-fail", "TOY_FAIL", seen=seen)
-    check("refuse/regenerate-failed", (rc, result, restored), (1, "regenerate-failed", ([], [])))
-    rc, result, _reason, restored = _refusal_run(tmp, "check-fail", failing_check=True, seen=seen)
-    check("refuse/check-failed", (rc, result, restored), (1, "check-failed", ([], [])))
-    # A regenerator that edits a tracked file outside the generated set cannot be undone by merge
-    # --abort, and the tool never resets or deletes, so the honest end state is restore-failed.
-    rc, result, reason, restored = _refusal_run(tmp, "not-fixpoint", "TOY_DRIFT", seen=seen)
-    check("refuse/regenerate-not-fixpoint", (rc, result, "regenerate-not-fixpoint" in reason,
-                                             restored[1]),
-          (3, "restore-failed", True, []))
-    rc, result, reason, restored = _refusal_run(tmp, "litter", "TOY_LITTER", seen=seen)
-    check("refuse/undeclared-write-restore-failed",
-          (rc, result, "undeclared-write" in reason, restored[1]), (3, "restore-failed", True, []))
+    rc, result, _reason, untouched = _refusal_run(tmp, "regen-fail", "TOY_FAIL", seen=seen)
+    check("refuse/regenerate-failed", (rc, result, untouched), (1, "regenerate-failed", ([], [])))
+    rc, result, _reason, untouched = _refusal_run(tmp, "check-fail", failing_check=True, seen=seen)
+    check("refuse/check-failed", (rc, result, untouched), (1, "check-failed", ([], [])))
+    rc, result, _reason, untouched = _refusal_run(tmp, "not-fixpoint", "TOY_DRIFT", seen=seen)
+    check("refuse/regenerate-not-fixpoint", (rc, result, untouched),
+          (1, "regenerate-not-fixpoint", ([], [])))
+    rc, result, _reason, untouched = _refusal_run(tmp, "litter", "TOY_LITTER", seen=seen)
+    check("refuse/undeclared-write", (rc, result, untouched), (1, "undeclared-write", ([], [])))
+    check("refuse/scratch-removed", [p for p in SCRATCHES if os.path.exists(p)], [])
     check("refuse/regenerate-invariants", _invariants(*seen), [])
 
 
@@ -1772,8 +1721,9 @@ def case_idem(tmp):
     def kill(*_args):
         raise KeyboardInterrupt("simulated kill after the commit")
 
-    def push_then_kill(ctx, _old, new):
-        _git(ctx["wt"], "push", "-q", "--", ctx["remote"], "%s:refs/heads/%s" % (new, ctx["branch"]))
+    def push_then_kill(ctx, scratch, _old, new):
+        _git(scratch, "push", "-q", "--", ctx["remote_url"],
+             "%s:refs/heads/%s" % (new, ctx["branch"]))
         raise KeyboardInterrupt("simulated kill after the push")
 
     def kill_in_merge(*_args):
@@ -1808,16 +1758,18 @@ def case_idem(tmp):
     rc, reports, _fatal = fx.run(apply=True)
     check("idem/kill-mid-merge-restarts", (rc, _result(reports, 1), len(fx.pushes())),
           (0, "pushed", 1))
-    fx = _fixture(tmp, "foreign-merge")
+    # An author's own in-progress merge lives in the author's worktree, which the tool never
+    # touches or even inspects for state: the run proceeds in its private checkout and the
+    # author's half-done merge survives byte-identically.
+    fx = _fixture(tmp, "author-merge")
     seen.append(fx)
     wt = _stale_pr(fx)
     _git(wt, "merge", "--no-commit", "--no-ff", fx.remote_ref("main"), ok=None,
          extra_env=FIXTURE_IDENT)
     before = _snapshot(wt)
     rc, reports, _fatal = fx.run(apply=True)
-    check("idem/foreign-merge-left-alone",
-          (_result(reports, 1), _snapshot_diff(before, _snapshot(wt))),
-          ("in-progress-operation", []))
+    check("idem/author-merge-in-progress-ignored",
+          (rc, _result(reports, 1), _snapshot_diff(before, _snapshot(wt))), (0, "pushed", []))
     check("idem/invariants", _invariants(*seen), [])
 
 
@@ -1834,7 +1786,7 @@ def case_remote_changed(tmp):
     # The third gh view (the re-check after the commit, just before the push) moves the PR branch
     # forward as a concurrent pusher would, so the exact-value lease no longer holds and the
     # remote refuses the push.
-    fx.set_gh(move_on_view=dict([("1", dict(call=3, remote=str(fx.remote), ref="refs/heads/feat/x",
+    fx.set_gh(move_on_view=dict([("1", dict(call=2, remote=str(fx.remote), ref="refs/heads/feat/x",
                                             old=old, new=other))]))
     before, pushed = _snapshot(wt), fx.pushes()
     rc, reports, _fatal = fx.run(apply=True)
@@ -1851,16 +1803,16 @@ def case_push_unknown(tmp):
     wt = _stale_pr(fx)
     old = fx.remote_ref("feat/x")
     # The post-receive hook points the checkout's origin at a missing path once the push has
-    # landed, so the observer's ls-remote cannot read the remote.
+    # landed, so the observer's ls-remote cannot read the remote: indeterminate, marker kept,
+    # nothing changed anywhere.
     (fx.base / "unreadable-after-push").write_text("", encoding="utf-8")
+    before = _snapshot(wt)
     rc, reports, _fatal = fx.run(apply=True)
-    head = _git_text(wt, "rev-parse", "HEAD")
     marker = _read_marker(_git_dir(wt)) or dict()
-    status = _git(wt, "status", "--porcelain=v2", "-z", "--untracked-files=all")[1]
-    check("push/unknown-keeps-commit-and-marker",
-          (rc, _result(reports, 1), head != old, marker.get("phase"), marker.get("new") == head,
-           status, fx.remote_ref("feat/x") == head, len(fx.pushes())),
-          (1, "push-unknown", True, "committed", True, b"", True, 1))
+    check("push/unknown-keeps-marker-changes-nothing",
+          (rc, _result(reports, 1), _snapshot_diff(before, _snapshot(wt)),
+           marker.get("new") == fx.remote_ref("feat/x"), marker.get("old"), len(fx.pushes())),
+          (1, "push-unknown", [], True, old, 1))
     _git(fx.main, "config", "remote.origin.url", str(fx.remote))
     rc, reports, _fatal = fx.run(apply=True)
     check("push/unknown-rerun-already-pushed",
@@ -1869,30 +1821,12 @@ def case_push_unknown(tmp):
     check("push/unknown-invariants", _invariants(fx), [])
 
 
-def case_hook_failed(tmp):
-    fx = _fixture(tmp, "hook-failed")
-    wt = _stale_pr(fx)
-    old = fx.remote_ref("feat/x")
-    hook = fx.main / ".git" / "hooks" / "pre-commit"
-    hook.write_text("#!/bin/sh\necho 'fixture pre-commit refuses' >&2\nexit 1\n", encoding="utf-8")
-    hook.chmod(0o755)
-    before, pushed = _snapshot(wt), fx.pushes()
-    rc, reports, _fatal = fx.run(apply=True)
-    check("refuse/hook-failed",
-          (rc, _result(reports, 1), "fixture pre-commit refuses" in _reason(reports, 1)),
-          (1, "hook-failed", True))
-    check("refuse/hook-failed-restored",
-          (_snapshot_diff(before, _snapshot(wt)), fx.remote_ref("feat/x"), fx.pushes() == pushed,
-           _has_marker(wt)), ([], old, True, False))
-    check("refuse/hook-failed-invariants", _invariants(fx), [])
-
-
 def case_generated_delete(tmp):
     fx = _fixture(tmp, "generated-delete")
     wt = fx.add_pr(1, "feat/x", dict([("src/b.txt", "bravo\n")]))
     _git(wt, "rm", "-q", "--", "gen/digest.txt")
     _git(wt, "commit", "-q", "-m", "pr drops the generated file", extra_env=FIXTURE_IDENT)
-    _git(wt, "push", "-q", "origin", "feat/x:refs/heads/feat/x")
+    _git(wt, "push", "-q", "origin", "%s:refs/heads/feat/x" % _git_text(wt, "rev-parse", "HEAD"))
     fx.prs[0]["headRefOid"] = old = _git_text(wt, "rev-parse", "HEAD")
     fx.set_gh()
     fx.advance_main(dict([("src/c.txt", "charlie\n")]))
@@ -1907,121 +1841,85 @@ def case_generated_delete(tmp):
     check("refuse/generated-delete-conflict-invariants", _invariants(fx), [])
 
 
-def case_busy_unknown(tmp):
-    # The fixture scan reports the table unreadable; case_scan proves _process_users returns None
-    # for an unreadable table and for an access error on a same-uid entry.
-    fx = _fixture(tmp, "busy-unknown")
+def case_author(tmp):
+    # The core promise of D-390-PRIVATE-WORKTREE: an author commit, a staged edit, an unstaged
+    # edit, an untracked file and an ignored file in the author's worktree survive a pushing run
+    # byte-identically (snapshot: worktree, index, refs, ignored contents), present through EVERY
+    # phase because they exist before the run starts; the local branch is never fast-forwarded.
+    fx = _fixture(tmp, "author")
     wt = _stale_pr(fx)
     old = fx.remote_ref("feat/x")
-    before, pushed = _snapshot(wt), fx.pushes()
-    fx.scan = lambda _wt: None
+    fx.write(wt, "ignored/valuable", "KEEP\n")
+    fx.write(wt, "untracked.txt", "author untracked\n")
+    fx.write(wt, "staged.txt", "author staged\n")
+    _git(wt, "add", "--", "staged.txt")
+    fx.write(wt, "src/b.txt", "author unstaged edit\n")
+    before = _snapshot(wt)
     rc, reports, _fatal = fx.run(apply=True)
-    check("refuse/busy-unknown", (rc, _result(reports, 1)), (1, "busy-unknown"))
-    check("refuse/busy-unknown-untouched",
-          (_snapshot_diff(before, _snapshot(wt)), fx.remote_ref("feat/x"), fx.pushes() == pushed,
-           _has_marker(wt)), ([], old, True, False))
-    check("refuse/busy-unknown-invariants", _invariants(fx), [])
+    new = fx.remote_ref("feat/x")
+    check("author/dirty-worktree-untouched-and-pushed",
+          (rc, _result(reports, 1), _snapshot_diff(before, _snapshot(wt)), new != old),
+          (0, "pushed", [], True))
+    check("author/local-branch-not-advanced",
+          (_git_text(wt, "rev-parse", "HEAD"),
+           _git_text(fx.main, "rev-parse", "refs/heads/feat/x")), (old, old))
+    # An author commit injected DURING the run, at the start-of-run gh view and at the pre-push gh
+    # view: the run still pushes, and the commit stays the local branch tip, never rewound.
+    fx2 = _fixture(tmp, "author-start")
+    wt2 = _stale_pr(fx2)
+    fx2.set_gh(commit_on_view=dict([("1", dict(call=1, worktree=str(wt2),
+                                               file="author-start.txt"))]))
+    rc, reports, _fatal = fx2.run(apply=True)
+    check("author/mid-run-commit-at-start-kept",
+          (rc, _result(reports, 1), _git_text(wt2, "log", "-1", "--format=%s"),
+           os.path.exists(os.path.join(str(wt2), "author-start.txt"))),
+          (0, "pushed", "author race", True))
+    fx3 = _fixture(tmp, "author-prepush")
+    wt3 = _stale_pr(fx3)
+    fx3.set_gh(commit_on_view=dict([("1", dict(call=2, worktree=str(wt3),
+                                               file="author-prepush.txt"))]))
+    rc, reports, _fatal = fx3.run(apply=True)
+    check("author/mid-run-commit-pre-push-kept",
+          (rc, _result(reports, 1), _git_text(wt3, "log", "-1", "--format=%s"),
+           os.path.exists(os.path.join(str(wt3), "author-prepush.txt"))),
+          (0, "pushed", "author race", True))
+    check("author/invariants", _invariants(fx, fx2, fx3), [])
 
 
-def case_resume(tmp):
-    # Recovery of an interrupted merge: busy is checked FIRST, and nothing the recorded merge
-    # could not have created is ever discarded.
-    def kill_in_fixpoint(*_args):
-        raise KeyboardInterrupt("simulated kill at the fixpoint guard")
-
-    fx = _fixture(tmp, "resume-merging")
+def case_observer(tmp):
+    # The observer's ls-remote times out AFTER the push was delivered: indeterminate, the marker is
+    # kept, nothing local changes, and the rerun reconciles to already-pushed.
+    fx = _fixture(tmp, "observer")
     wt = _stale_pr(fx)
-    saved = GUARDS["fixpoint"]
-    GUARDS["fixpoint"] = kill_in_fixpoint
-    try:
-        fx.run(apply=True)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        GUARDS["fixpoint"] = saved
-    git_dir = _git_dir(wt)
-    fx.write(wt, "author-staged.txt", "precious\n")
-    _git(wt, "add", "--", "author-staged.txt")
-    table = _fake_proc(Path(tmp) / "resume-proc", dict([(FAKE_PID, (wt, ["/bin/sleep", "30"], 1))]))
-    fx.scan = lambda path: _process_users(path, table)
+    old = fx.remote_ref("feat/x")
+    before = _snapshot(wt)
+    real_run = subprocess.run
+    state = dict(pushed=False)
+
+    def hostile_run(argv, **kwargs):
+        if "push" in argv and "--porcelain" in argv:
+            state["pushed"] = True
+            return real_run(argv, **kwargs)
+        if state["pushed"] and "ls-remote" in argv:
+            raise subprocess.TimeoutExpired(argv, kwargs.get("timeout") or 1)
+        return real_run(argv, **kwargs)
+
+    subprocess.run = hostile_run
     try:
         rc, reports, _fatal = fx.run(apply=True)
     finally:
-        fx.scan = _no_users
-    check("resume/busy-before-recovery",
-          (rc, _result(reports, 1), os.path.exists(os.path.join(str(wt), "author-staged.txt")),
-           os.path.lexists(os.path.join(git_dir, "MERGE_HEAD")), _has_marker(wt)),
-          (1, "busy", True, True, True))
-    rc, reports, _fatal = fx.run(apply=True)
-    check("resume/author-work-never-discarded",
-          (rc, _result(reports, 1), os.path.exists(os.path.join(str(wt), "author-staged.txt")),
-           os.path.lexists(os.path.join(git_dir, "MERGE_HEAD")), _has_marker(wt), fx.pushes()),
-          (1, "state-mismatch", True, True, True, []))
-    _git(wt, "restore", "--staged", "--", "author-staged.txt")
-    os.unlink(os.path.join(str(wt), "author-staged.txt"))
-    rc, reports, _fatal = fx.run(apply=True)
-    check("resume/proceeds-after-author-cleanup", (rc, _result(reports, 1), len(fx.pushes())),
-          (0, "pushed", 1))
-
-    # The committed-marker re-push re-runs the busy and gh re-checks and re-verifies the
-    # recorded validated tree before pushing.
-    def kill(*_args):
-        raise KeyboardInterrupt("simulated kill after the commit")
-
-    fx2 = _fixture(tmp, "resume-committed")
-    wt2 = _stale_pr(fx2)
-    _killed_run(fx2, kill)
-    git_dir2 = _git_dir(wt2)
-    table2 = _fake_proc(Path(tmp) / "resume-proc2",
-                        dict([(FAKE_PID, (wt2, ["/bin/sleep", "30"], 1))]))
-    fx2.scan = lambda path: _process_users(path, table2)
-    try:
-        rc, reports, _fatal = fx2.run(apply=True)
-    finally:
-        fx2.scan = _no_users
-    marker = _read_marker(git_dir2) or dict()
-    check("resume/repush-rechecks-busy",
-          (rc, _result(reports, 1), marker.get("phase"), len(fx2.pushes())),
-          (1, "busy", "committed", 0))
-    fx2.set_gh(rename_after=dict([("1", 0)]))
-    rc, reports, _fatal = fx2.run(apply=True)
-    check("resume/repush-rechecks-gh",
-          (rc, _result(reports, 1), _has_marker(wt2), len(fx2.pushes())),
-          (1, "branch-mismatch", True, 0))
-    fx2.set_gh()
-    marker_path = Path(git_dir2) / MARKER_NAME
-    good = marker_path.read_bytes()
-    tampered = json.loads(good.decode("utf-8"))
-    tampered["tree"] = ZERO
-    _write_marker(git_dir2, tampered)
-    rc, reports, _fatal = fx2.run(apply=True)
-    check("resume/repush-validated-tree", (rc, _result(reports, 1), len(fx2.pushes())),
-          (1, "state-mismatch", 0))
-    marker_path.write_bytes(good)
-    rc, reports, _fatal = fx2.run(apply=True)
-    check("resume/repush-after-rechecks",
-          (rc, _result(reports, 1), len(fx2.pushes()), _has_marker(wt2)), (0, "pushed", 1, False))
-    check("resume/invariants", _invariants(fx, fx2), [])
-
-
-def case_local_race(tmp):
-    # A concurrent author commit lands on the local PR branch between this run's commit and its
-    # rejected push: the rollback's local compare-and-set refuses to rewind it.
-    fx = _fixture(tmp, "local-race")
-    wt = _stale_pr(fx)
-    old = fx.remote_ref("feat/x")
-    (fx.base / "reject").write_text("", encoding="utf-8")
-    fx.set_gh(commit_on_view=dict([("1", dict(call=3, worktree=str(wt),
-                                              file="author-work.txt"))]))
-    rc, reports, _fatal = fx.run(apply=True)
-    head = _git_text(wt, "rev-parse", "HEAD")
+        subprocess.run = real_run
+    new = fx.remote_ref("feat/x")
     marker = _read_marker(_git_dir(wt)) or dict()
-    check("push/local-race-never-rewound",
-          (rc, _result(reports, 1), os.path.exists(os.path.join(str(wt), "author-work.txt")),
-           _git_text(wt, "log", "-1", "--format=%s"), marker.get("phase"),
-           head == marker.get("new"), fx.remote_ref("feat/x")),
-          (1, "local-race", True, "author race", "committed", False, old))
-    check("push/local-race-invariants", _invariants(fx), [])
+    check("push/observer-timeout-indeterminate",
+          (rc, _result(reports, 1), new != old, marker.get("new") == new,
+           _snapshot_diff(before, _snapshot(wt)), _git_text(wt, "rev-parse", "HEAD")),
+          (1, "push-unknown", True, True, [], old))
+    rc, reports, _fatal = fx.run(apply=True)
+    check("push/observer-timeout-rerun-already-pushed",
+          (rc, _result(reports, 1), _has_marker(wt), len(fx.pushes())),
+          (0, "already-pushed", False, 1))
+    check("push/observer-timeout-invariants", _invariants(fx), [])
 
 
 def case_rewind(tmp):
@@ -2031,7 +1929,7 @@ def case_rewind(tmp):
     wt = _stale_pr(fx)
     old = fx.remote_ref("feat/x")
     parent = _git_text(wt, "rev-parse", old + "^")
-    fx.set_gh(move_on_view=dict([("1", dict(call=3, remote=str(fx.remote),
+    fx.set_gh(move_on_view=dict([("1", dict(call=2, remote=str(fx.remote),
                                             ref="refs/heads/feat/x", old=old, new=parent))]))
     before = _snapshot(wt)
     rc, reports, _fatal = fx.run(apply=True)
@@ -2063,7 +1961,7 @@ def case_timeout(tmp):
         subprocess.run = real_run
     new = fx.remote_ref("feat/x")
     check("push/timeout-observed-delivered",
-          (rc, _result(reports, 1), new != old, _git_text(wt, "rev-parse", "HEAD") == new,
+          (rc, _result(reports, 1), new != old, _git_text(wt, "rev-parse", "HEAD") == old,
            _has_marker(wt)), (0, "pushed", True, True, False))
     check("push/timeout-invariants", _invariants(fx), [])
 
@@ -2079,7 +1977,7 @@ def case_symlink(tmp):
     os.symlink(str(outside), os.path.join(str(wt), "gen", "digest.txt"))
     _git(wt, "add", "-A", "--", "gen/digest.txt")
     _git(wt, "commit", "-q", "-m", "digest becomes a symlink", extra_env=FIXTURE_IDENT)
-    _git(wt, "push", "-q", "origin", "feat/x:refs/heads/feat/x")
+    _git(wt, "push", "-q", "origin", "%s:refs/heads/feat/x" % _git_text(wt, "rev-parse", "HEAD"))
     fx.prs[0]["headRefOid"] = old = _git_text(wt, "rev-parse", "HEAD")
     fx.set_gh()
     fx.advance_main(dict([("docs/note.txt", "note\n")]))
@@ -2104,134 +2002,108 @@ def case_symlink(tmp):
 
 
 def case_tamper(tmp):
-    # A pre-commit hook that edits and restages a source file after validation: the committed
-    # tree is not the validated tree, so the commit is refused and undone.
+    # Author-side hooks never run: the merge, checks and commit happen in the private checkout
+    # (hooks disabled, and the commit is commit-tree, which runs no hook anywhere), so a hook that
+    # edits and restages sources can neither block the run nor smuggle content into the push.
     fx = _fixture(tmp, "tamper")
     wt = _stale_pr(fx)
     old = fx.remote_ref("feat/x")
-    hook = fx.main / ".git" / "hooks" / "pre-commit"
-    hook.write_text("#!/bin/sh\nprintf 'HOOK CHANGED SOURCE\\n' >> src/a.txt\n"
-                    "git add -- src/a.txt\nexit 0\n", encoding="utf-8")
-    hook.chmod(0o755)
-    before, pushed = _snapshot(wt), fx.pushes()
+    for name in ("pre-commit", "post-commit", "post-merge"):
+        hook = fx.main / ".git" / "hooks" / name
+        hook.write_text("#!/bin/sh\nprintf 'HOOK CHANGED SOURCE\\n' >> src/a.txt\n"
+                        "git add -- src/a.txt\nexit 0\n", encoding="utf-8")
+        hook.chmod(0o755)
+    before = _snapshot(wt)
     rc, reports, _fatal = fx.run(apply=True)
-    check("refuse/commit-tree-tampered",
-          (rc, _result(reports, 1), _snapshot_diff(before, _snapshot(wt)),
-           fx.remote_ref("feat/x"), fx.pushes() == pushed, _has_marker(wt)),
-          (1, "commit-mismatch", [], old, True, False))
-    check("refuse/commit-tree-invariants", _invariants(fx), [])
+    new = fx.remote_ref("feat/x")
+    blob = _git(fx.remote, "cat-file", "blob", new + ":src/a.txt")[1]
+    check("refuse/hooks-never-run",
+          (rc, _result(reports, 1), b"HOOK CHANGED SOURCE" in blob,
+           _snapshot_diff(before, _snapshot(wt))), (0, "pushed", False, []))
+    # Unit probes of the two commit guards over a real private-style checkout: a parentless
+    # (hook-rewritten) commit and a commit carrying a foreign tree are both refused, so neither
+    # can ever be pushed.
+    probe = Path(tmp) / "tamper-probe"
+    _git(fx.base, "clone", "--quiet", "--shared", "--no-checkout", str(fx.main), str(probe))
+    _guard("scratch-setup")(probe)
+    _git(probe, "checkout", "--quiet", "--detach", old)
+    tree = _git_text(probe, "rev-parse", old + "^{tree}")
+    orphan = _git_text(probe, "commit-tree", tree, "-m", "orphan", extra_env=FIXTURE_IDENT)
+    try:
+        _guard("commit-parents")(probe, old, orphan)
+        got = "accepted"
+    except Refuse as refusal:
+        got = refusal.status
+    check("refuse/commit-parents-probe", got, "commit-mismatch")
+    other_tree = _git_text(probe, "rev-parse", fx.remote_ref("main") + "^{tree}")
+    swapped = _git_text(probe, "commit-tree", other_tree, "-p", old, "-m", "wrong tree",
+                        extra_env=FIXTURE_IDENT)
+    try:
+        _guard("commit-tree")(probe, swapped, tree)
+        got = "accepted"
+    except Refuse as refusal:
+        got = refusal.status
+    check("refuse/commit-tree-probe", got, "commit-mismatch")
+    check("refuse/tamper-invariants", _invariants(fx), [])
 
 
 def case_filter(tmp):
-    # A clean filter makes the staged generated blob differ from the worktree bytes the checks
-    # read: refused before the commit, so the unvalidated bytes are never pushed. Byte-exact
-    # restoration cannot be proven under a filter (git sees the filtered file as unmodified and
-    # leaves it), so the honest end state is restore-failed with the marker kept and nothing
-    # deleted.
+    # A clean filter in the author's repository (codex round-2 reproduction): the private checkout
+    # is a fresh clone that defines no filter and unsets every conversion attribute, so the checks
+    # read exactly the stored blobs and the pushed tree is self-consistent: a fresh materialization
+    # of the pushed commit passes the declared check.
     fx = _fixture(tmp, "filter")
     _git(fx.main, "config", "filter.constant.clean", "printf FILTERED")
     _git(fx.main, "config", "filter.constant.smudge", "cat")
     wt = fx.add_pr(1, "feat/x", dict([
-        ("src/b.txt", "bravo\n"), (".gitattributes", "gen/digest.txt filter=constant\n")]))
-    old = fx.remote_ref("feat/x")
-    os.unlink(os.path.join(str(wt), "gen", "digest.txt"))
-    _git(wt, "checkout", "--", "gen/digest.txt")
+        ("src/b.txt", "bravo\n"), (".gitattributes", "src/b.txt filter=constant\n")]))
     fx.advance_main(dict([("src/c.txt", "charlie\n")]))
-    before, pushed = _snapshot(wt), fx.pushes()
+    before = _snapshot(wt)
     rc, reports, _fatal = fx.run(apply=True)
-    check("refuse/clean-filter-divergence",
-          (rc, _result(reports, 1), "commit-mismatch" in _reason(reports, 1),
-           _snapshot_diff(before, _snapshot(wt)), fx.remote_ref("feat/x"),
-           fx.pushes() == pushed, _has_marker(wt)),
-          (3, "restore-failed", True, ["gen/digest.txt"], old, True, True))
-    check("refuse/clean-filter-invariants", _invariants(fx), [])
-
-
-def case_ignored(tmp):
-    # The restoration snapshot includes ignored-file CONTENTS: a misbehaving generator that edits
-    # an ignored file is reported restore-failed, never as cleanly restored.
-    fx = _fixture(tmp, "ignored")
-    wt = _stale_pr(fx)
-    fx.write(wt, "ignored/valuable", "KEEP\n")
-    os.environ["TOY_IGNORED"] = "1"
+    new = fx.remote_ref("feat/x")
+    fresh = Path(tmp) / "filter-fresh"
+    _git(fx.base, "clone", "--quiet", "--no-local", str(fx.remote), str(fresh))
+    _git(fresh, "checkout", "--quiet", "feat/x")
+    fresh_check = subprocess.run([sys.executable, "-I", "-B", "tools/gen.py", "--check"],
+                                 cwd=str(fresh), env=_clean_env(), timeout=60).returncode
+    check("filter/clean-filter-pushed-correctly",
+          (rc, _result(reports, 1), new is not None, fresh_check,
+           _snapshot_diff(before, _snapshot(wt))), (0, "pushed", True, 0, []))
+    # Unit probe of the every-path byte guard: a private checkout whose file bytes diverge from the
+    # committed blob (what any conversion would produce) is refused before the push.
+    probe = Path(tmp) / "filter-probe"
+    _git(fx.base, "clone", "--quiet", "--shared", "--no-checkout", str(fx.main), str(probe))
+    _guard("scratch-setup")(probe)
+    _git(probe, "checkout", "--quiet", "--detach", fx.remote_ref("main"))
+    tree = _git_text(probe, "rev-parse", "HEAD^{tree}")
+    (probe / "src" / "a.txt").write_text("DIVERGED\n", encoding="utf-8")
     try:
-        rc, reports, _fatal = fx.run(apply=True)
-    finally:
-        os.environ.pop("TOY_IGNORED", None)
-    payload = _read_text(os.path.join(str(wt), "ignored", "valuable"))
-    check("refuse/ignored-clobbered-restore-failed",
-          (rc, _result(reports, 1), payload, _has_marker(wt), fx.pushes()),
-          (3, "restore-failed", "LOST\n", True, []))
-    check("refuse/ignored-invariants", _invariants(fx), [])
+        _guard("pushed-bytes")(probe, tree)
+        got = "accepted"
+    except Refuse as refusal:
+        got = refusal.status
+    check("filter/pushed-bytes-probe", got, "commit-mismatch")
+    check("filter/invariants", _invariants(fx), [])
 
 
-def case_scan(tmp):
-    # _process_users over fake tables built in scratch; the host /proc is never read.
-    wt = Path(tmp) / "scan-wt"
-    (wt / "sub").mkdir(parents=True)
-    out = Path(tmp) / "scan-elsewhere"
-    out.mkdir()
-    inside = (wt / "sub", ["/bin/sleep", "30"], 1)
-    tables = iter(range(100))
-
-    def scan(entries, uid=None):
-        return _process_users(str(wt), _fake_proc(Path(tmp) / ("scan-%d" % next(tables)), entries),
-                              uid)
-
-    check("scan/same-uid-cwd-inside-reported", scan(dict([(FAKE_PID, inside)])),
-          ["%d:sleep" % FAKE_PID])
-    check("scan/argv-inside-reported",
-          scan(dict([(FAKE_PID, (out, ["/usr/bin/python3", str(wt / "x.py")], 1))])),
-          ["%d:python3" % FAKE_PID])
-    check("scan/outside-not-reported",
-          scan(dict([(FAKE_PID, (out, ["/bin/sleep", str(out / "x")], 1))])), [])
-    check("scan/other-uid-skipped", scan(dict([(FAKE_PID, inside)]), uid=os.getuid() + 1), [])
-    check("scan/vanished-entry-skipped",
-          scan(dict([(FAKE_PID, inside), (FAKE_ANCESTOR, (None, ["/bin/sleep"], 1))])),
-          ["%d:sleep" % FAKE_PID])
-    # A same-uid entry whose cwd raises PermissionError: readlink is patched for that one path, so
-    # no real permission changes.
-    table = _fake_proc(Path(tmp) / "scan-denied", dict([
-        (FAKE_PID, inside), (FAKE_ANCESTOR, (out, ["/bin/sleep"], 1))]))
-    denied = os.path.join(table, str(FAKE_ANCESTOR), "cwd")
-    real_readlink = os.readlink
-
-    def readlink(path, *args, **kwargs):
-        if os.fspath(path) == denied:
-            raise PermissionError(errno.EACCES, "Permission denied", path)
-        return real_readlink(path, *args, **kwargs)
-
-    os.readlink = readlink
-    try:
-        got = _process_users(str(wt), table)
-    finally:
-        os.readlink = real_readlink
-    check("scan/cwd-permission-error-unknown", got, None)
-    me = os.getpid()
-    check("scan/self-and-ancestors-skipped",
-          scan(dict([(me, (wt, [sys.executable], FAKE_ANCESTOR)),
-                     (FAKE_ANCESTOR, (wt, ["/bin/sh"], 1)), (FAKE_PID, inside)])),
-          ["%d:sleep" % FAKE_PID])
-    empty = Path(tmp) / "scan-no-table"
-    empty.mkdir()
-    check("scan/no-table-unknown", _process_users(str(wt), str(empty)), None)
-    check("scan/real-use-reads-host-proc", _process_users.__defaults__, ("/proc", None))
-
-
-def case_hermetic(tmp):
-    # self_test runs every case with _host_scan replaced by _host_scan_stub, which raises
-    # PermissionError: no case before this one may have reached it, and the busy check's default
-    # (no scan injected, as in real use) must.
-    check("hermetic/host-scan-unused", list(HOST_SCAN_CALLS), [])
-    idle = Path(tmp) / "hermetic"
-    idle.mkdir()
-    try:
-        guard_busy(idle, idle, [], 60, False)
-        reached = False
-    except PermissionError:
-        reached = True
-    del HOST_SCAN_CALLS[:]
-    check("hermetic/default-is-host-scan", (reached, _host_scan is _host_scan_stub), (True, True))
+def case_eol(tmp):
+    # An eol/text attribute in the PR (the autocrlf reproduction): with conversions disabled in the
+    # private checkout the materialized bytes equal the stored blob, the regenerated digest is
+    # computed over those same bytes, and the pushed source blob is exactly the PR's LF content.
+    # With the scratch-setup guard reverted, the CRLF materialization diverges from the blob and
+    # the every-path byte guard refuses the commit instead of pushing it.
+    fx = _fixture(tmp, "eol")
+    wt = fx.add_pr(1, "feat/x", dict([
+        ("src/b.txt", "bravo\n"), (".gitattributes", "src/b.txt text eol=crlf\n")]))
+    fx.advance_main(dict([("src/c.txt", "charlie\n")]))
+    before = _snapshot(wt)
+    rc, reports, _fatal = fx.run(apply=True)
+    new = fx.remote_ref("feat/x")
+    blob = _git(fx.remote, "cat-file", "blob", new + ":src/b.txt")[1] if new else b""
+    check("filter/eol-attribute-pushed-correctly",
+          (rc, _result(reports, 1), blob, _snapshot_diff(before, _snapshot(wt))),
+          (0, "pushed", b"bravo\n", []))
+    check("filter/eol-invariants", _invariants(fx), [])
 
 
 def case_lock_held(tmp):
@@ -2264,7 +2136,7 @@ def case_fetch_failure(tmp):
     finally:
         _git(fx.main, "config", "remote.origin.url", str(fx.remote))
     touching = [a for a in GIT_AUDIT[audit:] if a[:1] in (
-        ["merge"], ["commit"], ["push"], ["ls-remote"], ["checkout"], ["add"], ["reset"])]
+        ["merge"], ["commit-tree"], ["push"], ["ls-remote"], ["checkout"], ["add"], ["clone"])]
     check("run/fetch-failure-exit2", (rc, reports, "fetch failed" in (fatal or "")), (2, [], True))
     check("run/fetch-failure-touches-nothing",
           (touching, _snapshot_diff(before, _snapshot(wt)), fx.remote_ref("feat/x"),
@@ -2272,44 +2144,13 @@ def case_fetch_failure(tmp):
     check("run/fetch-failure-invariants", _invariants(fx), [])
 
 
-def case_position(tmp):
-    fx = _fixture(tmp, "position")
-    behind = fx.add_pr(1, "feat/behind", dict([("src/one.txt", "1\n")]))
-    ahead = fx.add_pr(2, "feat/ahead", dict([("src/two.txt", "2\n")]))
-    diverged = fx.add_pr(3, "feat/diverged", dict([("src/three.txt", "3\n")]))
-    fx.advance_main(dict([("src/c.txt", "c\n")]))
-    fx.prs[0]["headRefOid"] = fx.foreign_commit(fx.prs[0]["headRefOid"], "refs/heads/feat/behind")
-    fx.write(ahead, "src/two.txt", "2 local\n")
-    fx.commit(ahead, "local only")
-    fx.prs[2]["headRefOid"] = fx.foreign_commit(fx.prs[2]["headRefOid"],
-                                                "refs/heads/feat/diverged")
-    fx.write(diverged, "src/three.txt", "3 local\n")
-    fx.commit(diverged, "local only")
-    fx.set_gh()
-    trees = (behind, ahead, diverged)
-    branches = ("feat/behind", "feat/ahead", "feat/diverged")
-    befores = [_snapshot(wt) for wt in trees]
-    remotes = [fx.remote_ref(b) for b in branches]
-    pushed = fx.pushes()
-    rc, reports, _fatal = fx.run(apply=True)
-    check("position/worktree-behind", _result(reports, 1), "worktree-behind")
-    check("position/unpushed-commits", _result(reports, 2), "unpushed-commits")
-    check("position/diverged", _result(reports, 3), "diverged")
-    check("position/exit1-untouched",
-          (rc, [_snapshot_diff(b, _snapshot(wt)) for b, wt in zip(befores, trees)],
-           [fx.remote_ref(b) for b in branches], fx.pushes() == pushed,
-           [_has_marker(wt) for wt in trees]),
-          (1, [[], [], []], remotes, True, [False, False, False]))
-    check("position/invariants", _invariants(fx), [])
-
-
 def case_state_mismatch(tmp):
+    # A marker naming another PR or branch is refused untouched; a marker also blocks a dry run.
     fx = _fixture(tmp, "state-mismatch")
     wt = _stale_pr(fx)
     old = fx.remote_ref("feat/x")
     git_dir = _git_dir(wt)
-    _write_marker(git_dir, dict(pr=1, branch="feat/x", old=old, base_sha=fx.remote_ref("main"),
-                                phase="committed", new=ZERO))
+    _write_marker(git_dir, dict(pr=7, branch="feat/other", old=old, new=ZERO))
     marker = Path(git_dir) / MARKER_NAME
     marker_bytes = marker.read_bytes()
     before, pushed = _snapshot(wt), fx.pushes()
@@ -2339,17 +2180,15 @@ def case_cli(tmp):
 CASES = dict([
     ("config", case_config), ("absent", case_absent), ("frombase", case_frombase),
     ("dry", case_dry), ("happy", case_happy), ("carry", case_carry), ("discover", case_discover),
-    ("ambiguous", case_ambiguous_worktree), ("branch", case_branch), ("busy", case_busy),
-    ("dirty", case_dirty), ("conflict", case_conflict), ("regen", case_regen),
+    ("ambiguous", case_ambiguous_worktree), ("branch", case_branch), ("badname", case_badname),
+    ("audit", case_audit), ("conflict", case_conflict), ("regen", case_regen),
     ("reject", case_reject), ("idem", case_idem), ("remote-changed", case_remote_changed),
-    ("push-unknown", case_push_unknown), ("hook-failed", case_hook_failed),
-    ("generated-delete", case_generated_delete), ("busy-unknown", case_busy_unknown),
-    ("resume", case_resume), ("local-race", case_local_race), ("rewind", case_rewind),
-    ("timeout", case_timeout), ("symlink", case_symlink), ("tamper", case_tamper),
-    ("filter", case_filter), ("ignored", case_ignored),
-    ("scan", case_scan), ("lock-held", case_lock_held), ("fetch-failure", case_fetch_failure),
-    ("position", case_position), ("state-mismatch", case_state_mismatch), ("cli", case_cli),
-    ("hermetic", case_hermetic),
+    ("push-unknown", case_push_unknown), ("generated-delete", case_generated_delete),
+    ("author", case_author), ("rewind", case_rewind), ("timeout", case_timeout),
+    ("observer", case_observer), ("symlink", case_symlink), ("tamper", case_tamper),
+    ("filter", case_filter), ("eol", case_eol), ("lock-held", case_lock_held),
+    ("fetch-failure", case_fetch_failure), ("state-mismatch", case_state_mismatch),
+    ("cli", case_cli),
 ])
 
 
@@ -2367,26 +2206,20 @@ REVERTS = dict([
     ("config-fail-closed", (_noop, "config")),
     ("config-source", (lambda root, _sha: _read_text(os.path.join(str(root), CONFIG_PATH)),
                        "frombase")),
-    ("busy", (_noop, "busy")),
-    ("dirty", (_noop, "dirty")),
+    ("branch-name", (_noop, "badname")),
     ("branch-match", (_noop, "branch")),
     ("source-conflict", (_noop, "conflict")),
     ("regenerate-exit", (_noop, "regen")),
     ("check-exit", (_noop, "regen")),
     ("fixpoint", (_noop, "regen")),
-    ("push-restore", (_noop, "reject")),
-    ("abort-on-refusal", (_noop, "conflict")),
-    ("reconcile", (_noop, "idem")),
-    ("reconcile-preserve", (_noop, "resume")),
-    ("resume-recheck", (_noop, "resume")),
+    ("reconcile", (_noop, "push-unknown")),
+    ("scratch-setup", (_noop, "eol")),
+    ("generated-confined", (_noop, "symlink")),
+    ("pushed-bytes", (_noop, "filter")),
+    ("commit-parents", (_noop, "tamper")),
+    ("commit-tree", (_noop, "tamper")),
     ("push-lease", (lambda branch, old: [], "rewind")),
     ("push-indeterminate", (_reraise, "timeout")),
-    ("push-restore-cas", (lambda wt, new: True, "local-race")),
-    ("generated-confined", (_noop, "symlink")),
-    ("generated-bytes", (_noop, "filter")),
-    ("commit-tree", (_noop, "tamper")),
-    ("snapshot-files", (lambda wt: _git(wt, "ls-files", "-z", "--cached", "--others",
-                                        "--exclude-standard")[1], "ignored")),
 ])
 
 
@@ -2451,26 +2284,17 @@ def _write_report(report_path):
 
 def self_test(red_on_revert=False, report_path=None):
     """Every case inside fixture_git_lifecycle (GIT_* scrubbed, scratch HOME, global and system
-    config pinned to os.devnull, a PATH-front git wrapper), under one private temp directory, with
-    _host_scan replaced by _host_scan_stub so that no verdict depends on the host process table."""
-    global _host_scan
+    config pinned to os.devnull, a PATH-front git wrapper), under one private temp directory."""
     sys.path.insert(0, str(ROOT / "tools"))
     from _git_fixture_env import fixture_git_lifecycle
     stale = []
-    real_scan, _host_scan = _host_scan, _host_scan_stub
-    try:
-        with fixture_git_lifecycle():
-            with tempfile.TemporaryDirectory(prefix="merge-train-selftest-") as raw:
-                tmp = os.path.realpath(raw)
-                for name in CASES:
-                    _run_case(name, tmp)
-                if red_on_revert and not FAILURES:
-                    stale = _red_on_revert(tmp)
-    finally:
-        _host_scan = real_scan
-    if HOST_SCAN_CALLS:
-        FAILURES.append("hermetic/host-scan-called: %d call(s), first %r" % (
-            len(HOST_SCAN_CALLS), HOST_SCAN_CALLS[0]))
+    with fixture_git_lifecycle():
+        with tempfile.TemporaryDirectory(prefix="merge-train-selftest-") as raw:
+            tmp = os.path.realpath(raw)
+            for name in CASES:
+                _run_case(name, tmp)
+            if red_on_revert and not FAILURES:
+                stale = _red_on_revert(tmp)
     if not _write_report(report_path):
         return 2
     expected = _expected_check_ids()
