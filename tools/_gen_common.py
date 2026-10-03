@@ -2,7 +2,9 @@
 
 Requires Python 3.11+ for tomllib; CI pins 3.14. run_all_checks.sh runs these locally.
 """
+import io
 import os
+import stat
 import sys
 
 try:
@@ -64,8 +66,74 @@ def repo_root(start=None):
     return Path.cwd()
 
 
+class SourceReadRefused(OSError):
+    """A tracked source the shared reader refuses: a symlink, a non-regular entry (a FIFO, a device, a
+    directory), or an open/fstat/read error other than plain absence. An OSError subclass, so every caller's
+    existing fail-closed OSError arm (exit 2 for the gates) maps it with no new handler
+    (check-fails-closed-on-unreadable)."""
+
+
+def read_source_bytes(path, limit=None):
+    """Read a tracked source file (a rule-corpus source, a manifest SOURCES member, a TOML record) as raw
+    bytes through ONE descriptor: open O_RDONLY|O_NOFOLLOW|O_NONBLOCK, fstat the OPENED descriptor and
+    require S_ISREG, then read. O_NONBLOCK makes the open of a FIFO with no writer (or a slow device) return
+    at once, so the S_ISREG refusal is reached instead of the read blocking forever (F-CORPUS-FIFO-HANG); on a
+    regular file it is a no-op. O_NOFOLLOW refuses a symlink final component (ELOOP). A symlink, a
+    non-regular entry, or any open/fstat/read error is SourceReadRefused; plain absence (ENOENT) stays a
+    FileNotFoundError so callers that report a missing file keep doing so. `limit`, when given, reads at most
+    that many bytes. On a regular file the result equals path.read_bytes() (or its first `limit` bytes)."""
+    if not hasattr(os, "O_NOFOLLOW"):  # no O_NOFOLLOW (Windows): refuse a symlink by lstat before the open
+        try:
+            is_link = stat.S_ISLNK(os.lstat(path).st_mode)
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise SourceReadRefused("{}: refused, cannot lstat ({})".format(path, exc)) from exc
+        if is_link:
+            raise SourceReadRefused("{}: refused, a symlink, not a regular file".format(path))
+    flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+             | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0))
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise SourceReadRefused("{}: refused, cannot open as a regular non-symlink file ({})".format(
+            path, exc)) from exc
+    try:
+        try:
+            mode = os.fstat(fd).st_mode
+        except OSError as exc:
+            raise SourceReadRefused("{}: refused, cannot fstat ({})".format(path, exc)) from exc
+        if not stat.S_ISREG(mode):
+            raise SourceReadRefused("{}: refused, not a regular file (a FIFO, device, or directory)".format(
+                path))
+        chunks, remaining = [], limit
+        try:
+            while remaining is None or remaining > 0:
+                chunk = os.read(fd, 1 << 20 if remaining is None else min(remaining, 1 << 20))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                if remaining is not None:
+                    remaining -= len(chunk)
+        except OSError as exc:
+            raise SourceReadRefused("{}: refused, read error ({})".format(path, exc)) from exc
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def read_source_text(path, encoding="utf-8"):
+    """read_source_bytes decoded exactly as path.read_text(encoding=...) decodes (strict errors, universal
+    newlines), so a regular file reads identically; a non-UTF-8 source still raises UnicodeDecodeError."""
+    return io.TextIOWrapper(io.BytesIO(read_source_bytes(path)), encoding=encoding).read()
+
+
 def load_toml(path):
-    with open(path, "rb") as handle:
+    # read_source_bytes, not open(): a FIFO at a TOML record must be refused, never block the gate.
+    raw = read_source_bytes(path)
+    with io.BytesIO(raw) as handle:
         try:
             return tomllib.load(handle)
         except RecursionError as exc:

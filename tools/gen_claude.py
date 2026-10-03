@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, reconcile  # noqa: E402
+from _gen_common import repo_root, read_source_text, reconcile  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 from gen_agents import sort_key  # noqa: E402
 
@@ -68,7 +68,7 @@ def _group_key(fm):
 def title_of(path):
     """The rule's H1 title (the first '# ' line of the body, after the frontmatter). Raises ValueError
     if the body has no H1, so a malformed rule fails closed rather than emitting a blank index entry."""
-    text = path.read_text(encoding="utf-8")
+    text = read_source_text(path)
     end = text.find("\n---\n", 4)
     body = text[end + 5:].strip() if end != -1 else text.strip()
     first = body.splitlines()[0] if body else ""

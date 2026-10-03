@@ -47,7 +47,7 @@ except ModuleNotFoundError:  # Python < 3.11
     sys.exit("error: check_manifest.py requires Python 3.11+ (tomllib).")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml  # noqa: E402
+from _gen_common import repo_root, load_toml, read_source_bytes  # noqa: E402
 import gen_manifest  # noqa: E402  reuse the validated loader/expansion; recompute, never trust output
 
 _OPF_TOOLS = str(Path(__file__).resolve().parent.parent / "opf" / "tools")
@@ -102,8 +102,7 @@ def load_manifest(root):
     from _opf_adopt import VALID
 
     try:
-        with (root / gen_manifest.MANIFEST_REL).open("rb") as stream:
-            raw = stream.read(MAX_FILE_BYTES + 1)
+        raw = read_source_bytes(root / gen_manifest.MANIFEST_REL, MAX_FILE_BYTES + 1)
     except (OSError, ValueError) as exc:
         raise gen_manifest.GateError(
             "cannot read the manifest ({})".format(exc)
@@ -268,7 +267,7 @@ def run(root, anchored=False):
             if row["path"] not in classes:
                 continue  # already a finding above
             try:
-                data = (root / row["path"]).read_bytes()
+                data = read_source_bytes(root / row["path"])  # a FIFO is refused, never blocks
             except OSError as exc:
                 raise gen_manifest.GateError("cannot read SOURCES member {} ({})".format(row["path"], exc))
             if len(data) != row["bytes"] or hashlib.sha256(data).hexdigest() != row["sha256"]:
@@ -295,9 +294,9 @@ def run(root, anchored=False):
         if tree != manifest["tree-sha256"]:
             findings.append("tree-sha256 does not recompute from the SOURCES rows")
         try:
-            manifest_raw = (root / gen_manifest.MANIFEST_REL).read_bytes()
-            root_disk = (root / gen_manifest.ROOT_REL).read_bytes()
-            snippet_disk = (root / gen_manifest.SNIPPET_REL).read_bytes()
+            manifest_raw = read_source_bytes(root / gen_manifest.MANIFEST_REL)
+            root_disk = read_source_bytes(root / gen_manifest.ROOT_REL)
+            snippet_disk = read_source_bytes(root / gen_manifest.SNIPPET_REL)
         except OSError as exc:
             raise gen_manifest.GateError("cannot read a derived release artifact ({})".format(exc))
         root_hex = hashlib.sha256(manifest_raw).hexdigest()
@@ -369,6 +368,7 @@ def self_test_main():
 def _self_test_main_isolated():
     import io
     import shutil
+    import signal
     import tempfile
     from contextlib import redirect_stdout, redirect_stderr
 
@@ -407,6 +407,30 @@ def _self_test_main_isolated():
     def gen_quiet(root):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             return gm.run(root, check=False)
+
+    class _Hang(Exception):
+        pass
+
+    def _on_alarm(_signum, _frame):
+        raise _Hang()
+
+    def check_bounded(root, seconds=10):
+        """run(root) under a SIGALRM bound: (exit code, captured stderr), or ("hung", ...) when a read
+        blocked past the bound (the F-CORPUS-FIFO-HANG regression)."""
+        err = io.StringIO()
+        previous = signal.signal(signal.SIGALRM, _on_alarm)
+        signal.alarm(seconds)
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                rc = run(root)
+        except _Hang:
+            rc = "hung"
+        except SystemExit as exc:
+            rc = "raised SystemExit({!r})".format(exc.code)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+        return rc, err.getvalue()
 
     def _fresh(name, **kw):
         base = gm._build_fixture(Path(tmp) / name, **kw)
@@ -622,6 +646,21 @@ def _self_test_main_isolated():
         if check_quiet(cmmode) != 2:
             failures.append("F-236: check_manifest independently rejects an output at index mode 100755 "
                             "(exit 2)")
+
+        # (l) F-CORPUS-FIFO-HANG: a FIFO (no writer) at a SOURCES member and at a TOML record the gate
+        #     loads must be the named refusal (exit 2, "not a regular file") inside a bounded alarm, never a
+        #     blocking read. MUTATION: reverting _gen_common.read_source_bytes to a plain open/read blocks
+        #     here and the alarm records the hang. POSIX only (os.mkfifo, SIGALRM).
+        if hasattr(os, "mkfifo") and hasattr(signal, "SIGALRM"):
+            for label, rel in (("a SOURCES member", "src.txt"),
+                               ("a TOML record", ".aiqt/core/order.toml")):
+                ff = _fresh("fifo-" + rel.replace("/", "-"))
+                os.unlink(ff / rel)
+                os.mkfifo(ff / rel)
+                rc, err = check_bounded(ff)
+                if rc != 2 or "not a regular file" not in err:
+                    failures.append("F-CORPUS-FIFO-HANG: a FIFO at {} expected the named refusal (exit 2, "
+                                    "'not a regular file') within the alarm, got {!r}".format(label, rc))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -637,7 +676,8 @@ def _self_test_main_isolated():
           "surroundings-only change is clean; an order record disagreeing with the operative "
           "gen_rules constants is exit 1; an unknown top-level key in the order, references, or "
           "dispositions record and an unsatisfiable quorum each fail closed (exit 2, F-237); and "
-          "check_manifest independently rejects an output at git index mode 100755 (exit 2, F-236)")
+          "check_manifest independently rejects an output at git index mode 100755 (exit 2, F-236); a "
+          "FIFO at a SOURCES member or a TOML record is refused (exit 2) inside an alarm, never a hang")
     return 0
 
 

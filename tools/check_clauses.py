@@ -102,7 +102,7 @@ except ModuleNotFoundError:  # Python < 3.11
     sys.exit("error: check_clauses.py requires Python 3.11+ (tomllib).")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml  # noqa: E402
+from _gen_common import repo_root, load_toml, read_source_bytes  # noqa: E402
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
 from check_versions import _parse as _semver  # noqa: E402  reuse the shipped bare-SemVer parser
 from gen_rules import parse_source, CID_RE  # noqa: E402  reuse the frontmatter parser and corpus-id regex
@@ -580,7 +580,7 @@ def check_rows(root, rows, manifest_sources, rule_sources, rules_dir):
                                 .format(where, source_path, row.get("corpus-id")))
         if source_path not in digest_cache:
             try:
-                raw = abs_path.read_bytes()
+                raw = read_source_bytes(abs_path)
             except FileNotFoundError:
                 digest_cache[source_path] = ("missing", None, None)
             except OSError as exc:  # a permission or I/O error is environmental: fail closed
