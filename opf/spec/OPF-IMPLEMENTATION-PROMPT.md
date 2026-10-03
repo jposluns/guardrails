@@ -150,7 +150,8 @@ maintainer before step 1, and keep the confirmation in your implementation notes
 - **Modules.** Leave every module off (`governance`, `delivery_assurance`, `operational_policy`,
   `concurrent_operation`). Section 8.1 (Type taxonomy and placement) says modules ship default-off,
   section 8.5 (Transition rules) gives module types only in outline, and section 14.1 says adoption
-  MUST refuse to enable a record type the writer cannot author.
+  MUST refuse to enable a record type the writer cannot author. The synthetic 1.0.0 fixtures of
+  step 8 enable modules as test data; that does not change this choice for your store.
 - **Profiles.** Declare no profile. The `[profiles.aiqt]` table in the section 9 example is
   optional and ignored by base-only tooling (section 9.1, Base standard and profiles).
 - **Posture.** `posture = "required"` and `import_status = "none"` (section 11, Enforcement
@@ -285,12 +286,36 @@ the maintainer resolves it.
     identity is the committed pointer's `target` together with the SHA-256 of the discovered
     machine store's `init.toml`, which coupled init writes once and nothing rewrites, and the
     expected values are pinned in the CI job definition, outside the store (step 13).
-20. **What "tracked" means right after init.** Section 5.1 makes an untracked or ignored `.working/`
-    tree a hard failure, while OPF-INIT-D2B.md requires init-created sources staged and initial
-    views unstaged with "the whole store is VALID". This prompt's reading: the tracked-store check
-    fails when any path under `.working/` is ignored or any machine-store source file is absent from
-    the git index (staged or committed); a generated view may be absent from the index until the
-    first commit after init.
+20. **What "tracked" means while an init or an upgrade is uncommitted.** Section 5.1 makes an
+    untracked or ignored `.working/` tree "a hard failure in scaffolding and validation".
+    OPF-INIT-D2B.md requires init-created sources staged and initial views unstaged with "the whole
+    store is VALID". Section 9.2 has the upgrade create missing managed leaves and indexes
+    create-only, regenerate the declared views and "require a full doctor VALID before offering the
+    uncommitted change", and says "It MUST NOT stage or commit the change", so the files the upgrade
+    creates are outside the git index when that VALID is required. This prompt's reading, which
+    reconciles the three: the tracked-store check fails when any path under `.working/` is ignored,
+    or when any machine-store source file or any declared view under `.working/` is absent from the
+    git index (staged or committed), with exactly two exceptions, each keyed on the manifest at the
+    resolved machine store's path in `HEAD` (open point 22):
+    - While `HEAD` holds no manifest at that path, as right after init (an unborn `HEAD` included),
+      a declared view may be absent from the index. Init's sources get no exception: init stages
+      them.
+    - While the manifest at that path in `HEAD` declares a lower base version than the working tree
+      does (an `[opf]` `spec_version` below the working tree's, or the retired 1.0.0 `[devprocess]`
+      table), as after an upgrade that is not yet committed, a declared view may be absent from the
+      index, and so may a machine-store file that the section 9.2 deltas between those two versions
+      create, provided that it is absent from `HEAD`, is not ignored, and is byte-identical to the
+      empty file your emitter writes for its kind. Those files are the empty `contribution`,
+      `maintainer_decision` and `preference_pattern` indexes of the 1.0.0 delta and the imported
+      managed leaves of the 1.3.0 delta.
+
+    Once `HEAD` declares the working tree's version, neither exception applies, so the adopter's
+    commit of the upgrade must carry those files. Reading the base table and `spec_version` of the
+    manifest in `HEAD` only to bound the second exception is also this prompt's reading: it
+    discovers and validates no store at `HEAD`, and leaves the retired token's role of carrying a
+    store forward to `opf upgrade` alone (section 17). A `HEAD` manifest that the exception needs
+    and that cannot be read is cannot-evaluate. Whether the lease file of open point 12 is a source
+    for this check is part of that point. Ask the maintainer to ratify the whole rule.
 21. **Older declarations and the repair route.** Section 4.2 says "Activation MUST include the
     tested upgrade in section 9.2 and deterministic doctor coverage before a writer accepts the new
     format", and section 9.2 says "Earlier stores compose their applicable deltas with this delta".
@@ -318,18 +343,22 @@ the maintainer resolves it.
       record confers"). A 1.1.0 store also does not admit `init.toml` (section 9.2: "Base spec 1.2.0
       admits one new managed machine-store file"). The validator reports that `opf upgrade` is
       available as a notice, not as a finding.
-    - On such a store your writer's `create` and `transition` run under that grading and the full
-      step 10 operation sequence, and write only that version's format, never an imported leaf or an
-      imported counter row, so a maintainer can record the remedy there and commit it.
+    - On such a store your writer's `create` and `transition`, which step 8 builds for this purpose,
+      run under that grading and the full step 10 operation sequence, and write only that version's
+      format, never an imported leaf or an imported counter row, so a maintainer can record the
+      remedy there and commit it (open point 28 lists the remedies).
     - A 1.0.0 store carries the retired token `devprocess`, which section 17 says "is recognized by
       `opf upgrade` alone, purely to carry a legacy store forward", so neither your validator nor
       your writer discovers it, and discovery reports cannot-evaluate naming `opf upgrade`. Where
       the composed upgrade from 1.0.0 must refuse for a withdrawn authority, its remedy names a
       staged route, which is this prompt's choice: `opf upgrade --to 1.2.0` applies only the deltas
       section 9.2 gives up to 1.2.0 ("A 1.0.0 store takes the 1.0.0 delta above directly to
-      1.2.0"), under the same preconditions, guards and final validation; the maintainer then
-      records the remedy through the writer on the 1.2.0 store, commits it, and retries the upgrade
-      to 1.3.0.
+      1.2.0"), under the same preconditions, guards and final validation, and leaves its change
+      uncommitted like any upgrade. The maintainer then reviews and commits that intermediate
+      upgrade before running the writer, since the writer's planned destinations "MUST be clean"
+      (section 8.8, item 5) and the intermediate upgrade has just changed `counters.toml` and
+      created indexes the writer writes. Only then does the maintainer record the remedy through the
+      writer on the committed 1.2.0 store, commit it, and retry the upgrade to 1.3.0.
     - Any other declaration below 1.3.0 is a fail-closed INVALID finding naming the store-upgrade
       remedy (`opf upgrade`, step 8).
 22. **The writer's pending cannot-evaluate outside the verb, and the comparison snapshot.** Section
@@ -351,9 +380,12 @@ the maintainer resolves it.
     `done-with-receipt` before any commit, the validator sees `active -> done` against `HEAD` while
     the verb wrote `done/proposed -> done`. An uncommitted transition of another record would also
     fail a later operation's final validation, which accepts only the record and statuses that
-    operation has just written. This prompt's choice: `create`, `transition` and `done-with-receipt`
-    refuse before any write while any record present at `HEAD` has a working-tree status that
-    differs from its status there, naming the remedy, which is to commit the earlier change first.
+    operation has just written, and section 8.8 says "Every subcommand runs one operation
+    sequence". This prompt's choice: every writer operation, namely `create`, `transition`,
+    `done-with-receipt`, `worklog-append`, the open point 23 handoff operation, the release cut of
+    open point 9 and the step 8 remedy writer, refuses before any write while any record present at
+    `HEAD` has a working-tree status that differs from its status there, naming the remedy, which
+    is to commit the earlier change first.
     This prompt's choice for the other gates:
     a gate accepts a cannot-evaluate only when the validator reports it as this pending kind, naming
     one record and its from and to statuses, and the snapshot under test carries, in the unreleased
@@ -411,17 +443,38 @@ the maintainer resolves it.
       8.5 gives module types only "in outline (full schemas ship with the module schemas release)",
       section 8.1 says the LF taxonomy row "and legacy validation remain for existing stores and
       evidence", and section 9.2 says "legacy LF records and evidence remain readable and MUST NOT
-      be silently converted". An origin store holding module or LF records cannot reach the full
-      validator VALID the upgrade requires without those schemas.
+      be silently converted".
+    - The deferral seam. Section 8.3 says "A conforming imported series can reach doctor VALID: it
+      MUST NOT enter the legacy importer or module-schema deferral seam", which implies that the
+      validator has a seam deferring the grading of legacy importer-authored records and of
+      module-schema records. No pinned source defines it: which records enter it, how the validator
+      grades a record inside it, and whether a store holding such records reaches the full validator
+      VALID the upgrade requires through it. Whether an origin store holding module, LF or legacy
+      importer-authored records can reach that VALID is therefore open, not settled either way.
+    - The legacy `created_at` omission. Section 8.3 says "An importer MAY omit `created_at` where
+      the source genuinely does not record it; the omission is recorded as unknown via the import
+      provenance reference, never guessed. This legacy permission does not replace the following
+      1.3.0 imported-series contract." The permission itself is settled, and step 4 applies it to
+      legacy importer-authored clean records. The pinned sources do not define the import provenance
+      reference of a legacy clean record: its field, its form, or how the validator confirms that it
+      records the omission.
+    - The base field names of a 1.0.0 manifest. The section 9 example marks `layout` as "(was
+      `layout_profile`)", and OPF-QUICKSTART.md lists that rename beside the retirement of
+      `devprocess`, but the section 9.2 delta from 1.0.0 carries "every other base field over
+      unchanged" and renames no field. The pinned sources do not settle whether a 1.0.0
+      `[devprocess]` table carries `layout_profile` or `layout`, so the 1.0.0 fixtures cannot be
+      built from them alone.
 
     Do not invent these formats, and do not read them out of the reference tooling's code. Ask the
     maintainer to resolve each one, by naming a source pinned by commit and SHA-256 or by a recorded
     ruling, and keep the request in your implementation notes (the store does not exist yet). Until
     a detail is resolved, your validator and upgrade report cannot-evaluate on every input that
-    depends on it, so the upgrade refuses such a store before any write; the step 8 checks that
-    depend on it are reported as not run; step 8 is not passed; and the activation section 4.2
-    requires has not happened, so do not start step 9. Report this as a blocker, never as an
-    exclusion from your conformance scope.
+    depends on it, so the upgrade refuses such a store before any write. A legacy importer-authored
+    clean record without `created_at` is such an input: it is cannot-evaluate, never a schema
+    finding, since the specification permits the omission, and never valid, since the provenance
+    check cannot run. The step 8 checks that depend on a detail are reported as not run; step 8 is
+    not passed; and the activation section 4.2 requires has not happened, so do not start step 9.
+    Report this as a blocker, never as an exclusion from your conformance scope.
 26. **The section 8.6 receipt exception.** Section 8.6 says that where the section 9.2 upgrade
     "withdraws a ratified `done` item's only receipt as legacy importer-authored, a
     maintainer-authored clean `maintainer_decision` that links `corrects` to that item and records
@@ -443,6 +496,38 @@ the maintainer resolves it.
     the enabled type's `[types.<name>]` row itself, so neither step 3 nor the upgrade writes a
     further key for it. If the maintainer rules that a key is needed, add it to the step 3 manifest,
     to init, and to the step 8 allowed delta.
+28. **Which withdrawals leave the post-upgrade validator below VALID, and their remedies.**
+    Section 9.2 says the upgrade MUST refuse "Where a withdrawn authority would leave the
+    post-upgrade doctor below VALID", and names one case, the receipt-stripped `done` item, and one
+    general remedy, "a maintainer-authored clean record that restores or supersedes the withdrawn
+    authority under section 8.6". It does not list the other cases. This prompt's reading, from
+    sections 8.5 and 8.6:
+    - A ratified `done` backlog item whose only receipt is legacy importer-authored fails the clean
+      receipt obligation. The remedy is the open point 26 `maintainer_decision`, through `create`.
+    - A pending_decision supersession chain that holds a clean decision authored by a non-importer
+      actor, and whose only candidate for its current effective resolution is a legacy
+      importer-authored decision, fails the chain rule: section 8.6 says "An importer-authored
+      decision MUST NOT be treated as the current effective resolution of a clean
+      `pending_decision` chain", and section 8.5 says "exactly one current effective resolution
+      MUST exist per chain". Section 8.6 gives the remedy: "resolving such a chain now MUST take a
+      new clean decision linking back". This prompt's reading of how the writer performs it: the
+      maintainer `create`s a new pending_decision, commits it (open point 22), then `transition`s it
+      from `open` to unqualified `decided` with its resolution bundle, appending a `supersedes` link
+      to the importer-authored decision at the head of the chain (section 8.8). Section 8.8 says the
+      clean-series subcommands "MUST also refuse an importer-authored record as their operand"; this
+      prompt reads the supersession target as an input that `transition` reads, not as its operand,
+      since `transition` rewrites only the record it decides. If the maintainer rules that the
+      target is an operand, the specification names no writer-performable remedy for this chain:
+      report that as a blocker of step 8. A chain whose members are all importer-authored is
+      history by this reading and imposes no current obligation.
+    - A backlog item that leaves the actionability join, a block that stops granting a stop, and a
+      record that stops being the current handoff or another current state leave no finding by
+      this reading: those joins are derived when they are read, and section 8.5 allows "at most one"
+      current handoff, so none is also valid. The upgrade report still names each of them.
+
+    If your validator grades any other withdrawal below VALID, name it, its remedy and the writer
+    operation that performs it, and ask the maintainer to rule before step 8 passes. Ask the
+    maintainer to ratify this list and both readings above.
 
 ## The store you are building
 
@@ -608,6 +693,15 @@ Implement section 8 (Record model) in full for the baseline types.
   schema is closed: an unknown key fails validation unless it sits under a registered vendor table
   (section 8.3; section 8.7, Extensions). `proposed_from` is legal only on a `/proposed` status and
   only naming a legal predecessor state for the type (section 8.3).
+- **The legacy `created_at` permission.** Section 8.3 adds: "An importer MAY omit `created_at` where
+  the source genuinely does not record it; the omission is recorded as unknown via the import
+  provenance reference, never guessed. This legacy permission does not replace the following 1.3.0
+  imported-series contract." So a legacy importer-authored clean record, which exists only in an
+  older store or one upgraded from it and never in your store, may lack `created_at`, and your
+  validator applies that permission before and after the upgrade. The form of the import
+  provenance reference is not defined, so how the validator confirms the omission is recorded is
+  open point 25, which says how to grade such a record meanwhile. Every other clean record requires
+  `created_at`.
 - **Status grammar.** `state` or `state/proposed`. Each type declares a closed state set with one
   initial state and one or more terminal states (section 8.4, The status grammar). Transitions per
   type are in the section 8.5 table.
@@ -654,8 +748,11 @@ Acceptance checks, over records and snapshots the test builds:
 - Record validation refuses: an ID in the wrong namespace, an unknown key, a `/proposed` worklog
   entry, a `proposed_from` on a status without `/proposed` or naming an illegal predecessor, a
   maintainer_decision with `actor.kind = "assistant"`, an open pending_decision carrying any part
-  of its resolution bundle, a link with an unknown `rel`, and, given a prior and a current
-  snapshot, a terminal record moved back to a working state.
+  of its resolution bundle, a link with an unknown `rel`, a clean record without `created_at` whose
+  `actor.kind` is not `importer`, and, given a prior and a current snapshot, a terminal record moved
+  back to a working state.
+- A legacy importer-authored clean record without `created_at` is graded cannot-evaluate while open
+  point 25 is unresolved: never refused as schema-invalid and never accepted as valid.
 - An assistant-proposed `active/proposed` block does not make its scoped item non-actionable.
 
 ### Step 5: views and deliverables (`opf render`)
@@ -686,9 +783,12 @@ drift checks, so it comes first.
   worklog "generates the deterministic view `.working/WORKLOG.md`", and section 6.1 says `VERSION`
   is generated from the ledger and drift-gated. Section 9.2 notes that no composed view is
   required, and the specification names no further minimum. This prompt's choice: also declare
-  the `DECISIONS.toml` projection and the composed `BACKLOG.md`, `DECISIONS.md` and
-  `CONTRIBUTIONS.md`, which the section 9 example and the 1.1.0 upgrade delta in section 9.2
-  declare.
+  the `DECISIONS.toml` projection and the composed `BACKLOG.md`, `CONTRIBUTIONS.md` and
+  `DECISIONS.md`. The section 9 example declares `BACKLOG.md` and the projection, and the 1.1.0
+  upgrade delta in section 9.2 adds `CONTRIBUTIONS.md` and the projection. Neither declares
+  `DECISIONS.md`: it appears in the section 4.2 layout, and the 1.1.0 delta widens its `sources` to
+  `pending_decision`, `autonomous_decision`, `maintainer_decision` and `preference_pattern` "where
+  that view is declared", so declare it with those four sources.
 
 Acceptance checks, over stores the test builds:
 
@@ -711,8 +811,9 @@ containment.
 - At `posture = "required"`, an unreadable, unparseable or unresolvable declared input is a
   failure, never an empty or clean result (section 11). `CHANGELOG.md` is a declared input.
 - The tracked-store check fails hard on an untracked or ignored `.working/` tree; there is no
-  gitignore fallback (section 5.1, Always a git repository). How it treats views that init leaves
-  unstaged is open point 20.
+  gitignore fallback (section 5.1, Always a git repository). How it treats the views that init
+  leaves unstaged, and the files and views that the step 8 upgrade creates and must not stage, is
+  open point 20, whose reading names the only exceptions.
 - Transition legality compares the store with the prior committed snapshot (section 8.8, item 7);
   which commit that is, is open point 22, whose reading is the store repository's `HEAD`. A prior
   commit that is needed and cannot be read is cannot-evaluate, never "no change". An unborn `HEAD`,
@@ -739,7 +840,8 @@ containment.
   blocks leave the actionability join, and every current-state join "MUST evaluate only clean
   records authored by non-importer actors" (sections 8.5 and 8.6). The one exception is the
   `maintainer_decision` that section 8.6 lets stand in for a receipt the upgrade withdrew; doctor
-  "MUST accept it" (its form is open point 26). A store declaring an older version is graded as
+  "MUST accept it" (its form is open point 26). Which withdrawals leave a finding, the
+  decision-chain case included, is open point 28. A store declaring an older version is graded as
   open point 21 says.
 - On homes 1, path containment recognizes as OPF control area the imported managed leaves,
   `.working/archive/adoption/<run-id>/`, `.working/archive/moved/` and
@@ -781,6 +883,17 @@ Acceptance checks, each as an automated test over a throwaway store the test bui
   importer-authored is a finding, and an importer-authored `active` block does not make its scoped
   item non-actionable; adding a maintainer-authored clean `maintainer_decision` linking `corrects`
   to that item, in the form of open point 26, makes the validator report valid.
+- In a 1.3.0 store, a pending_decision chain in which a maintainer-authored decided record is
+  superseded by an importer-authored decided record at the chain head is a finding (open point
+  28); adding a maintainer-authored clean pending_decision at unqualified `decided` that links
+  `supersedes` to that head makes the validator report valid.
+- Given a committed store declaring 1.2.0, and a working tree that declares 1.3.0 and adds, unstaged
+  and not ignored, exactly the empty imported leaves of the section 9.2 delta, with the imported
+  counter rows at zero and the views rendered, the tracked-store check passes (open point 20). It
+  reports a finding when one of those leaves holds a row, when one is matched by an ignore rule,
+  when an index of a 1.2.0 type is absent from both `HEAD` and the index, and when `HEAD` already
+  declares 1.3.0. With an unborn `HEAD`, an unstaged machine-store source is a finding while an
+  unstaged declared view is not.
 - The render write mode refuses on a store with a duplicated ID and writes nothing.
 - Given a committed store and a working tree that changes one record's status and appends the
   matching `opf-record transition <ID> <from> -> <to>` worklog entry, a validator that grades the
@@ -826,15 +939,29 @@ sections 4, 9 and 9.2, in throwaway repositories:
 
 - 1.0.0 fixtures, with the base table `[devprocess]` and `standard = "devprocess"`, covering the
   whole origin family section 9.2 names: "a governance-enabled, a decision_support-enabled, a bare,
-  and a view-omitting 1.0.0 store";
+  and a view-omitting 1.0.0 store" (the 1.0.0 base field names are open point 25);
 - a 1.1.0 fixture, with the `[opf]` base table and `spec_version = "1.1.0"`;
 - 1.2.0 fixtures, with `spec_version = "1.2.0"`, no imported leaves and no imported counter rows;
-- fixtures holding synthetic legacy importer-authored clean records, and fixtures at
-  `import_status = "partial"` and `"complete"`.
+- fixtures holding synthetic legacy importer-authored clean records, one of them without
+  `created_at` (step 4), a fixture whose pending_decision chain needs the open point 28 repair, and
+  fixtures at `import_status = "partial"` and `"complete"`.
 
-Where a fixture needs a pre-1.3.0 detail the specification does not give, that is open point 25;
-do not invent it. None of this imports anything into your project's store, which is born at 1.3.0
-and needs no upgrade.
+Commit each fixture in its throwaway repository before the upgrade runs: the upgrade requires a
+clean tree, with the committed `HEAD` as its restore path (section 9.2), and the tracked-store
+reading of open point 20 is keyed on `HEAD`. Where a fixture needs a pre-1.3.0 detail the
+specification does not give, that is open point 25; do not invent it. None of this imports
+anything into your project's store, which is born at 1.3.0 and needs no upgrade.
+
+The governance-enabled and decision_support-enabled 1.0.0 fixtures enable modules, which your own
+store never does, so your validator and upgrade must accept them in these fixtures. Section 8.1
+says that from 1.1.0 "the governance module carries `maintainer_action` alone"; this prompt reads
+that as a governance-enabled 1.0.0 store declaring `governance = true` under `[modules]`, a
+`maintainer_action` type row with namespace `MA`, its index and an `MA` counter, beside the
+`maintainer_decision` row section 9.2 names. The upgrade keeps all of them, and, since
+`maintainer_action` stays an enabled type, the 1.3.0 delta creates
+`maintainer_action.imported.index.toml` and the `"imported:MA"` counter row at zero, which your
+validator accepts. The `maintainer_action` record schema is open point 25, so keep that index empty
+in your fixtures until it is resolved; the remedy writer below refuses to author a module type.
 
 - **The deltas.** Section 9.2 gives three. The 1.0.0 to 1.1.0 delta renames `[devprocess]` to
   `[opf]` and its token to `opf`, bumps the version, removes the retired `decision_support` module
@@ -869,7 +996,9 @@ and needs no upgrade.
   recognized here and nowhere else (section 17).
 - **Finish.** Regenerate the declared views, require a full validator VALID (step 6), and leave the
   change uncommitted for the adopter's own branch and merge: never stage or commit it, and never
-  write the adoption archive.
+  write the adoption archive. The files and views the upgrade creates therefore stay outside the
+  git index, and the step 6 tracked-store check accepts them only on the terms of open point 20
+  (this prompt's reading), which is what lets the required VALID be reached without staging.
 - **Authority report and the repair route.** The upgrade report MUST enumerate every legacy
   importer-authored clean record whose current authority the section 8.6 firewall withdraws,
   "naming each backlog item that leaves the actionability join, each block that stops granting a
@@ -881,20 +1010,30 @@ and needs no upgrade.
   supersedes the withdrawn authority under section 8.6, for a receipt-stripped `done` item the
   section 8.6 `maintainer_decision` route, recorded before the upgrade is retried; every named
   remedy MUST be performable through the sanctioned writer without hand-editing canonical files."
-  Make the remedy performable: on a 1.1.0 or 1.2.0 store the maintainer records it through your
+  Which withdrawals leave the validator below VALID, and the remedy for each, is open point 28.
+  Make every remedy performable: on a 1.1.0 or 1.2.0 store the maintainer records it through your
   writer under the grading of open point 21; from a 1.0.0 store the refusal names the staged route
-  of open point 21. The step 6 validator and the upgrade accept the `maintainer_decision` in the
-  form of open point 26.
-- **The remedy writer.** The upgrade is not tested until its remedy has been performed and the
-  upgrade retried, and that remedy goes through the sanctioned writer, so build part of the step 10
-  writer now: `opf record create` for a store declaring 1.1.0 or 1.2.0 only, graded as open point
-  21 says, with the full section 8.8 operation sequence that step 10 describes (lease,
-  byte-reproduction precondition, one atomic ID claim, the allowed-delta postcondition, clean
-  destinations, one journaled publication, render, final validation, the lifecycle worklog entry).
-  It refuses `actor.kind = "importer"`, refuses a `maintainer_decision` by any actor but a
-  maintainer (section 8.5), and writes only the store's declared format. It does not accept the
-  1.3.0 format until step 8 has passed; step 10 then extends the same writer. Writing a 1.1.0 or
-  1.2.0 store is not the "new format" that section 4.2 gates.
+  of open point 21, whose intermediate upgrade the maintainer commits before the writer runs. The
+  step 6 validator and the upgrade accept the `maintainer_decision` in the form of open point 26.
+- **The remedy writer.** The upgrade is not tested until its remedies have been performed and the
+  upgrade retried, and those remedies go through the sanctioned writer, so build the part of the
+  step 10 writer they need now: `opf record create` and `opf record transition`, for a store
+  declaring 1.1.0 or 1.2.0 only, graded as open point 21 says. `create` authors the open point 26
+  `maintainer_decision` and the new pending_decision of open point 28; `transition` decides that
+  pending_decision. Give both every rule section 8.8 states for them, as step 10 describes: the
+  `/proposed` landing and the `proposed_from` write, restore and removal; the pending_decision
+  resolution bundle with an explicit `decided_by` and a clock-read `decided_at`; the `supersedes`
+  append, its target checks, and the chain rule over the active index and every archived record;
+  the contribution delivery bundle; and the refusal of a record whose row is not schema-valid. Give
+  both the full section 8.8 operation sequence that step 10 describes (lease, byte-reproduction
+  precondition, one atomic ID claim, the allowed-delta postcondition, clean destinations, one
+  journaled publication, render, final validation, the lifecycle worklog entry), and the open point
+  22 refusal while an earlier status change is uncommitted. The remedy writer refuses
+  `actor.kind = "importer"`, refuses an importer-authored record as its operand (section 8.8),
+  refuses a `maintainer_decision` by any actor but a maintainer (section 8.5), refuses a module
+  type, whose schema is open point 25, and writes only the store's declared format. It does not
+  accept the 1.3.0 format until step 8 has passed; step 10 then extends the same writer. Writing a
+  1.1.0 or 1.2.0 store is not the "new format" that section 4.2 gates.
 - **A completed legacy import.** Section 9.2: "A completed legacy import upgrades in place: its
   `import_status` MUST stay `"complete"`, substantiated by its preserved legacy run evidence under
   section 11, and adoption approval, receipt or provenance MUST NOT be fabricated for it." Your
@@ -916,21 +1055,26 @@ and needs no upgrade.
 
 Acceptance checks, over synthetic fixtures the test builds:
 
-- A 1.2.0 fixture with no records upgrades to 1.3.0, and the only model changes are the version
-  bump, the imported leaves and the imported counter rows at zero (open point 27); views are
-  regenerated, the validator reports valid, and nothing is staged or committed.
+- A committed 1.2.0 fixture with no records upgrades to 1.3.0, and the only model changes are the
+  version bump, the imported leaves and the imported counter rows at zero (open point 27); views
+  are regenerated, nothing is staged or committed, the new leaves are absent from the git index,
+  and the validator reports valid, its tracked-store check accepting those leaves under open point
+  20. After the test commits the change, the validator still reports valid.
 - A 1.2.0 fixture with synthetic clean records keeps every record byte and every clean counter.
 - Each 1.0.0 origin-family fixture and the 1.1.0 fixture upgrade to 1.3.0 with exactly the
   composed allowed delta: the 1.0.0 fixtures carry `[opf]` and `standard = "opf"` afterwards, the
   retired `decision_support` key is gone, a governance-enabled fixture keeps its
-  `maintainer_decision` index byte for byte, a view-omitting fixture gains no `DECISIONS.md`, every
-  existing record and high-water value is kept, no `init.toml` is created, and the validator
-  reports valid.
+  `maintainer_decision` index byte for byte and its `maintainer_action` row, index and counter, and
+  gains `maintainer_action.imported.index.toml` and the `"imported:MA"` row at zero, a
+  view-omitting fixture gains no `DECISIONS.md`, every existing record and high-water value is
+  kept, no `init.toml` is created, and the validator reports valid.
 - Running the upgrade a second time on each result is a verified no-op.
 - A held lease, a dirty planned destination, a manifest carrying a comment, a `spec_version`
-  above 1.3.0, and a populated file at an imported leaf path each refuse with nothing written.
-  Your validator and your step 8 `create` do not discover a `devprocess` fixture, and report
-  cannot-evaluate naming `opf upgrade`.
+  above 1.3.0, a populated file at an imported leaf path, and a fixture holding a legacy
+  importer-authored clean record without `created_at` (cannot-evaluate until open point 25 is
+  resolved) each refuse with nothing written.
+  Your validator and your step 8 `create` and `transition` do not discover a `devprocess`
+  fixture, and report cannot-evaluate naming `opf upgrade`.
 - A 1.2.0 fixture at `import_status = "none"` holding a synthetic legacy importer-authored clean
   backlog item upgrades with that item named in the report. Using `"none"` here is this prompt's
   choice, so that these tests do not wait on open point 25; the specification does not say which
@@ -943,10 +1087,24 @@ Acceptance checks, over synthetic fixtures the test builds:
   same `create` run as an assistant refuses. The test commits the decision, retries the upgrade,
   and the upgrade reaches 1.3.0 with the validator reporting valid and the item named in the
   report.
-- The same route from a 1.0.0 fixture: the composed upgrade refuses before any write and names the
-  staged route; `opf upgrade --to 1.2.0` reaches 1.2.0 with the validator reporting valid; the
-  maintainer's decision is recorded through the writer and committed; and the retried upgrade
-  reaches 1.3.0 with the validator reporting valid.
+- The decision-chain repair, end to end (open point 28): a committed 1.2.0 fixture in which a
+  maintainer-authored decided pending_decision is superseded by a synthetic importer-authored
+  decided pending_decision at the head of the chain refuses before any write, naming the chain and
+  the remedy. On that fixture, your step 8 `create`, run as a maintainer, records a new
+  pending_decision at `open` and exits 0; the test commits it; your step 8 `transition`, run as a
+  maintainer, moves it to unqualified `decided` with its resolution bundle and a `supersedes` link
+  to the importer-authored head, and exits 0, reporting any pending cannot-evaluate as pending
+  until commit; the test commits it; and the retried upgrade reaches 1.3.0 with the validator
+  reporting valid and the importer-authored decision named in the report. The same `transition`
+  run as an assistant with the `supersedes` link refuses and writes nothing, since section 8.8
+  refuses the link on a `/proposed` landing, and a `transition` run before the `create` is committed
+  refuses on its dirty planned destinations (section 8.8, item 5) and writes nothing.
+- The receipt route from a 1.0.0 fixture: the composed upgrade refuses before any write and names
+  the staged route; `opf upgrade --to 1.2.0` reaches 1.2.0 with the validator reporting valid and
+  nothing staged; a `create` of the decision run now refuses on its dirty planned destinations and
+  writes nothing; the test commits the intermediate upgrade; the maintainer's decision is then
+  recorded through the writer (exit 0) and committed; and the retried upgrade reaches 1.3.0 with
+  the validator reporting valid.
 - A fixture at `import_status = "partial"`, and one at `"none"` holding a legacy staging run, each
   refuse before any write, naming the reconciliation remedy.
 - A fixture at `import_status = "complete"` with no preserved legacy run evidence refuses before
@@ -954,9 +1112,12 @@ Acceptance checks, over synthetic fixtures the test builds:
 - Once open point 25 is resolved: a fixture at `import_status = "complete"` with intact preserved
   evidence upgrades with the status still `"complete"`, no approval, receipt, provenance or
   `init.toml` created, and the validator reporting valid; one digest-mismatched evidence file
-  makes it refuse before any write; and a fixture holding synthetic LF or module records keeps
-  their bytes and reaches valid. Until then, report these checks as not run; step 8 is then not
-  passed and step 9 does not start (open point 25).
+  makes it refuse before any write; a fixture holding synthetic LF or module records keeps their
+  bytes and is graded as the resolved deferral seam says; and a fixture holding a legacy
+  importer-authored clean record without `created_at`, its omission recorded through the resolved
+  provenance reference, keeps its bytes and validates before and after the upgrade, while the same
+  record without that recorded omission is a finding. Until then, report these checks as not run;
+  step 8 is then not passed and step 9 does not start (open point 25).
 
 ### Step 9: fresh initialization (`opf init`)
 
@@ -1086,7 +1247,8 @@ Implement section 8.8 (Authoring operations). Subcommands:
 - `create`: a new record of an enabled baseline type in its initial state (not `done` receipts or
   worklog entries).
 - `transition`: a checked status change; writes `proposed_from` on an assistant or automation
-  landing at `/proposed`, restores it exactly on rejection, removes it on ratification; writes or
+  landing at `/proposed`; a rejection restores exactly the recorded `proposed_from` state, and
+  leaving the `/proposed` status, by rejection or ratification, removes the field; writes or
   removes the pending_decision resolution bundle and the contribution delivery bundle exactly as
   section 8.8 states; applies the chain rule over the active index and every archived record. It
   refuses to act on, or overwrite, a record whose current row is not schema-valid, `proposed_from`
@@ -1110,9 +1272,11 @@ Implement section 8.8 (Authoring operations). Subcommands:
   that no intermediate state links `supersedes` to a record that is not yet `superseded`; the
   commit between them follows from open point 22. Whether a
   `superseded/proposed` record reflects the supersession is part of open point 23.
-- Older stores: step 8 built `create` for a store declaring 1.1.0 or 1.2.0. Extend it with
-  `transition` on such a store, under the grading of open point 21, so every remedy section 9.2
-  names stays performable; `done-with-receipt` and `worklog-append` need no older-store mode.
+- Older stores: step 8 built `create` and `transition` for a store declaring 1.1.0 or 1.2.0, under
+  the grading of open point 21, so every remedy of open point 28 was performable before activation.
+  Extend the same two subcommands to the 1.3.0 format without changing their older-store
+  behaviour; `done-with-receipt` and `worklog-append` need no older-store mode, since no remedy
+  uses them.
 - The `import --batch` mode exists in the specification, but this fresh start does not implement
   or use it. The clean-series subcommands refuse `actor.kind = "importer"`.
 
@@ -1121,9 +1285,10 @@ transaction, whose `detail` opens with `opf-record create <ID> <status>` or
 `opf-record transition <ID> <from> -> <to>`, and a rejection's entry records its reason.
 `done-with-receipt` appends two, one per changed record (open point 16).
 
-Before any write, `create`, `transition` and `done-with-receipt` refuse while any record present
-at `HEAD` has a working-tree status that differs from its status there, naming the remedy, which
-is to commit the earlier change first (open point 22, this prompt's choice).
+Before any write, every subcommand, `worklog-append` and the open point 23 handoff operation
+included, refuses while any record present at `HEAD` has a working-tree status that differs from
+its status there, naming the remedy, which is to commit the earlier change first (open point 22,
+this prompt's choice).
 
 Every subcommand follows the eight-item operation sequence of section 8.8: reconcile any
 interrupted transaction first, under the lease; the byte-reproduction precondition; one atomic ID
@@ -1164,7 +1329,10 @@ Acceptance checks:
   exits 0.
 - `done-with-receipt` appends a transition-form entry for the backlog item and a create-form entry
   for the receipt; and after an assistant lands `done/proposed`, `done-with-receipt` before any
-  commit refuses and writes nothing, as does a `create` while that transition is uncommitted.
+  commit refuses and writes nothing, as do a `create` and a `worklog-append` while that transition
+  is uncommitted.
+- After step 10's extensions, every step 8 check that uses the remedy writer, the decision-chain
+  repair included, still passes.
 - A final validation failure exits 2 and leaves the planned change in the working tree with
   recovery advice naming the planned paths.
 - Killing the process between journal write and publication leaves the store, after
@@ -1183,7 +1351,8 @@ Implement sections 6 (The release triad) and 7 (Changelog gates: range coverage 
   new entry in the unreleased tail linking `corrects` (section 6.2). Re-render `VERSION`. The
   specification names no verb for this, and range coverage needs a summary row and heading for the
   new version (open point 9); whatever performs the cut runs under the lease and follows the step 10
-  operation sequence.
+  operation sequence, including its refusal before any write while an earlier status change is
+  uncommitted (open point 22).
 - **Drafting.** The machine drafts a summary from the level directly below (release summaries
   from their worklog span; range summaries from the release summaries they replace), using the
   worklog, the ledger and the linked `done` receipts (sections 6.3 and 6.4). The specification
@@ -1295,7 +1464,9 @@ platform." Wire all four, not only the platform you run on.
   item 7 lets the validator grade cannot-evaluate "until the change is committed", so the hook
   accepts that pending cannot-evaluate on the terms of open point 22 (this prompt's choice) and
   blocks on every finding and every other cannot-evaluate.
-- **Instructions, on every platform.** Add OPF working rules to each platform's instructions file
+- **Instructions, on every platform (this prompt's choice).** Section 14.1 requires instructions
+  only "on a platform without verifiable denial"; adding them on every platform, beside any deny
+  hook, is this prompt's choice. Add OPF working rules to each platform's instructions file
   (for example `CLAUDE.md` for Claude Code, `AGENTS.md` for Codex, `GEMINI.md` for Gemini CLI, and a
   rule file under `.cursor/rules/` for Cursor; confirm each file against that platform's official
   documentation, since the specification names platforms, not files). Editing an inventoried
@@ -1309,7 +1480,9 @@ platform." Wire all four, not only the platform you run on.
   `reference` or an `autonomous_decision`, carries no qualifier, and a worklog entry never takes
   `/proposed` (sections 8.3 and 8.4); never author a
   maintainer_decision, never run `done-with-receipt`, never weaken the posture (section 11), and
-  never publish a changelog summary (section 7.3); append a worklog entry for each change.
+  never publish a changelog summary (section 7.3); append a worklog entry for each change; and
+  commit each writer change before the next writer operation, which otherwise refuses (open point
+  22).
 - **Deny hook, per platform.** For each of the four platforms, read its official hook
   documentation. Where it confirms that a hook can deny a tool call, install a hook that denies
   direct writes to the store's record series, counters, declared views and evidence, and writes
@@ -1411,14 +1584,16 @@ test name). Any failed or not-run item means you do not claim conformance.
    and `VERSION` as ratified under open point 8).
 8. The validator runs the full section 11 roster plus the imported-series checks and the homes-1
    control-area registration, exits 0, 1 or 2 as step 6 describes, and fails closed on unreadable
-   input.
+   input; its tracked-store check admits unstaged files only on the terms of open point 20.
 9. Renders are byte-reproducible and the drift check catches a one-byte edit; the render write
    mode, the pre-commit check and the writer accept the pending cannot-evaluate of section 8.8,
    item 7 only on the terms of step 6, step 10 and open point 22, and nothing else.
 10. The upgrade to 1.3.0 of step 8, from 1.0.0, 1.1.0 and 1.2.0, with the completed-legacy-import
-    route and the repair route performed end to end, is implemented and passed every step 8 check
-    on synthetic fixtures before initialization and the record writer accepted the 1.3.0 format
-    (section 4.2); every detail of open point 25 is resolved, and no step 8 check was left not run.
+    route, the receipt repair route (from 1.2.0, and from 1.0.0 with the intermediate upgrade
+    committed before the writer runs) and the decision-chain repair route of open point 28
+    performed end to end, is implemented and passed every step 8 check on synthetic fixtures before
+    initialization and the record writer accepted the 1.3.0 format (section 4.2); every detail of
+    open point 25 is resolved, and no step 8 check was left not run.
 11. Initialization implements `opf.init.coupled/v1` (this prompt's scope choice; see "Choices to
     make before you start"): exit 0 only on fresh observations, with the exact success sentence;
     init-created sources staged as exact entries; views unstaged; no commit created; final
@@ -1452,7 +1627,7 @@ test name). Any failed or not-run item means you do not claim conformance.
 Import and the imported-series writer (section 8.8, `import --batch`; section 14.1, post-adoption
 import), adoption of pre-existing files (section 14), migrating an existing release pipeline
 (section 14.3), store relocation and sync (sections 5.4 to 5.6), schema upgrades other than the
-upgrades to 1.3.0 of step 8 (section 9.2), the homes-2 generation and its
-homes migration (sections 4.2 and 9.2), the modules (section 8.5), and profiles (section 9.1). If
-your project needs any of these, read those sections at the same pinned commit and extend the plan,
-under the same rules.
+upgrades to 1.3.0 of step 8 (section 9.2), the homes-2 generation and its homes migration
+(sections 4.2 and 9.2), the modules (section 8.5) beyond what the step 8 upgrade fixtures need, and
+profiles (section 9.1). If your project needs any of these, read those sections at the same pinned
+commit and extend the plan, under the same rules.
