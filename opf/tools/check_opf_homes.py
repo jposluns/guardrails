@@ -27,7 +27,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
     raise SystemExit(2)
 
 import re
-import sys
 import tempfile
 from pathlib import Path
 

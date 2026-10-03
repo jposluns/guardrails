@@ -78,7 +78,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import datetime
 import math
 import re
-import sys
 from pathlib import Path
 
 import tomllib

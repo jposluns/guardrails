@@ -52,7 +52,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # for the self-test's sibling imports below

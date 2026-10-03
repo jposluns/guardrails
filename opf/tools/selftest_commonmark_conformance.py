@@ -33,7 +33,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import json
 import os
 import subprocess
-import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _commonmark_headings as ch        # noqa: E402  reuse the pinned, containment-checked marko loader

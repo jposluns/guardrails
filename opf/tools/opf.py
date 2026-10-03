@@ -84,7 +84,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import json
 import os
 import stat
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # for the guarded _opf_* helper bootstrap below

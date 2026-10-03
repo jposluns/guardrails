@@ -101,7 +101,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import hashlib
 import json
 import re
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))

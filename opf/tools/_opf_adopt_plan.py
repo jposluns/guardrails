@@ -68,7 +68,6 @@ import datetime
 import hashlib
 import os
 import stat
-import sys
 import tomllib
 from pathlib import Path
 

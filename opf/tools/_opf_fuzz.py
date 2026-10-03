@@ -37,7 +37,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
     raise SystemExit(2)
 
 import ast
-import sys
 import tomllib
 from pathlib import Path
 

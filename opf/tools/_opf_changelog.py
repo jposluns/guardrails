@@ -104,7 +104,6 @@ import hashlib
 import os
 import re
 import stat
-import sys
 from collections import Counter
 from pathlib import Path
 

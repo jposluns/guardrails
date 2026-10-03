@@ -22,7 +22,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import re
 import runpy
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]

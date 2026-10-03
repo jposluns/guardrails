@@ -27,7 +27,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import argparse
 import hashlib
 import re
-import sys
 import tomllib
 from pathlib import Path
 

@@ -35,7 +35,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import hashlib
 import json
 import re
-import sys
 
 KEEP_SCHEMA = 1
 KEEP_OPERATION = "opf-init-keep"

@@ -24,7 +24,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import contextlib
 import os
 import stat
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch

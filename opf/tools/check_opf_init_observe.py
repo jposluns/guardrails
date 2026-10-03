@@ -19,7 +19,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import argparse
 import hashlib
 import pathlib
-import sys
 import types
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))

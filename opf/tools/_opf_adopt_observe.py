@@ -132,7 +132,6 @@ import signal
 import socket
 import ssl
 import stat
-import sys
 import tarfile
 import threading
 import time

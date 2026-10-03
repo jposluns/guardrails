@@ -44,7 +44,6 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import os
 import shutil
 import subprocess
-import sys
 from collections import namedtuple
 from pathlib import Path
 
