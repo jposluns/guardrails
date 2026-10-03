@@ -37,17 +37,19 @@ character in the Basic Multilingual Plane is one unit, an astral character such 
       lines at one indent, each holding one such string (`key:` with no item reads as null). A string is
       double quoted with no backslash, single quoted with no inner quote, or plain: it starts with no YAML
       indicator character and holds no `: ` or ` #` (in a flow sequence no comma, bracket, or brace
-      either). A nested list, a flow mapping, an escape, a multi-line value, an unknown or duplicate key,
-      or any other line exits 2.
-  SCOPE. A file whose frontmatter has a `paths:` key is conditional and is not counted, unless its globs
-      load everywhere, and only when every entry is a string glob: a typed `paths:` value or entry, one
-      YAML would read as null, a boolean, a number, a mapping, an alias, a tag, or a block scalar, exits 2
-      (the loader drops a scope it cannot read as strings and loads the file everywhere). The value (a
-      string, or each entry of a list) is normalized in the loader's order: split on the commas outside
-      braces, each piece trimmed, one level of brace alternation `{a,b}` expanded, one trailing `/**`
-      stripped, and empty globs dropped. The file is unconditional, and counted, when no glob is left or
-      every glob is `**` (so `**`, `**/**`, `/**`, `**,`, ` ** `, `{**,**}`, and `["**", "/**"]`). A glob
-      the normalizer cannot read (nested braces, an unbalanced brace, a backslash escape) exits 2.
+      either; a quoted string there may hold a comma, and a flow sequence splits only on the commas
+      outside quotes). A nested list, a flow mapping, an escape, a multi-line value, an unknown or
+      duplicate key, or any other line exits 2.
+  SCOPE. A file whose frontmatter has a `paths:` key is conditional and its own body is not counted (its
+      imports are, as IMPORTS states), unless its globs load everywhere, and only when every entry is a
+      string glob: a typed `paths:` value or entry, one YAML would read as null, a boolean, a number, a
+      mapping, an alias, a tag, or a block scalar, exits 2 (the loader drops a scope it cannot read as
+      strings and loads the file everywhere). The value (a string, or each entry of a list) is normalized in
+      the loader's order: split on the commas outside braces, each piece trimmed, one level of
+      brace alternation `{a,b}` expanded, one trailing `/**` stripped, and empty globs dropped. The file
+      is unconditional, and counted, when no glob is left or every glob is `**` (so `**`, `**/**`, `/**`,
+      `**,`, ` ** `, `{**,**}`, and `["**", "/**"]`). A glob the normalizer cannot read (nested braces, an
+      unbalanced brace, a backslash escape) exits 2.
   COMMENTS. An HTML comment is removed only in the one shape the loader certainly removes: a line that is
       exactly one `<!-- ... -->` comment at column 0, with a blank line or the start of the file before it
       and a blank line or the end of the file after it, outside a fenced code block. The line and its
@@ -58,29 +60,37 @@ character in the Basic Multilingual Plane is one unit, an astral character such 
       file it removes no comment, and a file holding a carriage return has no comment removed. A text
       holding `<!--` that does not end in a newline counts one unit more: the loader then rebuilds it from
       its Markdown lexer's tokens, which can add a final newline (a blockquote closing the file).
-  IMPORTS. Every `@` in a counted rule file, in the managed block, in an imported file, and, for SESSION,
-      in the whole CLAUDE.md is an import candidate, with no exclusion for code spans, comments, or other
-      Markdown structure. The candidate is the run of non-whitespace characters after the `@` (a
-      backslash-escaped space stays in the run); a run holding a character outside printable ASCII exits
-      2. The paths it may name are tested longest first: the whole run, then each prefix that ends just
-      before a Markdown delimiter character (`*`, `_`, a backtick, `)`, `]`, `}`, `>`, `,`, `.`, `;`, `:`,
-      `!`, `?`, quotes) or an inline opener (`<`, `[`, `(`, `{`, a backslash), each with its `#` fragment
-      cut, read with the escaped space and also with Markdown backslash escapes undone. This takes
-      trailing delimiters off one at a time as a special case, and also finds the path in
-      `<b>@big.txt</b>` and `[@big.txt](x)`. A tested path is resolved from the real directory of the
-      importing file, as the loader resolves it (for a symlinked CLAUDE.md, the directory of its target).
-      A tested path with a `..` component, or passing through a symlink at any component, exits 2, so the
-      lexical path and the real path are one file. Every tested path that names an existing regular file
-      is an import. When a path names no file under exact case but one file matches it case-insensitively,
-      that file is the import (the loader on a case-insensitive file system reads it); two such matches
-      exit 2. Each target is counted once, recursively through imported files to any depth (a cycle ends),
-      held to the grammar, its frontmatter and comments removed as for a rule file. Only a genuinely
-      absent path (the file system reports that it does not exist) adds 0 and does not fail: a mention
-      such as @alice, or an email address such as name@example.com. A path that holds only dot components
-      names a directory and adds 0. A candidate the gate cannot settle exits 2 with a message that calls
-      it ambiguous or cannot-evaluate: a home relative (`~/`) or absolute path; a path naming a directory
-      or another entry that is not a regular file; a path the gate cannot list or read (a PermissionError
-      or any other OSError, never read as missing); and a target that cannot be decoded as UTF-8.
+      The loader removes a comment before it looks for imports, so a comment can join an import path
+      across it (`@docs/big<!---->.md` loads docs/big.md). A measured file in which `<!--` or `-->`
+      shares a line with an `@`, or in which `<!--` follows an `@` with only whitespace between them,
+      exits 2 naming the line; the gate refuses the construct rather than model the join.
+  IMPORTS. Every `@` in a rule file, in the managed block, in an imported file, and, for SESSION, in the
+      whole CLAUDE.md is an import candidate. That includes a conditional rule file: the loader reads every
+      rule file with its whole import tree in every session and then drops only the entries that carry their
+      own scope, so a conditional file's imports load in every session though its own body is not counted;
+      they are followed and counted into both totals, recursively, as for an unconditional file. Candidates
+      are found with no exclusion for code spans, comments, or other Markdown structure (a comment next to
+      an `@` exits 2, as COMMENTS states). The candidate is the run of non-whitespace characters after the
+      `@` (a backslash-escaped space stays in the run); a run holding a character outside printable ASCII
+      exits 2. The paths it may name are tested longest first: the whole run, then each prefix that ends
+      just before a Markdown delimiter character (`*`, `_`, a backtick, `)`, `]`, `}`, `>`, `,`, `.`, `;`,
+      `:`, `!`, `?`, quotes) or an inline opener (`<`, `[`, `(`, `{`, a backslash), each with its `#`
+      fragment cut, read with the escaped space and also with Markdown backslash escapes undone. This takes
+      trailing delimiters off one at a time as a special case, and also finds the path in `<b>@big.txt</b>`
+      and `[@big.txt](x)`. A tested path is resolved from the real directory of the importing file, as the
+      loader resolves it (for a symlinked CLAUDE.md, the directory of its target). A tested path with a
+      `..` component, or passing through a symlink at any component, exits 2, so the lexical path and the real
+      path are one file. Every tested path that names an existing regular file is an import. When a path
+      names no file under exact case but one file matches it case-insensitively, that file is the import
+      (the loader on a case-insensitive file system reads it); two such matches exit 2. Each target is
+      counted once, recursively through imported files to any depth (a cycle ends), held to the grammar,
+      its frontmatter and comments removed as for a counted rule file. Only a genuinely absent path (the
+      file system reports that it does not exist) adds 0 and does not fail: a mention such as @alice, or
+      an email address such as name@example.com. A path that holds only dot components names a directory
+      and adds 0. A candidate the gate cannot settle exits 2 with a message that calls it ambiguous or
+      cannot-evaluate: a home relative (`~/`) or absolute path; a path naming a directory or another
+      entry that is not a regular file; a path the gate cannot list or read (a PermissionError or any
+      other OSError, never read as missing); and a target that cannot be decoded as UTF-8.
   MANAGED BLOCK. The pack-managed RULES-INDEX block of CLAUDE.md (the markers tools/gen_claude.py
       writes), comments removed as COMMENTS states with the scan run over the whole CLAUDE.md (so a fence
       opened before the block keeps the block's comments counted), plus its imports.
@@ -108,8 +118,9 @@ KNOWN OVER-COUNTS, by design (each can make PACK or SESSION higher than what the
     carriage return) is counted although the loader may remove it.
   - `@` text that happens to name a file is counted as an import: an email address, a mention, or a
     prefix of either that names a file, and an `@` in link destinations or HTML attributes.
-  - An import inside a code span, a fenced code block, or an HTML comment is counted although the loader
-    skips it, and a banned name there exits 1.
+  - An import inside a code span, a fenced code block, or an HTML comment spread over lines (on a line
+    holding neither `<!--` nor `-->`) is counted although the loader skips it, and
+    a banned name there exits 1.
   - Every target is followed without the loader's own path filter and to any depth, and two prefixes of
     one candidate that name two files both count.
   - A rule file reached under two names counts twice, and the unit added for a text holding `<!--` with
@@ -121,8 +132,12 @@ for; it is not a proof that the loader agrees on every input inside the grammar.
 user-level files (~/.claude/CLAUDE.md and ~/.claude/rules/), which load in every session too; an
 AGENTS.md or other file loaded through the instructionFiles setting rather than an `@` import; CLAUDE.md
 files in other directories, or CLAUDE.local.md; skills, hooks, tool definitions, or the system prompt; or
-loading by a Claude Code version other than the one pinned in the budget source. The count is UTF-16 code
-units, not tokens, so it tracks size, not model cost.
+loading by a Claude Code version other than the one pinned in the budget source. The loader also writes a
+header line before each file it loads (`Contents of <absolute path> (project instructions, checked into
+the codebase):` or similar, its length depending on where the repository sits); the gate counts file
+contents only, so that header, roughly a hundred units or more for each loaded file, is not in either
+total. The loader's own 120,000-character check sums file contents only, so the header does not bear on
+that floor. The count is UTF-16 code units, not tokens, so it tracks size, not model cost.
 
 Usage:
   check_instruction_budget.py                          measure and enforce; print both totals
@@ -175,6 +190,8 @@ JS_WHITESPACE = (" \t\n\v\f\r\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2
                  "\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff")
 # The one comment shape the gate removes: a whole line that is exactly one `<!-- ... -->` comment.
 COMMENT_LINE_RE = re.compile(r"<!--(?:(?!-->)[^\n])*-->")
+# An `@` with an HTML comment after it and only whitespace between: the loader may join a path across it.
+COMMENT_AFTER_AT_RE = re.compile(r"@[ \t\r\n]*<!--")
 FENCE_OPEN_RE = re.compile(r"(`{3,})[^`]*$|(~{3,})")
 FENCE_ANY_RE = re.compile(r"[ \t]*(?:`{3,}|~{3,})")
 _CONTAINER = r"[ \t>]*(?:(?:[*+-]|\d{1,9}[.)])[ \t>]*)*"
@@ -304,6 +321,23 @@ def _check_characters(text, where):
                                 where, text.count("\n", 0, idx) + 1, ord(ch)))
 
 
+def _check_comment_joins(text, where):
+    """GateError naming the file and line of the first `@` an HTML comment could join to an import path:
+    a line holding an `@` and also `<!--` or `-->`, or an `@` followed by `<!--` with only whitespace
+    between them. The loader removes comments before it looks for imports, so `@docs/big<!---->.md`
+    loads docs/big.md; the gate refuses the construct rather than model the join."""
+    for number, line in enumerate(text.split("\n"), 1):
+        if "@" in line and ("<!--" in line or "-->" in line):
+            raise GateError("{}:{}: an HTML comment opener or closer shares a line with an `@`; the loader "
+                            "removes the comment and may join an import path across it; outside the "
+                            "enumerated grammar, cannot evaluate".format(where, number))
+    joined = COMMENT_AFTER_AT_RE.search(text)
+    if joined:
+        raise GateError("{}:{}: an HTML comment follows an `@` with only whitespace between them; the loader "
+                        "removes the comment and may join an import path across it; outside the enumerated "
+                        "grammar, cannot evaluate".format(where, text.count("\n", 0, joined.start()) + 1))
+
+
 def _check_ascii(text, where, first_line, what):
     """GateError naming the file and line of the first character of `text` (the frontmatter, or an import
     token) that is not printable ASCII, LF, or the CR of a CR-LF pair."""
@@ -401,7 +435,7 @@ def parse_frontmatter(block, where, first_line):
             continue
         flow = value.startswith("[") and value.endswith("]")
         inner = value[1:-1].strip(" ") if flow else None
-        elems = ([e.strip(" ") for e in inner.split(",")] if inner else []) if flow else [value]
+        elems = ([e.strip(" ") for e in _flow_split(inner)] if inner else []) if flow else [value]
         if not all(_scalar_ok(e, flow) for e in elems):
             raise GateError("{}: frontmatter value {!r} is outside the enumerated grammar (a one-line string or "
                             "a flat flow sequence of them); cannot evaluate".format(here, value))
@@ -410,6 +444,26 @@ def parse_frontmatter(block, where, first_line):
                 _plain_string(e, here)
         fm[key] = [gen_rules._unquote(e) for e in elems] if flow else gen_rules._unquote(value)
     return fm
+
+
+def _flow_split(inner):
+    """The elements of a flow sequence's `inner` text, split on the commas outside quotes: a quote opens
+    only at the start of an element and closes at the next same quote, so `"**,**"` is one element. A
+    quote left open, or text after a closing quote, stays in its element for _scalar_ok to refuse."""
+    parts, current, quote = [], [], None
+    for ch in inner:
+        if quote is not None:
+            if ch == quote:
+                quote = None
+        elif ch in "\"'" and not "".join(current).strip(" "):
+            quote = ch
+        elif ch == ",":
+            parts.append("".join(current))
+            current = []
+            continue
+        current.append(ch)
+    parts.append("".join(current))
+    return parts
 
 
 def _plain_string(tok, where):
@@ -555,22 +609,28 @@ def rule_files(root):
 
 def measure_rules(root):
     """(counted units, counted file count, conditional file count, import origins) over the rule tree,
-    the origins one (body, real directory, where, first body line) per counted file, for follow_imports."""
+    the origins one (body, real directory, where, first body line) per rule file, for follow_imports. A
+    conditional file's body is not counted, but it is an origin: the loader reads every rule file with its
+    whole import tree in every session and drops only the entries that carry their own scope, so the
+    imports of a conditional file load in every session."""
     total = counted = conditional = 0
     origins = []
     for path in rule_files(root):
         where = path.relative_to(root).as_posix()
         text = read_text(path, where)
         _check_characters(text, where)
+        _check_comment_joins(text, where)
         front, body, line = split_frontmatter(text, where)
+        origin = (body, os.path.dirname(os.path.realpath(path)), where, _body_line(text, body))
         if front is not None:
             globs = path_globs(parse_frontmatter(front, where, line), where)
             if globs is not None and not loads_everywhere(normalize_globs(globs, where)):
                 conditional += 1
+                origins.append(origin)  # its body is not counted; its imports load in every session
                 continue
         total += counted_units(body)
         counted += 1
-        origins.append((body, os.path.dirname(os.path.realpath(path)), where, _body_line(text, body)))
+        origins.append(origin)
     return total, counted, conditional, origins
 
 
@@ -696,8 +756,9 @@ def follow_imports(root, origins, findings):
     """{resolved path: units} for every file reachable through `@` import candidates from `origins`, a
     list of (text, the real directory it sits in, where, the line `text` starts on), each counted once
     with frontmatter and comments removed as for a rule file. Each run must be printable ASCII
-    (_check_ascii), and every path candidate_paths gives that names a file is followed, so within the
-    enumerated grammar an import can be over-reported but is not dropped. A candidate whose tested paths
+    (_check_ascii), and every path candidate_paths gives that names a file is followed; a comment next to
+    an `@` was refused before (_check_comment_joins). This is the gate's model of the pinned loader, not a
+    proof that the loader loads no other file. A candidate whose tested paths
     or targets carry a BANNED_IMPORTS final component (any case) is appended to `findings`. GateError when
     a candidate is home relative or absolute (what it loads depends on the machine), when
     resolve_candidate fails, or when a target cannot be read, decoded, or held to the grammar."""
@@ -736,6 +797,7 @@ def follow_imports(root, origins, findings):
                     raise GateError("{}: import @{} names {}, which the gate cannot read ({}); whether the "
                                     "loader loads it is ambiguous; cannot evaluate".format(here, run, rel, exc))
                 _check_characters(text, rel)
+                _check_comment_joins(text, rel)
                 front, body, front_line = split_frontmatter(text, rel)
                 if front is not None:
                     parse_frontmatter(front, rel, front_line)
@@ -750,6 +812,7 @@ def measure(root):
     rules, counted, conditional, origins = measure_rules(root)
     claude = read_text(root / CLAUDE_REL, CLAUDE_REL)
     _check_characters(claude, CLAUDE_REL)
+    _check_comment_joins(claude, CLAUDE_REL)
     start, end = managed_block(claude)
     block = claude[start:end]
     findings = []
@@ -1096,12 +1159,36 @@ def self_test(report_path=None):
                                         "c.md": '---\npaths: "{src,lib}/**"\n---\nabc\n'})
         m = _measured(measure, src)
         check("scope/paths-src-excluded", (m["rules"], m["rule_files"], m["conditional_files"]), (3, 1, 2))
+        # A conditional rule file's own body is not counted, but the loader reads its import tree in every
+        # session and drops only the entries that carry their own scope, so its imports count, to any depth.
+        condimp = _tree(tmp / "cond-import", rules={"c.md": "---\npaths: src/**\n---\nSee @big.txt\n",
+                                                    "big.txt": "X" * 1000})
+        m = _measured(measure, condimp)
+        check("scope/conditional-file-import-counted",
+              (m["rules"], m["rule_files"], m["conditional_files"], m["pack_imports"], m["pack"]),
+              (0, 0, 1, 1000, 1000))
+        condchain = _tree(tmp / "cond-chain", rules={"c.md": "---\npaths: src/**\n---\n@a.txt\n",
+                                                     "a.txt": "@b.txt\n", "b.txt": "X" * 1000})
+        m = _measured(measure, condchain)
+        check("scope/conditional-file-two-deep-import-counted",
+              (m["rules"], m["pack_imports"], m["session_imports"]), (0, 1007, 1007))
+        # A quoted flow-list item may hold a comma: the sequence splits only outside quotes, and the
+        # loader's normalizer then splits the string itself.
+        for check_id, case, scope, want in (
+                ("scope/flow-quoted-comma-counted", "comma", 'paths: ["**,**"]', (4, 1, 0)),
+                ("scope/flow-quoted-brace-comma-counted", "brace", "paths: ['{**,**}', \"/**\"]", (4, 1, 0)),
+                ("scope/flow-quoted-comma-src-excluded", "comma-src", 'paths: ["src/**,lib/**", "**"]', (0, 0, 1))):
+            flowed = _tree(tmp / ("flow-" + case), rules={"a.md": "---\n" + scope + "\n---\nabc\n"})
+            m = _measured(measure, flowed)
+            check(check_id, (m["rules"], m["rule_files"], m["conditional_files"]), want)
+        badflow = _tree(tmp / "flow-text-after-quote", rules={"a.md": '---\npaths: ["a"b, c]\n---\nabc\n'})
+        check("exit/flow-text-after-quote-2", _quiet(run, badflow), 2)
 
         # Imports and totals: an @import in the managed block is followed and counted into PACK; SESSION
         # adds the bytes outside the block.
-        imp = _tree(tmp / "import", block="@docs/extra.md", extra={"docs/extra.md": "Imported\n"})
+        imp = _tree(tmp / "import", block="\n@docs/extra.md\n", extra={"docs/extra.md": "Imported\n"})
         m = _measured(measure, imp)
-        check("import/managed-block-import-followed", (m["block"], m["pack_imports"], m["pack"]), (14, 9, 23))
+        check("import/managed-block-import-followed", (m["block"], m["pack_imports"], m["pack"]), (16, 9, 25))
         ruleimp = _tree(tmp / "ruleimp", rules={"a.md": "@big.txt\n"},
                         extra={".claude/rules/big.txt": "---\ncorpus-id: x\n---\n" + "X" * 100})
         m = _measured(measure, ruleimp)
@@ -1115,7 +1202,7 @@ def self_test(report_path=None):
                                      ("import/html-tag-import-counted", "tag", "<b>@big.txt</b>\n"),
                                      ("import/link-import-counted", "link", "[see @big.txt](x)\n"),
                                      ("import/list-item-comment-import-counted", "list-comment",
-                                      "- a <!-- @big.txt -->\n"),
+                                      "- a <!--\n  @big.txt\n  -->\n"),
                                      ("import/backticks-across-heading-counted", "heading",
                                       "` x\n# @big.txt\n` y\n"),
                                      ("import/backticks-across-list-items-counted", "list-items",
@@ -1124,10 +1211,33 @@ def self_test(report_path=None):
                                      ("import/case-insensitive-import-counted", "case", "@BIG.txt\n")):
             marked = _tree(tmp / ("marked-" + case), rules={"a.md": body}, extra=big)
             check(check_id, _measured(measure, marked)["pack_imports"], 1000)
+        # A comment beside an `@` exits 2: the loader removes it before it looks for imports, so it can join
+        # an import path across it (`@docs/big<!---->.md` loads docs/big.md), in any measured file.
+        bigdoc = {"docs/big.md": "X" * 1000}
+        joined = []
+        for check_id, case, parts in (
+                ("exit/comment-split-rule-import-2", "rule",
+                 dict(rules={"a.md": "<!-- a -->@big<!-- b -->.txt\n", "big.txt": "X" * 1000})),
+                ("exit/comment-split-block-import-2", "block",
+                 dict(block="\n<!-- a -->@docs/big<!---->.md\n", extra=bigdoc)),
+                ("exit/comment-split-agents-import-2", "agents",
+                 dict(block="\n<!-- a -->@AGE<!---->NTS.md\n", extra={"AGENTS.md": "x\n"})),
+                ("exit/comment-split-outside-block-2", "outside",
+                 dict(outside="@docs/big<!---->.md\n", extra=bigdoc)),
+                ("exit/comment-split-in-imported-file-2", "target",
+                 dict(rules={"a.md": "@mid.txt\n", "mid.txt": "@big<!---->.txt\n", "big.txt": "X" * 1000})),
+                ("exit/comment-split-conditional-rule-2", "conditional",
+                 dict(rules={"c.md": "---\npaths: src/**\n---\n@big<!---->.txt\n", "big.txt": "X" * 1000})),
+                ("exit/comment-after-at-across-lines-2", "lines",
+                 dict(rules={"a.md": "@\n<!-- a -->big.txt\n", "big.txt": "X" * 1000}))):
+            joined.append(_tree(tmp / ("join-" + case), **parts))
+            code, err = _stderr_of(run, joined[-1])
+            check(check_id, (code, "HTML comment" in err), (2, True))
         prefixes = _tree(tmp / "prefixes", rules={"a.md": "@x.txt_b.txt\n"},
                          extra={".claude/rules/x.txt_b.txt": "X" * 10, ".claude/rules/x.txt": "Y" * 7})
         check("import/every-prefix-naming-a-file-counted", _measured(measure, prefixes)["pack_imports"], 17)
-        twocase = _tree(tmp / "twocase", block="@Docs/Big.md", extra={"docs/big.md": "x", "DOCS/big.md": "y"})
+        twocase = _tree(tmp / "twocase", block="\n@Docs/Big.md\n",
+                        extra={"docs/big.md": "x", "DOCS/big.md": "y"})
         code, err = _stderr_of(run, twocase)
         check("exit/case-insensitive-two-matches-ambiguous-2", (code, "ambiguous" in err), (2, True))
         ruleagents = _tree(tmp / "ruleagents", rules={"a.md": "@AGENTS.md\n"}, extra={"AGENTS.md": "x\n"})
@@ -1135,9 +1245,9 @@ def self_test(report_path=None):
         boldagents = _tree(tmp / "boldagents", rules={"a.md": "**@AGENTS.md**\n"},
                            extra={"AGENTS.md": "x\n"})
         check("exit/bold-agents-import-1", _quiet(run, boldagents), 1)
-        listspan = _tree(tmp / "listspan", block="- see `cat @AGENTS.md now`\n", extra={"AGENTS.md": "x\n"})
+        listspan = _tree(tmp / "listspan", block="\n- see `cat @AGENTS.md now`\n", extra={"AGENTS.md": "x\n"})
         check("exit/list-item-code-span-agents-import-1", _quiet(run, listspan), 1)
-        lowercase = _tree(tmp / "lowercase", block="@agents.md\n")
+        lowercase = _tree(tmp / "lowercase", block="\n@agents.md\n")
         check("exit/lowercase-agents-name-1", _quiet(run, lowercase), 1)
         # A candidate naming no file adds nothing and does not fail.
         rulemissing = _tree(tmp / "rulemissing", rules={"a.md": "@missing.txt\n"})
@@ -1147,13 +1257,13 @@ def self_test(report_path=None):
         check("exit/outside-block-email-prose-0", _quiet(run, email), 0)
         mention = _tree(tmp / "mention", outside="Ping @alice before merging...@...\n")
         check("exit/outside-block-mention-prose-0", _quiet(run, mention), 0)
-        fragment = _tree(tmp / "fragment", block="@docs/x.md#usage", extra={"docs/x.md": "Doc\n"})
+        fragment = _tree(tmp / "fragment", block="\n@docs/x.md#usage\n", extra={"docs/x.md": "Doc\n"})
         check("import/fragment-cut-followed", _measured(measure, fragment)["pack_imports"], 4)
         # An import the gate cannot settle exits 2 and says it is ambiguous.
         home = _tree(tmp / "home", outside="See @~/notes.md first.\n")
         code, err = _stderr_of(run, home)
         check("exit/home-import-ambiguous-2", (code, "ambiguous" in err), (2, True))
-        undecodable = _tree(tmp / "undecodable", block="@docs/x.md")
+        undecodable = _tree(tmp / "undecodable", block="\n@docs/x.md\n")
         (undecodable / "docs").mkdir()
         (undecodable / "docs" / "x.md").write_bytes(b"ok \xff\n")
         code, err = _stderr_of(run, undecodable)
@@ -1161,10 +1271,10 @@ def self_test(report_path=None):
         rulecycle = _tree(tmp / "rulecycle", rules={"a.md": "@b.txt\n"},
                           extra={".claude/rules/b.txt": "@c.txt\n", ".claude/rules/c.txt": "@b.txt\n"})
         check("import/rule-file-cycle-terminates", _measured(measure, rulecycle)["pack_imports"], 14)
-        mismatched = _tree(tmp / "mismatched", block="` literal\n\n@AGENTS.md\n\n`` literal\n",
+        mismatched = _tree(tmp / "mismatched", block="\n` literal\n\n@AGENTS.md\n\n`` literal\n",
                            extra={"AGENTS.md": "X" * 100})
         check("exit/mismatched-backticks-agents-import-1", _quiet(run, mismatched), 1)
-        spanned = _tree(tmp / "spanned", block="`@AGENTS.md` and ``@RULES-INDEX.md``\n")
+        spanned = _tree(tmp / "spanned", block="\n`@AGENTS.md` and ``@RULES-INDEX.md``\n")
         check("exit/code-span-banned-import-1", _quiet(run, spanned), 1)
         # Symlinks under .claude/rules: a directory resolving inside the repository is followed and
         # counted; one escaping the repository, a loop, or a second route to a directory exits 2.
@@ -1208,7 +1318,7 @@ def self_test(report_path=None):
                 ("exit/nel-frontmatter-fence-2", "nel-fence",
                  _files("a.md", "---" + nel + '\npaths: ["src/**"]\n---\n' + "X" * 1000), None, ""),
                 ("exit/bom-after-block-import-2", "bom-block", None, _files("big.txt", "X" * 1000),
-                 "See @big.txt" + bom_char + " now")):
+                 "\nSee @big.txt" + bom_char + " now\n")):
             check(check_id, _quiet(run, _tree(tmp / ("grammar-" + case), rules=rules, extra=extra, block=block)), 2)
         cafe = _tree(tmp / "cafe", rules=_files("a.md", "@caf" + chr(0xE9) + ".txt\n"),
                      extra=_files(".claude/rules/caf" + chr(0xE9) + ".txt", "X" * 1000))
@@ -1224,14 +1334,15 @@ def self_test(report_path=None):
                           extra=_files("docs/deep/big.txt", "X" * 1000))
         os.symlink(os.path.join("..", "..", "docs", "deep"), str(symimport / RULES_REL / "sub"))
         check("exit/symlinked-import-component-2", _quiet(run, symimport), 2)
-        private = _tree(tmp / "private", block="@private/big.txt", extra=_files("private/big.txt", "X" * 1000))
+        private = _tree(tmp / "private", block="\n@private/big.txt\n",
+                        extra=_files("private/big.txt", "X" * 1000))
         with _denied(private / "private"):
             check("exit/unreadable-import-directory-2", _quiet(run, private), 2)
             lenient_read = _mutant(tmp, "    except OSError as exc:  # anything but a genuinely absent entry\n",
                                    "    except OSError as exc:  # anything but a genuinely absent entry\n"
                                    "        return None\n")
             check("revert/unreadable-import-red", _quiet(lenient_read.run, private), 0)
-        linkclaude = _tree(tmp / "linkclaude", block="@big.md", extra=_files("docs/big.md", "X" * 1000))
+        linkclaude = _tree(tmp / "linkclaude", block="\n@big.md\n", extra=_files("docs/big.md", "X" * 1000))
         os.rename(str(linkclaude / CLAUDE_REL), str(linkclaude / "docs" / CLAUDE_REL))
         os.symlink(os.path.join("docs", CLAUDE_REL), str(linkclaude / CLAUDE_REL))
         check("import/symlinked-claude-md-real-base-counted", _measured(measure, linkclaude)["pack_imports"], 1000)
@@ -1247,10 +1358,10 @@ def self_test(report_path=None):
         check("exit/at-ratchet-0", _quiet(run, at), 0)
         over = _tree(tmp / "over", rules={"a.md": "x" * 10}, ratchet=9)
         check("exit/one-over-ratchet-1", _quiet(run, over), 1)
-        index = _tree(tmp / "index", block="@.claude/RULES-INDEX.md",
+        index = _tree(tmp / "index", block="\n@.claude/RULES-INDEX.md\n",
                       extra={".claude/RULES-INDEX.md": "x\n"})
         check("exit/rules-index-import-1", _quiet(run, index), 1)
-        agents = _tree(tmp / "agents", block="@AGENTS.md", extra={"AGENTS.md": "x\n"})
+        agents = _tree(tmp / "agents", block="\n@AGENTS.md\n", extra={"AGENTS.md": "x\n"})
         check("exit/agents-import-1", _quiet(run, agents), 1)
 
         # Fail-closed (exit 2).
@@ -1269,7 +1380,7 @@ def self_test(report_path=None):
         nomarkers = _tree(tmp / "nomarkers")
         (nomarkers / CLAUDE_REL).write_bytes(b"# CLAUDE.md with no managed block\n")
         check("exit/missing-managed-block-markers-2", _quiet(run, nomarkers), 2)
-        escape = _tree(tmp / "escape" / "repo", block="@../outside.md")
+        escape = _tree(tmp / "escape" / "repo", block="\n@../outside.md\n")
         (tmp / "escape" / "outside.md").write_bytes(b"outside\n")
         check("exit/import-escaping-repo-2", _quiet(run, escape), 2)
 
@@ -1282,8 +1393,9 @@ def self_test(report_path=None):
                                      "recursively through imported", "symlinked directory", "name@example.com",
                                      "ambiguous", "case-insensitively", "`..` component", "real directory",
                                      "PermissionError", "never read as missing", "path filter",
-                                     "a banned name there exits 1", "not a proof") if phrase not in doc]
-              + [phrase for phrase in ("never missed", "never under", "OVER-COUNT BY CONSTRUCTION")
+                                     "a banned name there exits 1", "not a proof", "its own body is not counted",
+                                     "shares a line with an `@`", "Contents of") if phrase not in doc]
+              + [phrase for phrase in ("never missed", "never under", "OVER-COUNT BY CONSTRUCTION", "not dropped")
                  if phrase in doc], [])
 
         # Red on revert: each fix put back in a mutant copy of the production code must turn its case red.
@@ -1344,6 +1456,19 @@ def self_test(report_path=None):
         check("revert/claude-md-real-base-red",
               (_measured(measure, linkclaude)["pack_imports"], _measured(root_base.measure, linkclaude)["pack_imports"]),
               (1000, 0))
+        uncond_only = _mutant(tmp, "                origins.append(origin)  # its body is not counted; its "
+                                   "imports load in every session\n", "")
+        check("revert/conditional-file-imports-red",
+              ([_measured(measure, r)["pack_imports"] for r in (condimp, condchain)],
+               [_measured(uncond_only.measure, r)["pack_imports"] for r in (condimp, condchain)]),
+              ([1000, 1007], [0, 0]))
+        no_join = _off(tmp, "_check_comment_joins")
+        check("revert/comment-join-red",
+              ([_quiet(run, r) for r in joined], [_quiet(no_join.run, r) for r in joined]), ([2] * 7, [0] * 7))
+        flows = [tmp / ("flow-" + case) for case in ("comma", "brace", "comma-src")]
+        comma_split = _mutant(tmp, "_flow_split(inner)] if inner", 'inner.split(",")] if inner')
+        check("revert/flow-quoted-comma-red",
+              ([_quiet(run, r) for r in flows], [_quiet(comma_split.run, r) for r in flows]), ([0] * 3, [2] * 3))
         no_rebuild = _mutant(tmp, "(1 if rebuilt else 0)", "0")
         check("revert/rebuilt-newline-red",
               (_measured(measure, lexer)["rules"], _measured(no_rebuild.measure, lexer)["rules"]), (22, 21))
@@ -1376,7 +1501,8 @@ def self_test(report_path=None):
           "exit 2 as ambiguous, symlinked rule directories counted and escaping, looping, or doubled "
           "symlinks exit 2, cycles ending, SESSION over PACK, the ratchet boundary, unreadable, invalid "
           "UTF-8, malformed frontmatter, budget, and markers exit 2, the docstring stating the model, and "
-          "every red-on-revert flip turning red); execution set "
+          "every red-on-revert flip turning red, a conditional rule file's imports counted to any depth, an "
+          "HTML comment beside an @ exit 2, and quoted commas in a flow list read); execution set "
           "reconciled against tools/selftest_checks.toml".format(len(EXECUTED)))
     return 0
 
