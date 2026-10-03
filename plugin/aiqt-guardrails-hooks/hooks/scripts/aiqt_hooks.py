@@ -194,19 +194,27 @@ FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSub
 # A handler returns (exit_code, stdout_obj_or_None, stderr_text_or_None). The dispatcher prints the
 # stdout object as JSON when present, prints the stderr text when present, and exits with the code.
 #
-# NOTE_CONSTRUCTORS is the CLOSED set of note constructors: top-level functions whose bodies alone may
-# build the {"systemMessage": ...} note result, directly or by returning another constructor's call.
-# Every use of one of these names is the callee of a call that is the direct value of a `return`
-# statement (no assignment, alias, attribute, conditional expression, lambda, comprehension or
-# argument), so each note site is one `return <constructor>(...)` position that the hooks self-test
-# inventories and requires to execute (tools/selftest_aiqt_hooks.py, _note_constructor_shape_failures).
-# _deny is the one deny constructor whose block result also carries a banner.
+# NOTE_CONSTRUCTORS is the declared set of note constructors and DENY_CONSTRUCTORS the declared set of
+# deny constructors (_deny, whose block result also carries a banner, and every helper that returns a
+# deny constructor's call). Only the single-return leaf constructors (_allow_note, _stop_warn,
+# _dispatcher_fail_open_warn and _deny) spell the {"systemMessage": ...} key; every other declared
+# constructor reaches a result only by returning another constructor's call. Every use of a declared
+# name is the callee of a call that is the direct value of a `return` statement (no assignment,
+# unpacking, subscript, alias, attribute, conditional expression, lambda, comprehension or argument),
+# so a result is never edited into another shape and each note site is one `return <constructor>(...)`
+# position that the hooks self-test inventories and requires to execute (tools/selftest_aiqt_hooks.py,
+# _note_constructor_shape_failures). That static check guards accidental drift, not adversarial source:
+# a note key assembled at run time, or a lookup through getattr or globals(), is outside it.
 NOTE_CONSTRUCTORS = (
     "_allow_note", "_stop_warn", "_dispatcher_fail_open_warn", "_diff_source_fallback",
     "_discard_recovery_result", "_expbnd_breadth_ask", "_expbnd_fallback", "_expbnd_target_ask",
     "_gate_weakening_fallback", "_gensrc_fail_ask", "_git_discard_fallback", "_stash_drop_clear_outcome",
     "_orch_stop_family")
-DENY_CONSTRUCTORS = ("_deny",)
+DENY_CONSTRUCTORS = (
+    "_deny", "_abspth_check_required", "_abspth_check_search_root", "_commit_denial",
+    "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
+    "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_protected_line_fallback",
+    "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -3441,14 +3449,15 @@ def _discard_ask_reason(kind, detail, optout=None):
     return (reason, banner)
 
 
-def _discard_deny(kind):
+def _discard_deny(kind, recovery=""):
     """A DENY: a whole-tree-clobbering verb on a tree the probe confirms is dirty (an uncommitted tracked
     change OR an untracked file the verb could reach), so the loss is certain. The wording covers untracked
-    too, because the config-forced probe now counts an untracked-only-dirty tree as dirty."""
+    too, because the config-forced probe now counts an untracked-only-dirty tree as dirty. `recovery` is
+    appended to the reason as given (see _deny_with_recovery), so no caller edits a built deny result."""
     reason = ("AIQT rule prsunc (preserve-uncommitted-work): {} would overwrite the working tree, which "
               "currently holds uncommitted or untracked changes the command could destroy, discarding any "
               "fix you have applied but not yet committed. {}{}"
-              .format(kind, _DISCARD_ALTS, _OPTOUT_PRISTINE))
+              .format(kind, _DISCARD_ALTS, _OPTOUT_PRISTINE)) + recovery
     banner = ("AIQT guardrail: blocked a git command that would discard uncommitted work (rule prsunc). "
               "Prefix GUARDRAIL_ALLOW_DISCARD=1 to override.")
     return _deny(reason, banner)
@@ -4387,14 +4396,14 @@ def _stash_drop_clear_outcome(repo, stash_op):
 
 def _deny_with_recovery(kind, snap):
     """A DENY (a confirmed whole-tree clobber on a dirty tree) whose reason folds in the recovery outcome,
-    mirroring _discard_recovery_result."""
-    code, obj, err = _discard_deny(kind)
+    mirroring _discard_recovery_result. The recovery text goes in through _discard_deny's parameter: a
+    deny constructor's result is only ever returned, never unpacked and edited."""
+    recovery = ""
     if snap is not None and snap[0] == "ok":
-        obj["hookSpecificOutput"]["permissionDecisionReason"] += " " + _recovery_pointer(snap[1])
+        recovery = " " + _recovery_pointer(snap[1])
     elif snap is not None and snap[0] == "fail":
-        obj["hookSpecificOutput"]["permissionDecisionReason"] += (
-            " NOTE: no pre-command recovery snapshot could be created ({}).".format(snap[1]))
-    return (code, obj, err)
+        recovery = " NOTE: no pre-command recovery snapshot could be created ({}).".format(snap[1])
+    return _discard_deny(kind, recovery)
 
 
 def _cd_target_dir(tokens, cw, base):
@@ -6411,7 +6420,7 @@ def protected_line(data):
                 "AIQT guardrail: denied a {} targeting a protected branch (rule prtbrn)."
                 .format(act_noun))
         if pending_deny is None:
-            pending_deny = _deny(
+            pending_deny = (
                 "AIQT rule prtbrn (protected-branch-integrity): this git push {}. This guard cannot "
                 "prove it will not rewrite the protected line, so it is denied fail-safe rather than "
                 "run. Re-issue it as a push this guard can prove misses the protected branch (an "
@@ -6420,7 +6429,7 @@ def protected_line(data):
                 "AIQT guardrail: denied a git push this guard cannot prove misses the protected branch "
                 "(rule prtbrn); push to a feature branch and merge on green.")
     if pending_deny is not None:
-        return pending_deny
+        return _deny(*pending_deny)
     if not saw_git and _RAW_GIT_RE.search(command):
         return _protected_line_fallback(command)
     return _allow()
@@ -6896,8 +6905,8 @@ def branch_root(data):
     # No-ask posture: branch rooting is a HAZARD class (an orphan/unrooted branch dispatches work onto a
     # retired root), so a case this guard cannot prove rooted DENIES-and-educates, naming the reachable
     # correct action (an explicit start point, a plain command from the target repo, or restoring
-    # origin/HEAD). A confirmed orphan returns immediately; a cannot-prove deny is held in pending_deny so a
-    # confirmed orphan elsewhere wins first.
+    # origin/HEAD). A confirmed orphan returns immediately; a cannot-prove deny's (reason, banner) is held in
+    # pending_deny so a confirmed orphan elsewhere wins first.
     pending_deny = None
     pending_note = None
     saw_dir_change = False
@@ -6916,7 +6925,7 @@ def branch_root(data):
             continue
         if start is _ASK_START:
             if pending_deny is None:
-                pending_deny = _deny(
+                pending_deny = (
                     "AIQT rule brnrot (branch-rooted-on-live-main): this command uses a branch/worktree form "
                     "this guard cannot classify with confidence (an --orphan, an abbreviated or negated "
                     "option, or an option of unknown arity); it may create a branch "
@@ -6933,7 +6942,7 @@ def branch_root(data):
             # a cd/pushd/popd earlier, or a non-cosmetic ambient GIT_* override: the repository view cannot be
             # reconciled with the session cwd and is NOT the honoured explicit-target form -> deny fail-safe.
             if pending_deny is None:
-                pending_deny = _deny(
+                pending_deny = (
                     "AIQT rule brnrot (branch-rooted-on-live-main): this branch-creation command runs under "
                     "a directory change or an ambient repository-view override this guard cannot reconcile "
                     "with the session repository (a cd/pushd in an earlier segment, or a non-cosmetic ambient "
@@ -6980,7 +6989,7 @@ def branch_root(data):
                 "or replay the branch's unique commits onto it first.".format(start),
                 "AIQT guardrail: denied branch creation from an orphaned start point (rule brnrot).")
         if outcome == "unknown" and pending_deny is None:
-            pending_deny = _deny(
+            pending_deny = (
                 "AIQT rule brnrot (branch-rooted-on-live-main): branch-root ancestry could not be evaluated "
                 "({}), so this guard cannot prove the start point is rooted and it is denied fail-safe. If "
                 "origin/HEAD is missing, run `git remote set-head origin --auto`, then retry; confirm the "
@@ -6988,7 +6997,7 @@ def branch_root(data):
                 "AIQT guardrail: denied a branch creation whose root ancestry is unresolved (rule brnrot); "
                 "restore origin/HEAD, then retry.")
     if pending_deny is not None:
-        return pending_deny  # a confirmed orphan / cannot-prove-rooted deny outranks an allow-note
+        return _deny(*pending_deny)  # a confirmed orphan / cannot-prove-rooted deny outranks an allow-note
     if pending_note is not None:
         return _allow_note(pending_note)  # an unresolvable command-local redirect (finding 12)
     return _allow()
@@ -9188,8 +9197,10 @@ def orch_yield_tool(data):
     if root is None:
         return _allow()
     status, reg = _orch_registry(root)
+    if status == "absent":
+        return _allow()
     if status != "ok":
-        return _allow() if status == "absent" else _deny(
+        return _deny(
             "AIQT guardrail (setcmp/cntdef): the orchestration registry could not be read ({}); a "
             "scheduling call that would park or end the run cannot be judged, so it is denied fail-closed "
             "(ignorance refuses the wind-down). Fix the orchestration registry, or continue the actionable "
