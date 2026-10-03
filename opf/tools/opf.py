@@ -1068,7 +1068,8 @@ _DISPATCH_FORMS = dict(
     **{name: _DISPATCH_LIVE for name in (
         "check_opf_doctor.py", "check_opf_drift.py", "check_opf_homes.py", "check_opf_init.py",
         "check_opf_init_contract.py", "check_opf_prompt_pack.py", "check_opf_upgrade.py")},
-    **{name: ((),) for name in ("_opf_views.py", "_opf_absorb.py", "_opf_changelog.py")},
+    **{"_opf_views.py": ((), ("--check",)), "_opf_absorb.py": ((), ("--freeze-digest",)),
+       "_opf_changelog.py": ((),)},
     **{"selftest_commonmark_conformance.py": ((), ("--interpreters", "python3"))},
     **{"_opf_adopt_observe.py": (("--self-test",), ("--self-test", "--vectors-only")),
        "_opf_pack_manifest.py": (("--self-test",), ("--self-test", "--vectors-only")),
@@ -1081,6 +1082,9 @@ _DISPATCH_FORMS = dict(
 _DISPATCH_UNRUN = {
     ("_opf_views.py", ()): "the `opf render` engine; run bare it renders the current directory, as the verb does",
     ("_opf_absorb.py", ()): "the `opf absorb` engine; run bare it absorbs the current directory, as the verb does",
+    ("_opf_views.py", ("--check",)): "the `opf render --check` engine flag, which the bare run defaults to",
+    ("_opf_absorb.py", ("--freeze-digest",)): "the `opf absorb --freeze-digest` engine mode over the current "
+    "directory",
     ("_opf_changelog.py", ()): "the changelog gates; run bare they check the current directory",
     ("selftest_commonmark_conformance.py", ("--interpreters", "python3")): "the documented optional matrix "
     "facility (module docstring); each word after --interpreters names an interpreter, `python3` stands for any",
@@ -1465,46 +1469,141 @@ _RUNTIME_TIMEOUT = 60
 
 
 def _runtime_snapshot(top):
-    """Map each path under `top` (relative; `.git` pruned; symlinks not followed) to its file type, size and
-    modification time."""
-    import stat
-    snap = {}
-    for base, dirs, files in os.walk(str(top)):
+    """Map each path under `top` (relative; `.git` pruned; symlinks not followed) to its mode, size,
+    modification time and content: the sha256 of a regular file's bytes, a symlink's target. Returns (snap,
+    unread): `unread` names, with the error, every path that could not be listed, stat'ed or read, and `top`
+    itself when it is not a directory, so a tree the probe cannot see is a cannot-evaluate finding, never a
+    skip."""
+    import hashlib
+    snap, unread = {}, []
+
+    def failed(exc):
+        unread.append("{} ({})".format(getattr(exc, "filename", None) or top, type(exc).__name__))
+
+    try:
+        if not stat.S_ISDIR(os.lstat(str(top)).st_mode):
+            unread.append("{} (not a directory)".format(top))
+    except OSError as exc:
+        failed(exc)
+    for base, dirs, files in os.walk(str(top), onerror=failed):
         dirs[:] = sorted(each for each in dirs if each != ".git")
-        for name in dirs + files:
+        for name in dirs + sorted(files):
             path = os.path.join(base, name)
             try:
                 st = os.lstat(path)
+                content = os.readlink(path) if stat.S_ISLNK(st.st_mode) else None
+                if stat.S_ISREG(st.st_mode):
+                    digest = hashlib.sha256()
+                    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+                    with os.fdopen(fd, "rb") as handle:
+                        for chunk in iter(lambda: handle.read(1 << 20), b""):
+                            digest.update(chunk)
+                    content = digest.hexdigest()
+            except OSError as exc:
+                failed(exc)
+                continue
+            snap[os.path.relpath(path, str(top))] = (st.st_mode, st.st_size, st.st_mtime_ns, content)
+    return snap, unread
+
+
+# Set in each runtime-probe child's environment to a token naming its run, so _runtime_survivors can find a
+# descendant that left the child's process group.
+_RUNTIME_MARKER = "OPF_RUNTIME_PROBE"
+# Seconds the runtime probe waits after a child exits before it looks for and kills the child's descendants.
+_RUNTIME_SETTLE = 0.05
+
+
+def _runtime_survivors(pgid, token):
+    """Find and kill (SIGKILL) what a probed child left running after it exited and was reaped: any process
+    still in its process group `pgid` (the child ran with start_new_session), and, where /proc is readable,
+    any process whose initial environment holds `_RUNTIME_MARKER=token`, so a descendant that left the group
+    with setsid is found too. Repeats until a pass finds none (at most 50 passes). Returns the sorted
+    descriptions of what it found, empty when nothing survived. Residuals: a descendant that left the group
+    and replaced its environment (an exec with a new one) or runs in another PID namespace is not found, and
+    without /proc only the group is."""
+    import signal
+    import time
+    marker = "{}={}".format(_RUNTIME_MARKER, token).encode()
+    seen = set()
+    for _ in range(50):
+        found = set()
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+            found.add("process group {}".format(pgid))
+        except ProcessLookupError:
+            pass
+        except OSError:
+            found.add("process group {}".format(pgid))
+        try:
+            pids = [each for each in os.listdir("/proc") if each.isdigit() and int(each) != os.getpid()]
+        except OSError:
+            pids = []
+        for pid in pids:
+            try:
+                with open("/proc/{}/environ".format(pid), "rb") as handle:
+                    environ = handle.read().split(b"\0")
             except OSError:
                 continue
-            snap[os.path.relpath(path, str(top))] = (stat.S_IFMT(st.st_mode), st.st_size, st.st_mtime_ns)
-    return snap
+            if marker in environ:
+                found.add("pid {}".format(pid))
+                try:
+                    os.kill(int(pid), signal.SIGKILL)
+                except OSError:
+                    pass
+        if not found:
+            break
+        seen |= found
+        time.sleep(0.02)
+    return sorted(seen)
+
+
+def _runtime_flag_forms(tree):
+    """The argument lists the runtime probe adds for a module from its own source: each str constant that
+    starts with `--` and holds no whitespace, alone and after `--self-test`, so an undeclared form the source
+    spells out is tried. The caller drops the module's declared forms."""
+    import ast
+    import re
+    flags = sorted({node.value for node in ast.walk(tree) if isinstance(node, ast.Constant)
+                    and isinstance(node.value, str) and node.value.startswith("--")
+                    and not re.search(r"\s", node.value)})
+    return [[flag] for flag in flags] + [["--self-test", flag] for flag in flags]
 
 
 def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None, timeout=_RUNTIME_TIMEOUT):
     """The authority over the self-test argument refusal, by behaviour: run EVERY *.py module in `directory`,
-    this host included (`names`, when given, restricts the set; only _self_test_runtime_escape_probe's mutant
-    passes it), as `python3 -I -B <module> <form>` for each _DISPATCH_REFUSED and _DISPATCH_REFUSED_WORDS form
-    and the empty argument list (unless `table`, default _DISPATCH_FORMS, declares a bare run of it). Each run
-    has a fresh empty cwd, HOME and TMPDIR under `tmp`, stdin closed, a `timeout` second limit and an
-    environment of PATH (os.defpath), HOME, TMPDIR and LC_ALL=C.UTF-8 only. A form passes only if the module
-    refuses it (exit 2, nothing on stdout, and on stderr one line, or for this host exactly its usage text) or
-    does nothing (exit 0, nothing on stdout or stderr), and in both cases leaves its cwd, HOME and TMPDIR empty
-    and `tree` unchanged (default: the repository root two levels above `directory` when it holds `.git`, else
-    `directory`; compared by _runtime_snapshot). Anything else (output, a write, another exit status, a
-    timeout, a failure to start) is a discrepancy naming the module and the form. The tree is compared once
-    around the whole parallel run; when it changed, every run is repeated one at a time to name the writer.
+    this host included (`names`, when given, restricts the set; only _self_test_runtime_escape_probe passes
+    it), as `python3 -I -B <module> <form>` for each _DISPATCH_REFUSED and _DISPATCH_REFUSED_WORDS form
+    and the empty argument list (unless `table`, default _DISPATCH_FORMS, declares a bare run of it), and each
+    form _runtime_flag_forms takes from the module's source (each `--` string constant alone and after
+    `--self-test`) that `table` does not declare for it, the exact `--self-test` aside (the entry scan's). Each run has a fresh empty cwd, HOME and TMPDIR under
+    `tmp`, stdin closed, a `timeout` second limit, its own process group (start_new_session) and an
+    environment of PATH (os.defpath), HOME, TMPDIR, LC_ALL=C.UTF-8 and _RUNTIME_MARKER (a token naming the
+    run) only; _RUNTIME_SETTLE seconds after it exits, _runtime_survivors kills its group and every process
+    holding its token. A form passes only if the module refuses it (exit 2, nothing on stdout, and on stderr
+    one line, or for this host exactly its usage text) or does nothing (exit 0, nothing on stdout or stderr),
+    and in both cases leaves no process running, its cwd, HOME and TMPDIR empty and `tree` unchanged (default:
+    the repository root two levels above `directory` when it holds `.git`, else `directory`; compared by
+    _runtime_snapshot, by content). Anything else (output, a write, a surviving descendant, another exit
+    status, a timeout, a failure to start, a module that cannot be read or parsed) is a discrepancy naming the
+    module and the form, and a path of `tree` that cannot be listed, stat'ed or read (or `tree` absent) is a
+    cannot-evaluate discrepancy naming it. The tree is compared once around the whole parallel run, after
+    _RUNTIME_SETTLE; when it changed, every run is repeated one at a time to name the writer.
     The static checks (_self_test_entry_gaps, _entry_tail_gap, _self_test_dispatch_probe) are fast pre-checks
     that name a cause; this probe decides. Residuals: it sees only the forms it tries, so behaviour gated on
-    any other argument list (a longer or differently spelled one), an environment variable, the date, the
-    network or a file outside its fresh directories is unseen; a module that runs a suite silently, writes
-    nothing it can see and exits 0 or 2 passes; a write outside the fresh directories and `tree`, or one that
-    restores a file's size and modification time, is unseen; and a write by another process during the run
-    may be blamed on a module. Returns the list of discrepancies."""
+    any other argument list (one built at run time, a word not spelled as a `--` constant, or a longer
+    combination), an environment variable, the date, the network or a file outside its fresh directories is
+    unseen; a module that runs a suite silently, writes nothing it can see and exits 0 or 2 passes; a write
+    outside the fresh directories and `tree` (`.git` included) is unseen; a descendant _runtime_survivors
+    cannot find (one that left the process group and replaced its environment, or one in another PID
+    namespace; without /proc, any that left the group) is unseen unless it writes into `tree` before the
+    tree is compared; and a write by another process during the run may be blamed on a module. Returns the
+    list of discrepancies."""
     import concurrent.futures
     import shutil
     import subprocess
     import tempfile
+    import time
+    import _optlevel
     table = _DISPATCH_FORMS if table is None else table
     directory = Path(directory).resolve()
     if tree is None:
@@ -1514,8 +1613,18 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None, 
                      if name.endswith(".py") and (names is None or name in names))
     if names is None and not modules:
         return ["no *.py module found in {}".format(directory)]
-    runs = [(name, argv) for name in modules for argv in list(_DISPATCH_REFUSED) + list(_DISPATCH_REFUSED_WORDS)
-            + ([[]] if () not in table.get(name, ()) else [])]
+    misses, runs = [], []
+    for name in modules:
+        forms = list(_DISPATCH_REFUSED) + list(_DISPATCH_REFUSED_WORDS) + (
+            [[]] if () not in table.get(name, ()) else [])
+        try:
+            extra = _runtime_flag_forms(_optlevel.parse((directory / name).read_bytes(), name))
+        except (OSError, SyntaxError, ValueError) as exc:
+            misses.append("{}: cannot be read or parsed for its `--` forms ({})".format(name, type(exc).__name__))
+            extra = []
+        forms += [argv for argv in extra if argv not in forms and argv != ["--self-test"]
+                  and tuple(argv) not in table.get(name, ())]
+        runs += [(name, argv) for argv in forms]
     usage = (str(__doc__) + "\n").encode("utf-8")
 
     def child(run):
@@ -1525,40 +1634,72 @@ def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None, 
             fresh = [os.path.join(box, each) for each in ("cwd", "home", "tmp")]
             for each in fresh:
                 os.mkdir(each)
-            env = dict(PATH=os.defpath, HOME=fresh[1], TMPDIR=fresh[2], LC_ALL="C.UTF-8")
+            token = os.path.basename(box)
+            env = dict(PATH=os.defpath, HOME=fresh[1], TMPDIR=fresh[2], LC_ALL="C.UTF-8",
+                       **{_RUNTIME_MARKER: token})
             try:
-                proc = subprocess.run([sys.executable, "-I", "-B", str(directory / name)] + argv, cwd=fresh[0],
-                                      env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout)
-            except subprocess.TimeoutExpired:
-                return "{} {}: timed out after {} s".format(name, argv, timeout)
+                proc = subprocess.Popen([sys.executable, "-I", "-B", str(directory / name)] + argv, cwd=fresh[0],
+                                        env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, start_new_session=True)
             except (OSError, subprocess.SubprocessError) as exc:
                 return "{} {}: failed to run ({})".format(name, argv, type(exc).__name__)
-            written = [os.path.basename(each) for each in fresh if os.listdir(each)]
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                _runtime_survivors(proc.pid, token)
+                proc.wait()
+                return "{} {}: timed out after {} s".format(name, argv, timeout)
+            time.sleep(_RUNTIME_SETTLE)
+            survivors = _runtime_survivors(proc.pid, token)
+            written = []
+            for each in fresh:
+                try:
+                    if os.listdir(each):
+                        written.append(os.path.basename(each))
+                except OSError as exc:
+                    written.append("{} (cannot be listed: {})".format(os.path.basename(each), type(exc).__name__))
         finally:
             shutil.rmtree(box, ignore_errors=True)
+        if survivors:
+            return "{} {}: left a process running after it exited ({}; killed)".format(
+                name, argv, ", ".join(survivors[:4]))
         if written:
             return "{} {}: wrote into its fresh {}".format(name, argv, " and ".join(written))
-        refused = proc.returncode == 2 and not proc.stdout and (
-            len(proc.stderr.splitlines()) == 1 or name == host and proc.stderr == usage)
-        if not (refused or proc.returncode == 0 and not proc.stdout and not proc.stderr):
+        refused = proc.returncode == 2 and not stdout and (
+            len(stderr.splitlines()) == 1 or name == host and stderr == usage)
+        if not (refused or proc.returncode == 0 and not stdout and not stderr):
             return "{} {}: neither refused nor idle (rc {}, {} bytes of stdout, {} lines of stderr; want " \
                    "exit 2 with one stderr line, or exit 0 with no output)".format(
-                       name, argv, proc.returncode, len(proc.stdout), len(proc.stderr.splitlines()))
+                       name, argv, proc.returncode, len(stdout), len(stderr.splitlines()))
         return None
 
-    def changed_since(before):
-        after = _runtime_snapshot(tree)
-        return sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
+    def cannot_evaluate(unread):
+        return "cannot evaluate {}: the runtime probe cannot list, stat or read {}".format(
+            tree, ", ".join(unread[:8]))
 
-    before = _runtime_snapshot(tree)
+    def changed_since(before):
+        after, unread = _runtime_snapshot(tree)
+        return sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path)) + [
+            "{} unreadable".format(each) for each in unread]
+
+    before, unread = _runtime_snapshot(tree)
+    if unread:
+        misses.append(cannot_evaluate(unread))
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        misses = [miss for miss in pool.map(child, runs) if miss]
+        misses += [miss for miss in pool.map(child, runs) if miss]
+    if unread:
+        return misses
+    time.sleep(_RUNTIME_SETTLE)
     changed = changed_since(before)
     if changed:
         misses.append("{} changed during the runtime probe ({})".format(tree, ", ".join(changed[:8])))
         for run in runs:
-            before = _runtime_snapshot(tree)
+            before, unread = _runtime_snapshot(tree)
+            if unread:
+                misses.append(cannot_evaluate(unread))
+                break
             child(run)
+            time.sleep(_RUNTIME_SETTLE)
             changed = changed_since(before)
             if changed:
                 misses.append("{} {}: changed {} ({})".format(run[0], run[1], tree, ", ".join(changed[:8])))
@@ -1608,6 +1749,24 @@ _RUNTIME_FIXTURES = (
      'if __name__ == "__main__":\n' + _RUNTIME_USAGE, "writes_tree.py ['--self-test', 'extra']: changed"),
     ("sleeps.py", 'import sys\nimport time\n\nif sys.argv[1:] == ["--selftest"]:\n    time.sleep(60)\n',
      "['--selftest']: timed out"),
+    ("restores.py", "import os\nimport sys\n\n"
+     'path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "same.txt")\nst = os.stat(path)\n'
+     'with open(path, "w") as handle:\n    handle.write(os.urandom(8).hex())\n'
+     "os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))\n" 'if __name__ == "__main__":\n' + _RUNTIME_USAGE,
+     "restores.py ['--self-test', 'extra']: changed"),
+    ("detached.py", "import os\nimport sys\nimport time\n\n\n" + _RUNTIME_EXIT_TAIL.replace(
+        "def main():\n", "def main():\n    if os.fork() == 0:\n        os.setsid()\n"
+        '        null = os.open(os.devnull, os.O_RDWR)\n        for fd in (0, 1, 2):\n            os.dup2(null, fd)\n'
+        "        time.sleep(30)\n        here = os.path.dirname(os.path.abspath(__file__))\n"
+        '        open(os.path.join(here, "LATE-{}".format(os.getpid())), "w").close()\n        os._exit(0)\n')
+     + "    sys.exit(main())\n", "left a process running"),
+    ("literal_form.py", "import sys\n\n\n" + _RUNTIME_EXIT_TAIL
+     + '    if sys.argv[1:2] == ["--self-test"] and sys.argv[2:] == ["--vectors-only"]:\n        sys.exit(cases())\n'
+     "    sys.exit(main())\n", "literal_form.py ['--self-test', '--vectors-only']: neither refused nor idle"),
+    ("locked.py", "import os\nimport sys\n\n\n" + _RUNTIME_EXIT_TAIL.replace(
+        "def main():\n", "def main():\n    here = os.path.dirname(os.path.abspath(__file__))\n"
+        '    with open(os.path.join(here, "locked", "payload"), "w") as handle:\n'
+        '        handle.write("AFTER!")\n') + "    sys.exit(main())\n", None),
 )
 
 
@@ -1616,8 +1775,13 @@ def _self_test_runtime_escape_probe(tmp):
     reproductions the static checks miss (a variable-guarded main, a constructed flag, a differently named
     suite, top-level vectors with no `__main__` block, `main` rebound through an alias of the module, and
     each early-exit spelling: a helper calling sys.exit, `from sys import exit as leave`, builtins.exit, an
-    alias of sys, os.execv), a write into the fresh cwd, a write into the tree and a timeout. Each red module
-    must be named for its reason and the passing ones not at all. Then the mutant: the same probe restricted
+    alias of sys, os.execv), a write into the fresh cwd, a write into the tree, a timeout, a rewrite that
+    restores the file's size and modification time, a detached (setsid) grandchild that writes into the tree
+    after the module exits, and an undeclared `--self-test --vectors-only` form spelled in the source. Each red
+    module must be named for its reason and the passing ones not at all. Unless this runs as root (to whom
+    chmod cannot deny a listing), the tree also holds a directory of mode 0111 that locked.py writes into: the
+    probe must name it as a path it cannot evaluate. An absent tree must be unreadable to _runtime_snapshot
+    too. Then the mutant: the same probe restricted
     to the modules the static checks select (_self_test_entry_gap exposes, or _dispatch_targets is non-empty)
     must name none of them, so the breadth of the probe, not the static selection, is what catches them. The
     modules are files run as children; nothing is passed to exec or eval. Returns a list of the
@@ -1632,9 +1796,26 @@ def _self_test_runtime_escape_probe(tmp):
         tree = _optlevel.parse(source.encode("utf-8"), name)
         if _self_test_entry_gap(tree)[0] or _dispatch_targets(tree):
             selected.add(name)
+    (directory / "same.txt").write_text("0" * 16, encoding="utf-8")
+    os.makedirs(str(directory / "locked"))
+    (directory / "locked" / "payload").write_text("BEFORE", encoding="utf-8")
+    locks = hasattr(os, "geteuid") and os.geteuid() != 0   # chmod cannot hide a listing from root
     table = {name: _DISPATCH_LIBRARY for name, _source, _want in _RUNTIME_FIXTURES}
-    found = _self_test_runtime_probe(directory, str(Path(tmp, "boxes")), table=table, timeout=5)
+    found = _self_test_runtime_probe(directory, str(Path(tmp, "boxes")), table=table, timeout=5,
+                                     names={name for name, _source, _want in _RUNTIME_FIXTURES} - {"locked.py"})
     faults = []
+    if locks:
+        (directory / "locked").chmod(0o111)
+        try:
+            blind = _self_test_runtime_probe(directory, str(Path(tmp, "boxes")), table=table, timeout=5,
+                                             names={"locked.py"})
+        finally:
+            (directory / "locked").chmod(0o755)
+        if not any(miss.startswith("cannot evaluate") and "locked" in miss for miss in blind):
+            faults.append("the unlistable directory locked/ was not named as a path the probe cannot evaluate "
+                          "({})".format("; ".join(blind) or "nothing"))
+    if not _runtime_snapshot(Path(tmp, "absent"))[1]:
+        faults.append("an absent tree was not reported unreadable by _runtime_snapshot")
     for name, _source, want in _RUNTIME_FIXTURES:
         mine = [miss for miss in found if miss.startswith(name + " ")]
         if want is None and mine:
