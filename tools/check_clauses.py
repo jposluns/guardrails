@@ -49,8 +49,10 @@ gen_manifest.py at build time).
   on a frontmatter line fails whatever its layer. Rule sources are read with gen_rules.read_rule_source
   and decode_rule_source (raw bytes, UTF-8, no newline translation), and the heading is located with
   gen_rules.detail_heading_line, so this gate refuses (exit 2) every layout gen_rules refuses: a CR byte,
-  a second, near-miss, setext, blockquoted, or listed heading naming Detail, one inside a fenced code
-  block or an HTML comment, any raw HTML block line, and an unclosed fence or comment. A missing, non-string, or unknown `layer`
+  a second, near-miss, blockquoted, or listed heading naming Detail, one inside a fenced code block or an
+  HTML comment, any setext heading, an ATX heading holding link, raw HTML, entity, escape or
+  strikethrough syntax, a fence or comment opener that is indented or inside a block quote or list item,
+  any raw HTML block line, and an unclosed fence or comment. A missing, non-string, or unknown `layer`
   value is also malformed input (exit 2); a disagreement, a crossing span, a frontmatter span, or an
   unregistered detail line is a finding (exit 1).
 
@@ -973,6 +975,12 @@ _LAYER_CASES = (
      [(1, 0, 0, "core"), (2, 4, 4, "detail"), (3, 6, 6, "detail")], 2),
     ("blockquote-setext-heading", ["core obligation", "", "> Detail", "> ---", "", "detail obligation"],
      [(1, 0, 0, "core"), (2, 5, 5, "core")], 2),
+    ("list-fence-heading", ["core obligation", "", "- a", "", "  ```", "x", "```", "## Detail", "",
+                            "detail obligation"], [(1, 0, 0, "core"), (2, 9, 9, "detail")], 2),
+    ("link-heading", ["core obligation", "", "## [Detail](https://example.test)", "", "detail obligation"],
+     [(1, 0, 0, "core"), (2, 4, 4, "core")], 2),
+    ("heading-then-rule", ["core obligation", "", "Detail is discussed here.", "# Another heading", "---"],
+     [(1, 0, 0, "core")], 0),
 )
 # Red on revert: each guard put back to its pre-fix form in a scratch copy of this module, loaded through
 # importlib (never exec), must turn its case from the expected exit to the reverted exit.
@@ -992,15 +1000,21 @@ _LAYER_REVERTS = (
      "partial-detail-paragraph", 0),
     ("frontmatter-span", "if start < first_body:", "if False:", "frontmatter-core-span", 0),
 )
-# The CR refusal, the raw HTML refusal and the container setext refusal live in the shared gen_rules reader
+# The CR, raw HTML, container setext, container fence and heading syntax refusals, and the setext
+# paragraph boundary, live in the shared gen_rules reader
 # and heading locator; each revert loads gen_rules with that guard removed and patches this module's rule
 # source readers and heading locator to the reverted ones for the one case.
 # (name, fixed text in gen_rules.py, reverted text, case, exit with the guard reverted)
 _SHARED_REVERTS = (
     ("cr-byte", 'if b"\\r" in raw:', "if False:", "cr-byte", 0),
     ("html-block", "if comment is None and _HTML_BLOCK_RE.match(line):", "if False:", "html-wrapped-heading", 0),
-    ("setext-container", "if _SETEXT_UNDERLINE_RE.match(_uncontained(line)):",
-     "if _SETEXT_UNDERLINE_RE.match(line):", "blockquote-setext-heading", 0),
+    ("setext-container", "_SETEXT_UNDERLINE_RE.match(_uncontained(scanned[index][1]))",
+     "_SETEXT_UNDERLINE_RE.match(scanned[index][1])", "blockquote-setext-heading", 0),
+    ("container-fence", 'if bare != line and (_FENCE_MARK_RE.match(bare) or bare.startswith("<!--")):',
+     "if False:", "list-fence-heading", 0),
+    ("heading-syntax", "elif _heading_syntax(line):", "elif False:", "link-heading", 0),
+    ("setext-above-heading", "    if _ATX_HEADING_RE.match(above):\n        return False\n", "",
+     "heading-then-rule", 2),
 )
 
 
@@ -1786,7 +1800,8 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
               "pass-through fold is permitted (exit 0)); and the clause layer: {} layer case(s) hold "
               "(derived pass, stored-layer disagreement, crossing span, unregistered detail paragraph or "
               "line, missing or unknown layer, two headings, detail row with no heading, frontmatter span, "
-              "fenced, commented, HTML-wrapped, setext, or blockquote setext heading, CR byte) and {} guard "
+              "fenced, commented, HTML-wrapped, setext, blockquote setext, list-fenced or linked heading, "
+              "heading then thematic break, CR byte) and {} guard "
               "revert(s) each go red"
               .format(core, len(_LAYER_CASES), len(_LAYER_REVERTS) + len(_SHARED_REVERTS)))
     else:
