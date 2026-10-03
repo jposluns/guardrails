@@ -468,8 +468,8 @@ reading, and it blocks activation until the maintainer resolves it.
     operation has just written, and section 8.8 says "Every subcommand runs one operation sequence".
     Section 8.8, item 5 already refuses most of these cases: "the planned destinations MUST be
     clean, including ignored files", and `create`, `transition`, `done-with-receipt`,
-    `worklog-append`, the open point 23 handoff operation and the step 8 remedy writer each rewrite
-    `worklog.toml` with their worklog entry, so each refuses on that dirty destination while an
+    `worklog-append`, `worklog-correct` (step 10), the open point 23 handoff operation and the step
+    8 remedy writer each rewrite `worklog.toml`, so each refuses on that dirty destination while an
     earlier record operation is uncommitted. This prompt's choice extends that refusal only to what
     item 5 does not cover. Every operation of yours that writes the store refuses while any record
     present at `HEAD` has a working-tree status that differs from its status there, even when none
@@ -773,7 +773,9 @@ reading, and it blocks activation until the maintainer resolves it.
         while PD-2 links to it, shape B has no writer-performable remedy, which section 9.2 does not
         allow ("every named remedy MUST be performable through the sanctioned writer"); report that
         as a blocker of step 8. Neither link targets an importer-authored record. This remedy does
-        not apply under reading 2, where shape B needs none.
+        not apply under reading 2, where shape B needs none. The step 10 shape-B check runs the
+        same `create` and `transition` under either reading, so it waits on the same two
+        confirmations.
       - The reading 2 remedy, for shape A, is the one section 8.6 names, "a new clean decision
         linking back", through the writer on the store at its declared 1.1.0 or 1.2.0 under open
         point 21's grading: the maintainer `create`s a new pending_decision PD-3 at `open`, the
@@ -906,14 +908,22 @@ Implement resolution exactly as sections 4.3 (The pointer), 4.4 (The machine sto
   snapshot it evaluates holds `.opf.local.toml` at the product root. That snapshot is the product
   repository's git index for a run on the working tree and for the step 14 pre-commit check, which
   evaluates the staged snapshot, and the checked-out revision for the step 13 CI gate; the
-  pre-commit check and the CI gate therefore block it. The validator never reports it because an
-  earlier commit, `HEAD` included, holds the file, so the commit that removes a committed override
-  is not blocked by the defect it removes. The remedy is `git rm --cached .opf.local.toml`, which
-  keeps the file on disk, and an ignore rule for it, committed together; your report asks the
-  maintainer for both. No OPF operation writes that rule. Section 4.2 has init and upgrade render
-  one ignore file, `.working/.gitignore`, and only at homes 2 ("Homes-2 init and upgrade MUST render
-  this managed block into `.working/.gitignore`"); at homes 1, this prompt's target, they render
-  none, and that file would not cover the product root in any case.
+  pre-commit check and the CI gate therefore block it. For a run on the working tree it is not the
+  snapshot under test of open point 22, which is the working tree itself: an override on disk that
+  the index does not hold is never reported. The validator never reports it because an earlier
+  commit, `HEAD` included, holds the file, so the commit that removes a committed override is not
+  blocked by the defect it removes. The remedy is `git rm --cached .opf.local.toml`, which keeps the
+  file on disk, and an ignore rule for it, committed together; your report asks the maintainer for
+  both, and says that this remedy does not undo the exposure: the earlier commits still hold the
+  file, and so does every remote they were pushed to, so any private or absolute target it held
+  stays readable there. Whether to rewrite that history, and whether to change what the file
+  exposed, is the maintainer's to decide; no OPF operation does either. The check also does not
+  report an override that is untracked and matched by no ignore rule, though section 4.3 says the
+  file is "ignored by version control". Step 14 discloses both limits as residuals. No OPF operation
+  writes the ignore rule. Section 4.2 has init and upgrade render one ignore file,
+  `.working/.gitignore`, and only at homes 2 ("Homes-2 init and upgrade MUST render this managed
+  block into `.working/.gitignore`"); at homes 1, this prompt's target, they render none, and that
+  file would not cover the product root in any case.
 
 Acceptance checks:
 
@@ -1147,9 +1157,10 @@ containment.
   gitignore fallback (section 5.1, Always a git repository). How it treats the views that init
   leaves unstaged, and the files and views that the step 8 upgrade creates and must not stage, is
   open point 20, whose reading names the only exceptions.
-- An `.opf.local.toml` that the snapshot under test holds is a finding, judged on that snapshot
-  alone and never on `HEAD` or an earlier commit (step 2; this prompt's choice, not a check the
-  specification names).
+- An `.opf.local.toml` at the product root is a finding when the snapshot that step 2 names holds
+  it: the git index for a run on the working tree and for the pre-commit check, never the working
+  tree itself, and the checked-out revision in CI. It is judged on that snapshot alone and never on
+  `HEAD` or an earlier commit (step 2; this prompt's choice, not a check the specification names).
 - Transition legality compares the store with the prior committed snapshot (section 8.8, item 7);
   which commit that is, is open point 22, whose reading is the store repository's `HEAD`, read at
   the prior snapshot's path by file name alone, without discovery at `HEAD`: that path is the
@@ -1638,15 +1649,18 @@ Acceptance checks, over synthetic fixtures the test builds:
   `transition` of PD-4 to unqualified `decided` with its resolution bundle appending `supersedes` to
   PD-3, and a commit; the retried upgrade reaches 1.3.0 with the validator reporting valid, PD-4 the
   chain's one current resolution, and no record of the chain named as becoming or ceasing to be
-  current. Under reading 2: shape B upgrades to 1.3.0 with no repair offered, the validator
-  reporting valid, PD-3 the current resolution, and no record of the chain named as becoming or
-  ceasing to be current. Shape A refuses before any write, naming PD-1, PD-2, open point 28 and the
-  remedy, and writes nothing; on that unchanged fixture, `create` of PD-3 at `open`, a commit,
-  `transition` of PD-3 to unqualified `decided` with its resolution bundle appending `supersedes` to
-  PD-2, and a commit; the retried upgrade reaches 1.3.0 with the validator reporting valid, PD-3 the
-  chain's one current resolution, and no record of the chain named as becoming or ceasing to be
-  current. If the maintainer rules under reading 2 that a `supersedes` target is an operand (open
-  point 28), the `transition` refuses, shape A has no remedy, and step 8 is blocked; report that.
+  current. If the maintainer rules under reading 1 that `create` may not write a `supersedes` link,
+  or reads "its own chain" as the connected component (open point 28), the `create` or the
+  `transition` refuses, shape B has no remedy, and step 8 is blocked; report that. Under reading 2:
+  shape B upgrades to 1.3.0 with no repair offered, the validator reporting valid, PD-3 the current
+  resolution, and no record of the chain named as becoming or ceasing to be current. Shape A refuses
+  before any write, naming PD-1, PD-2, open point 28 and the remedy, and writes nothing; on that
+  unchanged fixture, `create` of PD-3 at `open`, a commit, `transition` of PD-3 to unqualified
+  `decided` with its resolution bundle appending `supersedes` to PD-2, and a commit; the retried
+  upgrade reaches 1.3.0 with the validator reporting valid, PD-3 the chain's one current resolution,
+  and no record of the chain named as becoming or ceasing to be current. If the maintainer rules
+  under reading 2 that a `supersedes` target is an operand (open point 28), the `transition`
+  refuses, shape A has no remedy, and step 8 is blocked; report that.
 - The receipt route from a 1.0.0 fixture: the composed upgrade refuses before any write and names
   the staged route; `opf upgrade --to 1.2.0` reaches 1.2.0 with the validator reporting valid and
   nothing staged; a `create` of the decision run now refuses on its dirty planned destinations and
@@ -1818,6 +1832,27 @@ Implement section 8.8 (Authoring operations). Subcommands:
   (section 8.8: "A backlog item MUST reach unqualified `done` only through `done-with-receipt`").
 - `worklog-append`: appends one `recorded` entry to the unreleased tail; refuses an entry inside a
   released span and a `detail` that opens with the lifecycle grammar.
+- `worklog-correct`: corrects one existing entry of the unreleased tail of `worklog.toml` in place.
+  Section 6.2 says "An unreleased entry MAY be corrected in place through ordinary review", and
+  section 8.8 names no subcommand for it, so this subcommand, its name and the rules below are this
+  prompt's choice; ask the maintainer to ratify them. Without it, the step 14 enforcement would
+  remove that correction path, which section 14.1 forbids ("enforcement MUST NOT ship before the
+  writer can perform every operation it forces"). The request names the entry's ID and its
+  corrected `kind`, `summary`, `detail`, `links` and `refs`; the entry keeps its `id`, `date` and
+  `actor` and its place in the file. Before anything is written it refuses: an entry inside a
+  released span, which section 6.2 makes immutable, naming the remedy, a new entry linking
+  `corrects` through `worklog-append`; an ID that is not a clean entry of `worklog.toml`, an
+  `imported:` ID included; an entry whose `actor.kind` is `importer` (section 8.8 refuses an
+  importer-authored operand); a corrected `detail` that would open with the lifecycle grammar when
+  the entry's does not; and any change to the opening lifecycle line of an entry whose `detail`
+  opens with one, since that line records a record operation and the open point 22 gates match it.
+  Its allowed delta is exactly those value changes on that one row: no ID claim, no counter change
+  and no other row. It appends no entry of its own: section 8.8 requires a lifecycle entry only of
+  `create`, `transition` and `done-with-receipt`, and section 17 says the unreleased tail's
+  mutability "rests on review and version-control history rather than machine enforcement", so the
+  reviewed commit records the correction. Any actor but an importer may run it, since a worklog
+  entry never takes `/proposed` (section 8.4), and like every subcommand it leaves the change
+  uncommitted for the maintainer's review.
 - Handoff supersession: section 8.5 says "Posting a new handoff MUST supersede the previous in the
   same act", and section 8.8 gives no operation for it. Implement it only as open point 23
   describes, as the maintainer-performed replacement, once the maintainer has ruled. Until then,
@@ -1853,8 +1888,8 @@ Implement section 8.8 (Authoring operations). Subcommands:
 - Older stores: step 8 built `create` and `transition` for a store declaring 1.1.0 or 1.2.0, under
   the grading of open point 21, so every remedy of open point 28 was performable before activation.
   Extend the same two subcommands to the 1.3.0 format without changing their older-store
-  behaviour; `done-with-receipt` and `worklog-append` need no older-store mode, since no remedy
-  uses them.
+  behaviour; `done-with-receipt`, `worklog-append` and `worklog-correct` need no older-store mode,
+  since no remedy uses them.
 - The `import --batch` mode exists in the specification, but this fresh start does not implement
   or use it. The clean-series subcommands refuse `actor.kind = "importer"`.
 
@@ -1863,25 +1898,25 @@ transaction, whose `detail` opens with `opf-record create <ID> <status>` or
 `opf-record transition <ID> <from> -> <to>`, and a rejection's entry records its reason.
 `done-with-receipt` appends two, one per changed record (open point 16).
 
-Every subcommand, `worklog-append` and the open point 23 handoff operation included, refuses while
-any record present at `HEAD` has a working-tree status that differs from its status there, naming
-the remedy, which is to commit the earlier change first (open point 22, this prompt's choice). The
-refusal comes after the first item of the operation sequence below, which resolves the store and
-reconciles any interrupted transaction, and before any other write.
+Every subcommand, `worklog-append`, `worklog-correct` and the open point 23 handoff operation
+included, refuses while any record present at `HEAD` has a working-tree status that differs from its
+status there, naming the remedy, which is to commit the earlier change first (open point 22, this
+prompt's choice). The refusal comes after the first item of the operation sequence below, which
+resolves the store and reconciles any interrupted transaction, and before any other write.
 
-Every subcommand follows the eight-item operation sequence of section 8.8: reconcile any
-interrupted transaction first, under the lease; the byte-reproduction precondition; one atomic ID
-claim with the counter advance inside the same transaction; a postcondition that the model diff
-equals exactly the allowed delta, derived from the request and never from the planned rows; clean
-destinations, ignored files included, with the step 7 lease held across publication, render and the
-final validation; one crash-durable journaled publication (journal location: open point 11);
-render, then a full validation that must report valid; the verb's render and that validation
-accept the one pending cannot-evaluate of section 8.8, item 7 "only for exactly the record and the
-from and to statuses it has just written, never a finding and never any other cannot-evaluate",
-and the verb reports it as pending until commit; then release the lease and report. Leave the change
-uncommitted: never stage or commit it. When the final validation fails, leave the change in the
-working tree for review with recovery advice scoped to the planned paths, as section 8.8, item 7
-says; do not roll it back.
+Every subcommand follows the eight-item operation sequence of section 8.8: reconcile any interrupted
+transaction first, under the lease; the byte-reproduction precondition; one atomic ID claim with the
+counter advance inside the same transaction (`worklog-correct` claims no ID); a postcondition that
+the model diff equals exactly the allowed delta, derived from the request and never from the planned
+rows; clean destinations, ignored files included, with the step 7 lease held across publication,
+render and the final validation; one crash-durable journaled publication (journal location: open
+point 11); render, then a full validation that must report valid; the verb's render and that
+validation accept the one pending cannot-evaluate of section 8.8, item 7 "only for exactly the
+record and the from and to statuses it has just written, never a finding and never any other
+cannot-evaluate", and the verb reports it as pending until commit; then release the lease and
+report. Leave the change uncommitted: never stage or commit it. When the final validation fails,
+leave the change in the working tree for review with recovery advice scoped to the planned paths, as
+section 8.8, item 7 says; do not roll it back.
 
 Exit status: 0 when the change is recorded and the store validates (or carries only that pending
 cannot-evaluate), 2 on every refusal or cannot-evaluate (section 8.8). Section 8.8 names no status
@@ -1942,8 +1977,22 @@ Acceptance checks:
   ruling with the check.
 - `done-with-receipt` appends a transition-form entry for the backlog item and a create-form entry
   for the receipt; and after an assistant lands `done/proposed`, `done-with-receipt` before any
-  commit refuses and writes nothing, as do a `create` and a `worklog-append` while that transition
-  is uncommitted.
+  commit refuses and writes nothing, as do a `create`, a `worklog-append` and a `worklog-correct`
+  while that transition is uncommitted.
+- On a committed store whose unreleased tail holds an entry that `worklog-append` wrote, an
+  assistant's `worklog-correct` of that entry's `summary` exits 0 with its final validation valid;
+  the entry keeps its ID, `date`, `actor` and place, no other row and no counter changes, and no
+  entry is appended. Run before that entry is committed, the same correction refuses on its dirty
+  destination (section 8.8, item 5) and writes nothing.
+- On a committed store that the test builds as steps 3 to 8 build theirs, holding WL-1 and WL-2
+  with one `[[release]]` row whose span covers WL-1 alone, its summary row and its changelog
+  heading (the step 11 cut is not needed), a `worklog-correct` of WL-1 refuses, names a new entry
+  linking `corrects` as the remedy, and writes nothing; a `worklog-correct` of WL-2 exits 0 and the
+  validator reports valid, the release's coverage digest unchanged.
+- A `worklog-correct` naming an unknown ID or an `imported:WL-1` ID, one that changes the opening
+  lifecycle line of an entry that `create` appended, and one whose corrected `detail` would open
+  with the lifecycle grammar on an entry that `worklog-append` wrote each refuse and write nothing;
+  the same correction of that lifecycle entry's `summary` alone, its lifecycle line kept, exits 0.
 - After step 10's extensions, every step 8 check that uses the remedy writer still passes.
 - The decision chains of open point 28 on stores declaring 1.3.0, graded under the reading the
   maintainer ruled; until the ruling, report these checks as not run. These checks rest on open
@@ -1954,12 +2003,18 @@ Acceptance checks:
   carrying only the pending cannot-evaluate of step 6 for that transition), the new record the
   chain's one current resolution, unless the maintainer has ruled that a `supersedes` target is an
   operand, in which case it refuses and writes nothing and step 8 is already blocked. On a shape B
-  store, under either reading, a maintainer's `create` of PD-4 at `open` with a `supersedes` link to
-  PD-1 exits 0 with its final validation valid and PD-3 the one current resolution; after the test
-  commits it, a maintainer's `transition` of PD-4 to unqualified `decided` with a `supersedes` link
-  to PD-3 exits 0 with its final validation valid (or carrying only the pending cannot-evaluate of
-  step 6 for that transition) and PD-4 the one current resolution. Report the ruling with the
-  checks.
+  store, under either reading, and only once the maintainer has confirmed the two readings of open
+  point 28 that this check rests on, that `create` may write a `supersedes` link and that "its own
+  chain" follows the target's `supersedes` links: a maintainer's `create` of PD-4 at `open` with a
+  `supersedes` link to PD-1 exits 0 with its final validation valid and PD-3 the one current
+  resolution; after the test commits it, a maintainer's `transition` of PD-4 to unqualified
+  `decided` with a `supersedes` link to PD-3 exits 0 with its final validation valid (or carrying
+  only the pending cannot-evaluate of step 6 for that transition) and PD-4 the one current
+  resolution. If the maintainer rules that `create` may not write a `supersedes` link, that `create`
+  refuses and writes nothing; if the maintainer reads "its own chain" as the connected component,
+  that `transition` refuses and writes nothing. Under reading 1 either ruling has already blocked
+  step 8 (open point 28); under reading 2 shape B needs no remedy, and the check confirms the
+  refusal instead. Report the rulings with the checks.
 - With an assistant's `done/proposed` transition of a backlog item left uncommitted and every other
   file, `worklog.toml` and the views included, committed, a `create` of a finding refuses and writes
   nothing, though none of its planned destinations is dirty (open point 22).
@@ -2149,23 +2204,28 @@ platform." Wire all four, not only the platform you run on.
   per-clone hook residual of section 14.1.
 - **Instructions, on every platform (this prompt's choice).** Section 14.1 requires instructions
   only "on a platform without verifiable denial"; adding them on every platform, beside any deny
-  hook, is this prompt's choice. Add OPF working rules to each platform's instructions file
-  (for example `CLAUDE.md` for Claude Code, `AGENTS.md` for Codex, `GEMINI.md` for Gemini CLI, and a
-  rule file under `.cursor/rules/` for Cursor; confirm each file against that platform's official
+  hook, is this prompt's choice. Add OPF working rules to each platform's instructions file (for
+  example `CLAUDE.md` for Claude Code, `AGENTS.md` for Codex, `GEMINI.md` for Gemini CLI, and a rule
+  file under `.cursor/rules/` for Cursor; confirm each file against that platform's official
   documentation, since the specification names platforms, not files). Editing an inventoried
   instructions file follows the step 9 rule for planned instruction-surface edits. The rules: the
   store is the source of truth and you record before you claim (section 3, "Records first"); write
-  only through the record writer, never hand-edit store TOML or a generated view (sections 3 and
-  4.6); read every timestamp from the clock; author as `actor.kind = "assistant"`; land every
-  terminal transition, and every entry into a gated state (`block` `active`, `contribution` `sent`,
-  `preference_pattern` `active`), as `/proposed` for the maintainer to ratify (section 8.4); but a
-  record created directly in a terminal factual or ACT state that awaits no ratification, such as a
-  `reference` or an `autonomous_decision`, carries no qualifier, and a worklog entry never takes
-  `/proposed` (sections 8.3 and 8.4); never author a
-  maintainer_decision, never run `done-with-receipt`, never weaken the posture (section 11), and
-  never publish a changelog summary (section 7.3); append a worklog entry for each change; and
-  commit each writer change before the next writer operation, which otherwise refuses (open point
-  22).
+  the store only through its sanctioned operations (steps 5 and 7 to 12), and never hand-edit a
+  generated view (section 3: "Nobody hand-edits a generated file") or store TOML, asking the
+  maintainer for any change that no operation performs (Ordering, below); correct an unreleased
+  worklog entry through `worklog-correct` and a released one by a new entry linking `corrects`
+  (section 6.2); read every timestamp from the clock; author as `actor.kind = "assistant"`; land
+  every terminal transition, and every entry into a gated state (`block` `active`, `contribution`
+  `sent`, `preference_pattern` `active`), as `/proposed` for the maintainer to ratify (section 8.4);
+  but a record created directly in a terminal factual or ACT state that awaits no ratification, such
+  as a `reference` or an `autonomous_decision`, carries no qualifier, and a worklog entry never
+  takes `/proposed` (sections 8.3 and 8.4); never author a maintainer_decision, never run
+  `done-with-receipt`, never weaken the posture (section 11), and never publish a changelog summary
+  (section 7.3); append a worklog entry for each change; and commit each writer change before the
+  next writer operation, which otherwise refuses (open point 22). Section 4.6 says lowercase machine
+  source is what "humans change only through tooling or review, never casually", which permits a
+  reviewed hand edit; barring every hand edit of store TOML by an assistant, a reviewed one
+  included, is this prompt's choice and is stronger than sections 3 and 4.6.
 - **Deny hook, per platform.** For each of the four platforms, read its official hook
   documentation. Where it confirms that a hook can deny a tool call, install a hook that denies
   direct writes to the store's record series, counters, declared views and evidence, and writes
@@ -2186,26 +2246,72 @@ platform." Wire all four, not only the platform you run on.
   specifies and show that it returns a denial; that shows the hook's decision, not that the
   platform enforces it, so report it as a hook-level probe and ask the maintainer to run the live
   probe on that platform. Report a live probe you could not run as not run.
-- **Ordering.** Do not enable a deny rule before the writer can perform every operation the rule
-  forces (section 14.1). Until the maintainer has ruled on open point 23 and you have implemented
-  the handoff operation, the writer cannot post a second handoff, so no deny rule may cover the
-  handoff index. The deny hook then does not cover the whole record series, the own-platform
-  denial check below and checklist item 17 do not pass, and you claim no conformance until the
-  ruling. Once it is implemented, a maintainer posts a replacement handoff through the writer, and
-  the writer refuses an assistant's or automation's replacement under section 8.4 (open point 23).
-  This prompt's reading is that a deny rule on the handoff index then forces no operation the writer
-  cannot perform, since the `/proposed` rule of section 8.4, not the deny rule, keeps that actor
-  from completing the supersession. The deny rule also covers a handoff's move from `current` to
-  `superseded` with no successor, which section 8.5's table lists; under open point 23's reading
-  the specification defines no such operation, so the rule forces no operation there either.
-  Disclose that an assistant or automation cannot replace a handoff, and that a handoff leaves
-  `current` only by a maintainer's replacement.
+- **Ordering.** Do not enable a deny rule, or the instruction against hand edits, before the
+  writer can perform every operation the rule forces (section 14.1: enforcement "MUST NOT ship
+  before the writer can perform every operation it forces"). A rule on a path forces every change
+  to that path through the sanctioned operations. For each covered path, these are the changes the
+  specification allows and the operation that performs each; earlier steps build them all, except
+  the handoff operation below and rotation, which step 12 lets wait until the store needs it:
+  - A clean record index: a new record (`create`); a status change, ratification or rejection
+    (`transition`); a backlog item's completion with its receipt (`done-with-receipt`, which only a
+    maintainer runs); a contribution re-send (`transition`, then `create`); a handoff posted while
+    none is `current` (`create`); and a handoff replacement (open point 23, below). The
+    specification names no other in-place change to such a record: `updated_at` is "read from the
+    clock at the last transition", and section 13 names in-place correction only for a worklog entry
+    ("an unreleased entry may be corrected in place"). This prompt's reading is that a correction of
+    such a record is a new record through `create` linking `corrects`, so the rule forces nothing
+    more there; ask the maintainer to ratify it.
+  - `worklog.toml`: a new entry (`worklog-append`, and the lifecycle entries that the record
+    operations append); an unreleased entry corrected in place (`worklog-correct`, step 10); and a
+    released entry corrected by a new entry linking `corrects` (`worklog-append`; section 6.2).
+  - `counters.toml`: the ID claim inside a writer operation; section 8.2 allows no other change to
+    a fresh store's counters.
+  - The declared views: the render write mode, standalone or nested in an operation.
+  - The archive files under `archive/<YYYY>/`: rotation (step 12); until it exists nothing
+    rotates.
+  - The imported leaves, evidence under `.working/imported/`, and `.working/archive/adoption/`: no
+    operation in this prompt's scope writes them, since import and adoption are out of scope, so the
+    rule forces none there.
+  - `manifest.toml`, `version.toml`, `lease.toml` and `init.toml`, which the instruction covers and
+    a deny rule need not: the release cut of open point 9 writes a release row and its working
+    summary row, and the operations of steps 7 and 9 write `lease.toml` and `init.toml`.
+    Publication, re-publication and the landing of a rollup write summary rows (sections 6.4 and
+    7.2), and a manifest change is configuration; no operation of this prompt performs those. The
+    instruction binds only an assistant, and none of those changes is an assistant's act here:
+    publication follows the curation flow of section 7.3, where "the published words are the
+    curator's", and section 4.6 lets humans change machine source "only through tooling or review".
+    So the instruction forces no operation there: the assistant asks the maintainer, who makes such
+    a change through ordinary review. That split is this prompt's choice; if the maintainer wants an
+    assistant to make one of those changes, add a writer operation for it first.
+  - Restoring a store file to its bytes at `HEAD`, to discard a hand edit or the change of a failed
+    operation, which section 8.8, item 7 leaves "for review", authors nothing. This prompt's
+    reading is that it is the maintainer's review act, not a writer operation, so a deny rule may
+    refuse it to an assistant.
+
+  The pre-commit check and the CI gate refuse commits, not writes; each finding they report has its
+  remedy in an operation above, a render, or that restore. Until the maintainer has ruled on open
+  point 23 and you have implemented the handoff operation, the writer cannot post a second handoff,
+  so no deny rule may cover the handoff index. The instruction against hand edits may cover it: it
+  binds an assistant authoring as `assistant`, and open point 23 leaves that actor no replacement to
+  make in any case, so it forces none. The deny hook then does not cover the whole record series,
+  the own-platform denial check below and checklist item 17 do not pass, and you claim no
+  conformance until the ruling. Once it is implemented, a maintainer posts a replacement handoff
+  through the writer, and the writer refuses an assistant's or automation's replacement under
+  section 8.4 (open point 23). This prompt's reading is that a deny rule on the handoff index then
+  forces no operation the writer cannot perform, since the `/proposed` rule of section 8.4, not the
+  deny rule, keeps that actor from completing the supersession. The deny rule also covers a
+  handoff's move from `current` to `superseded` with no successor, which section 8.5's table lists;
+  under open point 23's reading the specification defines no such operation, so the rule forces no
+  operation there either. Disclose that an assistant or automation cannot replace a handoff, and
+  that a handoff leaves `current` only by a maintainer's replacement.
 - **Residuals to disclose.** Per-clone hook installation and bypass, canonical hand edits, shell or
   interpreter wrapping, same-user tampering, and unverified platform denial (section 14.1), plus
   each platform's own residual, and, under open point 22, that CI does not re-evaluate the
   transitions, deletions or counter decrements inside the commits it checks, and that the merge
-  check above does not grade a merge commit's status changes. Copy the relevant residuals of section
-  17 into your project's documentation as well.
+  check above does not grade a merge commit's status changes. For the step 2 override check,
+  disclose that removing a committed `.opf.local.toml` leaves it in history and in every remote
+  that history reached, and that an untracked override matched by no ignore rule is not reported.
+  Copy the relevant residuals of section 17 into your project's documentation as well.
 
 Acceptance checks:
 
@@ -2213,8 +2319,8 @@ Acceptance checks:
   instructional fallback with its residual disclosed.
 - On your own platform, a direct edit of an index file and a write under
   `.working/archive/adoption/` by your own tool call are denied (or, without verifiable denial, the
-  residual is written down), and `opf record create` and the render write still succeed with the
-  hook active.
+  residual is written down), and `opf record create`, `opf record worklog-correct` and the render
+  write still succeed with the hook active.
 - For each other platform with a hook, the hook-level probe denies the same two writes and allows
   the sanctioned writer and render paths, and the live probe is reported as run or as not run.
 - The pre-commit check blocks a commit that contains a hand-edited view.
@@ -2316,7 +2422,9 @@ maintainer's ruling on an open point, report the ruling with it.
     contribution re-send as a `transition` and a `create`, a non-importer predecessor at unqualified
     `superseded` first, and an importer-authored predecessor left at its recorded state), the
     resolution and delivery bundles, unqualified `done` only through `done-with-receipt`, the
-    lifecycle worklog entry, the eight-item operation sequence, and exits 0 or 2.
+    in-place correction of an unreleased worklog entry only through `worklog-correct`, keeping its
+    ID and refusing a released entry, the lifecycle worklog entry, the eight-item operation
+    sequence, and exits 0 or 2.
 13. Releases freeze worklog spans; the changelog passes range coverage and freeze; no summary was
     published without the maintainer's curation.
 14. The lease, the clean-state check and the integration-base merge rule are enforced.
