@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "396ba89e67f1e06faf7ab559335d96f445273a80b47e6c3b09f51e3468563690"
+tree-sha256 = "c9b178c97ed9a3e256583eecec8d4bad66135c942e2cc83df69332f881ab9cc5"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2331,8 +2331,8 @@ sha256 = "b80bb2b5bb6a77ebb8d6c5397ea793601b6f5f4cc5f57accaf46b638145c51f6"
 
 [[sources]]
 path = "RELEASING.md"
-bytes = 6265
-sha256 = "eeda8127106b6b7076c8e6e747a5f63b2dbd8ff3ed1bc9d18127c0fae39bb208"
+bytes = 11085
+sha256 = "0eb0ca5ef1565bde35ee7ce93a8bec094c7c7ea65d725ff0436e0bd1550577e0"
 
 [[sources]]
 path = "ROADMAP.md"
@@ -2366,8 +2366,8 @@ sha256 = "79f4539151ecb22ab0bca929f9d0ec7b6efc2541dd8da708b259ea8642d3ec5a"
 
 [[sources]]
 path = "changelog.toml"
-bytes = 1602
-sha256 = "ddbe345aebd16f9c3fef22a469d1968683052132e68334c884a6d97fda24529b"
+bytes = 1612
+sha256 = "ea5d62211d98b021db16de6f34d8db3f50a3ac8ac077547fa09515dfc9e899d2"
 
 [[sources]]
 path = "disclosure.toml"
@@ -3146,8 +3146,8 @@ sha256 = "3d2b51784f18397b11b5865db5232b186c3ff48a803de85da3c77234b4bd2941"
 
 [[sources]]
 path = "tools/_release_schema.py"
-bytes = 46385
-sha256 = "e19ad231e932a8b9fb463c4bc4d2f5837742b563d7c9f8fd0bd775b6c8832ede"
+bytes = 59246
+sha256 = "4855c97f48b02272421a816f7de12466cab7b20731085b6c0d63d24742236bdd"
 
 [[sources]]
 path = "tools/_standards.py"
@@ -3336,8 +3336,8 @@ sha256 = "064d47416f70f46adb0a0aeb6eba0934c7e4dc4cc547ca62f8068458cbdf6cd1"
 
 [[sources]]
 path = "tools/check_release_build.py"
-bytes = 184628
-sha256 = "5893faf4680c720f09083ecb4aedfdf68e8e54c5bc35a1fed33dd918ddcd64e5"
+bytes = 191815
+sha256 = "5f535322753a783b2eaf839a6b3653b02bf6f6608175d3587e6cda86c3b2fb32"
 
 [[sources]]
 path = "tools/check_release_cut.py"
@@ -3346,8 +3346,8 @@ sha256 = "91fa470bab48c2b3601e0be2124420524c996b1cd8e8f3a1bed294b54703efc1"
 
 [[sources]]
 path = "tools/check_release_delta.py"
-bytes = 194684
-sha256 = "3de22b7dca174f8ed5a3dd881cf420d4f42060b28ec727e2a73d17910e02fb1f"
+bytes = 402630
+sha256 = "f08ed01bd3b60ae34ce6bad7c68057edc2cde863dd460d19e5ee5fe2773e147a"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
@@ -3476,8 +3476,8 @@ sha256 = "64f2adcf49949237202e7e5e2b6770442319eab85afc813eafd1d82597de4c0c"
 
 [[sources]]
 path = "tools/gen_manifest.py"
-bytes = 61313
-sha256 = "cef7e70689d74401a05c75fa09acd4068a55fde4bfa32e543b0f39ca97768aa7"
+bytes = 62203
+sha256 = "bf3e4eb55840d32ca4169c76f6dea32aadae36b8e5d68e1d3bf78d0c8994e729"
 
 [[sources]]
 path = "tools/gen_mappings.py"
@@ -3601,8 +3601,8 @@ sha256 = "13c527d0d7999c696bf34fcf649c804e8856f11c6880c3cfde3bdee630d582fe"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 272662
-sha256 = "bd0d1f3b00d95a7a9a5d01c842bf9abc2725d86093ac6a6e731254e8f4d19eca"
+bytes = 273673
+sha256 = "54aa9530f0329e0299580b29bfa8cf17675614a87f8846de1084b572b9589956"
 
 [[sources]]
 path = "tools/selftest_opf_render.py"
