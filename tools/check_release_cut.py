@@ -1734,18 +1734,31 @@ _CLOSE_SWEEP_DISPOSITIONS = (
      "block; each later binding of fd is another early return's own move"),
     ("opf/tools/opf.py", "_watchdog_completion_case", "AFTER", "child", "child", 4,
      _CS_LEGS.format("_FixtureProcess")),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "AFTER", "handoff_peer", "handoff_peer", 1,
+     "false positive: the leg-1i close in the try body runs only in the forked sender (if sender == 0:), whose "
+     "body then calls os._exit(0) and whose handler is os._exit(124), so that process never reaches the "
+     "parent's handoff_peer.close() after the try; the parent closes its own copy there, once"),
     ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "child", "", 5, _CS_LEGS.format("_FixtureProcess")),
     ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "child.pidfd", "", 1,
      "false positive: a self-test leg's hygiene close; no try in the function closes it again"),
     ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "fake", "", 1,
      _CS_LEGS.format("types.SimpleNamespace stand-in")),
-    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "fd", "", 10, _CS_LEGS.format("pidfd")),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "fd", "", 11,
+     _CS_LEGS.format("pidfd (the unpinned-kill leg-5 handler's `if fd is not None: os.close(fd)` closes its "
+                     "received one only ahead of that handler's raise)")),
     ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "guardian_fd", "", 9,
      _CS_LEGS.format("pidfd (os.pidfd_open, or frozen_pair's, which closes its own on a refused handoff and "
                      "otherwise hands it to the one leg that closes it)")),
-    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "handoff_peer", "", 2,
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "handoff", "", 2,
+     "false positive: sequential self-test legs; each later binding is a fresh _pidfd_handoff_pair socket. The "
+     "unpinned-kill leg-5 handler's handoff.close() is followed by its raise, and whenever _pidfd_handoff_recv "
+     "reached its try, its own finally has already closed that socket object (a repeat close() of a socket "
+     "object closes no descriptor); the leg-1i sender child's handoff.close() closes its forked copy, and "
+     "every path of that child ends in os._exit"),
+    ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "handoff_peer", "", 5,
      _CS_LEGS.format("socket.socketpair end (a socket object: its first close() sets its fileno to -1, so a "
-                     "repeat would close no descriptor)")),
+                     "repeat would close no descriptor; the leg-1i sender child closes its forked copy, then "
+                     "calls os._exit(0), and its handler calls os._exit(124))")),
     ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "leader_fd", "", 1, _CS_LEGS.format("pidfd")),
     ("opf/tools/opf.py", "_watchdog_completion_case", "REBIND", "subject_fd", "", 2,
      _CS_LEGS.format("pidfd (or, for fake.subject_pidfd, a fresh types.SimpleNamespace stand-in's field), the "
