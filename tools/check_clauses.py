@@ -1045,8 +1045,8 @@ _SHARED_REVERTS = (
     ("grammar-second-heading", _BODY_REVERT[0], _BODY_REVERT[1], "heading-then-rule", 0),
     ("r6-fenced-comment", _BODY_REVERT[0], _BODY_REVERT[1], "r6-fenced-comment", 0),
     ("r6-ordered-setext", _BODY_REVERT[0], _BODY_REVERT[1], "r6-ordered-setext", 0),
-    ("r6-frontmatter-heading", "        if not line:\n            continue\n",
-     '        if not line or line.startswith("#"):\n            continue\n', "r6-frontmatter-heading", 0),
+    ("r6-frontmatter-heading", '        if raw.startswith("#"):\n            if adopter:',
+     '        if raw.lstrip(" ").startswith("#"):\n            if True:', "r6-frontmatter-heading", 0),
 )
 
 

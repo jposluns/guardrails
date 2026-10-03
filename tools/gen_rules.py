@@ -29,24 +29,49 @@ RULE SOURCE FORMAT (the two-layer split; this step parses and validates it, and 
       with three backticks (a fence) or like an ordered list item (digits, then `.` or `)`, then a
       space or the end of the line). A single leading backtick is allowed (a code span; the live
       corpus starts two lines with one), and so are `>`, `|`, `_` and `&` after the first character.
-  FRONTMATTER: this reader and a YAML reader must see the same keys and values, so each frontmatter line
-  whose reading could differ is refused (no YAML is modelled). The frontmatter is split into lines at LF
-  only, as the body is, and each raw line is checked before any strip: it holds no control, format, line
-  separator or paragraph separator character (Unicode categories Cc, Cf, Zl and Zp, so no tab, U+0085,
-  U+2028, U+2029 or U+001C to U+001F), except ZWNJ and ZWJ (U+200C and U+200D, which Persian text and
-  emoji sequences need). A line is refused when it starts with `#` (a YAML comment), is indented (YAML
-  reads it as part of the key above), or has no space after its key's colon. A value (and each element
-  of a flow sequence) is refused when it is empty or one of `~`, `null`, `Null`, `NULL`, a YAML 1.1
-  boolean word other than `true` and `false` (such as `yes` or `on`), or `=`; when it holds ` #` (YAML
-  drops the rest as a comment), `: ` or a final `:`; when it starts with a YAML indicator (`>`, `|`, `&`,
-  `*`, `!`, `%`, `@`, a backtick, `{`, `}`, `,`, `]`, `#`, or `-`, `?` or `:` followed by a space or the
-  end); and when it starts with a quote that does not close exactly at its end or holds that quote again.
-  A flow-sequence element holds no `{` or `}`. A value (for a flow sequence, the text inside its
-  brackets) holds no `<`, `[`, `]` or backslash, so it forms no HTML and no bracketed link. A value is a
-  number only when it is ASCII digits (with an optional leading `-`), so a non-ASCII digit token
-  (`tier: \u0661\u0660`) stays a string and is refused where a number is required. Not refused: a bare
-  value that YAML reads as a number or date while this tool reads a string (the live mapping ids `6.7`,
-  `10.2` and `8.1` are such values; keys still agree).
+  FRONTMATTER (decision D-392-FRONTMATTER-TYPED-GRAMMAR): this reader and a YAML reader must see the
+  same keys and the same values, so no YAML is modelled: every known key has one declared value type,
+  a value is accepted only in a shape of its type, and anything else is refused. The frontmatter is
+  split into lines at LF only, as the body is. Each raw line, before any strip, holds no character of
+  Unicode category Cc, Cf, Cn, Co, Cs, Zl or Zp (so no tab, U+0085, U+2028, U+2029, U+001C to U+001F,
+  U+FFFE or U+FFFF), except ZWNJ and ZWJ (U+200C and U+200D). A line holding only spaces is skipped. Every
+  other line is `key: value`: the key at column 0, `:`, at least one space, the value, and optional
+  trailing spaces. A line that is indented or starts with `#` (a YAML comment) is refused, except as
+  ADOPTER MODE below allows. The value types, matched against the whole value:
+    corpus-id       an id: `[a-z][a-z0-9]{5,}` (a string), `[1-9][0-9]{5,}` (an integer, as YAML reads
+                    it), or quoted (below) around `[a-z0-9]{6,}` (a string);
+    origin, family  a code: `[a-z]+`, bare or quoted (a string);
+    slug            `[a-z0-9]+(-[a-z0-9]+)*` starting with a letter when bare, or quoted (a string);
+    tier            exactly `10`, `20`, `30` or `40`, bare (an integer; no leading zero, no quotes);
+    apex            exactly `true` or `false`, bare (a boolean);
+    facet           a facet code: `[A-Z]{4,5}`, bare or quoted (a string);
+    secondary       a flow sequence of facet codes;
+    map-*           a flow sequence of mapping ids. A bare id is `[A-Za-z][A-Za-z0-9.&()-]*` with
+                    single spaces allowed inside (such as `GOVERN 4.1`, `CM-3(2)`, `I&S-02`), or
+                    `[0-9]+(\\.[0-9]+){2,}` (such as `6.4.2`), or the disclosed numeric form below; a
+                    quoted id is any `[A-Za-z0-9][A-Za-z0-9.&()-]*` with single inner spaces (a string);
+    detail-trigger, detail-reason (the prose keys)
+                    FREE TEXT: letters, digits and spaces (Unicode categories L, M, N and Zs), ZWNJ, ZWJ
+                    and the punctuation . , ; ( ) ' / - only, starting with a letter (category L) and
+                    ending with no space (Zs), bare or quoted (a string);
+    pack-id, restates (the worker-pack profile, which gen_worker_pack reads through this parser)
+                    pack-id is a slug; restates is a flow sequence of ids (as corpus-id).
+  Any other key is refused (exit 2). QUOTED means one matching pair of `"` or `'` around the text, with
+  no quote of that kind inside it (so YAML reads a plain string with no escape). A bare string value is
+  never a word some YAML reader resolves to a boolean or a null (`y`, `n`, `yes`, `no`, `true`, `false`,
+  `on`, `off` or `null` in any case). A flow sequence is `[`, its elements separated by `,` (spaces
+  allowed around each), and `]`; `[]` is empty. AGREEMENT BY CONSTRUCTION: no accepted shape holds `#`,
+  `:`, `{`, `}`, `[` or `]` inside a scalar, a backslash, a tab or a YAML line break, so YAML reads the
+  same lines and keys; a bare string starts with a letter (or is the dotted form `6.4.2`), so no YAML 1.1
+  int, float, timestamp, merge or value resolver matches it, and the bool and null words are refused; a
+  bare integer is `[1-9][0-9]*` and a bare boolean is `true` or `false`, which YAML reads alike. One gap
+  is accepted and disclosed: a bare mapping id `(0|[1-9][0-9]{0,3})\\.[0-9]{0,5}[1-9]` (the live ids
+  `6.7`, `10.2` and `8.1`) is a string here and a float to YAML, and the float's shortest decimal text is
+  that same id; quote it (`["6.7"]`) to make YAML read a string too. The live sources are not edited.
+  ADOPTER MODE (the placement gate, check_rule_placement, and conformance C3 through it, for rule files
+  in an adopter's .claude/rules/): each CRLF is read as LF before parsing (a lone CR is still refused),
+  and a frontmatter line starting with `#` at column 0 is a comment and skipped (YAML ignores it too).
+  The pack's own corpus (gen_rules, check_clauses) keeps LF only and no comment line.
   In a renderer that does not read frontmatter, the opening `---` is a thematic break and the frontmatter
   lines are one paragraph, which the closing `---` makes a setext h2; if the last frontmatter line holds
   a `|`, a GFM renderer can read the lines as a table instead. Either way the first text is a frontmatter
@@ -128,20 +153,38 @@ _HEADING_TEXT = frozenset(map(chr, range(0x20, 0x7f))) - frozenset("[]<>&\\~*_`"
 _PROSE_TEXT = frozenset(map(chr, range(0x20, 0x7f))) - frozenset("<[]\\")
 _PROSE_START = frozenset(" \t#>-+*=~|<[!_:")
 _ORDERED_RE = re.compile(r'^[0-9]+[.)](?: |$)')
-# A frontmatter value (see FRONTMATTER above) holds none of these characters.
-_VALUE_MARKUP = frozenset("<[]\\")
-# A raw frontmatter line holds no character of these Unicode categories (control, format, line separator,
-# paragraph separator), checked before any strip: str.strip() removes U+0085, U+2028, U+2029 and U+001C
-# to U+001F, and YAML reads the first three as line breaks. ZWNJ and ZWJ (format characters that Persian
-# text and emoji sequences need) are the only exceptions.
-_LINE_CATEGORIES = frozenset(("Cc", "Cf", "Zl", "Zp"))
+# The FRONTMATTER grammar (see RULE SOURCE FORMAT above). A raw frontmatter line holds no character of
+# these Unicode categories, checked before any strip (str.strip() removes U+0085, U+2028, U+2029 and U+001C
+# to U+001F, which YAML reads as line breaks; PyYAML refuses U+FFFE and U+FFFF, category Cn). ZWNJ and ZWJ
+# (format characters that Persian and Indic text need) are the only exceptions.
+_LINE_CATEGORIES = frozenset(("Cc", "Cf", "Cn", "Co", "Cs", "Zl", "Zp"))
 _JOINERS = frozenset("\u200c\u200d")
-# A frontmatter scalar (a value, or one flow-sequence element) that YAML reads as a null or a boolean, or
-# not as a plain string at all, where this tool reads a string; see _scalar_problem.
-_YAML_WORDS = frozenset(("", "~", "null", "Null", "NULL", "yes", "Yes", "YES", "no", "No", "NO", "on", "On",
-                         "ON", "off", "Off", "OFF", "True", "TRUE", "False", "FALSE", "="))
-_YAML_START = frozenset(">|&*!%@`{},]#")
-_YAML_SPACED_START = frozenset("-?:")
+# Words some YAML reader resolves to a boolean or a null, compared case-folded; a bare string is never one.
+_YAML_WORDS = frozenset(("y", "n", "yes", "no", "true", "false", "on", "off", "null"))
+# FREE TEXT: these Unicode categories (letters, marks, numbers, space separators), the joiners and this
+# ASCII punctuation, nothing else.
+_TEXT_CATEGORIES = frozenset(("Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Mc", "Me", "Nd", "Nl", "No", "Zs"))
+_TEXT_PUNCT = frozenset(".,;()'/-")
+_CODE_RE = re.compile(r'[a-z]+')
+_FACET_RE = re.compile(r'[A-Z]{4,5}')
+_TIER_RE = re.compile(r'10|20|30|40')
+_CID_BARE_RE = re.compile(r'[a-z][a-z0-9]{5,}|[1-9][0-9]{5,}')
+_MAP_ID_RE = re.compile(r'[A-Za-z][A-Za-z0-9.&()-]*(?: [A-Za-z0-9.&()-]+)*|[0-9]+(?:\.[0-9]+){2,}')
+_MAP_QUOTED_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9.&()-]*(?: [A-Za-z0-9.&()-]+)*')
+# The disclosed gap: a bare mapping id YAML reads as a float whose shortest decimal text is the id itself.
+_MAP_FLOAT_RE = re.compile(r'(?:0|[1-9][0-9]{0,3})\.[0-9]{0,5}[1-9]')
+# Each known key's declared value type; every map-* key is a mapping-id sequence (derive then checks it
+# against MAP_KEYS).
+_KEY_KINDS = {"corpus-id": "id", "origin": "code", "family": "code", "slug": "slug", "tier": "tier",
+              "apex": "apex", "facet": "facet", "secondary": "facets", "detail-trigger": "text",
+              "detail-reason": "text", "pack-id": "slug", "restates": "cids"}
+_KIND_NAMES = {"id": "an id ([a-z][a-z0-9]{5,}, [1-9][0-9]{5,} or a quoted [a-z0-9]{6,})",
+               "code": "a code ([a-z]+)", "slug": "a slug (kebab-case, a letter first when bare)",
+               "tier": "a tier (10, 20, 30 or 40, bare)", "apex": "true or false (bare)",
+               "facet": "a facet code ([A-Z]{4,5})", "facets": "a flow sequence of facet codes",
+               "ids": "a flow sequence of mapping ids", "cids": "a flow sequence of ids",
+               "text": ("free text (letters, digits, spaces and . , ; ( ) ' / - only, a letter first and no "
+                        "space last)")}
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
@@ -155,88 +198,91 @@ GENSRC_OUTPUTS = (
 )
 
 
-def _scalar_problem(tok):
-    """Why YAML could read the frontmatter scalar tok (a value, or one flow-sequence element, spaces
-    stripped) other than as this tool does, or None. This models no YAML: it refuses each shape whose YAML
-    reading could differ (a null or boolean word, a quote that does not close exactly at the end, a
-    leading YAML indicator, a mapping separator)."""
-    if tok in _YAML_WORDS:
-        return "is empty or a YAML null or boolean word"
-    if tok[:1] in ("'", '"'):
-        if len(tok) < 2 or tok[-1] != tok[0] or tok[0] in tok[1:-1]:
-            return "has a quote that does not close exactly at its end"
-        return None
-    if tok[:1] in _YAML_START:
-        return "starts with a YAML indicator"
-    if tok[:1] in _YAML_SPACED_START and tok[1:2] in ("", " "):
-        return "starts with a YAML indicator"
-    if ": " in tok or tok.endswith(":"):
-        return "holds a YAML mapping separator (': ' or a final ':')"
+def _quoted(tok):
+    """The text inside one matching pair of quotes around tok, with no quote of that kind inside, or None."""
+    if len(tok) >= 2 and tok[0] in "\"'" and tok[-1] == tok[0] and tok[0] not in tok[1:-1]:
+        return tok[1:-1]
     return None
 
 
-def _unquote(tok):
-    """A single scalar STRING element: strip matching quotes, else the bare token. Fail-closed."""
-    if tok and tok[0] in "\"'":
-        if len(tok) >= 2 and tok[-1] == tok[0]:
-            return tok[1:-1]
-        raise ValueError("malformed quoted value {!r}".format(tok))
-    return tok
+def _is_text(text):
+    """True when text is FREE TEXT (see FRONTMATTER above)."""
+    return (text[:1] != "" and unicodedata.category(text[0])[0] == "L"
+            and unicodedata.category(text[-1]) != "Zs"
+            and all(ch in _TEXT_PUNCT or ch in _JOINERS or unicodedata.category(ch) in _TEXT_CATEGORIES
+                    for ch in text))
 
 
-def _value(v):
-    problem = _scalar_problem(v) if not v.startswith("[") else None
-    if problem:
-        raise ValueError("frontmatter value {!r} {} (a YAML reader would read it differently)".format(v, problem))
-    if v and v[0] in "\"'":
-        return _unquote(v)
-    # Flow sequence of strings, e.g. [INTEG, QUALI] (spec section 4). Elements are strings; a bare
-    # element is not coerced to int/bool. Malformed (unclosed, or an empty element) is fail-closed.
-    if v.startswith("["):
-        if not v.endswith("]"):
-            raise ValueError("malformed flow sequence {!r} (unterminated)".format(v))
+def _scalar(kind, tok):
+    """(True, value) when tok is a scalar of the declared kind, else (False, None). Never models YAML: a
+    shape not listed under FRONTMATTER is not accepted."""
+    inner = _quoted(tok)
+    if inner is not None:
+        quoted_ok = {"id": CID_RE.match, "code": _CODE_RE.fullmatch, "slug": SLUG_RE.match,
+                     "facet": _FACET_RE.fullmatch, "text": _is_text, "ids": _MAP_QUOTED_RE.fullmatch}.get(kind)
+        return (True, inner) if quoted_ok is not None and quoted_ok(inner) else (False, None)
+    if kind == "tier":
+        return (True, int(tok)) if _TIER_RE.fullmatch(tok) else (False, None)
+    if kind == "apex":
+        return (True, tok == "true") if tok in ("true", "false") else (False, None)
+    if kind == "id" and _CID_BARE_RE.fullmatch(tok):
+        return True, int(tok) if tok.isdigit() else tok
+    if kind == "ids" and _MAP_FLOAT_RE.fullmatch(tok):
+        return True, tok
+    bare_ok = {"code": _CODE_RE.fullmatch, "slug": lambda t: SLUG_RE.match(t) and t[0].isalpha(),
+               "facet": _FACET_RE.fullmatch, "text": _is_text, "ids": _MAP_ID_RE.fullmatch}.get(kind)
+    if bare_ok is not None and bare_ok(tok) and tok.casefold() not in _YAML_WORDS:
+        return True, tok
+    return False, None
+
+
+def _value(key, v):
+    """The value of frontmatter key from its text v (spaces stripped), by the key's declared type. Raises
+    ValueError when the key has no declared type or v is not in a shape of it."""
+    kind = "ids" if key.startswith("map-") else _KEY_KINDS.get(key)
+    if kind is None:
+        raise ValueError("unknown frontmatter key {!r} (no declared value type)".format(key))
+    if kind in ("facets", "ids", "cids"):
+        element = {"facets": "facet", "ids": "ids", "cids": "id"}[kind]
+        if not (v.startswith("[") and v.endswith("]")):
+            raise ValueError("frontmatter value of {} {!r} is not {}".format(key, v, _KIND_NAMES[kind]))
         inner = v[1:-1].strip(" ")
-        if inner == "":
-            return []
-        if "[" in inner or "]" in inner:
-            raise ValueError("nested flow sequence not allowed in {!r} (strings only)".format(v))
         elems = []
-        for part in inner.split(","):
-            part = part.strip(" ")
-            if part == "":
-                raise ValueError("empty element in flow sequence {!r}".format(v))
-            problem = _scalar_problem(part)
-            if problem is None and ("{" in part or "}" in part):
-                problem = "holds a YAML flow mapping brace"
-            if problem:
-                raise ValueError("flow sequence element {!r} {} (a YAML reader would read it differently)"
-                                 .format(part, problem))
-            elems.append(_unquote(part))
+        for part in inner.split(",") if inner else ():
+            ok, elem = _scalar(element, part.strip(" "))
+            if not ok:
+                raise ValueError("frontmatter value of {}: element {!r} is not {} (see FRONTMATTER)".format(
+                    key, part.strip(" "), _KIND_NAMES[element] if element != "ids" else "a mapping id"))
+            elems.append(elem)
         return elems
-    if v in ("true", "false"):
-        return v == "true"
-    if re.fullmatch(r'-?[0-9]+', v):
-        return int(v)
-    return v
+    ok, value = _scalar(kind, v)
+    if not ok:
+        raise ValueError("frontmatter value of {} {!r} is not {} (see FRONTMATTER)".format(key, v, _KIND_NAMES[kind]))
+    return value
 
 
-def decode_rule_source(raw, name):
+def decode_rule_source(raw, name, adopter=False):
     """A rule source's text from its raw bytes: UTF-8 with no newline translation. Raises ValueError on
     a CR byte (LF line endings only, as check_byte_canon requires) and on invalid UTF-8 (a
-    UnicodeDecodeError, itself a ValueError). check_clauses decodes rule sources through this too."""
+    UnicodeDecodeError, itself a ValueError). check_clauses decodes rule sources through this too. With
+    adopter (ADOPTER MODE), each CRLF is first read as LF; a lone CR is still refused."""
+    if adopter:
+        raw = raw.replace(b"\r\n", b"\n")
     if b"\r" in raw:
         raise ValueError("{}: line {}: holds a CR byte; a rule source uses LF line endings only".format(
             name, raw.count(b"\n", 0, raw.index(b"\r")) + 1))
     return raw.decode("utf-8")
 
 
-def read_rule_source(path):
+def read_rule_source(path, adopter=False):
     """Read one rule source the one way both gen_rules and check_clauses read it (see decode_rule_source)."""
-    return decode_rule_source(path.read_bytes(), path.name)
+    return decode_rule_source(path.read_bytes(), path.name, adopter)
 
 
-def parse_source(path):
-    text = read_rule_source(path)
+def parse_source(path, adopter=False):
+    """The frontmatter of one rule source as {key: value}, by the FRONTMATTER grammar; adopter selects
+    ADOPTER MODE (the placement gate). Raises ValueError on a malformed source."""
+    text = read_rule_source(path, adopter)
     if not text.startswith("---\n"):
         raise ValueError("{}: no frontmatter".format(path.name))
     end = text.find("\n---\n", 4)
@@ -245,40 +291,32 @@ def parse_source(path):
     fm = {}
     for raw in text[4:end].split("\n"):
         if any(unicodedata.category(ch) in _LINE_CATEGORIES and ch not in _JOINERS for ch in raw):
-            raise ValueError("{}: frontmatter line {!r} holds a hidden character (a control, format, line "
-                             "separator or paragraph separator character; YAML can read a second key "
-                             "there)".format(path.name, raw))
-        line = raw.strip(" ")
-        if not line:
+            raise ValueError("{}: frontmatter line {!r} holds a hidden or unassigned character (Unicode "
+                             "category Cc, Cf, Cn, Co, Cs, Zl or Zp; YAML can read a second key there or "
+                             "refuse the file)".format(path.name, raw))
+        if not raw.strip(" "):
             continue
-        if line.startswith("#"):
+        if raw.startswith("#"):
+            if adopter:
+                continue
             raise ValueError("{}: frontmatter line {!r} starts with '#' (a YAML comment is refused: a "
-                             "renderer that does not read frontmatter shows it as a heading)".format(path.name, line))
+                             "renderer that does not read frontmatter shows it as a heading)".format(path.name, raw))
         if raw.startswith(" "):
             raise ValueError("{}: frontmatter line {!r} is indented (YAML reads it as part of the key "
                              "above)".format(path.name, raw))
-        if ":" not in line:
-            raise ValueError("{}: bad frontmatter line {!r}".format(path.name, line))
-        key, val = line.split(":", 1)
+        if ":" not in raw:
+            raise ValueError("{}: bad frontmatter line {!r}".format(path.name, raw))
+        key, val = raw.split(":", 1)
         key = key.strip(" ")
         if key in fm:
             raise ValueError("{}: duplicate key {}".format(path.name, key))
-        if val[:1] not in ("", " "):
-            raise ValueError("{}: frontmatter key {} is not followed by ': ' (YAML reads the line as one "
-                             "string)".format(path.name, key))
-        if " #" in val:
-            raise ValueError("{}: frontmatter value of {} holds ' #' (YAML drops the rest as a "
-                             "comment)".format(path.name, key))
+        if val[:1] != " ":
+            raise ValueError("{}: frontmatter key {} is not followed by ': ' and a value (YAML reads the "
+                             "line as one string, or an empty value as a null)".format(path.name, key))
         try:
-            fm[key] = _value(val.strip(" "))
+            fm[key] = _value(key, val.strip(" "))
         except ValueError as exc:
             raise ValueError("{}: {}".format(path.name, exc))
-        val = val.strip(" ")
-        if isinstance(fm[key], list):
-            val = val[1:-1]
-        if any(ch in _VALUE_MARKUP for ch in val):
-            raise ValueError("{}: frontmatter value of {} holds '<', '[', ']' or a backslash (a renderer that "
-                             "shows frontmatter as Markdown reads HTML or a link there)".format(path.name, key))
     return fm
 
 
@@ -581,7 +619,7 @@ _RULE_REL = "aiqt/10-QUALI-gen-rules-selftest-target.md"
 # _CASE_FRAME overrides the family lines or the core text of a case; every other case is an aiqt rule
 # whose core is an H1 and one paragraph.
 _DETAIL_SRC = """---
-corpus-id: selfd1
+corpus-id: {cid}
 origin: pack
 {family}slug: gen-rules-selftest-detail
 {keys}---
@@ -610,6 +648,117 @@ Core text.
 
 Detail text.
 """
+# ADOPTER MODE: an adopter rule with CRLF line endings, and one with a full-line `#` comment in its
+# frontmatter, pass the placement gate's read (parse_source in adopter mode, then derive with the adopter
+# origin allowed, as check_rule_placement.check_drift does) and are refused by the pack's strict reader.
+_ADOPTER_MODE_REL = "aiqt/10-QUALI-team-review.md"
+_ADOPTER_MODE_SRC = """---
+corpus-id: teamrv
+origin: adopter
+family: aiqt
+{comment}tier: 10
+facet: QUALI
+slug: team-review
+---
+# Team review
+
+Core text.
+"""
+_ADOPTER_MODE_CASES = (
+    ("adopter-crlf", _ADOPTER_MODE_SRC.format(comment="").replace("\n", "\r\n")),
+    ("adopter-comment", _ADOPTER_MODE_SRC.format(comment="# reviewed by the platform team, 2026-09\n")),
+)
+
+
+def _yaml_agreement(root, tmp):
+    """Check that PyYAML safe_load reads the same frontmatter keys and values as parse_source, for every
+    live source under root and a deterministic fuzz of accepted values. Returns (failures, live count,
+    fuzz count, disclosed float-gap count), or None when PyYAML is not importable."""
+    try:
+        import yaml
+    except ImportError:
+        return None
+    import random
+
+    def agree(path, failures):
+        text = path.read_text(encoding="utf-8")
+        mine = parse_source(path)
+        theirs = yaml.safe_load(text[4:text.index("\n---\n", 4)])
+        gaps = 0
+        if set(mine) != set(theirs):
+            failures.append("{}: keys differ: {} vs {}".format(path.name, sorted(mine), sorted(theirs)))
+            return 0
+        for key, value in mine.items():
+            other = theirs[key]
+            pairs = list(zip(value, other)) if isinstance(value, list) and isinstance(other, list) and \
+                len(value) == len(other) else [(value, other)]
+            for a, b in pairs:
+                if type(a) is type(b) and a == b:
+                    continue
+                if isinstance(a, str) and type(b) is float and _MAP_FLOAT_RE.fullmatch(a) and repr(b) == a:
+                    gaps += 1
+                    continue
+                failures.append("{}: {}: {!r} here, {!r} to YAML".format(path.name, key, value, other))
+                break
+        return gaps
+
+    failures, gaps, live = [], 0, 0
+    src_dir = root / ".aiqt" / "core" / "rules"
+    for path in sorted(src_dir.rglob("*.md")) if src_dir.is_dir() else ():
+        gaps += agree(path, failures)
+        live += 1
+    rng = random.Random(392)
+    letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\u00e9\u0436\u0645\u4e2d\u0d28"
+    text_pool = letters + "0123456789 .,;()'/-\u0301\u0661\u00a0\u3000\u200c\u200d"
+    id_pool = "ABCZaz09.&()-"
+
+    def pick(make, kind):
+        while True:
+            value = make()
+            if kind is None or _scalar(kind, value)[0]:
+                return value
+
+    def quote(value):
+        mark = rng.choice("\"'")
+        return mark + value + mark if mark not in value and rng.random() < 0.3 else value
+
+    def text():
+        return rng.choice(letters) + "".join(rng.choice(text_pool) for _ in range(rng.randrange(12))) + \
+            rng.choice(letters + "0123456789.)")
+
+    def map_id():
+        form = rng.randrange(4)
+        if form == 0:
+            return "{}.{}".format(rng.choice(("0", "6", "10", "8", "123")), rng.choice(("7", "2", "01", "305")))
+        if form == 1:
+            return ".".join(str(rng.randrange(20)) for _ in range(rng.randrange(3, 5)))
+        word = rng.choice(letters[:52]) + "".join(rng.choice(id_pool) for _ in range(rng.randrange(6)))
+        return word + (" " + "".join(rng.choice(id_pool) for _ in range(rng.randrange(1, 4))) if form == 2 else "")
+
+    makers = (("corpus-id", lambda: rng.choice((quote("abc" + str(rng.randrange(10 ** 6))),
+                                                str(rng.randrange(10 ** 5, 10 ** 8)), "'0123456'")), "id"),
+              ("origin", lambda: quote(rng.choice(("pack", "adopter"))), "code"),
+              ("family", lambda: quote(rng.choice(("aiqt", "security"))), "code"),
+              ("slug", lambda: quote(rng.choice(("a-b", "on-call", "x1-2y", "rule"))), "slug"),
+              ("tier", lambda: rng.choice(("10", "20", "30", "40")), "tier"),
+              ("apex", lambda: rng.choice(("true", "false")), "apex"),
+              ("facet", lambda: quote(rng.choice(sorted(KNOWN_FACETS))), "facet"),
+              ("detail-trigger", lambda: quote(text()), "text"),
+              ("detail-reason", lambda: quote(text()), "text"))
+    fuzz = 1500
+    for number in range(fuzz):
+        lines = ["{}: {}{}".format(key, pick(make, kind), " " * rng.randrange(2)) for key, make, kind in makers]
+        lines.append("secondary: [{}]".format(", ".join(quote(rng.choice(sorted(KNOWN_FACETS)))
+                                                        for _ in range(rng.randrange(4)))))
+        lines.append("map-x-broad: [{}]".format(" ,".join(quote(pick(map_id, "ids"))
+                                                          for _ in range(rng.randrange(1, 5)))))
+        rng.shuffle(lines)
+        path = tmp / "fuzz-{}.md".format(number)
+        path.write_bytes(("---\n" + "\n".join(lines) + "\n---\n# T\n").encode("utf-8"))
+        gaps += agree(path, failures)
+    return failures, live, fuzz, gaps
+
+
 _R6_FENCED_COMMENT = "\n```\n<!--\n```\nDeta<span\nclass=\"x\">il</span>\n---\nHidden.\n-->\n"
 _R6_ORDERED_SETEXT = "\nDetail[](x '\n2. # y')\n---\nHidden.\n"
 _DETAIL_CASES = (
@@ -803,7 +952,8 @@ _DETAIL_CASES = (
     ("r8-raw-trailing-separator", _TRIGGER + "detail-reason: x\x1c\n", _DETAIL_BODY, 2),
     ("r8-raw-trailing-line-separator", _TRIGGER + "detail-reason: x\u2028\n", _DETAIL_BODY, 2),
     ("r8-zwnj-persian", _TRIGGER + "detail-reason: \u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645\n", _DETAIL_BODY, 0),
-    ("r8-zwj-emoji", _TRIGGER + "detail-reason: pairing \U0001f469\u200d\U0001f4bb\n", _DETAIL_BODY, 0),
+    ("r8-zwj-emoji", _TRIGGER + "detail-reason: pairing \U0001f469\u200d\U0001f4bb\n", _DETAIL_BODY, 2),
+    ("r9-zwj-malayalam", _TRIGGER + "detail-reason: \u0d28\u0d4d\u200d text\n", _DETAIL_BODY, 0),
     # A value YAML would read differently from this tool is refused: a null or boolean word, ' #' (a YAML
     # comment), a leading YAML indicator, a quote that does not close exactly at the end, a mapping
     # separator, a key with no space after its colon, and an indented line.
@@ -826,12 +976,12 @@ _DETAIL_CASES = (
     ("r8-start-comma", "detail-trigger: , x\n", _DETAIL_BODY, 2),
     ("r8-start-question", "detail-trigger: ? x\n", _DETAIL_BODY, 2),
     ("r8-start-dash", "detail-trigger: - x\n", _DETAIL_BODY, 2),
-    ("r8-dash-word-ok", "detail-trigger: -x writing\n", _DETAIL_BODY, 0),
+    ("r8-dash-word", "detail-trigger: -x writing\n", _DETAIL_BODY, 2),
     ("r8-quote-unclosed", "detail-trigger: 'writing\n", _DETAIL_BODY, 2),
     ("r8-quote-doubled", "detail-trigger: 'it''s'\n", _DETAIL_BODY, 2),
     ("r8-mapping-separator", "detail-trigger: a: b\n", _DETAIL_BODY, 2),
     ("r8-final-colon", "detail-trigger: writing:\n", _DETAIL_BODY, 2),
-    ("r8-url-ok", "detail-trigger: see https://example.test/x\n", _DETAIL_BODY, 0),
+    ("r8-url", "detail-trigger: see https://example.test/x\n", _DETAIL_BODY, 2),
     ("r8-no-space-after-colon", "detail-trigger:writing\n", _DETAIL_BODY, 2),
     ("r8-indented-under-empty", "detail-reason:\n  detail-trigger: x\n", _DETAIL_BODY, 2),
     ("r8-indented-under-folded", "detail-reason: >\n  detail-trigger: x\n", _DETAIL_BODY, 2),
@@ -839,6 +989,34 @@ _DETAIL_CASES = (
     ("r8-element-null", "map-iso-42001-broad: [A.5.1, ~]\n" + _TRIGGER, _DETAIL_BODY, 2),
     ("r8-element-pair", "map-iso-42001-broad: [A.5.1, a: b]\n" + _TRIGGER, _DETAIL_BODY, 2),
     ("r8-element-brace", "map-iso-42001-broad: [A.5.1, a{b]\n" + _TRIGGER, _DETAIL_BODY, 2),
+    # QA round 9 (D-392-FRONTMATTER-TYPED-GRAMMAR): each key has a declared value type, and only its
+    # shapes are accepted; the round-9 reproductions exit 2 and the declared shapes exit 0.
+    ("r9-tier-leading-zero", "", "", 2),
+    ("r9-tier-quoted", "", "", 2),
+    ("r9-corpus-id-leading-zero", "", "", 2),
+    ("r9-corpus-id-digits-ok", "", "", 0),
+    ("r9-corpus-id-quoted-ok", "", "", 0),
+    ("r9-noncharacter-fffe", "detail-trigger: editing \ufffe files\n", _DETAIL_BODY, 2),
+    ("r9-noncharacter-ffff", "detail-trigger: \uffff\n", _DETAIL_BODY, 2),
+    ("r9-private-use", "detail-trigger: editing \ue000 files\n", _DETAIL_BODY, 2),
+    ("r9-element-question", "map-iso-42001-broad: [?a]\n" + _TRIGGER, _DETAIL_BODY, 2),
+    ("r9-element-colon", "map-iso-42001-broad: [:a]\n" + _TRIGGER, _DETAIL_BODY, 2),
+    ("r9-element-inner-question", "map-iso-42001-broad: [a?b]\n" + _TRIGGER, _DETAIL_BODY, 2),
+    ("r9-element-true", "map-iso-42001-broad: [true]\n" + _TRIGGER, _DETAIL_BODY, 2),
+    ("r9-element-false", "map-iso-42001-broad: [False]\n" + _TRIGGER, _DETAIL_BODY, 2),
+    ("r9-element-integer", "map-iso-42001-broad: [7]\n" + _TRIGGER, _DETAIL_BODY, 2),
+    ("r9-element-ids-ok", "map-iso-42001-broad: [6.7, \"6.7\", '7', A.5.1, 6.4.2]\n" + _TRIGGER,
+     _DETAIL_BODY, 0),
+    ("r9-element-trailing-comma", "map-iso-42001-broad: [A.5.1,]\n" + _TRIGGER, _DETAIL_BODY, 2),
+    ("r9-secondary-quoted-ok", "secondary: ['INTEG', \"TRUST\"]\n" + _TRIGGER, _DETAIL_BODY, 0),
+    ("r9-secondary-word", "secondary: [NULL]\n" + _TRIGGER, _DETAIL_BODY, 2),
+    ("r9-unknown-key", "notes: a b\n" + _TRIGGER, _DETAIL_BODY, 2),
+    ("r9-text-quoted-ok", _TRIGGER + "detail-reason: \"it's the reviewer's call\"\n", _DETAIL_BODY, 0),
+    ("r9-text-digit-first", _TRIGGER + "detail-reason: 2026-10-03\n", _DETAIL_BODY, 2),
+    ("r9-text-trailing-nbsp", _TRIGGER + "detail-reason: text\u00a0\n", _DETAIL_BODY, 2),
+    ("r9-text-punctuation-ok", _TRIGGER + "detail-reason: Reviews (a, b; c) in /x - it's done.\n",
+     _DETAIL_BODY, 0),
+    ("r9-pack-comment-line", "# reviewed by the platform team\n", "", 2),
     # The BODY GRAMMAR: one case per refused shape (each exits 2); a grammar-title case sets its title
     # through _CASE_FRAME.
     ("grammar-no-title", "", "", 2),
@@ -908,6 +1086,11 @@ _CASE_FRAME = {
     "grammar-no-title": {"core": "\n"},
     "r6-fenced-comment-refdef": {"core": "# Gen-rules detail self-test rule\n\nSee [the policy].\n"},
     "r7b-frontmatter-non-ascii-tier": {"family": "family: aiqt\ntier: \u0661\u0660\nfacet: QUALI\n"},
+    "r9-tier-leading-zero": {"family": "family: aiqt\ntier: 010\nfacet: QUALI\n"},
+    "r9-tier-quoted": {"family": "family: aiqt\ntier: \"10\"\nfacet: QUALI\n"},
+    "r9-corpus-id-leading-zero": {"cid": "0123456"},
+    "r9-corpus-id-digits-ok": {"cid": "1234567"},
+    "r9-corpus-id-quoted-ok": {"cid": "'0123456'"},
 }
 # Red on revert: each guard put back to its pre-fix form in a scratch copy of this module, loaded through
 # importlib, must then turn its case to the reverted exit (0 for a guard that refuses, 2 for a shape the
@@ -930,32 +1113,29 @@ _NEAR = (_NEAR_GUARD, "if False:")
 _BLANK = (_BLANK_GUARD, "if False:")
 _SECOND = ("if found is not None:", "if False:")
 _NOTITLE = ("    if title is None:\n        raise", "    if False:\n        raise")
-_FM = ("        if not line:\n            continue\n", '        if not line or line.startswith("#"):\n            continue\n')
 _FENCE = (' or line.startswith("```")', "")
-_FMVAL = ("if any(ch in _VALUE_MARKUP for ch in val):", "if False:")
-_FMVAL_ASCII = (_FMVAL[0], "if not set(val) <= _PROSE_TEXT:")
-_VCAT_FIXED = '_LINE_CATEGORIES = frozenset(("Cc", "Cf", "Zl", "Zp"))'
-_FMINT = ("if re.fullmatch(r'-?[0-9]+', v):", "if re.fullmatch(r'-?\\d+', v):")
-_FMSPLIT = ('for raw in text[4:end].split("\\n"):', "for raw in text[4:end].splitlines():")
-# The round-7 hidden-character check read the value after str.strip(); the revert puts that back.
-_FMRAW = ("for ch in raw):", 'for ch in raw.strip().partition(":")[2].strip()):')
+# The FRONTMATTER grammar guards (D-392-FRONTMATTER-TYPED-GRAMMAR), each a (fixed text, reverted text) pair.
+_FMTYPE = ("    ok, value = _scalar(kind, v)\n", "    ok, value = True, v\n")
+_FMELEM = ("            ok, elem = _scalar(element, part.strip(\" \"))\n",
+           "            ok, elem = True, part.strip(\" \")\n")
+_FMRAW = ("for ch in raw):", 'for ch in ""):')
 _FMJOIN = (" and ch not in _JOINERS for ch in raw", " for ch in raw")
-_FMCOLON = ('if val[:1] not in ("", " "):', "if False:")
-_FMSEP = ('if ": " in tok or tok.endswith(":"):', "if False:")
-_FMCOMMENT = ('if " #" in val:', "if False:")
+_VCAT_FIXED = '_LINE_CATEGORIES = frozenset(("Cc", "Cf", "Cn", "Co", "Cs", "Zl", "Zp"))'
+_FMCOLON = ('if val[:1] != " ":', "if False:")
 _FMINDENT = ('if raw.startswith(" "):', "if False:")
-_FMQUOTE = (" or tok[0] in tok[1:-1]:", ":")
-_FMUNQUOTE = ('        raise ValueError("malformed quoted value {!r}".format(tok))', "        return tok")
-_FMQUOTED = ("if len(tok) < 2 or tok[-1] != tok[0] or tok[0] in tok[1:-1]:", "if False:")
-_FMELEM = ("            problem = _scalar_problem(part)\n", "            problem = None\n")
-_FMBRACE = ('if problem is None and ("{" in part or "}" in part):', "if False:")
-_YSTART_FIXED = '_YAML_START = frozenset(">|&*!%@`{},]#")'
-_YSPACED = ('if tok[:1] in _YAML_SPACED_START and tok[1:2] in ("", " "):', "if False:")
+_FMHASH = ('        if raw.startswith("#"):\n            if adopter:', '        if raw.lstrip(" ").startswith("#"):\n            if True:')
+_FMTIER = ("_TIER_RE = re.compile(r'10|20|30|40')", "_TIER_RE = re.compile(r'0*(?:10|20|30|40)')")
+_FMCID = ("_CID_BARE_RE = re.compile(r'[a-z][a-z0-9]{5,}|[1-9][0-9]{5,}')",
+          "_CID_BARE_RE = re.compile(r'[a-z][a-z0-9]{5,}|[0-9]{6,}')")
+_FMTEXT = ("ch in _TEXT_PUNCT or ch in _JOINERS or unicodedata.category(ch) in _TEXT_CATEGORIES",
+           'ch in _TEXT_PUNCT or ch in _JOINERS or (ch.isascii() and ch.isalnum()) or ch == " "')
 
 
-def _word(word):
-    """The guard pair that drops one word from _YAML_WORDS."""
-    return '"{}", '.format(word), ""
+def _cat(category):
+    """The guard pair that drops one category from _LINE_CATEGORIES."""
+    return _VCAT_FIXED, _VCAT_FIXED.replace('"{}", '.format(category), "").replace(', "{}"'.format(category), "")
+
+
 _ORDERED = ("if _ORDERED_RE.match(line):", "if False:")
 _CHARS = ("if not set(line) <= _PROSE_TEXT:", "if False:")
 _TSTART = ('if not line.startswith("# "):', "if False:")
@@ -981,8 +1161,8 @@ _DETAIL_REVERTS = (
     _revert("cr-byte", "cr-byte", ('if b"\\r" in raw:', "if False:"), _CHARS),  # a CR is also not printable ASCII
     ("empty-layer", 'if not "\\n".join(lines[heading:]).strip():', "if False:",
      "empty-detail", 0),
-    ("non-string-value", "if not isinstance(fm[key], str) or not fm[key].strip():", "if False:",
-     "non-string-trigger", 0),
+    ("non-string-value", ("if not isinstance(fm[key], str) or not fm[key].strip():", _FMTYPE[0]),
+     ("if False:", '    ok, value = (True, [v]) if kind == "text" else _scalar(kind, v)\n'), "non-string-trigger", 0),
     ("corpus-wiring", "check_detail(read_rule_source(src), fm, src.name)", "pass", "detail-without-trigger", 0),
     ("security-detail-keys", '_check_keys(fm, BASE_KEYS | {"facet", "secondary"} | MAP_KEYS | DETAIL_KEYS, name)',
      '_check_keys(fm, BASE_KEYS | {"facet", "secondary"} | MAP_KEYS, name)', "security-detail", 2),
@@ -1166,63 +1346,77 @@ _DETAIL_REVERTS = (
     _revert("body-r6-ordered-break-setext", "r6-ordered-break-setext", _PROSE),
     _revert("body-r6-ordered-fence-setext", "r6-ordered-fence-setext", _PROSE),
     _revert("body-r6-ordered-paren-setext", "r6-ordered-paren-setext", _PROSE),
-    _revert("body-r6-frontmatter-heading", "r6-frontmatter-heading", _FM),
-    _revert("body-r6-frontmatter-indented-comment", "r6-frontmatter-indented-comment", _FM),
-    _revert("fm-r7-frontmatter-html-heading", "r7-frontmatter-html-heading", _FMVAL),
-    _revert("fm-r7-frontmatter-style", "r7-frontmatter-style", _FMVAL),
-    _revert("fm-r7-frontmatter-quoted-html", "r7-frontmatter-quoted-html", _FMVAL),
-    _revert("fm-r7-frontmatter-link", "r7-frontmatter-link", _FMVAL),
-    _revert("fm-r7-frontmatter-backslash", "r7-frontmatter-backslash", _FMVAL),
-    ("fm-r7-sequence-brackets", "val = val[1:-1]", "val = val", "r7-frontmatter-sequence-ok", 2),
-    ("fm-r7b-ascii-only", _FMVAL_ASCII[0], _FMVAL_ASCII[1], "r7-frontmatter-non-ascii", 2),
-    ("fm-r7b-control", _VCAT_FIXED, _VCAT_FIXED.replace('"Cc", ', ""), "r7b-frontmatter-tab", 0),
-    ("fm-r7b-format", _VCAT_FIXED, _VCAT_FIXED.replace('"Cf", ', ""), "r7b-frontmatter-format", 0),
-    ("fm-r7b-line-separator", _VCAT_FIXED, _VCAT_FIXED.replace('"Zl", ', ""), "r7b-frontmatter-line-separator", 0),
-    ("fm-r7b-paragraph-separator", _VCAT_FIXED, _VCAT_FIXED.replace(', "Zp"', ""),
-     "r7b-frontmatter-paragraph-separator", 0),
-    _revert("fm-r7b-lf-split", "r7b-frontmatter-separator-key", _FMSPLIT),
-    _revert("fm-r7b-ascii-int", "r7b-frontmatter-non-ascii-tier", _FMINT),
-    # Round 8: each reproduction that also holds ': ' after a separator is refused by the raw-line check,
-    # the colon-space check and the mapping-separator check, so all three are reverted together.
-    _revert("fm-r8-f1-paragraph-separator-slug", "r8-f1-paragraph-separator-slug", _FMRAW, _FMCOLON, _FMSEP),
-    _revert("fm-r8-f1-next-line-key", "r8-f1-next-line-key", _FMRAW, _FMCOLON, _FMSEP),
-    _revert("fm-r8-codex-line-separator-key", "r8-codex-line-separator-key", _FMRAW, _FMCOLON, _FMSEP),
-    _revert("fm-r8-raw-leading-next-line", "r8-raw-leading-next-line", _FMRAW),
-    _revert("fm-r8-raw-trailing-separator", "r8-raw-trailing-separator", _FMRAW),
-    _revert("fm-r8-raw-trailing-line-separator", "r8-raw-trailing-line-separator", _FMRAW),
+    _revert("fm-r6-frontmatter-heading", "r6-frontmatter-heading", _FMHASH),
+    _revert("fm-r6-frontmatter-indented-comment", "r6-frontmatter-indented-comment", _FMHASH),
+    _revert("fm-r9-pack-comment-line", "r9-pack-comment-line", _FMHASH),
+    _revert("fm-r7-frontmatter-html-heading", "r7-frontmatter-html-heading", _FMTYPE),
+    _revert("fm-r7-frontmatter-style", "r7-frontmatter-style", _FMTYPE),
+    _revert("fm-r7-frontmatter-quoted-html", "r7-frontmatter-quoted-html", _FMTYPE),
+    _revert("fm-r7-frontmatter-link", "r7-frontmatter-link", _FMTYPE),
+    _revert("fm-r7-frontmatter-backslash", "r7-frontmatter-backslash", _FMTYPE),
+    ("fm-r7b-ascii-only", _FMTEXT[0], _FMTEXT[1], "r7-frontmatter-non-ascii", 2),
+    _revert("fm-r7b-control", "r7b-frontmatter-tab", _cat("Cc"), _FMTYPE),
+    _revert("fm-r7b-format", "r7b-frontmatter-format", _cat("Cf"), _FMTYPE),
+    _revert("fm-r7b-line-separator", "r7b-frontmatter-line-separator", _cat("Zl"), _FMTYPE),
+    _revert("fm-r7b-paragraph-separator", "r7b-frontmatter-paragraph-separator", _cat("Zp"), _FMTYPE),
+    _revert("fm-r9-noncharacter-fffe", "r9-noncharacter-fffe", _cat("Cn"), _FMTYPE),
+    _revert("fm-r9-noncharacter-ffff", "r9-noncharacter-ffff", _cat("Cn"), _FMTYPE),
+    _revert("fm-r9-private-use", "r9-private-use", _cat("Co"), _FMTYPE),
+    _revert("fm-r8-f1-paragraph-separator-slug", "r8-f1-paragraph-separator-slug", _FMRAW, _FMCOLON, _FMTYPE),
+    _revert("fm-r8-f1-next-line-key", "r8-f1-next-line-key", _FMRAW, _FMCOLON, _FMTYPE),
+    _revert("fm-r8-codex-line-separator-key", "r8-codex-line-separator-key", _FMRAW, _FMCOLON, _FMTYPE),
+    _revert("fm-r8-raw-leading-next-line", "r8-raw-leading-next-line", _FMRAW, _FMTYPE),
+    _revert("fm-r8-raw-trailing-separator", "r8-raw-trailing-separator", _FMRAW, _FMTYPE),
+    _revert("fm-r8-raw-trailing-line-separator", "r8-raw-trailing-line-separator", _FMRAW, _FMTYPE),
     ("fm-r8-zwnj-persian", _FMJOIN[0], _FMJOIN[1], "r8-zwnj-persian", 2),
-    ("fm-r8-zwj-emoji", _FMJOIN[0], _FMJOIN[1], "r8-zwj-emoji", 2),
-    _revert("fm-r8-null-tilde", "r8-null-tilde", _word("~")),
-    _revert("fm-r8-null-lower", "r8-null-lower", _word("null")),
-    _revert("fm-r8-null-title", "r8-null-title", _word("Null")),
-    _revert("fm-r8-null-upper", "r8-null-upper", _word("NULL")),
-    _revert("fm-r8-bool-yes", "r8-bool-yes", _word("yes")),
-    _revert("fm-r8-value-equals", "r8-value-equals", ('"FALSE", "="', '"FALSE"')),
-    _revert("fm-r8-comment", "r8-comment", _FMCOMMENT),
-    _revert("fm-r8-start-folded", "r8-start-folded", _without(_YSTART_FIXED, ">")),
-    _revert("fm-r8-start-literal", "r8-start-literal", _without(_YSTART_FIXED, "|")),
-    _revert("fm-r8-start-anchor", "r8-start-anchor", _without(_YSTART_FIXED, "&")),
-    _revert("fm-r8-start-alias", "r8-start-alias", _without(_YSTART_FIXED, "*")),
-    _revert("fm-r8-start-tag", "r8-start-tag", _without(_YSTART_FIXED, "!")),
-    _revert("fm-r8-start-percent", "r8-start-percent", _without(_YSTART_FIXED, "%")),
-    _revert("fm-r8-start-at", "r8-start-at", _without(_YSTART_FIXED, "@")),
-    _revert("fm-r8-start-backtick", "r8-start-backtick", _without(_YSTART_FIXED, "`")),
-    _revert("fm-r8-start-brace", "r8-start-brace", _without(_YSTART_FIXED, "{")),
-    _revert("fm-r8-start-comma", "r8-start-comma", _without(_YSTART_FIXED, ",")),
-    _revert("fm-r8-start-question", "r8-start-question", _YSPACED),
-    _revert("fm-r8-start-dash", "r8-start-dash", _YSPACED),
-    ("fm-r8-dash-word-ok", _YSPACED[0], 'if tok[:1] in _YAML_SPACED_START:', "r8-dash-word-ok", 2),
-    _revert("fm-r8-quote-unclosed", "r8-quote-unclosed", _FMQUOTED, _FMUNQUOTE),
-    _revert("fm-r8-quote-doubled", "r8-quote-doubled", _FMQUOTE),
-    _revert("fm-r8-mapping-separator", "r8-mapping-separator", _FMSEP),
-    _revert("fm-r8-final-colon", "r8-final-colon", _FMSEP),
-    ("fm-r8-url-ok", _FMSEP[0], 'if ":" in tok:', "r8-url-ok", 2),
+    ("fm-r9-zwj-malayalam", _FMJOIN[0], _FMJOIN[1], "r9-zwj-malayalam", 2),
+    _revert("fm-r8-zwj-emoji", "r8-zwj-emoji", _FMTYPE),
+    _revert("fm-r8-null-tilde", "r8-null-tilde", _FMTYPE),
+    _revert("fm-r8-null-lower", "r8-null-lower", _FMTYPE),
+    _revert("fm-r8-null-title", "r8-null-title", _FMTYPE),
+    _revert("fm-r8-null-upper", "r8-null-upper", _FMTYPE),
+    _revert("fm-r8-bool-yes", "r8-bool-yes", _FMTYPE),
+    _revert("fm-r8-value-equals", "r8-value-equals", _FMTYPE),
+    _revert("fm-r8-comment", "r8-comment", _FMTYPE),
+    _revert("fm-r8-start-folded", "r8-start-folded", _FMTYPE),
+    _revert("fm-r8-start-literal", "r8-start-literal", _FMTYPE),
+    _revert("fm-r8-start-anchor", "r8-start-anchor", _FMTYPE),
+    _revert("fm-r8-start-alias", "r8-start-alias", _FMTYPE),
+    _revert("fm-r8-start-tag", "r8-start-tag", _FMTYPE),
+    _revert("fm-r8-start-percent", "r8-start-percent", _FMTYPE),
+    _revert("fm-r8-start-at", "r8-start-at", _FMTYPE),
+    _revert("fm-r8-start-backtick", "r8-start-backtick", _FMTYPE),
+    _revert("fm-r8-start-brace", "r8-start-brace", _FMTYPE),
+    _revert("fm-r8-start-comma", "r8-start-comma", _FMTYPE),
+    _revert("fm-r8-start-question", "r8-start-question", _FMTYPE),
+    _revert("fm-r8-start-dash", "r8-start-dash", _FMTYPE),
+    _revert("fm-r8-dash-word", "r8-dash-word", _FMTYPE),
+    _revert("fm-r8-quote-unclosed", "r8-quote-unclosed", _FMTYPE),
+    _revert("fm-r8-quote-doubled", "r8-quote-doubled", _FMTYPE),
+    _revert("fm-r8-mapping-separator", "r8-mapping-separator", _FMTYPE),
+    _revert("fm-r8-final-colon", "r8-final-colon", _FMTYPE),
+    _revert("fm-r8-url", "r8-url", _FMTYPE),
     _revert("fm-r8-no-space-after-colon", "r8-no-space-after-colon", _FMCOLON),
-    _revert("fm-r8-indented-under-folded", "r8-indented-under-folded", _without(_YSTART_FIXED, ">"), _FMINDENT),
+    _revert("fm-r8-indented-under-folded", "r8-indented-under-folded", _FMTYPE, _FMINDENT),
     _revert("fm-r8-indented-under-value", "r8-indented-under-value", _FMINDENT),
     _revert("fm-r8-element-null", "r8-element-null", _FMELEM),
     _revert("fm-r8-element-pair", "r8-element-pair", _FMELEM),
-    _revert("fm-r8-element-brace", "r8-element-brace", _FMBRACE),
+    _revert("fm-r8-element-brace", "r8-element-brace", _FMELEM),
+    _revert("fm-r9-tier-leading-zero", "r9-tier-leading-zero", _FMTIER),
+    _revert("fm-r7b-ascii-int", "r7b-frontmatter-non-ascii-tier", (_FMTIER[0], "_TIER_RE = re.compile(r'\\d\\d')")),
+    _revert("fm-r7b-lf-split", "r7b-frontmatter-separator-key",
+            ('for raw in text[4:end].split("\\n"):', "for raw in text[4:end].splitlines():")),
+    _revert("fm-r9-tier-quoted", "r9-tier-quoted",
+            ('quoted_ok = {"id": CID_RE.match,', 'quoted_ok = {"tier": _TIER_RE.fullmatch, "id": CID_RE.match,')),
+    _revert("fm-r9-corpus-id-leading-zero", "r9-corpus-id-leading-zero", _FMCID),
+    _revert("fm-r9-element-question", "r9-element-question", _FMELEM),
+    _revert("fm-r9-element-colon", "r9-element-colon", _FMELEM),
+    _revert("fm-r9-element-inner-question", "r9-element-inner-question", _FMELEM),
+    _revert("fm-r9-element-true", "r9-element-true", _FMELEM),
+    _revert("fm-r9-element-false", "r9-element-false", _FMELEM),
+    _revert("fm-r9-element-integer", "r9-element-integer", _FMELEM),
+    _revert("fm-r9-text-digit-first", "r9-text-digit-first", _FMTYPE),
+    _revert("fm-r9-text-trailing-nbsp", "r9-text-trailing-nbsp", _FMTYPE),
     _revert("body-grammar-no-title", "grammar-no-title", _NOTITLE),
     _revert("body-grammar-title-not-first", "grammar-title-not-first", _TITLE, _PROSE),
     _revert("body-grammar-title-no-space", "grammar-title-no-space", _TSTART),
@@ -1282,9 +1476,9 @@ _DETAIL_REVERTS = tuple(_with_body(r) if r[0] in _ALSO_BODY else r for r in _DET
 # trigger), so their revert is checked at parse_source: the fixed parse refuses the source and the
 # reverted parse reads it. (name, fixed texts, reverted texts, case)
 _PARSE_REVERTS = (
-    ("fm-r8-f1-line-separator-trigger",) + _revert("", "", _FMRAW, _FMCOLON, _FMSEP)[1:3]
+    ("fm-r8-f1-line-separator-trigger",) + _revert("", "", _FMRAW, _FMCOLON, _FMTYPE)[1:3]
     + ("r8-f1-line-separator-trigger",),
-    ("fm-r8-indented-under-empty",) + _revert("", "", ('"", "~"', '"~"'), _FMINDENT)[1:3]
+    ("fm-r8-indented-under-empty",) + _revert("", "", _FMCOLON, _FMINDENT, _FMTYPE)[1:3]
     + ("r8-indented-under-empty",),
 )
 
@@ -1292,7 +1486,7 @@ _PARSE_REVERTS = (
 def _detail_case_root(base, name):
     """A synthetic corpus holding the one rule of the named detail case. Returns the case root."""
     _case, keys, body, _expected = next(c for c in _DETAIL_CASES if c[0] == name)
-    frame = dict(dict(family=_AIQT_FAMILY, core=_CORE), **_CASE_FRAME.get(name, {}))
+    frame = dict(dict(family=_AIQT_FAMILY, core=_CORE, cid="selfd1"), **_CASE_FRAME.get(name, {}))
     src = base / name / ".aiqt" / "core" / "rules"
     src.mkdir(parents=True)
     (src / "gen-rules-selftest-detail.md").write_bytes(
@@ -1400,7 +1594,7 @@ def self_test_main():
         if got != "security/" + _ADOPTER_NAME:
             failures.append("adopter case: a non-ASCII string value expected acceptance, got {!r}".format(got))
         try:
-            mutant = _load_reverted(revert_base, "fm-r7b-adopter-ascii-only", *_FMVAL_ASCII)
+            mutant = _load_reverted(revert_base, "fm-r7b-adopter-ascii-only", *_FMTEXT)
         except AssertionError as exc:
             failures.append(str(exc))
         else:
@@ -1410,6 +1604,27 @@ def self_test_main():
                                 "the adopter case expected a refusal")
             except ValueError:
                 pass
+
+        rules = tmp / "adopter-mode" / ".claude" / "rules"
+        for case, content in _ADOPTER_MODE_CASES:
+            path = rules / case / _ADOPTER_MODE_REL
+            path.parent.mkdir(parents=True)
+            path.write_bytes(content.encode("utf-8"))
+            try:  # the read check_rule_placement.check_drift makes: adopter mode, adopter origin allowed
+                got = derive(parse_source(path, adopter=True), path.name, ("pack", "adopter"))
+                got = None if got == _ADOPTER_MODE_REL else "derives {}".format(got)
+            except ValueError as exc:
+                got = str(exc)
+            if got is not None:
+                failures.append("adopter case {}: expected the placement gate to accept it, got {!r}".format(case, got))
+            try:
+                parse_source(path)
+                failures.append("adopter case {}: expected the pack's strict reader to refuse it".format(case))
+            except ValueError:
+                pass
+        agreement = _yaml_agreement(repo_root(), tmp / "adopter-mode")
+        if agreement is not None:
+            failures.extend("YAML agreement: " + f for f in agreement[0][:20])
 
         for label, old, new, case in _PARSE_REVERTS:
             source = _detail_case_root(revert_base / label, case) / ".aiqt" / "core" / "rules" / \
@@ -1440,8 +1655,12 @@ def self_test_main():
     print("SELF-TEST PASS: an invalid-UTF-8 generated target fails closed (exit 2), not a raw "
           "UnicodeDecodeError traceback (guards the widened reconcile arm); {} detail layout case(s) "
           "hold and {} guard revert(s) each go red; an adopter-shaped rule with a non-ASCII value is accepted "
-          "and goes red under the ASCII-only revert; {} parse-level revert(s) each go red.".format(
-              len(_DETAIL_CASES), len(_DETAIL_REVERTS) + 1, len(_PARSE_REVERTS)))
+          "and goes red under the ASCII-only revert; {} parse-level revert(s) each go red; {} adopter-mode "
+          "case(s) pass the placement gate and are refused by the pack reader; {}.".format(
+              len(_DETAIL_CASES), len(_DETAIL_REVERTS) + 1, len(_PARSE_REVERTS), len(_ADOPTER_MODE_CASES),
+              "PyYAML agreement NOT RUN (PyYAML is not importable)" if agreement is None else
+              "PyYAML safe_load reads the same keys and values for {} live source(s) and {} fuzzed "
+              "frontmatter(s) ({} disclosed bare float id(s))".format(*agreement[1:])))
     return 0
 
 
