@@ -39,10 +39,32 @@ RULE SOURCE FORMAT (the two-layer split; this step parses and validates it, and 
     - anywhere in the body, any other line whose visible text reads `detail` or `details`: the visible
       text is the line with HTML entities decoded, NFKC-normalized, invisible (format) characters,
       leading blockquote and list item markers, HTML tags and link targets dropped, then only its
-      letters and digits kept, case-folded. This refuses every near miss (another level, case, plural,
-      spacing, emphasis, link, entity or invisible character, a setext heading's text line, a heading
-      inside a fence, comment, HTML block, block quote or list item), so no near miss can leave the
-      author believing text was split when it was not;
+      letters and digits kept, case-folded. This is a per-line check: it refuses a one-line near miss
+      (another level, case, plural, spacing, emphasis, link, entity or invisible character, a setext
+      heading's text line, a heading inside a fence, comment, HTML block, block quote or list item), and
+      the PLAIN BODY rules below refuse every heading or HTML construct it cannot read on one line;
+    - PLAIN BODY (decision D-392-PLAIN-BODY): this reader does not model what a heading renders as, so
+      every heading-capable construct anywhere in the body must be plain:
+        * an ATX heading line (zero to three spaces, after any leading block quote or list item
+          markers, then one to six `#` and a space, a tab or the end of the line) whose text is
+          not printable ASCII (0x20 to 0x7E), is blank, or holds any of [ ] < > & ~ * _, a backslash
+          or a backtick (`(` and `)` are allowed, decision D-392-PLAIN-BODY-UNBLOCK: with no `[` no link
+          or image can form, so a parenthesis cannot change what the heading renders);
+        * a setext underline (after any leading `>` markers and whitespace, a run of only `=` or only
+          `-`, then optional spaces or tabs) directly under a line that is not blank after its `>`
+          markers and whitespace are removed, unless that line, after its leading block quote and list
+          item markers are removed, cannot be paragraph text by construction: an ATX heading line, a
+          thematic break of `*` or `_`, a bare fence marker line (three or more backticks or tildes and
+          optional trailing spaces, no info string), or the last line of an allowed HTML comment;
+        * raw HTML: a `<` followed by an ASCII letter, `/`, `?` or `!`, anywhere outside an allowed
+          HTML comment. An allowed HTML comment starts at column 0 of a line with `<!--` and ends at the
+          end of the same or a later line with the first `-->` after it (or is the whole-line `<!-->` or
+          `<!--->`), with nothing else on those lines. The live corpus holds no comment; the shapes stay
+          allowed because an author's note to a reviewer is a whole-line comment, and a whole-line
+          comment is an HTML block that ends on its own last line, so it cannot hide or join a heading;
+        * in the detail layer, a link reference definition, refused as any line below the split that
+          holds `]:` (a definition there would change how the core renders on its own; a definition
+          that starts above the split ends above it, since a label holds no blank line);
     - an empty core layer (blank lines only) or an empty detail layer (blank lines and HTML comments
       only).
   A source with no `## Detail` line and no line whose visible text reads Detail is not read further.
@@ -112,6 +134,15 @@ _LIST_LIKE_RE = re.compile(r'^\d{1,9}[.)](?:[ \t]|$)')
 _HEADING_MARKUP = frozenset("[<&\\~*_`")
 # An HTML comment, for the empty detail layer test only (`<!-->` and `<!--->` are whole comments).
 _COMMENT_RE = re.compile(r'<!--(?:-?>|[\s\S]*?-->)')
+# The PLAIN BODY rules (see RULE SOURCE FORMAT above).
+_ATX_RE = re.compile(r'^ {0,3}#{1,6}(?=[ \t]|$)(.*)$')
+_HEADING_TEXT = frozenset(map(chr, range(0x20, 0x7f))) - frozenset("[]<>&\\~*_`")
+_UNDERLINE_RE = re.compile(r'^(?:[ \t]*>)*[ \t]*(?:=+|-+)[ \t]*$')
+_QUOTE_PREFIX_RE = re.compile(r'^(?:[ \t]*>)*[ \t]*')
+_NOT_PARAGRAPH_RE = re.compile(
+    r'^ {0,3}(?:#{1,6}(?:[ \t]|$)|([*_])(?:[ \t]*\1){2,}[ \t]*$|(?:`{3,}|~{3,})[ \t]*$)')
+_RAW_HTML_RE = re.compile(r'<[A-Za-z/?!]')
+_WHOLE_COMMENT_RE = re.compile(r'<!--(?:>|->|[\s\S]*?-->)')
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
@@ -300,6 +331,34 @@ def _names_detail(line):
     return _visible_text(line) in _DETAIL_NAMES
 
 
+def _comment_end(lines, number):
+    """The 1-based number of the last line of the allowed HTML comment that starts at line number, or 0
+    when no allowed comment starts there (see PLAIN BODY in RULE SOURCE FORMAT)."""
+    if not lines[number - 1].startswith("<!--"):
+        return 0
+    rest = "\n".join(lines[number - 1:])
+    comment = _WHOLE_COMMENT_RE.match(rest)
+    if comment is None or rest[comment.end():comment.end() + 1] not in ("", "\n"):
+        return 0
+    return number + rest.count("\n", 0, comment.end())
+
+
+def _plain_body_problem(lines, number, first, comment_end):
+    """What makes body line number (1-based) a heading-capable construct outside the PLAIN BODY rules, or
+    None. comment_end is the last line of the allowed HTML comment that ends nearest above it, or 0."""
+    line = lines[number - 1]
+    heading = _ATX_RE.match(_uncontained(line))
+    if heading and (not heading.group(1).strip() or not set(heading.group(1)) <= _HEADING_TEXT):
+        return ("a heading whose text is not plain (printable ASCII, not blank, none of "
+                "[ ] < > & ~ * _, a backslash or a backtick)")
+    if _UNDERLINE_RE.match(line) and number > first and _QUOTE_PREFIX_RE.sub("", lines[number - 2]):
+        if comment_end != number - 1 and not _NOT_PARAGRAPH_RE.match(_uncontained(lines[number - 2])):
+            return "a setext underline directly under a line that can be paragraph text"
+    if _RAW_HTML_RE.search(line):
+        return "raw HTML outside a whole-line HTML comment"
+    return None
+
+
 def _plain_text_problem(text):
     """None when text is a PLAIN PREFIX paragraph text line, else what makes it not one."""
     if not text or text[0] not in _PLAIN_START:
@@ -359,6 +418,7 @@ def detail_heading_line(text, name):
     first = body_first_line(text, name)
     lines = text.split("\n")
     found = None
+    comment_end = 0
     for number in range(first, len(lines) + 1):
         line = lines[number - 1]
         if line == DETAIL_HEADING:
@@ -369,6 +429,18 @@ def detail_heading_line(text, name):
         elif _names_detail(line):
             raise ValueError("{}: line {}: {!r} reads as Detail but is not the split line '{}'".format(
                 name, number, line, DETAIL_HEADING))
+        if number <= comment_end:
+            continue
+        if _comment_end(lines, number):
+            comment_end = _comment_end(lines, number)
+            continue
+        body_problem = _plain_body_problem(lines, number, first, comment_end)
+        if body_problem is not None:
+            raise ValueError("{}: line {}: {!r} is outside the plain-body rules ({})".format(
+                name, number, line, body_problem))
+        if found is not None and "]:" in line:
+            raise ValueError("{}: line {}: {!r} below the '{}' split holds ']:' (a link reference "
+                             "definition is refused in the detail layer)".format(name, number, line, DETAIL_HEADING))
     if found is None:
         return None
     if found > first and lines[found - 2] != "":
@@ -602,7 +674,7 @@ _DETAIL_CASES = (
     ("fullwidth-heading", "", "\n## \uff24\uff45\uff54\uff41\uff49\uff4c\n", 2),
     ("invisible-before-marker", "", "\n\u200b10. Detail\n", 2),
     ("plain-setext", _TRIGGER, "\nOverview\n===\n" + _DETAIL_BODY, 2),
-    ("no-split-setext", "", "\nOverview\n===\n\nTail.\n", 0),
+    ("no-split-setext", "", "\nOverview\n===\n\nTail.\n", 2),
     ("heading-then-rule", "", "\nDetail is discussed here.\n# Another heading\n---\n", 0),
     ("blank-then-rule", "", "\nDetail is discussed here.\n\n---\n", 0),
     ("fence-then-rule", "", "\n```\nDetail is here\n```\n---\n", 0),
@@ -639,6 +711,20 @@ _DETAIL_CASES = (
     ("r4-zwsp-lead", "", "\n## \u200bDetail\n", 2),
     ("r4-zwsp-inner", "", "\n## De\u200btail\n", 2),
     ("r4-soft-hyphen", "", "\n## De\u00adtail\n", 2),
+    # QA round 5: every reproduced finding of both reviews exits 2 (PLAIN BODY, D-392-PLAIN-BODY).
+    ("r5-balanced-link-heading", "", "\n## [Detail](https://example.test/a(b)c)\n\nTail.\n", 2),
+    ("r5-comment-gt-heading", "", "\n## Detail <!-- > hidden -->\n\nTail.\n", 2),
+    ("r5-multiline-html-heading", "", "\n<h2>De<span\ntitle=\"x\">tail</span></h2>\n\nTail.\n", 2),
+    ("r5-multiline-comment-setext", "", "\nDeta<!--\n-->il\n---\n\nTail.\n", 2),
+    ("r5-multiline-span-setext", "", "\nDeta<span\nclass=\"x\">il</span>\n---\n\nTail.\n", 2),
+    ("r5-hangul-filler", "", "\n## Detail\u3164\n\nTail.\n", 2),
+    ("r5-halfwidth-hangul-filler", "", "\n## Detail\uffa0\n\nTail.\n", 2),
+    ("r5-cyrillic-e", "", "\n## D\u0435tail\n\nTail.\n", 2),
+    ("r5-detail-reference-definition", _TRIGGER,
+     "\n## Detail\n\n[the policy]: https://example.test/p\n\nDetail text.\n", 2),
+    # D-392-PLAIN-BODY-UNBLOCK: a heading with parentheses and no bracket is plain, in either layer.
+    ("r5-paren-heading", "", "\n# The principle (highest precedence)\n\nTail.\n", 0),
+    ("r5-paren-heading-split", _TRIGGER, "\n## Scope (core)\n" + _DETAIL_BODY + "\n### Notes (a)(b) ()\n", 0),
     # The PLAIN PREFIX grammar: one case per rule (each exits 2), and two layouts it admits (exit 0).
     ("plain-prefix-ok", _TRIGGER, "\n## Scope\n\nText with (parens), 'quotes' and `code`.\n\"Quoted\" start."
      "\n2024 was a year.\n" + _DETAIL_BODY, 0),
@@ -674,6 +760,7 @@ _CASE_FRAME = {
     "security-detail": {"family": "family: security\nfacet: SECI\n"},
     "empty-core": {"core": ""},
     "comment-only-core": {"core": "<!-- no visible core -->\n"},
+    "r5-detail-reference-definition": {"core": "# Gen-rules detail self-test rule\n\nSee [the policy].\n"},
 }
 # Red on revert: each guard put back to its pre-fix form in a scratch copy of this module, loaded through
 # importlib, must then turn its case to the reverted exit (0 for a guard that refuses, 2 for the security
@@ -690,6 +777,11 @@ _VIS_DROP = 'text = _LINK_TAIL_RE.sub("", _TAG_RE.sub("", _uncontained(text)))'
 _VIS_KEEP = 'return "".join(ch for ch in text if ch.isalnum()).casefold()'
 _START_GUARD = "if not text or text[0] not in _PLAIN_START:"
 _MARKUP_FIXED = '_HEADING_MARKUP = frozenset("[<&\\\\~*_`")'
+_BODY_GUARD = "body_problem = _plain_body_problem(lines, number, first, comment_end)"
+_HEADING_GUARD = "if heading and (not heading.group(1).strip() or not set(heading.group(1)) <= _HEADING_TEXT):"
+_SETEXT_GUARD = 'if _UNDERLINE_RE.match(line) and number > first and _QUOTE_PREFIX_RE.sub("", lines[number - 2]):'
+_HTML_GUARD = "if _RAW_HTML_RE.search(line):"
+_TEXT_FIXED = '_HEADING_TEXT = frozenset(map(chr, range(0x20, 0x7f))) - frozenset("[]<>&\\\\~*_`")'
 _DETAIL_REVERTS = (
     ("missing-trigger", 'if "detail-trigger" not in fm:', "if False:", "detail-without-trigger", 0),
     ("orphan-keys", "        if present:\n", "        if False:\n", "trigger-without-detail", 0),
@@ -829,7 +921,61 @@ _DETAIL_REVERTS = (
     ("plain-item-indent", 'if line[:indent] != " " * indent:', "if False:", "plain-item-indent", 0),
     ("plain-item-text", "indent = item.end()\n                text = line[indent:]",
      'indent = item.end()\n                text = "item"', "plain-item-text", 0),
+    # The PLAIN BODY rules: each QA round 5 case goes to exit 0 with the rules that refuse it reverted, and
+    # each admitted shape goes to exit 2 with its admission reverted.
+    ("r5-balanced-link-heading", _HEADING_GUARD, "if False:", "r5-balanced-link-heading", 0),
+    ("r5-comment-gt-heading", (_HEADING_GUARD, _HTML_GUARD), ("if False:", "if False:"), "r5-comment-gt-heading", 0),
+    ("r5-multiline-html-heading", _HTML_GUARD, "if False:", "r5-multiline-html-heading", 0),
+    ("r5-multiline-comment-setext", (_SETEXT_GUARD, _HTML_GUARD), ("if False:", "if False:"),
+     "r5-multiline-comment-setext", 0),
+    ("r5-multiline-span-setext", (_SETEXT_GUARD, _HTML_GUARD), ("if False:", "if False:"),
+     "r5-multiline-span-setext", 0),
+    ("r5-hangul-filler", _HEADING_GUARD, "if False:", "r5-hangul-filler", 0),
+    ("r5-halfwidth-hangul-filler", _HEADING_GUARD, "if False:", "r5-halfwidth-hangul-filler", 0),
+    ("r5-cyrillic-e", _HEADING_GUARD, "if False:", "r5-cyrillic-e", 0),
+    ("r5-paren-heading", _TEXT_FIXED, _TEXT_FIXED.replace("[]", "[]()"), "r5-paren-heading", 2),
+    ("r5-paren-heading-split", _TEXT_FIXED, _TEXT_FIXED.replace("[]", "[]()"), "r5-paren-heading-split", 2),
+    ("r5-detail-reference-definition", 'if found is not None and "]:" in line:', "if False:",
+     "r5-detail-reference-definition", 0),
+    ("body-setext", _SETEXT_GUARD, "if False:", "no-split-setext", 0),
+    ("body-comment-admitted", "if _comment_end(lines, number):", "if False:", "closed-fence-and-comment", 2),
+    ("body-comment-above-underline", "if comment_end != number - 1 and not", "if not", "comment-then-rule", 2),
+    ("body-heading-above-underline",
+     "if comment_end != number - 1 and not _NOT_PARAGRAPH_RE.match(_uncontained(lines[number - 2])):",
+     "if comment_end != number - 1:", "heading-then-rule", 2),
+    ("body-fence-above-underline",
+     "if comment_end != number - 1 and not _NOT_PARAGRAPH_RE.match(_uncontained(lines[number - 2])):",
+     "if comment_end != number - 1:", "fence-then-rule", 2),
+    ("body-break-above-underline",
+     "if comment_end != number - 1 and not _NOT_PARAGRAPH_RE.match(_uncontained(lines[number - 2])):",
+     "if comment_end != number - 1:", "rule-then-rule", 2),
 )
+# Since D-392-PLAIN-BODY each of these cases is also refused by a PLAIN BODY rule, so its revert removes
+# the PLAIN BODY check together with the guard it names (the guard alone no longer decides the exit).
+_ALSO_BODY = frozenset((
+    "near-miss-setext", "near-miss-setext-h1", "near-miss-blockquote-setext", "near-miss-list-setext",
+    "near-miss-multiline-setext", "near-miss-bold-setext", "r4-setext-dash-space", "r4-setext-dash-tab",
+    "r4-quote-setext-dash", "r4-list-setext-dash", "r4-comment-reopen-setext", "r4-wide-ordered-setext-h1",
+    "r4-wide-bullet-setext", "r4-nested-list-setext", "r4-tab-list-setext", "visible-bold", "visible-underscore",
+    "visible-backtick", "visible-escape", "visible-strikethrough", "visible-nfkc", "visible-entity", "visible-tag",
+    "visible-html-heading", "visible-link", "visible-link-setext", "r4-comment-reopen-link", "r4-wide-ordered-setext",
+    "r4-wide-one-setext", "r4-zwsp-lead", "r4-zwsp-inner", "r4-soft-hyphen", "plain-html-details",
+    "plain-unterminated-comment", "plain-code-span-comment", "plain-setext", "plain-indented-comment",
+    "r4-quoted-script-blank", "r4-comment-reopen-blank", "both-html-pre", "both-html-div", "both-html-script",
+    "both-html-close-tag", "both-html-processing", "both-html-declaration", "both-list-comment", "r4-quoted-script",
+    "r4-comment-reopen", "r4-comment-reopen-next", "plain-heading-empty", "plain-heading-bracket",
+    "plain-heading-lt", "plain-heading-amp", "plain-heading-backslash", "plain-heading-tilde", "plain-heading-star",
+    "plain-heading-underscore", "plain-heading-backtick", "plain-heading-tab"))
+
+
+def _with_body(revert):
+    """The revert with the PLAIN BODY check reverted as well."""
+    label, old, new, case, reverted_exit = revert
+    old, new = (old if isinstance(old, tuple) else (old,)), (new if isinstance(new, tuple) else (new,))
+    return label, old + (_BODY_GUARD,), new + ("body_problem = None",), case, reverted_exit
+
+
+_DETAIL_REVERTS = tuple(_with_body(r) if r[0] in _ALSO_BODY else r for r in _DETAIL_REVERTS)
 
 
 def _detail_case_root(base, name):

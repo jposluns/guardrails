@@ -51,8 +51,11 @@ gen_manifest.py at build time).
   gen_rules.detail_heading_line, so this gate refuses (exit 2) every layout gen_rules refuses: a CR byte,
   a second `## Detail` line, one without a blank line above it, a line above the split outside the
   gen_rules PLAIN PREFIX grammar (a fence, an HTML comment or block, a block quote, indented code, a
-  nested list, a setext underline, a heading with markup), and any other body line whose visible text
-  reads Detail (a near miss, a setext heading, or a heading inside a container). A missing, non-string,
+  nested list, a setext underline, a heading with markup), any other body line whose visible text
+  reads Detail (a near miss, a setext heading, or a heading inside a container), and any body line
+  outside the gen_rules PLAIN BODY rules (a heading whose text is not plain, a setext underline under
+  possible paragraph text, raw HTML outside a whole-line comment, a link reference definition below the
+  split). A missing, non-string,
   or unknown `layer` value is also malformed input (exit 2); a disagreement, a crossing span, a frontmatter span, or an
   unregistered detail line is a finding (exit 1).
 
@@ -991,6 +994,8 @@ _LAYER_CASES = (
                            "<!--", "```", "more -->"], [(1, 0, 0, "core"), (2, 7, 7, "detail")], 2),
     ("r4-wide-ordered-setext", ["core obligation", "", "10. Detail", "    ---"], [(1, 0, 0, "core")], 2),
     ("r4-zwsp-heading", ["core obligation", "", "## De\u200btail"], [(1, 0, 0, "core")], 2),
+    ("r5-multiline-html-heading", ["core obligation", "", "<h2>De<span", 'title="x">tail</span></h2>'],
+     [(1, 0, 0, "core")], 2),
 )
 # Red on revert: each guard put back to its pre-fix form in a scratch copy of this module, loaded through
 # importlib (never exec), must turn its case from the expected exit to the reverted exit.
@@ -1013,16 +1018,24 @@ _LAYER_REVERTS = (
 # The CR refusal, the near-miss refusal, the blank line above the split and the PLAIN PREFIX grammar live
 # in the shared gen_rules reader and heading locator; each revert loads gen_rules with that guard removed
 # and patches this module's rule source readers and heading locator to the reverted ones for the one case.
+# A guard given as a tuple is reverted together with the others in it: since D-392-PLAIN-BODY a case the
+# PLAIN BODY check also refuses reverts that check (_BODY_REVERT) with the guard it names.
 # (name, fixed text in gen_rules.py, reverted text, case, exit with the guard reverted)
+_BODY_REVERT = ("body_problem = _plain_body_problem(lines, number, first, comment_end)", "body_problem = None")
 _SHARED_REVERTS = (
-    ("cr-byte", 'if b"\\r" in raw:', "if False:", "cr-byte", 0),
-    ("near-miss-setext", "elif _names_detail(line):", "elif False:", "setext-heading", 0),
-    ("near-miss-container-setext", "elif _names_detail(line):", "elif False:", "blockquote-setext-heading", 0),
-    ("near-miss-link", "elif _names_detail(line):", "elif False:", "link-heading", 0),
-    ("near-miss-r4-setext", "elif _names_detail(line):", "elif False:", "r4-setext-dash-space", 0),
+    ("cr-byte", ('if b"\\r" in raw:', _BODY_REVERT[0]), ("if False:", _BODY_REVERT[1]), "cr-byte", 0),
+    ("near-miss-setext", ("elif _names_detail(line):", _BODY_REVERT[0]), ("elif False:", _BODY_REVERT[1]),
+     "setext-heading", 0),
+    ("near-miss-container-setext", ("elif _names_detail(line):", _BODY_REVERT[0]),
+     ("elif False:", _BODY_REVERT[1]), "blockquote-setext-heading", 0),
+    ("near-miss-link", ("elif _names_detail(line):", _BODY_REVERT[0]), ("elif False:", _BODY_REVERT[1]),
+     "link-heading", 0),
+    ("near-miss-r4-setext", ("elif _names_detail(line):", _BODY_REVERT[0]), ("elif False:", _BODY_REVERT[1]),
+     "r4-setext-dash-space", 0),
     ("blank-before", 'if found > first and lines[found - 2] != "":', "if False:", "split-after-text", 0),
-    ("plain-prefix-html", "problem = _plain_prefix_problem(lines, first, found)", "problem = None",
-     "html-wrapped-heading", 0),
+    ("plain-prefix-html", ("problem = _plain_prefix_problem(lines, first, found)", _BODY_REVERT[0]),
+     ("problem = None", _BODY_REVERT[1]), "html-wrapped-heading", 0),
+    ("plain-body-html", "if _RAW_HTML_RE.search(line):", "if False:", "r5-multiline-html-heading", 0),
     ("plain-prefix-fence", "problem = _plain_prefix_problem(lines, first, found)", "problem = None",
      "list-fence-heading", 0),
 )
@@ -1267,13 +1280,17 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
             gr_source = (Path(__file__).resolve().parent / "gen_rules.py").read_text(encoding="utf-8")
             gr_production, gr_sep, gr_tests = gr_source.partition("\n# --- self-test ")
             for label, old, new, case, reverted_exit in _SHARED_REVERTS:
-                if not gr_sep or gr_production.count(old) != 1:
+                pairs = list(zip(old, new)) if isinstance(old, tuple) else [(old, new)]
+                if not gr_sep or any(gr_production.count(fixed) != 1 for fixed, _reverted in pairs):
                     failures.append("revert {}: the fixed text must occur exactly once in gen_rules.py's "
                                     "production code".format(label))
                     continue
                 import importlib.util
+                gr_mutated = gr_production
+                for fixed, reverted in pairs:
+                    gr_mutated = gr_mutated.replace(fixed, reverted, 1)
                 gr_path = revert_base / "gen_rules_reverted_{}.py".format(label.replace("-", "_"))
-                gr_path.write_text(gr_production.replace(old, new, 1) + gr_sep + gr_tests, encoding="utf-8")
+                gr_path.write_text(gr_mutated + gr_sep + gr_tests, encoding="utf-8")
                 spec = importlib.util.spec_from_file_location(gr_path.stem, gr_path)
                 gr_mutant = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(gr_mutant)
@@ -1811,7 +1828,8 @@ def self_test_main():  # noqa: C901  a flat sequence of independent fixture case
               "(derived pass, stored-layer disagreement, crossing span, unregistered detail paragraph or "
               "line, missing or unknown layer, two headings, detail row with no heading, frontmatter span, "
               "fenced, commented, HTML-wrapped, setext, blockquote setext, list-fenced or linked heading, "
-              "heading then thematic break, split after text, the QA round-4 reproductions, CR byte) and {} guard "
+              "heading then thematic break, split after text, the QA round-4 reproductions, the QA round-5 "
+              "multi-line HTML heading, CR byte) and {} guard "
               "revert(s) each go red"
               .format(core, len(_LAYER_CASES), len(_LAYER_REVERTS) + len(_SHARED_REVERTS)))
     else:
