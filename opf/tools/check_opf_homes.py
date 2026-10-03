@@ -14,7 +14,7 @@ matching registry edit, which review of registry changes catches. Section 9.1 st
 over its lowercase-may profile rule, but its implementation-class paragraph is pinned sentence
 by sentence (_PINNED), so deleting or rewording a pinned sentence there turns the gate red;
 the rest of 9.1, and additions to it, stay unprotected. The quickstart's implementation-class
-sentence and the opfiles.ai disclosure page's fresh-only item are pinned the same way over
+sentences and the opfiles.ai disclosure page's fresh-only item are pinned the same way over
 tag-stripped text (_SURFACE), outside the keyword lint; the rest of those files, and additions
 to them, stay unprotected.
 
@@ -164,6 +164,7 @@ _CONTRACT = {
         'For a fresh-only implementation, a recognized legacy candidate, an ambiguous outcome, and an input that discovery cannot read or parse are a failed discovery of an existing store and MUST NOT be treated as an absent store that permits initialization or adoption; a recognized legacy candidate beside a matching store makes the outcome ambiguous, which yields cannot-evaluate, not unsupported-older-store, a refusal that applies only where no matching store accompanies the legacy candidate.',
         'A fresh-only implementation MUST NOT treat a zero-match outcome over a present .working/ as authorizing initialization or adoption by itself.',
         'Before any write there, it MUST run the section 16.1 legacy-state search over that whole .working/ tree and MUST refuse each listed item it finds as unsupported-legacy-state; where that .working/ holds no recognized legacy candidate and no section 16.1 legacy-state item, only a section 14 first adoption authorizes initialization there, through an investigation that distinguishes first adoption from re-adoption and records a digest-stamped inventory, and one approved plan that gives every foreign file a disposition before init-store (section 14.1).',
+        'Because a zero-match outcome discovers no store manifest, that search MUST apply the section 16.1 rule for a store with no discovered manifest: the import_status item does not apply, the search parses only the section 16.1 candidates present, and an unreadable, malformed, or contradictory candidate that is present yields cannot-evaluate, which authorizes neither initialization nor adoption.',
     ),
     "4.6": (
         _D('Source files are lowercase; deliverables are uppercase.'),
@@ -494,7 +495,7 @@ _CONTRACT = {
         'Unproven legacy .archive/ entries MUST remain in place with a standing finding until dispositioned.',
         "A base-schema version bump MUST ship a tested, in-place store-schema upgrade (opf upgrade) in at least one published upgrade-capable implementation (section 16.1), the reference tooling, so that a store below the new version has an upgrade path once that upgrade activates; the path holds only within this section's preconditions and refusals and that implementation's disclosed residuals.",
         'Every requirement of this section on an upgrade, its deltas, preconditions, report, refusals, and remedies binds an upgrade-capable implementation; a fresh-only implementation implements none of them and MUST instead refuse under section 16.1.',
-        _D("The version ceiling's refusal at the end of this section binds every implementation class; its homes-2 recognition binds only an upgrade-capable implementation, and a fresh-only implementation refuses that declaration under section 16.1."),
+        "Every implementation class MUST apply the version ceiling's refusal at the end of this section, a fresh-only implementation at its section 16.1 admission check; a fresh-only implementation MUST NOT apply the ceiling's homes-2 recognition and MUST refuse that declaration under section 16.1.",
         'The upgrade MUST be idempotent.',
         'A purely schema-level bump MUST be additive, using atomic replacement of existing files, create-only writes for new index files, and regeneration of declared views through exclusively created temporary files followed by atomic rename.',
         _D('These writes are sequential, with recovery scope held in memory, not a durable transaction journal.'),
@@ -733,7 +734,7 @@ _CONTRACT = {
         'A class changes which requirements bind an implementation only where this specification says so; a declared scope, exclusion, profile, or posture MUST NOT otherwise waive a base requirement.',
         _D('Current-format requirements, the imported series, adoption, and the section 8.6 authority firewall included, bind both classes.'),
         _D('An upgrade-capable implementation meets every section 9.2 requirement for each earlier base version and generation and grades legacy state under sections 8.1, 8.6, 11, and 14.1.'),
-        _D('The reference tooling is upgrade-capable.'),
+        _D('The reference tooling targets the upgrade-capable class: its opf upgrade carries a store from base 1.0.0 or 1.1.0 to base 1.2.0 today, within its disclosed residuals, and its upgrade into base 1.3.0 remains a target contract (section 9.2).'),
         _D('A fresh-only implementation supports exactly one base spec_version, one homes generation, and one worklog storage generation, initializes stores directly at them, and implements no section 9.2 upgrade and no legacy-state grading.'),
         'An implementation MUST declare, in the documentation of each release and in every conformance report it emits, its release identity, its class, and its supported spec_version, homes generation, and worklog storage generation.',
         'An implementation that declares no class MUST be treated as upgrade-capable, and every upgrade requirement binds it.',
@@ -742,13 +743,16 @@ _CONTRACT = {
         'The check MUST compare parsed versions, never strings, and MUST refuse:',
         _D('- as unsupported-older-store, a store whose manifest declares a spec_version below the supported one, or whose base table is the retired [devprocess] (section 4.5), naming the declared version or table, the supported version, the store location, and the remedy: upgrade the store with an upgrade-capable implementation, then retry;'),
         _D('- as unsupported-store-generation, a store whose homes or worklog storage generation differs from the supported one, naming each generation found and supported;'),
-        _D('- as unsupported-legacy-state, a store at the supported version that holds legacy state, or a zero-match .working/ that holds it (section 4.5), naming each item and its path.'),
+        _D('- as unsupported-legacy-state, a store at the supported version that holds legacy state, or a zero-match .working/ that holds it (section 4.5), naming each item and its path;'),
+        _D('- with the section 9.2 version ceiling\'s finding, a store whose manifest declares a spec_version above the supported one, the reserved homes-2 declaration (section 4.2) included, naming the declared and supported versions and the tooling-upgrade remedy.'),
         _D('Legacy state is this closed list: a clean-series record, active or archived, whose actor.kind is importer (section 8.6); a declared legacy_fragment type or an LF record (section 8.1); a partial or complete import_status in a store that holds no adoption receipt (sections 11 and 14.1); an evidence inventory in the legacy format opf.ingest.evidence-inventory/v1 (section 4.2); a .working/IMPORT-REPORT.md; and a legacy .working/imports/ directory (section 4.4).'),
         _D('Extending the list is a specification change.'),
-        'The check MUST search the whole .working/ tree of the store repository for each item, its staging, archive, and imported areas included, within the two limits that follow, and MUST read import_status from the store manifest; a legacy run archive outside .working/, for the reference tooling .aiqt/import-archive/, is reached only through the import_status item.',
+        'The check MUST search the whole .working/ tree of the store repository for each item, its staging, archive, and imported areas included, within the two limits that follow, and, where discovery finds a store manifest, MUST read import_status from it; a legacy run archive outside .working/, for the reference tooling .aiqt/import-archive/, is reached only through the import_status item.',
         'First, the check MUST match the two path-defined items, a .working/IMPORT-REPORT.md and a legacy .working/imports/ directory, at those live paths only; a copy preserved under .working/archive/adoption/<run-id>/ (section 14.2) is adoption evidence, not legacy state.',
-        'Second, the check MUST NOT read the contents of, or enumerate beneath, a path registered under [unmanaged] (section 14.2): it matches such a path against a path-defined item by the path alone and leaves any other listed item kept inside it unsearched, a gap section 17 discloses.',
-        _D('A store declaring a spec_version above the supported one is refused under the section 9.2 ceiling.'),
+        'Second, the check MUST NOT read the contents of, or enumerate beneath, a path registered under [unmanaged] that section 14.2 permits: it matches such a path against a path-defined item by the path alone and leaves any other listed item kept inside it unsearched, a gap section 17 discloses.',
+        'That limit applies to no other [unmanaged] entry: an entry that equals, contains, or lies within a reserved control area (section 14.2) or the machine store, that equals or contains .working/ itself, or that names an OPF-managed file or view is a contradictory input, and the check MUST yield cannot-evaluate for it, never admission.',
+        'To find the items defined by file content, the check MUST parse exactly these candidates and no other file, a boundary section 17 discloses: the discovered store manifest; as candidate records, the record files of the discovered machine store, active and archived, meaning each <type>.index.toml and <type>.imported.index.toml, each per-record file under a <type>/ directory, and each index and record file under its record archive archive/<YYYY>/ (section 12); as candidate inventories, each inventory.toml and inventory-<phase>.toml at the root of a run folder .working/staging/<kind>/<run-id>/ or .working/imported/<kind>/<run-id>/; and the adoption evidence under .working/imported/adoption/ (section 14.2) that decides whether the store holds an adoption receipt.',
+        'Where discovery finds no store manifest, as over a zero-match .working/ (section 4.5), the import_status item and the declared legacy_fragment type item do not apply and no file is a candidate record; the check still parses each candidate inventory present and matches both path-defined items, and an unreadable, malformed, or contradictory candidate that is present, a candidate manifest.toml that discovery reads (section 4.5) included, MUST yield cannot-evaluate, never admission.',
         "Where a store meets more than one refusal above, the section 9.2 ceiling included, the check MUST report every finding it meets, and that store's refusal fixture names each of them.",
         'An input the check cannot read, parse, or enumerate MUST yield cannot-evaluate, never admission.',
         'Each refusal MUST be a fail-closed INVALID finding, never VALID.',
@@ -785,7 +789,7 @@ _CONTRACT = {
         _D('The retired 1.0.0 token devprocess is recognized by opf upgrade, purely to carry a legacy store forward, and by a fresh-only implementation (section 16.1), purely to refuse that store by name.'),
         _D('- A fresh-only implementation (section 16.1) proves tested admission and refusal behaviour, not authenticated history: a version declaration and the absence of listed legacy state cannot prove that a store was never upgraded or hand-rewritten, and the closed legacy-state list catches only what it lists.'),
         _D('It does not list a legacy staging run under .working/staging/import/ or .working/staging/ingest/ that carries no legacy-format inventory, a legacy .archive/ entry that section 9.2 leaves in place with a standing finding, or a legacy run archive outside .working/, which only the import_status item reaches.'),
-        _D('Admission never reads a path registered under [unmanaged] (section 14.2), so a listed item that only the contents of such a path would show, such as a legacy-format inventory kept there, goes undetected.'),
+        _D('Admission parses only the section 16.1 candidates and never reads beneath a path registered under [unmanaged] that section 14.2 permits, so a listed item kept outside those candidates, such as a legacy-format inventory kept under such a path or anywhere but the root of a staging or evidence run folder, goes undetected; an [unmanaged] entry that section 14.2 forbids is a cannot-evaluate input, never a reason to leave a path unsearched.'),
         _D('Its refusal leaves a store unchanged but offers no preservation, repair, or continuity; an adopter whose store holds legacy state, an upgraded store with pre-1.3.0 import history included, needs an upgrade-capable implementation for that store.'),
         _D('Until validation tooling ships, a class claim is self-asserted (section 16).'),
     ),
@@ -807,10 +811,13 @@ _PINNED = {
 # They are not specification sentences, so the section 2 keyword lint does not read them.
 _SURFACE = {
     QUICKSTART: (
-        'An implementation declares a conformance class: an upgrade-capable one carries older stores forward, and a fresh-only one supports one current format and refuses by name an older store or one holding an item on its closed legacy-state list, which catches only what it lists (OPF-SPEC section 16.1).',
+        'An implementation declares a conformance class: an upgrade-capable one carries older stores forward, and a fresh-only one supports one current format and refuses by name an older store or one in which its admission check detects an item on its closed legacy-state list (OPF-SPEC section 16.1).',
+        'That check searches only the files section 16.1 permits and the list catches only what it lists, so legacy state the list omits, or that sits where the check does not search, goes undetected.',
+        'The reference tooling targets the upgrade-capable class, but its upgrade into base 1.3.0 is still a target it does not yet perform.',
     ),
     DISCLOSURE: (
-        'A fresh-only implementation (specification section 16.1) proves tested admission and refusal behaviour, not authenticated history: it refuses by name, and leaves unchanged, an older store or one holding an item on the closed legacy-state list, which catches only what it lists; an input it cannot read is cannot-evaluate, never admitted.',
+        'A fresh-only implementation (specification section 16.1) proves tested admission and refusal behaviour, not authenticated history: it refuses by name, and leaves unchanged, an older store or one in which its admission check detects an item on the closed legacy-state list.',
+        'That check searches only the files section 16.1 permits and the list catches only what it lists, so legacy state the list omits, or that sits where the check does not search, goes undetected; an input it cannot read is cannot-evaluate, never admitted.',
         'It offers no upgrade, repair, or continuity, so a store holding legacy state needs an upgrade-capable implementation.',
         'The upgrade into base 1.3.0 is still a target that the reference tooling does not yet perform, and the reference-tooling residuals above name stores its current upgrade cannot carry.',
         'A class claim is self-asserted until validation tooling ships.',

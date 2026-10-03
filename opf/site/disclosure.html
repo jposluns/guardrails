@@ -113,8 +113,11 @@
         <code>devprocess</code> to <code>opf</code> did.</li>
       <li><b style="color:var(--ink)">A fresh-only implementation</b> (specification section 16.1)
         proves tested admission and refusal behaviour, not authenticated history: it refuses by name,
-        and leaves unchanged, an older store or one holding an item on the closed legacy-state list,
-        which catches only what it lists; an input it cannot read is cannot-evaluate, never admitted.
+        and leaves unchanged, an older store or one in which its admission check detects an item on
+        the closed legacy-state list. That check searches only the files section 16.1 permits and
+        the list catches only what it lists, so legacy state the list omits, or that sits where the
+        check does not search, goes undetected; an input it cannot read is cannot-evaluate, never
+        admitted.
         It offers no upgrade, repair, or continuity, so a store holding legacy state needs an
         upgrade-capable implementation. The upgrade into base 1.3.0 is still a target that the
         reference tooling does not yet perform, and the reference-tooling residuals above name stores

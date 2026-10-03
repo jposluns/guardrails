@@ -594,9 +594,12 @@ run without the self-test, and an addition landed together with a matching regis
 which review of registry changes catches. Section 9.1 stays untiled over its lowercase-may
 profile rule, but its implementation-class paragraph is pinned sentence by sentence, each pin
 proven unique and deletion-red by the self-test, so only the rest of 9.1 and additions to it
-stay unprotected. The default entry also runs a section 2 keyword lint over every pin of those
-tiled sections and those untiled pins: a pin without MUST, MUST NOT, SHOULD or MAY is red
-unless the registry marks it descriptive (_D, red once a marked pin gains a keyword); the
+stay unprotected. The quickstart's implementation-class sentences and the opfiles.ai disclosure
+page's fresh-only item are pinned the same way over tag-stripped text, outside the keyword lint,
+so the rest of those files and additions to them stay unprotected. The default entry also runs a
+section 2 keyword lint over every pin of those tiled sections and those untiled pins: a pin
+without MUST, MUST NOT, SHOULD or MAY is red unless the registry marks it descriptive (_D, red
+once a marked pin gains a keyword); the
 self-test proves synthetic cases, flips every marker and every keyword pin red, and reverts
 named QA5 rewrites red. The lint reads the registry marker, not the meaning, so a requirement
 wrongly marked descriptive stays green, which review of registry changes catches. The

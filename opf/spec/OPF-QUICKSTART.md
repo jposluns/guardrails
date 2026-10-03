@@ -82,8 +82,11 @@ Scaffolding, validation, rendering, and migration tooling ships in later release
 until then the files are simple enough to keep by hand, and a conformance claim is self-asserted
 and says so. An implementation declares a conformance class: an upgrade-capable one carries older
 stores forward, and a fresh-only one supports one current format and refuses by name an older store
-or one holding an item on its closed legacy-state list, which catches only what it lists (OPF-SPEC
-section 16.1).
+or one in which its admission check detects an item on its closed legacy-state list (OPF-SPEC
+section 16.1). That check searches only the files section 16.1 permits and the list catches only
+what it lists, so legacy state the list omits, or that sits where the check does not search, goes
+undetected. The reference tooling targets the upgrade-capable class, but its upgrade into base
+1.3.0 is still a target it does not yet perform.
 
 ---
 

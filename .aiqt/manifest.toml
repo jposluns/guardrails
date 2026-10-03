@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "e95750a27a3599fa2984f97616afd3526517f0d0493194e95f03c86ec7531d5b"
+tree-sha256 = "a7b52fb5912c3724183b4338e0d9f3c869601bd5d4c5e8e7811345f59d2fad3b"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -61,8 +61,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 242335
-sha256 = "19b6f7bcabafd949c6d25c1556efe894a40b9341c79a9b84f1bd0f8ddb74e26b"
+bytes = 242577
+sha256 = "0abe9bac053102e0ed7477c06b236e72f7d37669cfc8796d203342000bbca8c3"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2466,8 +2466,8 @@ sha256 = "664c263516f5edd3cebb5f882ff66a456d33774ec8a1174b51c847b32b58551e"
 
 [[sources]]
 path = "opf/site/disclosure.html"
-bytes = 10542
-sha256 = "51c42f0e68c10e25cdd2c1596c5f79de52f622aaacfa4a0f1f8d9aeb4c10b362"
+bytes = 10753
+sha256 = "3aecd87cbb72bcf89f48e259309fd3aed544098ace6940c5f68c20754a36550e"
 
 [[sources]]
 path = "opf/site/favicon.svg"
@@ -2536,13 +2536,13 @@ sha256 = "4b84f78ec791853cb78451535cde86650060628bc5f48f1f55a6f0d6f87b26ec"
 
 [[sources]]
 path = "opf/spec/OPF-QUICKSTART.md"
-bytes = 9033
-sha256 = "a044c044faeb7d09f426e79f4d1873f028942050d0354a666a1af97a60f9ec0f"
+bytes = 9352
+sha256 = "d11a22efa39cbbc6536e31b594d20c50678983578bf85fa7695a74a676110783"
 
 [[sources]]
 path = "opf/spec/OPF-SPEC.md"
-bytes = 161975
-sha256 = "c512bbbe1192f2420b6c8464b3a97cb9ca2fcc4bc05d38907696404cd40fc168"
+bytes = 164680
+sha256 = "6c8a338e1528d9a336754c445464ca038d6e1c99fc07178c0f6f1525ff9318ac"
 
 [[sources]]
 path = "opf/tools/_byte_canon.py"
@@ -2876,8 +2876,8 @@ sha256 = "c8d74d534524f5ee33bb1443f52f9954a67507d4cfa664414a86a84e17ab2809"
 
 [[sources]]
 path = "opf/tools/check_opf_homes.py"
-bytes = 264317
-sha256 = "9e850f2a6211edc91f80ed84e38ed603fef351bb72c20565df5c191b94295d2c"
+bytes = 267556
+sha256 = "fc69f3e7d143bc39ed88671eb7d8ada919f5924cfbb217980b2240fac344b7a2"
 
 [[sources]]
 path = "opf/tools/check_opf_init.py"
