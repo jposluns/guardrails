@@ -6,7 +6,7 @@ direct-H2 selection, plus the fail-closed paths (parser exception, missing span,
 import origin, and manifest drift). Judged on the adapter's returned values / raised errors, never by
 grepping output. Reports the count of checks actually run. Runs as:
 
-    python3 -I -B opf/tools/selftest_commonmark_headings.py
+    python3 -I -B opf/tools/selftest_commonmark_headings.py --self-test
 
 Exit 0 clean, 1 on a failed check, 2 on a fail-closed harness error (the vendored marko cannot load). The
 full CommonMark 0.31.2 conformance replay lives in opf/tools/selftest_commonmark_conformance.py; this suite is
@@ -322,4 +322,5 @@ def self_test():
 if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:
         sys.exit(self_test())
-    sys.exit(self_test())
+    print("usage: selftest_commonmark_headings.py --self-test (a self-test module; no live mode)", file=sys.stderr)
+    sys.exit(2)

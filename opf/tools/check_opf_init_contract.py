@@ -3,7 +3,8 @@
 Verifies the frozen contract constants stay aligned with their source authorities and that the PR1
 contract surface is registered. Fail-closed: exit 2 (CANNOT-EVALUATE) on a missing/unreadable authority
 or a changed source shape that means the contract can no longer be checked; exit 1 (DRIFT) on a concrete
-mismatch; exit 0 clean. Run: python3 -I -B opf/tools/check_opf_init_contract.py [--self-test].
+mismatch; exit 0 clean. Run: python3 -I -B opf/tools/check_opf_init_contract.py [--self-test]; any other
+argument list exits 2.
 
 Detection is SEMANTIC, never a bare substring: a constant is matched as a whole module-level line
 (ignoring trailing comments); the pinned view tuple and the reserved-namespace set are parsed with
@@ -258,6 +259,9 @@ def _self_test():
 
 
 if __name__ == "__main__":
-    if "--self-test" in sys.argv:
+    if sys.argv[1:] == ["--self-test"]:
         _self_test()
+    if sys.argv[1:]:
+        sys.stderr.write("usage: python3 -I -B check_opf_init_contract.py [--self-test]\n")
+        sys.exit(2)
     _checks()

@@ -10,10 +10,13 @@ through doctor's real profile handling.
 import ast
 import copy
 import inspect
+import sys
+from pathlib import Path
 
-import _opf_init
-import _opf_store
-import _optlevel
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _opf_init  # noqa: E402
+import _opf_store  # noqa: E402
+import _optlevel  # noqa: E402
 
 
 MANIFEST_CALLERS = ("loader", "views", "plan_views",

@@ -2419,8 +2419,7 @@ def self_test():
 
 
 def main():
-    args = sys.argv[1:]
-    if "--self-test" in args or "--selftest" in args:
+    if sys.argv[1:] == ["--self-test"]:
         return self_test()
     print("usage: _opf_adopt_hook.py --self-test (a pure library module; the enable-hook op wiring "
           "is a later slice)", file=sys.stderr)

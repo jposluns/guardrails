@@ -331,6 +331,82 @@ def _unconditional_binding(statements):
     return found
 
 
+def _entry_tail_gap(tree, block):
+    """Return the reason the statements after the canonical `--self-test` statement in `block` (the module's
+    `__main__` block, in the parsed module `tree`) let another argument reach self_test or exit unchecked, or
+    None. That tail must be non-empty and name self_test nowhere, and it must be exactly the refusal the
+    library modules use, `print("usage: ...", file=sys.stderr)` (one str constant starting "usage: " and only
+    the keyword file=sys.stderr) then `sys.exit(2)` and nothing else, or a live mode whose last statement is
+    `sys.exit(<name>(...))` for a <name> whose only module-scope binding is its single top-level def
+    (`sys.exit(main())`; an assignment, augmented assignment, import or `as` alias binding <name>, a second
+    def, or a `global` naming it anywhere is a gap, each counted as _binds counts), with no exit before that
+    last statement's own call (a sys.exit, os._exit, exit or quit call, or a `raise`, anywhere in the tail
+    outside that call). Those binding forms are the only rebindings of <name> it rejects. It does not inspect
+    decorators on the def (a decorator returning self_test passes), default arguments (`def main(f=self_test)`),
+    a `__code__` or other attribute swap, a call through another name (`sys.exit(main(run()))` with
+    `run = self_test`), or what the dispatched def does (a def that reaches self_test directly, or through
+    exec, eval, getattr, globals() or any other dynamic dispatch); _self_test_dispatch_probe backstops these
+    at run time for the argument lists it tries."""
+    import ast
+    tail = block.body[1:]
+    if not tail:
+        return "its `__main__` block (line {}) ends with the canonical `--self-test` statement, so any other " \
+               "argument falls through and exits 0; it must go on to refuse (`print(\"usage: ...\", " \
+               "file=sys.stderr)` then `sys.exit(2)`) or end with `sys.exit(<def>(...))`".format(block.lineno)
+    named = [node.lineno for statement in tail for node in ast.walk(statement)
+             if isinstance(node, ast.Name) and node.id == "self_test"]
+    if named:
+        return "its `__main__` block (line {}) names self_test after the canonical `--self-test` statement " \
+               "(line {}), so an argument other than exactly `--self-test` can run the suite".format(
+                   block.lineno, min(named))
+
+    def exits(statement):
+        # The call inside a statement `sys.exit(<one argument>)`, or None.
+        call = statement.value if isinstance(statement, ast.Expr) else None
+        if not (isinstance(call, ast.Call) and ast.dump(call.func) == ast.dump(ast.parse("sys.exit").body[0].value)
+                and len(call.args) == 1 and not call.keywords):
+            return None
+        return call.args[0]
+
+    if len(tail) == 2 and isinstance(tail[0], ast.Expr) and isinstance(tail[0].value, ast.Call):
+        usage = tail[0].value
+        code = exits(tail[1])
+        if (isinstance(usage.func, ast.Name) and usage.func.id == "print" and len(usage.args) == 1
+                and isinstance(usage.args[0], ast.Constant) and isinstance(usage.args[0].value, str)
+                and usage.args[0].value.startswith("usage: ") and len(usage.keywords) == 1
+                and usage.keywords[0].arg == "file"
+                and ast.dump(usage.keywords[0].value) == ast.dump(ast.parse("sys.stderr").body[0].value)
+                and isinstance(code, ast.Constant) and type(code.value) is int and code.value == 2):
+            return None
+    code = exits(tail[-1])
+    if isinstance(code, ast.Call) and isinstance(code.func, ast.Name):
+        name = code.func.id
+        ends = [ast.dump(ast.parse(spelling).body[0].value)
+                for spelling in ("sys.exit", "os._exit", "exit", "quit")]
+        early = [node.lineno for statement in tail for node in ast.walk(statement)
+                 if node is not tail[-1].value and (isinstance(node, ast.Raise)
+                                                    or isinstance(node, ast.Call) and ast.dump(node.func) in ends)]
+        if early:
+            return "its `__main__` block (line {}) can end the run (line {}) before its last statement " \
+                   "dispatches to {}, so an argument may exit without that dispatch's refusal".format(
+                       block.lineno, min(early), name)
+        defs = [node for node in tree.body[:-1] if isinstance(node, ast.FunctionDef) and node.name == name]
+        if not defs:
+            return "its `__main__` block (line {}) ends with `sys.exit({}(...))`, but {} is not a top-level " \
+                   "def".format(block.lineno, name, name)
+        bound = [node.lineno for node in _module_scope(tree) for _ in range(_binds(node, name))] + [
+            node.lineno for node in ast.walk(tree) if isinstance(node, ast.Global) for each in node.names
+            if each == name]
+        if len(bound) != 1:
+            return "its `__main__` block (line {}) dispatches to {}, which is bound {} times at module scope " \
+                   "(lines {}), other than by its single top-level def".format(
+                       block.lineno, name, len(bound), ", ".join(str(line) for line in sorted(bound)))
+        return None
+    return "its `__main__` block (line {}) does not follow the canonical `--self-test` statement with exactly " \
+           "a refusal (`print(\"usage: ...\", file=sys.stderr)` then `sys.exit(2)`) or a last statement " \
+           "`sys.exit(<def>(...))`".format(block.lineno)
+
+
 def _self_test_entry_gap(tree):
     """Return (exposes, reason) for one parsed module. `exposes` is whether it binds self_test at module scope
     by any form _binds counts, or by a `global self_test` anywhere (a function can bind it so). An exposing
@@ -350,9 +426,10 @@ def _self_test_entry_gap(tree):
     `__builtins__` nowhere at module scope (counted as `__name__` is), no statement before the block changes
     sys through the name sys (_sys_change: a store to, delete of or augmented assignment to any
     `sys.<attribute>`, a store or delete through `sys.modules` or `sys.__dict__`, or an argv change), none
-    stores to or deletes through `builtins`, `__builtins__` or `__main__` (_namespace_store), and none stores
+    stores to or deletes through `builtins`, `__builtins__` or `__main__` (_namespace_store), none stores
     to or deletes through the name self_test or through a target that starts from an expression rather than
-    a name (_self_test_or_expression_store); otherwise it names the first rule broken."""
+    a name (_self_test_or_expression_store), and the block's statements after the canonical one are a usage
+    refusal or a live-mode dispatch (_entry_tail_gap); otherwise it names the first rule broken."""
     import ast
     import _optlevel
 
@@ -458,7 +535,7 @@ def _self_test_entry_gap(tree):
     if store is not None:
         return True, "it stores to or deletes through an expression, not a name (line {}), before its " \
                      "`__main__` block; the guard does not follow such a target".format(store[0].lineno)
-    return True, None
+    return True, _entry_tail_gap(tree, block)
 
 
 def _self_test_entry_gaps(directory, required=()):
@@ -469,8 +546,12 @@ def _self_test_entry_gaps(directory, required=()):
         if __name__ == "__main__":
             if sys.argv[1:] == ["--self-test"]:
                 sys.exit(self_test())
-            ...  # any other argument handling the module has
+            print("usage: <module>.py --self-test", file=sys.stderr)   # a module with no live mode
+            sys.exit(2)
 
+    or, for a module with a live mode, the same block whose statements after the canonical one name self_test
+    nowhere, end with `sys.exit(<def>(...))` for a name whose only module-scope binding is one top-level def
+    (`sys.exit(main())`), and hold no sys.exit, os._exit, exit or quit call or `raise` outside that last call,
     as its last top-level statement, with that operand order, sys imported at top level, the inner `if` holding
     nothing else and no else, no other test of `__name__` against "__main__" that runs at import (an if, while,
     conditional expression, and/or, comprehension condition or match, at module scope or in a class body, whose
@@ -548,7 +629,11 @@ def _self_test_entry_gaps(directory, required=()):
     including one under a `__main__` test it does not count, such as one in a function body or one reached
     through a held value). For example, _opf_adopt_observe's sys.path setup holds its `__name__` comparison in
     a name, so its `if` is not counted as a `__main__` test. Nor does it catch exit subversion after the call
-    (an atexit hook, os._exit, a SystemExit handler, a stateful self_test).
+    (an atexit hook, os._exit, a SystemExit handler, a stateful self_test). For a live-mode entry the rule is
+    structural: it checks that the dispatched name is one top-level def and that the tail cannot end the run
+    first, and it does not inspect what that def does. A def that reaches self_test or ends the run through
+    exec, eval, getattr, globals(), an alias held in a value, or any other dynamic dispatch is residual; each
+    live-mode dispatcher carries its own exact-argument rule and child-run vectors for that.
 
     Beyond the return shape above, the guard does not check the value self_test returns at run time, or how
     sys.exit treats that value. How sys.exit treats a value is platform- and version-dependent, and no rule
@@ -663,7 +748,9 @@ def _self_test_floor(registry, directory, exempt):
 # required too, so the floor does not over-reject), and absent/ and empty/ are a missing and an empty directory.
 _ENTRY_HEAD = 'import sys\n\n\ndef self_test():\n    return 0\n\n\n'
 _ENTRY_BODY = '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n'
-_ENTRY_MAIN = 'if __name__ == "__main__":\n' + _ENTRY_BODY
+_ENTRY_REFUSE = '    print("usage: fixture.py --self-test", file=sys.stderr)\n    sys.exit(2)\n'
+_ENTRY_MAIN = 'if __name__ == "__main__":\n' + _ENTRY_BODY + _ENTRY_REFUSE
+_ENTRY_OPEN = 'if __name__ == "__main__":\n' + _ENTRY_BODY
 _ENTRY_NONE = 'no `if __name__ == "__main__":` block'
 _ENTRY_FIRST = "not the canonical `--self-test` statement"
 _ENTRY_BLOCK_BINDS = ") binds self_test"
@@ -680,12 +767,19 @@ _ENTRY_STAR = "a star import may bind `__name__`, `sys` or `self_test`"
 _ENTRY_BUILTINS = "binds `__builtins__` at module scope"
 _ENTRY_SELF_TEST_STORE = "stores to or deletes through `self_test`"
 _ENTRY_EXPRESSION_STORE = "through an expression, not a name"
+_ENTRY_TAIL_SELF_TEST = "names self_test after the canonical `--self-test` statement"
+_ENTRY_TAIL_EMPTY = "ends with the canonical `--self-test` statement"
+_ENTRY_TAIL_SHAPE = "does not follow the canonical `--self-test` statement with exactly"
+_ENTRY_TAIL_DISPATCH = "is not a top-level def"
+_ENTRY_TAIL_EARLY_EXIT = "before its last statement dispatches"
+_ENTRY_TAIL_REBOUND = "other than by its single top-level def"
 _ENTRY_FIXTURES = (
-    ("canonical.py", _ENTRY_HEAD + "def main(argv):\n    return 2\n\n\n" + _ENTRY_MAIN
+    ("canonical.py", _ENTRY_HEAD + "def main(argv):\n    return 2\n\n\n" + _ENTRY_OPEN
      + "    sys.exit(main(sys.argv[1:]))\n", True, None),
     ("canonical_import.py", "import sys\nfrom _no_such_module import self_test\n\n" + _ENTRY_MAIN, True, None),
     ("canonical_spaced.py", _ENTRY_HEAD + "if (__name__ == '__main__'):  # entry\n    if sys.argv[1 :] == [\n"
-     "            '--self-test',]:\n        sys.exit(  self_test( ) )\n", True, None),
+     "            '--self-test',]:\n        sys.exit(  self_test( ) )\n    print( 'usage: x' ,file = sys.stderr )\n"
+     "    sys.exit( 2 )  # refuse\n", True, None),
     ("plain.py", 'if __name__ == "__main__":\n    raise SystemExit(0)\n', False, None),
     ("local_only.py", "import holder\n\n\ndef helper():\n    self_test = 1\n    return self_test\n\n\n"
      "class Holder:\n    self_test = 0\n\n\nholder.self_test = [self_test for self_test in ()]\n"
@@ -713,7 +807,7 @@ _ENTRY_FIXTURES = (
      "    sys.exit(main())\n", True, _ENTRY_FIRST),
     ("drops_result.py", _ENTRY_HEAD + 'if __name__ == "__main__":\n    if sys.argv[1:] == ["--self-test"]:\n'
      "        self_test()\n", True, _ENTRY_FIRST),
-    ("inner_else.py", _ENTRY_HEAD + _ENTRY_MAIN + "    else:\n        sys.exit(2)\n", True, _ENTRY_FIRST),
+    ("inner_else.py", _ENTRY_HEAD + _ENTRY_OPEN + "    else:\n        sys.exit(2)\n", True, _ENTRY_FIRST),
     ("inner_extra.py", _ENTRY_HEAD + 'if __name__ == "__main__":\n    if sys.argv[1:] == ["--self-test"]:\n'
      '        print("self-test")\n        sys.exit(self_test())\n', True, _ENTRY_FIRST),
     ("not_first.py", _ENTRY_HEAD + 'if __name__ == "__main__":\n    print("entry")\n' + _ENTRY_BODY, True,
@@ -761,8 +855,8 @@ _ENTRY_FIXTURES = (
     ("argv_append.py", _ENTRY_HEAD + 'sys.argv.append("--quiet")\n\n\n' + _ENTRY_MAIN, True, _ENTRY_ARGV),
     ("argv_class.py", _ENTRY_HEAD + 'class Quiet:\n    sys.argv += ["--quiet"]\n\n\n' + _ENTRY_MAIN, True,
      _ENTRY_ARGV),
-    ("argv_local.py", _ENTRY_HEAD + "def reset():\n    del sys.argv[1:]\n\n\n" + _ENTRY_MAIN
-     + "    sys.argv.pop()\n", True, None),
+    ("argv_local.py", _ENTRY_HEAD + "def reset():\n    del sys.argv[1:]\n\n\n" + _ENTRY_OPEN
+     + "    sys.argv.pop()\n    sys.exit(reset())\n", True, None),
     ("two_bindings.py", _ENTRY_HEAD + "def main():\n    return 0\n\n\nself_test = main\n\n\n" + _ENTRY_MAIN, True,
      _ENTRY_REBOUND),
     ("star_after_def.py", _ENTRY_HEAD + "from _no_such_module import *\n\n\n" + _ENTRY_MAIN, True,
@@ -852,6 +946,44 @@ _ENTRY_FIXTURES = (
      _ENTRY_EXPRESSION_STORE),
     ("name_root_store.py", _ENTRY_HEAD + 'rows = {}\nrows[len(rows)] = 0\nrows.copy()["x"] = 1\n\n\n'
      + _ENTRY_MAIN, True, None),
+    ("tail_self_test.py", _ENTRY_HEAD + _ENTRY_OPEN + "    sys.exit(self_test())\n", True, _ENTRY_TAIL_SELF_TEST),
+    ("tail_raise.py", _ENTRY_HEAD + _ENTRY_OPEN + "    raise SystemExit(self_test())\n", True,
+     _ENTRY_TAIL_SELF_TEST),
+    ("tail_recheck.py", _ENTRY_HEAD + _ENTRY_OPEN + '    if len(sys.argv) > 1 and sys.argv[1] == "--self-test":\n'
+     '        sys.exit(self_test())\n    sys.exit("usage: x")\n', True, _ENTRY_TAIL_SELF_TEST),
+    ("tail_main_alias.py", _ENTRY_HEAD + _ENTRY_OPEN + "    main = self_test\n    sys.exit(main())\n", True,
+     _ENTRY_TAIL_SELF_TEST),
+    ("tail_empty.py", _ENTRY_HEAD + _ENTRY_OPEN, True, _ENTRY_TAIL_EMPTY),
+    ("tail_exit_one.py", _ENTRY_HEAD + _ENTRY_OPEN + '    print("usage: x", file=sys.stderr)\n    sys.exit(1)\n',
+     True, _ENTRY_TAIL_SHAPE),
+    ("tail_stdout.py", _ENTRY_HEAD + _ENTRY_OPEN + '    print("usage: x")\n    sys.exit(2)\n', True,
+     _ENTRY_TAIL_SHAPE),
+    ("tail_exit_string.py", _ENTRY_HEAD + _ENTRY_OPEN + '    sys.exit("usage: x")\n', True, _ENTRY_TAIL_SHAPE),
+    ("tail_exit_name.py", "import sys\n\nEXIT_MALFORMED = 2\n\n\n" + _ENTRY_HEAD[len("import sys\n\n\n"):]
+     + _ENTRY_OPEN + '    print("usage: x", file=sys.stderr)\n    sys.exit(EXIT_MALFORMED)\n', True, _ENTRY_TAIL_SHAPE),
+    ("tail_no_usage.py", _ENTRY_HEAD + _ENTRY_OPEN + '    print("x", file=sys.stderr)\n    sys.exit(2)\n', True,
+     _ENTRY_TAIL_SHAPE),
+    ("tail_after_refusal.py", _ENTRY_HEAD + _ENTRY_MAIN + '    print("unreached")\n', True, _ENTRY_TAIL_SHAPE),
+    ("tail_bare_exit.py", _ENTRY_HEAD + _ENTRY_OPEN + "    sys.exit()\n", True, _ENTRY_TAIL_SHAPE),
+    ("tail_dispatch_import.py", "import sys\nfrom _no_such_module import main\n\n\n"
+     + _ENTRY_HEAD[len("import sys\n\n\n"):] + _ENTRY_OPEN + "    sys.exit(main())\n", True, _ENTRY_TAIL_DISPATCH),
+    ("tail_dispatch.py", _ENTRY_HEAD + "def render(argv):\n    return len(argv)\n\n\n" + _ENTRY_OPEN
+     + "    argv = sys.argv[1:]\n    sys.exit(render(argv))\n", True, None),
+    ("tail_main_assigned.py", _ENTRY_HEAD + "def main():\n    return 2\n\n\nmain = self_test\n\n\n" + _ENTRY_OPEN
+     + "    sys.exit(main())\n", True, _ENTRY_TAIL_REBOUND),
+    ("tail_main_augmented.py", _ENTRY_HEAD + "def main():\n    return 2\n\n\nmain += 0\n\n\n" + _ENTRY_OPEN
+     + "    sys.exit(main())\n", True, _ENTRY_TAIL_REBOUND),
+    ("tail_main_import_as.py", _ENTRY_HEAD + "def main():\n    return 2\n\n\nfrom _no_such_module import helper as main"
+     "\n\n\n" + _ENTRY_OPEN + "    sys.exit(main())\n", True, _ENTRY_TAIL_REBOUND),
+    ("tail_main_two_defs.py", _ENTRY_HEAD + "def main():\n    return 2\n\n\ndef main():\n    return self_test()\n\n\n"
+     + _ENTRY_OPEN + "    sys.exit(main())\n", True, _ENTRY_TAIL_REBOUND),
+    ("tail_main_global.py", _ENTRY_HEAD + "def main():\n    return 2\n\n\ndef install():\n    global main\n"
+     "    main = len\n\n\n" + _ENTRY_OPEN + "    sys.exit(main())\n", True, _ENTRY_TAIL_REBOUND),
+    ("tail_early_exit.py", _ENTRY_HEAD + "def main():\n    return 2\n\n\n" + _ENTRY_OPEN
+     + "    sys.exit(0)\n    sys.exit(main())\n", True, _ENTRY_TAIL_EARLY_EXIT),
+    ("tail_early_nested.py", _ENTRY_HEAD + "def main(code):\n    return 2\n\n\n" + _ENTRY_OPEN
+     + "    if sys.argv[1:]:\n        raise SystemExit(0)\n    sys.exit(main(sys.exit(0)))\n", True,
+     _ENTRY_TAIL_EARLY_EXIT),
 )
 
 
@@ -916,6 +1048,1925 @@ def _self_test_floor_probe(registry, directory, elsewhere):
     return misses
 
 
+# Every module in this directory with a `__main__` block, this host included, declares here the exact argument
+# lists it is run with: the self-test forms (`--self-test`, and a `--vectors-only` or `--red-on-revert`
+# variant) and the bare live or gate run, `()`. _self_test_dispatch_probe reconciles the table with every
+# invocation of these modules in the runners (_dispatch_runner_forms) and runs every module but this host with
+# each refused form. No module is chosen by reading its source: a module with a `__main__` block that the table
+# does not name is itself a probe failure. These are fast pre-checks; _self_test_runtime_probe, which runs every
+# *.py module here with each refused form and judges only its behaviour, is the authority.
+_DISPATCH_LIBRARY = (("--self-test",),)
+_DISPATCH_LIVE = ((), ("--self-test",))
+_DISPATCH_FORMS = dict(
+    {name: _DISPATCH_LIBRARY for name in (
+        "_journal.py", "_opf_adopt.py", "_opf_adopt_apply.py", "_opf_adopt_hook.py", "_opf_adopt_plan.py",
+        "_opf_allocation.py", "_opf_check.py", "_opf_emit.py", "_opf_fuzz.py", "_opf_init.py",
+        "_opf_init_contract.py", "_opf_init_operation.py", "_opf_init_substrate.py", "_opf_observe.py",
+        "_opf_oplock.py", "_opf_record.py", "_opf_release.py", "_opf_schema.py", "_opf_store.py",
+        "_opf_worklog.py", "_opf_worklog_regressions.py", "check_opf_init_qa.py",
+        "selftest_commonmark_headings.py", "opf.py")},
+    **{name: _DISPATCH_LIVE for name in (
+        "check_opf_doctor.py", "check_opf_drift.py", "check_opf_homes.py", "check_opf_init.py",
+        "check_opf_init_contract.py", "check_opf_prompt_pack.py", "check_opf_upgrade.py")},
+    **{"_opf_views.py": ((), ("--check",)), "_opf_absorb.py": ((), ("--freeze-digest",)),
+       "_opf_changelog.py": ((),)},
+    **{"selftest_commonmark_conformance.py": ((), ("--interpreters", "python3"))},
+    **{"_opf_adopt_observe.py": (("--self-test",), ("--self-test", "--vectors-only")),
+       "_opf_pack_manifest.py": (("--self-test",), ("--self-test", "--vectors-only")),
+       "check_opf_init_observe.py": (("--self-test",), ("--self-test", "--red-on-revert")),
+       "check_opf_record.py": (("--self-test",), ("--self-test", "--red-on-revert")),
+       "check_opf_init_p0.py": (("--self-test",), ("--self-test", "--red-on-revert"),
+                                ("--self-test", "--vectors-only"))})
+# Declared forms no runner calls, each with its reason. The exact `--self-test` needs no entry: the entry scan
+# requires it of every module that binds self_test, and this host runs most of those suites in process.
+_DISPATCH_UNRUN = {
+    ("_opf_views.py", ()): "the `opf render` engine; run bare it renders the current directory, as the verb does",
+    ("_opf_absorb.py", ()): "the `opf absorb` engine; run bare it absorbs the current directory, as the verb does",
+    ("_opf_views.py", ("--check",)): "the `opf render --check` engine flag, which the bare run defaults to",
+    ("_opf_absorb.py", ("--freeze-digest",)): "the `opf absorb --freeze-digest` engine mode over the current "
+    "directory",
+    ("_opf_changelog.py", ()): "the changelog gates; run bare they check the current directory",
+    ("selftest_commonmark_conformance.py", ("--interpreters", "python3")): "the documented optional matrix "
+    "facility (module docstring); each word after --interpreters names an interpreter, `python3` stands for any",
+}
+_DISPATCH_REFUSED = (["--self-test", "extra"], ["--selftest"], ["--self-t"], ["extra", "--self-test"])
+# Also refused by every module: the subcommand spellings, and the bare run where the table declares none.
+_DISPATCH_REFUSED_WORDS = (["selftest"], ["self-test"])
+# The suite functions a refused form must not enter: one so named in any module of the probed directory, or a
+# function of the probed module that an exact `--self-test` branch of it calls (_dispatch_targets).
+_DISPATCH_SUITES = ("self_test", "_suite", "_self_check", "_run_single", "vectors")
+# A refusal's stderr must hold a line containing one of these (case-insensitive): the library modules print
+# `usage: ...`, the live modules name the refused argument.
+_DISPATCH_USAGE = ("usage", "unknown argument", "unexpected argument", "unrecognized argument",
+                   "expected --self-test")
+# The runners the table is reconciled with, relative to the repository root two levels above this directory,
+# besides this directory's own run_all_checks.sh (required). A standalone opf copy carries none of them, so
+# there only the runner-to-table direction is checked.
+_DISPATCH_RUNNERS = ("tools/run_all_checks.sh", ".github/workflows/quality.yml",
+                     "tools/check_opf_standalone_closure.py")
+_DISPATCH_STUB = (
+    "import os, sys\n"
+    "sys.argv = sys.argv[1:]\n"
+    "sys.path.insert(0, os.path.dirname(sys.argv[0]))\n"
+    "module = __import__(os.path.basename(sys.argv[0])[:-3])\n"
+    "module.self_test = lambda **kwargs: print('DISPATCHED', sorted(kwargs.items())) or 0\n"
+    "sys.exit(module.main())\n")
+# For a module that binds no self_test: run it as `__main__` with a profile hook that, at the first call of a
+# function the exact `--self-test` branches dispatch (_dispatch_targets), prints its bool arguments and ends
+# the child before the suite runs.
+_DISPATCH_REACH_STUB = (
+    "import os, runpy, sys\n"
+    "path, targets = os.path.realpath(sys.argv[1]), sys.argv[2].split(',')\n"
+    "sys.argv = [path] + sys.argv[3:]\n"
+    "sys.path.insert(0, os.path.dirname(path))\n"
+    "def hook(frame, event, arg):\n"
+    "    code = frame.f_code\n"
+    "    if event == 'call' and code.co_name in targets and code.co_filename == path:\n"
+    "        print('DISPATCHED', sorted((k, v) for k, v in frame.f_locals.items() if isinstance(v, bool)),\n"
+    "              flush=True)\n"
+    "        os._exit(0)\n"
+    "sys.setprofile(hook)\n"
+    "runpy.run_path(path, run_name='__main__')\n"
+    "sys.setprofile(None)\n"
+    "print('NOT DISPATCHED')\n")
+# A refused form runs the real module as `__main__`, nothing replaced, under a profile hook (this thread and
+# every thread started later) that at the entry of a suite function writes `ENTERED <name>` to stderr and ends
+# the child with exit 3 before the suite runs. argv: module, fallback import directory, suite names, the
+# module's own targets, then the form.
+_DISPATCH_REFUSE_STUB = (
+    "import os, runpy, sys, threading\n"
+    "path, fallback = os.path.realpath(sys.argv[1]), sys.argv[2]\n"
+    "suites, local = set(sys.argv[3].split(',')), set(sys.argv[4].split(',')) - {''}\n"
+    "sys.argv = [path] + sys.argv[5:]\n"
+    "sys.path[:0] = [os.path.dirname(path)]\n"
+    "sys.path.append(fallback)\n"
+    "here = os.path.dirname(path) + os.sep\n"
+    "def hook(frame, event, arg):\n"
+    "    code = frame.f_code\n"
+    "    if event == 'call' and (code.co_name in suites and code.co_filename.startswith(here)\n"
+    "                            or code.co_name in local and code.co_filename == path):\n"
+    "        os.write(2, ('ENTERED ' + code.co_name + '\\n').encode())\n"
+    "        os._exit(3)\n"
+    "threading.setprofile(hook)\n"
+    "sys.setprofile(hook)\n"
+    "runpy.run_path(path, run_name='__main__')\n")
+
+
+def _dispatch_targets(tree):
+    """The names of the functions called in the bodies of the module's exact `--self-test` branches: each
+    `if <argument list> == ["--self-test", ...]:` (`sys.argv[1:]`, or a name holding a copy of it)."""
+    import ast
+    targets = set()
+    for node in ast.walk(tree):
+        test = node.test if isinstance(node, ast.If) else None
+        if not (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq)
+                and isinstance(test.comparators[0], ast.List) and test.comparators[0].elts
+                and isinstance(test.comparators[0].elts[0], ast.Constant)
+                and test.comparators[0].elts[0].value == "--self-test"):
+            continue
+        targets.update(call.func.id for statement in node.body for call in ast.walk(statement)
+                       if isinstance(call, ast.Call) and isinstance(call.func, ast.Name))
+    return targets
+
+
+def _dispatch_triggers(tree):
+    """The environment variables a refused form also runs with, set to "1": every str constant in the module
+    spelled as an environment name (an upper-case letter, then three or more upper-case letters, digits or
+    underscores) that the probe's own environment does not set. This widens the inputs; it selects no module."""
+    import ast
+    import re
+    return sorted({node.value for node in ast.walk(tree) if isinstance(node, ast.Constant)
+                   and isinstance(node.value, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{3,}", node.value)
+                   and node.value not in os.environ})
+
+
+def _dispatch_runner_forms(directory, names, runners=_DISPATCH_RUNNERS):
+    """Map each module in `names` to every argument list the runners pass it, bare runs included: this
+    directory's run_all_checks.sh and each `runners` file present under the repository root. A shell or
+    workflow line is split as a shell word list; a word naming the module (the basename of a path under
+    `opf/tools/`, or under `$here/` in this directory's runner) takes the words after it up to the first shell
+    operator or redirection. A Python runner is parsed: a str constant naming the module followed, in the same
+    tuple, list or call, by a list or tuple of str constants is one form. Returns (forms, misses, complete),
+    `complete` False when a root runner is absent."""
+    import ast
+    import shlex
+    forms, misses = {}, []
+    root = Path(directory).resolve().parent.parent
+    own = Path(directory, "run_all_checks.sh")
+    paths = [own] + [root / rel for rel in runners if (root / rel).is_file()]
+    complete = len(paths) == len(runners) + 1
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            misses.append("runner {} cannot be read ({})".format(path.name, type(exc).__name__))
+            continue
+        if path.suffix == ".py":
+            try:
+                tree = ast.parse(text)
+            except (SyntaxError, ValueError) as exc:
+                misses.append("runner {} cannot be parsed ({})".format(path.name, type(exc).__name__))
+                continue
+            for node in ast.walk(tree):
+                elements = node.elts if isinstance(node, (ast.Tuple, ast.List)) else (
+                    node.args if isinstance(node, ast.Call) else ())
+                for at, each in enumerate(elements[:-1]):
+                    form = elements[at + 1]
+                    if (isinstance(each, ast.Constant) and each.value in names
+                            and isinstance(form, (ast.List, ast.Tuple))
+                            and all(isinstance(item, ast.Constant) and isinstance(item.value, str)
+                                    for item in form.elts)):
+                        forms.setdefault(each.value, set()).add(tuple(item.value for item in form.elts))
+            continue
+        for line in text.splitlines():
+            try:
+                words = shlex.split(line, comments=True)
+            except ValueError:
+                words = line.split()
+            for at, word in enumerate(words):
+                name = word.rsplit("/", 1)[-1]
+                if name not in names or not ("opf/tools/" in word or path == own and word.startswith("$here/")):
+                    continue
+                args = []
+                for each in words[at + 1:]:
+                    if each in ("|", "||", "&&", ";", "&") or each.startswith((">", "<", "2>", "1>")):
+                        break
+                    args.append(each)
+                forms.setdefault(name, set()).add(tuple(args))
+    return forms, misses, complete
+
+
+def _self_test_dispatch_probe(directory, tmp, table=None, unrun=None, runners=_DISPATCH_RUNNERS, fallback=None):
+    """Probe every module in `directory` that has a `__main__` block (_main_tests), whatever its source holds.
+    `table` (default _DISPATCH_FORMS) must name exactly those modules, and is reconciled with
+    _dispatch_runner_forms: a form a runner calls that the table lacks is a miss, and so, when every runner is
+    present, is a declared form no runner calls, except the exact `--self-test`, a variant the module's own
+    source spells out (the runner fixture it forwards, `--self-test --vectors-only`), and the `unrun` entries
+    (default _DISPATCH_UNRUN), which must each be declared and uncalled. Every module but this host (whose verb
+    routing _cli_self_test covers) then runs as a child under _DISPATCH_REFUSE_STUB with each _DISPATCH_REFUSED
+    and _DISPATCH_REFUSED_WORDS form and, unless the table declares a bare run, no argument, with
+    _dispatch_triggers set: each must exit 2, write nothing to stdout, write a stderr line holding a
+    _DISPATCH_USAGE phrase, and enter no _DISPATCH_SUITES function nor any function of its own an exact
+    `--self-test` branch calls. Each declared `--self-test` variant must still reach the self-test: for a
+    module whose `__main__` block ends `sys.exit(<def>(...))` a child imports it, stubs self_test and calls
+    main(); otherwise `--self-test` and each variant run under _DISPATCH_REACH_STUB and must enter a function
+    an exact `--self-test` branch calls, a variant with a True argument and `--self-test` alone with none; a
+    variant with neither route is a miss. Returns the list of discrepancies. Residuals: the hook sees Python
+    function entries in this process only (a suite run in a child process, or as module top-level code, is
+    seen only through the exit, stdout and stderr tests), a trigger needing a value other than "1" or a name
+    built at run time, and argument lists outside the forms tried. A fast pre-check that names a cause:
+    _self_test_runtime_probe, which runs every module whatever its source holds, is the authority."""
+    import ast
+    import concurrent.futures
+    import subprocess
+    import _optlevel
+    table = _DISPATCH_FORMS if table is None else table
+    unrun = _DISPATCH_UNRUN if unrun is None else unrun
+    fallback = str(Path(directory).resolve()) if fallback is None else str(fallback)
+    host = Path(__file__).name
+    trees, sources, misses = {}, {}, []
+    for name in sorted(name for name in os.listdir(str(directory)) if name.endswith(".py")):
+        try:
+            source = Path(directory, name).read_bytes()
+            tree = _optlevel.parse(source, name)
+        except (OSError, SyntaxError, ValueError) as exc:
+            misses.append("{} cannot be read or parsed ({})".format(name, type(exc).__name__))
+            continue
+        if _main_tests(tree):
+            trees[name], sources[name] = tree, source.decode("utf-8", "replace")
+    if not trees:
+        misses.append("no module with a `__main__` block found")
+    misses += ["{} has a `__main__` block but is not declared in _DISPATCH_FORMS".format(name)
+               for name in sorted(set(trees) - set(table))]
+    misses += ["{} is declared in _DISPATCH_FORMS but has no `__main__` block here".format(name)
+               for name in sorted(set(table) - set(trees))]
+    forms, runner_misses, complete = _dispatch_runner_forms(directory, set(table), runners)
+    misses += runner_misses
+    for name, called in sorted(forms.items()):
+        misses += ["a runner calls {} {} but that form is not declared in _DISPATCH_FORMS".format(
+            name, list(argv)) for argv in sorted(called - set(table[name]))]
+    for (name, argv), _reason in sorted(unrun.items()):
+        if argv not in table.get(name, ()) or argv in forms.get(name, set()):
+            misses.append("unrun entry {} {} is not a declared form no runner calls".format(name, list(argv)))
+    if complete:
+        misses += ["{} {} is declared in _DISPATCH_FORMS but no runner calls it".format(name, list(argv))
+                   for name, declared in sorted(table.items()) for argv in declared
+                   if argv != ("--self-test",) and argv not in forms.get(name, set()) and (name, argv) not in unrun
+                   and not (len(argv) > 1 and " ".join(argv) in sources.get(name, ""))]
+    runs = []
+    for name, tree in sorted(trees.items()):
+        if name == host or name not in table:
+            continue
+        targets = sorted(_dispatch_targets(tree))
+        refused = list(_DISPATCH_REFUSED) + list(_DISPATCH_REFUSED_WORDS) + ([[]] if () not in table[name] else [])
+        runs += [(name, argv, "refuse", targets) for argv in refused]
+        variants = [list(argv) for argv in table[name] if len(argv) > 1 and argv[0] == "--self-test"]
+        exposes, reason = _self_test_entry_gap(tree)
+        last = tree.body[-1].body[-1] if exposes and reason is None else None
+        if (isinstance(last, ast.Expr) and isinstance(last.value, ast.Call) and last.value.args
+                and isinstance(last.value.args[0], ast.Call) and isinstance(last.value.args[0].func, ast.Name)):
+            runs += [(name, argv, "stub", targets) for argv in variants]
+        elif targets and not exposes:
+            runs += [(name, argv, "reach", targets) for argv in [["--self-test"]] + variants]
+        else:
+            misses += ["{} declares {} but neither route can confirm it reaches the self-test".format(name, argv)
+                       for argv in variants]
+
+    def child(run):
+        name, argv, mode, targets = run
+        path = str(Path(directory, name))
+        env = None
+        if mode == "refuse":
+            command = [_DISPATCH_REFUSE_STUB, path, fallback, ",".join(_DISPATCH_SUITES), ",".join(targets)] + argv
+            env = dict(os.environ, **{each: "1" for each in _dispatch_triggers(trees[name])})
+        elif mode == "stub":
+            command = [_DISPATCH_STUB, path] + argv
+        else:
+            command = [_DISPATCH_REACH_STUB, path, ",".join(targets)] + argv
+        try:
+            proc = subprocess.run([sys.executable, "-I", "-B", "-c"] + command, cwd=tmp, capture_output=True,
+                                  text=True, timeout=120, stdin=subprocess.DEVNULL, env=env)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return "{} {}: child failed to run ({})".format(name, argv, type(exc).__name__)
+        if mode != "refuse":
+            variant = argv != ["--self-test"]
+            if proc.returncode != 0 or "DISPATCHED" not in proc.stdout or "NOT DISPATCHED" in proc.stdout \
+                    or ("True" in proc.stdout) != variant:
+                return "{} {}: the {} did not reach the self-test as declared (rc {})".format(
+                    name, argv, "declared variant" if variant else "exact `--self-test`", proc.returncode)
+            return None
+        entered = [line[len("ENTERED "):] for line in proc.stderr.splitlines() if line.startswith("ENTERED ")]
+        if entered:
+            return "{} {}: not refused, entered {}".format(name, argv, entered[0])
+        if proc.returncode != 2 or proc.stdout or not any(
+                phrase in line.lower() for line in proc.stderr.splitlines() for phrase in _DISPATCH_USAGE):
+            return "{} {}: not refused (rc {}, {} bytes of stdout; want 2, no stdout and a usage line on " \
+                   "stderr)".format(name, argv, proc.returncode, len(proc.stdout))
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        misses += [miss for miss in pool.map(child, runs) if miss]
+    return misses
+
+
+_DISPATCH_USAGE_TAIL = '    print("usage: fixture --self-test", file=sys.stderr)\n    sys.exit(2)\n'
+_DISPATCH_SUITE_DEF = "def self_test():\n    return 0\n\n\n"
+# The escape fixtures (name, source, table forms, the phrase its miss must hold, or None for a clean module).
+_DISPATCH_FIXTURES = (
+    ("clean_lib.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n' + _DISPATCH_USAGE_TAIL,
+     _DISPATCH_LIBRARY, None),
+    ("clean_live.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + "def main(argv):\n"
+     '    if argv == ["--self-test"]:\n        return self_test()\n    if argv:\n'
+     '        print("clean_live: unexpected argument(s)", file=sys.stderr)\n        return 2\n    return 0\n\n\n'
+     'if __name__ == "__main__":\n    sys.exit(main(sys.argv[1:]))\n', _DISPATCH_LIVE, None),
+    ("const_alias.py", "import sys\n\n_SELF_TEST_FORMS = ([\"--self-test\"], [\"--selftest\"])\n\n\n"
+     + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n    if sys.argv[1:] in _SELF_TEST_FORMS:\n'
+     "        sys.exit(self_test())\n" + _DISPATCH_USAGE_TAIL, _DISPATCH_LIBRARY, "entered self_test"),
+    ("match_form.py", "import sys\n\n\ndef _suite():\n    return 0\n\n\n" 'if __name__ == "__main__":\n'
+     '    match sys.argv[1:]:\n        case ["--self-test", *_]:\n            sys.exit(_suite())\n'
+     '    print("usage: fixture --self-test", file=sys.stderr)\n    sys.exit(2)\n', _DISPATCH_LIBRARY,
+     "entered _suite"),
+    ("built_string.py", 'import sys\n\nFLAG = "--self" + "-test"\n\n\n' + _DISPATCH_SUITE_DEF
+     + 'if __name__ == "__main__":\n    if sys.argv[1:2] == [FLAG]:\n        sys.exit(self_test())\n'
+     + _DISPATCH_USAGE_TAIL, _DISPATCH_LIBRARY, "entered self_test"),
+    ("env_trigger.py", "import os\nimport sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"] or os.environ.get("FIXTURE_SELF_TEST"):\n'
+     "        sys.exit(self_test())\n" + _DISPATCH_USAGE_TAIL, _DISPATCH_LIBRARY, "entered self_test"),
+    ("argparse_sub.py", "import argparse\nimport sys\n\n\n" + _DISPATCH_SUITE_DEF + "def main():\n"
+     '    parser = argparse.ArgumentParser(prog="fixture")\n    verbs = parser.add_subparsers(dest="verb")\n'
+     '    verbs.add_parser("selftest")\n    args, _ = parser.parse_known_args()\n'
+     '    if args.verb == "selftest":\n        return self_test()\n'
+     '    print("usage: fixture --self-test", file=sys.stderr)\n    return 2\n\n\n'
+     'if __name__ == "__main__":\n    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n'
+     "    sys.exit(main())\n", _DISPATCH_LIBRARY, "entered self_test"),
+    ("decorated_main.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + "def _wrap(func):\n"
+     "    def inner():\n        self_test()\n        return func()\n    return inner\n\n\n@_wrap\ndef main():\n"
+     '    print("usage: fixture --self-test", file=sys.stderr)\n    return 2\n\n\n'
+     'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n    sys.exit(main())\n',
+     _DISPATCH_LIBRARY, "entered self_test"),
+    ("prints_exit2.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + "def _cases():\n"
+     '    print("case 1 ok")\n    return 2\n\n\n' 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n    _cases()\n' + _DISPATCH_USAGE_TAIL,
+     _DISPATCH_LIBRARY, "bytes of stdout"),
+    ("silent_suite.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] != ["--self-test"]:\n        self_test()\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n' + _DISPATCH_USAGE_TAIL,
+     _DISPATCH_LIBRARY, "entered self_test"),
+    ("no_usage.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n'
+     '    print("error", file=sys.stderr)\n    sys.exit(2)\n', _DISPATCH_LIBRARY, "a usage line on stderr"),
+    ("undeclared.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n' + _DISPATCH_USAGE_TAIL,
+     None, "not declared in _DISPATCH_FORMS"),
+    ("runner_form.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n' + _DISPATCH_USAGE_TAIL,
+     _DISPATCH_LIBRARY, "a runner calls runner_form.py"),
+    ("unused_form.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + "def main(argv):\n"
+     '    if argv == ["--self-test"]:\n        return self_test()\n    if argv:\n'
+     '        print("usage: unused_form.py [--self-test]", file=sys.stderr)\n        return 2\n    return 0\n\n\n'
+     'if __name__ == "__main__":\n    sys.exit(main(sys.argv[1:]))\n', _DISPATCH_LIVE, "no runner calls it"),
+)
+# The runner lines the fixture tree carries: every bare declared form is called except unused_form.py's, and
+# runner_form.py is called with a form its table lacks.
+_DISPATCH_FIXTURE_RUNNER = (
+    "python3 -I -B opf/tools/clean_live.py\n"
+    "python3 -I -B opf/tools/runner_form.py --self-test --vectors-only\n"
+    "python3 -I -B opf/tools/selftest_commonmark_conformance.py\n")
+# The reverted conformance pre-check: _self_check runs again before the argument list is checked.
+_DISPATCH_CONFORMANCE_REVERT = ("def main(argv):\n", "def main(argv):\n    _self_check()\n")
+
+
+def _self_test_dispatch_escape_probe(tmp):
+    """Run _self_test_dispatch_probe over a synthetic tree in `tmp`: the reviewers' escape fixtures (a flag
+    set held in a constant, a match statement, a built string, an environment trigger, an argparse
+    subcommand, a decorated main, a suite that prints and exits 2, a suite run silently before the refusal), a
+    refusal without a usage line, an undeclared module, a runner form the table lacks, a declared form no
+    runner calls, and selftest_commonmark_conformance.py with its argument pre-check reverted. Each red module
+    must be named for its reason and the clean ones not at all. The modules are files run as children; nothing
+    is passed to exec or eval. Returns a list of the discrepancies."""
+    root = Path(tmp, "tree")
+    directory = root / "opf" / "tools"
+    os.makedirs(str(directory))
+    os.makedirs(str(root / "tools"))
+    os.makedirs(str(root / ".github" / "workflows"))
+    here = Path(__file__).resolve().parent
+    table, expected = {}, {}
+    for name, source, forms, want in _DISPATCH_FIXTURES:
+        (directory / name).write_text(source, encoding="utf-8")
+        if forms is not None:
+            table[name] = forms
+        expected[name] = want
+    conformance = (here / "selftest_commonmark_conformance.py").read_text(encoding="utf-8")
+    before, after = _DISPATCH_CONFORMANCE_REVERT
+    if conformance.count(before) != 1:
+        return ["selftest_commonmark_conformance.py: the pre-check revert has no single `def main(argv):`"]
+    (directory / "selftest_commonmark_conformance.py").write_text(conformance.replace(before, after),
+                                                                  encoding="utf-8")
+    table["selftest_commonmark_conformance.py"] = ((),)
+    expected["selftest_commonmark_conformance.py"] = "entered _self_check"
+    (directory / "run_all_checks.sh").write_text("", encoding="utf-8")
+    (root / "tools" / "run_all_checks.sh").write_text(_DISPATCH_FIXTURE_RUNNER, encoding="utf-8")
+    (root / ".github" / "workflows" / "quality.yml").write_text("", encoding="utf-8")
+    (root / "tools" / "check_opf_standalone_closure.py").write_text("", encoding="utf-8")
+    os.makedirs(str(Path(tmp, "cwd")))
+    found = _self_test_dispatch_probe(directory, str(Path(tmp, "cwd")), table=table, unrun={}, fallback=here)
+    faults = []
+    for name, want in sorted(expected.items()):
+        mine = [miss for miss in found if name in miss]
+        if want is None and mine:
+            faults.append("clean fixture {} named ({})".format(name, mine[0]))
+        elif want is not None and not any(want in miss for miss in mine):
+            faults.append("escape fixture {} not caught for its reason ({!r}; got {})".format(
+                name, want, "; ".join(mine) or "nothing"))
+    return faults
+
+
+# The runtime probe (_self_test_runtime_probe), the authority over the refusal: each module runs at most this
+# many seconds per form.
+_RUNTIME_TIMEOUT = 60
+
+
+def _runtime_snapshot(top):
+    """Map each path under `top` (relative; only the TOP-LEVEL `.git` pruned, a nested `.git` recorded;
+    symlinks not followed) to its mode, size, modification time, inode identity (st_ino, st_nlink and
+    st_dev, so a hardlink swap that preserves bytes, mode, size and mtime is still a change) and
+    content: the sha256 of a regular file's bytes, a symlink's target. Returns (snap,
+    unread): `unread` names, with the error, every path that could not be listed, stat'ed or read, and `top`
+    itself when it is not a directory, so a tree the probe cannot see is a cannot-evaluate finding, never a
+    skip."""
+    import hashlib
+    snap, unread = {}, []
+
+    def failed(exc):
+        unread.append("{} ({})".format(getattr(exc, "filename", None) or top, type(exc).__name__))
+
+    try:
+        if not stat.S_ISDIR(os.lstat(str(top)).st_mode):
+            unread.append("{} (not a directory)".format(top))
+    except OSError as exc:
+        failed(exc)
+    for base, dirs, files in os.walk(str(top), onerror=failed):
+        dirs[:] = sorted(each for each in dirs if each != ".git" or base != str(top))
+        for name in dirs + sorted(files):
+            path = os.path.join(base, name)
+            try:
+                st = os.lstat(path)
+                content = os.readlink(path) if stat.S_ISLNK(st.st_mode) else None
+                if stat.S_ISREG(st.st_mode):
+                    digest = hashlib.sha256()
+                    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+                    with os.fdopen(fd, "rb") as handle:
+                        for chunk in iter(lambda: handle.read(1 << 20), b""):
+                            digest.update(chunk)
+                    content = digest.hexdigest()
+            except OSError as exc:
+                failed(exc)
+                continue
+            snap[os.path.relpath(path, str(top))] = (
+                st.st_mode, st.st_size, st.st_mtime_ns, st.st_ino, st.st_nlink, st.st_dev, content)
+    return snap, unread
+
+
+# Set in each runtime-probe child's environment to a token naming its run; it is informational only. No
+# kill is ever chosen by an environment match, a name match or uid ownership, so an unrelated same-uid
+# process whose environment happens to carry the marker is never signalled and never reported;
+# containment is the supervisor's own-children subtree alone.
+_RUNTIME_MARKER = "OPF_RUNTIME_PROBE"
+# Seconds the runtime probe waits after a child exits before it looks for and kills the child's
+# descendants.
+_RUNTIME_SETTLE = 0.05
+# Bounds on the supervisor's kill-and-reap rounds over its own children after the module exits: past
+# either, a child that still appears is reported as a survivor the rounds never drained, a finding.
+_RUNTIME_REAP_SECONDS = 5.0
+_RUNTIME_REAP_ROUNDS = 250
+
+# The per-run supervisor source the runtime probe passes inline (python3 -I -B -c <source>), so no
+# supervisor file ever exists for a probed module to overwrite or pre-plant, and the self-test's own
+# process never carries the subreaper flag. The supervisor FIRST resets SIGCHLD to SIG_DFL: an inherited
+# SIG_IGN would make the kernel auto-reap its children, so subprocess would read a failing module as
+# rc 0 on ECHILD and a reaped pid could be reused before it is signalled. It then makes ITSELF a child
+# subreaper (prctl PR_SET_CHILD_SUBREAPER, option 36, Linux) before it spawns the probed module, so
+# every orphaned descendant of the module, a setsid'd, non-dumpable or fork-hopping one included,
+# reparents to the supervisor. It also makes ITSELF non-dumpable (PR_SET_DUMPABLE, option 4, to 0), so
+# a same-uid process can neither list /proc/<sup>/fd nor pidfd_getfd its descriptors whatever Yama's
+# ptrace_scope says, and it carries the module's stdout and stderr over SOCKETPAIRS, never pipes: a
+# pipe end could be reopened through /proc/<pid>/fd by a concurrent same-uid process and drained, so a
+# failing module's output would vanish into a clean-looking report; reopening a socket end that way
+# gives ENXIO (QA8 claude M1/m4). After the module exits it repeatedly SIGKILLs and reaps the processes it
+# can prove are its own un-reaped children. The census is /proc/self/task/*/children, or where that file
+# is unavailable the ppid field of /proc/<pid>/stat equal to its own pid; a vanished pid is skipped, and
+# a record that is unreadable for any other reason, or malformed, raises, making the run cannot-evaluate,
+# never clean and never a wider kill. Every signal goes through a pidfd (os.pidfd_open) whose target a
+# waitid(P_PIDFD, ..., WNOHANG|WNOWAIT) has just proved to still be the supervisor's own child; there is
+# no numeric kill anywhere, so pid reuse cannot redirect a signal to an unrelated process (the one
+# non-census kill, the module timeout, goes through Popen.kill on the supervisor's own un-reaped direct
+# child, whose pid the kernel cannot reuse while it stays un-reaped). Reaping is waitpid(WNOHANG) inside
+# the round deadline, never a blocking wait: a traced child, whose exit only its tracer can collect,
+# cannot stall the supervisor past its bound, and anything still present when the deadline ends is
+# reported as an undrained survivor, a finding, before the supervisor exits. It prints one JSON line:
+# the module's exit status and output, a timeout flag, the survivors (any is a finding) and whether the
+# rounds drained. When prctl fails, the census is unavailable or untrustworthy, or pidfd signalling is
+# unavailable, it says so and the probe reports cannot-evaluate, never a clean pass and never a numeric
+# fallback kill. Residual: a clean report proves only that the supervisor's own subtree is drained; ANY
+# same-uid process outside that subtree that the module can reach (through /proc/<pid>/fd, a FIFO, a
+# socket, a user daemon, or a launcher that reparents work elsewhere; no privilege is needed, and in a
+# shared-uid worker pool such processes exist) can act for the module after the report.
+_RUNTIME_SUPERVISOR = """\
+import base64
+import json
+import os
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+
+def _children():
+    kids = set()
+    try:
+        for task in os.listdir("/proc/self/task"):
+            with open("/proc/self/task/{}/children".format(task)) as handle:
+                kids.update(int(pid) for pid in handle.read().split())
+        return kids
+    except (OSError, ValueError):
+        kids = set()
+    me = str(os.getpid()).encode()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or entry.encode() == me:
+            continue
+        try:
+            with open("/proc/{}/stat".format(entry), "rb") as handle:
+                fields = handle.read().rsplit(b")", 1)[1].split()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError as exc:
+            raise OSError("/proc/{}/stat unreadable ({})".format(entry, type(exc).__name__))
+        except IndexError:
+            raise OSError("/proc/{}/stat malformed".format(entry))
+        if len(fields) < 2:
+            raise OSError("/proc/{}/stat malformed".format(entry))
+        if fields[1] == me:
+            kids.add(int(entry))
+    return kids
+
+
+def _reap(report, reap_seconds, reap_rounds):
+    deadline = time.monotonic() + reap_seconds
+    for _ in range(reap_rounds):
+        kids = _children()
+        if not kids:
+            break
+        for pid in sorted(kids):
+            label = "pid {}".format(pid)
+            if label not in report["survivors"]:
+                report["survivors"].append(label)
+            try:
+                fd = os.pidfd_open(pid, 0)
+            except OSError:
+                continue
+            try:
+                try:
+                    os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                except OSError:
+                    continue
+                try:
+                    signal.pidfd_send_signal(fd, signal.SIGKILL)
+                except OSError:
+                    pass
+            finally:
+                os.close(fd)
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except OSError:
+                pass
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.02)
+    if _children():
+        report["drained"] = False
+
+
+def _emit(report_fd, report):
+    os.write(report_fd, (json.dumps(report) + "\\n").encode("utf-8"))
+
+
+def main():
+    signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+    report_fd = int(sys.argv[1])
+    timeout, settle = float(sys.argv[2]), float(sys.argv[3])
+    reap_seconds, reap_rounds = float(sys.argv[4]), int(sys.argv[5])
+    report = {"subreaper": False, "undumpable": False, "enumerable": False, "pidfd": False,
+              "census": None, "spawn": None, "timeout": False, "rc": None, "stdout": "",
+              "stderr": "", "survivors": [], "drained": True}
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        report["subreaper"] = libc.prctl(36, 1, 0, 0, 0) == 0
+        # PR_SET_DUMPABLE (4) 0: a non-dumpable process's /proc/<pid>/fd is
+        # root-owned and pidfd_getfd against it is refused whatever Yama's
+        # ptrace_scope says, so a same-uid process can neither enumerate nor
+        # copy this supervisor's channel descriptors (QA8 claude m4). Required
+        # like the subreaper flag: failure is cannot-evaluate, never best-effort.
+        report["undumpable"] = libc.prctl(4, 0, 0, 0, 0) == 0
+    except (OSError, AttributeError, ValueError):
+        report["subreaper"] = False
+        report["undumpable"] = False
+    try:
+        _children()
+        report["enumerable"] = True
+    except OSError as exc:
+        report["census"] = str(exc)
+    try:
+        probe = os.pidfd_open(os.getpid(), 0)
+        os.close(probe)
+        report["pidfd"] = (hasattr(signal, "pidfd_send_signal")
+                           and hasattr(os, "P_PIDFD") and hasattr(os, "WNOWAIT"))
+    except (AttributeError, OSError):
+        report["pidfd"] = False
+    if not (report["subreaper"] and report["undumpable"] and report["enumerable"]
+            and report["pidfd"]):
+        _emit(report_fd, report)
+        return 0
+    # The module's stdout and stderr travel over SOCKETPAIRS, never pipes: a
+    # same-uid process could reopen a pipe end through /proc/<pid>/fd and drain a
+    # failing module's output into a clean-looking report, but reopening a socket
+    # end that way gives ENXIO (QA8 claude M1).
+    pairs = {"stdout": socket.socketpair(), "stderr": socket.socketpair()}
+    try:
+        proc = subprocess.Popen(sys.argv[6:], stdin=subprocess.DEVNULL,
+                                stdout=pairs["stdout"][1].fileno(),
+                                stderr=pairs["stderr"][1].fileno(),
+                                start_new_session=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        report["spawn"] = type(exc).__name__
+        proc = None
+    for key in ("stdout", "stderr"):
+        pairs[key][1].close()
+    gathered = {"stdout": [], "stderr": []}
+    deadline = time.monotonic() + timeout + reap_seconds + 10.0
+
+    def drain(key):
+        sock = pairs[key][0]
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0.0:
+                return
+            sock.settimeout(left)
+            try:
+                piece = sock.recv(65536)
+            except OSError:
+                return
+            if not piece:
+                return
+            gathered[key].append(piece)
+
+    pumps = [threading.Thread(target=drain, args=(key,)) for key in ("stdout", "stderr")]
+    for pump in pumps:
+        pump.start()
+    if proc is not None:
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            report["timeout"] = True
+            proc.kill()
+            try:
+                proc.wait(timeout=reap_seconds)
+            except subprocess.TimeoutExpired:
+                report["drained"] = False
+                report["survivors"].append(
+                    "module pid {} did not exit within {}s of SIGKILL".format(proc.pid, reap_seconds))
+        report["rc"] = proc.returncode
+    time.sleep(settle)
+    try:
+        _reap(report, reap_seconds, reap_rounds)
+    except OSError as exc:
+        report["enumerable"] = False
+        report["census"] = str(exc)
+    # The pumps end at EOF (the module and any descendant that inherited a write
+    # end are dead after the reap) or at their deadline (an undrained survivor
+    # still holds a write end); either way the join is bounded and the report
+    # carries what arrived.
+    for pump in pumps:
+        pump.join()
+    for key in ("stdout", "stderr"):
+        pairs[key][0].close()
+    report["stdout"] = base64.b64encode(b"".join(gathered["stdout"])).decode("ascii")
+    report["stderr"] = base64.b64encode(b"".join(gathered["stderr"])).decode("ascii")
+    _emit(report_fd, report)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+"""
+
+
+def _runtime_flag_forms(tree):
+    """The argument lists the runtime probe adds for a module from its own source: each str constant that
+    starts with `--` and holds no whitespace, alone and after `--self-test`, so an undeclared form the source
+    spells out is tried. The caller drops the module's declared forms."""
+    import ast
+    import re
+    flags = sorted({node.value for node in ast.walk(tree) if isinstance(node, ast.Constant)
+                    and isinstance(node.value, str) and node.value.startswith("--")
+                    and not re.search(r"\s", node.value)})
+    return [[flag] for flag in flags] + [["--self-test", flag] for flag in flags]
+
+
+def _self_test_runtime_probe(directory, tmp, table=None, names=None, tree=None,
+                             timeout=_RUNTIME_TIMEOUT, spy=None):
+    """The authority over the self-test argument refusal, by behaviour: run EVERY *.py module in `directory`,
+    this host included (`names`, when given, restricts the set; only _self_test_runtime_escape_probe passes
+    it), as `python3 -I -B <module> <form>` for each _DISPATCH_REFUSED and _DISPATCH_REFUSED_WORDS form
+    and the empty argument list (unless `table`, default _DISPATCH_FORMS, declares a bare run of it), and each
+    form _runtime_flag_forms takes from the module's source (each `--` string constant alone and after
+    `--self-test`) that `table` does not declare for it, the exact `--self-test` aside (the entry scan's). Each run has a fresh empty cwd, HOME and TMPDIR under
+    `tmp`, stdin closed, a `timeout` second limit, its own process group (start_new_session) and an
+    environment of PATH (os.defpath), HOME, TMPDIR, LC_ALL=C.UTF-8 and _RUNTIME_MARKER (a token naming the
+    run; informational only). Each run is supervised by a dedicated child-subreaper process
+    (_RUNTIME_SUPERVISOR, passed inline as `python3 -I -B -c <source>`, so no supervisor file exists
+    anywhere for a probed module to overwrite or pre-plant): the supervisor first resets SIGCHLD to
+    SIG_DFL (an inherited SIG_IGN would auto-reap its children, reading a failing module as rc 0 and
+    reopening pid reuse), and _RUNTIME_SETTLE seconds after the module exits it SIGKILLs and reaps, in
+    bounded rounds and time (every wait a WNOHANG poll, so a traced child, whose exit only its tracer
+    can collect, cannot stall it past the deadline; whatever is still present when the deadline ends is
+    reported as an undrained survivor, a finding, before the supervisor exits), exactly its own
+    un-reaped children, to which every orphaned descendant of the module (a setsid'd, non-dumpable or
+    fork-hopping one included) has reparented; every signal goes through a pidfd whose target a
+    waitid(P_PIDFD, ..., WNOHANG|WNOWAIT) has just proved to still be the supervisor's own child, never
+    a numeric kill, and a host where PR_SET_CHILD_SUBREAPER, PR_SET_DUMPABLE 0, pidfd signalling or the
+    /proc child census is unavailable, or where a census record is unreadable for any reason but a vanished pid, or
+    malformed, makes the run a cannot-evaluate discrepancy, never a clean pass and never a wider kill. A form passes only if the module
+    refuses it (exit 2, nothing on stdout, and on stderr
+    one line, or for this host exactly its usage text) or does nothing (exit 0, nothing on stdout or stderr),
+    and in both cases leaves no process running, its cwd, HOME and TMPDIR empty and `tree` unchanged (default:
+    the repository root two levels above `directory` when it holds `.git`, else `directory`; compared by
+    _runtime_snapshot, by content). Anything else (output, a write, a surviving descendant, another exit
+    status, a timeout, a failure to start, a module that cannot be read or parsed) is a discrepancy naming the
+    module and the form, and a path of `tree` that cannot be listed, stat'ed or read (or `tree` absent) is a
+    cannot-evaluate discrepancy naming it. The tree is compared once around the whole parallel run, after
+    _RUNTIME_SETTLE; when it changed, every run is repeated one at a time to name the writer.
+    The static checks (_self_test_entry_gaps, _entry_tail_gap, _self_test_dispatch_probe) are fast pre-checks
+    that name a cause; this probe decides. Residuals: it sees only the forms it tries, so behaviour gated on
+    any other argument list (one built at run time, a word not spelled as a `--` constant, or a longer
+    combination), an environment variable, the date, the network or a file outside its fresh directories is
+    unseen; a module that runs a suite silently, writes nothing it can see and exits 0 or 2 passes; a write
+    outside the fresh directories and `tree` (the top-level `.git` included; a nested `.git` IS
+    recorded) is unseen; a clean report proves only that the supervisor's own subtree is drained, so ANY
+    same-uid process outside that subtree that the module can reach (through /proc/<pid>/fd, a FIFO, a
+    socket, a user daemon, or a launcher that reparents work elsewhere; no privilege is needed, and in a
+    shared-uid worker pool such processes exist) can act for the module after the report, and is unseen
+    unless it writes into `tree` before the tree is compared; and a write by another process during the run may be blamed on a module. `spy`, when given, is
+    called with (name, argv, token) just before a run's supervisor starts; only
+    _self_test_runtime_escape_probe passes it, to time a decoy against a live run token. Returns the
+    list of discrepancies."""
+    import base64
+    import concurrent.futures
+    import json
+    import shutil
+    import socket
+    import subprocess
+    import tempfile
+    import threading
+    import time
+    import _optlevel
+    table = _DISPATCH_FORMS if table is None else table
+    directory = Path(directory).resolve()
+    if tree is None:
+        tree = directory.parent.parent if (directory.parent.parent / ".git").exists() else directory
+    host = Path(__file__).name
+    modules = sorted(name for name in os.listdir(str(directory))
+                     if name.endswith(".py") and (names is None or name in names))
+    if names is None and not modules:
+        return ["no *.py module found in {}".format(directory)]
+    misses, runs = [], []
+    for name in modules:
+        forms = list(_DISPATCH_REFUSED) + list(_DISPATCH_REFUSED_WORDS) + (
+            [[]] if () not in table.get(name, ()) else [])
+        try:
+            extra = _runtime_flag_forms(_optlevel.parse((directory / name).read_bytes(), name))
+        except (OSError, SyntaxError, ValueError) as exc:
+            misses.append("{}: cannot be read or parsed for its `--` forms ({})".format(name, type(exc).__name__))
+            extra = []
+        forms += [argv for argv in extra if argv not in forms and argv != ["--self-test"]
+                  and tuple(argv) not in table.get(name, ())]
+        runs += [(name, argv) for argv in forms]
+    usage = (str(__doc__) + "\n").encode("utf-8")
+
+    def child(run):
+        name, argv = run
+        box = tempfile.mkdtemp(prefix="run-", dir=str(tmp))
+        try:
+            fresh = [os.path.join(box, each) for each in ("cwd", "home", "tmp")]
+            for each in fresh:
+                os.mkdir(each)
+            token = os.path.basename(box)
+            env = dict(PATH=os.defpath, HOME=fresh[1], TMPDIR=fresh[2], LC_ALL="C.UTF-8",
+                       **{_RUNTIME_MARKER: token})
+            if spy is not None:
+                spy(name, argv, token)
+            report_r, report_w = socket.socketpair()
+            try:
+                proc = subprocess.Popen([sys.executable, "-I", "-B", "-c", _RUNTIME_SUPERVISOR,
+                                         str(report_w.fileno()), str(timeout), str(_RUNTIME_SETTLE),
+                                         str(_RUNTIME_REAP_SECONDS), str(_RUNTIME_REAP_ROUNDS),
+                                         sys.executable, "-I", "-B",
+                                         str(directory / name)] + argv, cwd=fresh[0], env=env,
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, start_new_session=True,
+                                        pass_fds=(report_w.fileno(),))
+            except (OSError, subprocess.SubprocessError) as exc:
+                report_r.close()
+                report_w.close()
+                return "{} {}: failed to run ({})".format(name, argv, type(exc).__name__)
+            report_w.close()
+            # The supervisor returns its report ONLY over this socketpair, never over
+            # its stdout, and the module's own stdout/stderr reach the supervisor over
+            # socketpairs too: opening a socket end through /proc/<pid>/fd gives ENXIO
+            # (a pipe, the former channel for both, could be reopened that way), and
+            # the supervisor is non-dumpable, so a same-uid process can neither list
+            # nor pidfd_getfd its descriptors whatever Yama ptrace_scope says (QA7
+            # claude M1; QA8 claude M1/m4) -- that closes the report channel on the
+            # SUPERVISOR side only. NOT covered: the supervisor's own stdout/stderr
+            # pipes to this process, where tampering can only turn a pass into a
+            # failure (the supervisor's stdout must be empty, and a drained or
+            # garbled report fails the run); and THIS test process, which stays
+            # dumpable, so at Yama ptrace_scope 0 a same-uid process could
+            # pidfd_getfd this reader's report_r (and report_w until the close
+            # above) and turn a FAILURE INTO A PASS by draining the genuine report
+            # and writing a forged clean one (QA9 claude F4) -- at scope 0 such a
+            # process could already ptrace this test outright, so the route adds no
+            # new exposure, and at scope >= 1 pidfd_getfd on a non-descendant is
+            # refused. Drain the socket in a thread so a large report cannot deadlock
+            # against communicate() draining the supervisor's stdio pipes.
+            collected = {}
+
+            def drain():
+                parts = []
+                try:
+                    while True:
+                        chunk = report_r.recv(65536)
+                        if not chunk:
+                            break
+                        parts.append(chunk)
+                except OSError:
+                    pass
+                collected["raw"] = b"".join(parts)
+
+            pump = threading.Thread(target=drain)
+            pump.start()
+            budget = timeout + _RUNTIME_REAP_SECONDS + 30
+            try:
+                sup_out, sup_err = proc.communicate(timeout=budget)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                # Join the pump BEFORE closing report_r: the write end died with the
+                # killed supervisor, so recv reaches EOF and the join is prompt, and
+                # the drain thread never races a reused fd number (QA8 claude nit).
+                pump.join()
+                report_r.close()
+                return "{} {}: the probe supervisor did not finish within {} s".format(name, argv, budget)
+            pump.join()
+            report_r.close()
+            report_raw = collected.get("raw", b"")
+            written = []
+            for each in fresh:
+                try:
+                    if os.listdir(each):
+                        written.append(os.path.basename(each))
+                except OSError as exc:
+                    written.append("{} (cannot be listed: {})".format(os.path.basename(each),
+                                                                      type(exc).__name__))
+        finally:
+            shutil.rmtree(box, ignore_errors=True)
+        if proc.returncode != 0:
+            return "{} {}: the probe supervisor failed (rc {}; stderr tail {!r})".format(
+                name, argv, proc.returncode, sup_err[-160:])
+        if sup_out:
+            return "{} {}: the probe supervisor wrote to stdout ({!r}); the report channel is the " \
+                   "socketpair alone".format(name, argv, sup_out[:160])
+        try:
+            text = report_raw.decode("utf-8")
+        except ValueError as exc:
+            return "{} {}: the probe supervisor report was not valid UTF-8 ({})".format(
+                name, argv, type(exc).__name__)
+        if text.count("\n") != 1 or not text.endswith("\n"):
+            return "{} {}: the probe supervisor report was not exactly one line ({} newlines, {} bytes)".format(
+                name, argv, text.count("\n"), len(report_raw))
+        try:
+            report = json.loads(text)
+            stdout = base64.b64decode(report["stdout"])
+            stderr = base64.b64decode(report["stderr"])
+            survivors = sorted(set(report["survivors"]))
+        except (ValueError, KeyError, TypeError) as exc:
+            return "{} {}: the probe supervisor returned no result ({})".format(
+                name, argv, type(exc).__name__)
+        if not (report.get("subreaper") and report.get("undumpable")
+                and report.get("enumerable") and report.get("pidfd")):
+            return ("cannot evaluate {} {}: the supervisor cannot contain descendants here "
+                    "(PR_SET_CHILD_SUBREAPER, PR_SET_DUMPABLE 0, pidfd signalling or the "
+                    "/proc child census is unavailable{})").format(name, argv,
+                                             "; " + report["census"] if report.get("census") else "")
+        if report.get("spawn"):
+            return "{} {}: failed to run ({})".format(name, argv, report["spawn"])
+        if report.get("timeout"):
+            return "{} {}: timed out after {} s".format(name, argv, timeout)
+        if not report.get("drained"):
+            survivors.append("children still appearing when the reap rounds ended")
+        if survivors:
+            return "{} {}: left a process running after it exited ({}; killed)".format(
+                name, argv, ", ".join(survivors[:4]))
+        if written:
+            return "{} {}: wrote into its fresh {}".format(name, argv, " and ".join(written))
+        rc = report.get("rc")
+        refused = rc == 2 and not stdout and (
+            len(stderr.splitlines()) == 1 or name == host and stderr == usage)
+        if not (refused or rc == 0 and not stdout and not stderr):
+            return "{} {}: neither refused nor idle (rc {}, {} bytes of stdout, {} lines of stderr; want " \
+                   "exit 2 with one stderr line, or exit 0 with no output)".format(
+                       name, argv, rc, len(stdout), len(stderr.splitlines()))
+        return None
+
+    def cannot_evaluate(unread):
+        return "cannot evaluate {}: the runtime probe cannot list, stat or read {}".format(
+            tree, ", ".join(unread[:8]))
+
+    def changed_since(before):
+        after, unread = _runtime_snapshot(tree)
+        return sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path)) + [
+            "{} unreadable".format(each) for each in unread]
+
+    before, unread = _runtime_snapshot(tree)
+    if unread:
+        misses.append(cannot_evaluate(unread))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        misses += [miss for miss in pool.map(child, runs) if miss]
+    if unread:
+        return misses
+    time.sleep(_RUNTIME_SETTLE)
+    changed = changed_since(before)
+    if changed:
+        misses.append("{} changed during the runtime probe ({})".format(tree, ", ".join(changed[:8])))
+        for run in runs:
+            before, unread = _runtime_snapshot(tree)
+            if unread:
+                misses.append(cannot_evaluate(unread))
+                break
+            child(run)
+            time.sleep(_RUNTIME_SETTLE)
+            changed = changed_since(before)
+            if changed:
+                misses.append("{} {}: changed {} ({})".format(run[0], run[1], tree, ", ".join(changed[:8])))
+    return misses
+
+
+_RUNTIME_USAGE = '    print("usage: fixture --self-test", file=sys.stderr)\n    sys.exit(2)\n'
+_RUNTIME_EXIT_TAIL = ('def cases():\n    print("SUITE RAN")\n\n\ndef main():\n'
+                      '    print("usage: fixture --self-test", file=sys.stderr)\n    return 2\n\n\n'
+                      'if __name__ == "__main__":\n')
+# The runtime probe's fixtures (name, source, the phrase its discrepancy must hold, or None for a passing
+# module): the reviewers' reproductions the static checks miss, run as files. None but clean_lib.py binds
+# self_test or compares an argument list with a `--self-test` list literal, so the static selection is it alone.
+_RUNTIME_FIXTURES = (
+    ("clean_lib.py", "import sys\n\n\n" + _DISPATCH_SUITE_DEF + 'if __name__ == "__main__":\n'
+     '    if sys.argv[1:] == ["--self-test"]:\n        sys.exit(self_test())\n' + _RUNTIME_USAGE, None),
+    ("idle_lib.py", "import sys\n\nVALUE = len(sys.argv)\n", None),
+    # Round-6 claude F1: a module that plants (or overwrites) a would-be supervisor file two levels
+    # above its fresh cwd, where the per-run boxes live. The supervisor source is passed inline, so no
+    # such file is ever read and later runs stay contained: detached.py and its siblings, which sort
+    # and run after this module, pin that their setsid'd writers are still caught.
+    ("a_planter.py", "import os\nimport sys\n\n"
+     "boxes = os.path.dirname(os.path.dirname(os.getcwd()))\n"
+     'target = os.path.join(boxes, "_opf_runtime_supervisor.py")\n'
+     'fake = ("import json\\n"\n'
+     '        "print(json.dumps(dict(subreaper=True, enumerable=True, pidfd=True, census=None,"\n'
+     '        " spawn=None, timeout=False, rc=0, stdout=\'\', stderr=\'\', survivors=[],"\n'
+     '        " drained=True)))\\n")\n'
+     'scratch = target + ".{}".format(os.getpid())\n'
+     'with open(scratch, "w") as handle:\n    handle.write(fake)\n'
+     "os.replace(scratch, target)\n"
+     'if __name__ == "__main__":\n' + _RUNTIME_USAGE, None),
+    ("var_guard.py", 'import sys\n\n\ndef cases():\n    print("TEST VECTOR EXECUTED")\n    return 0\n\n\n'
+     'IS_MAIN = __name__ == "__main__"\nif IS_MAIN:\n    sys.exit(cases())\n', "neither refused nor idle"),
+    ("built_flag.py", 'import sys\n\nFLAG = "--self" + "-test"\n\n\ndef cases():\n'
+     '    print("TEST VECTOR EXECUTED", file=sys.stderr)\n    return 0\n\n\nif __name__ == "__main__":\n'
+     "    if sys.argv[1:] == [FLAG]:\n        sys.exit(cases())\n    if sys.argv[1:2] == [FLAG]:\n        cases()\n"
+     + _RUNTIME_USAGE, "['--self-test', 'extra']: neither refused nor idle"),
+    ("suite_name.py", 'import sys\n\n\ndef run_checks():\n    print("CHECKS RAN")\n    return 0\n\n\n'
+     'if __name__ == "__main__":\n    if "--self-test" in sys.argv[1:]:\n        sys.exit(run_checks())\n'
+     + _RUNTIME_USAGE, "neither refused nor idle"),
+    ("toplevel.py", 'import sys\n\n\ndef _vectors():\n    print("VECTOR 1 ok")\n\n\n'
+     'if sys.argv[1:2] == ["--selftest"]:\n    _vectors()\n', "['--selftest']: neither refused nor idle"),
+    ("alias_main.py", "import sys\n\nimport __main__ as _me\n\n\n" + _RUNTIME_EXIT_TAIL.replace(
+        'if __name__ == "__main__":\n', '_me.main = cases\nif __name__ == "__main__":\n')
+     + "    sys.exit(main())\n", "neither refused nor idle"),
+    ("exit_call.py", "import sys\n\n\ndef _pre():\n    sys.exit(0)\n\n\n" + _RUNTIME_EXIT_TAIL
+     + "    cases()\n    _pre()\n    sys.exit(main())\n", "neither refused nor idle"),
+    ("exit_alias.py", "import sys\nfrom sys import exit as leave\n\n\n" + _RUNTIME_EXIT_TAIL
+     + "    cases()\n    leave(0)\n    sys.exit(main())\n", "neither refused nor idle"),
+    ("exit_builtins.py", "import builtins\nimport sys\n\n\n" + _RUNTIME_EXIT_TAIL
+     + "    cases()\n    builtins.exit(0)\n    sys.exit(main())\n", "neither refused nor idle"),
+    ("exit_sysalias.py", "import sys\n\n_s = sys\n\n\n" + _RUNTIME_EXIT_TAIL
+     + "    cases()\n    _s.exit(0)\n    sys.exit(main())\n", "neither refused nor idle"),
+    ("exit_execv.py", "import os\nimport sys\n\n\n" + _RUNTIME_EXIT_TAIL
+     + '    os.execv(sys.executable, [sys.executable, "-I", "-B", "-c", "print(1)"])\n    sys.exit(main())\n',
+     "neither refused nor idle"),
+    ("writes_cwd.py", 'import sys\n\nopen("left.txt", "w").close()\nif __name__ == "__main__":\n'
+     + _RUNTIME_USAGE, "wrote into its fresh cwd"),
+    ("writes_tree.py", "import os\nimport sys\n\n"
+     'open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "left.txt"), "w").close()\n'
+     'if __name__ == "__main__":\n' + _RUNTIME_USAGE, "writes_tree.py ['--self-test', 'extra']: changed"),
+    ("sleeps.py", 'import sys\nimport time\n\nif sys.argv[1:] == ["--selftest"]:\n    time.sleep(60)\n',
+     "['--selftest']: timed out"),
+    ("restores.py", "import os\nimport sys\n\n"
+     'path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "same.txt")\nst = os.stat(path)\n'
+     'with open(path, "w") as handle:\n    handle.write(os.urandom(8).hex())\n'
+     "os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))\n" 'if __name__ == "__main__":\n' + _RUNTIME_USAGE,
+     "restores.py ['--self-test', 'extra']: changed"),
+    ("detached.py", "import os\nimport sys\nimport time\n\n\n" + _RUNTIME_EXIT_TAIL.replace(
+        "def main():\n", "def main():\n    if os.fork() == 0:\n        os.setsid()\n"
+        '        null = os.open(os.devnull, os.O_RDWR)\n        for fd in (0, 1, 2):\n            os.dup2(null, fd)\n'
+        "        time.sleep(30)\n        here = os.path.dirname(os.path.abspath(__file__))\n"
+        '        open(os.path.join(here, "LATE-{}".format(os.getpid())), "w").close()\n        os._exit(0)\n')
+     + "    sys.exit(main())\n", "left a process running"),
+    ("nondumpable.py", "import ctypes\nimport os\nimport sys\nimport time\n\n\n" + _RUNTIME_EXIT_TAIL.replace(
+        "def main():\n", "def main():\n    if os.fork() == 0:\n        os.setsid()\n"
+        "        ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)\n"
+        "        null = os.open(os.devnull, os.O_RDWR)\n        for fd in (0, 1, 2):\n"
+        "            os.dup2(null, fd)\n"
+        "        time.sleep(30)\n        here = os.path.dirname(os.path.abspath(__file__))\n"
+        "        open(os.path.join(here, \"LATE-nondumpable\"), \"w\").close()\n        os._exit(0)\n")
+     + "    sys.exit(main())\n", "left a process running"),
+    ("hopper.py", "import os\nimport sys\nimport time\n\n\n" + _RUNTIME_EXIT_TAIL.replace(
+        "def main():\n", "def main():\n    if os.fork() == 0:\n        os.setsid()\n"
+        "        null = os.open(os.devnull, os.O_RDWR)\n        for fd in (0, 1, 2):\n"
+        "            os.dup2(null, fd)\n"
+        "        end = time.monotonic() + 0.5\n        while time.monotonic() < end:\n"
+        "            if os.fork() != 0:\n                os._exit(0)\n"
+        "        time.sleep(30)\n        here = os.path.dirname(os.path.abspath(__file__))\n"
+        "        open(os.path.join(here, \"LATE-hopper\"), \"w\").close()\n        os._exit(0)\n")
+     + "    sys.exit(main())\n", "left a process running"),
+    ("inode_swap.py", "import os\nimport sys\n\n"
+     "here = os.path.dirname(os.path.abspath(__file__))\ntarget = os.path.join(here, \"pin.txt\")\n"
+     "dir_st = os.stat(here)\nst = os.stat(target)\n"
+     "with open(target, \"rb\") as handle:\n    data = handle.read()\n"
+     "outside = os.path.join(os.path.dirname(here), \"outside-{}.bin\".format(os.getpid()))\n"
+     "with open(outside, \"wb\") as handle:\n    handle.write(data)\n"
+     "os.chmod(outside, st.st_mode & 0o7777)\nos.utime(outside, ns=(st.st_atime_ns, st.st_mtime_ns))\n"
+     "hop = target + \".{}\".format(os.getpid())\nos.link(outside, hop)\nos.rename(hop, target)\n"
+     "os.utime(here, ns=(dir_st.st_atime_ns, dir_st.st_mtime_ns))\n"
+     "if __name__ == \"__main__\":\n" + _RUNTIME_USAGE,
+     "inode_swap.py ['--self-test', 'extra']: changed"),
+    ("gitnest.py", "import os\nimport sys\n\n"
+     "here = os.path.dirname(os.path.abspath(__file__))\nsub = os.path.join(here, \"sub\")\n"
+     "nest = os.path.join(sub, \".git\")\nsub_st = os.stat(sub)\nnest_st = os.stat(nest)\n"
+     "with open(os.path.join(nest, \"config\"), \"w\") as handle:\n"
+     "    handle.write(os.urandom(8).hex())\n"
+     "os.utime(nest, ns=(nest_st.st_atime_ns, nest_st.st_mtime_ns))\n"
+     "os.utime(sub, ns=(sub_st.st_atime_ns, sub_st.st_mtime_ns))\n"
+     "if __name__ == \"__main__\":\n" + _RUNTIME_USAGE,
+     "gitnest.py ['--self-test', 'extra']: changed"),
+    ("literal_form.py", "import sys\n\n\n" + _RUNTIME_EXIT_TAIL
+     + '    if sys.argv[1:2] == ["--self-test"] and sys.argv[2:] == ["--vectors-only"]:\n        sys.exit(cases())\n'
+     "    sys.exit(main())\n", "literal_form.py ['--self-test', '--vectors-only']: neither refused nor idle"),
+    ("locked.py", "import os\nimport sys\n\n\n" + _RUNTIME_EXIT_TAIL.replace(
+        "def main():\n", "def main():\n    here = os.path.dirname(os.path.abspath(__file__))\n"
+        '    with open(os.path.join(here, "locked", "payload"), "w") as handle:\n'
+        '        handle.write("AFTER!")\n') + "    sys.exit(main())\n", None),
+)
+
+
+def _runtime_supervisor_signal_audit(source):
+    """A TRIPWIRE over the supervisor source for ORDINARY signalling spellings, not a proof of
+    absence (QA7 codex 3 / claude m1 + codex 2; QA8 codex minor / claude m2). Returns (signals,
+    unbounded_wait): the sorted names of every DIRECT call spelled as os.kill, os.killpg or
+    signal.pthread_kill, through any `import os as x` module alias, or as a bare name from
+    `from os import kill`/`killpg` or `from signal import pthread_kill`; and True when a .wait()
+    call carries neither argument nor keyword. It reads the parse tree (a textual scan missed an
+    aliased import), and it does NOT see dynamic or indirect spellings: getattr(os, "kill"),
+    os.__dict__["kill"], an assignment alias (k = os.kill; k(...)), functools.partial(os.kill),
+    ctypes/libc.kill, posix.kill, __import__("os").kill, `from os import *`, a subprocess or
+    os.system kill(1), an unproven pidfd_send_signal, or a wait made unbounded by an explicit
+    None (wait(None), wait(timeout=None), a bare communicate(), os.waitpid(pid, 0)). The
+    behavioural checks are the safeguard: the waitid(P_PIDFD, ..., WNOWAIT) ownership proof
+    pinned by _self_test_runtime_supervisor_unit's proof-removed mutant run, and
+    _kill_proved_child's forged-pid refusal."""
+    import ast
+    tree = ast.parse(source)
+    os_mods = set()
+    signal_mods = set()
+    bare = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "os":
+                    os_mods.add(alias.asname or "os")
+                elif alias.name == "signal":
+                    signal_mods.add(alias.asname or "signal")
+        elif isinstance(node, ast.ImportFrom) and node.module == "os":
+            for alias in node.names:
+                if alias.name in ("kill", "killpg"):
+                    bare.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module == "signal":
+            for alias in node.names:
+                if alias.name == "pthread_kill":
+                    bare.add(alias.asname or alias.name)
+    signals = []
+    unbounded_wait = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            base = func.value
+            if isinstance(base, ast.Name):
+                if base.id in os_mods and func.attr in ("kill", "killpg"):
+                    signals.append("{}.{}".format(base.id, func.attr))
+                elif base.id in signal_mods and func.attr == "pthread_kill":
+                    signals.append("{}.{}".format(base.id, func.attr))
+            if func.attr == "wait" and not node.args and not node.keywords:
+                unbounded_wait = True
+        elif isinstance(func, ast.Name) and func.id in bare:
+            signals.append(func.id)
+    return sorted(set(signals)), unbounded_wait
+
+
+def _self_test_runtime_supervisor_unit(tmp):
+    """Unit checks over _RUNTIME_SUPERVISOR, loaded as a module from a file private to this check (the
+    probe itself passes the source inline with `-c`, so no supervisor file exists at probe time). Pins:
+    the source holds no numeric kill (every census signal goes through a pidfd) and resets SIGCHLD to
+    SIG_DFL first thing; the census skips a vanished pid but raises on an unreadable or malformed
+    /proc/<pid>/stat record, so an untrustworthy census can never read as clean; and the reap loop
+    drains a real child within its bound through pidfd signalling with every wait a WNOHANG poll, never
+    a blocking waitpid a traced child could stall. The waitid(P_PIDFD, ..., WNOWAIT) ownership proof is
+    load-bearing: a proof-removed mutant signals a modelled non-child where the committed source sends
+    nothing. _kill_proved_child -- the one route for any self-test signal on a pid from a file or an
+    earlier /proc read -- must refuse a FORGED live non-child pid (no signal recorded) and own this
+    process's own forked child, and an AST pin keeps this check's cleanup and the helper free of
+    numeric kills, so restoring the QA7 reaped-child `os.kill` turns this red (QA8). Returns the list
+    of faults."""
+    import importlib.util
+    import signal
+    import time
+    import types
+    faults = []
+    signals, unbounded_wait = _runtime_supervisor_signal_audit(_RUNTIME_SUPERVISOR)
+    if signals:
+        faults.append("the supervisor source can signal a process by pid ({}); every census signal must "
+                      "go through a pidfd it has just proved owns one of its own children".format(
+                          ", ".join(signals)))
+    if unbounded_wait:
+        faults.append("the supervisor waits on the module without a timeout, so a traced or wedged module "
+                      "could stall the run past its deadline")
+    if "signal.signal(signal.SIGCHLD, signal.SIG_DFL)" not in _RUNTIME_SUPERVISOR:
+        faults.append("the supervisor does not reset SIGCHLD to SIG_DFL, so an inherited SIG_IGN would "
+                      "auto-reap its children")
+    base = Path(tmp, "supervisor-unit")
+    os.makedirs(str(base))
+    source = base / "_runtime_supervisor_unit.py"
+    source.write_text(_RUNTIME_SUPERVISOR, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("_runtime_supervisor_unit", str(source))
+    sup = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sup)
+    real_os = sup.os
+
+    def shadow(**overrides):
+        copied = {name: getattr(real_os, name) for name in dir(real_os) if not name.startswith("_")}
+        copied.update(overrides)
+        return types.SimpleNamespace(**copied)
+
+    def shadow_for(base_os, **overrides):
+        copied = {name: getattr(base_os, name) for name in dir(base_os) if not name.startswith("_")}
+        copied.update(overrides)
+        return types.SimpleNamespace(**copied)
+
+    records = {}
+
+    def census_listdir(target):
+        if target == "/proc":
+            return sorted(records)
+        raise OSError("the unit census has no task listing")
+
+    class _Payload:
+        def __init__(self, data):
+            self.data = data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self):
+            return self.data
+
+    def census_open(target, _mode="r"):
+        data = records[target.split("/")[2]]
+        if isinstance(data, Exception):
+            raise data
+        return _Payload(data)
+
+    me = str(os.getpid()).encode("ascii")
+    sup.os = shadow(listdir=census_listdir)
+    sup.open = census_open
+    try:
+        records["4242"] = ProcessLookupError("vanished")
+        try:
+            if sup._children() != set():
+                faults.append("the census did not skip a vanished pid")
+        except OSError:
+            faults.append("a vanished pid made the census raise instead of being skipped")
+        records["4242"] = b"4242 (comm) S " + me + b" 0 0"
+        try:
+            if sup._children() != {4242}:
+                faults.append("the census did not list a live child of this process")
+        except OSError:
+            faults.append("a well-formed child record made the census raise")
+        for label, data in (("an unreadable", PermissionError("denied")),
+                            ("a malformed", b"no stat fields here")):
+            records["4242"] = data
+            try:
+                sup._children()
+                faults.append("{} /proc stat record gave a clean census instead of raising, so a run "
+                              "with unavailable ownership evidence could read as clean".format(label))
+            except OSError:
+                pass
+    finally:
+        sup.os = real_os
+        del sup.open
+
+    remaining = set()
+    waits = []
+
+    def unit_census():
+        return set(remaining)
+
+    def unit_waitpid(pid, flags):
+        waits.append(flags)
+        done = real_os.waitpid(pid, flags)
+        if done[0] == pid:
+            remaining.discard(pid)
+        return done
+
+    child = os.fork()
+    if child == 0:
+        time.sleep(60)
+        os._exit(1)
+    remaining.add(child)
+    try:
+        child_fd = os.pidfd_open(child, 0)
+    except OSError:
+        child_fd = None
+    real_children = sup._children
+    report = {"survivors": [], "drained": True}
+    begin = time.monotonic()
+    try:
+        sup._children = unit_census
+        sup.os = shadow(waitpid=unit_waitpid)
+        sup._reap(report, _RUNTIME_REAP_SECONDS, _RUNTIME_REAP_ROUNDS)
+    finally:
+        sup.os = real_os
+        sup._children = real_children
+        # Clean up the forked child WITHOUT a numeric kill: _reap may already have
+        # reaped it, so signalling its pid could hit an unrelated reused process in a
+        # shared-uid pool (QA7 blocker, lab_infra rule). _kill_proved_child signals
+        # and reaps only through a pidfd that a waitid(WNOWAIT) still proves is our
+        # own un-reaped child; ECHILD (already reaped) or any waitid error means
+        # nothing is signalled. The numeric-kill AST pin below keeps this cleanup red
+        # if the pre-fix `os.kill(child, signal.SIGKILL)` ever returns (QA8 claude m3).
+        if child_fd is not None:
+            try:
+                _kill_proved_child(child, pidfd=child_fd)
+            finally:
+                os.close(child_fd)
+    took = time.monotonic() - begin
+    if remaining or not report["drained"] or "pid {}".format(child) not in report["survivors"]:
+        faults.append("the reap unit did not drain and report a real child (survivors {}, drained {})"
+                      .format(report["survivors"], report["drained"]))
+    if not waits or any(not flags & os.WNOHANG for flags in waits):
+        faults.append("the reap waited without WNOHANG, so a traced child, whose exit only its tracer "
+                      "can collect, would block the supervisor past its bound")
+    if took > _RUNTIME_REAP_SECONDS + 2:
+        faults.append("the reap unit overran its bound ({:.1f} s)".format(took))
+
+    # QA7 codex 3 / claude m1: the waitid(WNOWAIT) ownership proof is load-bearing.
+    # Model a census naming a pid that is NOT our un-reaped child (a forked child
+    # already reaped, so its pidfd answers ECHILD): the committed supervisor must
+    # send it NO signal, and a mutant with the proof removed must try to signal it,
+    # so deleting the proof turns this check red. No real signal is ever delivered:
+    # pidfd_send_signal is shadowed by a recorder in both runs.
+    gone = os.fork()
+    if gone == 0:
+        os._exit(0)
+    try:
+        gone_fd = os.pidfd_open(gone, 0)
+    except OSError:
+        gone_fd = None
+    try:
+        os.waitpid(gone, 0)  # reap it: the pidfd now answers ECHILD, never an un-reaped child
+    except OSError:
+        pass
+    if gone_fd is None:
+        faults.append("could not model a non-child pid for the ownership-proof check")
+    else:
+        sent = []
+
+        def recording_signal(fd, sig):
+            sent.append(sig)
+
+        def fake_census():
+            return {gone}
+
+        def run_reap(module):
+            del sent[:]
+            saved_os = module.os
+            saved_signal = module.signal
+            saved_children = module._children
+            module._children = fake_census
+            module.os = shadow_for(saved_os, pidfd_open=lambda pid, flags=0: os.dup(gone_fd))
+            module.signal = shadow_for(saved_signal, pidfd_send_signal=recording_signal)
+            try:
+                module._reap({"survivors": [], "drained": True}, 0.2, 3)
+            finally:
+                module.os = saved_os
+                module.signal = saved_signal
+                module._children = saved_children
+            return list(sent)
+
+        if run_reap(sup):
+            faults.append("the committed supervisor signalled a pid it could not prove is its own "
+                          "un-reaped child")
+        proof = ("                try:\n"
+                 "                    os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG | os.WNOWAIT)\n"
+                 "                except OSError:\n"
+                 "                    continue\n")
+        if proof not in _RUNTIME_SUPERVISOR:
+            faults.append("the supervisor waitid ownership proof was not found in its expected form, so "
+                          "the ownership-proof mutant check is vacuous")
+        else:
+            mutant_file = base / "_runtime_supervisor_proofless.py"
+            mutant_file.write_text(_RUNTIME_SUPERVISOR.replace(proof, "", 1), encoding="utf-8")
+            mspec = importlib.util.spec_from_file_location(
+                "_runtime_supervisor_proofless", str(mutant_file))
+            mutant = importlib.util.module_from_spec(mspec)
+            mspec.loader.exec_module(mutant)
+            if not run_reap(mutant):
+                faults.append("removing the waitid ownership proof did not change whether a non-child is "
+                              "signalled, so the proof is not pinned by this check")
+        os.close(gone_fd)
+
+    # QA8 codex blocker (class check): _kill_proved_child is the single route for a
+    # self-test signal whose target pid came from a file or an earlier /proc read.
+    # Feed it a FORGED pid -- a live process that is NOT this process's child (its
+    # own parent) -- and require NO signal: the waitid(P_PIDFD, ..., WNOWAIT) proof
+    # answers ECHILD and the helper refuses. The recorder captures any signal a
+    # proof-less mutant would send; nothing real is ever delivered.
+    forged_sent = []
+    real_send = signal.pidfd_send_signal
+    signal.pidfd_send_signal = lambda fd, sig: forged_sent.append(sig)
+    try:
+        forged_signalled = _kill_proved_child(os.getppid())
+    finally:
+        signal.pidfd_send_signal = real_send
+    if forged_sent or forged_signalled:
+        faults.append("the ownership helper signalled a live pid it could not prove is this "
+                      "process's own child (sent {})".format(forged_sent))
+    probe_kid = os.fork()
+    if probe_kid == 0:
+        time.sleep(60)
+        os._exit(1)
+    if not _kill_proved_child(probe_kid):
+        faults.append("the ownership helper refused this process's own live un-reaped child")
+        try:
+            kid_fd = os.pidfd_open(probe_kid, 0)
+            signal.pidfd_send_signal(kid_fd, signal.SIGKILL)
+            os.close(kid_fd)
+            os.waitpid(probe_kid, 0)
+        except OSError:
+            pass
+
+    # QA8 claude m3: regression pin for the QA7 blocker, widened by QA9
+    # claude F1 and by QA10 (D-385-PIDFD-HANDOFF). Parse this host file and
+    # require, across the shared helper, this check, and EVERY _watchdog_*
+    # fixture driver (nested fixture helpers included), that a numeric
+    # signal call targets only os.getpid(), the un-reaped launcher
+    # guardian's `child.pid`, or a name whose NEAREST PRECEDING binding in
+    # the same scope is `os.fork()` (plain or annotated assignment) and that
+    # has NOT since been passed to os.waitpid/wait4/waitid (a waited child
+    # may be reaped, so its number is no longer pinned), and that a bare
+    # os.pidfd_open pins only such a target: every other pid -- one read
+    # from a fixture file included -- must route through _kill_proved_child
+    # or arrive as a descriptor from its forking parent
+    # (_pidfd_handoff_recv). Aliased spellings that would dodge the name
+    # match -- getattr(os, "kill"), k = os.kill, po = os.pidfd_open -- are
+    # refused, except an alias bound in a scope that patch.object-replaces
+    # that same attribute (the standard forward-to-the-real-one patch shim).
+    # Inside this check and the helper themselves the rule stays TOTAL (the
+    # QA7 reaped-child class: even a fork-bound name can be stale here), so
+    # restoring the pre-fix `os.kill(child, signal.SIGKILL)` turns this red
+    # -- as does reverting any QA9 rerouted cleanup kill or any QA10 handoff
+    # receive to a bare open. Like _runtime_supervisor_signal_audit, a
+    # tripwire over ordinary spellings, NOT a proof: it does not see a
+    # rebind through `nonlocal`, a loop-carried rebind, `except ... as`, a
+    # closure capturing a name its owner scope later rebinds, a dynamic
+    # getattr with a computed name, os.__dict__ lookups, or
+    # functools.partial; the forged-pid runs and the handoff legs are the
+    # behavioural safeguard.
+    import ast
+    host_tree = ast.parse(Path(__file__).read_bytes())
+
+    def scan_scope(scope, owner, total):
+        aliasable = ("kill", "killpg", "pthread_kill", "pidfd_open")
+        bindings, calls, nested, aliases = {}, [], [], []
+        arguments = scope.args
+        for argument in (tuple(getattr(arguments, "posonlyargs", ()))
+                         + tuple(arguments.args) + tuple(arguments.kwonlyargs)
+                         + tuple(filter(None, (arguments.vararg, arguments.kwarg)))):
+            bindings.setdefault(argument.arg, []).append((scope.lineno, "other"))
+
+        def bind(target, lineno, kind):
+            if isinstance(target, ast.Name):
+                bindings.setdefault(target.id, []).append((lineno, kind))
+            elif isinstance(target, (ast.Tuple, ast.List)):
+                for element in target.elts:
+                    bind(element, lineno, "other")
+            elif isinstance(target, ast.Starred):
+                bind(target.value, lineno, "other")
+
+        def collect(node):
+            for item in ast.iter_child_nodes(node):
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    nested.append(item)
+                    bindings.setdefault(item.name, []).append((item.lineno, "other"))
+                    continue
+                if isinstance(item, ast.Assign):
+                    kind = "fork" if (
+                        isinstance(item.value, ast.Call)
+                        and isinstance(item.value.func, ast.Attribute)
+                        and item.value.func.attr == "fork"
+                        and len(item.targets) == 1
+                        and isinstance(item.targets[0], ast.Name)) else "other"
+                    if isinstance(item.value, ast.Attribute) \
+                            and item.value.attr in aliasable:
+                        aliases.append((item.value.attr, item.lineno))
+                    for target in item.targets:
+                        bind(target, item.lineno, kind)
+                elif isinstance(item, ast.AnnAssign):
+                    # `p: int = os.fork()` binds ownership exactly like the
+                    # plain assignment (QA10 codex minor).
+                    kind = "fork" if (
+                        item.value is not None
+                        and isinstance(item.value, ast.Call)
+                        and isinstance(item.value.func, ast.Attribute)
+                        and item.value.func.attr == "fork") else "other"
+                    if isinstance(item.value, ast.Attribute) \
+                            and item.value.attr in aliasable:
+                        aliases.append((item.value.attr, item.lineno))
+                    bind(item.target, item.lineno, kind)
+                elif isinstance(item, (ast.AugAssign, ast.NamedExpr)):
+                    bind(item.target, item.lineno, "other")
+                elif isinstance(item, ast.For):
+                    bind(item.target, item.lineno, "other")
+                elif isinstance(item, ast.withitem) and item.optional_vars is not None:
+                    bind(item.optional_vars, item.context_expr.lineno, "other")
+                if isinstance(item, ast.Call):
+                    calls.append(item)
+                collect(item)
+
+        collect(scope)
+
+        patched = set()
+        for call in calls:
+            func = call.func
+            named = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if named in ("waitpid", "wait4", "waitid"):
+                index = 1 if named == "waitid" else 0
+                if len(call.args) > index and isinstance(call.args[index], ast.Name):
+                    # A waited name may already be reaped: its number is no
+                    # longer pinned by the fork, so later kills in this scope
+                    # lose the fork-bound licence (QA10 codex minor).
+                    bindings.setdefault(call.args[index].id, []).append(
+                        (call.lineno, "waited"))
+            elif named == "object" and isinstance(func, ast.Attribute) \
+                    and isinstance(func.value, ast.Name) \
+                    and func.value.id == "patch" and len(call.args) > 1 \
+                    and isinstance(call.args[1], ast.Constant):
+                patched.add(call.args[1].value)
+        for attr, lineno in aliases:
+            if attr not in patched:
+                faults.append("{} binds an alias of {} (line {}); aliased signal/pidfd "
+                              "spellings outside a patch-forwarding shim dodge this "
+                              "tripwire and are refused (QA10 claude m3)".format(
+                                  owner, attr, lineno))
+
+        def fork_bound(name, lineno):
+            prior = [entry for entry in bindings.get(name, ()) if entry[0] < lineno]
+            return bool(prior) and max(prior)[1] == "fork"
+
+        def allowed(argument, lineno):
+            if isinstance(argument, ast.Call) and isinstance(argument.func, ast.Attribute) \
+                    and argument.func.attr == "getpid":
+                return True
+            if isinstance(argument, ast.Attribute) and argument.attr == "pid" \
+                    and isinstance(argument.value, ast.Name) and argument.value.id == "child":
+                return True
+            if isinstance(argument, ast.Name):
+                return fork_bound(argument.id, lineno)
+            return False
+
+        for call in calls:
+            func = call.func
+            named = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if isinstance(func, ast.Name) and func.id == "getattr" \
+                    and len(call.args) > 1 \
+                    and isinstance(call.args[1], ast.Constant) \
+                    and call.args[1].value in aliasable:
+                faults.append("{} fetches {} through getattr (line {}); dynamic "
+                              "signal/pidfd spellings dodge this tripwire and are "
+                              "refused (QA10 claude m3)".format(
+                                  owner, call.args[1].value, call.lineno))
+            if named in ("kill", "killpg", "pthread_kill"):
+                if total:
+                    faults.append("{} holds a numeric signal call ({}, line {}); the QA7 "
+                                  "reaped-child kill blocker is back".format(
+                                      owner, named, call.lineno))
+                elif not (call.args and allowed(call.args[0], call.lineno)):
+                    faults.append("{} holds a numeric signal call ({}, line {}) on a target "
+                                  "it cannot prove is its own; route it through "
+                                  "_kill_proved_child or a proved pidfd (QA9 claude F1)"
+                                  .format(owner, named, call.lineno))
+            elif named == "pidfd_open" and not total \
+                    and not (call.args and allowed(call.args[0], call.lineno)):
+                faults.append("{} opens an unproved pidfd (line {}) on a pid liveness alone "
+                              "cannot authenticate; take the descriptor from the forking "
+                              "parent instead (_pidfd_handoff_recv, D-385-PIDFD-HANDOFF; "
+                              "QA9 codex blocker 1)".format(owner, call.lineno))
+        for inner in nested:
+            scan_scope(inner, owner, total)
+
+    for node in host_tree.body:
+        if isinstance(node, ast.FunctionDef) and (
+                node.name in ("_self_test_runtime_supervisor_unit", "_kill_proved_child")
+                or node.name.startswith("_watchdog_")):
+            scan_scope(node, node.name, node.name in (
+                "_self_test_runtime_supervisor_unit", "_kill_proved_child"))
+    return faults
+
+
+def _self_test_runtime_report_channel(tmp):
+    """QA7 claude M1: the supervisor returns its report over a socketpair, a channel /proc/<pid>/fd
+    cannot reopen, never over its stdout. Spawn one real supervisor over a socketpair with the module
+    gated open, try BOTH forge routes a concurrent same-uid run would use -- reopen the supervisor's
+    inherited report write-end through /proc/<sup>/fd/<n>, and reopen this reader's own read-end through
+    /proc/self/fd/<n> -- and require both to fail; then require the genuine report to arrive as exactly
+    one JSON line with nothing on the supervisor's stdout. A pipe (the former channel) would let
+    /proc/<pid>/fd reopen it, so reverting the channel to a pipe turns this red. QA8 adds: the
+    PROBE's own channel is pinned too (a Popen recorder requires every fd the real probe hands a
+    supervisor through pass_fds to be a socket at spawn time, claude m1); while the gated module is
+    live, the supervisor's fd table must be unlistable by this same-uid process (non-dumpable,
+    PR_SET_DUMPABLE 0, so pidfd_getfd is refused even at Yama ptrace_scope 0; skipped for root,
+    whom /proc never refuses, claude m4); and the module's stdout and stderr must be SOCKETS whose
+    /proc entries cannot be reopened (claude M1) -- a mutant restoring pipes for either channel
+    turns this red. Returns the faults."""
+    import json
+    import socket
+    import subprocess
+    import time
+    faults = []
+
+    # QA8 claude m1: pin the PROBE's own report channel, not just this check's.
+    pin_dir = Path(tmp, "chanpin", "opf", "tools")
+    os.makedirs(str(pin_dir))
+    os.makedirs(str(Path(tmp, "chanpin", "boxes")))
+    (pin_dir / "idle.py").write_text("import sys\n\nVALUE = len(sys.argv)\n", encoding="utf-8")
+    handed = []
+    real_popen = subprocess.Popen
+
+    def recording_popen(*args, **kwargs):
+        argv = args[0] if args else kwargs.get("args")
+        if argv and _RUNTIME_SUPERVISOR in argv:
+            for each in kwargs.get("pass_fds", ()):
+                handed.append(stat.S_ISSOCK(os.fstat(each).st_mode))
+        return real_popen(*args, **kwargs)
+
+    subprocess.Popen = recording_popen
+    try:
+        pinned = _self_test_runtime_probe(pin_dir, str(Path(tmp, "chanpin", "boxes")),
+                                          table={"idle.py": _DISPATCH_LIBRARY},
+                                          tree=pin_dir, timeout=10, names={"idle.py"})
+    finally:
+        subprocess.Popen = real_popen
+    faults += ["the channel-pin probe named {}".format(miss) for miss in pinned]
+    if not handed:
+        faults.append("the channel-pin probe launched no supervisor with a passed report fd")
+    elif not all(handed):
+        faults.append("the probe handed its supervisor a non-socket report channel: a pipe "
+                      "end could be reopened through /proc/<pid>/fd and drained or forged")
+    directory = Path(tmp, "chan", "opf", "tools")
+    os.makedirs(str(directory))
+    gate = Path(tmp, "chan", "gate")
+    module = directory / "gated.py"
+    module.write_text(
+        "import os\nimport time\n\n"
+        "gate = {!r}\n".format(str(gate))
+        + "bound = time.monotonic() + 30\n"
+        "while not os.path.exists(gate):\n"
+        "    if time.monotonic() >= bound:\n        break\n    time.sleep(0.005)\n",
+        encoding="utf-8")
+    report_r, report_w = socket.socketpair()
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-I", "-B", "-c", _RUNTIME_SUPERVISOR,
+             str(report_w.fileno()), "20", str(_RUNTIME_SETTLE),
+             str(_RUNTIME_REAP_SECONDS), str(_RUNTIME_REAP_ROUNDS),
+             sys.executable, "-I", "-B", str(module)],
+            cwd=str(directory),
+            env=dict(PATH=os.defpath, HOME=str(directory), TMPDIR=str(directory),
+                     LC_ALL="C.UTF-8", **{_RUNTIME_MARKER: "chan"}),
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True, pass_fds=(report_w.fileno(),))
+    except (OSError, subprocess.SubprocessError) as exc:
+        report_r.close()
+        report_w.close()
+        return ["the report-channel supervisor failed to start ({})".format(type(exc).__name__)]
+    write_fd = report_w.fileno()
+    read_fd = report_r.fileno()
+    report_w.close()
+    raw = b""
+
+    def reopens(path, flags):
+        """Whether the /proc fd entry `path` reopens; a reopened descriptor is closed once, here, and a
+        failing close propagates rather than passing for a refused reopen."""
+        try:
+            opened = os.open(path, flags)
+        except OSError:
+            return False
+        os.close(opened)
+        return True
+
+    try:
+        # QA8 claude M1 pin + m4: find the gated module (it waits on the gate for up
+        # to 30 s), then require (a) the supervisor's fd table to be unlistable by
+        # this same-uid process (non-dumpable; root reads /proc regardless and skips
+        # that leg) and (b) the module's stdout and stderr to be SOCKETS that /proc
+        # cannot reopen. A mutant handing the module pipes turns (b) red: the
+        # readlink names a pipe and the reopen succeeds.
+        module_pid = None
+        bound = time.monotonic() + 25
+        wanted = str(module).encode("utf-8")
+        while module_pid is None and time.monotonic() < bound:
+            for entry in os.listdir("/proc"):
+                if not entry.isdigit() or int(entry) == proc.pid:
+                    continue
+                try:
+                    argv_raw = Path("/proc", entry, "cmdline").read_bytes()
+                except OSError:
+                    continue
+                if wanted in argv_raw:
+                    module_pid = int(entry)
+                    break
+            if module_pid is None:
+                time.sleep(0.01)
+        if module_pid is None:
+            faults.append("the gated module never appeared for the channel checks")
+        else:
+            if hasattr(os, "geteuid") and os.geteuid() != 0:
+                try:
+                    os.listdir("/proc/{}/fd".format(proc.pid))
+                    faults.append("the supervisor's fd table is listable by a same-uid "
+                                  "process: it is not non-dumpable (PR_SET_DUMPABLE 0), so "
+                                  "pidfd_getfd could copy its channel ends at ptrace_scope 0")
+                except OSError:
+                    pass
+            for stream_fd in (1, 2):
+                fd_entry = "/proc/{}/fd/{}".format(module_pid, stream_fd)
+                try:
+                    target = os.readlink(fd_entry)
+                except OSError as exc:
+                    faults.append("the module's output fd {} could not be inspected ({})"
+                                  .format(stream_fd, type(exc).__name__))
+                    continue
+                if not target.startswith("socket:"):
+                    faults.append("the module's output fd {} is {}, not a socket: a same-uid "
+                                  "process could reopen it through /proc and drain a failing "
+                                  "module's output into a clean report".format(stream_fd, target))
+                if reopens(fd_entry, os.O_RDONLY):
+                    faults.append("the module's output fd {} could be reopened through /proc"
+                                  .format(stream_fd))
+        if reopens("/proc/{}/fd/{}".format(proc.pid, write_fd), os.O_WRONLY):
+            faults.append("the supervisor report write-end could be reopened through /proc/<pid>/fd, so "
+                          "a concurrent run could forge its report")
+        if reopens("/proc/self/fd/{}".format(read_fd), os.O_RDONLY):
+            faults.append("the report reader end could be reopened through /proc/<pid>/fd, so a "
+                          "concurrent run could drain or forge the report")
+        gate.write_text("go", encoding="ascii")
+        parts = []
+        while True:
+            chunk = report_r.recv(65536)
+            if not chunk:
+                break
+            parts.append(chunk)
+        raw = b"".join(parts)
+        try:
+            sup_out, sup_err = proc.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            return faults + ["the report-channel supervisor did not finish"]
+    finally:
+        report_r.close()
+    if sup_out:
+        faults.append("the report-channel supervisor wrote to stdout ({!r})".format(sup_out[:80]))
+    text = raw.decode("utf-8", "replace")
+    if text.count("\n") != 1 or not text.endswith("\n"):
+        faults.append("the report did not arrive as exactly one line ({} newlines, {} bytes)".format(
+            text.count("\n"), len(raw)))
+        return faults
+    try:
+        report = json.loads(text)
+    except ValueError as exc:
+        return faults + ["the report-channel report did not parse ({})".format(type(exc).__name__)]
+    if not (report.get("subreaper") and report.get("undumpable")
+            and report.get("enumerable") and report.get("pidfd")):
+        return faults  # a host without containment support is not a channel fault
+    if report.get("rc") != 0:
+        faults.append("the gated module did not exit 0 over the report channel (rc {})".format(
+            report.get("rc")))
+    return faults
+
+
+def _self_test_runtime_escape_probe(tmp):
+    """Run _self_test_runtime_probe over a synthetic tree in `tmp` holding _RUNTIME_FIXTURES: the reviewers'
+    reproductions the static checks miss (a variable-guarded main, a constructed flag, a differently named
+    suite, top-level vectors with no `__main__` block, `main` rebound through an alias of the module, and
+    each early-exit spelling: a helper calling sys.exit, `from sys import exit as leave`, builtins.exit, an
+    alias of sys, os.execv), a write into the fresh cwd, a write into the tree, a timeout, a rewrite that
+    restores the file's size and modification time, a detached (setsid) grandchild that writes into the tree
+    after the module exits, a non-dumpable setsid'd grandchild (PR_SET_DUMPABLE 0, its environ
+    unreadable), a fork-hopping grandchild (each parent exits at once), a hardlink swap over a tracked
+    file and a write into a pre-existing nested `.git` (each restoring the parent mtimes), and an
+    undeclared `--self-test --vectors-only` form spelled in the source. Each red
+    module must be named for its reason and the passing ones not at all. Unless this runs as root (to whom
+    chmod cannot deny a listing), the tree also holds a directory of mode 0111 that locked.py writes into: the
+    probe must name it as a path it cannot evaluate. An absent tree must be unreadable to _runtime_snapshot
+    too. TWO UNRELATED same-uid processes, started outside the probe's subtree with environments
+    carrying _RUNTIME_MARKER (one with a token no run ever uses, spanning the whole probe, and one,
+    started by the probe's spy just before the sleeps.py `--selftest` run's supervisor spawns, carrying
+    that live run's ACTUAL token for that run's whole 5 s window), must survive the whole run
+    unsignalled and unreported: no kill or report is chosen by an environment match, an exact-token
+    match, a name match or uid ownership. Direct _runtime_snapshot checks
+    then pin the new coverage: the top-level `.git` stays pruned, a nested `.git` is recorded, a
+    hardlink swap preserving bytes, mode, size and mtime is a change revealed ONLY by the inode
+    identity, and a plant into the nested `.git` with the parent mtimes restored changes nested-`.git`
+    paths alone (the former prune-everywhere snapshot recorded none of them, so it missed the plant).
+    A rerun over a failing module with the caller's SIGCHLD ignored must still name it (the supervisor
+    resets SIGCHLD to SIG_DFL first thing; an inherited SIG_IGN would auto-reap its children and read
+    the module as rc 0 on ECHILD), and _self_test_runtime_supervisor_unit pins the supervisor's census
+    and reap behaviour directly. Then the mutant: the same probe restricted
+    to the modules the static checks select (_self_test_entry_gap exposes, or _dispatch_targets is non-empty)
+    must name none of them, so the breadth of the probe, not the static selection, is what catches them. The
+    modules are files run as children; nothing is passed to exec or eval. Returns a list of the
+    discrepancies."""
+    import subprocess
+
+    import _optlevel
+    directory = Path(tmp, "tree", "opf", "tools")
+    os.makedirs(str(directory))
+    os.makedirs(str(Path(tmp, "boxes")))
+    selected = set()
+    for name, source, _want in _RUNTIME_FIXTURES:
+        (directory / name).write_text(source, encoding="utf-8")
+        tree = _optlevel.parse(source.encode("utf-8"), name)
+        if _self_test_entry_gap(tree)[0] or _dispatch_targets(tree):
+            selected.add(name)
+    (directory / "same.txt").write_text("0" * 16, encoding="utf-8")
+    (directory / "pin.txt").write_text("0" * 16, encoding="utf-8")
+    os.makedirs(str(directory / "sub" / ".git"))
+    os.makedirs(str(directory / "locked"))
+    (directory / "locked" / "payload").write_text("BEFORE", encoding="utf-8")
+    locks = hasattr(os, "geteuid") and os.geteuid() != 0   # chmod cannot hide a listing from root
+    table = {name: _DISPATCH_LIBRARY for name, _source, _want in _RUNTIME_FIXTURES}
+    decoy = subprocess.Popen([sys.executable, "-I", "-B", "-c", "import time; time.sleep(600)"],
+                             env=dict(PATH=os.defpath, **{_RUNTIME_MARKER: "run-decoy"}),
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+    token_decoy = {}
+
+    def spy(name, argv, token):
+        # Round-6 codex 3 / claude F5: a decoy whose marker carries the ACTUAL token of a live run,
+        # started just before that run's supervisor spawns. The sleeps.py `--selftest` run lasts its
+        # whole 5 s timeout, so the decoy is alive and execed for the whole window in which a restored
+        # exact-token environ kill would select it (the old killer's predicate never matched the fixed
+        # `run-decoy` token).
+        if name == "sleeps.py" and argv == ["--selftest"] and "proc" not in token_decoy:
+            token_decoy["proc"] = subprocess.Popen(
+                [sys.executable, "-I", "-B", "-c", "import time; time.sleep(600)"],
+                env=dict(PATH=os.defpath, **{_RUNTIME_MARKER: token}),
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    try:
+        found = _self_test_runtime_probe(directory, str(Path(tmp, "boxes")), table=table, timeout=5,
+                                         names={name for name, _source, _want in _RUNTIME_FIXTURES}
+                                         - {"locked.py"}, spy=spy)
+    finally:
+        signalled = decoy.poll()
+        decoy.kill()
+        decoy.wait()
+        tokened = token_decoy.get("proc")
+        token_signalled = tokened.poll() if tokened is not None else None
+        if tokened is not None:
+            tokened.kill()
+            tokened.wait()
+    faults = []
+    if signalled is not None:
+        faults.append("the unrelated same-uid marker-carrying process outside the probe subtree was "
+                      "signalled (rc {})".format(signalled))
+    if any("pid {}".format(decoy.pid) in miss for miss in found):
+        faults.append("the unrelated same-uid marker-carrying process outside the probe subtree was "
+                      "reported by the probe")
+    if tokened is None:
+        faults.append("the exact-token decoy never started: the spy saw no sleeps.py `--selftest` run")
+    else:
+        if token_signalled is not None:
+            faults.append("the unrelated same-uid process carrying the actual run token was signalled "
+                          "(rc {})".format(token_signalled))
+        if any("pid {}".format(tokened.pid) in miss for miss in found):
+            faults.append("the unrelated same-uid process carrying the actual run token was reported "
+                          "by the probe")
+    if locks:
+        (directory / "locked").chmod(0o111)
+        try:
+            blind = _self_test_runtime_probe(directory, str(Path(tmp, "boxes")), table=table, timeout=5,
+                                             names={"locked.py"})
+        finally:
+            (directory / "locked").chmod(0o755)
+        if not any(miss.startswith("cannot evaluate") and "locked" in miss for miss in blind):
+            faults.append("the unlistable directory locked/ was not named as a path the probe cannot evaluate "
+                          "({})".format("; ".join(blind) or "nothing"))
+    if not _runtime_snapshot(Path(tmp, "absent"))[1]:
+        faults.append("an absent tree was not reported unreadable by _runtime_snapshot")
+    for name, _source, want in _RUNTIME_FIXTURES:
+        mine = [miss for miss in found if miss.startswith(name + " ")]
+        if want is None and mine:
+            faults.append("passing runtime fixture {} named ({})".format(name, mine[0]))
+        elif want is not None and not any(want in miss for miss in mine):
+            faults.append("runtime fixture {} not caught for its reason ({!r}; got {})".format(
+                name, want, "; ".join(mine) or "nothing"))
+    if selected != {"clean_lib.py"}:
+        faults.append("the static selection of the runtime fixtures is {}, not clean_lib.py alone".format(
+            sorted(selected)))
+    restricted = _self_test_runtime_probe(directory, str(Path(tmp, "boxes")), table=table, names=selected,
+                                          timeout=5)
+    faults += ["the probe restricted to the static selection still names {}".format(miss) for miss in restricted]
+    # Round-6 codex blocker 1 / claude F2: a caller-inherited ignored SIGCHLD must not blind the probe.
+    # Popen does not restore SIGCHLD, so without the supervisor's own SIG_DFL reset the kernel would
+    # auto-reap its children and the failing module below would read as rc 0 on ECHILD, a clean pass.
+    import signal
+    chld = Path(tmp, "chld")
+    os.makedirs(str(chld))
+    (chld / "fails.py").write_text("import sys\n\nsys.exit(1)\n", encoding="utf-8")
+    previous = signal.getsignal(signal.SIGCHLD)
+    signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    try:
+        ignored = _self_test_runtime_probe(chld, str(Path(tmp, "boxes")),
+                                           table={"fails.py": _DISPATCH_LIBRARY}, tree=chld,
+                                           timeout=5, names={"fails.py"})
+    finally:
+        signal.signal(signal.SIGCHLD, previous)
+    if not any(miss.startswith("fails.py") and "rc 1" in miss for miss in ignored):
+        faults.append("with SIGCHLD ignored by the caller, a failing module was not named (got {})"
+                      .format("; ".join(ignored[:3]) or "nothing"))
+    faults += _self_test_runtime_supervisor_unit(tmp)
+    faults += _self_test_runtime_report_channel(tmp)
+    unit = Path(tmp, "snapunit")
+    os.makedirs(str(unit / "sub" / ".git"))
+    os.makedirs(str(unit / ".git"))
+    (unit / ".git" / "config").write_text("top-level, pruned", encoding="utf-8")
+    (unit / "sub" / "data.txt").write_text("same bytes", encoding="utf-8")
+    key, nest = os.path.join("sub", "data.txt"), os.path.join("sub", ".git")
+    first, unread = _runtime_snapshot(unit)
+    if unread:
+        faults.append("the snapshot unit tree was unreadable ({})".format("; ".join(unread)))
+    if any(path == ".git" or path.startswith(".git" + os.sep) for path in first):
+        faults.append("the top-level .git was not pruned from the snapshot")
+    if nest not in first:
+        faults.append("a nested .git directory was not recorded by the snapshot")
+    st = os.lstat(str(unit / "sub" / "data.txt"))
+    dir_st = os.lstat(str(unit / "sub"))
+    outside = Path(tmp, "outside.bin")
+    outside.write_bytes((unit / "sub" / "data.txt").read_bytes())
+    os.chmod(str(outside), st.st_mode & 0o7777)
+    os.utime(str(outside), ns=(st.st_atime_ns, st.st_mtime_ns))
+    os.link(str(outside), str(unit / "sub" / "data.lnk"))
+    os.rename(str(unit / "sub" / "data.lnk"), str(unit / "sub" / "data.txt"))
+    os.utime(str(unit / "sub"), ns=(dir_st.st_atime_ns, dir_st.st_mtime_ns))
+    second, unread = _runtime_snapshot(unit)
+    if unread or first.get(key) == second.get(key):
+        faults.append("a hardlink swap preserving bytes, mode, size and mtime was not a snapshot change")
+    elif first.get(key) and second.get(key) and (
+            tuple(first[key][index] for index in (0, 1, 2, 6))
+            != tuple(second[key][index] for index in (0, 1, 2, 6))):
+        faults.append("the hardlink swap was revealed by mode, size, mtime or content rather than by the"
+                      " inode identity alone, so the check does not pin the identity fields")
+    nest_st = os.lstat(str(unit / "sub" / ".git"))
+    (unit / "sub" / ".git" / "config").write_text("PLANTED", encoding="utf-8")
+    os.utime(str(unit / "sub" / ".git"), ns=(nest_st.st_atime_ns, nest_st.st_mtime_ns))
+    os.utime(str(unit / "sub"), ns=(dir_st.st_atime_ns, dir_st.st_mtime_ns))
+    third, unread = _runtime_snapshot(unit)
+    planted = sorted(path for path in set(second) | set(third) if second.get(path) != third.get(path))
+    if unread or not planted:
+        faults.append("a write into a nested .git with the parent mtimes restored was not a snapshot change")
+    elif [path for path in planted if path != nest and not path.startswith(nest + os.sep)]:
+        faults.append("the nested .git plant changed paths outside the nested .git ({}), so the top-level-"
+                      "only pruning is not what catches it".format(planted))
+    return faults
+
+
 def _aggregator_self_test():
     """Guard the aggregator's fail-closed return-vocabulary check (MAJOR 3). A helper returning a value
     OUTSIDE the {0,1,2} int vocabulary must fail the aggregate CLOSED (a non-zero worst), never be
@@ -936,6 +2987,14 @@ def _aggregator_self_test():
     gaps, exposers = _self_test_entry_gaps(here, required)
     with tempfile.TemporaryDirectory(prefix="opf-entry-scan-") as tmp:
         missed = _self_test_entry_probe(tmp) + _self_test_floor_probe(registry, here, tmp)
+    with tempfile.TemporaryDirectory(prefix="opf-entry-dispatch-") as tmp:
+        missed += _self_test_dispatch_probe(here, tmp)
+    with tempfile.TemporaryDirectory(prefix="opf-entry-escape-") as tmp:
+        missed += _self_test_dispatch_escape_probe(tmp)
+    with tempfile.TemporaryDirectory(prefix="opf-entry-runtime-") as tmp:
+        missed += _self_test_runtime_probe(here, tmp)
+    with tempfile.TemporaryDirectory(prefix="opf-entry-runtime-escape-") as tmp:
+        missed += _self_test_runtime_escape_probe(tmp)
     if gaps or faults or missed:
         print("opf aggregator self-test: FAIL (self_test modules without the canonical `--self-test` entry: {}; "
               "registry floor faults: {}; synthetic probe discrepancies: {})".format(
@@ -963,6 +3022,145 @@ def _aggregator_self_test():
           "{} self_test modules carries the canonical --self-test entry, {} of them required by the registry)".format(
               len(exposers), len(required)))
     return EXIT_OK
+
+
+def _kill_proved_child(pid, sig=None, pidfd=None):
+    """The ONE route for a self-test signal whose target pid came from a file, an earlier
+    /proc read, or any other record that liveness alone cannot authenticate (QA8 codex
+    blocker; lab_infra shared-uid rule): signal `pid` only through a pidfd whose target a
+    waitid(P_PIDFD, ..., WEXITED | WNOHANG | WNOWAIT) has JUST proved is this process's own
+    un-reaped child -- a directly forked one, or a fixture orphan reparented here while this
+    process held PR_SET_CHILD_SUBREAPER (_case_subreaper). ECHILD or any other pidfd or
+    waitid failure means NOTHING is signalled and False is returned, so a forged or recycled
+    pid can never redirect a self-test signal to an unrelated same-uid process. `sig`
+    defaults to SIGKILL; a SIGKILL target is then reaped through the SAME pidfd
+    (waitid(P_PIDFD, ..., WEXITED), race-free against pid reuse). A caller-supplied `pidfd`
+    stays owned (and closed) by the caller; otherwise the fd is opened and closed here.
+    Returns True only when the signal was sent."""
+    import signal as signal_module
+    if sig is None:
+        sig = signal_module.SIGKILL
+    if not (hasattr(os, "pidfd_open") and hasattr(os, "P_PIDFD") and hasattr(os, "WNOWAIT")
+            and hasattr(signal_module, "pidfd_send_signal")):
+        return False
+    fd, opened = pidfd, False
+    if fd is None:
+        try:
+            fd = os.pidfd_open(pid, 0)
+        except OSError:
+            return False
+        opened = True
+    try:
+        try:
+            os.waitid(os.P_PIDFD, fd, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except OSError:
+            return False
+        try:
+            signal_module.pidfd_send_signal(fd, sig)
+        except OSError:
+            return False
+        if sig == signal_module.SIGKILL:
+            try:
+                os.waitid(os.P_PIDFD, fd, os.WEXITED)
+            except OSError:
+                pass
+        return True
+    finally:
+        if opened:
+            os.close(fd)
+
+
+def _pidfd_handoff_send(conn, pid):
+    """Forking-parent side of the pidfd handoff (D-385-PIDFD-HANDOFF): call
+    IMMEDIATELY after os.fork() returned `pid`, before ANY wait on it. An
+    un-reaped child's pid cannot be reused, so the pidfd opened HERE is bound
+    to the true child, and SCM_RIGHTS preserves that binding across the
+    socketpair. The numeric pid rides along as DISCLOSURE (for /proc state
+    reads and messages); the receiver never signals the number. On a host
+    without pidfd support the payload is sent descriptor-less and the
+    receiver fails closed (returns False here, True when a descriptor was
+    sent)."""
+    import socket
+    payload = str(int(pid)).encode("ascii")
+    if not hasattr(os, "pidfd_open"):
+        conn.send(payload)
+        return False
+    fd = os.pidfd_open(int(pid), 0)
+    try:
+        socket.send_fds(conn, [payload], [fd])
+    finally:
+        os.close(fd)
+    return True
+
+
+def _pidfd_handoff_recv(conn, note):
+    """Receiving side of the pidfd handoff (D-385-PIDFD-HANDOFF, which
+    retires the /proc-ancestry walk _pidfd_proved_descendant: the walk
+    pinned only the TARGET, so an intermediate /proc hop could exit, be
+    reaped and have its number recycled beneath the anchor mid-walk,
+    splicing an unrelated target into an accepted chain -- QA10 codex
+    blocker / claude m1). The ONLY way a self-test accepts a signal target
+    it did not fork itself is a descriptor the target's FORKING PARENT
+    opened on its own direct child immediately after fork and passed here
+    with SCM_RIGHTS (socket.send_fds / socket.recv_fds). Returns
+    (pid, fd); the pid is disclosure only -- /proc state reads and
+    messages -- NEVER a signal target. The receiver OWNS `conn`: it is
+    closed exactly once, in a finally, on every path, refusals included.
+    Fails closed with AssertionError
+    naming `note`, every received descriptor closed and NOTHING signalled,
+    when: no message arrives within the bound; the sender closed without a
+    message; the message carries no descriptor (or more than one); the
+    payload is not a pid; or the descriptor's process has ALREADY EXITED
+    (the pidfd polls readable) -- a dead target takes no signal and the
+    refusal is loud, never swallowed."""
+    import select
+    import socket
+
+    def refuse(fds, reason):
+        for received in fds:
+            os.close(received)
+        raise AssertionError("pidfd handoff refused ({}): {}; nothing is "
+                             "signalled".format(note, reason))
+
+    try:
+        poller = select.poll()
+        poller.register(conn.fileno(), select.POLLIN)
+        if not poller.poll(30000):
+            refuse((), "no handoff message arrived within the bound")
+        message, fds, _flags, _addr = socket.recv_fds(conn, 64, 1)
+    finally:
+        conn.close()
+    if not message:
+        refuse(fds, "the forking parent closed without a handoff message")
+    if len(fds) != 1:
+        refuse(fds, "the forking parent passed {} descriptors, not exactly "
+                    "one".format(len(fds)))
+    try:
+        pid = int(message.decode("ascii"))
+    except (UnicodeDecodeError, ValueError):
+        refuse(fds, "the handoff payload is not a pid")
+    fd = fds[0]
+    poller = select.poll()
+    poller.register(fd, select.POLLIN)
+    if poller.poll(0):  # readable: the handed-off target has already exited
+        refuse([fd], "the handed-off target (pid {}) has already "
+                     "exited".format(pid))
+    return pid, fd
+
+
+def _case_subreaper():
+    """Make THIS process a child subreaper (PR_SET_CHILD_SUBREAPER, prctl option 36, Linux),
+    so a fixture orphan whose guardian has died reparents HERE and _kill_proved_child's
+    waitid proof can own it. Process-scoped by design: each caller is a dedicated fixture
+    process under _watchdog_regression_self_test. Returns True when the flag was set; on a
+    host without the flag the ownership proofs fail closed (nothing is signalled) and the
+    fixtures' own completion waits name the leftover loudly."""
+    import ctypes
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        return libc.prctl(36, 1, 0, 0, 0) == 0
+    except (OSError, AttributeError, ValueError):
+        return False
 
 
 def _watchdog_timer_case(label, mode):
@@ -1467,6 +3665,15 @@ def _watchdog_completion_case(mode):
     import _opf_emit as emit
     import _optlevel
 
+    # QA8 (codex blocker class): arm PR_SET_CHILD_SUBREAPER so a fixture orphan
+    # (its guardian dead and collected) reparents to THIS case process and
+    # _kill_proved_child's waitid proof can own every hygiene signal below whose
+    # target is not this process itself, a Popen-managed child, or a directly
+    # forked, still-held un-reaped child. The flag is process-scoped by design:
+    # each completion case runs in its own dedicated fixture process under
+    # _watchdog_regression_self_test.
+    _case_subreaper()
+
     command = [sys.executable, "-I", "-B", "-c", "return 0"]
 
     def launch(code="return 0", **kwargs):
@@ -1970,7 +4177,8 @@ def _watchdog_completion_case(mode):
                     children = Path("/proc", str(gpid), "task", str(gpid), "children")
                     subject = int(children.read_text(encoding="ascii").split()[0])
                     await_state(subject, {"Z"}, "subject did not finish after release")
-                    os.kill(gpid, signal.SIGCONT)
+                    assert _kill_proved_child(gpid, signal.SIGCONT), \
+                        "the resume refused: the published guardian pid is not our own child"
                     await_state(gpid, {"Z", None}, "guardian did not exit after resume")
                 finally:
                     gate.set()
@@ -2059,8 +4267,10 @@ def _watchdog_completion_case(mode):
         except ChildProcessError:
             leaked = False
         if leaked:
-            os.kill(leaked_pid, signal.SIGKILL)  # hygiene for the demonstrated leak
-            os.waitpid(leaked_pid, 0)
+            # Hygiene through the ownership proof alone: _kill_proved_child re-proves
+            # the un-reaped child through a pidfd before SIGKILL and reaps through it.
+            assert _kill_proved_child(leaked_pid), \
+                "the leaked fork child could not be proved and killed"
         assert leaked, "the inline flip did not reproduce the interruptible window"
         flip_child.close()
     elif mode == "launch-cancel":
@@ -2642,8 +4852,14 @@ def _watchdog_completion_case(mode):
 
             # Flip A: without the parent check (and with pdeathsig disarmed, which
             # a post-death arm cannot help anyway) the released orphan runs its
-            # callable: the QA18 codex F3 defect, reproduced.
-            with patch.object(emit, "_fixture_check_parent", lambda expected: None):
+            # callable: the QA18 codex F3 defect, reproduced. The ownership ack is
+            # disarmed too, as in subject-ack's flip: launch_held proves only that
+            # the receipt was SENT, so this leg's SIGKILL can land between the
+            # guardian's receipt send and its ack write, and a subject still gated
+            # on the ack would read EOF and refuse for a reason this flip does not
+            # test (the intermittent completion-subject-orphan failure).
+            with patch.object(emit, "_fixture_check_parent", lambda expected: None), \
+                    patch.object(emit, "_fixture_await_ack", lambda fd: None):
                 child, subject = launch_held(arm=False)
                 os.kill(child.pid, signal.SIGKILL)
                 await_state(child.pid, ("Z",), "the killed guardian did not exit")
@@ -2657,6 +4873,25 @@ def _watchdog_completion_case(mode):
                 assert failures, "the flip close was read as clean"
                 await_state(subject, (None, "Z"), "the flip cleanup did not complete")
 
+            # Leg A-iso (QA7 codex 4 vs claude): isolate the parent check. The
+            # positive Flip-A leg disarms the ack, so a removed _fixture_check_parent
+            # could otherwise hide behind the ack EOF on the kill-before-ack race
+            # (the guardian may die before writing the ack). Here the ack is disarmed
+            # but the REAL parent check stays, so an orphaned subject must refuse on
+            # the parent check ALONE: removing that check turns this leg red whatever
+            # the ack schedule, which the ack-enabled leg 1 cannot do deterministically.
+            with patch.object(emit, "_fixture_await_ack", lambda fd: None):
+                child, subject = launch_held()
+                os.kill(child.pid, signal.SIGKILL)
+                await_state(child.pid, ("Z",), "the killed guardian did not exit")
+                release.write_text("go", encoding="ascii")
+                await_state(subject, (None, "Z"), "the orphaned subject kept running")
+                assert not marker.exists(), \
+                    "an orphaned subject ran its callable with the ack disarmed and the parent check live"
+                failures = []
+                cancel(child, failures)
+                assert failures, "a SIGKILLed guardian was read as clean"
+
             # Flip B: without the close-side subject kill, a live subject survives
             # a guardian failure and close() names the surviving pid.
             child, subject = launch_held()
@@ -2668,7 +4903,9 @@ def _watchdog_completion_case(mode):
             assert failures and "could not confirm subject exit" in failures[0], failures
             assert state(subject) not in (None, "Z"), \
                 "flip: the subject died without its kill"
-            os.kill(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
+            # Hygiene through the ownership proof alone (QA8): the orphan reparented
+            # to this subreaper case process, so the proof owns it before any signal.
+            assert _kill_proved_child(subject), "the flip hygiene refused the orphaned subject"
             await_state(subject, (None, "Z"), "the flip hygiene did not complete")
     elif mode == "escalation-subject":
         import time
@@ -2728,11 +4965,26 @@ def _watchdog_completion_case(mode):
                         emit, "_fixture_pdeathsig", lambda: None))
                 child = emit._FixtureProcess(time.monotonic() + 3600, subject=subject_tree)
                 pid = child.start()
+                # Hold OUR OWN duplicate of the launcher's guardian pidfd
+                # for the whole exercise: the launcher opened child.pidfd on
+                # its own direct child immediately after the fork (the
+                # forking-parent descriptor, D-385-PIDFD-HANDOFF), close()
+                # runs in the worker thread below and can reap the guardian
+                # (and close the original descriptor) concurrently, so the
+                # freeze and the recovery SIGCONT both go through the
+                # ownership proof on this held duplicate, never a bare
+                # numeric pid a concurrent reap could free for reuse (QA9
+                # codex blocker 2 / claude F2).
+                assert child.pidfd is not None, \
+                    "the launcher holds no guardian pidfd"
+                held_fd = os.dup(child.pidfd)
+                stack.callback(os.close, held_fd)
                 subject = await_child(pid, "the guardian subject never appeared")
                 descendant = await_child(subject, "the subject descendant never appeared")
                 # A stopped guardian models a cleanup that cannot make progress: it
                 # can never exit, so an unbounded close() would block until resumed.
-                os.kill(pid, signal.SIGSTOP)
+                assert _kill_proved_child(pid, signal.SIGSTOP, pidfd=held_fd), \
+                    "the guardian freeze was refused"
                 bound = time.monotonic() + 30
                 while state(pid) != "T":
                     assert time.monotonic() < bound, "the guardian did not stop"
@@ -2785,7 +5037,10 @@ def _watchdog_completion_case(mode):
                     worker.join(20)
                     blocked = worker.is_alive()
                     if blocked:
-                        os.kill(pid, signal.SIGCONT)  # unwedge the leak before failing
+                        # Unwedge the leak before failing: proof-routed, since
+                        # the worker may reap the guardian between the sample
+                        # above and this signal (QA9 codex blocker 2).
+                        _kill_proved_child(pid, signal.SIGCONT, pidfd=held_fd)
                         worker.join(30)
                 elapsed = time.monotonic() - begun
                 assert not blocked, "close() blocked past its bounded cleanup budget"
@@ -2830,7 +5085,12 @@ def _watchdog_completion_case(mode):
         pid, guardian_fd, subject, descendant, sequence, failures = exercise(flip=True)
         assert state(subject) not in dead, "flip: the subject died without its kill step"
         assert "could not confirm subject exit" in failures[0], failures
-        os.killpg(subject, signal.SIGKILL)  # clean up the deliberately-leaked tree
+        # Clean up the deliberately-leaked tree member by member through the
+        # ownership proof (QA8): both orphans reparented to this subreaper case
+        # process; killing the proved subject reparents (and then proves) the
+        # descendant, never a numeric group kill.
+        assert _kill_proved_child(subject), "the flip cleanup refused the orphaned subject"
+        assert _kill_proved_child(descendant), "the flip cleanup refused the orphaned descendant"
         bound = time.monotonic() + 30
         while state(subject) not in dead or state(descendant) not in dead:
             assert time.monotonic() < bound, "the flip cleanup did not complete"
@@ -2927,7 +5187,12 @@ def _watchdog_completion_case(mode):
             subject, grandchild = exercise(flip=True)
             assert state(grandchild) not in (None, "Z"), \
                 "flip: the descendant died without the group kill"
-            os.killpg(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
+            # Hygiene through the ownership proof alone (QA8): the reaped subject may
+            # already be gone (the proof then refuses, which is fine); the surviving
+            # descendant has reparented to this subreaper case process and must die.
+            _kill_proved_child(subject)
+            assert _kill_proved_child(grandchild), \
+                "the flip hygiene refused the orphaned descendant"
             await_state(grandchild, (None, "Z"), "the flip hygiene did not complete")
     elif mode == "poll-collected":
         import time
@@ -3028,7 +5293,8 @@ def _watchdog_completion_case(mode):
                         "close() left the poll-collected failure's subject running")
             assert state(descendant) not in (None, "Z"), \
                 "the no-guardian path census-killed the orphaned descendant"
-            os.kill(descendant, signal.SIGKILL)  # hygiene for the disclosed residual
+            assert _kill_proved_child(descendant), \
+                "the residual hygiene refused the orphaned descendant"  # proof, never a bare-pid kill
             await_state(descendant, (None, "Z"),
                         "the residual hygiene did not complete")
 
@@ -3076,7 +5342,11 @@ def _watchdog_completion_case(mode):
                 "flip: the subject died without close()'s kill"
             assert state(descendant) not in (None, "Z"), \
                 "flip: the descendant died without close()'s kill"
-            os.killpg(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
+            # Hygiene through the ownership proof alone (QA8): both orphans reparented
+            # to this subreaper case process; the proved subject kill reparents (and
+            # then proves) the descendant, never a numeric group kill.
+            assert _kill_proved_child(subject), "the flip hygiene refused the orphaned subject"
+            assert _kill_proved_child(descendant), "the flip hygiene refused the orphaned descendant"
             await_state(subject, (None, "Z"), "the flip hygiene did not complete")
             await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
     elif mode == "close-cancel":
@@ -3694,7 +5964,8 @@ def _watchdog_completion_case(mode):
             closed = close_grace(child)
             assert closed and "guardian failed" in closed[0], closed
             assert "descendants, if any, unaddressed" in closed[0], closed
-            os.kill(descendant, signal.SIGKILL)  # hygiene for the disclosed residual
+            assert _kill_proved_child(descendant), \
+                "the residual hygiene refused the orphaned descendant"  # proof, never a bare-pid kill
             await_state(descendant, (None, "Z"),
                         "the residual hygiene did not complete")
 
@@ -3735,7 +6006,8 @@ def _watchdog_completion_case(mode):
             closed = close_grace(child)
             assert closed and "supervision unresolved" in closed[0], closed
             assert "descendants, if any, unaddressed" in closed[0], closed
-            os.kill(descendant, signal.SIGKILL)  # hygiene for the disclosed residual
+            assert _kill_proved_child(descendant), \
+                "the residual hygiene refused the orphaned descendant"  # proof, never a bare-pid kill
             await_state(descendant, (None, "Z"),
                         "the residual hygiene did not complete")
 
@@ -3749,7 +6021,9 @@ def _watchdog_completion_case(mode):
             assert not closed, closed
             assert state(subject) not in (None, "Z"), \
                 "flip: the subject died without close()'s kill"
-            os.killpg(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
+            # Hygiene through the ownership proof alone (QA8), member by member.
+            assert _kill_proved_child(subject), "the flip hygiene refused the orphaned subject"
+            assert _kill_proved_child(descendant), "the flip hygiene refused the orphaned descendant"
             await_state(subject, (None, "Z"), "the flip hygiene did not complete")
             await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
 
@@ -3822,7 +6096,8 @@ def _watchdog_completion_case(mode):
                         "the lost-ownership refusal left the subject running")
             assert state(descendant) not in (None, "Z"), \
                 "the lost-ownership path census-killed the orphaned descendant"
-            os.kill(descendant, signal.SIGKILL)  # hygiene for the disclosed residual
+            assert _kill_proved_child(descendant), \
+                "the residual hygiene refused the orphaned descendant"  # proof, never a bare-pid kill
             await_state(descendant, (None, "Z"), "the 2b hygiene did not complete")
 
             # Flip: forge the pre-fix write order's post-interruption state
@@ -3835,7 +6110,9 @@ def _watchdog_completion_case(mode):
             assert not closed, closed
             assert state(subject) not in (None, "Z"), \
                 "flip: the subject died without close()'s kill"
-            os.killpg(subject, signal.SIGKILL)  # hygiene for the demonstrated leak
+            # Hygiene through the ownership proof alone (QA8), member by member.
+            assert _kill_proved_child(subject), "the flip hygiene refused the orphaned subject"
+            assert _kill_proved_child(descendant), "the flip hygiene refused the orphaned descendant"
             await_state(subject, (None, "Z"), "the flip hygiene did not complete")
             await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
 
@@ -3857,7 +6134,9 @@ def _watchdog_completion_case(mode):
             assert "subject tree killed" not in closed[0], closed
             assert state(subject) not in (None, "Z"), \
                 "an unpinned pid-only subject was signalled anyway"
-            os.killpg(subject, signal.SIGKILL)  # hygiene for the documented residual
+            # Hygiene through the ownership proof alone (QA8), member by member.
+            assert _kill_proved_child(subject), "the residual hygiene refused the orphaned subject"
+            assert _kill_proved_child(descendant), "the residual hygiene refused the orphaned descendant"
             await_state(subject, (None, "Z"), "the residual hygiene did not complete")
             await_state(descendant, (None, "Z"), "the residual hygiene did not complete")
 
@@ -3877,10 +6156,13 @@ def _watchdog_completion_case(mode):
                 except emit.ChildStatusUnavailable as exc:
                     closed.append(str(exc))
             assert closed and "subject cleanup unverified" not in closed[0], closed
-            os.killpg(subject, signal.SIGKILL)  # hygiene for the demonstrated blindness
+            # Hygiene through the ownership proof alone (QA8), member by member.
+            assert _kill_proved_child(subject), "the flip hygiene refused the orphaned subject"
+            assert _kill_proved_child(descendant), "the flip hygiene refused the orphaned descendant"
             await_state(subject, (None, "Z"), "the flip hygiene did not complete")
             await_state(descendant, (None, "Z"), "the flip hygiene did not complete")
     elif mode == "unpinned-kill":
+        import socket
         import time
         # QA20 claude F1 + QA21 codex F3: NEVER signal a numeric pid or pgid
         # whose ownership is not pinned -- a held pidfd does not pin the
@@ -3976,7 +6258,8 @@ def _watchdog_completion_case(mode):
             os.close(fd)
             assert state(descendant) not in (None, "Z"), \
                 "the no-guardian path killed the orphaned descendant"
-            os.kill(descendant, signal.SIGKILL)  # hygiene for the disclosed residual
+            assert _kill_proved_child(descendant), \
+                "the residual hygiene refused the orphaned descendant"  # proof, never a bare-pid kill
             await_state(descendant, (None, "Z"),
                         "the leg-1 hygiene did not complete")
 
@@ -4039,7 +6322,8 @@ def _watchdog_completion_case(mode):
             assert recorded and recorded[0] == ("pidfd", fd, signal.SIGSTOP), recorded
             assert state(descendant) not in (None, "Z"), \
                 "an unpinned zombie-leader group was signalled anyway"
-            os.kill(descendant, signal.SIGKILL)  # hygiene for the disclosed residual
+            assert _kill_proved_child(descendant), \
+                "the residual hygiene refused the orphaned descendant"  # proof, never a bare-pid kill
             os.waitpid(leader, 0)
             os.close(fd)
             await_state(descendant, (None, "Z"),
@@ -4084,11 +6368,11 @@ def _watchdog_completion_case(mode):
         # pins the group and the member kill still reaches it through its own
         # verified pidfd (QA18 gemini F1 preserved under the pin rule).
         with tempfile.TemporaryDirectory(prefix="opf-pin-") as directory:
-            leader_file = Path(directory, "leader")
             grandchild_file = Path(directory, "grandchild")
             frozen_file = Path(directory, "frozen")
             opened = Path(directory, "opened")
 
+            handoff, handoff_peer = socket.socketpair()
             guardian = os.fork()
             if guardian == 0:
                 try:
@@ -4108,9 +6392,7 @@ def _watchdog_completion_case(mode):
                         scratch.rename(grandchild_file)
                         time.sleep(3600)      # until the guardian kills it
                         os._exit(0)
-                    scratch = Path(directory, "leader.tmp")
-                    scratch.write_text(str(leader), encoding="ascii")
-                    scratch.rename(leader_file)
+                    _pidfd_handoff_send(handoff_peer, leader)
                     bound = time.monotonic() + 30
                     while not opened.exists():  # the caller holds the pidfd now
                         if time.monotonic() >= bound:
@@ -4132,9 +6414,13 @@ def _watchdog_completion_case(mode):
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
 
-            await_file(leader_file, "the model leader never appeared")
-            leader = int(leader_file.read_text(encoding="ascii"))
-            fd = os.pidfd_open(leader)
+            handoff_peer.close()
+            # The signal target arrives as a DESCRIPTOR from its forking
+            # parent (D-385-PIDFD-HANDOFF): the guardian opened the pidfd on
+            # its own un-reaped child immediately after the fork and passed
+            # it with SCM_RIGHTS; the numeric pid is disclosure only, never
+            # a signal target.
+            leader, fd = _pidfd_handoff_recv(handoff, "the model leader")
             await_file(grandchild_file, "the model grandchild never appeared")
             grandchild = int(grandchild_file.read_text(encoding="ascii"))
             scratch = Path(directory, "opened.tmp")
@@ -4213,8 +6499,10 @@ def _watchdog_completion_case(mode):
         refuses(ValueError, lambda: legacy_escalate(leader, fd))
         await_state(leader, ("T",),
                     "the reverted probe did not strand the frozen leader")
-        os.kill(leader, signal.SIGKILL)  # hygiene for the demonstrated strand
-        os.waitpid(leader, 0)
+        # Hygiene for the demonstrated strand, through the ownership proof on
+        # the held pidfd (QA9 claude F1): the helper SIGKILLs and reaps race-free.
+        assert _kill_proved_child(leader, pidfd=fd), \
+            "the strand hygiene refused the frozen leader"
         os.close(fd)
 
         # Leg 7 (fix 2y, codex F1/F2 on the GUARDIAN path): with a frozen
@@ -4224,10 +6512,10 @@ def _watchdog_completion_case(mode):
         # pidfd), addresses the descendant, and accounts nothing skipped --
         # only then may the outcome claim the tree ("tree", []).
         with tempfile.TemporaryDirectory(prefix="opf-order-") as directory:
-            leader_file = Path(directory, "leader")
             grandchild_file = Path(directory, "grandchild")
             frozen_file = Path(directory, "frozen")
 
+            handoff, handoff_peer = socket.socketpair()
             guardian = os.fork()
             if guardian == 0:
                 try:
@@ -4247,9 +6535,7 @@ def _watchdog_completion_case(mode):
                         scratch.rename(grandchild_file)
                         time.sleep(3600)      # LIVE leader, killed last
                         os._exit(0)
-                    scratch = Path(directory, "leader.tmp")
-                    scratch.write_text(str(leader), encoding="ascii")
-                    scratch.rename(leader_file)
+                    _pidfd_handoff_send(handoff_peer, leader)
                     scratch = Path(directory, "frozen.tmp")
                     scratch.write_text("stopping", encoding="ascii")
                     scratch.rename(frozen_file)
@@ -4264,11 +6550,10 @@ def _watchdog_completion_case(mode):
                     assert time.monotonic() < bound, note
                     time.sleep(0.005)
 
-            await_file(leader_file, "the leg-7 leader never appeared")
-            leader = int(leader_file.read_text(encoding="ascii"))
+            handoff_peer.close()
+            leader, fd = _pidfd_handoff_recv(handoff, "the leg-7 leader")
             await_file(grandchild_file, "the leg-7 grandchild never appeared")
             grandchild = int(grandchild_file.read_text(encoding="ascii"))
-            fd = os.pidfd_open(leader)
             await_file(frozen_file, "the leg-7 guardian never froze")
             await_state(guardian, ("T",), "the leg-7 guardian did not stop")
             member_calls = []
@@ -4355,6 +6640,7 @@ def _watchdog_completion_case(mode):
         os.waitpid(sentinel, 0)
         os.waitpid(zombie, 0)
     elif mode == "census-verify":
+        import socket
         import time
         import types
         # Fix 2z (premise change) + maintainer ruling
@@ -4392,12 +6678,15 @@ def _watchdog_completion_case(mode):
         def frozen_tree(directory, forker):
             # Frozen subreaper guardian -> setsid leader -> one same-group
             # grandchild; with `forker`, the grandchild forks one more
-            # same-group child when cued through the cue file.
-            leader_file = Path(directory, "leader")
+            # same-group child when cued through the cue file. The leader --
+            # the signal target -- is handed out as a DESCRIPTOR its forking
+            # guardian opened immediately after fork (D-385-PIDFD-HANDOFF),
+            # never as a number published through a file.
             grandchild_file = Path(directory, "grandchild")
             frozen_file = Path(directory, "frozen")
             cue = Path(directory, "cue")
             forked_file = Path(directory, "forked")
+            handoff, handoff_peer = socket.socketpair()
             guardian = os.fork()
             if guardian == 0:
                 try:
@@ -4430,9 +6719,7 @@ def _watchdog_completion_case(mode):
                         scratch.rename(grandchild_file)
                         time.sleep(3600)              # LIVE leader, killed last
                         os._exit(0)
-                    scratch = Path(directory, "leader.tmp")
-                    scratch.write_text(str(leader), encoding="ascii")
-                    scratch.rename(leader_file)
+                    _pidfd_handoff_send(handoff_peer, leader)
                     scratch = Path(directory, "frozen.tmp")
                     scratch.write_text("stopping", encoding="ascii")
                     scratch.rename(frozen_file)
@@ -4440,17 +6727,20 @@ def _watchdog_completion_case(mode):
                     os._exit(0)
                 except BaseException:
                     os._exit(125)
-            await_file(leader_file, "the model leader never appeared")
-            leader = int(leader_file.read_text(encoding="ascii"))
+            handoff_peer.close()
+            leader, leader_fd = _pidfd_handoff_recv(handoff, "the model leader")
             await_file(grandchild_file, "the model grandchild never appeared")
             grandchild = int(grandchild_file.read_text(encoding="ascii"))
             await_file(frozen_file, "the model guardian never froze")
             await_state(guardian, ("T",), "the model guardian did not stop")
             assert state(grandchild) not in (None, "Z"), "the descendant died early"
-            return guardian, leader, grandchild, cue, forked_file
+            return guardian, leader, leader_fd, grandchild, cue, forked_file
 
         def release(guardian):
-            os.kill(guardian, signal.SIGCONT)
+            # Proof-routed resume (QA9 claude F1): the frozen guardian is this
+            # process's own un-reaped child; never trust the bare number.
+            assert _kill_proved_child(guardian, signal.SIGCONT), \
+                "the release refused the frozen guardian"
             os.waitpid(guardian, 0)
 
         # Leg 1 (codex BLOCKER 2 / gemini F2): an unreadable /proc entry is
@@ -4459,9 +6749,8 @@ def _watchdog_completion_case(mode):
         # PermissionError as an exited process and claimed ("tree", []) with
         # the member alive.
         with tempfile.TemporaryDirectory(prefix="opf-unread-") as directory:
-            guardian, leader, grandchild, _cue, _forked = frozen_tree(
+            guardian, leader, fd, grandchild, _cue, _forked = frozen_tree(
                 Path(directory), forker=False)
-            fd = os.pidfd_open(leader)
             real_os_open = os.open
             blocked = str(Path("/proc", str(grandchild), "stat"))
 
@@ -4498,18 +6787,21 @@ def _watchdog_completion_case(mode):
                 "the unaccounted member was signalled anyway")
             await_state(leader, (None, "Z"), "the leader kill never landed")
             os.close(fd)
-            os.kill(grandchild, signal.SIGKILL)  # hygiene for the NAMED member
+            # Release and collect the frozen subreaper guardian FIRST: the NAMED
+            # member then reparents from it to this subreaper case process, and
+            # only the ownership proof licenses its hygiene kill (QA8).
+            release(guardian)
+            assert _kill_proved_child(grandchild), \
+                "the leg-1 hygiene refused the orphaned member"
             await_state(grandchild, (None, "Z"),
                         "the leg-1 hygiene did not complete")
-            release(guardian)
         # Leg 2 (gemini F1): a leader SIGKILL failing with anything but
         # ProcessLookupError NAMES the surviving leader and never claims the
         # tree. The pre-fix code swallowed the failure and, with a clean
         # census, still claimed ("tree", []) over the live leader.
         with tempfile.TemporaryDirectory(prefix="opf-leaderfail-") as directory:
-            guardian, leader, grandchild, _cue, _forked = frozen_tree(
+            guardian, leader, fd, grandchild, _cue, _forked = frozen_tree(
                 Path(directory), forker=False)
-            fd = os.pidfd_open(leader)
             real_pidfd_signal = signal.pidfd_send_signal
 
             def failing_leader_kill(target_fd, signum, *args):
@@ -4540,9 +6832,8 @@ def _watchdog_completion_case(mode):
         # "every member addressed" -- with the forked member alive and
         # unaccounted.
         with tempfile.TemporaryDirectory(prefix="opf-forkrace-") as directory:
-            guardian, leader, grandchild, cue, forked_file = frozen_tree(
+            guardian, leader, fd, grandchild, cue, forked_file = frozen_tree(
                 Path(directory), forker=True)
-            fd = os.pidfd_open(leader)
             real_listdir = os.listdir
             proc_listings = []
 
@@ -4579,9 +6870,13 @@ def _watchdog_completion_case(mode):
             await_state(leader, (None, "Z"), "the leg-3 leader survived")
             await_state(grandchild, (None, "Z"), "the leg-3 grandchild survived")
             os.close(fd)
-            os.kill(forked, signal.SIGKILL)  # hygiene for the NAMED survivor
-            await_state(forked, (None, "Z"), "the leg-3 hygiene did not complete")
+            # Release and collect the frozen subreaper guardian FIRST: the NAMED
+            # survivor then reparents to this subreaper case process, and only the
+            # ownership proof licenses its hygiene kill (QA8).
             release(guardian)
+            assert _kill_proved_child(forked), \
+                "the leg-3 hygiene refused the orphaned survivor"
+            await_state(forked, (None, "Z"), "the leg-3 hygiene did not complete")
 
         # Leg 4 (maintainer ruling PD-335-TREE-CLAIM-STALL): the "tree"
         # observation needs TWO CONSECUTIVE clean censuses -- a /proc scan
@@ -4626,6 +6921,7 @@ def _watchdog_completion_case(mode):
         os.kill(survivor, signal.SIGKILL)  # hygiene for the NAMED survivor
         os.waitpid(survivor, 0)
     elif mode == "census-exception":
+        import socket
         import time
         import types
         # Fix 2z (codex BLOCKER 3): cleanup is exception-safe. The subject's
@@ -4674,8 +6970,8 @@ def _watchdog_completion_case(mode):
                 time.sleep(0.005)
 
         def frozen_pair(directory):
-            leader_file = Path(directory, "leader")
             frozen_file = Path(directory, "frozen")
+            handoff, handoff_peer = socket.socketpair()
             guardian = os.fork()
             if guardian == 0:
                 try:
@@ -4688,9 +6984,7 @@ def _watchdog_completion_case(mode):
                         os.setsid()
                         time.sleep(3600)
                         os._exit(0)
-                    scratch = Path(directory, "leader.tmp")
-                    scratch.write_text(str(leader), encoding="ascii")
-                    scratch.rename(leader_file)
+                    _pidfd_handoff_send(handoff_peer, leader)
                     scratch = Path(directory, "frozen.tmp")
                     scratch.write_text("stopping", encoding="ascii")
                     scratch.rename(frozen_file)
@@ -4698,11 +6992,16 @@ def _watchdog_completion_case(mode):
                     os._exit(0)
                 except BaseException:
                     os._exit(125)
-            await_file(leader_file, "the model leader never appeared")
+            # The forking-parent descriptor on the GUARDIAN -- opened on
+            # this test's own direct child immediately after its fork, well
+            # before any reap (D-385-PIDFD-HANDOFF).
+            guardian_fd = os.pidfd_open(guardian)
+            handoff_peer.close()
             await_file(frozen_file, "the model guardian never froze")
             await_state(guardian, ("T",), "the model guardian did not stop")
-            # The guardian publishes the leader pid at fork, but the
-            # leader runs its own setsid: the caller's subject freeze
+            # The LEADER arrives as the descriptor its forking guardian
+            # handed off with SCM_RIGHTS; the pid rides along as disclosure.
+            # The leader runs its own setsid: the caller's subject freeze
             # could land FIRST, pinning the leader in this test
             # process's group for good, so the guardian-anchored
             # census found no group member, no census ran, and the
@@ -4710,16 +7009,24 @@ def _watchdog_completion_case(mode):
             # intermittent "fixture was accepted" flake (fix 16,
             # QA37 claude). Hand the pair out only once the leader
             # holds its own group.
-            leader = int(leader_file.read_text(encoding="ascii"))
-            await_pgid(leader, "the model leader never took its own group")
-            return guardian, leader
+            leader_fd = None
+            try:
+                leader, leader_fd = _pidfd_handoff_recv(handoff, "the model leader")
+                await_pgid(leader, "the model leader never took its own group")
+            except BaseException:
+                # A refused handoff or a leader that never took its group:
+                # every descriptor this pair holds is closed once, here.
+                if leader_fd is not None:
+                    os.close(leader_fd)
+                os.close(guardian_fd)
+                raise
+            return guardian, guardian_fd, leader, leader_fd
 
         # Leg 1: the held-pidfd subject SIGKILL survives a raising census;
         # the census exception still propagates. The pre-fix escalation
         # propagated BEFORE the kill and stranded the frozen leader.
         with tempfile.TemporaryDirectory(prefix="opf-cexc-") as directory:
-            guardian, leader = frozen_pair(Path(directory))
-            fd = os.pidfd_open(leader)
+            guardian, guardian_fd, leader, fd = frozen_pair(Path(directory))
             with patch.object(emit, "_fixture_kill_group_members",
                               side_effect=RuntimeError("injected census failure")):
                 refuses(RuntimeError, lambda: emit._fixture_escalate_subject(
@@ -4727,8 +7034,130 @@ def _watchdog_completion_case(mode):
             await_state(leader, (None, "Z"),
                         "the raising census stranded the frozen subject")
             os.close(fd)
-            os.kill(guardian, signal.SIGCONT)
+            os.close(guardian_fd)
+            assert _kill_proved_child(guardian, signal.SIGCONT), \
+                "the leg-1 release refused the frozen guardian"
             os.waitpid(guardian, 0)
+
+        # Leg 1f (QA9 codex blocker 1 / claude F3; reshaped by
+        # D-385-PIDFD-HANDOFF after QA10 codex blocker / claude m1): a pid a
+        # FIXTURE FILE names is NEVER read for a signal target. Forge the
+        # file with a live, UNRELATED group leader -- a decoy whose parent
+        # chain never reaches the guardian -- while the REAL target arrives
+        # as the descriptor its forking guardian handed off: the committed
+        # path never consults the file, every pidfd signal of the run goes
+        # through the handed-off descriptor, and the decoy is never
+        # signalled -- not stopped, not killed. A caller reverted to reading
+        # the file and opening a bare os.pidfd_open on the number is caught
+        # by the AST pin; one that signals the file-named number freezes or
+        # kills the decoy and turns this red.
+        with tempfile.TemporaryDirectory(prefix="opf-forged-") as directory:
+            guardian, guardian_fd, leader, fd = frozen_pair(Path(directory))
+            decoy = os.fork()
+            if decoy == 0:
+                os.setsid()
+                time.sleep(3600)
+                os._exit(0)
+            await_pgid(decoy, "the decoy never took its own group")
+            scratch = Path(directory, "leader.tmp")
+            scratch.write_text(str(decoy), encoding="ascii")
+            scratch.rename(Path(directory, "leader"))
+            assert leader != decoy, "the decoy collided with the real leader"
+            sent = []
+            real_pidfd_signal = signal.pidfd_send_signal
+
+            def rec_send(target_fd, signum, *args):
+                sent.append((target_fd, signum))
+                return real_pidfd_signal(target_fd, signum, *args)
+
+            with patch.object(signal, "pidfd_send_signal", rec_send):
+                outcome = emit._fixture_escalate_subject(
+                    leader, fd, guardian_pid=guardian)
+            assert outcome == ("tree", []), (
+                "the forged-file run did not address the real tree", outcome)
+            assert sent and all(entry[0] == fd for entry in sent), (
+                "a descriptor other than the handed-off leader pidfd was "
+                "signalled", sent)
+            await_state(leader, (None, "Z"), "the real leader survived")
+            assert state(decoy) in ("S", "R"), (
+                "the forged file's number was signalled: the decoy did not "
+                "stay running untouched", state(decoy))
+            os.close(fd)
+            os.close(guardian_fd)
+            assert _kill_proved_child(decoy), "the leg-1f hygiene refused the decoy"
+            assert _kill_proved_child(guardian, signal.SIGCONT), \
+                "the leg-1f release refused the frozen guardian"
+            os.waitpid(guardian, 0)
+
+        # Leg 1g (D-385-PIDFD-HANDOFF, fail closed): a forking parent that
+        # sends NO descriptor is refused -- the receiver fails closed with a
+        # named reason, signals nothing, and the pid named in the payload (a
+        # live bystander here) survives untouched. There is no fallback from
+        # the missing descriptor to the number.
+        bystander = os.fork()
+        if bystander == 0:
+            time.sleep(3600)
+            os._exit(0)
+        handoff, handoff_peer = socket.socketpair()
+        sender = os.fork()
+        if sender == 0:
+            try:
+                handoff_peer.send(str(bystander).encode("ascii"))
+                os._exit(0)
+            except BaseException:
+                os._exit(125)
+        handoff_peer.close()
+        sent = []
+        with patch.object(signal, "pidfd_send_signal",
+                          lambda target_fd, signum, *args:
+                              sent.append((target_fd, signum))):
+            try:
+                _pid, proofless_fd = _pidfd_handoff_recv(
+                    handoff, "the leg-1g proofless handoff")
+            except AssertionError as exc:
+                named = str(exc)
+            else:
+                os.close(proofless_fd)
+                raise AssertionError("a descriptor-less handoff was accepted")
+        assert "passed 0 descriptors" in named and "leg-1g" in named, named
+        assert sent == [], ("the descriptor-less handoff was signalled", sent)
+        waited, raw = os.waitpid(sender, 0)
+        assert os.WIFEXITED(raw) and os.WEXITSTATUS(raw) == 0, raw
+        assert state(bystander) in ("S", "R"), (
+            "the payload-named bystander did not survive the refusal",
+            state(bystander))
+        assert _kill_proved_child(bystander), \
+            "the leg-1g hygiene refused the bystander"
+
+        # Leg 1h (D-385-PIDFD-HANDOFF, fail closed): a handed-off descriptor
+        # whose process has ALREADY EXITED is refused loudly -- no signal is
+        # sent through it and the refusal is a named error, never a
+        # swallowed one. This test is the forking parent here: the handoff
+        # is opened on its own un-reaped child, whose pid the zombie still
+        # pins, and the RECEIVER must still refuse the dead target.
+        departed = os.fork()
+        if departed == 0:
+            os._exit(0)
+        handoff, handoff_peer = socket.socketpair()
+        await_state(departed, ("Z",), "the departed child never became a zombie")
+        assert _pidfd_handoff_send(handoff_peer, departed), \
+            "the exited-target handoff was not sent"
+        handoff_peer.close()
+        sent = []
+        with patch.object(signal, "pidfd_send_signal",
+                          lambda target_fd, signum, *args:
+                              sent.append((target_fd, signum))):
+            try:
+                _pid, departed_fd = _pidfd_handoff_recv(
+                    handoff, "the leg-1h exited target")
+            except AssertionError as exc:
+                named = str(exc)
+            else:
+                os.close(departed_fd)
+                raise AssertionError("an exited handoff target was accepted")
+        assert "already exited" in named and "leg-1h" in named, named
+        assert sent == [], ("the exited handoff target was signalled", sent)
+        os.waitpid(departed, 0)
 
         # Leg 2: at the _escalate tier the guardian SIGKILL survives the
         # same failure, the kill that DID run is recorded ("partial",
@@ -4736,9 +7165,8 @@ def _watchdog_completion_case(mode):
         # The pre-fix tier propagated before the guardian SIGKILL and
         # recorded nothing.
         with tempfile.TemporaryDirectory(prefix="opf-cexc2-") as directory:
-            guardian, leader = frozen_pair(Path(directory))
-            guardian_fd = os.pidfd_open(guardian)
-            leader_fd = os.pidfd_open(leader)
+            guardian, guardian_fd, leader, leader_fd = frozen_pair(
+                Path(directory))
             fake = types.SimpleNamespace(
                 pid=guardian, pidfd=guardian_fd,
                 subject_pid=leader, subject_pidfd=leader_fd,
@@ -4839,8 +7267,7 @@ def _watchdog_completion_case(mode):
         # SIGKILL. The pre-fix freeze sat before the try: the exception
         # skipped the kill and stranded the live subject.
         with tempfile.TemporaryDirectory(prefix="opf-freeze-") as directory:
-            guardian, leader = frozen_pair(Path(directory))
-            fd = os.pidfd_open(leader)
+            guardian, guardian_fd, leader, fd = frozen_pair(Path(directory))
             real_pidfd_signal = signal.pidfd_send_signal
 
             def freeze_fault(target_fd, signum, *args):
@@ -4855,7 +7282,9 @@ def _watchdog_completion_case(mode):
                         "the freeze exception skipped the held-pidfd "
                         "subject SIGKILL")
             os.close(fd)
-            os.kill(guardian, signal.SIGCONT)
+            os.close(guardian_fd)
+            assert _kill_proved_child(guardian, signal.SIGCONT), \
+                "the leg-4 release refused the frozen guardian"
             os.waitpid(guardian, 0)
 
         # Leg 5 (round 24, codex boundary): at the _escalate tier the same
@@ -5004,9 +7433,8 @@ def _watchdog_completion_case(mode):
         # the send failed and the frozen subject survives. The pre-fix
         # wording claimed "subject SIGKILL sent".
         with tempfile.TemporaryDirectory(prefix="opf-dfault-") as directory:
-            guardian, leader = frozen_pair(Path(directory))
-            guardian_fd = os.pidfd_open(guardian)
-            leader_fd = os.pidfd_open(leader)
+            guardian, guardian_fd, leader, leader_fd = frozen_pair(
+                Path(directory))
             fake = types.SimpleNamespace(
                 pid=guardian, pidfd=guardian_fd,
                 subject_pid=leader, subject_pidfd=leader_fd,
@@ -5049,10 +7477,16 @@ def _watchdog_completion_case(mode):
             assert ("subject SIGKILL attempted through its held "
                     "pidfd") in named, named
             assert "SIGKILL sent" not in named, named
-            os.kill(leader, signal.SIGKILL)  # hygiene for the surviving subject
+            # Hygiene through the ownership proof alone (QA8). Collect the guardian
+            # FIRST (SIGKILLed by the escalate finally; its delivery is asynchronous,
+            # so the proof must not race it): once it is reaped, the surviving frozen
+            # subject has reparented to this subreaper case process and the proof
+            # owns it.
+            os.waitpid(guardian, 0)
+            assert _kill_proved_child(leader), \
+                "the leg-8 hygiene refused the orphaned subject"
             await_state(leader, (None, "Z"),
                         "the leg-8 hygiene did not complete")
-            os.waitpid(guardian, 0)  # SIGKILLed by the escalate finally
             os.close(guardian_fd)
             os.close(leader_fd)
 
@@ -8692,6 +11126,44 @@ def _watchdog_completion_case(mode):
                 emit._fixture_kill_group_members(6060, signal.SIGKILL,
                                                  set([7777]))
 
+        def hop_close_driver(cancellation, fault, state):
+            # pending point: the SECOND ancestry hop's stat read inside
+            # the pinned parent-chain walk; cleanup: the held hop pidfd
+            # close in the walk's own boundary (QA10).
+            def fake_listdir(path):
+                assert str(path) == "/proc", path
+                return ["4242"]
+
+            def fake_stat_fields(target):
+                if int(target) == 4242:
+                    return [b"S", b"5151", b"6060"]
+                assert int(target) == 5151, target
+                raise cancellation
+
+            def fake_pidfd(target):
+                return {4242: 987002, 5151: 987008}[int(target)]
+
+            def fake_send(fd, signum, *args):
+                raise AssertionError(
+                    ("an unanchored member was signalled", fd, signum))
+
+            def fake_close(fd):
+                if fd == 987008:
+                    raise fault
+                assert fd == 987002, fd
+                return None
+
+            with patch.object(os, "listdir", fake_listdir), (
+                    patch.object(emit, "_fixture_stat_fields",
+                                 fake_stat_fields)), (
+                    patch.object(emit, "_fixture_pidfd",
+                                 fake_pidfd)), (
+                    patch.object(signal, "pidfd_send_signal",
+                                 fake_send)), (
+                    patch.object(os, "close", fake_close)):
+                emit._fixture_kill_group_members(6060, signal.SIGKILL,
+                                                 set([7777]))
+
         def subject_kill_driver(cancellation, fault, state):
             # pending point: the subject freeze; cleanup: the
             # held-pidfd SIGKILL (the leg 12 shape, all three types).
@@ -9009,6 +11481,9 @@ def _watchdog_completion_case(mode):
         behavioural_drivers[
             ("f:_fixture_kill_group_members",
              "member pidfd close", 0)] = member_close_driver
+        behavioural_drivers[
+            ("f:_fixture_kill_group_members",
+             "ancestry hop pidfd close", 0)] = hop_close_driver
         behavioural_drivers[
             ("f:_fixture_escalate_subject",
              "held-pidfd subject SIGKILL", 0)] = subject_kill_driver

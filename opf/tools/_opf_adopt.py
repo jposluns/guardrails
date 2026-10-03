@@ -2691,8 +2691,7 @@ def plan(product_root, *, sources, expected_observation_digest, product, decisio
 
 
 def main():
-    args = sys.argv[1:]
-    if "--self-test" in args or "--selftest" in args:
+    if sys.argv[1:] == ["--self-test"]:
         return self_test()
     print("usage: _opf_adopt.py --self-test (a library module; the adoption verb is `opf adopt`)",
           file=sys.stderr)
