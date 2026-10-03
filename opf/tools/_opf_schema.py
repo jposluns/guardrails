@@ -73,9 +73,17 @@ unit is that schema release for the record model and DEFINES the following where
     table of `<NS> = <non-negative int>` (mirroring version.toml's `schema = 1` marker); the spec fixes
     the semantics (one monotonic high-water per namespace) but not the file layout.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    sys.stderr.write(
+        "error: _opf_schema.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+        "Nothing was run (cannot evaluate).\n"
+        % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+    raise SystemExit(2)
+
 import datetime
 import re
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
