@@ -172,94 +172,197 @@ def _decision(handler, command, tool="Bash", cwd=None):
     return _reduce_result(code, stdout_obj)
 
 
-def _own_returns(func):
-    """Every return statement in func's own body (a nested def, lambda or class is its own scope)."""
-    out, stack = [], list(func.body)
-    while stack:
-        node = stack.pop()
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
-            continue
-        if isinstance(node, ast.Return) and node.value is not None:
-            out.append(node)
-        stack.extend(ast.iter_child_nodes(node))
+def _declared_names(tree, name):
+    """(node, names) for the string tuple assigned to module-level `name` in tree: names is None when the
+    value is not a literal tuple of string constants, and both are None when the name is not assigned."""
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == name):
+            if isinstance(node.value, ast.Tuple) and all(
+                    isinstance(elt, ast.Constant) and isinstance(elt.value, str) for elt in node.value.elts):
+                return node, tuple(elt.value for elt in node.value.elts)
+            return node, None
+    return None, None
+
+
+def _docstring_ids(tree):
+    """The ids of every docstring constant (module, class and function) in tree."""
+    out = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+            first = node.body[0]
+            if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)):
+                out.add(id(first.value))
     return out
 
 
-def _is_note_literal(node):
-    """True for the literal allow-with-note object: a dict display whose only key is "systemMessage"."""
-    return (isinstance(node, ast.Dict) and len(node.keys) == 1 and isinstance(node.keys[0], ast.Constant)
-            and node.keys[0].value == "systemMessage")
+def _note_constructor_shape_failures(path=None):
+    """(note-shape) The hook source keeps every allow-with-note result inside the CLOSED set of note
+    constructors it declares in NOTE_CONSTRUCTORS, so the coverage inventory is exactly the
+    `return <constructor>(...)` statements and needs no shape discovery. Refused, each by its line:
+    a missing or non-literal NOTE_CONSTRUCTORS or DENY_CONSTRUCTORS tuple; a declared name that is not
+    exactly one top-level function, or that is also defined nested or as a method; a declared
+    constructor whose body neither holds the note key nor returns another constructor's call; the note
+    key ("systemMessage" as a string, inside a non-docstring string, or as a keyword, attribute or name)
+    outside the constructors' bodies, except in a deny constructor's dict that also carries
+    hookSpecificOutput; any reference to a constructor name (a name, an attribute, or a string equal to
+    it, as a getattr or globals() lookup would need) other than as the callee of a call that is the
+    direct value of a return statement; and a function returning a constructor call that is neither a
+    declared constructor, a HANDLERS entry referenced only from that table, nor main referenced only
+    from its `sys.exit(main(...))` entry line (so no caller of an undeclared helper can drop a note)."""
+    path = Path(path or aiqt_hooks.__file__)
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    out = []
+    decl_node, names = _declared_names(tree, "NOTE_CONSTRUCTORS")
+    deny_node, deny_names = _declared_names(tree, "DENY_CONSTRUCTORS")
+    if not names or deny_names is None:
+        return ["(note-shape-declared) {} declares no literal NOTE_CONSTRUCTORS and DENY_CONSTRUCTORS "
+                "tuples of names".format(path.name)]
+    names, deny_names = set(names), set(deny_names)
+    top = collections.defaultdict(list)
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            top[node.name].append(node)
+    top_ids = {id(node) for nodes in top.values() for node in nodes}
+    for name in sorted(names | deny_names):
+        if len(top[name]) != 1:
+            out.append("(note-shape-toplevel-{}) the declared constructor {} is defined {} times at the top "
+                       "level of {}, not exactly once".format(name, name, len(top[name]), path.name))
+    for node in ast.walk(tree):
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                and node.name in names | deny_names and id(node) not in top_ids):
+            out.append("(note-shape-nested-L{}) line {} defines {} nested or as a method; a constructor is a "
+                       "top-level function only".format(node.lineno, node.lineno, node.name))
+    bodies = {name: top[name][0] for name in names | deny_names if len(top[name]) == 1}
+    inside = {}
+    for name, func in bodies.items():
+        for node in ast.walk(func):
+            inside[id(node)] = name
+    for name in sorted(names):
+        func = bodies.get(name)
+        if func is not None and not any(
+                (isinstance(node, ast.Constant) and node.value == "systemMessage")
+                or (isinstance(node, ast.Return) and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name) and node.value.func.id in names)
+                for node in ast.walk(func)):
+            out.append("(note-shape-empty-{}) the declared constructor {} neither builds the note nor returns "
+                       "a constructor call".format(name, name))
+    docs = _docstring_ids(tree)
+    deny_ok = set()
+    for name in deny_names:
+        for node in (ast.walk(bodies[name]) if name in bodies else ()):
+            if isinstance(node, ast.Dict) and any(
+                    isinstance(key, ast.Constant) and key.value == "hookSpecificOutput" for key in node.keys):
+                deny_ok.update(id(key) for key in node.keys if isinstance(key, ast.Constant))
+    for node in ast.walk(tree):
+        key_text = None
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str) and "systemMessage" in node.value
+                and id(node) not in docs):
+            key_text = "string"
+        elif isinstance(node, ast.keyword) and node.arg == "systemMessage":
+            key_text = "keyword"
+        elif isinstance(node, ast.Attribute) and node.attr == "systemMessage":
+            key_text = "attribute"
+        elif isinstance(node, ast.Name) and node.id == "systemMessage":
+            key_text = "name"
+        if key_text is None or inside.get(id(node)) in names or id(node) in deny_ok:
+            continue
+        out.append("(note-shape-key-L{}) line {} holds the note key as a {} outside the declared note "
+                   "constructors; build the note through a constructor".format(node.lineno, node.lineno, key_text))
+    handler_ids, handler_names, callee_ok, main_ok = set(), set(), set(), set()
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict)
+                and any(isinstance(t, ast.Name) and t.id == "HANDLERS" for t in node.targets)):
+            handler_ids = {id(value) for value in node.value.values}
+            handler_names = {value.id for value in node.value.values if isinstance(value, ast.Name)}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Return) and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name) and node.value.func.id in names):
+            callee_ok.add(id(node.value.func))
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "exit"
+                and len(node.args) == 1 and isinstance(node.args[0], ast.Call)
+                and isinstance(node.args[0].func, ast.Name) and node.args[0].func.id == "main"):
+            main_ok.add(id(node.args[0].func))
+    declared_strings = {id(elt) for decl in (decl_node, deny_node) for elt in decl.value.elts}
+    refs = collections.defaultdict(list)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            refs[node.id].append(id(node))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in names and id(node) not in callee_ok:
+            out.append("(note-shape-use-L{}) line {} uses the note constructor {} other than as the callee of a "
+                       "call that is the direct value of a return".format(node.lineno, node.lineno, node.id))
+        elif isinstance(node, ast.Attribute) and node.attr in names:
+            out.append("(note-shape-use-L{}) line {} reaches the note constructor {} through an attribute"
+                       .format(node.lineno, node.lineno, node.attr))
+        elif (isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in names
+              and id(node) not in declared_strings):
+            out.append("(note-shape-use-L{}) line {} names the note constructor {} as a string (a getattr or "
+                       "globals() lookup)".format(node.lineno, node.lineno, node.value))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name not in names:
+            if not any(isinstance(ret, ast.Return) and isinstance(ret.value, ast.Call)
+                       and id(ret.value.func) in callee_ok for ret in ast.walk(node)):
+                continue
+            own = refs[node.name]
+            if id(node) in top_ids and node.name in handler_names and all(r in handler_ids for r in own):
+                continue
+            if id(node) in top_ids and node.name == "main" and own and all(r in main_ok for r in own):
+                continue
+            out.append("(note-shape-wrapper-L{}) line {} defines {}, which returns a note constructor call but is "
+                       "neither a declared constructor nor a dispatcher entry, so a caller of it is no "
+                       "inventoried site; declare it in NOTE_CONSTRUCTORS".format(node.lineno, node.lineno,
+                                                                                   node.name))
+    return out
 
 
 def _note_site_inventory(path=None):
-    """AST scan of the hook source for every allow-with-note site, found by shape, never by a hand list.
-    Returns (names, sites, aliases). names holds the note constructors: _allow_note, then, to a fixed
-    point, every function with a `return NAME(...)` whose NAME is already one (so _gensrc_fail_ask,
-    _discard_recovery_result and a handler that returns one are found). sites maps the exact source
-    position (kind, first line, last line, first column, end column) of each site to (what, first line):
-    kind "call" is every direct call of a constructor name, kind "return" is every return statement
-    whose value is the literal {"systemMessage": ...} dict, alone or inside a tuple, outside _allow_note's
-    own body. aliases lists the line of every reference to a constructor name that is neither the
-    callee of a direct call nor a value of the HANDLERS dispatch table."""
+    """The coverage inventory: exactly the `return <constructor>(...)` statements of the hook source, one
+    per declared NOTE_CONSTRUCTORS call that is a return's direct value (the only note shape
+    _note_constructor_shape_failures admits, so no other note site exists while that check passes).
+    Returns (names, sites): names is the declared set; sites maps the exact source position (kind
+    "call", first line, last line, first column, end column) of each such call to (what, first line)."""
     path = Path(path or aiqt_hooks.__file__)
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    funcs = [node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
-    names = {"_allow_note"}
-    while True:
-        grown = {func.name for func in funcs if func.name not in names and any(
-            isinstance(ret.value, ast.Call) and isinstance(ret.value.func, ast.Name)
-            and ret.value.func.id in names for ret in _own_returns(func))}
-        if not grown:
-            break
-        names |= grown
-    sites, allowed_refs = {}, set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in names:
-            allowed_refs.add(id(node.func))
-            sites[("call", node.lineno, node.end_lineno, node.col_offset, node.end_col_offset)] = (
-                "call of " + node.func.id, node.lineno)
-        elif (isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict)
-              and any(isinstance(target, ast.Name) and target.id == "HANDLERS" for target in node.targets)):
-            allowed_refs.update(id(value) for value in node.value.values)
-    for func in funcs:
-        if func.name == "_allow_note":
+    names = set(_declared_names(tree, "NOTE_CONSTRUCTORS")[1] or ())
+    sites = {}
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        for ret in _own_returns(func):
-            parts = ret.value.elts if isinstance(ret.value, ast.Tuple) else [ret.value]
-            if any(_is_note_literal(part) for part in parts):
-                sites[("return", ret.lineno, ret.end_lineno, ret.col_offset, ret.end_col_offset)] = (
-                    "literal note return in " + func.name, ret.lineno)
-    aliases = sorted(node.lineno for node in ast.walk(tree)
-                     if isinstance(node, ast.Name) and node.id in names and id(node) not in allowed_refs)
-    return names, sites, aliases
+        for node in ast.walk(func):
+            if (isinstance(node, ast.Return) and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name) and node.value.func.id in names):
+                call = node.value
+                sites[("call", call.lineno, call.end_lineno, call.col_offset, call.end_col_offset)] = (
+                    "return {}(...) in {}".format(call.func.id, func.name), call.lineno)
+    return names, sites
 
 
 class _NoteSiteMonitor:
-    """Counts how often each inventoried note site executes, with sys.monitoring, at the site's own
-    bytecode. A call site is credited when the CALL instruction whose source position is exactly that
-    call's invokes the ORIGINAL constructor object captured before any case ran; a literal return is
-    credited when the return instruction whose position is exactly that statement's executes. Nothing is
+    """Counts how often each inventoried `return <constructor>(...)` site executes, with sys.monitoring,
+    at the site's own bytecode: a site is credited when the CALL instruction whose source position is
+    exactly that call's invokes the ORIGINAL constructor object captured before any case ran. Nothing is
     installed into aiqt_hooks, so a case that replaces a constructor (and restores it or not) cannot fake
     a count: a call through the replacement is not credited, and a replacement still installed at the
     end fails. A call from aiqt_hooks.py that invokes an original constructor at a position that is no
-    inventoried call site (an alias) is recorded as unmapped. It calls no os.path function, because
-    several cases patch os.path.realpath while a handler runs."""
+    inventoried site is recorded as unmapped. It calls no os.path function, because several cases patch
+    os.path.realpath while a handler runs."""
 
     def __init__(self):
         self.filename = aiqt_hooks.__file__
-        self.names, self.sites, self.aliases = _note_site_inventory()
-        self.originals = {name: getattr(aiqt_hooks, name) for name in self.names}
-        self.by_id = {id(fn): name for name, fn in self.originals.items()}
+        self.names, self.sites = _note_site_inventory()
+        self.originals = {name: getattr(aiqt_hooks, name, None) for name in self.names}
+        self.by_id = {id(fn): name for name, fn in self.originals.items() if fn is not None}
         self.counts = collections.Counter()
         self.unmapped = set()
         self.positions = {}
         self.tool = None
 
-    def _key(self, kind, code, offset):
+    def _key(self, code, offset):
         table = self.positions.get(code)
         if table is None:
             table = self.positions[code] = list(code.co_positions())
-        return (kind,) + tuple(table[offset // 2])
+        return ("call",) + tuple(table[offset // 2])
 
     def _on_call(self, code, offset, callee, _arg0):
         if code.co_filename != self.filename:
@@ -267,25 +370,17 @@ class _NoteSiteMonitor:
         name = self.by_id.get(id(callee))
         if name is not None and self.originals[name] is not callee:
             name = None
-        key = self._key("call", code, offset)
+        key = self._key(code, offset)
         site = self.sites.get(key)
         if site is None:
             if name is None:
                 return sys.monitoring.DISABLE
             self.unmapped.add((name, key[1]))
             return None
-        if site[0] == "call of " + str(name):
+        if name is not None and site[0].startswith("return {}(".format(name)):
             self.counts[key] += 1
             return sys.monitoring.DISABLE
         return None
-
-    def _on_return(self, code, offset, _value):
-        if code.co_filename != self.filename:
-            return sys.monitoring.DISABLE
-        key = self._key("return", code, offset)
-        if key in self.sites:
-            self.counts[key] += 1
-        return sys.monitoring.DISABLE
 
     def start(self):
         mon = sys.monitoring
@@ -295,39 +390,36 @@ class _NoteSiteMonitor:
         self.tool = free[0]
         mon.use_tool_id(self.tool, "aiqt-note-site-coverage")
         mon.register_callback(self.tool, mon.events.CALL, self._on_call)
-        mon.register_callback(self.tool, mon.events.PY_RETURN, self._on_return)
-        mon.set_events(self.tool, mon.events.CALL | mon.events.PY_RETURN)
+        mon.set_events(self.tool, mon.events.CALL)
 
     def stop(self):
         mon = sys.monitoring
         if self.tool is not None:
             mon.set_events(self.tool, 0)
             mon.register_callback(self.tool, mon.events.CALL, None)
-            mon.register_callback(self.tool, mon.events.PY_RETURN, None)
             mon.free_tool_id(self.tool)
             self.tool = None
 
 
 def _note_site_coverage_failures(monitor):
-    """(an-coverage) Every inventoried note site (see _note_site_inventory: each direct call of
-    _allow_note or of a function that returns a call of one, and each literal {"systemMessage": ...}
-    return) must have executed at least once during the suite. A site that ran zero times is named by
-    its first line. A reference to a constructor other than a direct call (an alias), a call that reaches
-    an original constructor from an uninventoried position, and a constructor replacement still
-    installed at the end also fail. Out of scope: a call made through getattr, globals() or another
-    module's copy of the hook source. Reaching a site does not by itself prove a case pins its outcome;
-    the per-site mutation sweep shows that."""
+    """(an-coverage) Every inventoried note site (see _note_site_inventory: each `return <constructor>(...)`
+    of a declared note constructor) must have executed at least once during the suite. A site that ran
+    zero times is named by its first line. A declared constructor missing from the module, a call that
+    reaches an original constructor from an uninventoried position, and a constructor replacement still
+    installed at the end also fail. Which shapes may build a note at all is the static
+    _note_constructor_shape_failures check run beside this one. Reaching a site does not by itself prove
+    a case pins its outcome; the per-site mutation sweep shows that."""
     out = []
     for name, original in sorted(monitor.originals.items()):
-        if getattr(aiqt_hooks, name, None) is not original:
+        if original is None:
+            out.append("(an-coverage-missing) aiqt_hooks has no attribute {} although NOTE_CONSTRUCTORS "
+                       "declares it".format(name))
+        elif getattr(aiqt_hooks, name, None) is not original:
             out.append("(an-coverage-replaced) aiqt_hooks.{} is not the object the suite started with; a case "
                        "left a replacement installed".format(name))
-    if not any(key[0] == "call" for key in monitor.sites):
-        out.append("(an-coverage-scan) the AST scan found no note constructor call site in {}"
+    if not monitor.sites:
+        out.append("(an-coverage-scan) the AST scan found no note constructor return site in {}"
                    .format(aiqt_hooks.__file__))
-    for line in monitor.aliases:
-        out.append("(an-coverage-alias-L{}) aiqt_hooks.py line {} references a note constructor other than as "
-                   "a direct call, so a call through it would be no inventoried site".format(line, line))
     for name, line in sorted(monitor.unmapped):
         out.append("(an-coverage-unmapped-L{}) aiqt_hooks.py line {} called {} from no inventoried call site"
                    .format(line, line, name))
@@ -429,12 +521,13 @@ def _ask_label_failures(source_path=None):
 
 
 def _test_note_literal_sites(failures, tmp):
-    """(nl-*) Each literal {"systemMessage": ...} return in the hook source, outside _allow_note, reached
-    from its handler and judged by _reduce_result: allow-note is required, so a silent mutant (allow) and
-    an explicit permissionDecision "allow" mutant (explicit-allow) at the site both fail. The PreToolUse
-    sites are orch_yield_tool's two note returns and orch_resume_barrier's; the PostToolUse ledger
-    returns, the Stop _stop_warn and the dispatcher's fail-open warning are pinned the same way. The
-    fixtures are selftest_orch_hooks.Fixture repos under tmp."""
+    """(nl-*) The note sites that once returned a literal {"systemMessage": ...} (now `return
+    _allow_note(...)`), reached from their handlers and judged by _reduce_result: allow-note is required,
+    so a silent mutant (allow) and an explicit permissionDecision "allow" mutant (explicit-allow) at the
+    site both fail. The PreToolUse sites are orch_yield_tool's two note returns and orch_resume_barrier's;
+    the PostToolUse ledger returns, the Stop loop-bound _stop_warn and the dispatcher's bad-argv
+    fail-open note are pinned the same way (the other Stop and dispatcher sites: (ns-*)). The fixtures
+    are selftest_orch_hooks.Fixture repos under tmp."""
     import selftest_orch_hooks as orch
 
     def note(label, result, needle):
@@ -499,6 +592,97 @@ def _test_note_literal_sites(failures, tmp):
         obj = "unparseable stdout " + repr(buf.getvalue())
     note("(nl-dispatch-warn) a bad-argv Stop invocation prints the dispatcher's fail-open note",
          (code, obj, None), "could not run")
+
+
+def _test_stop_dispatch_note_sites(failures, tmp):
+    """(ns-*) The Stop, SessionStart, TeammateIdle and dispatcher note sites, each reached from its own
+    handler (or main) and judged by _reduce_result, so a silent mutant (allow) or an explicit
+    permissionDecision "allow" mutant at the site fails here, in the hooks suite, not only in the
+    orchestration suite: diff_wall_stop's wrong-event, unreadable-payload and diff-wall warnings;
+    _orch_stop_family's unreadable-registry, unsaved-counter and failed-escape-spoof-record warnings
+    (Stop and TeammateIdle); orch_resume_audit's divergence warning; and main's unreadable-payload and
+    handler-crash fail-open notes. The fixtures are selftest_orch_hooks.Fixture repos under tmp."""
+    import selftest_orch_hooks as orch
+
+    def note(label, result, needle):
+        code, obj, _err = result
+        got = _reduce_result(code, obj)
+        if got != "allow-note":
+            failures.append("{}: expected allow-note, got {}".format(label, got))
+        elif needle not in obj["systemMessage"]:
+            failures.append("{}: the note does not name {!r}: {!r}".format(label, needle, obj["systemMessage"]))
+
+    note("(ns-wall-event) the diff-wall Stop check wired to a non-Stop event warns",
+         aiqt_hooks.diff_wall_stop({"hook_event_name": "PreToolUse"}), "unexpected event")
+    note("(ns-wall-unreadable) a Stop payload with no readable last_assistant_message warns",
+         aiqt_hooks.diff_wall_stop({"hook_event_name": "Stop", "last_assistant_message": None}),
+         "could not run")
+    wall = "Here is the change:\ndiff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n"
+    note("(ns-wall-warn) a final response holding a raw diff wall warns (rule cnsdif)",
+         aiqt_hooks.diff_wall_stop({"hook_event_name": "Stop", "last_assistant_message": wall}),
+         "no-console-diff-dumps")
+    if _reduce_result(*aiqt_hooks.diff_wall_stop(
+            {"hook_event_name": "Stop", "last_assistant_message": "All done; tests pass."})[:2]) != "allow":
+        failures.append("(ns-wall-clean) a plain final response must pass the diff-wall Stop check silently")
+    base = tmp / "stop-dispatch-notes"
+    base.mkdir()
+    s = orch.Fixture(base, "stop")
+    saved = (aiqt_hooks._orch_registry, aiqt_hooks._orch_record_denial, aiqt_hooks._orch_escape_active,
+             aiqt_hooks._orch_record_escape_spoof, aiqt_hooks._orch_resume_probes)
+    try:
+        aiqt_hooks._orch_registry = lambda root: ("bad", "ns-registry-detail")
+        note("(ns-stop-registry) a Stop whose orchestration registry is unreadable warns and fails open",
+             aiqt_hooks.orch_stop_guard(s.payload("Stop")), "ns-registry-detail")
+        aiqt_hooks._orch_registry = saved[0]
+        s.set_items([orch.item("NS-1")])
+        s.set_turn_state(dict())
+        aiqt_hooks._orch_record_denial = lambda *_a: False
+        note("(ns-stop-counter) a Stop deny whose denial counter cannot be saved fails open with a warning",
+             aiqt_hooks.orch_stop_guard(s.payload("Stop")), "denial counter could not be persisted")
+        aiqt_hooks._orch_record_denial = saved[1]
+        aiqt_hooks._orch_escape_active = lambda reg, root: (False, "ns-spoof-detail")
+        aiqt_hooks._orch_record_escape_spoof = lambda root, detail: "NS-SPOOF-UNRECORDED"
+        s.set_items([])
+        s.set_turn_state(dict())
+        note("(ns-stop-spoof) a clean Stop whose escape-spoof record failed still warns",
+             aiqt_hooks.orch_stop_guard(s.payload("Stop")), "NS-SPOOF-UNRECORDED")
+        s.set_turn_state(dict())
+        note("(ns-idle-spoof) a clean TeammateIdle whose escape-spoof record failed still warns",
+             aiqt_hooks.orch_teammate_idle(s.payload("TeammateIdle")), "NS-SPOOF-UNRECORDED")
+        aiqt_hooks._orch_escape_active, aiqt_hooks._orch_record_escape_spoof = saved[2], saved[3]
+        aiqt_hooks._orch_resume_probes = lambda reg, root: ["ns-resume-finding"]
+        note("(ns-resume-audit) a SessionStart resume audit that finds divergence warns",
+             aiqt_hooks.orch_resume_audit(s.payload("SessionStart")), "ns-resume-finding")
+    finally:
+        (aiqt_hooks._orch_registry, aiqt_hooks._orch_record_denial, aiqt_hooks._orch_escape_active,
+         aiqt_hooks._orch_record_escape_spoof, aiqt_hooks._orch_resume_probes) = saved
+
+    def dispatch(stdin_text):
+        buf, saved_stdin = io.StringIO(), sys.stdin
+        try:
+            sys.stdin = io.StringIO(stdin_text)
+            with contextlib.redirect_stdout(buf):
+                code = aiqt_hooks.main(["orch_stop_guard"])
+        finally:
+            sys.stdin = saved_stdin
+        try:
+            return code, json.loads(buf.getvalue()), None
+        except ValueError:
+            return code, "unparseable stdout " + repr(buf.getvalue()), None
+
+    note("(ns-dispatch-unreadable) a Stop invocation with an unreadable payload prints the fail-open note",
+         dispatch("{"), "unreadable payload")
+    saved_handler = aiqt_hooks.HANDLERS["orch_stop_guard"]
+
+    def crash(_data):
+        raise RuntimeError("ns-handler-crash")
+
+    try:
+        aiqt_hooks.HANDLERS["orch_stop_guard"] = crash
+        note("(ns-dispatch-crash) a crashing Stop handler prints the fail-open note, never exit 2",
+             dispatch("{}"), "ns-handler-crash")
+    finally:
+        aiqt_hooks.HANDLERS["orch_stop_guard"] = saved_handler
 
 
 def _git(repo, *args, env_identity=False):
@@ -702,6 +886,10 @@ def main():
 
 
 def _main_with_recorder():
+    if sys.version_info < (3, 12):
+        print("SELF-TEST ERROR: the note-site coverage monitor needs sys.monitoring, which requires Python "
+              "3.12 or later; this interpreter is {}.{}".format(*sys.version_info[:2]), file=sys.stderr)
+        return 2
     monitor = _NoteSiteMonitor()
     monitor.start()
     try:
@@ -6685,6 +6873,7 @@ def _main_isolated(monitor):
 
         _test_git_stash_ref(failures)
         _test_note_literal_sites(failures, tmp)
+        _test_stop_dispatch_note_sites(failures, tmp)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
@@ -7535,8 +7724,10 @@ def _main_isolated(monitor):
         if _f18_tmp is not None:
             shutil.rmtree(str(_f18_tmp), ignore_errors=True)
 
-    # (an-coverage) every _allow_note( call site in the hook source ran at least once above, and
+    # (note-shape) every note is built inside the declared constructor set, (an-coverage) every
+    # `return <constructor>(...)` site in the hook source ran at least once above, and
     # (label-unique) no case label names two cases.
+    failures.extend(_note_constructor_shape_failures())
     failures.extend(_note_site_coverage_failures(monitor))
     failures.extend(_ask_label_failures())
     failures.extend(_duplicate_label_failures())

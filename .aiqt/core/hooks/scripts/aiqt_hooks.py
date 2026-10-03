@@ -193,6 +193,20 @@ FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSub
 # --- decision constructors ---------------------------------------------------------------------------
 # A handler returns (exit_code, stdout_obj_or_None, stderr_text_or_None). The dispatcher prints the
 # stdout object as JSON when present, prints the stderr text when present, and exits with the code.
+#
+# NOTE_CONSTRUCTORS is the CLOSED set of note constructors: top-level functions whose bodies alone may
+# build the {"systemMessage": ...} note result, directly or by returning another constructor's call.
+# Every use of one of these names is the callee of a call that is the direct value of a `return`
+# statement (no assignment, alias, attribute, conditional expression, lambda, comprehension or
+# argument), so each note site is one `return <constructor>(...)` position that the hooks self-test
+# inventories and requires to execute (tools/selftest_aiqt_hooks.py, _note_constructor_shape_failures).
+# _deny is the one deny constructor whose block result also carries a banner.
+NOTE_CONSTRUCTORS = (
+    "_allow_note", "_stop_warn", "_dispatcher_fail_open_warn", "_diff_source_fallback",
+    "_discard_recovery_result", "_expbnd_breadth_ask", "_expbnd_fallback", "_expbnd_target_ask",
+    "_gate_weakening_fallback", "_gensrc_fail_ask", "_git_discard_fallback", "_stash_drop_clear_outcome",
+    "_orch_stop_family")
+DENY_CONSTRUCTORS = ("_deny",)
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -6948,7 +6962,7 @@ def branch_root(data):
                 probe_repo = rd
             else:
                 if pending_note is None:
-                    pending_note = _allow_note(
+                    pending_note = (
                         "AIQT guardrail (rule brnrot, branch-rooted-on-live-main): this branch creation "
                         "carries a command-local repository redirect whose target this guard cannot resolve "
                         "(a --git-dir/GIT_DIR/-c form, or an unresolvable -C target), so it "
@@ -6976,7 +6990,7 @@ def branch_root(data):
     if pending_deny is not None:
         return pending_deny  # a confirmed orphan / cannot-prove-rooted deny outranks an allow-note
     if pending_note is not None:
-        return pending_note  # a command-local redirect whose target could not be resolved (finding 12)
+        return _allow_note(pending_note)  # an unresolvable command-local redirect (finding 12)
     return _allow()
 
 
@@ -7242,7 +7256,7 @@ def gate_weakening(data):
         # gate bypass) still DENIES.
         if sep_after == "||" and _command_word(nxt) in _EXIT_SWALLOWS:
             if pending_note is None:
-                pending_note = _allow_note(
+                pending_note = (
                     "AIQT guardrail (rule gatdis, gate-discipline): {!r} looks like a verification gate and "
                     "its failure would be swallowed by the following '|| {}'. If it genuinely gates this "
                     "work, do not swallow it: run it bare and let the exit status stand, so a failing check "
@@ -7250,14 +7264,14 @@ def gate_weakening(data):
                     .format(_command_word(tokens), _command_word(nxt)))
         elif sep_after == "|" and _command_word(nxt) in _TRUNCATING_SINKS:
             if pending_note is None:
-                pending_note = _allow_note(
+                pending_note = (
                     "AIQT guardrail (rule gatdis, gate-discipline): {!r} looks like a verification gate and "
                     "is piped into '{}', a truncating sink whose exit status replaces the checker's under "
                     "default pipeline semantics. If it gates this work, run it bare (or redirect the output "
                     "to a file and read that) so its failure signal is not discarded; if it is only a benign "
                     "output glance, this is allowed.".format(_command_word(tokens), _command_word(nxt)))
     if pending_note is not None:
-        return pending_note
+        return _allow_note(pending_note)
     return _allow()
 
 
@@ -9238,9 +9252,9 @@ def orch_yield_tool(data):
                 msg += " " + extra
         if spoof_warn:
             msg += " " + spoof_warn
-        return (0, {"systemMessage": msg}, None)
+        return _allow_note(msg)
     if spoof_warn:
-        return (0, {"systemMessage": "AIQT guardrail: {}".format(spoof_warn)}, None)
+        return _allow_note("AIQT guardrail: {}".format(spoof_warn))
     return _allow()
 
 
@@ -9807,9 +9821,9 @@ def orch_dispatch_ledger(data):
             # identifier is SURFACED as unbound, never correlated to a dispatch by recency or arrival
             # order. Non-blocking (this recorder never blocks), so a genuinely id-less read is flagged
             # rather than silently accepted.
-            return (0, {"systemMessage": "AIQT rule expbnd: this TaskOutput carried no task_id, so its "
-                        "result is UNBOUND and cannot be tied to a dispatch; correlate it by the "
-                        "dispatch's own id, never by which task completed most recently."}, None)
+            return _allow_note("AIQT rule expbnd: this TaskOutput carried no task_id, so its "
+                               "result is UNBOUND and cannot be tied to a dispatch; correlate it by the "
+                               "dispatch's own id, never by which task completed most recently.")
     else:
         dispatch_tools = reg.get("dispatch_tools") if isinstance(
             reg.get("dispatch_tools"), list) else []
@@ -9836,8 +9850,8 @@ def orch_dispatch_ledger(data):
     row["ts"] = _orch_now().isoformat()
     path = os.path.join(_orch_state_dir_for_root(root), "dispatch-ledger.jsonl")
     if not _orch_append_jsonl(path, row):
-        return (0, {"systemMessage": "AIQT guardrail: the dispatch-ledger write failed; "
-                                     "the launched work may be invisible to the stop guard."}, None)
+        return _allow_note("AIQT guardrail: the dispatch-ledger write failed; "
+                           "the launched work may be invisible to the stop guard.")
     return _allow()
 
 
@@ -10375,11 +10389,11 @@ def orch_resume_barrier(data):
             json.dump(barrier, fh)
     except OSError:
         pass
-    return (0, {"systemMessage": (
+    return _allow_note(
         "AIQT guardrail (resume barrier, BAKE posture: surfacing, not blocking): the resume "
         "audit found divergence ({}) and this mutation is outside the record surfaces. Correct the "
         "record first, then clear the barrier with 'python3 tools/orch_doctor.py --resume-audit'."
-        .format("; ".join(barrier.get("findings") or [])[:500]))}, None)
+        .format("; ".join(barrier.get("findings") or [])[:500]))
 
 
 # --- write-scope guard (EN-8, wrtscp) ----------------------------------------------------------------
@@ -11196,10 +11210,13 @@ HANDLER_EVENT = {
 def _dispatcher_fail_open_warn(handler_name, detail):
     """A fail-open dispatcher-level error for a Stop/SubagentStop/SessionStart/TeammateIdle/
     UserPromptSubmit/PostToolUse handler: a non-blocking systemMessage on exit 0, so no error on
-    these paths can wedge a session, trap a teammate, or block a human prompt."""
-    return {"systemMessage": (
+    these paths can wedge a session, trap a teammate, or block a human prompt. It prints the note and
+    returns the exit code 0, so main returns it directly (a note constructor's call is only ever the
+    direct value of a return)."""
+    print(json.dumps({"systemMessage": (
         "AIQT guardrail: the {} check could not run ({}); surfacing a warning rather than blocking "
-        "(non-blocking by design on this event).".format(handler_name, detail))}
+        "(non-blocking by design on this event).".format(handler_name, detail))}))
+    return 0
 
 
 def main(argv):
@@ -11222,8 +11239,7 @@ def main(argv):
         if is_fail_open:
             # A Stop handler's ERROR path never exits 2 (a deliberate deny does, via the orchestration
             # stop guard), not even on a malformed invocation: WARN and exit 0.
-            print(json.dumps(_dispatcher_fail_open_warn(handler_name,"bad invocation: {}".format(detail))))
-            return 0
+            return _dispatcher_fail_open_warn(handler_name, "bad invocation: {}".format(detail))
         print("aiqt_hooks: {} ({}); failing closed".format(handler_name, detail), file=sys.stderr)
         return 2
     try:
@@ -11235,8 +11251,7 @@ def main(argv):
         if is_fail_open:
             # A Stop handler's ERROR path never exits 2: surface a non-blocking warning and exit 0, so no Stop
             # payload (including a bare '{' or any garbage) can ever wedge the session.
-            print(json.dumps(_dispatcher_fail_open_warn(handler_name,"unreadable payload: {}".format(exc))))
-            return 0
+            return _dispatcher_fail_open_warn(handler_name, "unreadable payload: {}".format(exc))
         # A PreToolUse hook that cannot read its payload cannot clear the action, so it fails CLOSED.
         # exit 2 is the platform's blocking path; the diagnostic reaches Claude on stderr.
         print("aiqt_hooks: unreadable hook payload ({}); failing closed".format(exc), file=sys.stderr)
@@ -11247,8 +11262,7 @@ def main(argv):
         if is_fail_open:
             # Same event-aware posture for a crash inside the Stop handler (e.g. the detector throws on a
             # pathological message): WARN and exit 0, never exit 2.
-            print(json.dumps(_dispatcher_fail_open_warn(handler_name,"handler crash: {}".format(exc))))
-            return 0
+            return _dispatcher_fail_open_warn(handler_name, "handler crash: {}".format(exc))
         # A PreToolUse handler crash fails closed (block), not pass.
         print("aiqt_hooks: handler {} failed ({}); failing closed".format(handler_name, exc),
               file=sys.stderr)
