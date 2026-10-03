@@ -90,7 +90,8 @@ hook runs), verifies the new commit's first parent is the exact PR head this run
 by itself makes that head an ancestor of the new commit), checks the candidate in a SECOND, normal
 private checkout (the committed attributes and the operator's global and system configuration
 honoured, no local configuration carried over, hooks disabled) and refuses normal-checkout-failed
-when any declared check fails there (regeneration with conversions disabled must not publish a
+when that checkout reports any error or any declared check fails there (regeneration with
+conversions disabled must not publish a
 commit whose own fresh checkout fails its generators), and pushes from the private checkout with an
 exact-value
 compare-and-set (--force-with-lease=refs/heads/<branch>:<the head this run validated>, a 40- or
@@ -135,6 +136,7 @@ branch, edits PR metadata, or reads an ambient git identity.
 """
 
 
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -754,7 +756,11 @@ def guard_fresh_checkout(ctx, scratch, new):
     PR into a pushed commit whose own fresh checkout fails its generators). A filter or conversion
     defined only in a repository's LOCAL configuration is NOT modelled here: this fresh clone
     carries no local configuration, so a consumer whose checkout depends on a repository-local
-    filter is out of this check's scope."""
+    filter is out of this check's scope. The checkout itself FAILS CLOSED (QA round 8, observed
+    on git 2.53.0: with a blob of the candidate missing from, or unreadable in, the shared object
+    store, this checkout prints "error: unable to read sha1 file" on stderr, EXITS 0 and leaves
+    the path out of the worktree, so the checks would run over an incomplete tree): a nonzero
+    exit or ANY stderr output is refused as normal-checkout-failed before any check runs."""
     fresh_root = tempfile.mkdtemp(prefix="merge-train-fresh-")
     SCRATCHES.append(fresh_root)
     try:
@@ -762,7 +768,12 @@ def guard_fresh_checkout(ctx, scratch, new):
         _git(scratch, "clone", "--quiet", "--shared", "--no-checkout", str(scratch), fresh)
         for key, value in (("core.hooksPath", os.devnull), ("core.fsmonitor", "false")):
             _git(fresh, "config", key, value)
-        _git(fresh, "checkout", "--quiet", "--detach", new, timeout=ctx["cmd_timeout"])
+        rc, _out, err = _git(fresh, "checkout", "--quiet", "--detach", new,
+                             timeout=ctx["cmd_timeout"], ok=None)
+        if rc != 0 or err:
+            raise Refuse("normal-checkout-failed",
+                         "git checkout could not materialize the candidate in a fresh normal "
+                         "checkout (exit %d): %s" % (rc, err.strip()[:300] or "(no stderr)"))
         for command in ctx["cfg"]["generated"]["check"]:
             code, _out, err = _run_external(command, fresh, ctx["cmd_timeout"],
                                             dict(PYTHONDONTWRITEBYTECODE="1"))
@@ -3176,6 +3187,110 @@ def _unreadable_probe(tmp):
     return got
 
 
+@contextlib.contextmanager
+def _object_unavailable(repo, sha, how):
+    """A REAL read failure of one loose object of repo's store for the duration: "missing" moves
+    the file aside, "unreadable" sets its mode to 0; either is undone on exit."""
+    objects = _git_text(repo, "rev-parse", "--path-format=absolute", "--git-path", "objects")
+    path = os.path.join(objects, sha[:2], sha[2:])
+    if how == "missing":
+        os.rename(path, path + ".aside")
+    else:
+        os.chmod(path, 0)
+    try:
+        yield
+    finally:
+        if how == "missing":
+            os.rename(path + ".aside", path)
+        else:
+            os.chmod(path, 0o444)
+
+
+def _status_of(call):
+    try:
+        result = call()
+    except Refuse as exc:
+        return exc.status, exc.reason
+    except FailClosed as exc:
+        return "fail-closed", str(exc)
+    return "accepted", result
+
+
+def case_gitread(tmp):
+    # QA round 8: every GUARDS function that runs git over the object store, against a REAL read
+    # failure of one object of a private-style --shared checkout's store (the shape of a missing
+    # promised blob, rounds 6 and 7). fresh-checkout: `git checkout --detach` in the fresh clone
+    # EXITS 0 with only "error: unable to read sha1 file" on stderr (observed on git 2.53.0), so
+    # the guard must refuse by name on stderr output, before any check runs (the check here always
+    # passes, so a guard that ignores stderr accepts). pushed-bytes (ls-tree -r over a missing
+    # subtree exits 1; cat-file of a missing symlink blob exits 128), commit-parents (rev-list of a
+    # missing commit exits 128) and commit-tree (rev-parse <missing>^{tree} exits 128) call git with
+    # ok=(0,), so _git refuses git-failed. config-source (git show of a missing config blob exits
+    # 128) reads as no config, which load_config fails closed as "not enabled", never as an empty
+    # config. Root reads a mode-0 file, so the unreadable variant is a NAMED skip there.
+    src = Path(tmp) / "gitread-src"
+    _git(tmp, "init", "--quiet", str(src))
+    for rel, text in (("dir/file", "x\n"), ("top", "t\n"), (CONFIG_PATH, "version = 1\n")):
+        os.makedirs(str((src / rel).parent), exist_ok=True)
+        with open(str(src / rel), "w", encoding="utf-8") as handle:
+            handle.write(text)
+    os.symlink("top", str(src / "ln"))
+    _git(src, "add", "-A")
+    _git(src, "commit", "-q", "-m", "gitread fixture", extra_env=FIXTURE_IDENT)
+    head = _git_text(src, "rev-parse", "HEAD")
+    tree, sub, blob, link, cfg = [_git_text(src, "rev-parse", head + spec) for spec in (
+        "^{tree}", ":dir", ":dir/file", ":ln", ":" + CONFIG_PATH)]
+    scratch = str(Path(tmp) / "gitread-co")
+    _git(src, "clone", "--quiet", "--shared", "--no-checkout", str(src), scratch)
+    _guard("scratch-setup")(scratch)
+    _git(scratch, "checkout", "--quiet", "--detach", head)
+    ctx = dict(cmd_timeout=60, cfg=dict(generated=dict(check=[[sys.executable, "-I", "-B", "-c",
+                                                                "pass"]])))
+
+    def fresh():
+        return _guard("fresh-checkout")(ctx, scratch, head)
+
+    made = len(SCRATCHES)
+    check("gitread/fresh-checkout-baseline-accepted", _status_of(fresh)[0], "accepted")
+    with _object_unavailable(src, blob, "missing"):
+        got = _status_of(fresh)
+    check("gitread/fresh-checkout-missing-blob-refused",
+          (got[0], "unable to read" in str(got[1])), ("normal-checkout-failed", True))
+    if os.geteuid() == 0:
+        print("SELF-TEST SKIP gitread/fresh-checkout-unreadable-blob-refused: running as root, "
+              "which reads a mode-0 file, so the permission error cannot be produced",
+              file=sys.stderr)
+        got = want = "skipped-as-root"
+    else:
+        with _object_unavailable(src, blob, "unreadable"):
+            status, reason = _status_of(fresh)
+        got, want = (status, "Permission denied" in str(reason)), ("normal-checkout-failed", True)
+    check("gitread/fresh-checkout-unreadable-blob-refused", got, want)
+    check("gitread/fresh-checkout-removed",
+          [p for p in SCRATCHES[made:] if os.path.exists(p)], [])
+
+    def pushed():
+        return _guard("pushed-bytes")(scratch, tree)
+
+    with _object_unavailable(src, sub, "missing"):
+        missing_sub = _status_of(pushed)[0]
+    with _object_unavailable(src, link, "missing"):
+        missing_link = _status_of(pushed)[0]
+    check("gitread/pushed-bytes-missing-object-refused",
+          (_status_of(pushed)[0], missing_sub, missing_link),
+          ("accepted", "git-failed", "git-failed"))
+    with _object_unavailable(src, head, "missing"):
+        got = (_status_of(lambda: _guard("commit-parents")(scratch, head, head))[0],
+               _status_of(lambda: _guard("commit-tree")(scratch, head, tree))[0])
+    check("gitread/commit-guards-missing-commit-refused", got, ("git-failed", "git-failed"))
+    with _object_unavailable(src, cfg, "missing"):
+        got = (_status_of(lambda: _guard("config-source")(src, head))[1],
+               _status_of(lambda: load_config(src, head))[0])
+    check("gitread/config-source-missing-blob-fails-closed",
+          (_status_of(lambda: _guard("config-source")(src, head))[1], got),
+          ("version = 1\n", (None, "fail-closed")))
+
+
 def case_signal(tmp):
     # A real SIGTERM, SIGHUP, SIGQUIT or SIGINT mid-regenerate, against a REAL tool subprocess
     # with a case-private TMPDIR: the handler converts the signal into the normal cleanup (SIGINT
@@ -3696,6 +3811,7 @@ CASES = dict([
     ("cli", case_cli), ("refmap", case_refmap), ("basefetch", case_basefetch),
     ("leak", case_leak), ("partial", case_partial), ("signal", case_signal),
     ("crlf", case_crlf), ("latepush", case_latepush), ("rename", case_rename),
+    ("gitread", case_gitread),
 ])
 
 
