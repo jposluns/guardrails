@@ -84,13 +84,12 @@ sidebar-active = "teams"
       <li>Admin controls, policy management, and cross-team reporting.</li>
       <li>Commercial support and service levels.</li>
     </ul>
-    <p style="margin-top:1rem">Two of these become the ideas we are considering, below. A
-      shared or aggregate record across people is what a web console would surface, and central
+    <p style="margin-top:1rem">Three of these lead to the two ideas we are considering, below:
+      a shared or aggregate record across people is what a web console would surface, and central
       deployment together with admin controls, policy management, and cross-team reporting is
-      what enterprise management would cover. The remaining two, technical enforcement and
-      commercial support, are simply not built: AIQT is a behavioural standard the assistant
-      follows, not a control that blocks a model, and it is an open project, not a commercial
-      product with a support desk.</p>
+      what enterprise management would cover. The other two are not offered today: technical
+      enforcement, because AIQT is a standard the assistant follows, and commercial support,
+      because AIQT is an open project, not a commercial product with a support desk.</p>
   </div>
 </section>
 
