@@ -29,21 +29,34 @@ RULE SOURCE FORMAT (the two-layer split; this step parses and validates it, and 
       with three backticks (a fence) or like an ordered list item (digits, then `.` or `)`, then a
       space or the end of the line). A single leading backtick is allowed (a code span; the live
       corpus starts two lines with one), and so are `>`, `|`, `_` and `&` after the first character.
-  FRONTMATTER: in a renderer that does not read frontmatter, the opening `---` is a thematic break and
-  the closing `---` turns the frontmatter into one setext h2 whose text starts with a frontmatter key, so
-  it can never read Detail (a blank or indented frontmatter line can only shorten that heading to the
-  lines after it, or leave no heading). The frontmatter is split into lines at LF only, as the body is. A
-  frontmatter line that starts with `#` (a YAML comment, an ATX heading in that renderer) is refused, and
-  a frontmatter value (for a flow sequence, the text inside its brackets) holds no `<`, `[`, `]`,
-  backslash, control or format character (Unicode categories Cc and Cf) or line or paragraph separator,
-  so no HTML or link in a value can add a heading (`<h2>Detail</h2>`) or hide one (`<style>`) there.
-  Other text, non-ASCII included, is accepted: it can form no HTML or link, and the heading still starts
-  with a key. A value is a number only when it is ASCII digits (with an optional leading `-`), so a
-  non-ASCII digit token (`tier: \u0661\u0660`) stays a string and is refused where a number is required.
+  FRONTMATTER: this reader and a YAML reader must see the same keys and values, so each frontmatter line
+  whose reading could differ is refused (no YAML is modelled). The frontmatter is split into lines at LF
+  only, as the body is, and each raw line is checked before any strip: it holds no control, format, line
+  separator or paragraph separator character (Unicode categories Cc, Cf, Zl and Zp, so no tab, U+0085,
+  U+2028, U+2029 or U+001C to U+001F), except ZWNJ and ZWJ (U+200C and U+200D, which Persian text and
+  emoji sequences need). A line is refused when it starts with `#` (a YAML comment), is indented (YAML
+  reads it as part of the key above), or has no space after its key's colon. A value (and each element
+  of a flow sequence) is refused when it is empty or one of `~`, `null`, `Null`, `NULL`, a YAML 1.1
+  boolean word other than `true` and `false` (such as `yes` or `on`), or `=`; when it holds ` #` (YAML
+  drops the rest as a comment), `: ` or a final `:`; when it starts with a YAML indicator (`>`, `|`, `&`,
+  `*`, `!`, `%`, `@`, a backtick, `{`, `}`, `,`, `]`, `#`, or `-`, `?` or `:` followed by a space or the
+  end); and when it starts with a quote that does not close exactly at its end or holds that quote again.
+  A flow-sequence element holds no `{` or `}`. A value (for a flow sequence, the text inside its
+  brackets) holds no `<`, `[`, `]` or backslash, so it forms no HTML and no bracketed link. A value is a
+  number only when it is ASCII digits (with an optional leading `-`), so a non-ASCII digit token
+  (`tier: \u0661\u0660`) stays a string and is refused where a number is required. Not refused: a bare
+  value that YAML reads as a number or date while this tool reads a string (the live mapping ids `6.7`,
+  `10.2` and `8.1` are such values; keys still agree).
+  In a renderer that does not read frontmatter, the opening `---` is a thematic break and the frontmatter
+  lines are one paragraph, which the closing `---` makes a setext h2; if the last frontmatter line holds
+  a `|`, a GFM renderer can read the lines as a table instead. Either way the first text is a frontmatter
+  key, a blank frontmatter line can only shorten that heading to the lines after it, and no value holds
+  HTML or a bracketed link, so the frontmatter can never add a Detail heading or hide one. A value can
+  still render as a GFM autolink (a bare URL, a `www.` address or an email address); that adds no heading.
   Each of these is refused as a malformed source (exit 2, naming the file and, for a line, its number):
     - either key without the split, a missing detail-trigger with it, or a key value that is not a
       non-empty string;
-    - a frontmatter line that starts with `#`, and a frontmatter value holding a refused character;
+    - a frontmatter line or value refused under FRONTMATTER above;
     - a second `## Detail` line;
     - a `## Detail` line without a blank line directly above it;
     - a body with no title line, and a body line outside the BODY GRAMMAR;
@@ -115,10 +128,20 @@ _HEADING_TEXT = frozenset(map(chr, range(0x20, 0x7f))) - frozenset("[]<>&\\~*_`"
 _PROSE_TEXT = frozenset(map(chr, range(0x20, 0x7f))) - frozenset("<[]\\")
 _PROSE_START = frozenset(" \t#>-+*=~|<[!_:")
 _ORDERED_RE = re.compile(r'^[0-9]+[.)](?: |$)')
-# A frontmatter value (see FRONTMATTER above) holds none of these characters and none of these Unicode
-# categories (control, format, line separator, paragraph separator).
+# A frontmatter value (see FRONTMATTER above) holds none of these characters.
 _VALUE_MARKUP = frozenset("<[]\\")
-_VALUE_CATEGORIES = frozenset(("Cc", "Cf", "Zl", "Zp"))
+# A raw frontmatter line holds no character of these Unicode categories (control, format, line separator,
+# paragraph separator), checked before any strip: str.strip() removes U+0085, U+2028, U+2029 and U+001C
+# to U+001F, and YAML reads the first three as line breaks. ZWNJ and ZWJ (format characters that Persian
+# text and emoji sequences need) are the only exceptions.
+_LINE_CATEGORIES = frozenset(("Cc", "Cf", "Zl", "Zp"))
+_JOINERS = frozenset("\u200c\u200d")
+# A frontmatter scalar (a value, or one flow-sequence element) that YAML reads as a null or a boolean, or
+# not as a plain string at all, where this tool reads a string; see _scalar_problem.
+_YAML_WORDS = frozenset(("", "~", "null", "Null", "NULL", "yes", "Yes", "YES", "no", "No", "NO", "on", "On",
+                         "ON", "off", "Off", "OFF", "True", "TRUE", "False", "FALSE", "="))
+_YAML_START = frozenset(">|&*!%@`{},]#")
+_YAML_SPACED_START = frozenset("-?:")
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
@@ -132,6 +155,26 @@ GENSRC_OUTPUTS = (
 )
 
 
+def _scalar_problem(tok):
+    """Why YAML could read the frontmatter scalar tok (a value, or one flow-sequence element, spaces
+    stripped) other than as this tool does, or None. This models no YAML: it refuses each shape whose YAML
+    reading could differ (a null or boolean word, a quote that does not close exactly at the end, a
+    leading YAML indicator, a mapping separator)."""
+    if tok in _YAML_WORDS:
+        return "is empty or a YAML null or boolean word"
+    if tok[:1] in ("'", '"'):
+        if len(tok) < 2 or tok[-1] != tok[0] or tok[0] in tok[1:-1]:
+            return "has a quote that does not close exactly at its end"
+        return None
+    if tok[:1] in _YAML_START:
+        return "starts with a YAML indicator"
+    if tok[:1] in _YAML_SPACED_START and tok[1:2] in ("", " "):
+        return "starts with a YAML indicator"
+    if ": " in tok or tok.endswith(":"):
+        return "holds a YAML mapping separator (': ' or a final ':')"
+    return None
+
+
 def _unquote(tok):
     """A single scalar STRING element: strip matching quotes, else the bare token. Fail-closed."""
     if tok and tok[0] in "\"'":
@@ -142,6 +185,9 @@ def _unquote(tok):
 
 
 def _value(v):
+    problem = _scalar_problem(v) if not v.startswith("[") else None
+    if problem:
+        raise ValueError("frontmatter value {!r} {} (a YAML reader would read it differently)".format(v, problem))
     if v and v[0] in "\"'":
         return _unquote(v)
     # Flow sequence of strings, e.g. [INTEG, QUALI] (spec section 4). Elements are strings; a bare
@@ -149,16 +195,22 @@ def _value(v):
     if v.startswith("["):
         if not v.endswith("]"):
             raise ValueError("malformed flow sequence {!r} (unterminated)".format(v))
-        inner = v[1:-1].strip()
+        inner = v[1:-1].strip(" ")
         if inner == "":
             return []
         if "[" in inner or "]" in inner:
             raise ValueError("nested flow sequence not allowed in {!r} (strings only)".format(v))
         elems = []
         for part in inner.split(","):
-            part = part.strip()
+            part = part.strip(" ")
             if part == "":
                 raise ValueError("empty element in flow sequence {!r}".format(v))
+            problem = _scalar_problem(part)
+            if problem is None and ("{" in part or "}" in part):
+                problem = "holds a YAML flow mapping brace"
+            if problem:
+                raise ValueError("flow sequence element {!r} {} (a YAML reader would read it differently)"
+                                 .format(part, problem))
             elems.append(_unquote(part))
         return elems
     if v in ("true", "false"):
@@ -191,29 +243,41 @@ def parse_source(path):
     if end == -1:
         raise ValueError("{}: unterminated frontmatter".format(path.name))
     fm = {}
-    for line in text[4:end].split("\n"):
-        line = line.strip()
+    for raw in text[4:end].split("\n"):
+        if any(unicodedata.category(ch) in _LINE_CATEGORIES and ch not in _JOINERS for ch in raw):
+            raise ValueError("{}: frontmatter line {!r} holds a hidden character (a control, format, line "
+                             "separator or paragraph separator character; YAML can read a second key "
+                             "there)".format(path.name, raw))
+        line = raw.strip(" ")
         if not line:
             continue
         if line.startswith("#"):
             raise ValueError("{}: frontmatter line {!r} starts with '#' (a YAML comment is refused: a "
                              "renderer that does not read frontmatter shows it as a heading)".format(path.name, line))
+        if raw.startswith(" "):
+            raise ValueError("{}: frontmatter line {!r} is indented (YAML reads it as part of the key "
+                             "above)".format(path.name, raw))
         if ":" not in line:
             raise ValueError("{}: bad frontmatter line {!r}".format(path.name, line))
         key, val = line.split(":", 1)
-        key = key.strip()
+        key = key.strip(" ")
         if key in fm:
             raise ValueError("{}: duplicate key {}".format(path.name, key))
+        if val[:1] not in ("", " "):
+            raise ValueError("{}: frontmatter key {} is not followed by ': ' (YAML reads the line as one "
+                             "string)".format(path.name, key))
+        if " #" in val:
+            raise ValueError("{}: frontmatter value of {} holds ' #' (YAML drops the rest as a "
+                             "comment)".format(path.name, key))
         try:
-            fm[key] = _value(val.strip())
+            fm[key] = _value(val.strip(" "))
         except ValueError as exc:
             raise ValueError("{}: {}".format(path.name, exc))
-        val = val.strip()
+        val = val.strip(" ")
         if isinstance(fm[key], list):
             val = val[1:-1]
-        if any(ch in _VALUE_MARKUP or unicodedata.category(ch) in _VALUE_CATEGORIES for ch in val):
-            raise ValueError("{}: frontmatter value of {} holds '<', '[', ']', a backslash, or a control, "
-                             "format, line separator or paragraph separator character (a renderer that "
+        if any(ch in _VALUE_MARKUP for ch in val):
+            raise ValueError("{}: frontmatter value of {} holds '<', '[', ']' or a backslash (a renderer that "
                              "shows frontmatter as Markdown reads HTML or a link there)".format(path.name, key))
     return fm
 
@@ -729,6 +793,52 @@ _DETAIL_CASES = (
     ("r7b-frontmatter-paragraph-separator", _TRIGGER + "detail-reason: a\u2029b\n", _DETAIL_BODY, 2),
     ("r7b-frontmatter-separator-key", "detail-reason: a\u2028detail-trigger: x\n", _DETAIL_BODY, 2),
     ("r7b-frontmatter-non-ascii-tier", "", "", 2),
+    # QA round 8: the hidden-character check reads the raw frontmatter line before any strip, so a
+    # separator at a value's edge (which str.strip() removes and YAML reads as a line break) is refused.
+    ("r8-f1-paragraph-separator-slug", _TRIGGER + "detail-reason:\u2029slug: other-slug\n", _DETAIL_BODY, 2),
+    ("r8-f1-next-line-key", _TRIGGER + "detail-reason:\x85detail-x: y\n", _DETAIL_BODY, 2),
+    ("r8-f1-line-separator-trigger", "detail-reason:\u2028detail-trigger: hidden key\n", _DETAIL_BODY, 2),
+    ("r8-codex-line-separator-key", "detail-trigger:\u2028injected: surprise\n", _DETAIL_BODY, 2),
+    ("r8-raw-leading-next-line", _TRIGGER + "detail-reason: \x85x\n", _DETAIL_BODY, 2),
+    ("r8-raw-trailing-separator", _TRIGGER + "detail-reason: x\x1c\n", _DETAIL_BODY, 2),
+    ("r8-raw-trailing-line-separator", _TRIGGER + "detail-reason: x\u2028\n", _DETAIL_BODY, 2),
+    ("r8-zwnj-persian", _TRIGGER + "detail-reason: \u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645\n", _DETAIL_BODY, 0),
+    ("r8-zwj-emoji", _TRIGGER + "detail-reason: pairing \U0001f469\u200d\U0001f4bb\n", _DETAIL_BODY, 0),
+    # A value YAML would read differently from this tool is refused: a null or boolean word, ' #' (a YAML
+    # comment), a leading YAML indicator, a quote that does not close exactly at the end, a mapping
+    # separator, a key with no space after its colon, and an indented line.
+    ("r8-null-tilde", "detail-trigger: ~\n", _DETAIL_BODY, 2),
+    ("r8-null-lower", "detail-trigger: null\n", _DETAIL_BODY, 2),
+    ("r8-null-title", "detail-trigger: Null\n", _DETAIL_BODY, 2),
+    ("r8-null-upper", "detail-trigger: NULL\n", _DETAIL_BODY, 2),
+    ("r8-bool-yes", "detail-trigger: yes\n", _DETAIL_BODY, 2),
+    ("r8-value-equals", "detail-trigger: =\n", _DETAIL_BODY, 2),
+    ("r8-comment", "detail-trigger: writing x #hidden part\n", _DETAIL_BODY, 2),
+    ("r8-start-folded", "detail-trigger: > x\n", _DETAIL_BODY, 2),
+    ("r8-start-literal", "detail-trigger: | x\n", _DETAIL_BODY, 2),
+    ("r8-start-anchor", "detail-trigger: &a x\n", _DETAIL_BODY, 2),
+    ("r8-start-alias", "detail-trigger: *a\n", _DETAIL_BODY, 2),
+    ("r8-start-tag", "detail-trigger: !!str x\n", _DETAIL_BODY, 2),
+    ("r8-start-percent", "detail-trigger: %x\n", _DETAIL_BODY, 2),
+    ("r8-start-at", "detail-trigger: @x\n", _DETAIL_BODY, 2),
+    ("r8-start-backtick", "detail-trigger: `x`\n", _DETAIL_BODY, 2),
+    ("r8-start-brace", "detail-trigger: {x}\n", _DETAIL_BODY, 2),
+    ("r8-start-comma", "detail-trigger: , x\n", _DETAIL_BODY, 2),
+    ("r8-start-question", "detail-trigger: ? x\n", _DETAIL_BODY, 2),
+    ("r8-start-dash", "detail-trigger: - x\n", _DETAIL_BODY, 2),
+    ("r8-dash-word-ok", "detail-trigger: -x writing\n", _DETAIL_BODY, 0),
+    ("r8-quote-unclosed", "detail-trigger: 'writing\n", _DETAIL_BODY, 2),
+    ("r8-quote-doubled", "detail-trigger: 'it''s'\n", _DETAIL_BODY, 2),
+    ("r8-mapping-separator", "detail-trigger: a: b\n", _DETAIL_BODY, 2),
+    ("r8-final-colon", "detail-trigger: writing:\n", _DETAIL_BODY, 2),
+    ("r8-url-ok", "detail-trigger: see https://example.test/x\n", _DETAIL_BODY, 0),
+    ("r8-no-space-after-colon", "detail-trigger:writing\n", _DETAIL_BODY, 2),
+    ("r8-indented-under-empty", "detail-reason:\n  detail-trigger: x\n", _DETAIL_BODY, 2),
+    ("r8-indented-under-folded", "detail-reason: >\n  detail-trigger: x\n", _DETAIL_BODY, 2),
+    ("r8-indented-under-value", "detail-trigger: a\n  detail-reason: b\n", _DETAIL_BODY, 2),
+    ("r8-element-null", "map-iso-42001-broad: [A.5.1, ~]\n" + _TRIGGER, _DETAIL_BODY, 2),
+    ("r8-element-pair", "map-iso-42001-broad: [A.5.1, a: b]\n" + _TRIGGER, _DETAIL_BODY, 2),
+    ("r8-element-brace", "map-iso-42001-broad: [A.5.1, a{b]\n" + _TRIGGER, _DETAIL_BODY, 2),
     # The BODY GRAMMAR: one case per refused shape (each exits 2); a grammar-title case sets its title
     # through _CASE_FRAME.
     ("grammar-no-title", "", "", 2),
@@ -822,11 +932,30 @@ _SECOND = ("if found is not None:", "if False:")
 _NOTITLE = ("    if title is None:\n        raise", "    if False:\n        raise")
 _FM = ("        if not line:\n            continue\n", '        if not line or line.startswith("#"):\n            continue\n')
 _FENCE = (' or line.startswith("```")', "")
-_FMVAL = ("if any(ch in _VALUE_MARKUP or unicodedata.category(ch) in _VALUE_CATEGORIES for ch in val):", "if False:")
+_FMVAL = ("if any(ch in _VALUE_MARKUP for ch in val):", "if False:")
 _FMVAL_ASCII = (_FMVAL[0], "if not set(val) <= _PROSE_TEXT:")
-_VCAT_FIXED = '_VALUE_CATEGORIES = frozenset(("Cc", "Cf", "Zl", "Zp"))'
+_VCAT_FIXED = '_LINE_CATEGORIES = frozenset(("Cc", "Cf", "Zl", "Zp"))'
 _FMINT = ("if re.fullmatch(r'-?[0-9]+', v):", "if re.fullmatch(r'-?\\d+', v):")
-_FMSPLIT = ('for line in text[4:end].split("\\n"):', "for line in text[4:end].splitlines():")
+_FMSPLIT = ('for raw in text[4:end].split("\\n"):', "for raw in text[4:end].splitlines():")
+# The round-7 hidden-character check read the value after str.strip(); the revert puts that back.
+_FMRAW = ("for ch in raw):", 'for ch in raw.strip().partition(":")[2].strip()):')
+_FMJOIN = (" and ch not in _JOINERS for ch in raw", " for ch in raw")
+_FMCOLON = ('if val[:1] not in ("", " "):', "if False:")
+_FMSEP = ('if ": " in tok or tok.endswith(":"):', "if False:")
+_FMCOMMENT = ('if " #" in val:', "if False:")
+_FMINDENT = ('if raw.startswith(" "):', "if False:")
+_FMQUOTE = (" or tok[0] in tok[1:-1]:", ":")
+_FMUNQUOTE = ('        raise ValueError("malformed quoted value {!r}".format(tok))', "        return tok")
+_FMQUOTED = ("if len(tok) < 2 or tok[-1] != tok[0] or tok[0] in tok[1:-1]:", "if False:")
+_FMELEM = ("            problem = _scalar_problem(part)\n", "            problem = None\n")
+_FMBRACE = ('if problem is None and ("{" in part or "}" in part):', "if False:")
+_YSTART_FIXED = '_YAML_START = frozenset(">|&*!%@`{},]#")'
+_YSPACED = ('if tok[:1] in _YAML_SPACED_START and tok[1:2] in ("", " "):', "if False:")
+
+
+def _word(word):
+    """The guard pair that drops one word from _YAML_WORDS."""
+    return '"{}", '.format(word), ""
 _ORDERED = ("if _ORDERED_RE.match(line):", "if False:")
 _CHARS = ("if not set(line) <= _PROSE_TEXT:", "if False:")
 _TSTART = ('if not line.startswith("# "):', "if False:")
@@ -1053,6 +1182,47 @@ _DETAIL_REVERTS = (
      "r7b-frontmatter-paragraph-separator", 0),
     _revert("fm-r7b-lf-split", "r7b-frontmatter-separator-key", _FMSPLIT),
     _revert("fm-r7b-ascii-int", "r7b-frontmatter-non-ascii-tier", _FMINT),
+    # Round 8: each reproduction that also holds ': ' after a separator is refused by the raw-line check,
+    # the colon-space check and the mapping-separator check, so all three are reverted together.
+    _revert("fm-r8-f1-paragraph-separator-slug", "r8-f1-paragraph-separator-slug", _FMRAW, _FMCOLON, _FMSEP),
+    _revert("fm-r8-f1-next-line-key", "r8-f1-next-line-key", _FMRAW, _FMCOLON, _FMSEP),
+    _revert("fm-r8-codex-line-separator-key", "r8-codex-line-separator-key", _FMRAW, _FMCOLON, _FMSEP),
+    _revert("fm-r8-raw-leading-next-line", "r8-raw-leading-next-line", _FMRAW),
+    _revert("fm-r8-raw-trailing-separator", "r8-raw-trailing-separator", _FMRAW),
+    _revert("fm-r8-raw-trailing-line-separator", "r8-raw-trailing-line-separator", _FMRAW),
+    ("fm-r8-zwnj-persian", _FMJOIN[0], _FMJOIN[1], "r8-zwnj-persian", 2),
+    ("fm-r8-zwj-emoji", _FMJOIN[0], _FMJOIN[1], "r8-zwj-emoji", 2),
+    _revert("fm-r8-null-tilde", "r8-null-tilde", _word("~")),
+    _revert("fm-r8-null-lower", "r8-null-lower", _word("null")),
+    _revert("fm-r8-null-title", "r8-null-title", _word("Null")),
+    _revert("fm-r8-null-upper", "r8-null-upper", _word("NULL")),
+    _revert("fm-r8-bool-yes", "r8-bool-yes", _word("yes")),
+    _revert("fm-r8-value-equals", "r8-value-equals", ('"FALSE", "="', '"FALSE"')),
+    _revert("fm-r8-comment", "r8-comment", _FMCOMMENT),
+    _revert("fm-r8-start-folded", "r8-start-folded", _without(_YSTART_FIXED, ">")),
+    _revert("fm-r8-start-literal", "r8-start-literal", _without(_YSTART_FIXED, "|")),
+    _revert("fm-r8-start-anchor", "r8-start-anchor", _without(_YSTART_FIXED, "&")),
+    _revert("fm-r8-start-alias", "r8-start-alias", _without(_YSTART_FIXED, "*")),
+    _revert("fm-r8-start-tag", "r8-start-tag", _without(_YSTART_FIXED, "!")),
+    _revert("fm-r8-start-percent", "r8-start-percent", _without(_YSTART_FIXED, "%")),
+    _revert("fm-r8-start-at", "r8-start-at", _without(_YSTART_FIXED, "@")),
+    _revert("fm-r8-start-backtick", "r8-start-backtick", _without(_YSTART_FIXED, "`")),
+    _revert("fm-r8-start-brace", "r8-start-brace", _without(_YSTART_FIXED, "{")),
+    _revert("fm-r8-start-comma", "r8-start-comma", _without(_YSTART_FIXED, ",")),
+    _revert("fm-r8-start-question", "r8-start-question", _YSPACED),
+    _revert("fm-r8-start-dash", "r8-start-dash", _YSPACED),
+    ("fm-r8-dash-word-ok", _YSPACED[0], 'if tok[:1] in _YAML_SPACED_START:', "r8-dash-word-ok", 2),
+    _revert("fm-r8-quote-unclosed", "r8-quote-unclosed", _FMQUOTED, _FMUNQUOTE),
+    _revert("fm-r8-quote-doubled", "r8-quote-doubled", _FMQUOTE),
+    _revert("fm-r8-mapping-separator", "r8-mapping-separator", _FMSEP),
+    _revert("fm-r8-final-colon", "r8-final-colon", _FMSEP),
+    ("fm-r8-url-ok", _FMSEP[0], 'if ":" in tok:', "r8-url-ok", 2),
+    _revert("fm-r8-no-space-after-colon", "r8-no-space-after-colon", _FMCOLON),
+    _revert("fm-r8-indented-under-folded", "r8-indented-under-folded", _without(_YSTART_FIXED, ">"), _FMINDENT),
+    _revert("fm-r8-indented-under-value", "r8-indented-under-value", _FMINDENT),
+    _revert("fm-r8-element-null", "r8-element-null", _FMELEM),
+    _revert("fm-r8-element-pair", "r8-element-pair", _FMELEM),
+    _revert("fm-r8-element-brace", "r8-element-brace", _FMBRACE),
     _revert("body-grammar-no-title", "grammar-no-title", _NOTITLE),
     _revert("body-grammar-title-not-first", "grammar-title-not-first", _TITLE, _PROSE),
     _revert("body-grammar-title-no-space", "grammar-title-no-space", _TSTART),
@@ -1108,6 +1278,15 @@ def _with_body(revert):
 
 
 _DETAIL_REVERTS = tuple(_with_body(r) if r[0] in _ALSO_BODY else r for r in _DETAIL_REVERTS)
+# Cases a later check refuses even with the frontmatter guard reverted (a missing trigger, an empty
+# trigger), so their revert is checked at parse_source: the fixed parse refuses the source and the
+# reverted parse reads it. (name, fixed texts, reverted texts, case)
+_PARSE_REVERTS = (
+    ("fm-r8-f1-line-separator-trigger",) + _revert("", "", _FMRAW, _FMCOLON, _FMSEP)[1:3]
+    + ("r8-f1-line-separator-trigger",),
+    ("fm-r8-indented-under-empty",) + _revert("", "", ('"", "~"', '"~"'), _FMINDENT)[1:3]
+    + ("r8-indented-under-empty",),
+)
 
 
 def _detail_case_root(base, name):
@@ -1231,6 +1410,25 @@ def self_test_main():
                                 "the adopter case expected a refusal")
             except ValueError:
                 pass
+
+        for label, old, new, case in _PARSE_REVERTS:
+            source = _detail_case_root(revert_base / label, case) / ".aiqt" / "core" / "rules" / \
+                "gen-rules-selftest-detail.md"
+            try:
+                parse_source(source)
+                failures.append("parse case {}: expected parse_source to refuse it".format(case))
+            except ValueError:
+                pass
+            try:
+                mutant = _load_reverted(revert_base, label, old, new)
+            except AssertionError as exc:
+                failures.append(str(exc))
+                continue
+            try:
+                mutant.parse_source(source)
+            except ValueError as exc:
+                failures.append("revert {}: with the guard removed, parse_source expected to read case {}, "
+                                "got {}".format(label, case, exc))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1242,7 +1440,8 @@ def self_test_main():
     print("SELF-TEST PASS: an invalid-UTF-8 generated target fails closed (exit 2), not a raw "
           "UnicodeDecodeError traceback (guards the widened reconcile arm); {} detail layout case(s) "
           "hold and {} guard revert(s) each go red; an adopter-shaped rule with a non-ASCII value is accepted "
-          "and goes red under the ASCII-only revert.".format(len(_DETAIL_CASES), len(_DETAIL_REVERTS) + 1))
+          "and goes red under the ASCII-only revert; {} parse-level revert(s) each go red.".format(
+              len(_DETAIL_CASES), len(_DETAIL_REVERTS) + 1, len(_PARSE_REVERTS)))
     return 0
 
 
