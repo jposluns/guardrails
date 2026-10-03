@@ -67,7 +67,12 @@ signed; the independently published digest is the authenticated reference.
    digest in its proper Checksum field by hand.
 5. Verify. `python3 tools/check_artifact_checksums.py` must report armed and passing, and
    `bash tools/run_all_checks.sh` must be green end to end. Steps 3, 4, and 5 land as one pull request,
-   merged on green. Main stays frozen from this merge until step 6a has merged.
+   merged on green. Main stays frozen from this merge until step 6b has merged: the freeze covers the
+   tag and BOTH post-release pull requests (6a and 6b), which is what makes the release-delta gate print
+   its `release-delta: POST-RELEASE` line on each of them. If the freeze is broken and a commit declaring
+   a later version lands before step 6b, the step 6b gate prints its ordinary `PASS:` line instead of
+   `POST-RELEASE`; treat that as evidence the freeze was broken and re-check the intervening commits, not
+   as the step 6b 'exit 0' evidence.
    - 5b. Pre-tag check. Run `python3 tools/check_release_build.py --pre-tag --candidate-sha <full step 5
      merge SHA> --qa-path <QA object> --qa-sha256 <its SHA-256>` and require exit 0. For the genesis
      (first recorded) release only, that is, while `.aiqt/core/releases.toml` has no `[[release]]` row,
@@ -96,7 +101,8 @@ signed; the independently published digest is the authenticated reference.
      the file would land inside the last sub-table and the release-delta gate rejects it). Then run
      `python3 tools/gen_manifest.py`, and land both through a separate pull request, merged on
      green before step 7. On that pull request `python3 tools/check_release_delta.py` must again exit 0
-     with `release-delta: POST-RELEASE`; in `changelog.toml` it accepts only the newest release's
+     with `release-delta: POST-RELEASE` (main is still frozen here, per step 5, so no later version is
+     declared and `POST-RELEASE` is the line to expect); in `changelog.toml` it accepts only the newest release's
      `tag = "vX.Y.Z"` key. The tag-monotonicity check arms from the recorded changelog `tag` key, not from
      the git tag alone, so pushing the git tag without landing the recorded key on the protected branch
      leaves that check dormant.

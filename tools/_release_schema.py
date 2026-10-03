@@ -625,16 +625,31 @@ def default_correction_evidence_findings(row, where):
 
 # --- filter-free tree materialization (round-4 finding 1) -------------------------------------------
 
+def _substitution_free_env():
+    """Replace refs and grafts disabled for every raw object read (QA round-3 codex R3-1): the
+    materialized bytes must be the RECORDED objects. `git cat-file --batch` follows refs/replace/*
+    by default AND echoes the REQUESTED oid over the substituted body, so the batch protocol check
+    cannot catch a replacement; only these pins (with the --no-replace-objects argv option) can."""
+    env = dict(os.environ)
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["GIT_GRAFT_FILE"] = os.devnull
+    return env
+
+
 def _cat_file_batch(root, shas):
     """{sha: raw bytes} for the given blob shas via ONE `git cat-file --batch` process (no checkout, so no
-    smudge/clean filter and no gitattributes transformation runs). SchemaError on any git or protocol
-    failure or a missing object (cannot-evaluate)."""
+    smudge/clean filter and no gitattributes transformation runs), with replace objects, grafts, and the
+    commit-graph cache disabled (QA round-3 codex R3-1: a refs/replace/* blob mapping must never
+    substitute the recorded bytes). SchemaError on any git or protocol failure or a missing object
+    (cannot-evaluate)."""
     uniq = list(dict.fromkeys(shas))
     if not uniq:
         return {}
     try:
-        proc = subprocess.run(["git", "-C", str(root), "cat-file", "--batch"],
-                              input=("\n".join(uniq) + "\n").encode("ascii"), capture_output=True)
+        proc = subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",
+                               "-C", str(root), "cat-file", "--batch"],
+                              input=("\n".join(uniq) + "\n").encode("ascii"), capture_output=True,
+                              env=_substitution_free_env())
     except OSError as exc:
         raise SchemaError("cannot launch git cat-file --batch ({})".format(exc))
     if proc.returncode != 0:
@@ -688,10 +703,15 @@ def materialize_tree_raw(root, commit, dest):
     """Write the committed tree at `commit` into `dest` from RAW blob bytes only (git ls-tree + cat-file),
     applying NO checkout smudge/clean filter and NO gitattributes transformation, so a hostile filter cannot
     substitute old bytes during a checkout the way `git worktree add`/`git checkout` would (round-4 finding
-    1). Symlinks and gitlinks are rejected. Returns the set of written repo-relative paths. SchemaError on
-    any git/materialization failure (cannot-evaluate)."""
+    1). Symlinks and gitlinks are rejected. Replace objects, grafts, and the commit-graph cache are
+    disabled on both the tree listing and the blob reads (QA round-3 codex R3-1 / claude F1), so a
+    refs/replace/* or grafts substitution of the commit, its tree, or any blob cannot alter the
+    materialized bytes. Returns the set of written repo-relative paths. SchemaError on any
+    git/materialization failure (cannot-evaluate)."""
     try:
-        ls = subprocess.run(["git", "-C", str(root), "ls-tree", "-r", "-z", commit], capture_output=True)
+        ls = subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",
+                             "-C", str(root), "ls-tree", "-r", "-z", commit], capture_output=True,
+                            env=_substitution_free_env())
     except OSError as exc:
         raise SchemaError("cannot launch git ls-tree ({})".format(exc))
     if ls.returncode != 0:

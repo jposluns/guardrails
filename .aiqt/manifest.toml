@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "7f2a28202b46e37d0e30584ac3126a4cc437ebf1c684a0053f6e644fd756fd92"
+tree-sha256 = "a04d7601bc38979bdfa4427e28d55b2ee96a4815d938e4934566785164ab0ad2"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2321,8 +2321,8 @@ sha256 = "68c58a0a2af9e5c5b36fc21b24745ba134e2ef09fd1761ff340c99cba57ae3b8"
 
 [[sources]]
 path = "RELEASING.md"
-bytes = 9733
-sha256 = "45c79f683abc5d83d2bd8ff58a4366c3c849fb6128fdfad72fb5692553138793"
+bytes = 10330
+sha256 = "10dec45b177ba7f09f540adffa6be673b0bb118db7d9faf3669cffac2b2854e4"
 
 [[sources]]
 path = "ROADMAP.md"
@@ -3141,8 +3141,8 @@ sha256 = "3d2b51784f18397b11b5865db5232b186c3ff48a803de85da3c77234b4bd2941"
 
 [[sources]]
 path = "tools/_release_schema.py"
-bytes = 46385
-sha256 = "e19ad231e932a8b9fb463c4bc4d2f5837742b563d7c9f8fd0bd775b6c8832ede"
+bytes = 47667
+sha256 = "713bb45b2b0b8591c8ae8013e061bc88ba392894cab688548b704593dbe059cf"
 
 [[sources]]
 path = "tools/_standards.py"
@@ -3331,8 +3331,8 @@ sha256 = "91fa470bab48c2b3601e0be2124420524c996b1cd8e8f3a1bed294b54703efc1"
 
 [[sources]]
 path = "tools/check_release_delta.py"
-bytes = 237310
-sha256 = "bf14c70f5c96c614fca3c505994ef98ac959a3105a9121de5e406f414831433f"
+bytes = 257376
+sha256 = "9d3216a8971e5e40d92e6adf589b02af7456385c189bd5337fc29e357b0a09b6"
 
 [[sources]]
 path = "tools/check_rule_placement.py"

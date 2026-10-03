@@ -29,9 +29,10 @@ control must not run the gate mis-configured.
 
 Modes: default (genesis mode while releases.toml is zero-row and the manifest declares genesis;
 post-release mode while the changelog head version EQUALS the newest attested release row, accepted only
-when the head is a fully committed descendant of that row's commit_sha differing from it in nothing but the
-post-release record paths, AND the attested release itself re-passes the exact gate it faced before its row
-was appended (the whole-surface delta from release_rows[-2], or the genesis validation for a first release;
+when the head COMMIT descends from that row's commit_sha and differs from it in nothing but the
+post-release record paths (judged entirely over COMMITTED objects through the substitution-free funnel;
+checkout drift is a stderr advisory, never the verdict), AND the attested release itself re-passes the
+exact gate it faced before its row was appended (the whole-surface delta from release_rows[-2], or the genesis validation for a first release;
 RELEASING steps 6a/6b; see _post_release_head); whole-surface delta otherwise, where the head version must
 strictly increase over the newest row); --repin --target V (10.4 adopter mode, rollback branch keyed on the
 pin-history match plus wholesale target validation plus recorded authorization); --self-test.
@@ -119,9 +120,31 @@ class DeltaEvent:
 
 # --- git plumbing (as check_version_monotonicity: every return code checked) ------------------------
 
+def _substitution_free_env():
+    """The env half of the ONE substitution-free read funnel (QA round-3 codex R3-1 / claude F1):
+    GIT_NO_REPLACE_OBJECTS=1 disables refs/replace/* object substitution and GIT_GRAFT_FILE pinned to
+    os.devnull disables <GIT_DIR>/info/grafts parent rewriting, belt-and-braces with the
+    --no-replace-objects argv option _git and _git_raw also pass."""
+    env = dict(os.environ)
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["GIT_GRAFT_FILE"] = os.devnull
+    return env
+
+
 def _git(root, args, binary=False):
+    """THE substitution-free read funnel for every git read this gate makes (rev-parse, cat-file, show,
+    ls-tree, the status advisory, worktree list; _git_raw is its diff-tree/merge-base twin): replace
+    objects are disabled (--no-replace-objects AND GIT_NO_REPLACE_OBJECTS=1), commit grafts are disabled
+    (GIT_GRAFT_FILE pinned to os.devnull), and the commit-graph cache is never read (core.commitGraph
+    pinned false, so ancestry and parent answers come from the recorded commit objects, never from a
+    substitutable cache file). A replace ref or graft that substitutes another blob, tree, or parent
+    chain for HEAD or the release commit therefore cannot alter any byte this gate judges (QA round-3
+    codex R3-1 / claude F1). _release_schema's raw materialization (ls-tree + cat-file --batch) carries
+    the SAME pins, so every committed byte the verdict consumes is substitution-free."""
     try:
-        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=not binary)
+        return subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",
+                               "-C", str(root), *args],
+                              capture_output=True, text=not binary, env=_substitution_free_env())
     except OSError as exc:
         raise GateError("git is not available: {}".format(exc))
 
@@ -762,15 +785,15 @@ def _claimed_rank(prev_v, head_v):
 # --- post-release head (RELEASING steps 6a/6b) -------------------------------------------------------
 
 def _git_raw(root, args):
-    """Run git with replacement objects AND commit grafts disabled (--no-replace-objects plus an empty
-    graft file), so the post-release comparison reads the RAW recorded objects: a replace ref or graft that
-    substitutes another tree or parent chain for HEAD or the release commit cannot alter what is compared
-    (QA round-2)."""
-    env = dict(os.environ)
-    env["GIT_GRAFT_FILE"] = os.devnull
+    """The binary-capture diff-tree/merge-base twin of the _git funnel, with the IDENTICAL substitution
+    pins (--no-replace-objects plus GIT_NO_REPLACE_OBJECTS=1, GIT_GRAFT_FILE pinned to os.devnull, and
+    the commit-graph cache disabled): a replace ref or graft that substitutes another tree or parent
+    chain for HEAD or the release commit cannot alter what is compared (QA round-2; round-3 widened the
+    same pins to EVERY git read via _git, so the two launches share one funnel policy)."""
     try:
-        return subprocess.run(["git", "--no-replace-objects", "-C", str(root), *args],
-                              capture_output=True, env=env)
+        return subprocess.run(["git", "--no-replace-objects", "-c", "core.commitGraph=false",
+                               "-C", str(root), *args],
+                              capture_output=True, env=_substitution_free_env())
     except OSError as exc:
         raise GateError("git is not available: {}".format(exc))
 
@@ -837,20 +860,30 @@ def _head_tree_diff(root, commit):
     return set(changed)
 
 
-def _require_committed_head(root):
-    """The post-release branch certifies the HEAD REVISION, so the index, the working tree, and the
-    untracked set must all equal HEAD (QA round-2 codex 1/2: a staged-only edit or an untracked file never
-    enters a tree comparison and must not ride along under a certified status line). `git status
-    --porcelain=v1 -z --untracked-files=all` must print nothing; anything else is exit 2."""
+def _warn_checkout_drift(root):
+    """ADVISORY ONLY, never part of the verdict (QA round-3 codex R3-3). The post-release branch judges
+    HEAD's COMMITTED objects exclusively: every byte it reads comes through the substitution-free funnel
+    over committed objects, and the manifest freshness/integrity legs run over a raw materialization of
+    HEAD's committed tree, so the index, the working tree, checkout filters, and untracked files cannot
+    change the verdict. This helper only prints a stderr note when `git status --porcelain=v1 -z
+    --untracked-files=all` reports entries, as a courtesy to a maintainer whose checkout drifted from
+    the revision the verdict certifies. It is explicitly NOT a cleanliness guarantee, which is exactly
+    why it does not gate: porcelain status cannot see an index entry carrying assume-unchanged or
+    skip-worktree, an executable-bit change under core.filemode=false, an untracked file hidden by
+    .git/info/exclude or a .gitignore, or a working-tree file whose clean-filter output equals the
+    indexed blob (codex R3-3's three reproductions). A status failure is likewise only a note."""
     proc = _git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], binary=True)
     if proc.returncode != 0:
-        raise GateError("git status failed: cannot establish a committed post-release head")
+        print("post-release advisory: git status failed; checkout drift from the certified revision is "
+              "unknown (the verdict reads committed objects only)", file=sys.stderr)
+        return
     if proc.stdout.strip(b"\0"):
         entries = sorted(rec[3:].decode("utf-8", "replace")
                          for rec in proc.stdout.split(b"\0") if len(rec) > 3)
-        raise GateError("post-release head: the index, working tree, or untracked files differ from HEAD "
-                        "({} entr{}, e.g. {}); commit or stash them first".format(
-                            len(entries), "y" if len(entries) == 1 else "ies", entries[:5]))
+        print("post-release advisory: the index, working tree, or untracked files differ from HEAD "
+              "({} entr{}, e.g. {}); the verdict certifies the COMMITTED revision only, never this "
+              "checkout".format(len(entries), "y" if len(entries) == 1 else "ies", entries[:5]),
+              file=sys.stderr)
 
 
 def _post_release_changelog_ok(prev_bytes, head_bytes, version):
@@ -917,8 +950,10 @@ def _post_release_head(root, prev_row, release_rows, head_version):
                                                    | only, with no path-quoting or filter hazard
       an addition, deletion, type or mode change   | every differing entry must stay 100644 -> 100644
                                                    | status M (_assert_tree_entry_regular), on every path
-      a staged, dirty, or untracked state          | git status --porcelain=v1 -z --untracked-files=all
-      presented as the head                        | must be empty (_require_committed_head)
+      a staged, dirty, or untracked state          | NOT JUDGED: the verdict binds to HEAD's COMMITTED
+      presented as the head                        | objects only; checkout drift is a stderr ADVISORY
+                                                   | (_warn_checkout_drift, never the verdict), and CI
+                                                   | runs this gate on a fresh checkout
       a head not descending from the release       | git merge-base --is-ancestor commit_sha HEAD, raw
                                                    | (_assert_head_ancestry)
       the release's OWN whole-surface delta: the   | _release_checks_at_commit replays the full delta from
@@ -928,21 +963,43 @@ def _post_release_head(root, prev_row, release_rows, head_version):
       disposition sweep, the claimed-bump floor    | existed
       a malformed FIRST release (the zero-row      | with exactly one row, _release_checks_at_commit runs
       genesis strict validation)                   | the same genesis checks over the tagged tree
-      a stale or inconsistent HEAD manifest        | _head_manifest_integrity(root) plus the HEAD-byte
-                                                   | version bindings below
+      a stale or inconsistent HEAD manifest        | gen_manifest --check + check_manifest over a RAW
+                                                   | materialization of HEAD's COMMITTED tree
+                                                   | (_head_committed_manifest_integrity), plus the
+                                                   | HEAD-byte version bindings below
       a changelog edit beyond the newest tag key   | _post_release_changelog_ok over HEAD's COMMITTED bytes
       a rewritten releases record                  | HEAD's committed rows == the release commit's rows
                                                    | plus exactly the newest row (_assert_release_rows_prefix)
 
-    Every record read below is from HEAD's or the release commit's COMMITTED bytes (git show), never the
-    working tree (QA round-2 codex 1/2): the committed-state check makes the working tree byte-identical
-    anyway, and a clean/smudge filter cannot substitute bytes in a tree object. Returns (sorted changed
-    paths, replayed-release findings)."""
+    Every byte this branch judges comes from HEAD's or the release commit's COMMITTED objects through
+    the substitution-free funnel (_git/_git_raw and the raw materialization: replace objects, grafts,
+    and the commit-graph cache all disabled), and the manifest freshness/integrity legs run over a raw
+    materialization of HEAD's committed tree, NEVER the working tree (QA round-3 codex R3-1/R3-2/R3-3,
+    claude F1/F2/F3). The working tree, the index and its flags (assume-unchanged, skip-worktree,
+    core.filemode=false), checkout clean/smudge filters, and exclude rules therefore cannot make a bad
+    committed state print POST-RELEASE. The records run() loads from the checkout before branching here
+    can at most prevent this branch from running (fail-closed exit 2) or route it to the stricter delta
+    branch; every one of them is re-read below from HEAD's committed bytes and cross-checked, so a
+    divergent checkout is caught, never certified.
+
+    EXACTNESS of the coverage table (QA round-3 claude F5): "rejected" above means rejected at the
+    RECORD level, not the byte level. Exactly three byte-level variants that the pre-row gate rejected
+    (it rejected EVERY same-version head outright) are ACCEPTED here because the records they encode
+    are identical and gen_manifest/check_manifest bind the exact committed bytes: (1) a committed
+    releases.toml whose bytes differ from the release commit's rows plus the newest row only in TOML
+    comments or formatting (rows are compared PARSED, _assert_release_rows_prefix); (2) a tag line
+    terminated CRLF inside an LF changelog (the one-added-line check strips the terminator; the parsed
+    proof is unaffected; reachable only through plumbing, because the generated .gitattributes pins the
+    changelog to eol=lf and porcelain checkin normalizes the CRLF away); (3) the tag key placed elsewhere WITHIN the newest [[release]] table than
+    immediately after its version line (the enforced property is the parsed one: the newest table
+    itself carries tag == "v" + version and nothing else changed; RELEASING step 6b's placement advice
+    exists so a hand-added line does not land inside a sub-table). Each variant is locked by a
+    self-test case. Returns (sorted changed paths, replayed-release findings)."""
     commit = prev_row["commit_sha"]
     head_oid = _rev_parse(root, "HEAD^{commit}")
     _assert_head_ancestry(root, commit)
     changed = _head_tree_diff(root, commit)
-    _require_committed_head(root)
+    _warn_checkout_drift(root)
     head_rows = _strict(_release_schema.strict_releases, _show_toml(root, head_oid, RELEASES_REL),
                         "HEAD " + RELEASES_REL)
     if head_rows != release_rows:
@@ -974,7 +1031,7 @@ def _post_release_head(root, prev_row, release_rows, head_version):
         raise GateError("post-release head: {} differs from the release commit by more than the newest "
                         "release's tag = \"v{}\" key; declare a new version".format(CHANGELOG_REL,
                                                                                     head_version))
-    _head_manifest_integrity(root)
+    _head_committed_manifest_integrity(root, head_oid)
     findings = _release_checks_at_commit(root, release_rows, newest_manifest)
     return sorted(changed), findings
 
@@ -997,7 +1054,9 @@ def _release_checks_at_commit(root, release_rows, newest_manifest):
       RAW-materialized tree (_predecessor_tree_checks).
 
     Head-side records are read from the newest row's COMMIT (git show / raw materialization), never the
-    working tree. Returns the findings list (empty when clean)."""
+    working tree, and every read goes through the substitution-free funnel (replace objects, grafts, and
+    the commit-graph cache disabled; QA round-3 claude F1). Returns the findings list (empty when
+    clean)."""
     newest = release_rows[-1]
     n_commit, version = newest["commit_sha"], newest["version"]
     n_rows = _validate_dispositions_data(_show_toml(root, n_commit, DISPOSITIONS_REL),
@@ -1130,11 +1189,39 @@ def _head_manifest_integrity(root):
     is strict-validated by the caller; here run the AUTHORITATIVE freshness (gen_manifest --check) and
     integrity (check_manifest SOURCES set-equality + raw re-hash) against the HEAD working tree, so a stale
     HEAD manifest that omits a staged pack path is exit 2. Mirrors _predecessor_tree_checks' manifest legs.
-    HEAD is the real git working tree, so no materialization or throwaway index is needed."""
+    GENESIS and DELTA branches only, whose subject IS the checkout; the POST-RELEASE branch judges the
+    committed revision and uses _head_committed_manifest_integrity instead (QA round-3 codex R3-2)."""
     _validate_via_tool(root, "gen_manifest.py", ["--check", "--root", str(root)],
                        "head manifest freshness (gen_manifest --check)")
     _validate_via_tool(root, "check_manifest.py", ["--root", str(root)],
                        "head manifest integrity (check_manifest SOURCES set-equality)")
+
+
+def _head_committed_manifest_integrity(root, head_oid):
+    """The post-release manifest freshness + integrity legs over a RAW materialization of HEAD's
+    COMMITTED tree, exactly as _predecessor_tree_checks runs them for older commits (QA round-3 codex
+    R3-2 / claude F2): gen_manifest --check and check_manifest consume the materialized committed bytes,
+    never the working tree, so a checkout clean/smudge filter, a skip-worktree or assume-unchanged index
+    flag, or any other checkout drift can neither mask a stale/corrupt COMMITTED manifest nor substitute
+    fresh working-tree bytes for stale committed ones. Hermetic like _predecessor_tree_checks: a temp
+    dir removed in finally, the throwaway index built on the CLEAN materialized tree first."""
+    import shutil
+    import tempfile
+    tmp = Path(tempfile.mkdtemp(prefix="aiqt-release-delta-head-"))
+    dest = tmp / "tree"
+    dest.mkdir()
+    try:
+        try:
+            _release_schema.materialize_tree_raw(root, head_oid, dest)
+        except SchemaError as exc:
+            raise GateError(str(exc))
+        _index_materialized_tree(dest, "head")
+        _validate_via_tool(dest, "gen_manifest.py", ["--check", "--root", str(dest)],
+                           "head manifest freshness (gen_manifest --check)")
+        _validate_via_tool(dest, "check_manifest.py", ["--root", str(dest)],
+                           "head manifest integrity (check_manifest SOURCES set-equality)")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _genesis_structural(root):
@@ -2309,9 +2396,23 @@ def _post_release_e2e(tmp, failures, only=None):
     an OLDER release's table, which only the TOML check catches), and the replayed GENESIS validation over a
     malformed clauses.toml (round-2 B1 reproduction 2). Separate fixtures cover the predecessor-manifest
     version binding and the two-release replay (B1 reproduction 1: an undispositioned clause edit still
-    exits 1 after its attestation row lands; an altered prior row exits 2). `only` (an iterable of label
-    substrings) runs a subset: the mutant-discrimination driver uses it to show each guard's case failing
-    alone when that guard is removed. Returns True if it ran, False if skipped."""
+    exits 1 after its attestation row lands; an altered prior row exits 2).
+
+    QA round-3 coverage (codex R3-1/R3-2/R3-3, claude F1/F2/F3/F5), each case failing alone when its
+    guard is bypassed: a refs/replace blob substitution masking a forbidden committed changelog edit
+    (plus a direct assertion that the funneled _show returns the RECORDED bytes, so bypassing the _git
+    pins fails even where a redundant guard would still exit 2); a refs/replace substitution of a
+    corrupt committed manifest blob by a fresh one (discriminates the raw-materialization pins); an
+    info/grafts parent rewrite masking a non-descendant head (plus the direct _git_raw refusal); a
+    clean/smudge-filter-masked corrupt committed manifest and a skip-worktree-masked stale committed
+    manifest (both must exit 2 from the materialized COMMITTED tree); the checkout-drift ADVISORY
+    (staged-only edit and untracked files now exit 0 with the stderr advisory, and an assume-unchanged
+    working-tree overwrite of a tracked path never reaches the verdict); and the three ADMITTED
+    byte-level variants locked by the _post_release_head exactness note (a releases.toml comment, a
+    CRLF tag line, the tag key before the version line).
+
+    `only` (an iterable of label substrings) runs a subset, for out-of-tree mutant-discrimination
+    drivers and focused debugging. Returns True if it ran, False if skipped."""
     env = _selftest_env()
     arch = _archive_head(repo_root())
     if arch is None:
@@ -2425,6 +2526,28 @@ def _post_release_e2e(tmp, failures, only=None):
         orphan = _gout(repo, "commit-tree", _gout(repo, "rev-parse", "HEAD^{tree}"), "-m", "orphan")
         _g(repo, "checkout", "-q", orphan)
 
+    def _post_assume_unchanged():
+        (repo / "AGENTS.md").write_text("NOT THE COMMITTED BYTES\n", encoding="utf-8")
+        _g(repo, "update-index", "--assume-unchanged", "--", "AGENTS.md")
+
+    def _reset_case():
+        # Undo every per-case mask so no case can leak into the next: filter config and attributes,
+        # replace refs and grafts (round-3), assume-unchanged / skip-worktree index flags (cleared
+        # BEFORE reset --hard, which would otherwise leave the flagged worktree bytes in place).
+        for key in ("filter.mask.smudge", "filter.mask.clean"):
+            _g(repo, "config", "--unset-all", key)
+        for extra in ("attributes", "grafts"):
+            p_ = repo / ".git" / "info" / extra
+            if p_.exists():
+                p_.unlink()
+        for ref in _gout(repo, "for-each-ref", "--format=%(refname)", "refs/replace").splitlines():
+            _g(repo, "update-ref", "-d", ref)
+        for rel in sorted(POST_RELEASE_PATHS) + ["AGENTS.md"]:
+            _g(repo, "update-index", "--no-assume-unchanged", "--", rel)
+            _g(repo, "update-index", "--no-skip-worktree", "--", rel)
+        for args in (("reset", "-q", "--hard", commit1), ("clean", "-q", "-fdx")):
+            _g(repo, *args)
+
     # (label, mutate [pre-regen], regen, after_regen [post-regen pre-commit], commit, post [post-commit],
     #  want_rc, want_msg). Every case that asserts a committed-state guard COMMITS its mutation.
     cases = [
@@ -2471,12 +2594,22 @@ def _post_release_e2e(tmp, failures, only=None):
         ("a committed edit to a quoted path (a name starting with a double quote)",
          lambda: _write(quoted_rel, "EVIL CONTENT\n"), True, None, True, None,
          2, "beyond the post-release paths"),
-        ("a staged-only edit with restored working-tree bytes",
-         None, True, None, True, _post_staged, 2, "commit or stash"),
-        ("an untracked file at the repository root",
-         None, True, None, True, _post_untracked_root, 2, "commit or stash"),
-        ("an untracked file under .aiqt/core",
-         None, True, None, True, _post_untracked_core, 2, "commit or stash"),
+        ("a staged-only edit is ADVISORY only; the committed verdict stands (QA round-3 codex R3-3)",
+         None, True, None, True, _post_staged, 0, "post-release advisory"),
+        ("an untracked file at the repository root is ADVISORY only (QA round-3)",
+         None, True, None, True, _post_untracked_root, 0, "post-release advisory"),
+        ("an untracked file under .aiqt/core is ADVISORY only (QA round-3)",
+         None, True, None, True, _post_untracked_core, 0, "post-release advisory"),
+        ("an assume-unchanged working-tree overwrite of a tracked path never reaches the verdict "
+         "(QA round-3 codex R3-3)",
+         None, True, None, True, _post_assume_unchanged, 0, "release-delta: POST-RELEASE"),
+        ("(F5-1) a committed releases.toml comment: byte-level formatting is admitted when the parsed "
+         "rows equal the release commit's plus exactly the newest row",
+         lambda: _write(RELEASES_REL, "# byte-level comment (QA round-3 claude F5)\n" + row),
+         True, None, True, None, 0, "release-delta: POST-RELEASE"),
+        ("(F5-3) the tag key before the version line, inside the newest release table, is admitted",
+         lambda: _write(CHANGELOG_REL, base_cl.replace(v_line, tag_line + v_line)),
+         True, None, True, None, 0, "release-delta: POST-RELEASE"),
         ("a non-descendant head (an orphan commit with an identical tree)",
          None, True, None, True, _post_orphan, 2, "not an ancestor"),
     ] + [("a mode-only (+x) change on the post-release path " + rel, None, True,
@@ -2486,13 +2619,7 @@ def _post_release_e2e(tmp, failures, only=None):
     for label, mutate, regen, after_regen, commit_it, post, want, want_msg in cases:
         if not _sel(label):
             continue
-        for key in ("filter.mask.smudge", "filter.mask.clean"):
-            _g(repo, "config", "--unset-all", key)
-        attrs = repo / ".git" / "info" / "attributes"
-        if attrs.exists():
-            attrs.unlink()
-        for args in (("reset", "-q", "--hard", commit1), ("clean", "-q", "-fdx")):
-            _g(repo, *args)
+        _reset_case()
         _write(RELEASES_REL, row)
         if mutate:
             mutate()
@@ -2505,6 +2632,155 @@ def _post_release_e2e(tmp, failures, only=None):
         if post:
             post()
         _check(repo, label, want, want_msg)
+
+    # ---- substitution attacks on fixture 1 (QA round-3 codex R3-1/R3-2, claude F1/F2/F3) -----------
+    labelR = "a committed forbidden changelog edit masked by a blob replacement (refs/replace, R3-1)"
+    if _sel(labelR):
+        _reset_case()
+        _write(RELEASES_REL, row)
+        _write(CHANGELOG_REL, base_cl + 'date = "2000-01-01"\n')
+        if (_regen_fixture_manifest(repo, "post-release " + labelR, failures, env)
+                and _commit_all(repo, labelR)):
+            bad_blob = _gout(repo, "rev-parse", "HEAD:" + CHANGELOG_REL)
+            good_blob = _gout(repo, "rev-parse", commit1 + ":" + CHANGELOG_REL)
+            if _g(repo, "replace", bad_blob, good_blob).returncode != 0:
+                failures.append("fixture setup ({}): git replace failed".format(labelR))
+            else:
+                if b"2000-01-01" in _g(repo, "show", "HEAD:" + CHANGELOG_REL).stdout:
+                    print("SELF-TEST NOTE: this git did not substitute the planted replace ref; the "
+                          "blob-replacement case still asserts the funnel reads", file=sys.stderr)
+                # The funnel itself must return the RECORDED committed bytes while the replacement is
+                # active: this assertion fails ALONE when the _git pins are bypassed (claude F3), even
+                # where a redundant downstream guard would still exit 2.
+                try:
+                    funneled = _show(repo, _gout(repo, "rev-parse", "HEAD"), CHANGELOG_REL)
+                except GateError as exc:
+                    funneled = b""
+                    failures.append("blob replacement: funneled _show failed ({})".format(exc))
+                if funneled and b"2000-01-01" not in funneled:
+                    failures.append("blob replacement: the funneled _show returned the SUBSTITUTED "
+                                    "bytes; the --no-replace-objects pins are not effective")
+                _check(repo, labelR, 2, "by more than the newest")
+
+    labelR2 = "a corrupt COMMITTED manifest masked by a blob replacement (raw materialization pins)"
+    if _sel(labelR2):
+        _reset_case()
+        _write(RELEASES_REL, row)
+        if _regen_fixture_manifest(repo, "post-release " + labelR2, failures, env):
+            man_path = repo / MANIFEST_REL
+            valid = man_path.read_text(encoding="utf-8")
+            marker = 'sha256 = "'
+            base = valid.find("[[sources]]")
+            pos = valid.find(marker, base) if base != -1 else -1
+            corrupt = (valid[:pos + len(marker)] + "0" * 64 + valid[pos + len(marker) + 64:]
+                       if pos != -1 else valid)
+            if corrupt == valid:
+                failures.append("fixture setup ({}): could not corrupt a manifest sha256".format(
+                    labelR2))
+            else:
+                man_path.write_text(corrupt, encoding="utf-8")
+            if corrupt != valid and _commit_all(repo, labelR2):
+                (tmp / "man-valid-r2.bin").write_text(valid, encoding="utf-8")
+                corrupt_blob = _gout(repo, "rev-parse", "HEAD:" + MANIFEST_REL)
+                valid_blob = _gout(repo, "hash-object", "-w", str(tmp / "man-valid-r2.bin"))
+                if not valid_blob or _g(repo, "replace", corrupt_blob, valid_blob).returncode != 0:
+                    failures.append("fixture setup ({}): git replace failed".format(labelR2))
+                else:
+                    # With the materialization pins, the COMMITTED corrupt manifest is what
+                    # gen_manifest --check sees (exit 2); with them bypassed, the replacement feeds the
+                    # fresh blob to cat-file --batch and the gate would pass, so this case fails alone.
+                    _check(repo, labelR2, 2, "head manifest")
+
+    labelGf = "a non-descendant head masked by a commit graft (info/grafts)"
+    if _sel(labelGf):
+        _reset_case()
+        _write(RELEASES_REL, row)
+        if (_regen_fixture_manifest(repo, "post-release " + labelGf, failures, env)
+                and _commit_all(repo, labelGf)):
+            _post_orphan()
+            orphan_oid = _gout(repo, "rev-parse", "HEAD")
+            (repo / ".git" / "info" / "grafts").write_text(orphan_oid + " " + commit1 + "\n",
+                                                           encoding="utf-8")
+            if _g(repo, "merge-base", "--is-ancestor", commit1, "HEAD").returncode != 0:
+                print("SELF-TEST NOTE: this git ignores info/grafts; the graft case still asserts the "
+                      "funnel reads", file=sys.stderr)
+            # The funnel must refuse the grafted parent: fails ALONE when the GIT_GRAFT_FILE pin is
+            # bypassed (claude F3).
+            if _git_raw(repo, ["merge-base", "--is-ancestor", commit1, "HEAD"]).returncode == 0:
+                failures.append("graft: the funneled merge-base honoured the planted graft; the "
+                                "GIT_GRAFT_FILE pin is not effective")
+            _check(repo, labelGf, 2, "not an ancestor")
+
+    labelC = "(F5-2) a plumbing-committed CRLF tag line inside the LF changelog is admitted"
+    if _sel(labelC):
+        _reset_case()
+        _write(RELEASES_REL, row)
+        _write(CHANGELOG_REL, base_cl.replace(v_line, v_line + 'tag = "v1.0.0"\r\n'))
+        # The generated .gitattributes pins changelog.toml to eol=lf, so a porcelain `git add` would
+        # normalize the CRLF away at checkin; the committed blob must REALLY carry it for the exactness
+        # note's variant (2), so the CRLF blob is committed through plumbing (hash-object --no-filters +
+        # update-index --cacheinfo). The manifest is regenerated first against the CRLF working tree,
+        # so the committed manifest binds the exact committed bytes.
+        if _regen_fixture_manifest(repo, "post-release " + labelC, failures, env):
+            blob = _gout(repo, "hash-object", "-w", "--no-filters", str(repo / CHANGELOG_REL))
+            steps = ((("add", "-A"),) if blob else ())
+            ok = bool(blob)
+            for args in steps + (("update-index", "--cacheinfo",
+                                  "100644," + blob + "," + CHANGELOG_REL),
+                                 ("commit", "-q", "--no-verify", "-m", "post-release case")):
+                if ok and _g(repo, *args).returncode != 0:
+                    ok = False
+            if not ok:
+                failures.append("fixture setup ({}): could not plumbing-commit the CRLF blob".format(
+                    labelC))
+            else:
+                _check(repo, labelC, 0, "release-delta: POST-RELEASE")
+
+    labelF = "a corrupt COMMITTED manifest masked by a clean/smudge filter (codex R3-2)"
+    if _sel(labelF):
+        _reset_case()
+        _write(RELEASES_REL, row)
+        if _regen_fixture_manifest(repo, "post-release " + labelF, failures, env):
+            man_path = repo / MANIFEST_REL
+            valid = man_path.read_text(encoding="utf-8")
+            marker = 'sha256 = "'
+            base = valid.find("[[sources]]")
+            pos = valid.find(marker, base) if base != -1 else -1
+            corrupt = (valid[:pos + len(marker)] + "0" * 64 + valid[pos + len(marker) + 64:]
+                       if pos != -1 else valid)
+            if corrupt == valid:
+                failures.append("fixture setup ({}): could not corrupt a manifest sha256".format(labelF))
+            else:
+                man_path.write_text(corrupt, encoding="utf-8")
+                if _commit_all(repo, labelF):
+                    (tmp / "man-valid.bin").write_text(valid, encoding="utf-8")
+                    (tmp / "man-corrupt.bin").write_text(corrupt, encoding="utf-8")
+                    (repo / ".git" / "info" / "attributes").write_text(
+                        MANIFEST_REL + " filter=mask\n", encoding="utf-8")
+                    _g(repo, "config", "filter.mask.smudge", "cat " + str(tmp / "man-valid.bin"))
+                    _g(repo, "config", "filter.mask.clean", "cat " + str(tmp / "man-corrupt.bin"))
+                    man_path.unlink()
+                    _g(repo, "checkout", "--", MANIFEST_REL)
+                    if _g(repo, "status", "--porcelain=v1").stdout.strip():
+                        print("SELF-TEST NOTE: the filter mask did not clean the status; the masked-"
+                              "manifest case still asserts the committed verdict", file=sys.stderr)
+                    # The working tree now shows the VALID manifest and status is clean, yet the
+                    # COMMITTED manifest is corrupt: only the materialized-committed-tree legs catch it.
+                    _check(repo, labelF, 2, "head manifest")
+
+    labelS = "a STALE committed manifest with fresh working-tree bytes hidden by skip-worktree (F2)"
+    if _sel(labelS):
+        _reset_case()
+        _write(RELEASES_REL, row)
+        # Commit WITHOUT regenerating: the committed manifest/root/snippet are stale for the new row;
+        # then regenerate the WORKING TREE and hide the drift behind skip-worktree. The old working-tree
+        # freshness check passed this (claude F2's H2); the committed verdict must exit 2.
+        if _commit_all(repo, labelS):
+            if _regen_fixture_manifest(repo, "post-release " + labelS + " (working tree)", failures,
+                                       env):
+                for rel in sorted(POST_RELEASE_PATHS):
+                    _g(repo, "update-index", "--skip-worktree", "--", rel)
+                _check(repo, labelS, 2, "head manifest freshness")
 
     # ---- fixture: the release commit's manifest disagreeing with its own row (claude M4) ------------
     labelM = "predecessor-manifest version binding (release-version 9.9.9 at the release commit)"
@@ -3544,11 +3820,18 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
         full_pack += ("; and the POST-RELEASE head (RELEASING steps 6a/6b, round-2 rewrite over COMMITTED "
                       "revisions: the attestation row alone and plus the correctly placed changelog tag key "
                       "exit 0; another committed path, a smudge-masked committed edit, a quoted-path edit, a "
-                      "mode-only change or a deletion on each post-release path, a staged-only edit, "
-                      "untracked files (root and .aiqt/core), a non-descendant head, a stale manifest, an "
+                      "mode-only change or a deletion on each post-release path, a non-descendant head "
+                      "(bare, and masked by an info/grafts parent rewrite), a stale manifest, an "
                       "extra or altered prior row, a predecessor-manifest version mismatch, a changelog edit "
-                      "other than the tag key, a mis-placed tag key (EOF/older table, the TOML-only catch), "
-                      "and a head version below the newest row each fail; and the replayed pre-row gate "
+                      "other than the tag key (bare, and masked by a refs/replace blob substitution, with "
+                      "the funneled _show read asserted directly), a corrupt or stale COMMITTED manifest "
+                      "masked by a blob replacement, a clean/smudge filter, or skip-worktree, "
+                      "a mis-placed tag key (EOF/older table, the TOML-only catch), "
+                      "and a head version below the newest row each fail; a staged-only edit and untracked "
+                      "files are a stderr ADVISORY over an exit-0 committed verdict, an assume-unchanged "
+                      "working-tree overwrite never reaches the verdict, and the three admitted byte-level "
+                      "variants (a releases.toml comment, a CRLF tag line, the tag key before the version "
+                      "line) exit 0 (QA round-3); and the replayed pre-row gate "
                       "(round-2 B1: an undispositioned later release exits 1 after its row lands, with its "
                       "pre-row control; a malformed genesis tree exits 2) holds) hold") if post_ran else \
                      "; the POST-RELEASE head cases were SKIPPED (git archive unavailable)"
