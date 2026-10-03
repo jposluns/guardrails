@@ -953,10 +953,13 @@
             <span class="chip"><code>opf init</code></span>
             <span class="chip"><code>opf render</code></span>
             <span class="chip"><code>opf doctor</code></span>
+            <span class="chip"><code>opf record</code></span>
             <p><code>init</code> scaffolds the empty index; <code>render</code> composes the view;
               <code>doctor</code> checks schema, the delivery-bundle completeness rules, and
-              gated-state legality. Updated by the send transition, acknowledgement, supersession, or
-              withdrawal.</p>
+              gated-state legality. <code>opf record</code> creates the record and authors its
+              transitions: the send takes <code>--channel</code> and <code>--delivery-ref</code> and
+              writes the delivery bundle, and acknowledgement may add a receipt with
+              <code>--receipt-ref</code>. A rejection removes what its proposal wrote.</p>
           </dd>
         </div>
       </dl>
