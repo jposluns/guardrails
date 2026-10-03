@@ -73,8 +73,9 @@ def check_name(family, name):
 
 def check_drift(f, rules):
     """Return a (code, detail) frontmatter-drift finding for file f, or None. Raises OSError on read."""
-    # ADOPTER MODE (gen_rules FRONTMATTER): an adopter's rule may use CRLF line endings and full-line
-    # `#` comments in its frontmatter; the pack's own corpus stays LF-only with no comment line.
+    # ADOPTER MODE (gen_rules FRONTMATTER): an adopter's rule may use CRLF line endings and comment
+    # lines (spaces, then `#`) in its frontmatter; the pack's own corpus stays LF-only with no comment line.
+    # conformance --self-test pins this call (case 7b).
     try:
         fm = parse_source(f, adopter=True)
     except ValueError as exc:

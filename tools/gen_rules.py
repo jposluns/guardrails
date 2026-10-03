@@ -36,8 +36,8 @@ RULE SOURCE FORMAT (the two-layer split; this step parses and validates it, and 
   Unicode category Cc, Cf, Cn, Co, Cs, Zl or Zp (so no tab, U+0085, U+2028, U+2029, U+001C to U+001F,
   U+FFFE or U+FFFF), except ZWNJ and ZWJ (U+200C and U+200D). A line holding only spaces is skipped. Every
   other line is `key: value`: the key at column 0, `:`, at least one space, the value, and optional
-  trailing spaces. A line that is indented or starts with `#` (a YAML comment) is refused, except as
-  ADOPTER MODE below allows. The value types, matched against the whole value:
+  trailing spaces. A comment line (spaces, then `#`; YAML ignores it) is refused, and so is any other
+  indented line, except as ADOPTER MODE below allows. The value types, matched against the whole value:
     corpus-id       an id: `[a-z][a-z0-9]{5,}` (a string), `[1-9][0-9]{5,}` (an integer, as YAML reads
                     it), or quoted (below) around `[a-z0-9]{6,}` (a string);
     origin, family  a code: `[a-z]+`, bare or quoted (a string);
@@ -65,13 +65,28 @@ RULE SOURCE FORMAT (the two-layer split; this step parses and validates it, and 
   same lines and keys; a bare string starts with a letter (or is the dotted form `6.4.2`), so no YAML 1.1
   int, float, timestamp, merge or value resolver matches it, and the bool and null words are refused; a
   bare integer is `[1-9][0-9]*` and a bare boolean is `true` or `false`, which YAML reads alike. One gap
-  is accepted and disclosed: a bare mapping id `(0|[1-9][0-9]{0,3})\\.[0-9]{0,5}[1-9]` (the live ids
-  `6.7`, `10.2` and `8.1`) is a string here and a float to YAML, and the float's shortest decimal text is
-  that same id; quote it (`["6.7"]`) to make YAML read a string too. The live sources are not edited.
+  is accepted and disclosed: a bare mapping id that matches `(0|[1-9][0-9]{0,3})\\.[0-9]{0,5}[1-9]` and
+  is exactly the shortest decimal text of its float (`repr(float(id)) == id`; the live ids `6.2`, `6.7`,
+  `8.1` and `10.2`) is a string here and a float to YAML, and that float prints as the same id. Any other
+  float-shaped bare id is refused, such as `6.70`, `06.7` and `0.00001` (whose float prints as `1e-05`);
+  quote an id (`["6.7"]`) to make YAML read a string too. The live sources are not edited.
   ADOPTER MODE (the placement gate, check_rule_placement, and conformance C3 through it, for rule files
-  in an adopter's .claude/rules/): each CRLF is read as LF before parsing (a lone CR is still refused),
-  and a frontmatter line starting with `#` at column 0 is a comment and skipped (YAML ignores it too).
-  The pack's own corpus (gen_rules, check_clauses) keeps LF only and no comment line.
+  in an adopter's .claude/rules/): each CRLF is read as LF before parsing, and a comment line (any
+  number of spaces, then `#`) is skipped, as YAML skips it. A comment line may hold a tab after its `#`;
+  any other hidden character in it is still refused (YAML reads U+0085, U+2028 and U+2029 as line
+  breaks, so the text after one could be a key to YAML). A lone CR (classic Mac line endings) is still
+  refused, although YAML reads it as a line break. The pack's own corpus (gen_rules, check_clauses)
+  keeps LF only and no comment line.
+  ADOPTER NOTE: an adopter rule file that passed the placement gate before this typed grammar may now be
+  refused. The refusal names the file and quotes the line or value. The newly refused shapes are:
+    - a quoted tier (`tier: "10"`): write it bare (`tier: 10`);
+    - a bare slug or corpus-id that starts with a digit (`slug: 1-team`, `corpus-id: 1teamr`): quote it
+      (`slug: "1-team"`); a corpus-id of digits only with no leading zero is still accepted bare;
+    - lone-CR line endings: save the file with LF or CRLF line endings;
+    - a YAML-special word or form as a value, such as `on`, `off`, `yes`, `no`, `y`, `n` or `null` in
+      any case where a string is expected, `~`, a leading YAML indicator (`&`, `*`, `!`, `>`, `|`, `?`,
+      `-`), a ` #` comment after a value, or a number with a leading zero: quote the value or reword it;
+    - a tab outside a comment (after a key's colon, in a value, or before a `#`): use spaces.
   In a renderer that does not read frontmatter, the opening `---` is a thematic break and the frontmatter
   lines are one paragraph, which the closing `---` makes a setext h2; if the last frontmatter line holds
   a `|`, a GFM renderer can read the lines as a table instead. Either way the first text is a frontmatter
@@ -171,7 +186,8 @@ _TIER_RE = re.compile(r'10|20|30|40')
 _CID_BARE_RE = re.compile(r'[a-z][a-z0-9]{5,}|[1-9][0-9]{5,}')
 _MAP_ID_RE = re.compile(r'[A-Za-z][A-Za-z0-9.&()-]*(?: [A-Za-z0-9.&()-]+)*|[0-9]+(?:\.[0-9]+){2,}')
 _MAP_QUOTED_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9.&()-]*(?: [A-Za-z0-9.&()-]+)*')
-# The disclosed gap: a bare mapping id YAML reads as a float whose shortest decimal text is the id itself.
+# The disclosed gap: a bare mapping id of this shape YAML reads as a float; _scalar accepts it only when the
+# float's shortest decimal text (repr) is the id itself.
 _MAP_FLOAT_RE = re.compile(r'(?:0|[1-9][0-9]{0,3})\.[0-9]{0,5}[1-9]')
 # Each known key's declared value type; every map-* key is a mapping-id sequence (derive then checks it
 # against MAP_KEYS).
@@ -227,7 +243,7 @@ def _scalar(kind, tok):
         return (True, tok == "true") if tok in ("true", "false") else (False, None)
     if kind == "id" and _CID_BARE_RE.fullmatch(tok):
         return True, int(tok) if tok.isdigit() else tok
-    if kind == "ids" and _MAP_FLOAT_RE.fullmatch(tok):
+    if kind == "ids" and _MAP_FLOAT_RE.fullmatch(tok) and repr(float(tok)) == tok:
         return True, tok
     bare_ok = {"code": _CODE_RE.fullmatch, "slug": lambda t: SLUG_RE.match(t) and t[0].isalpha(),
                "facet": _FACET_RE.fullmatch, "text": _is_text, "ids": _MAP_ID_RE.fullmatch}.get(kind)
@@ -265,7 +281,8 @@ def decode_rule_source(raw, name, adopter=False):
     """A rule source's text from its raw bytes: UTF-8 with no newline translation. Raises ValueError on
     a CR byte (LF line endings only, as check_byte_canon requires) and on invalid UTF-8 (a
     UnicodeDecodeError, itself a ValueError). check_clauses decodes rule sources through this too. With
-    adopter (ADOPTER MODE), each CRLF is first read as LF; a lone CR is still refused."""
+    adopter (ADOPTER MODE), each CRLF is first read as LF; a lone CR (classic Mac line endings) is still
+    refused."""
     if adopter:
         raw = raw.replace(b"\r\n", b"\n")
     if b"\r" in raw:
@@ -290,17 +307,22 @@ def parse_source(path, adopter=False):
         raise ValueError("{}: unterminated frontmatter".format(path.name))
     fm = {}
     for raw in text[4:end].split("\n"):
-        if any(unicodedata.category(ch) in _LINE_CATEGORIES and ch not in _JOINERS for ch in raw):
+        comment = raw.lstrip(" ").startswith("#")
+        # ADOPTER MODE: a comment line may hold a tab after its `#` (YAML skips the line); every other
+        # hidden character is still refused there, since YAML reads U+0085, U+2028 and U+2029 as breaks.
+        scanned = raw.replace("\t", "") if adopter and comment else raw
+        if any(unicodedata.category(ch) in _LINE_CATEGORIES and ch not in _JOINERS for ch in scanned):
             raise ValueError("{}: frontmatter line {!r} holds a hidden or unassigned character (Unicode "
                              "category Cc, Cf, Cn, Co, Cs, Zl or Zp; YAML can read a second key there or "
                              "refuse the file)".format(path.name, raw))
         if not raw.strip(" "):
             continue
-        if raw.startswith("#"):
+        if comment:
             if adopter:
                 continue
-            raise ValueError("{}: frontmatter line {!r} starts with '#' (a YAML comment is refused: a "
-                             "renderer that does not read frontmatter shows it as a heading)".format(path.name, raw))
+            raise ValueError("{}: frontmatter line {!r} is a YAML comment line (refused in the pack's own "
+                             "rules: a renderer that does not read frontmatter can show it as a heading)"
+                             .format(path.name, raw))
         if raw.startswith(" "):
             raise ValueError("{}: frontmatter line {!r} is indented (YAML reads it as part of the key "
                              "above)".format(path.name, raw))
@@ -616,12 +638,12 @@ A minimal rule so the reconcile has one desired target to read.
 _RULE_REL = "aiqt/10-QUALI-gen-rules-selftest-target.md"
 
 # The two-layer split cases: (name, frontmatter key lines, body after the core paragraph, expected exit).
-# _CASE_FRAME overrides the family lines or the core text of a case; every other case is an aiqt rule
-# whose core is an H1 and one paragraph.
+# _CASE_FRAME overrides the family lines, the slug, the corpus-id or the core text of a case; every other
+# case is an aiqt rule whose core is an H1 and one paragraph.
 _DETAIL_SRC = """---
 corpus-id: {cid}
 origin: pack
-{family}slug: gen-rules-selftest-detail
+{family}slug: {slug}
 {keys}---
 {core}{body}"""
 _AIQT_FAMILY = "family: aiqt\ntier: 10\nfacet: QUALI\n"
@@ -648,9 +670,11 @@ Core text.
 
 Detail text.
 """
-# ADOPTER MODE: an adopter rule with CRLF line endings, and one with a full-line `#` comment in its
-# frontmatter, pass the placement gate's read (parse_source in adopter mode, then derive with the adopter
-# origin allowed, as check_rule_placement.check_drift does) and are refused by the pack's strict reader.
+# ADOPTER MODE: an adopter rule with CRLF line endings, or with a comment line in its frontmatter (at
+# column 0, indented, or holding a tab), passes the placement gate's read (parse_source in adopter mode,
+# then derive with the adopter origin allowed, as check_rule_placement.check_drift does) and is refused by
+# the pack's strict reader with a message holding the given text. conformance --self-test runs these same
+# rules through C3.
 _ADOPTER_MODE_REL = "aiqt/10-QUALI-team-review.md"
 _ADOPTER_MODE_SRC = """---
 corpus-id: teamrv
@@ -665,8 +689,36 @@ slug: team-review
 Core text.
 """
 _ADOPTER_MODE_CASES = (
-    ("adopter-crlf", _ADOPTER_MODE_SRC.format(comment="").replace("\n", "\r\n")),
-    ("adopter-comment", _ADOPTER_MODE_SRC.format(comment="# reviewed by the platform team, 2026-09\n")),
+    ("adopter-crlf", _ADOPTER_MODE_SRC.format(comment="").replace("\n", "\r\n"), "CR byte"),
+    ("adopter-comment", _ADOPTER_MODE_SRC.format(comment="# reviewed by the platform team, 2026-09\n"),
+     "YAML comment"),
+    ("adopter-indented-comment", _ADOPTER_MODE_SRC.format(comment="  # reviewed by the platform team\n"),
+     "YAML comment"),
+    ("adopter-tab-comment", _ADOPTER_MODE_SRC.format(comment="#\treviewed by the platform team\n"),
+     "hidden or unassigned character"),
+)
+# Shapes ADOPTER MODE still refuses: a lone CR, a tab before the `#`, and a comment line holding a YAML
+# line break (U+2028), after which YAML would read a key.
+_ADOPTER_MODE_REFUSALS = (
+    ("adopter-lone-cr", _ADOPTER_MODE_SRC.format(comment="").replace("\n", "\r")),
+    ("adopter-tab-before-comment", _ADOPTER_MODE_SRC.format(comment="\t# reviewed\n")),
+    ("adopter-comment-line-separator",
+     _ADOPTER_MODE_SRC.format(comment="# reviewed\u2028secondary: [TRUST]\n")),
+)
+# Red on revert for ADOPTER MODE: with the guard put back (or, for a refusal, loosened), the placement
+# gate's read of the case flips. (name, case, fixed text, reverted text)
+_ADOPTER_MODE_REVERTS = (
+    ("adopter-crlf", "adopter-crlf", '        raw = raw.replace(b"\\r\\n", b"\\n")\n', "        pass\n"),
+    ("adopter-comment", "adopter-comment", "        if comment:\n            if adopter:",
+     "        if comment:\n            if False:"),
+    ("adopter-indented-comment", "adopter-indented-comment", 'comment = raw.lstrip(" ").startswith("#")',
+     'comment = raw.startswith("#")'),
+    ("adopter-tab-comment", "adopter-tab-comment", 'scanned = raw.replace("\\t", "") if adopter and comment',
+     "scanned = raw if adopter and comment"),
+    ("adopter-tab-before-comment", "adopter-tab-before-comment", 'comment = raw.lstrip(" ").startswith("#")',
+     'comment = raw.lstrip(" \\t").startswith("#")'),
+    ("adopter-comment-line-separator", "adopter-comment-line-separator",
+     'scanned = raw.replace("\\t", "") if adopter and comment', 'scanned = "" if adopter and comment'),
 )
 
 
@@ -1017,6 +1069,20 @@ _DETAIL_CASES = (
     ("r9-text-punctuation-ok", _TRIGGER + "detail-reason: Reviews (a, b; c) in /x - it's done.\n",
      _DETAIL_BODY, 0),
     ("r9-pack-comment-line", "# reviewed by the platform team\n", "", 2),
+    # QA round 10: a value YAML reads as another type is refused (a date or integer slug, a float-shaped
+    # id whose float does not print as the id, an escape in a double-quoted id), and so is a repeated key.
+    # The float ids that print as themselves (the live 6.2, 6.7, 8.1 and 10.2, and 0.0001) are accepted.
+    ("r10-slug-date", "", "", 2),
+    ("r10-slug-digits", "", "", 2),
+    ("r10-element-trailing-zero", "map-iso-42001-broad: [6.70]\n" + _TRIGGER, _DETAIL_BODY, 2),
+    ("r10-element-leading-zero", "map-iso-42001-broad: [06.7]\n" + _TRIGGER, _DETAIL_BODY, 2),
+    ("r10-element-whole-float", "map-iso-42001-broad: [6.0]\n" + _TRIGGER, _DETAIL_BODY, 2),
+    ("r10-element-float-exponent", "map-iso-42001-broad: [0.00001]\n" + _TRIGGER, _DETAIL_BODY, 2),
+    ("r10-element-float-exponent-6", "map-iso-42001-broad: [0.000001]\n" + _TRIGGER, _DETAIL_BODY, 2),
+    ("r10-element-floats-ok", "map-iso-42001-broad: [6.2, 6.7, 8.1, 10.2, 0.0001]\n" + _TRIGGER,
+     _DETAIL_BODY, 0),
+    ("r10-element-quoted-escape", 'map-iso-42001-broad: ["a\x5cx41"]\n' + _TRIGGER, _DETAIL_BODY, 2),
+    ("r10-duplicate-key", _TRIGGER + "detail-trigger: writing another fixture\n", _DETAIL_BODY, 2),
     # The BODY GRAMMAR: one case per refused shape (each exits 2); a grammar-title case sets its title
     # through _CASE_FRAME.
     ("grammar-no-title", "", "", 2),
@@ -1091,6 +1157,8 @@ _CASE_FRAME = {
     "r9-corpus-id-leading-zero": {"cid": "0123456"},
     "r9-corpus-id-digits-ok": {"cid": "1234567"},
     "r9-corpus-id-quoted-ok": {"cid": "'0123456'"},
+    "r10-slug-date": {"slug": "2026-10-03"},
+    "r10-slug-digits": {"slug": "123456"},
 }
 # Red on revert: each guard put back to its pre-fix form in a scratch copy of this module, loaded through
 # importlib, must then turn its case to the reverted exit (0 for a guard that refuses, 2 for a shape the
@@ -1118,15 +1186,23 @@ _FENCE = (' or line.startswith("```")', "")
 _FMTYPE = ("    ok, value = _scalar(kind, v)\n", "    ok, value = True, v\n")
 _FMELEM = ("            ok, elem = _scalar(element, part.strip(\" \"))\n",
            "            ok, elem = True, part.strip(\" \")\n")
-_FMRAW = ("for ch in raw):", 'for ch in ""):')
-_FMJOIN = (" and ch not in _JOINERS for ch in raw", " for ch in raw")
+_FMRAW = ("for ch in scanned):", 'for ch in ""):')
+_FMJOIN = (" and ch not in _JOINERS for ch in scanned", " for ch in scanned")
 _VCAT_FIXED = '_LINE_CATEGORIES = frozenset(("Cc", "Cf", "Cn", "Co", "Cs", "Zl", "Zp"))'
 _FMCOLON = ('if val[:1] != " ":', "if False:")
 _FMINDENT = ('if raw.startswith(" "):', "if False:")
-_FMHASH = ('        if raw.startswith("#"):\n            if adopter:', '        if raw.lstrip(" ").startswith("#"):\n            if True:')
+_FMHASH = ("        if comment:\n            if adopter:", "        if comment:\n            if True:")
 _FMTIER = ("_TIER_RE = re.compile(r'10|20|30|40')", "_TIER_RE = re.compile(r'0*(?:10|20|30|40)')")
 _FMCID = ("_CID_BARE_RE = re.compile(r'[a-z][a-z0-9]{5,}|[1-9][0-9]{5,}')",
           "_CID_BARE_RE = re.compile(r'[a-z][a-z0-9]{5,}|[0-9]{6,}')")
+_FMSLUG = ('"slug": lambda t: SLUG_RE.match(t) and t[0].isalpha(),', '"slug": lambda t: SLUG_RE.match(t),')
+_FMREPR = (" and repr(float(tok)) == tok:", ":")
+_FMFLOAT_FIXED = "_MAP_FLOAT_RE = re.compile(r'(?:0|[1-9][0-9]{0,3})\\.[0-9]{0,5}[1-9]')"
+_FMFLOAT_TAIL = (_FMFLOAT_FIXED, _FMFLOAT_FIXED.replace("[0-9]{0,5}[1-9]", "[0-9]{0,6}"))
+_FMFLOAT_HEAD = (_FMFLOAT_FIXED, _FMFLOAT_FIXED.replace("(?:0|[1-9][0-9]{0,3})", "[0-9]{1,4}"))
+_FMDOTTED = ("|[0-9]+(?:\\.[0-9]+){2,}')", "|[0-9]+(?:\\.[0-9]+){1,}')")
+_FMQUOTED = ('"ids": _MAP_QUOTED_RE.fullmatch}', '"ids": bool}')
+_FMDUP = ("if key in fm:", "if False:")
 _FMTEXT = ("ch in _TEXT_PUNCT or ch in _JOINERS or unicodedata.category(ch) in _TEXT_CATEGORIES",
            'ch in _TEXT_PUNCT or ch in _JOINERS or (ch.isascii() and ch.isalnum()) or ch == " "')
 
@@ -1417,6 +1493,17 @@ _DETAIL_REVERTS = (
     _revert("fm-r9-element-integer", "r9-element-integer", _FMELEM),
     _revert("fm-r9-text-digit-first", "r9-text-digit-first", _FMTYPE),
     _revert("fm-r9-text-trailing-nbsp", "r9-text-trailing-nbsp", _FMTYPE),
+    _revert("fm-r10-slug-date", "r10-slug-date", _FMSLUG),
+    _revert("fm-r10-slug-digits", "r10-slug-digits", _FMSLUG),
+    _revert("fm-r10-element-trailing-zero", "r10-element-trailing-zero", _FMFLOAT_TAIL, _FMREPR),
+    _revert("fm-r10-element-trailing-zero-dotted", "r10-element-trailing-zero", _FMDOTTED),
+    _revert("fm-r10-element-leading-zero", "r10-element-leading-zero", _FMFLOAT_HEAD, _FMREPR),
+    _revert("fm-r10-element-leading-zero-dotted", "r10-element-leading-zero", _FMDOTTED),
+    _revert("fm-r10-element-whole-float", "r10-element-whole-float", _FMFLOAT_TAIL),
+    _revert("fm-r10-element-float-exponent", "r10-element-float-exponent", _FMREPR),
+    _revert("fm-r10-element-float-exponent-6", "r10-element-float-exponent-6", _FMREPR),
+    _revert("fm-r10-element-quoted-escape", "r10-element-quoted-escape", _FMQUOTED),
+    _revert("fm-r10-duplicate-key", "r10-duplicate-key", _FMDUP),
     _revert("body-grammar-no-title", "grammar-no-title", _NOTITLE),
     _revert("body-grammar-title-not-first", "grammar-title-not-first", _TITLE, _PROSE),
     _revert("body-grammar-title-no-space", "grammar-title-no-space", _TSTART),
@@ -1486,7 +1573,8 @@ _PARSE_REVERTS = (
 def _detail_case_root(base, name):
     """A synthetic corpus holding the one rule of the named detail case. Returns the case root."""
     _case, keys, body, _expected = next(c for c in _DETAIL_CASES if c[0] == name)
-    frame = dict(dict(family=_AIQT_FAMILY, core=_CORE, cid="selfd1"), **_CASE_FRAME.get(name, {}))
+    frame = dict(dict(family=_AIQT_FAMILY, core=_CORE, cid="selfd1", slug="gen-rules-selftest-detail"),
+                 **_CASE_FRAME.get(name, {}))
     src = base / name / ".aiqt" / "core" / "rules"
     src.mkdir(parents=True)
     (src / "gen-rules-selftest-detail.md").write_bytes(
@@ -1606,22 +1694,45 @@ def self_test_main():
                 pass
 
         rules = tmp / "adopter-mode" / ".claude" / "rules"
-        for case, content in _ADOPTER_MODE_CASES:
-            path = rules / case / _ADOPTER_MODE_REL
-            path.parent.mkdir(parents=True)
-            path.write_bytes(content.encode("utf-8"))
-            try:  # the read check_rule_placement.check_drift makes: adopter mode, adopter origin allowed
-                got = derive(parse_source(path, adopter=True), path.name, ("pack", "adopter"))
-                got = None if got == _ADOPTER_MODE_REL else "derives {}".format(got)
+
+        def placement(module, path):
+            # The read check_rule_placement.check_drift makes: adopter mode, adopter origin allowed. None
+            # when the gate accepts the rule at its path, else the refusal.
+            try:
+                got = module.derive(module.parse_source(path, adopter=True), path.name, ("pack", "adopter"))
+                return None if got == _ADOPTER_MODE_REL else "derives {}".format(got)
             except ValueError as exc:
-                got = str(exc)
+                return str(exc)
+
+        this = sys.modules[__name__]
+        adopter_paths = {}
+        for case, content in [c[:2] for c in _ADOPTER_MODE_CASES] + list(_ADOPTER_MODE_REFUSALS):
+            adopter_paths[case] = rules / case / _ADOPTER_MODE_REL
+            adopter_paths[case].parent.mkdir(parents=True)
+            adopter_paths[case].write_bytes(content.encode("utf-8"))
+        for case, _content, strict_text in _ADOPTER_MODE_CASES:
+            got = placement(this, adopter_paths[case])
             if got is not None:
                 failures.append("adopter case {}: expected the placement gate to accept it, got {!r}".format(case, got))
             try:
-                parse_source(path)
+                parse_source(adopter_paths[case])
                 failures.append("adopter case {}: expected the pack's strict reader to refuse it".format(case))
-            except ValueError:
-                pass
+            except ValueError as exc:
+                if strict_text not in str(exc):
+                    failures.append("adopter case {}: the strict refusal should say {!r}, got {}".format(
+                        case, strict_text, exc))
+        for case, _content in _ADOPTER_MODE_REFUSALS:
+            if placement(this, adopter_paths[case]) is None:
+                failures.append("adopter case {}: expected the placement gate to refuse it".format(case))
+        for label, case, old, new in _ADOPTER_MODE_REVERTS:
+            try:
+                mutant = _load_reverted(revert_base, "adopter-" + label, old, new)
+            except AssertionError as exc:
+                failures.append(str(exc))
+                continue
+            if (placement(mutant, adopter_paths[case]) is None) != (case in dict(_ADOPTER_MODE_REFUSALS)):
+                failures.append("revert adopter-{}: with the guard changed, the placement gate's read of case "
+                                "{} expected to flip".format(label, case))
         agreement = _yaml_agreement(repo_root(), tmp / "adopter-mode")
         if agreement is not None:
             failures.extend("YAML agreement: " + f for f in agreement[0][:20])
@@ -1656,8 +1767,10 @@ def self_test_main():
           "UnicodeDecodeError traceback (guards the widened reconcile arm); {} detail layout case(s) "
           "hold and {} guard revert(s) each go red; an adopter-shaped rule with a non-ASCII value is accepted "
           "and goes red under the ASCII-only revert; {} parse-level revert(s) each go red; {} adopter-mode "
-          "case(s) pass the placement gate and are refused by the pack reader; {}.".format(
+          "case(s) pass the placement gate and are refused by the pack reader, {} more are refused by both, "
+          "and {} adopter-mode revert(s) each go red; {}.".format(
               len(_DETAIL_CASES), len(_DETAIL_REVERTS) + 1, len(_PARSE_REVERTS), len(_ADOPTER_MODE_CASES),
+              len(_ADOPTER_MODE_REFUSALS), len(_ADOPTER_MODE_REVERTS),
               "PyYAML agreement NOT RUN (PyYAML is not importable)" if agreement is None else
               "PyYAML safe_load reads the same keys and values for {} live source(s) and {} fuzzed "
               "frontmatter(s) ({} disclosed bare float id(s))".format(*agreement[1:])))
