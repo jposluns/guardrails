@@ -59,10 +59,12 @@ Legs, in order:
                  YAML reader may read each as a line break, and the leg splits only on newline.
                  A step that uses actions/setup-python (the name in any case, any version) is a
                  finding unless a strict pin line sets its python-version input: a pin whose parent
-                 line (the nearest earlier line less indented, comment lines skipped) is the step's
-                 own with: key. The step runs from its `-` marker line (a with: before the uses: line
-                 counts) to the next non-blank line at the same or lesser indentation than that
-                 marker; a comment line, at any column, never ends it. A uses: line (the key in any
+                 line (the nearest earlier line whose first key, after any `- ` marker, starts left
+                 of the pin's key, comment lines skipped) is the step's own with: key, so a pin at
+                 the column of that with: key (a sibling, which leaves with: empty) is not one. The
+                 step runs from its `-` marker line (a with: before the uses: line counts) to the
+                 next non-blank line at the same or lesser indentation than that marker; a comment
+                 line, at any column, never ends it. A uses: line (the key in any
                  case) that is not one plain or quoted literal, a line that names setup-python
                  anywhere else (a comment or a flow mapping included), and a setup-python uses: line
                  whose `-` marker the line model cannot find are cannot-evaluate; a python-version-file
@@ -73,6 +75,12 @@ Legs, in order:
                  or .. path part, no leading or trailing slash, no .git suffix), so another spelling
                  the runner may resolve to the action is never passed over. A with: whose body is a
                  block sequence (its next line a `- ` entry) is cannot-evaluate: it holds no input.
+                 A line of a workflow or action file holding a flow mapping with a key named uses
+                 (after its first `{`, a key spelled uses in any case, plain or quoted) is
+                 cannot-evaluate, naming the line: the leg does not read a step written as a flow
+                 mapping, so the action it runs (a local ./PATH included) is never scanned or
+                 refused as missing. The line is judged as written, script text included, a
+                 disclosed over-rejection.
   guard          each guarded-surfaces entrypoint opens with the canonical refusal guard, AST-matched
                  against GUARD_TEMPLATE with the file's own basename and the floor; only a module
                  docstring and `from __future__` imports may precede its `import sys`.
@@ -189,10 +197,17 @@ USES_LINE_RE = re.compile(
 WITH_LINE_RE = re.compile(r" *(?:- +)?(?P<key>with) *:(?:[ \t]+#.*|[ \t]*)")
 # A block sequence entry's `-` marker and the spaces after it, up to the entry's first key.
 STEP_MARKER_RE = re.compile(r" *- +(?=[^\s#])")
+# A line's indentation and any `- ` list markers: its end is the column of the line's first key.
+LEAD_RE = re.compile(r" *(?:- +)*")
+# A key inside a flow mapping, after a `{` or `,`: an optional explicit-key `?`, a double-quoted,
+# single-quoted or plain key, then optional spaces and a colon. Read only to refuse a uses key.
+FLOW_KEY_RE = re.compile(
+    r"[{,][ \t]*(?:\?[ \t]+)?(?:\"(?P<double>[^\"]*)\"|'(?P<single>(?:[^']|'')*)'"
+    r"|(?P<plain>[^\s,\[\]{}:'\"#][^,\[\]{}:#]*?))[ \t]*:")
 # The rules this line model adds to the strict pin rule. The self-test's red-on-revert loads a copy of
 # this gate through importlib, removes one entry, and shows the reproduction that rule refuses passing.
 RULES = frozenset({"grammar", "duplicate-key", "comment-span", "action-files", "local-uses-target",
-                   "uses-shape", "with-list", "extension-case"})
+                   "uses-shape", "with-list", "extension-case", "flow-uses", "with-child"})
 # The enumerated plain grammar of a workflow or action file (_grammar_check). A key line: a plain key,
 # optional spaces, a colon, then nothing or whitespace and the value.
 GRAMMAR_KEY_RE = re.compile(r"(?P<key>[A-Za-z0-9_][A-Za-z0-9_.-]*) *:(?:[ \t]+(?P<value>.*))?")
@@ -378,6 +393,7 @@ def pin_findings(root, floor):
             findings.append("{}: carries no python-version pin (want {!r})".format(rel, want))
         findings.extend(_setup_python_findings(rel, lines, pin_lines))
         if yaml_file:
+            _flow_uses_check(rel, lines)
             _grammar_check(rel, lines)
             targets += [(target, False) for target in _local_targets(root, rel, lines)]
     return findings
@@ -404,9 +420,42 @@ def _parent(lines, index):
     return None
 
 
+def _key_parent(lines, index):
+    """Index of the nearest earlier non-blank, non-comment line whose first key (after any `- `
+    marker) starts left of the first key of lines[index], or None: the key lines[index] nests under. A
+    key at the same column, on a `- ` line or not, is its sibling in one mapping, never its parent."""
+    column = LEAD_RE.match(lines[index]).end()
+    for back in range(index - 1, -1, -1):
+        text = lines[back]
+        if text.strip(" \t") and not text.lstrip(" \t").startswith("#") \
+                and LEAD_RE.match(text).end() < column:
+            return back
+    return None
+
+
+def _flow_uses_check(rel, lines):
+    """Refuse a line that holds a flow mapping with a key named uses (any case, plain or quoted): this
+    line model does not read a step written as a flow mapping, so it can neither judge nor scan the
+    action that step runs, a local ./PATH included. Every line is judged as written, script text too."""
+    if "flow-uses" not in RULES:
+        return
+    for index, line in enumerate(lines):
+        start = line.find("{")
+        for key in (FLOW_KEY_RE.finditer(line, start) if start >= 0 else ()):
+            name = next(group for group in key.group("double", "single", "plain")
+                        if group is not None).strip(" \t")
+            if name.lower() == "uses" or name.upper() == "USES":
+                raise CannotEvaluate(
+                    "{}:{}: a flow mapping with the key {}, a step written as a flow mapping; this "
+                    "line model does not read one, so it cannot judge or scan the action it runs (a "
+                    "local ./PATH included); write the step as a block mapping, - uses: owner/action@ref"
+                    .format(rel, index + 1, name))
+
+
 def _setup_python_findings(rel, lines, pin_lines):
     """Each step that uses actions/setup-python must set its python-version input on a strict pin line
-    (pin_lines, 1-based) whose parent line is the step's own with: key; a step without one is a finding,
+    (pin_lines, 1-based) whose parent line (_key_parent) is the step's own with: key; a step without one
+    is a finding,
     since the action then falls back to another interpreter. What the line model cannot judge is
     cannot-evaluate: a uses: line that is not one plain or quoted literal, a line that names
     setup-python outside such a line, a setup-python uses: line whose `-` marker it cannot find, a uses:
@@ -459,7 +508,8 @@ def _setup_python_findings(rel, lines, pin_lines):
         for pin_index in range(dash, end):
             if pin_index + 1 not in pin_lines:
                 continue
-            parent = _parent(lines, pin_index)
+            parent = _key_parent(lines, pin_index) if "with-child" in RULES \
+                else _parent(lines, pin_index)
             with_key = WITH_LINE_RE.fullmatch(lines[parent]) if parent is not None else None
             if parent is not None and parent >= dash and with_key is not None \
                     and with_key.start("key") == column:
@@ -1199,6 +1249,15 @@ def _self_test_cases(base):
              "          python-version: '3.14'\n")):
         code, lines = evaluate(_fixture(base, files=steps(body)))
         check(check_id, (code, _has(lines, no_input)), (1, True))
+    # A pin at the column of the with: key is its sibling: the with: is empty and sets no input.
+    for check_id, body, number in (
+            ("pins/setup-python-with-first-sibling-pin-finding",
+             "      - with:\n        python-version: '3.14'\n        uses: actions/setup-python@v5\n", 6),
+            ("pins/setup-python-empty-with-sibling-pin-finding",
+             "      - uses: actions/setup-python@v5\n        with:\n        python-version: '3.14'\n", 4)):
+        code, lines = evaluate(_fixture(base, files=steps(body)))
+        check(check_id, (code, _has(lines, no_input.replace(":4:", ":{}:".format(number)))),
+              (1, True))
     for check_id, body in (
             ("pins/setup-python-pinned-passes",
              "      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.14'\n"),
@@ -1260,6 +1319,50 @@ def _self_test_cases(base):
              "          note: 'it''s'\n"),
             ("grammar/leading-document-marker-passes", "---\n" + head + "      - run: x\n")):
         check(check_id, evaluate(_fixture(base, files={WORKFLOWS_REL + "/attack.yml": text}))[0], 0)
+    # A step written as a flow mapping with a uses key, whatever its target (a skipped directory, a
+    # repository checked out at run time, a missing path), in any case or quoting, is cannot-evaluate.
+    attack = WORKFLOWS_REL + "/attack.yml"
+    evil = ("runs:\n  using: composite\n  steps:\n    - uses: actions/setup-python@v5\n"
+            "      with:\n        python-version: '3.12'\n")
+    checkout = ("      - uses: actions/checkout@v4\n        with:\n"
+                "          repository: someorg/py312-action\n          path: gen\n")
+    flow = "attack.yml:7: a flow mapping with the key "
+    gen = "attack.yml:11: a flow mapping with the key uses"
+    for check_id, files, marker in (
+            ("pins/flow-uses-node-modules-cannot-evaluate", {
+                attack: head + "      - {uses: ./node_modules/evil}\n",
+                "node_modules/evil/action.yml": evil}, flow + "uses"),
+            ("pins/flow-uses-dot-venv-cannot-evaluate", {
+                attack: head + "      - {uses: ./.venv/evil}\n", ".venv/evil/action.yml": evil},
+             flow + "uses"),
+            ("pins/flow-uses-venv-quoted-cannot-evaluate", {
+                attack: head + "      - {uses: './venv/evil'}\n", "venv/evil/action.yml": evil},
+             flow + "uses"),
+            ("pins/flow-uses-pycache-cannot-evaluate", {
+                attack: head + "      - {uses: ./__pycache__/evil}\n",
+                "__pycache__/evil/action.yml": evil}, flow + "uses"),
+            ("pins/flow-uses-checked-out-cannot-evaluate",
+             {attack: head + checkout + "      - {uses: ./gen}\n"}, gen),
+            ("pins/flow-uses-checked-out-double-quoted-cannot-evaluate",
+             {attack: head + checkout + "      - {uses: \"./gen\"}\n"}, gen),
+            ("pins/flow-uses-checked-out-named-cannot-evaluate",
+             {attack: head + checkout + "      - {name: py, uses: ./gen}\n"}, gen),
+            ("pins/flow-uses-absent-cannot-evaluate",
+             {attack: head + "      - {uses: ./absent}\n"}, flow + "uses"),
+            ("pins/flow-uses-upper-case-key-cannot-evaluate",
+             {attack: head + "      - {USES: ./absent}\n"}, flow + "USES"),
+            ("pins/flow-uses-quoted-key-cannot-evaluate",
+             {attack: head + "      - {'Uses': ./absent}\n"}, flow + "Uses"),
+            ("pins/flow-uses-in-flow-sequence-cannot-evaluate",
+             {attack: head.replace("steps:\n", "steps: [{uses: ./absent}]\n")},
+             "attack.yml:6: a flow mapping with the key uses"),
+            ("pins/flow-uses-action-file-cannot-evaluate", {
+                "tools/a/action.yml": "runs:\n  using: composite\n  steps:\n"
+                "    - {uses: ./node_modules/e}\n",
+                "node_modules/e/action.yml": evil.replace("python-version: '3.12'", "cache: pip")},
+             "tools/a/action.yml:4: a flow mapping with the key uses")):
+        code, lines = evaluate(_fixture(base, files=files))
+        check(check_id, (code, _has(lines, marker)), (2, True))
     code, lines = evaluate(_fixture(base, files={"tools/x/action.yml": (
         "runs:\n  using: composite\n  steps:\n    - uses: actions/setup-python@v5\n")}))
     check("pins/unreferenced-action-file-finding",
@@ -1458,6 +1561,17 @@ def _rule_reverts(base):
         ("revert/with-list-pin", "with-list", {attack: head + step + "        with:\n"
             "          - python-version: '3.14'\n"},
          2, "attack.yml:8: a with: whose body is a block sequence"),
+        ("revert/flow-uses-checked-out", "flow-uses", {attack: head + (
+            "      - uses: actions/checkout@v4\n        with:\n"
+            "          repository: someorg/py312-action\n          path: gen\n"
+            "      - {uses: ./gen}\n")},
+         2, "attack.yml:11: a flow mapping with the key uses"),
+        ("revert/flow-uses-missing-target", "flow-uses",
+         {attack: head + "      - {uses: ./absent}\n"},
+         2, "attack.yml:7: a flow mapping with the key uses"),
+        ("revert/with-child-sibling-pin", "with-child", {attack: head + (
+            "      - with:\n        python-version: '3.14'\n        uses: actions/setup-python@v5\n")},
+         1, "attack.yml:9: a step that uses actions/setup-python sets no python-version input"),
         ("revert/extension-case-upper-yml", "extension-case",
          {WORKFLOWS_REL + "/x.YML": head + anchored},
          2, "x.YML:7: a uses: line that is not one plain or quoted literal"),
