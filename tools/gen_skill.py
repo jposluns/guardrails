@@ -38,7 +38,7 @@ except ModuleNotFoundError:  # Python < 3.11
     sys.exit("error: gen_skill.py requires Python 3.11+ (tomllib).")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, reconcile  # noqa: E402
+from _gen_common import repo_root, read_source_text, reconcile  # noqa: E402
 from _standards import dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 
@@ -227,7 +227,7 @@ def parse_source(path):
 def _rule_body(path):
     """The rule body with its YAML frontmatter stripped (same extraction as gen_agents.body_of, without
     the H1 demotion). Used only for the deterministic source-corpus hash, never rendered into the body."""
-    text = path.read_text(encoding="utf-8")
+    text = read_source_text(path)
     end = text.find("\n---\n", 4)
     return text[end + 5:].strip()
 

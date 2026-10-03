@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, replace_block, reconcile  # noqa: E402
+from _gen_common import repo_root, read_source_text, replace_block, reconcile  # noqa: E402
 from _standards import load_manifests, ManifestError, natkey  # noqa: E402
 import gen_rules  # noqa: E402  (reuse the one frontmatter parser + full corpus validation)
 from gen_agents import sort_key  # noqa: E402  (canonical AIQT priority order for the rules)
@@ -112,7 +112,7 @@ def _oxford_lower(items):
 def rule_title(path):
     """The rule's display title: the first body '# ' heading. There is deliberately no frontmatter title
     key (gen_rules._check_keys rejects unknown keys), so the H1 is the only source. Fail closed if none."""
-    text = path.read_text(encoding="utf-8")
+    text = read_source_text(path)
     end = text.find("\n---\n", 4)
     body = text[end + 5:] if end != -1 else text
     for line in body.splitlines():

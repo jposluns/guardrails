@@ -60,7 +60,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root, load_toml, reconcile  # noqa: E402
+from _gen_common import repo_root, load_toml, read_source_text, reconcile  # noqa: E402
 from _standards import dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
 from gen_agents import sort_key  # noqa: E402  canonical AIQT-priority rule order (as gen_mappings uses)
@@ -367,7 +367,7 @@ def _rows_in_order(corpus, roadmap):
 def rule_title(path):
     """The rule's display title: the first body '# ' heading (the same convention gen_mappings uses; there
     is deliberately no frontmatter title key). Fail closed if none."""
-    text = path.read_text(encoding="utf-8")
+    text = read_source_text(path)
     end = text.find("\n---\n", 4)
     body = text[end + 5:] if end != -1 else text
     for line in body.splitlines():

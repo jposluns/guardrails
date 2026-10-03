@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import repo_root  # noqa: E402
+from _gen_common import repo_root, read_source_text  # noqa: E402
 from _standards import dir_present, map_keys  # noqa: E402
 
 TIER_FACETS = {"10": {"ACCUR", "INTEG", "QUALI", "TRUST"}, "20": {"PROGR"},
@@ -99,7 +99,7 @@ def _value(v):
 
 
 def parse_source(path):
-    text = path.read_text(encoding="utf-8")
+    text = read_source_text(path)  # FIFO/symlink/non-regular: SourceReadRefused (OSError), never a hang
     if not text.startswith("---\n"):
         raise ValueError("{}: no frontmatter".format(path.name))
     end = text.find("\n---\n", 4)
@@ -227,7 +227,7 @@ def run(root, check):
         # not read as an absent corpus (which would delete every generated file as an orphan below).
         if dir_present(src_dir):
             for src, _fm, rel in load_corpus(src_dir):
-                desired[rel] = src.read_text(encoding="utf-8")
+                desired[rel] = read_source_text(src)
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc))
         return 2
@@ -306,6 +306,7 @@ _RULE_REL = "aiqt/10-QUALI-gen-rules-selftest-target.md"
 def self_test_main():
     import io
     import shutil
+    import signal
     import tempfile
     from contextlib import redirect_stdout, redirect_stderr
 
@@ -339,13 +340,50 @@ def self_test_main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    # F-CORPUS-FIFO-HANG: a FIFO (no writer) at a rule source must be the named refusal (exit 2, "not a
+    # regular file") inside a bounded alarm, never a blocking read in load_corpus. MUTATION: reverting
+    # parse_source to path.read_text() blocks on the FIFO and the alarm records the hang. POSIX only.
+    if hasattr(os, "mkfifo") and hasattr(signal, "SIGALRM"):
+        class _Hang(Exception):
+            pass
+
+        def _on_alarm(_signum, _frame):
+            raise _Hang()
+
+        try:
+            ftmp = Path(tempfile.mkdtemp(prefix="aiqt-gen-rules-fifo-"))
+        except OSError as exc:
+            print("SELF-TEST ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
+            return 2
+        out = io.StringIO()
+        previous = signal.signal(signal.SIGALRM, _on_alarm)
+        try:
+            fsrc = ftmp / ".aiqt" / "core" / "rules"
+            fsrc.mkdir(parents=True)
+            os.mkfifo(fsrc / "gen-rules-selftest-target.md")
+            signal.alarm(10)
+            try:
+                with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                    rc = run(ftmp, check=True)
+            except _Hang:
+                rc = "hung"
+            finally:
+                signal.alarm(0)
+            if rc != 2 or "not a regular file" not in out.getvalue():
+                failures.append("a FIFO rule source expected the named refusal (exit 2, 'not a regular "
+                                "file') within the alarm, got {!r}".format(rc))
+        finally:
+            signal.signal(signal.SIGALRM, previous)
+            shutil.rmtree(ftmp, ignore_errors=True)
+
     if failures:
         print("SELF-TEST FAIL:")
         for failure in failures:
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: an invalid-UTF-8 generated target fails closed (exit 2), not a raw "
-          "UnicodeDecodeError traceback (guards the widened reconcile arm).")
+          "UnicodeDecodeError traceback (guards the widened reconcile arm); a FIFO rule source is refused "
+          "(exit 2) inside an alarm, never a hang.")
     return 0
 
 
