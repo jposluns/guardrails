@@ -106,11 +106,14 @@ floor synthesized in-tree, removed in the finally.
 
   selftest_aiqt_hooks.py    exit 0 on SELF-TEST PASS, 1 on SELF-TEST FAIL, 2 on a harness/setup error
 """
+import ast
+import collections
 import contextlib
 import datetime
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -132,7 +135,10 @@ def _reduce_result(code, stdout_obj):
     "allow" is ONLY the silent no-decision (exit 0, no stdout object, the hooks' _allow). "allow-note" is
     exit 0 with a systemMessage holding non-whitespace text and NO hookSpecificOutput (the _allow_note shape
     the no-ask posture uses to surface an informational note while the user's own permission flow still
-    governs); a whitespace-only or non-string note is "unexpected". "deny" and "ask" (which these hooks must
+    governs). The stdout object's keys must be EXACTLY {"systemMessage"}: that is the only note shape the hook
+    source emits on a PreToolUse allow (_allow_note returns (0, {"systemMessage": message}, None)), so a note
+    beside any other top-level key (a "decision", a "continue", a "suppressOutput", ...) is "unexpected", as
+    is a whitespace-only or non-string note. "deny" and "ask" (which these hooks must
     NEVER emit) carry that permissionDecision. An explicit permissionDecision "allow", with or without a
     note, is "explicit-allow": the hooks' _allow docstring forbids it (it would bypass the user's own
     permission flow), so no expectation accepts it and it never reads as either allow. Any other shape is
@@ -147,8 +153,8 @@ def _reduce_result(code, stdout_obj):
                 return "explicit-allow"
             if decision in ("ask", "deny"):
                 return decision
-        elif "hookSpecificOutput" not in stdout_obj:
-            note = stdout_obj.get("systemMessage")
+        elif set(stdout_obj) == {"systemMessage"}:
+            note = stdout_obj["systemMessage"]
             if isinstance(note, str) and note.strip():
                 return "allow-note"
     return "unexpected result (code={!r}, stdout={!r})".format(code, stdout_obj)
@@ -164,6 +170,114 @@ def _decision(handler, command, tool="Bash", cwd=None):
         data["cwd"] = cwd
     code, stdout_obj, _stderr = handler(data)
     return _reduce_result(code, stdout_obj)
+
+
+def _allow_note_sites():
+    """AST scan of the hook source: the (first line, last line) span of every `_allow_note(` call site."""
+    path = Path(aiqt_hooks.__file__)
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return sorted((node.lineno, node.end_lineno) for node in ast.walk(tree)
+                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                  and node.func.id == "_allow_note")
+
+
+class _AllowNoteRecorder:
+    """Stands in for aiqt_hooks._allow_note for the whole suite: it records the hook-source line of each
+    caller (read from the caller's frame) and returns the real constructor's result unchanged. It calls no
+    os.path function, because several cases patch os.path.realpath while a handler runs."""
+
+    def __init__(self, original):
+        self.original = original
+        self.filename = aiqt_hooks.__file__
+        self.lines = collections.Counter()
+
+    def __call__(self, message):
+        caller = sys._getframe(1)
+        if caller.f_code.co_filename == self.filename:
+            self.lines[caller.f_lineno] += 1
+        return self.original(message)
+
+
+def _allow_note_coverage_failures(recorder):
+    """(an-coverage) Every `_allow_note(` call site the AST scan finds must have executed at least once
+    during the suite, so no note path can exist that no case reaches. A recorded line is credited to the
+    call whose span contains it. A site that ran zero times is named by its first line; a recorded line
+    inside no scanned span, or a recorder replaced mid-suite, also fails (the count would be incomplete).
+    Reaching a site does not by itself prove a case pins its outcome; the per-site mutation sweep shows that."""
+    out = []
+    if aiqt_hooks._allow_note is not recorder:
+        out.append("(an-coverage-recorder) aiqt_hooks._allow_note was replaced during the suite, so the "
+                   "call-site coverage count is incomplete")
+    sites = _allow_note_sites()
+    if not sites:
+        out.append("(an-coverage-scan) the AST scan found no _allow_note( call site in {}"
+                   .format(aiqt_hooks.__file__))
+    credited = set()
+    for start, end in sites:
+        hits = 0
+        for line, count in recorder.lines.items():
+            if start <= line <= end:
+                hits += count
+                credited.add(line)
+        if hits == 0:
+            out.append("(an-coverage-L{}) the _allow_note( call site at aiqt_hooks.py line {} executed zero "
+                       "times during the suite; add a case that reaches it and asserts its outcome"
+                       .format(start, start))
+    for line in sorted(set(recorder.lines) - credited):
+        out.append("(an-coverage-unmapped) an _allow_note call from aiqt_hooks.py line {} is inside no "
+                   "scanned call site".format(line))
+    return out
+
+
+_LABEL_RE = re.compile(r"^\(([^()\s{}]+)\)")
+
+
+def _first_literal(node):
+    """The leading string literal of a call argument: a constant, a constant.format(...), or the left
+    operand of a concatenation; None for anything else (a computed label is out of this check's scope)."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "format"):
+        return _first_literal(node.func.value)
+    if isinstance(node, ast.BinOp):
+        return _first_literal(node.left)
+    return None
+
+
+def _duplicate_label_failures(source_path=None):
+    """(label-unique) Every case label names exactly one case. A case label is the literal "(label)" that
+    opens the first argument of a case call (expect, gexpect, pexpect, run, ... : any call other than
+    failures.append). Two case calls must not share a label. A failures.append message may reuse a case
+    call's label only as that case's own judgement, written within 12 lines after the call (the run-then-
+    judge pattern); anywhere else it is a second case under the same name. Labels built at run time (with
+    a {} placeholder) are outside this static check."""
+    path = Path(source_path or __file__)
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    case_calls = collections.defaultdict(list)
+    appends = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and node.args):
+            continue
+        text = _first_literal(node.args[0])
+        match = _LABEL_RE.match(text) if text is not None else None
+        if match is None:
+            continue
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "append":
+            appends.append((match.group(1), node.lineno))
+        else:
+            case_calls[match.group(1)].append(node.lineno)
+    out = []
+    for label, lines in sorted(case_calls.items()):
+        if len(lines) > 1:
+            out.append("(label-unique-{}) the case label ({}) names {} cases, at lines {}"
+                       .format(label, label, len(lines), ", ".join(str(n) for n in sorted(lines))))
+    for label, line in sorted(appends):
+        if label in case_calls and not any(0 < line - call <= 12 for call in case_calls[label]):
+            out.append("(label-unique-{}) the failure message at line {} reuses the case label ({}) of the "
+                       "case at line(s) {}".format(label, line, label,
+                                                   ", ".join(str(n) for n in sorted(case_calls[label]))))
+    return out
 
 
 def _git(repo, *args, env_identity=False):
@@ -363,10 +477,20 @@ def main():
     from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
     scrub_git_environment()
     with fixture_git_lifecycle():
-        return _main_isolated()
+        return _main_with_recorder()
 
 
-def _main_isolated():
+def _main_with_recorder():
+    _real_allow_note = aiqt_hooks._allow_note
+    recorder = _AllowNoteRecorder(_real_allow_note)
+    aiqt_hooks._allow_note = recorder
+    try:
+        return _main_isolated(recorder)
+    finally:
+        aiqt_hooks._allow_note = _real_allow_note
+
+
+def _main_isolated(recorder):
     scrub_git_environment()
     handler = aiqt_hooks.git_discard
     try:
@@ -438,6 +562,11 @@ def _main_isolated():
         expect("(bound-b2) unparseable non-lossy command allows", 'ls -la "unbalanced', "allow")
         expect("(bound-b3) unparseable + lossy + opt-out prefix still ASKS (round-15: opt-out not honoured on unparseable)",
                'GUARDRAIL_ALLOW_DISCARD=1 git reset --hard "unbalanced', "allow", cwd=rp)
+        # (bound-b4) a relative -C redirect with no session cwd is "opaque" (unresolvable); on a
+        # NON-destructive form (checkout -b creates a branch, discards nothing) git_discard allows with a
+        # note. Falsifiable: a silent allow there reads "allow"; an explicit allow, "explicit-allow".
+        expect("(bound-b4) opaque relative -C redirect on a non-destructive form allows with a note",
+               "git -C rel checkout -b nb", "allow-note")
 
         # === a PROVABLY CLEAN tree: every recognized discard is safe -> ALLOW ================
         expect("(clean-a) reset --hard clean allows", "git reset --hard", "allow", cwd=rp)
@@ -1661,6 +1790,19 @@ def _main_isolated():
         if not _recovery_refs(rec_hd):
             failures.append("(rec-heredoc-snap) expected a best-effort recovery ref for an unparseable "
                             "dirty-tree discard (Class C)")
+
+        # (rec-unbalanced) an unbalanced-quote discard (no target redirect) reaches _git_discard_fallback; on a
+        # DIRTY session cwd its recovery snapshot succeeds, so it allows with a recovery-pointer note.
+        # Falsifiable: a silent allow there reads "allow"; an explicit allow, "explicit-allow".
+        rec_ub = _init_repo(tmp / "rec-unbalanced")
+        (rec_ub / "file.txt").write_text("committed line\nunbalanced dirty\n", encoding="utf-8")
+        got_ub = _decision(handler, 'git reset --hard "unbalanced', cwd=str(rec_ub))
+        if got_ub != "allow-note":
+            failures.append("(rec-unbalanced) an unparseable discard on a dirty tree whose recovery snapshot "
+                            "succeeds allows with a note, got {}".format(got_ub))
+        if not _recovery_refs(rec_ub):
+            failures.append("(rec-unbalanced-snap) expected a recovery ref before the unparseable discard's "
+                            "allow-with-note")
 
         # (rec-subdir-tmp) C2: cwd is a SUBDIR of the repo and TMPDIR points at the worktree ROOT (above cwd).
         # The temp-dir containment check anchors on the resolved TOPLEVEL, not the cwd, so the temp dir is
@@ -5492,7 +5634,7 @@ def _main_isolated():
 
         # gs-ac / gs-ad: the guarded-realpath-fault branch (the target or repo-root realpath raises, in
         # gensrc_guard's own wrap; the fault fires there first, so neither case reaches the registry-entry
-        # realpath inside _gensrc_match, which gs-af covers) and the
+        # realpath inside _gensrc_match, which gs-aj covers) and the
         # _gensrc_within containment-fault "err" branch are DEFENSE-IN-DEPTH and NOT input-reachable on
         # POSIX (a control-char input is rejected before realpath; a realpath'd absolute never makes
         # os.path.commonpath raise on Linux). Exercise them DETERMINISTICALLY by INJECTING the fault:
@@ -5524,7 +5666,7 @@ def _main_isolated():
                     "allow-note", tool="Write", file_path=_gs_inj_fp, cwd=gr)
         finally:
             os.path.commonpath = _real_commonpath
-        # gs-af: the registry-entry fault branch ("a registry entry could not be resolved for containment").
+        # gs-aj: the registry-entry fault branch ("a registry entry could not be resolved for containment").
         # The injected realpath raises ONLY on the joined registry-entry path (root_c + "GEN.md", the first
         # entry) AND only when its caller is _gensrc_match (gensrc_guard's own target resolution and the
         # _gensrc_within containment check resolve the same string and must succeed). The case asserts
@@ -5536,25 +5678,25 @@ def _main_isolated():
         def _raise_entry_realpath(path, *a, **k):
             if path == _gs_entry_path and sys._getframe(1).f_code.co_name == "_gensrc_match":
                 _gs_entry_hits.append(path)
-                raise OSError("injected registry-entry realpath fault (gs-af)")
+                raise OSError("injected registry-entry realpath fault (gs-aj)")
             return _real_realpath(path, *a, **k)
 
         try:
             os.path.realpath = _raise_entry_realpath
-            gexpect("(gs-af) an injected realpath fault on the joined registry-entry path allows with a note "
+            gexpect("(gs-aj) an injected realpath fault on the joined registry-entry path allows with a note "
                     "(registry-entry fault branch)",
                     "allow-note", tool="Write", file_path=_gs_inj_fp, cwd=gr)
         finally:
             os.path.realpath = _real_realpath
         if not _gs_entry_hits:
-            failures.append("(gs-af-reached) the injected registry-entry realpath fault never fired, so gs-af "
+            failures.append("(gs-aj-reached) the injected registry-entry realpath fault never fired, so gs-aj "
                             "did not reach _gensrc_match's entry resolution")
-        # gs-ag / gs-ah / gs-ai: gdecide's allow vocabulary. A whitespace-only note is not a note, and an
+        # gs-ak / gs-al / gs-ai: gdecide's allow vocabulary. A whitespace-only note is not a note, and an
         # explicit permissionDecision "allow" (with or without a note) is neither the silent "allow" nor
         # "allow-note": the hooks' own _allow forbids it. Each patches the module-global constructor
-        # gensrc_guard calls, drives a real fault case (gs-ag, gs-ah) or a real allow case (gs-ai), and
-        # restores in the finally. Falsifiable: dropping note.strip() reads gs-ag as "allow-note"; mapping
-        # an explicit allow to "allow" or "allow-note" reads gs-ah / gs-ai as accepted.
+        # gensrc_guard calls, drives a real fault case (gs-ak, gs-al) or a real allow case (gs-ai), and
+        # restores in the finally. Falsifiable: dropping note.strip() reads gs-ak as "allow-note"; mapping
+        # an explicit allow to "allow" or "allow-note" reads gs-al / gs-ai as accepted.
         _real_fail_ask = aiqt_hooks._gensrc_fail_ask
         _real_gs_allow = aiqt_hooks._allow
         try:
@@ -5576,10 +5718,10 @@ def _main_isolated():
         finally:
             aiqt_hooks._allow = _real_gs_allow
         if not _gs_ws.startswith("unexpected"):
-            failures.append("(gs-ag) a whitespace-only note on a fault branch must read as unexpected, got {}"
+            failures.append("(gs-ak) a whitespace-only note on a fault branch must read as unexpected, got {}"
                             .format(_gs_ws))
         if _gs_xn != "explicit-allow":
-            failures.append("(gs-ah) an explicit allow WITH a note on a fault branch must read as explicit-allow, "
+            failures.append("(gs-al) an explicit allow WITH a note on a fault branch must read as explicit-allow, "
                             "got {}".format(_gs_xn))
         if _gs_xs != "explicit-allow":
             failures.append("(gs-ai) an explicit allow with NO note on a no-match path must read as "
@@ -6159,6 +6301,11 @@ def _main_isolated():
                  "cd /x && git tag -- newt1", "allow-note")
         ebexpect("(eb-e56) branch LIST with a pattern after -- is a read under cd",
                  "cd /x && git branch --list -- 'new*'", "allow")
+        # (eb-e57) a relocated whole-tree BREADTH stage with NO publish: the -C target credits the binding,
+        # but 'git add -A' still takes its scope from the whole ambient tree, so _expbnd_breadth_ask allows
+        # with a note. Falsifiable: a silent allow there reads "allow"; an explicit allow, "explicit-allow".
+        ebexpect("(eb-e57) relocated breadth stage with an explicit -C target and no publish allows with a note",
+                 "cd /abs/repo && git -C /abs/repo add -A", "allow-note")
         # GD-158 round-6 + tri-family synthesis: the branch/tag classifier is now FAIL-SAFE (defaults
         # MUTATING; returns read only when every token resolves to a recognized read-neutral role and no
         # create/rename/delete target is present). This table exercises _git_is_mutating directly against
@@ -6978,12 +7125,17 @@ def _main_isolated():
             return "hard_block"  # a deliberate exit-2 (mis-wired event), never an ask
         return _reduce_result(code, stdout_obj)
 
-    # (noask-vocab) the sweep's reducer flags an explicit allow and a whitespace-only note as shapes the
-    # sweep rejects (explicit-allow / unexpected), and keeps a real note as "allow-note", never "ask".
+    # (noask-vocab) the sweep's reducer flags an explicit allow, a whitespace-only note, and a note beside an
+    # extra top-level key (decision, continue) as shapes the sweep rejects (explicit-allow / unexpected), and
+    # keeps a real note as "allow-note", never "ask".
     _nv_spec = {"hookEventName": "PreToolUse", "permissionDecision": "allow"}
     for _nv_name, _nv_out, _nv_ok in (
             ("explicit", (0, {"hookSpecificOutput": _nv_spec}, None), lambda g: g == "explicit-allow"),
             ("ws-note", (0, {"systemMessage": "  "}, None), lambda g: g.startswith("unexpected")),
+            ("decision-key", (0, {"systemMessage": "n", "decision": "approve"}, None),
+             lambda g: g.startswith("unexpected")),
+            ("continue-key", (0, {"systemMessage": "n", "continue": False}, None),
+             lambda g: g.startswith("unexpected")),
             ("note", (0, {"systemMessage": "n"}, None), lambda g: g == "allow-note")):
         _nv_got = _decision_any(lambda _d, _o=_nv_out: _o, {"hook_event_name": "PreToolUse"})
         if not _nv_ok(_nv_got):
@@ -7033,6 +7185,9 @@ def _main_isolated():
             if _got == "ask":
                 failures.append("(noask-gensrc-{}-{!r}) gensrc_guard returned 'ask' (hooks must never ask)"
                                 .format(_tool, _fp))
+            elif _got.startswith("unexpected") or _got == "explicit-allow":
+                failures.append("(noask-gensrc-shape-{}-{!r}) gensrc_guard returned an unrecognized decision "
+                                "shape: {}".format(_tool, _fp, _got))
     # orch PreToolUse guards must not ask either (inert-probe legs, kept for shape coverage).
     for _og, _od in ((aiqt_hooks.orch_truncation_guard,
                       {"hook_event_name": "PreToolUse", "tool_name": "Bash",
@@ -7041,9 +7196,13 @@ def _main_isolated():
                       {"hook_event_name": "PreToolUse", "tool_name": "Bash",
                        "tool_input": {"command": "python x.py | tee out", "run_in_background": True},
                        "cwd": "/nonexistent-noask-probe"})):
-        if _decision_any(_og, _od) == "ask":
+        _got = _decision_any(_og, _od)
+        if _got == "ask":
             failures.append("(noask-orch-{}) an orchestration PreToolUse guard returned 'ask'"
                             .format(getattr(_og, "__name__", _og)))
+        elif _got.startswith("unexpected") or _got == "explicit-allow":
+            failures.append("(noask-orch-shape-{}) an orchestration PreToolUse guard returned an unrecognized "
+                            "decision shape: {}".format(getattr(_og, "__name__", _og), _got))
 
     # ROUND-2 FINDING 18: exercise the orchestration PreToolUse guards on REAL triggering inputs (a real git
     # repo + a version-1 orchestration registry), not only the inert /nonexistent probe (root None -> early
@@ -7134,12 +7293,25 @@ def _main_isolated():
             failures.append("(noask-trunc-sink-deny) orch_truncation_guard must DENY a background producer "
                             "piped into a truncating sink on a real repo (finding 9/18); got {}"
                             .format(_f18_sink))
+        # (noask-trunc-note) a background dispatch with shell syntax (a redirect) but no truncating sink, on
+        # the same real repo + registry, reaches orch_truncation_guard's final allow-with-note. Falsifiable:
+        # a silent allow there reads "allow"; an explicit permissionDecision "allow" reads "explicit-allow".
+        _f18_note = _f18_trunc("python producer.py > out.log", True)
+        if _f18_note != "allow-note":
+            failures.append("(noask-trunc-note) orch_truncation_guard must ALLOW WITH A NOTE a background "
+                            "dispatch whose shell syntax it does not parse (a redirect, no truncating sink) "
+                            "on a real repo; got {}".format(_f18_note))
     except (OSError, subprocess.SubprocessError) as _f18_exc:
         failures.append("(noask-orch-fixture) could not build the finding-18 armed orch fixture: {}"
                         .format(_f18_exc))
     finally:
         if _f18_tmp is not None:
             shutil.rmtree(str(_f18_tmp), ignore_errors=True)
+
+    # (an-coverage) every _allow_note( call site in the hook source ran at least once above, and
+    # (label-unique) no case label names two cases.
+    failures.extend(_allow_note_coverage_failures(recorder))
+    failures.extend(_duplicate_label_failures())
 
     if failures:
         print("SELF-TEST FAIL:")

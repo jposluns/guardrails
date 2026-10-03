@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "db22d65809da25609f21c7012135bc93031815e451d6678472f2d937fd553318"
+tree-sha256 = "48bd061bafb38db51c7c9543e352a6a45fda214b079f8739baf9f36a126163f6"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3571,8 +3571,8 @@ sha256 = "52d03cbb65320a7f1589d2c871bba1524d4ea2325a50b1519193c77ac8082e1c"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 534905
-sha256 = "574d1e5f4642954437649d51242b61cf7d6bc64754d4de375c92f658bb2152c7"
+bytes = 544894
+sha256 = "49a7c58d3bddbc37518412233f3029b69ddb3d15c3a8fd54b0e4d9241b425f8f"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
