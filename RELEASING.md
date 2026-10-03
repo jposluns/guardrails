@@ -97,7 +97,7 @@ signed; the independently published digest is the authenticated reference.
      resolve to a file on disk. By design it also refuses (exit 2) a tree that is not a git checkout
      but has, in its ancestry, a `.git` entry, a git-directory name (`HEAD`, `objects`, `refs`,
      `commondir`, `gitdir`), or an entry it cannot read; the message names the directory and the
-     entry it found, or the entry it could not read. Merge without rewriting the
+     entry it found, or the entry it could not read; it also refuses (exit 2) when the gate module is imported and `main()` is called directly with no stage-1 hand-off recorded (the single-stage checkout gate never falls back to the current directory). Merge without rewriting the
      gated commit (no
      squash or rebase), so the commit post-tag certified lands unchanged and its parent stays the tagged
      commit.

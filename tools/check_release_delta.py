@@ -4880,6 +4880,27 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
             sys.setrecursionlimit(prev_reclimit)
             sys.set_int_max_str_digits(prev_digits)
 
+    # QA round-11 claude F1: main() reached by IMPORTING this module (never through the `if
+    # __name__ == "__main__" and sys.argv[1:] == []` guard that invokes _stage1_main) leaves
+    # _STAGE1_ROOT at its None default; main() must refuse exit 2 naming the missing hand-off,
+    # never silently run() against an unrelated cwd.
+    label11h = "(R11 import main, no hand-off) main() imported with no stage-1 hand-off refuses exit 2"
+    _r11_src = ("import sys; sys.path.insert(0,'tools'); sys.argv=['x']; import "
+                "check_release_delta as m; sys.exit(m.main())")
+    try:
+        proc11 = subprocess.run([sys.executable, "-I", "-B", "-c", _r11_src],
+                                 cwd=str(repo_root()), capture_output=True, env=_selftest_env(),
+                                 timeout=600)
+    except (OSError, subprocess.TimeoutExpired) as exc11:
+        failures.append("fixture setup ({}): could not run the gate ({})".format(label11h, exc11))
+    else:
+        out11 = (proc11.stdout + proc11.stderr).decode("utf-8", "replace")
+        if (proc11.returncode != 2 or "no stage-1 hand-off was recorded" not in out11
+                or "Traceback" in out11):
+            failures.append("{}: expected exit 2 with 'no stage-1 hand-off was recorded' and no "
+                            "traceback (got rc={}: {})".format(label11h, proc11.returncode,
+                                                                out11.strip()[-300:]))
+
     def _rows(*specs):
         # specs: (kind, target, release[, impact-or-old-class][, new-class]). The row's `id` IS the target
         # (finding 2: id is the consumption key). renderer-semantics carries impact in spec[3]; class-change
