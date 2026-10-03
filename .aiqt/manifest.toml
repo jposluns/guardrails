@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "6f307ad703e874a4398b21aadd84f1a2533b6776ae7896d20e5ad49977f5ba7b"
+tree-sha256 = "211c88c128f326d45394ec3d44f0a0d0ae8152bed70a64d0922350e30a647530"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2326,8 +2326,8 @@ sha256 = "68c58a0a2af9e5c5b36fc21b24745ba134e2ef09fd1761ff340c99cba57ae3b8"
 
 [[sources]]
 path = "RELEASING.md"
-bytes = 10679
-sha256 = "ad55bd0a9774523d9e3eb358e68f4205713a89b22e7d4ad52df6f2c59162b3ee"
+bytes = 10857
+sha256 = "520164ca19a3937fb50573311832447dd66fcb2643561bc8aef283e60f556e4a"
 
 [[sources]]
 path = "ROADMAP.md"
@@ -3336,8 +3336,8 @@ sha256 = "91fa470bab48c2b3601e0be2124420524c996b1cd8e8f3a1bed294b54703efc1"
 
 [[sources]]
 path = "tools/check_release_delta.py"
-bytes = 390997
-sha256 = "eaf365c2ae62f9538baf0b2ffbc7d17303cca57b2b9fe1bd209fad0378461a1e"
+bytes = 401069
+sha256 = "bf8312561ba574635176824b32c67d2473eac1694d21beaf7225db9678e9babe"
 
 [[sources]]
 path = "tools/check_rule_placement.py"

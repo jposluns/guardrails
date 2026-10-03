@@ -253,10 +253,13 @@ def _stage1_gate_paths():
     symlinked gate FILE. abspath erases `link/..` as text, so a root derived from it can name a
     directory the gate does not live in. The lexical forms (abspath of __file__, the raw __file__
     and sys.argv[0] joined to the cwd, un-normalized) are ADDITIONAL inputs to the superset walk
-    only, never the root. Raises OSError when the cwd or the path cannot be resolved."""
+    only, never the root. Raises OSError when the cwd or the path cannot be resolved: realpath runs
+    STRICT (QA round-10 claude F1), so a launch path naming no file on disk (a pipe read through
+    /dev/fd/N resolves to `pipe:[n]`, stdin's `<stdin>`) is cannot-evaluate, never a lexical
+    remainder whose ancestry reads as absence. The caller checks __file__ exists first."""
     cwd = os.getcwd()
     raw = os.path.join(cwd, __file__)
-    physical = os.path.realpath(raw)
+    physical = os.path.realpath(raw, strict=True)
     dirs = [os.path.dirname(physical), os.path.dirname(raw),
             os.path.dirname(os.path.abspath(__file__))]
     if sys.argv and sys.argv[0]:
@@ -296,6 +299,12 @@ def _stage1_no_committed_state(repo, launch=()):
     return _stage1_git(repo, ["show-ref", "--verify", "--quiet", ref]).returncode == 1
 
 
+# The physical gate root stage 1 established when it hands off to the single-stage checkout gate
+# (QA round-10 claude F2): main() judges THIS root, never _gen_common.repo_root(), whose fallback is
+# the cwd, a directory stage 1 never inspected. None until stage 1 positively hands off.
+_STAGE1_ROOT = None
+
+
 def _stage1_main():
     """Returns the final exit code, or None to fall through to the single-stage checkout gate ONLY
     when _stage1_no_committed_state POSITIVELY establishes that no committed state exists (not a
@@ -304,9 +313,18 @@ def _stage1_main():
     Any OTHER git failure (QA round-6 codex blocker 1 / claude 3: dubious ownership, a corrupt
     HEAD, bad config, git not launchable) is exit 2 HERE, before any checkout module is imported:
     a git failure is never permission to execute checkout code. The gate root is the PHYSICAL
-    root of the running file (_stage1_gate_paths, QA round 9), never a lexical normalization."""
+    root of the running file (_stage1_gate_paths, QA round 9), never a lexical normalization; on
+    the hand-off it records that root in _STAGE1_ROOT for main() (QA round 10)."""
+    global _STAGE1_ROOT
     import shutil
     import tempfile
+    if not isinstance(globals().get("__file__"), str) or not globals()["__file__"]:
+        # QA round-10 claude F1: code run with no __file__ (an exec of the source, a loader with
+        # no location) names no running file, so no physical root exists: exit 2, no traceback.
+        print("error: stage-1 re-execution: the running gate has no __file__ (run without a "
+              "source file), so its physical root cannot be established; no checkout code runs; "
+              "fail-closed", file=sys.stderr)
+        return 2
     try:
         repo, launch = _stage1_gate_paths()
     except OSError as exc:
@@ -317,6 +335,7 @@ def _stage1_main():
         proc = _stage1_git(repo, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
         if proc.returncode != 0:
             if _stage1_no_committed_state(repo, launch):
+                _STAGE1_ROOT = repo
                 return None
             found = _stage1_repository_in_ancestry(repo, *launch)
             print("error: stage-1 re-execution: git cannot resolve HEAD ({}) at the gate root {} "
@@ -4150,8 +4169,13 @@ def _post_release_e2e(tmp, failures, only=None):
                    "never hides the gate's physical repository")
         label9u = ("(R9 unsearchable ancestor) an ancestor without search permission fails "
                    "closed through the OSError branch")
+        label10f = ("(R10 no physical file) a launch naming no file on disk (a pipe read through "
+                    "/dev/fd/N, a source run with no __file__) is exit 2, never a traceback")
+        label10r = ("(R10 hand-off root) a non-git copy of the gate run from inside another "
+                    "repository judges its own root, never the cwd")
         if (_sel(label7a) or _sel(label7g) or _sel(label7n) or _sel(label8s) or _sel(label8b)
-                or _sel(label8v) or _sel(label9p) or _sel(label9u)):
+                or _sel(label8v) or _sel(label9p) or _sel(label9u) or _sel(label10f)
+                or _sel(label10r)):
             gate_bytes7 = (r5 / "tools" / "check_release_delta.py").read_bytes()
 
             def _mini_gate7(base_):
@@ -4443,6 +4467,107 @@ def _post_release_e2e(tmp, failures, only=None):
                 finally:
                     _shutil9u.rmtree(u9, ignore_errors=True)
 
+        # ---- QA round 10 (claude F1): realpath runs STRICT, and a missing __file__ is checked
+        # first. A pipe read through /dev/fd/N resolves to `/proc/<pid>/fd/pipe:[n]`, which names
+        # no file; non-strict realpath kept it as text, its ancestry read as absence and the
+        # checkout import ran (rc 1, ModuleNotFoundError). Code run with no __file__ raised a
+        # NameError traceback (rc 1). Each must be the named exit 2 with the tripwire inert.
+        if _sel(label10f):
+            import threading as _threading10
+            cwd10 = tmp / "r10-cwd-repo"
+            cwd10.mkdir()
+            (cwd10 / "README").write_text("r10 cwd repository\n", encoding="utf-8")
+            _git_init_commit(cwd10, "r10 cwd repository")
+
+            def _cli10(label_, argv_, want_msg, pass_fds_=(), feed_fd=None):
+                try:
+                    proc_ = subprocess.Popen([sys.executable, "-I", "-B"] + argv_,
+                                             cwd=str(cwd10), stdout=subprocess.PIPE,
+                                             stderr=subprocess.PIPE, env=env,
+                                             pass_fds=pass_fds_)
+                except OSError as exc:
+                    failures.append("fixture setup ({}): could not run the gate ({})".format(
+                        label_, exc))
+                    return
+                feeder_ = None
+                if feed_fd is not None:
+                    os.close(pass_fds_[0])
+
+                    def _feed():
+                        try:
+                            view_ = memoryview(gate_bytes7)
+                            while view_:
+                                view_ = view_[os.write(feed_fd, view_):]
+                        except OSError:
+                            pass
+                        finally:
+                            os.close(feed_fd)
+                    feeder_ = _threading10.Thread(target=_feed)
+                    feeder_.start()
+                try:
+                    out_b, err_b = proc_.communicate(timeout=600)
+                except subprocess.TimeoutExpired:
+                    proc_.kill()
+                    out_b, err_b = proc_.communicate()
+                if feeder_ is not None:
+                    feeder_.join()
+                out_ = (out_b + err_b).decode("utf-8", "replace")
+                if (proc_.returncode != 2 or want_msg not in out_ or "Traceback" in out_
+                        or "(R6 checkout import, must never run)" in out_):
+                    failures.append("{}: expected exit 2 with {!r} and no traceback (got rc={}: "
+                                    "{})".format(label_, want_msg, proc_.returncode,
+                                                 out_.strip()[-300:]))
+
+            rfd10, wfd10 = os.pipe()
+            _cli10(label10f + " [pipe read through /dev/fd/{}]".format(rfd10),
+                   ["/dev/fd/{}".format(rfd10)],
+                   "cannot resolve the physical path of the running gate",
+                   pass_fds_=(rfd10,), feed_fd=wfd10)
+            projf10 = _mini_gate7(tmp / "r10-no-file")
+            # A loader with no location: module_from_spec sets no __file__ and runs the source
+            # as __main__ (the exec-with-no-__file__ shape, with no exec in this source).
+            nofile10 = ("import importlib.abc, importlib.util, sys\n"
+                        "src = open(sys.argv[1], encoding='utf-8').read()\n"
+                        "class NoFile(importlib.abc.InspectLoader):\n"
+                        "    def get_source(self, name):\n"
+                        "        return src\n"
+                        "    def is_package(self, name):\n"
+                        "        return False\n"
+                        "spec = importlib.util.spec_from_loader('__main__', NoFile())\n"
+                        "mod = importlib.util.module_from_spec(spec)\n"
+                        "assert not hasattr(mod, '__file__')\n"
+                        "del sys.argv[1:]\n"
+                        "spec.loader.exec_module(mod)\n")
+            _cli10(label10f + " [no __file__]",
+                   ["-c", nofile10, str(projf10 / "tools" / "check_release_delta.py")],
+                   "the running gate has no __file__")
+
+        # ---- QA round 10 (claude F2): on the hand-off to the single-stage gate main() judged
+        # _gen_common.repo_root(), whose fallback is the cwd stage 1 never inspected. A non-git
+        # copy whose OWN releases.toml is corrupt, run from inside a committed repository, must
+        # report that corruption; with run(repo_root()) it judges the cwd repository instead.
+        if _sel(label10r):
+            import shutil as _shutil10
+            import tempfile as _tempfile10
+            base10 = _marker_free_base7()
+            if base10 is None:
+                failures.append(label10r + ": no marker-free temp path exists for the non-git "
+                                "copy (fixture-env)")
+            else:
+                r10 = Path(_tempfile10.mkdtemp(prefix="aiqt-r10-handoff-", dir=str(base10)))
+                try:
+                    copy10 = _extract(arch, r10 / "copy")
+                    with open(copy10 / RELEASES_REL, "a", encoding="utf-8") as fh10:
+                        fh10.write("[[release\n")
+                    cwd10r = r10 / "elsewhere"
+                    cwd10r.mkdir()
+                    (cwd10r / "README").write_text("r10 cwd repository\n", encoding="utf-8")
+                    _git_init_commit(cwd10r, "r10 cwd repository")
+                    _gate_cli7(label10r, copy10, 2,
+                               "cannot read {} (Expected ']]'".format(RELEASES_REL), cwd_=cwd10r)
+                finally:
+                    _shutil10.rmtree(r10, ignore_errors=True)
+
         # ---- QA round-7 claude F3: a repo-config core.fsmonitor hook is attacker-chosen code and
         # must never run on the checkout-judged branches either. gen_manifest.git_tracked (the one
         # tracked-set enumerator those branches consume, directly and through the gen_manifest /
@@ -4659,12 +4784,25 @@ def _drift_child_failures(returncode, out, err):
                         "(got {}); a duplicate or a malformed extra record is never resolved by "
                         "order".format(len(records)))
         return failures
+    # A key repeated INSIDE the one record (QA round-10 codex minor) is a named failure: json.loads
+    # keeps the last value, so the order of contradictory values would otherwise decide.
+    repeated = []
+
+    def _pairs(pairs):
+        keys = [key for key, _value in pairs]
+        repeated.extend(sorted(set(key for key in keys if keys.count(key) > 1)))
+        return dict(pairs)
+
     states = None
     if records[0].startswith("DRIFT-STATES "):
         try:
-            states = json.loads(records[0][len("DRIFT-STATES "):])
+            states = json.loads(records[0][len("DRIFT-STATES "):], object_pairs_hook=_pairs)
         except ValueError:
             states = None
+    if repeated:
+        failures.append("(R6 drift) the DRIFT-STATES record repeats the key(s) {}; a duplicate "
+                        "key is never resolved by order".format(", ".join(repeated)))
+        return failures
     if not isinstance(states, dict):
         failures.append("(R6 drift) the advisory child reported no structured per-path states "
                         "(DRIFT-STATES); empty or truncated output never reads as clean")
@@ -4704,6 +4842,17 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
         if not _drift_child_failures(0, "UNCHECKED big.txt\n" + "\n".join(lines9) + "\n", ""):
             failures.append("(R9 drift record) {}: more than one DRIFT-STATES record must fail; "
                             "a later record never erases an earlier one".format(tag9))
+    # QA round-10 codex minor: a key repeated INSIDE the one record fails, named, in either order
+    # (json.loads keeps the last value, so codex's record read clean with "drift" last).
+    for tag10, first10, last10 in (("match first", "match", "drift"),
+                                   ("drift first", "drift", "match")):
+        rec10 = ('DRIFT-STATES {"fifo.txt":"' + first10 + '","lnkdir/leaf.txt":"drift",'
+                 '"lnkfile.txt":"drift","fifo.txt":"' + last10 + '","emptyfifo.txt":"drift",'
+                 '"big.txt":"unchecked"}')
+        got10 = _drift_child_failures(0, "UNCHECKED big.txt\n" + rec10 + "\n", "")
+        if not any("repeats the key(s) fifo.txt" in f10 for f10 in got10):
+            failures.append("(R10 drift duplicate key) {}: a DRIFT-STATES record repeating "
+                            "'fifo.txt' must fail naming the key (got {!r})".format(tag10, got10))
 
     # F-TOML-BARE-VALUEERROR-CLASS: a predecessor TOML carrying an over-long integer literal (a BARE
     # ValueError) or a 1200-deep nested array (a RecursionError) must fail closed as GateError at the
@@ -5889,11 +6038,18 @@ def _self_test_main_isolated():  # noqa: C901  a flat sequence of independent cl
                       "reached through a symlinked launch path, a bare ancestor with a corrupt "
                       "HEAD, and dangling, looping and unreadable ancestor .git entries each exit "
                       "2 with the tripwire inert while an unborn ancestor HEAD still reaches the "
-                      "checkout gate), the no-follow bounded drift "
+                      "checkout gate; and round 9: a symlink followed by `..` and a symlinked "
+                      "gate file never hide the gate's physical repository, an unsearchable "
+                      "ancestor fails closed, and the refusal names the marker it found; and "
+                      "round 10: a pipe read through /dev/fd/N and a source run with no __file__ "
+                      "each exit 2 with no traceback, and a non-git copy run from inside another "
+                      "repository judges its own root, not the cwd), the no-follow bounded drift "
                       "advisory (a symlinked parent, a swapped-in FIFO, an over-cap UNCHECKED "
                       "file; and round 7: a final-component symlink to an outside committed copy, "
                       "an empty-blob FIFO, a refused dot-dot/dot component, per-path drift "
-                      "states judged by exact name, a child-bounded FIFO open, and the fsmonitor pins held on the genesis route and on "
+                      "states judged by exact name, a child-bounded FIFO open; and rounds 9 "
+                      "and 10: exactly one DRIFT-STATES record, with no key repeated inside it, "
+                      "and the fsmonitor pins held on the genesis route and on "
                       "git_tracked/_index_materialized_tree), the promisor lazy-fetch "
                       "refusal (GIT_NO_LAZY_FETCH pinned, no transport, no sshCommand), and the "
                       "stage-2 sitecustomize isolation hold; and the replayed "
@@ -6003,7 +6159,13 @@ def main():
         print("error: --repin is the 10.4 adopter mode; its doctor packaging is adopter-experience-"
               "owned and not wired at this release; fail-closed", file=sys.stderr)
         return 2
-    return run(repo_root())
+    if _STAGE1_ROOT is None:
+        # QA round-10 claude F2: the single-stage gate judges ONLY the physical root stage 1
+        # inspected and handed off; with no hand-off there is no inspected root to judge.
+        print("error: the single-stage checkout gate runs only on the physical gate root stage 1 "
+              "established; no stage-1 hand-off was recorded; fail-closed", file=sys.stderr)
+        return 2
+    return run(Path(_STAGE1_ROOT))
 
 
 if __name__ == "__main__":

@@ -93,9 +93,11 @@ signed; the independently published digest is the authenticated reference.
      (`python3 tools/check_release_delta.py`) must exit 0 with its `release-delta: POST-RELEASE` status
      line, which it prints only when the head changes nothing but the post-release paths from the
      tagged commit. The gate judges the repository found from the physical location of the running
-     gate file, and by design it refuses (exit 2) a tree that is not a git checkout but has a `.git`
-     entry or a git-directory name (`HEAD`, `objects`, `refs`, `commondir`, `gitdir`) in its
-     ancestry; the message names the directory and the entry it found. Merge without rewriting the
+     gate file, not the current directory, and it refuses (exit 2) a launch whose path does not
+     resolve to a file on disk. By design it also refuses (exit 2) a tree that is not a git checkout
+     but has, in its ancestry, a `.git` entry, a git-directory name (`HEAD`, `objects`, `refs`,
+     `commondir`, `gitdir`), or an entry it cannot read; the message names the directory and the
+     entry it found, or the entry it could not read. Merge without rewriting the
      gated commit (no
      squash or rebase), so the commit post-tag certified lands unchanged and its parent stays the tagged
      commit.
