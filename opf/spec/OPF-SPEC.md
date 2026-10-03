@@ -350,20 +350,20 @@ table is the retired `[devprocess]` only to refuse that store as `unsupported-ol
 recognition is not a discovery match. For a fresh-only implementation, a recognized legacy
 candidate, an ambiguous outcome, and an input that discovery cannot read or parse are a failed
 discovery of an existing store and MUST NOT be treated as an absent store that permits
-initialization or adoption; a recognized legacy candidate beside a matching store makes the
-outcome ambiguous, which yields cannot-evaluate, not `unsupported-older-store`, a refusal that
-applies only where no matching store accompanies the legacy candidate. A fresh-only implementation
-MUST NOT treat a zero-match outcome over a present `.working/` as authorizing initialization or
-adoption by itself. Before any write there, it MUST run the section 16.1 legacy-state search over
-that `.working/` tree and MUST refuse each listed item it finds as `unsupported-legacy-state`;
-where that `.working/` holds no recognized legacy candidate and no section 16.1 legacy-state item,
-only a section 14 first adoption authorizes initialization there,
-through an investigation that distinguishes first adoption from re-adoption and records a
-digest-stamped inventory, and one approved plan that gives every foreign file a disposition before
-`init-store` (section 14.1). Because a zero-match outcome discovers no store manifest, that search
-MUST apply the section 16.1 rule for a store with no discovered manifest, exactly as section 16.1
-states it, and a cannot-evaluate result of that search authorizes neither initialization nor
-adoption.
+initialization or adoption; a recognized legacy candidate beside a matching store makes the outcome
+ambiguous, which yields cannot-evaluate, not `unsupported-older-store`, a refusal that applies only
+where no matching store accompanies the legacy candidate. A fresh-only implementation MUST NOT treat
+a zero-match outcome over a present `.working/` as authorizing initialization or adoption by itself.
+In every command that resolves a store and meets that outcome, before any write, it MUST run the
+section 16.1 legacy-state search over that `.working/` tree and MUST refuse each listed item it
+finds as `unsupported-legacy-state`, beside the zero-match cannot-evaluate result; where that
+`.working/` holds no recognized legacy candidate and no section 16.1 legacy-state item, only a
+section 14 first adoption authorizes initialization there, through an investigation that
+distinguishes first adoption from re-adoption and records a digest-stamped inventory, and one
+approved plan that gives every foreign file a disposition before `init-store` (section 14.1).
+Because a zero-match outcome discovers no store manifest, that search MUST apply the section 16.1
+rule for a store with no discovered manifest, exactly as section 16.1 states it, and a
+cannot-evaluate result of that search authorizes neither initialization nor adoption.
 
 ### 4.6 Casing convention and rationale
 
@@ -1507,6 +1507,10 @@ create-only initialization of missing imported managed leaves for enabled types,
 of missing imported counter rows at zero only where no imported ancestry exists.
 Existing records, evidence, clean counters and imported high-water values MUST be preserved;
 a populated collision, missing ancestral counter or unprovable prestate refuses.
+The upgrade MUST refuse before any write a store whose `[unmanaged]` entry equals or contains a
+discovery candidate (section 14.2), which an earlier store can carry, naming the entry and the
+candidate; the remedy is the adopter's own fresh plan re-dispositioning that candidate (section
+14.2), recorded before the upgrade is retried.
 The upgrade MUST NOT create historical records, adoption approval or provenance, MUST NOT change
 posture or import status, and MUST NOT add imported views.
 The bump changes no record's bytes, but it does change what a legacy importer-authored clean
@@ -1893,15 +1897,19 @@ approved source scope and MUST NOT authorize an incidental discovery.
 
 The plan MUST record one disposition per foreign file from `keep`, `migrate`, `move`, `retire`:
 
-- **Keep.** Leave it untouched and register it under `[unmanaged]`. Ordinary tooling MUST NOT
-  read, rewrite or delete it. An `[unmanaged]` path MUST NOT equal or contain a discovery
-  candidate, a `manifest.toml` present in an immediate subdirectory of `.working/` (section 4.5);
-  such an entry is a contradictory input and MUST yield cannot-evaluate, so the keep protection
-  never covers a file that discovery reads. An unmanaged path MUST NOT collide with an OPF-managed file or view: a `keep` declaration naming a
-  declared view or managed store path MUST refuse at plan time, and a later manifest change, type
-  enablement or upgrade delta that would declare a view or managed store path at a registered
-  `[unmanaged]` path MUST refuse the same way (section 9.2), so a kept path never becomes an
-  occupied destination.
+- **Keep.** Leave it untouched and register it under `[unmanaged]`. Ordinary tooling MUST NOT read,
+  rewrite or delete it. An `[unmanaged]` path MUST NOT equal or contain a discovery candidate, a
+  `manifest.toml` present in an immediate subdirectory of `.working/` (section 4.5); such an entry
+  is a contradictory input and MUST yield cannot-evaluate, so the keep protection never covers a
+  file that discovery reads. A `keep` declaration whose path equals or contains a discovery
+  candidate MUST refuse at plan time, naming that candidate, the same way a collision refuses below,
+  and the section 9.2 upgrade into 1.3.0 refuses a store that already carries such an entry. A
+  no-follow existence probe of `manifest.toml` in an immediate subdirectory of `.working/`, a kept
+  one included, used only by discovery and by this rule, is not a read of a kept path. An unmanaged
+  path MUST NOT collide with an OPF-managed file or view: a `keep` declaration naming a declared
+  view or managed store path MUST refuse at plan time, and a later manifest change, type enablement
+  or upgrade delta that would declare a view or managed store path at a registered `[unmanaged]`
+  path MUST refuse the same way (section 9.2), so a kept path never becomes an occupied destination.
 - **Migrate.** Keep the source for post-adoption import into the separate imported series. Its
   exact bytes MUST be preserved at apply, as the archived occupying copy for an occupying source
   and as a retirement preimage under `.working/archive/adoption/<run-id>/<source-path>` for a
@@ -2078,7 +2086,14 @@ declaration MUST yield cannot-evaluate and MUST NOT authorize any store operatio
 
 A fresh-only implementation MUST run an admission check in every command that resolves a store, at
 every posture, before any other grading and before any write, the claim of the single-writer lease
-(section 5.7) included. The check MUST compare parsed versions, never strings, and MUST refuse:
+(section 5.7) included. The check MUST run after any section 5.7 reconciliation the command
+performs, over the state that reconciliation found, and a fast-forward that a fresh-only
+implementation's `opf sync` performs MUST NOT bring in a state that the check, run first over the
+fetched target state, refuses or cannot evaluate. Once a command that writes holds the lease, and
+before any other write, it MUST confirm that every directory listing and candidate the check read is
+unchanged; where any differs, it MUST stop as cannot-evaluate, make no other write, and release the
+lease (section 5.7), so the lease path ends as it was before the claim. The check MUST compare
+parsed versions, never strings, and MUST refuse:
 
 - as `unsupported-older-store`, a store whose manifest declares a `spec_version` below the supported
   one, or whose base table is the retired `[devprocess]` (section 4.5), naming the declared version
@@ -2089,8 +2104,9 @@ every posture, before any other grading and before any write, the claim of the s
 - as `unsupported-legacy-state`, a store at the supported version that holds legacy state, or a
   zero-match `.working/` that holds it (section 4.5), naming each item and its path;
 - with the section 9.2 version ceiling's finding, a store whose manifest declares a `spec_version`
-  above the supported one, the reserved homes-2 declaration (section 4.2) included, naming the
-  declared and supported versions and the tooling-upgrade remedy.
+  above the supported one, the reserved homes-2 declaration (section 4.2) included when the
+  supported version is below it, naming the declared and supported versions and the tooling-upgrade
+  remedy.
 
 Legacy state is this closed list: a clean-series record, active or archived, whose `actor.kind` is
 `importer` (section 8.6); a declared `legacy_fragment` type or an LF record (section 8.1); a
@@ -2098,40 +2114,45 @@ Legacy state is this closed list: a clean-series record, active or archived, who
 14.1); an evidence inventory in the legacy format `opf.ingest.evidence-inventory/v1` (section 4.2);
 a `.working/IMPORT-REPORT.md`; and a legacy `.working/imports/` directory (section 4.4). Extending
 the list is a specification change. The check MUST search the `.working/` tree of the store
-repository for each item, its staging and imported areas and the record archive included, within
-the three limits that follow, and, where discovery finds a store manifest, MUST read
-`import_status` from it; a legacy run archive outside `.working/`, for the reference tooling
-`.aiqt/import-archive/`, is reached only through the `import_status` item. The check MUST
-enumerate `.working/` and every directory beneath the discovered machine store, `.working/staging/`
-and `.working/imported/`, and a directory among these that it cannot enumerate yields
-cannot-evaluate; no other directory can hold a candidate or a path-defined item, so the check
-enumerates no other. First, the check MUST match the two path-defined items, a
-`.working/IMPORT-REPORT.md` and a legacy `.working/imports/` directory, at those live paths only;
-a copy preserved under `.working/archive/adoption/<run-id>/` (section 14.2) is adoption evidence,
-not legacy state. Second, the check MUST NOT read the contents of, or enumerate beneath, a path
-registered under `[unmanaged]` that section 14.2 permits: it matches such a path against a
-path-defined item by the path alone and leaves any other listed item kept inside it unsearched, a
-gap section 17 discloses. That limit applies to no other `[unmanaged]` entry: an entry that equals,
-contains, or lies within a reserved control area (section 14.2) or the machine store, that equals or
-contains `.working/` itself or a discovery candidate (section 14.2), or that names an OPF-managed
-file or view is a contradictory input, and the check MUST yield cannot-evaluate for it, never
-admission.
+repository for each item, its staging and imported areas and the record archive included, within the
+three limits that follow, and, where discovery finds a store manifest, MUST read `import_status`
+from it; a legacy run archive outside `.working/`, for the reference tooling
+`.aiqt/import-archive/`, is reached only through the `import_status` item. The check MUST enumerate
+`.working/` and every directory beneath the discovered machine store, `.working/staging/` and
+`.working/imported/`, and a directory among these that it cannot enumerate yields cannot-evaluate.
+Outside those directories, a candidate lies only at a `manifest.toml` in an immediate subdirectory
+of `.working/`, which the check MUST reach only by a no-follow existence probe of that name (section
+14.2), never by enumerating that subdirectory; a probe it cannot complete yields cannot-evaluate,
+and no other directory can hold a candidate or a path-defined item, so the check enumerates no
+other. First, the check MUST match the two path-defined items, a `.working/IMPORT-REPORT.md` and a
+legacy `.working/imports/` directory, at those live paths only; a copy preserved under
+`.working/archive/adoption/<run-id>/` (section 14.2) is adoption evidence, not legacy state. Second,
+the check MUST NOT read the contents of, or enumerate beneath, a path registered under `[unmanaged]`
+that section 14.2 permits: it matches such a path against a path-defined item by the path alone,
+makes no access beneath it but the existence probe above, and leaves any other listed item kept
+inside it unsearched, a gap section 17 discloses. That limit applies to no other `[unmanaged]`
+entry: an entry that equals, contains, or lies within a reserved control area (section 14.2) or the
+machine store, that equals or contains `.working/` itself or a discovery candidate (section 14.2),
+or that names an OPF-managed file or view is a contradictory input, and the check MUST yield
+cannot-evaluate for it, never admission.
 
-Third, to find the items defined by file content, the check MUST parse exactly these candidates
-and no other file, a boundary section 17 discloses: the discovered store manifest; as candidate
-records, the record files of the discovered machine store, active and archived, meaning the
-worklog ledger `worklog.toml` and the imported worklog `worklog.imported.toml` (sections 6.2 and
-8.3), each `<type>.index.toml` and `<type>.imported.index.toml`, each per-record file under a
-`<type>/` directory (section 9), and each index, worklog ledger, and record file under its record
-archive `archive/<YYYY>/` (section 12); as candidate inventories, each `inventory.toml` and
-`inventory-<phase>.toml` at the root of a run folder `.working/staging/<kind>/<run-id>/` or
-`.working/imported/<kind>/<run-id>/`; and the adoption evidence under `.working/imported/adoption/`
-(section 14.2) that decides whether the store holds an adoption receipt. Where discovery finds no
-store manifest, as over a zero-match `.working/` (section 4.5), the `import_status` item and the
-declared `legacy_fragment` type item do not apply and no file is a candidate record; the check
-still parses each candidate inventory present and matches both path-defined items, and an
-unreadable, malformed, or contradictory candidate that is present, a candidate `manifest.toml` that
-discovery reads (section 4.5) included, MUST yield cannot-evaluate, never admission.
+Third, to find the items defined by file content, the check MUST parse exactly these candidates and
+no other file, a boundary section 17 discloses: each candidate `manifest.toml` that discovery reads
+(section 4.5), the discovered store manifest included; as candidate records, the record files of the
+discovered machine store, active and archived, meaning the worklog ledger `worklog.toml` and the
+imported worklog `worklog.imported.toml` (sections 6.2 and 8.3), each `<type>.index.toml` and
+`<type>.imported.index.toml`, each per-record file under a `<type>/` directory (section 9), and each
+index, worklog ledger, and record file under its record archive `archive/<YYYY>/` (section 12); as
+candidate inventories, each `inventory.toml` and `inventory-<phase>.toml` at the root of a run
+folder `.working/staging/<kind>/<run-id>/` or `.working/imported/<kind>/<run-id>/`; and, in each run
+folder `.working/imported/adoption/<run-id>/` (section 14.2), the file at the adoption receipt path
+of the implementation's own section 14 adoption writer, which alone decides whether the store holds
+an adoption receipt. Where discovery finds no store manifest, as over a zero-match `.working/`
+(section 4.5), the `import_status` item and the declared `legacy_fragment` type item do not apply
+and no file is a candidate record or a candidate adoption receipt; the check still parses each
+candidate inventory present and matches both path-defined items, and an unreadable, malformed, or
+contradictory candidate that is present, a candidate `manifest.toml` that discovery reads (section
+4.5) included, MUST yield cannot-evaluate, never admission.
 
 The check MUST classify each candidate it reads by the rules that follow, whether or not discovery
 finds a store manifest, and MUST yield cannot-evaluate, never admission, for each candidate those
@@ -2141,36 +2162,45 @@ cannot read its bytes, and malformed where those bytes do not parse as TOML. A c
 and that match is contradictory where the file also carries a `[devprocess]` table, where its
 `spec_version` is absent or does not parse as a version, where a present `[opf].homes` or
 `[opf].worklog` value is not a TOML integer, or where a present `import_status` is not `none`,
-`partial`, or `complete`. A candidate `manifest.toml` that carries an `[opf]` table whose
-`standard` is absent or any other value is contradictory, a mistyped or altered discovery token
-(section 17) included; one that carries a `[devprocess]` table and no `[opf]` table is a recognized
-legacy candidate (section 4.5); and one that carries neither table is foreign content, neither a
-match nor a contradiction, that a section 14 first adoption dispositions. Any other candidate is
-contradictory where a value that decides a listed item, a record's `actor.kind` or `type` or an
-inventory's `format`, is absent where its envelope or format requires it, or is present and not a
-string.
+`partial`, or `complete`. A candidate `manifest.toml` that carries an `[opf]` table whose `standard`
+is absent or any other value is contradictory, a mistyped or altered discovery token (section 17)
+included; one that carries a `[devprocess]` table and no `[opf]` table is a recognized legacy
+candidate (section 4.5); and one that carries neither table is foreign content, neither a match nor
+a contradiction, that a section 14 first adoption dispositions. Any other candidate is contradictory
+where a value that decides a listed item, a record's `actor.kind` or `type` or an inventory's
+`format`, is absent where its envelope or format requires it, or is present and not a string. This
+specification fixes no adoption receipt path or format: a candidate adoption receipt that does not
+parse in the receipt format of the implementation's own section 14 adoption writer is contradictory,
+and a file under `.working/imported/adoption/` at no such receipt path is not a candidate and
+decides nothing.
 
 Where a store meets more than one refusal above, the section 9.2 ceiling included, the check MUST
-report every finding it meets, and that store's refusal fixture names each of them.
-An input the check cannot read, parse, or enumerate MUST yield cannot-evaluate, never admission.
-Each refusal MUST be a fail-closed INVALID finding, never VALID. A fresh-only implementation MUST
-NOT grade the rest of a refused store, write, stage, or partially upgrade any file, rewrite a
-version declaration, fabricate provenance, or invoke another upgrader; the store and product trees,
-ignored files and the lease path included, MUST stay byte-identical. A fresh-only implementation
-that provides an upgrade command MUST refuse an older store with the same finding and MUST NOT
-report a successful upgrade; it MAY report a no-op on a supported store only after full doctor
-VALID. Admission MUST NOT substitute for any other applicable check.
+report every finding it meets, and that store's refusal fixture asserts each of them. An input the
+check cannot read, parse, or enumerate MUST yield cannot-evaluate, never admission. Each refusal
+MUST be a fail-closed INVALID finding, never VALID. A fresh-only implementation MUST NOT grade the
+rest of a refused store, write, stage, or partially upgrade any file, rewrite a version declaration,
+fabricate provenance, or invoke another upgrader; the store and product trees, ignored files and the
+lease path included, MUST stay byte-identical. A fresh-only implementation that provides an upgrade
+command MUST refuse an older store with the same finding and MUST NOT report a successful upgrade;
+it MAY report a no-op on a supported store only after full doctor VALID. Admission MUST NOT
+substitute for any other applicable check.
 
 For a store its admission check refuses, a report MUST give the base result as `indeterminate`,
 naming the class, the supported version and generations, and the finding; it MUST NOT give
 `conformant_for_declared_scope`, nor `nonconformant` on that refusal alone. A claim of the
 fresh-only class MUST cite refusal evidence: for each finding above and each legacy-state item, a
-fixture that every store-resolving command refuses with the named finding, with both trees
-byte-identical, the importer-authored clean-series item's fixtures including an importer-authored
-entry in the active `worklog.toml` ledger beside an active and an archived typed record. Missing
-evidence makes the claim `indeterminate`, never a pass. A fresh-only claim
-MUST NOT imply upgrade compatibility or continuity from the implementation's own earlier releases;
-moving to a later base version requires a new declaration and new evidence.
+fixture that every store-resolving command refuses with that finding, asserting each seeded
+legacy-state item by its path, with both trees byte-identical; for the section 9.2 ceiling, whose
+finding carries no token in this specification, the fixture asserts an INVALID finding that names
+the declared and supported versions and the tooling-upgrade remedy. The importer-authored
+clean-series item's fixtures MUST include three separate fixtures that each seed exactly one
+importer-authored clean record, one an entry in the active `worklog.toml` ledger, one an active
+typed record, and one an archived typed record, and the `import_status` item's fixtures MUST include
+one that holds no adoption receipt but holds another file under
+`.working/imported/adoption/<run-id>/`. Missing evidence makes the claim `indeterminate`, never a
+pass. A fresh-only claim MUST NOT imply upgrade compatibility or continuity from the
+implementation's own earlier releases; moving to a later base version requires a new declaration and
+new evidence.
 
 ## 17. Residual coverage disclosures
 
