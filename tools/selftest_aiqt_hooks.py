@@ -232,7 +232,8 @@ def _note_constructor_shape_failures(path=None):
     constructor whose body neither holds a dict literal with a "systemMessage" key nor returns another
     note constructor's call, and a declared deny constructor (not also declared a note constructor) whose
     body neither holds a dict literal with a "hookSpecificOutput" key nor returns another deny
-    constructor's call (a keyword or a key string outside a dict literal counts as neither); a deny
+    constructor's call (a keyword or a key string outside a dict literal counts as neither, and a
+    constructor's call to itself is not another constructor's call); a deny
     constructor (not also declared a note constructor) that returns a note constructor's call; the note
     key ("systemMessage" as a string, inside a non-docstring string, or as an attribute or name) anywhere
     but the body of a LEAF constructor (see _leaf_constructors: _allow_note, _stop_warn and
@@ -312,16 +313,17 @@ def _note_constructor_shape_failures(path=None):
 
     for name in sorted(names):
         func = bodies.get(name)
-        if func is not None and not builds(func, "systemMessage") and not returns_call(func, names):
+        if (func is not None and not builds(func, "systemMessage")
+                and not returns_call(func, names - {name})):
             out.append("(note-shape-empty-{}) the declared constructor {} neither builds the note nor returns "
-                       "a constructor call".format(name, name))
+                       "another note constructor's call".format(name, name))
     for name in sorted(deny_names - names):
         func = bodies.get(name)
         if func is None:
             continue
-        if not builds(func, "hookSpecificOutput") and not returns_call(func, deny_names):
+        if not builds(func, "hookSpecificOutput") and not returns_call(func, deny_names - {name}):
             out.append("(note-shape-empty-{}) the declared deny constructor {} neither builds the deny nor "
-                       "returns a deny constructor call".format(name, name))
+                       "returns another deny constructor's call".format(name, name))
         if returns_call(func, names):
             out.append("(note-shape-deny-note-{}) the deny constructor {} returns a note constructor's call; "
                        "declare it in NOTE_CONSTRUCTORS so its callers are inventoried".format(name, name))
@@ -882,7 +884,8 @@ def _test_note_shape_pins(failures, tmp):
     result bound and edited, unpacked, iterated or reached through an undeclared wrapper, a leaf body
     given a second return or any _LEAF_REFUSED node type, a deny constructor returning a note
     constructor's call, a note or deny constructor that builds nothing (a keyword or a key string outside
-    a dict literal counts as building nothing), a decorated handler, constructor or main, a handler
+    a dict literal counts as building nothing, and a return of its own call counts as returning no other
+    constructor's call), a decorated handler, constructor or main, a handler
     result bound again or edited in main, a main with no HANDLERS binding, a global statement in main, a
     leaf's note or deny dict passed to a call or method before its return or rebound, a leaf's
     hookSpecificOutput value that is no dict literal, a leaf calling dict by name or by an attribute
@@ -995,6 +998,13 @@ def _test_note_shape_pins(failures, tmp):
          "note-shape-empty-_deny_relative")
     body("(ns-pin-note-empty) the note constructor _allow_note whose body is only `return _allow()` is "
          "refused", "_allow_note", ["return _allow()"], "note-shape-empty-_allow_note")
+    body("(ns-pin-deny-empty-self) claude's deny constructor _deny_relative whose body only returns its own "
+         "call is refused, since its own call is not another deny constructor's call", "_deny_relative",
+         ["return _deny_relative(tool, field, value)"], "note-shape-empty-_deny_relative")
+    body("(ns-pin-note-empty-self) claude's note constructor _diff_source_fallback whose body only returns "
+         "its own call is refused, since its own call is not another note constructor's call",
+         "_diff_source_fallback", ["return _diff_source_fallback(command)"],
+         "note-shape-empty-_diff_source_fallback")
     textual("(ns-pin-dispatch-codex) codex's warning_only pop of main's stdout_obj before the print is "
             "refused",
             "    if stdout_obj is not None:\n        print(json.dumps(stdout_obj))\n",
