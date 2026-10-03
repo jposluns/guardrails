@@ -497,7 +497,11 @@ def _pv(status, code, location, detail):
 
 
 def _roster_namespaces():
-    """(baseline, importer, module) namespace sets, derived from the store vocabulary."""
+    """(baseline, importer, module) namespace sets, derived from the store vocabulary.
+
+    Only `baseline` is REQUIRED of an ancestral seed. `importer` (legacy_fragment, LF) is deprecated
+    for new stores (spec 8.1): it is accepted and copied when an ancestral store carried it, never
+    required, and never scaffolded on a fresh store. `module` is the module tier."""
     baseline = frozenset(_opf_store.BASELINE_TYPES.values())
     importer = frozenset(_opf_store.IMPORTER_TYPES.values())
     module = frozenset(ns for ns, _mod in _opf_store.MODULE_TYPES.values())
@@ -522,8 +526,9 @@ def read_ancestral_counter_seed(store_root, *, pinned_head, evidence_commit, pre
       - resolves the counters blob's object id at that path and reads exactly that blob;
       - validates the TOML, schema, and namespace/value constraints (validate_counters), accepting
         exactly the store roster and module-tier namespaces;
-      - returns the roster high-waters it carries, the roster namespaces it LACKS as `unknown` (never
-        a zero), the module-tier high-waters as `module_counters`, and commit / blob / path /
+      - returns the baseline and importer high-waters it carries, the BASELINE namespaces it LACKS
+        as `unknown` (never a zero; an absent importer namespace is not unknown, since LF is never
+        required), the module-tier high-waters as `module_counters`, and commit / blob / path /
         content-digest evidence.
 
     REFUSES an unavailable, malformed, off-line, or unprovable seed and NEVER falls back to an older
@@ -581,7 +586,7 @@ def read_ancestral_counter_seed(store_root, *, pinned_head, evidence_commit, pre
         raise InitOperationError("ancestral counters {} exceed the TOML 64-bit integer range; "
                                  "refusing".format(", ".join(oversized)))
     counters = {ns: v for ns, v in values.items() if ns in baseline | importer}
-    unknown = tuple(sorted((baseline | importer) - set(counters)))
+    unknown = tuple(sorted(baseline - set(counters)))
     module_counters = {ns: v for ns, v in values.items() if ns in module}
     evidence = {
         "commit": evidence_oid,
@@ -594,7 +599,7 @@ def read_ancestral_counter_seed(store_root, *, pinned_head, evidence_commit, pre
 
 def seed_permanence_refusal(seed):
     """The reason an ancestral seed cannot support the permanence claim (decision 6), or None: a
-    roster namespace the snapshot lacks is UNKNOWN and never becomes a zero; a NONZERO module-tier
+    baseline namespace the snapshot lacks is UNKNOWN and never becomes a zero; a NONZERO module-tier
     high-water would be dropped by a new store whose modules are disabled, so a later re-enable
     could reallocate its identifiers."""
     if seed.unknown:
@@ -2975,12 +2980,23 @@ def _b6_tests(base, env, ok, refuses):
        == "sha256:" + hashlib.sha256(body).hexdigest())
     counters = tomllib.loads(_opf_init.build_counters(seed=seed.counters))
     ok("B2-wl-next-allocation", high_water(counters["counters"], "WL") + 1 == 8)
-    # B3: a snapshot that predates LF: LF is UNKNOWN (never zero) and the plan refuses it.
-    pre = {ns: 1 for ns in _opf_store.BASELINE_TYPES.values()}
+    ok("B2-lf-copied", seed.counters.get("LF") == 5 and counters["counters"].get("LF") == 5)
+    # B3: LF is accepted-if-present, never required (spec 8.1), so a snapshot WITHOUT LF is a
+    # complete seed whose counters carry no LF; a snapshot missing a BASELINE namespace (HO) is still
+    # UNKNOWN (never zero) and the plan refuses it.
+    nolf = dict.fromkeys(_opf_store.BASELINE_TYPES.values(), 1)
+    r3n, h3n, _b = _seed_repo(os.path.join(base, "r3n"), env, nolf)
+    s3n = read_ancestral_counter_seed(r3n, pinned_head=h3n, evidence_commit=h3n, prefix="",
+                                      object_format="sha1")
+    ok("B3-lf-absent-is-complete", s3n.unknown == () and "LF" not in s3n.counters)
+    ok("B3-lf-absent-plans", _mk_plan(seed=s3n)[0]["first_adoption"] is False
+       and "LF" not in tomllib.loads(_opf_init.build_counters(seed=s3n.counters))["counters"])
+    pre = dict(nolf)
+    del pre["HO"]
     r3, h3, _b = _seed_repo(os.path.join(base, "r3"), env, pre)
     s3 = read_ancestral_counter_seed(r3, pinned_head=h3, evidence_commit=h3, prefix="",
                                      object_format="sha1")
-    ok("B3-missing-is-unknown", s3.unknown == ("LF",) and "LF" not in s3.counters)
+    ok("B3-missing-is-unknown", s3.unknown == ("HO",) and "HO" not in s3.counters)
     refuses("B3-unknown-refuses-plan", lambda: _mk_plan(seed=s3), needle="UNKNOWN")
     refuses("B3-unknown-refuses-builder", lambda: build_source_payloads(
         operation_id="12345678-1234-4234-8234-1234567890ab", binding=_mk_binding(),

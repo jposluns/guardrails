@@ -117,38 +117,39 @@ def build_counters(*, seed=None):
     """Return a counters.toml high-water ledger for a fresh store.
 
     With `seed` omitted (the clean first-adoption bootstrap), returns a ZERO high-water for every
-    baseline namespace, including worklog (WL), and for the legacy_fragment importer namespace (LF) so a
-    fresh store can accept quarantine imports; the exact canonical bytes are unchanged from D1.
+    baseline namespace, including worklog (WL), and for no other namespace: the legacy_fragment
+    importer namespace (LF) is deprecated for new stores and MUST NOT be scaffolded (spec 8.1), so a
+    fresh store carries no LF counter.
 
     With `seed` supplied (B6 re-adoption: a validated ancestral high-water, e.g. from
-    _opf_init_operation.read_ancestral_counter_seed), the ancestral values are COPIED WITHOUT MUTATION
-    into the same complete namespace roster, so the next allocation follows the ancestral high-water
-    (including the WL prefix): EVERY roster namespace, baseline and importer alike, MUST be present in
-    the seed (PD-D2B-PR3-SCHEMA decision 6: a missing historical value is UNKNOWN, never a zero, so a
-    missing one is a refusal), each value is a genuine non-negative 64-bit integer copied verbatim, and a
-    seed namespace outside the store roster refuses. The result is re-validated through
+    _opf_init_operation.read_ancestral_counter_seed), the ancestral values are COPIED WITHOUT MUTATION,
+    so the next allocation follows the ancestral high-water (including the WL prefix): EVERY baseline
+    namespace MUST be present in the seed (PD-D2B-PR3-SCHEMA decision 6: a missing historical value is
+    UNKNOWN, never a zero, so a missing one is a refusal); an importer namespace (LF) is accepted and
+    copied when the ancestral store carried one, and is never required or invented when it did not;
+    each value is a genuine non-negative 64-bit integer copied verbatim, and a seed namespace outside
+    the baseline and importer roster refuses. The result is re-validated through
     validate_counters and refused on any finding; zero is NEVER substituted for a missing, unreadable, or
     malformed input (guard-input-soundness). SELECTION of the ancestral snapshot is the reader's / PR4's
     authority, not this builder's."""
     baseline = frozenset(_opf_store.BASELINE_TYPES.values())
     importer = frozenset(_opf_store.IMPORTER_TYPES.values())
-    namespaces = baseline | importer
     if seed is None:
-        document = {"schema": SUPPORTED_SCHEMA, "counters": {ns: 0 for ns in namespaces}}
+        document = {"schema": SUPPORTED_SCHEMA, "counters": {ns: 0 for ns in baseline}}
         text = _opf_emit.emit_checked(document)
-        _high, findings = validate_counters(tomllib.loads(text), known_namespaces=namespaces)
+        _high, findings = validate_counters(tomllib.loads(text), known_namespaces=baseline)
         if findings:
             raise InitError("{}: bootstrap validation failed: {}".format(COUNTERS_NAME, findings))
         return text
     if type(seed) is not dict:
         raise InitError("counters seed must be a validated high-water mapping")
-    for ns in sorted(namespaces):
+    for ns in sorted(baseline):
         if ns not in seed:
             raise InitError("counters seed is missing a high-water for namespace {!r}; a missing "
                             "ancestral value is unknown, and zero is never substituted".format(ns))
     counters = {}
     for ns, val in seed.items():
-        if type(ns) is not str or ns not in namespaces:
+        if type(ns) is not str or ns not in baseline | importer:
             raise InitError("counters seed carries namespace {!r} outside the store roster".format(ns))
         # bool is an int subclass; a genuine high-water is never True/False. A value past the TOML
         # signed 64-bit range cannot be carried by a counters ledger, so it refuses too.
@@ -214,6 +215,13 @@ def self_test():
         except InitError:
             return True
         return False
+
+    def seeded_or_none(seed):
+        # A refused seed is a named check failure here, never a fail-closed harness error.
+        try:
+            return build_counters(seed=seed)
+        except InitError:
+            return None
 
     try:
         authority = _opf_emit._load_byte_canon_authority()
@@ -282,7 +290,7 @@ def self_test():
         schema_line = "schema = {}\n".format(SUPPORTED_SCHEMA)
         expected_counters = (
             schema_line + "\n[counters]\n"
-            "AD = 0\nBI = 0\nBL = 0\nCN = 0\nDN = 0\nFN = 0\nHO = 0\nLF = 0\nMD = 0\nPD = 0\n"
+            "AD = 0\nBI = 0\nBL = 0\nCN = 0\nDN = 0\nFN = 0\nHO = 0\nMD = 0\nPD = 0\n"
             "PP = 0\nRF = 0\nWL = 0\n"
         )
         expected_version = "release = []\n" + schema_line + "summary = []\n"
@@ -298,38 +306,51 @@ def self_test():
             check(name + " canonical bytes", text.encode("utf-8") == expected.encode("ascii"))
             check(name + " repeat bytes", text == builder())
             check(name + " keys", set(tomllib.loads(text)) == keys)
-        namespaces = (frozenset(_opf_store.BASELINE_TYPES.values())
-                      | frozenset(_opf_store.IMPORTER_TYPES.values()))
+        namespaces = frozenset(_opf_store.BASELINE_TYPES.values())
         counters = tomllib.loads(documents[COUNTERS_NAME])
         high, findings = validate_counters(counters, known_namespaces=namespaces)
         check("counters validate and are complete", not findings and high == {
             ns: 0 for ns in namespaces
         })
-        # B6 re-adoption seed path: an ancestral high-water is copied without mutation into the full
-        # roster, so the next allocation follows it (including WL); the no-seed bytes stay unchanged
-        # (guarded by the pinned "counters canonical bytes" check above, which is the revert-flip for
-        # a regressed default). Each negative below refuses rather than silently zeroing.
+        # Spec 8.1: legacy_fragment is deprecated for new stores and MUST NOT be scaffolded, so a fresh
+        # ledger carries no importer namespace (the revert-flip for a re-seeded LF, beside the pinned
+        # "counters canonical bytes" check above).
+        check("fresh counters contain no LF",
+              "LF" not in counters["counters"]
+              and not set(counters["counters"]) & frozenset(_opf_store.IMPORTER_TYPES.values()))
+        # B6 re-adoption seed path: an ancestral high-water is copied without mutation, so the next
+        # allocation follows it (including WL). Every baseline namespace is required; an importer
+        # namespace (LF) is accepted and copied if present and never required. Each negative below
+        # refuses rather than silently zeroing.
         baseline_ns = frozenset(_opf_store.BASELINE_TYPES.values())
         importer_ns = frozenset(_opf_store.IMPORTER_TYPES.values())
         good_seed = {ns: 0 for ns in baseline_ns | importer_ns}
-        good_seed.update({"WL": 7, "BI": 3})
-        seeded = tomllib.loads(build_counters(seed=good_seed))
+        good_seed.update({"WL": 7, "BI": 3, "LF": 5})
+        seeded = seeded_or_none(good_seed)
+        seeded = tomllib.loads(seeded) if seeded is not None else {"counters": {}}
         check("seeded counters follow ancestral high-water",
-              seeded["counters"]["WL"] == 7 and seeded["counters"]["BI"] == 3)
-        check("seeded counters cover the full roster",
-              set(seeded["counters"]) == (baseline_ns | importer_ns))
-        check("seeded importer namespace absent from the seed refuses (unknown, never zero)",
-              rejects(lambda: build_counters(seed={ns: 0 for ns in baseline_ns})))
+              seeded["counters"].get("WL") == 7 and seeded["counters"].get("BI") == 3)
+        check("seed with LF is accepted and copied",
+              set(seeded["counters"]) == (baseline_ns | importer_ns)
+              and seeded["counters"]["LF"] == 5)
+        lf_free_seed = dict({ns: 0 for ns in baseline_ns}, WL=7)
+        lf_free = seeded_or_none(lf_free_seed)
+        lf_free = tomllib.loads(lf_free)["counters"] if lf_free is not None else {}
+        check("seed without LF is accepted (LF is never required or invented)",
+              set(lf_free) == baseline_ns and lf_free["WL"] == 7)
         check("seed with a value past the 64-bit range refuses",
               rejects(lambda: build_counters(seed=dict(good_seed, WL=1 << 63))))
+        ceiling = seeded_or_none(dict(good_seed, WL=(1 << 63) - 1))
         check("seed at the 64-bit ceiling is accepted",
-              tomllib.loads(build_counters(seed=dict(good_seed, WL=(1 << 63) - 1)))["counters"][
-                  "WL"] == (1 << 63) - 1)
+              ceiling is not None and tomllib.loads(ceiling)["counters"]["WL"] == (1 << 63) - 1)
         check("seeded counters revalidate", not validate_counters(
             seeded, known_namespaces=baseline_ns, optional_namespaces=importer_ns)[1])
         missing = {ns: 0 for ns in (baseline_ns | importer_ns) if ns != "WL"}
         check("seed missing a baseline namespace refuses",
               rejects(lambda: build_counters(seed=missing)))
+        check("LF-free seed missing a baseline namespace refuses",
+              rejects(lambda: build_counters(
+                  seed={ns: 0 for ns in baseline_ns if ns != "HO"})))
         check("seed with a bool value refuses",
               rejects(lambda: build_counters(seed=dict(good_seed, WL=True))))
         check("seed with a negative value refuses",
@@ -339,8 +360,7 @@ def self_test():
         check("non-mapping seed refuses",
               rejects(lambda: build_counters(seed=[1, 2, 3])))
         check("no-seed and empty-adoption bytes are the zero baseline",
-              build_counters() == build_counters(
-                  seed={ns: 0 for ns in (baseline_ns | importer_ns)}))
+              build_counters() == seeded_or_none({ns: 0 for ns in baseline_ns}))
         check("version validates", valid(validate_version(tomllib.loads(documents[VERSION_NAME]))))
         check("worklog validates", valid(validate_worklog(tomllib.loads(documents[WORKLOG_NAME]))))
         check("index roster", INDEX_TYPES == tuple(sorted(set(_opf_store.BASELINE_TYPES) - {"worklog"})))

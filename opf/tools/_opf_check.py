@@ -149,10 +149,11 @@ _ROSTER_NS_SET = frozenset(_ROSTER_NAMESPACES.values())
 
 # A record whose schema has not shipped in the baseline validator is a named CANNOT-EVALUATE deferral,
 # never graded INVALID (F4; round-5 F-2). This covers the module tier (schemas land in U2M) AND the
-# importer-only legacy_fragment type (its record schema ships in U7's import layer, not the baseline
-# validator), mirroring U7's own staging validation of the identical shape.
+# importer-only legacy_fragment type (deprecated for new stores, spec 8.1: no record schema ships in the
+# baseline validator, so records in an existing store stay readable as a named deferral).
 _SCHEMA_DEFERRAL = ("record schema not available to the baseline validator; deferred (module-tier schemas "
-                    "land in U2M, the importer legacy_fragment schema in the import layer)")
+                    "land in U2M; legacy_fragment is deprecated for new stores and has no baseline "
+                    "record schema)")
 
 
 def _schema_deferred(tname):
@@ -2810,9 +2811,10 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                     "8.2)".format(_rel(machine_rel, COUNTERS_NAME)))
     elif cst == "ok":
         # Importer/quarantine namespaces (IMPORTER_TYPES, i.e. LF) are ACCEPTED-if-present but NOT
-        # REQUIRED: a fresh 1.1.0 store declares an LF counter (opf init) while legacy_fragment stays out
-        # of the manifest [types] (schema-deferred), so LF is absent from known_ns; passing it as optional
-        # keeps the fresh-init store clean without requiring LF on a store that lacks it (spec 8.2).
+        # REQUIRED: a store scaffolded before LF's deprecation (spec 8.1) carries an LF counter from
+        # opf init while legacy_fragment stays out of the manifest [types] (schema-deferred), so LF is
+        # absent from known_ns; passing it as optional keeps such a store clean without requiring LF on
+        # a store that lacks it, as a new store does (spec 8.2).
         high, cfindings = validate_counters(counters_data, known_namespaces=known_ns,
                                             optional_namespaces=frozenset(IMPORTER_TYPES.values()))
         for f in cfindings:
@@ -3591,8 +3593,8 @@ def self_test():
         check("b1-nonwl-gap-below-max-invalid", _b1gr is not None and _b1gr.status == INVALID)
         check("b1-nonwl-gap-below-max-named",
               _b1gr is not None and any("C-NO-DELETION" in f and "FN-2" in f for f in _b1gr.findings))
-        # F-2: a declared importer legacy_fragment type defers to a named CANNOT-EVALUATE (its record schema
-        # ships in U7's import layer, not the baseline validator), never a false INVALID.
+        # F-2: a declared importer legacy_fragment type defers to a named CANNOT-EVALUATE (it is deprecated for
+        # new stores and has no baseline record schema), never a false INVALID.
         _lff = clean_machine()
         _lff["manifest.toml"] = base_manifest()
         _lff["manifest.toml"]["types"]["legacy_fragment"] = {"namespace": "LF"}
@@ -4462,8 +4464,8 @@ def self_test():
         check("c-counters-missing-namespace-flagged",
               ccr is not None and ccr.checks.get("C-COUNTERS") == "FINDING")
 
-        # C-COUNTERS (fresh-init LF regression, round-2): a fresh 1.1.0 store declares an LF
-        # (legacy_fragment) counter at `opf init` while legacy_fragment stays OUT of the manifest [types]
+        # C-COUNTERS (LF in an existing store, round-2): an older store may carry an LF
+        # (legacy_fragment) counter from its `opf init` while legacy_fragment stays OUT of the manifest [types]
         # (schema-deferred), so LF is not a known/required namespace. It is an ACCEPTED-if-present importer
         # namespace, NOT a "not a known namespace" finding: doctor must pass it. Without the optional-
         # namespaces wiring (C-COUNTERS passing optional_namespaces=IMPORTER_TYPES) this vector flips to a
