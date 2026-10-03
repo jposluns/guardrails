@@ -8,8 +8,8 @@ concatenation equality per section), so deleting any sentence in a tiled section
 red. Residual: the default gate's pins are substring checks over normalized text, so added
 text, a pinned sentence neutralized by appended text included, stays green under the default
 entry alone; the self-test's per-section tiling equality turns red on any addition inside a
-tiled section. The live residuals are additions to untiled sections (for example 8.7, 10, 13
-and 16), a default-gate run without the self-test, and an addition landed together with a
+tiled section. The live residuals are additions to untiled sections (for example 8.7, 9.1, 10
+and 13), a default-gate run without the self-test, and an addition landed together with a
 matching registry edit, which review of registry changes catches.
 
 The default entry also runs a section 2 keyword lint over every registered pin: a pin without
@@ -51,7 +51,7 @@ _CONTRACT = {
         _D('Public brand: OPFiles (opfiles.ai).'),
         _D('Base discovery token: opf.'),
         _D('Status: draft (specification only; schemas and the reference tooling, the scaffolder opf init, the adopter opf adopt, the post-adoption importer opf import, the validator opf doctor, the renderer opf render, the relocator opf migrate, the synchronizer opf sync, the schema-upgrader opf upgrade, the absorber opf absorb, and the record author opf record, ship in later releases).'),
-        _D('Date: 2026-09-27 (UTC).'),
+        _D('Date: 2026-10-03 (UTC).'),
         _D('OPFiles is a neutral, self-contained operational-files standard published under the Apache License 2.0 (except vendored third-party material, which remains under its own terms).'),
         _D('AIQT and AIQT Guardrails are trademarks (registration pending); AIQT is a brand, not a legal entity, and the standard is authored and maintained by its lead maintainer.'),
         _D('A project conforms to OPFiles with this specification and its own checks; the AIQT Guardrails pack is the reference enforcement suite and a consumer of the standard, not its definition.'),
@@ -74,8 +74,9 @@ _CONTRACT = {
     ),
     "4.2": (
         _D('Base spec 1.3.0 defines adoption and the separate imported series on homes 1.'),
-        _D('The 1.3.0 requirements in sections 4.2, 6.1, 8, 9.2, 11, 12, and 14 are a target contract; they do not claim that the reference tooling has activated adoption, imported-series validation, or the import writer.'),
-        'Activation MUST include the tested upgrade in section 9.2 and deterministic doctor coverage before a writer accepts the new format.',
+        _D('The 1.3.0 requirements in sections 4.2, 4.5, 6.1, 8, 9.1, 9.2, 11, 12, 14, and 16.1 are a target contract; they do not claim that the reference tooling has activated adoption, imported-series validation, or the import writer.'),
+        'Activation MUST include deterministic doctor coverage before a writer accepts the new format.',
+        'For an upgrade-capable implementation (section 16.1), activation MUST also include the tested upgrade in section 9.2; a fresh-only implementation activates without it and MUST instead include the section 16.1 admission check and its refusal evidence.',
         _D('Homes 2 is a separate, later activation.'),
         _D('The homes-2 contract below is for spec_version = "2.0.0" and [opf].homes = 2.'),
         _D('The current reference tooling reserves these names and implements their homes-2 boundary checks.'),
@@ -143,6 +144,15 @@ _CONTRACT = {
         "The machine subdirectory's standard name is toml; tooling MUST NOT hardcode it, and MUST locate it by discovery.",
         'The names imports, imported, archive, staging, and journals are reserved at the store level for OPF control area and MUST NOT be used as a machine subdirectory name; discovery fails closed on a machine store so named.',
         _D('The legacy staging name imports remains reserved so legacy content cannot be re-absorbed.'),
+    ),
+    "4.5": (
+        _D('Within the resolved store repository, tooling locates the machine store by finding exactly one immediate subdirectory of .working/ containing a manifest.toml that declares standard = "opf" in its [opf] base table, trying toml first.'),
+        _D('Zero matches, or more than one, is a cannot-evaluate outcome: the tool reports it and stops; it never guesses, and never treats it as an empty or absent store.'),
+        _D('The pointer names which repository carries the store; the manifest discovery observes where, within it, the machine store sits.'),
+        _D('Because the machine subdirectory is observed at each use rather than declared and trusted, renaming it is a directory move with nothing to go stale; the pointer, which does declare a location, is validated at every resolution and fails closed rather than trusting a stale target (section 4.3).'),
+        _D('Profiles declared under [profiles.<name>] are enumerated after the base is validated; a profile a tool does not support is ignored for enforcement and recorded as unevaluated, never treated as a base-validation failure (section 9).'),
+        'A fresh-only implementation (section 16.1) MUST recognize a candidate manifest.toml whose base table is the retired [devprocess] only to refuse that store as unsupported-older-store; the recognition is not a discovery match.',
+        'A recognized legacy candidate, and any other zero-match or ambiguous outcome, MUST NOT be treated as an absent store that permits initialization or adoption.',
     ),
     "4.6": (
         _D('Source files are lowercase; deliverables are uppercase.'),
@@ -217,6 +227,7 @@ _CONTRACT = {
         _D('legacy_fragment (LF) is deprecated for new stores as of 1.3.0, not removed: its taxonomy row and legacy validation remain for existing stores and evidence.'),
         'New imports MUST use the imported series and verbatim unparsed text (section 8.3), not LF quarantine.',
         'LF MUST NOT be scaffolded.',
+        'A fresh-only implementation (section 16.1) provides no legacy LF validation and MUST refuse a store that declares the legacy_fragment type or holds an LF record.',
         _D('- Imported history uses the same enabled types in a separate series, not additional record types.'),
         _D('Reserved namespaces remain reserved.'),
         _D('Imported states describe history and confer no current authority (section 8.6).'),
@@ -345,6 +356,7 @@ _CONTRACT = {
         _D("The same bar covers every current obligation, record-level or store-level, including field-borne authority: a gate_run verdict, a tier_assessment outcome, an artifact's promoted state, a release's published state and a maintainer_action's done on an importer-authored record describe history and discharge nothing now."),
         "A clean done record's receipt_of MUST target a clean backlog item, and a clean backlog item reaching ratified done MUST hold a clean receipt authored by a non-importer actor; a legacy importer-authored receipt satisfies, as recorded history, only the legacy importer-authored backlog item it was recorded with.",
         "One exception is defined so that the section 9.2 refusal always has a writer-performable remedy: where that upgrade withdraws a ratified done item's only receipt as legacy importer-authored, a maintainer-authored clean maintainer_decision that links corrects to that item and records that its completion stands MUST satisfy the item's receipt obligation in place of the withdrawn receipt; opf record create authors such a decision, doctor and the upgrade MUST accept it, and a maintainer who instead judges the work unfinished MUST record a new clean backlog item linking derives_from back, never reopen the terminal done.",
+        'That acceptance binds an upgrade-capable implementation (section 16.1); a fresh-only implementation never reaches it, because the withdrawn legacy receipt is legacy state that it MUST refuse under section 16.1.',
         'An importer-authored decision MUST NOT be treated as the current effective resolution of a clean pending_decision chain; resolving such a chain now MUST take a new clean decision linking back.',
         'Importer-authored blocks MUST NOT grant a current stop, and an importer-authored record MUST NOT discharge a required supersession.',
         'The firewall covers every state-bearing type: an importer-authored record MUST NOT be treated as the current handoff, an active waiver, a held session_lease, an active mode, or a ratified active preference_pattern; a state-bearing status on an importer-authored record describes history at its source and MUST confer nothing now, and every current-state join, including the section 8.5 at-most-one-current handoff rule, MUST evaluate only clean records authored by non-importer actors.',
@@ -469,7 +481,9 @@ _CONTRACT = {
         _D('The homes-generation target does not itself change the runtime supported version or init format.'),
         'The migration MUST refuse a store resolved outside the product root until a multi-root coordinator exists.',
         'Unproven legacy .archive/ entries MUST remain in place with a standing finding until dispositioned.',
-        'A base-schema version bump MUST ship a tested, in-place store-schema upgrade (opf upgrade).',
+        'A base-schema version bump MUST ship a tested, in-place store-schema upgrade (opf upgrade) in at least one published upgrade-capable implementation (section 16.1), the reference tooling, so every store below the new version keeps an upgrade path.',
+        'Every requirement of this section on an upgrade, its deltas, preconditions, report, refusals, and remedies binds an upgrade-capable implementation; a fresh-only implementation implements none of them and MUST instead refuse under section 16.1.',
+        _D('The version ceiling at the end of this section binds every implementation class.'),
         'The upgrade MUST be idempotent.',
         'A purely schema-level bump MUST be additive, using atomic replacement of existing files, create-only writes for new index files, and regeneration of declared views through exclusively created temporary files followed by atomic rename.',
         _D('These writes are sequential, with recovery scope held in memory, not a durable transaction journal.'),
@@ -521,6 +535,8 @@ _CONTRACT = {
         _D('"complete" means every such source has a green completion result and recorded retirement under section 14.1 with a live full doctor VALID, or that a pre-1.3.0 legacy import finished and its preserved legacy run evidence substantiates it; the section 9.2 upgrade preserves that legacy status without fabricating an approval or receipt.'),
         'A partial or complete status that neither an adoption receipt with completion results nor preserved legacy import evidence substantiates MUST fail closed, as does a missing, unreadable or contradictory input.',
         'Elapsed time and a staging directory MUST NOT be taken as proof of status.',
+        'A fresh-only implementation (section 16.1) MUST NOT use the preserved-legacy-evidence route: it substantiates partial and complete only through an adoption receipt with completion results, and it refuses a partial or complete status in a store that holds no adoption receipt as legacy state under section 16.1.',
+        'The section 16.1 admission check belongs to neither layer above: it MUST run at every posture, and off and warn MUST NOT disable or soften it.',
         'From the recorded approval until its retirement is recorded, a path the approved plan enumerates as a frozen retire, move or migrate source (section 14.2) is bounded adoption state: while its live bytes still match its plan digest, containment MUST report it as migration_incomplete detail rather than failing it, at "none" during a clean start as much as at "partial".',
         'A digest mismatch (a drifted source) or an unenumerated path MUST remain a containment-gate failure at required; the bounded treatment is never a blanket exemption.',
         'A formerly occupied destination needs no bounded treatment: its occupying source was archived at apply (section 14.2), the destination is an ordinary managed path from apply onward, and a check that reads the adoption archive, the section 14.1 completion check and import included, MUST fail at required, naming the path, on a missing, unreadable or digest-mismatched archived copy.',
@@ -615,6 +631,7 @@ _CONTRACT = {
         'Their evidence inventories and readers remain available; old acceptance records describe those runs and MUST NOT authorize a new adoption or retirement.',
         'A legacy import completed under the pre-1.3.0 contract MUST keep its recorded status, substantiated by its preserved run evidence (section 11); a retrospective approval or receipt MUST NOT be fabricated.',
         "Preserved legacy run evidence is that run's durable archive in its recorded legacy home, for the reference tooling .aiqt/import-archive/<run-id>/, holding the run's acceptance record and its evidence inventory in the retained legacy format; substantiation MUST re-read that inventory and digest-match every file it enumerates, and a missing, unreadable or digest-mismatched item MUST leave the status unsubstantiated, failing closed under section 11.",
+        'A fresh-only implementation (section 16.1) provides none of these legacy readers: it MUST refuse such a store under section 16.1, MUST NOT alter its recorded status, and MUST NOT substantiate a status from legacy run evidence.',
         'Old import and ingest orchestration MUST be retired by staged decoupling only after clean-start adoption ships.',
         'Required evidence MUST be re-read and digest-matched in its durable home before staging reclamation.',
         'Reclamation MUST be journaled and idempotent; an unreadable tree MUST hold the run.',
@@ -690,6 +707,44 @@ _CONTRACT = {
         _D("AIQT appears in the standard's title and brand as trademark and authorship attribution (the standard is authored and maintained by its lead maintainer), which is attribution rather than a requirement dependency; AIQT is also one profile, [profiles.aiqt], cited only as the reference enforcement suite and a consumer."),
         _D("A profile carries an adopter's own additional requirements without the base ever depending on them."),
     ),
+    "16": (
+        _D('Conformance is reported against the base and, separately, against each declared profile a tool evaluated.'),
+        _D('A report speaks in conformant_for_declared_scope, nonconformant, indeterminate, or migration_incomplete, each qualified by whether it concerns the OPFiles **base** or a named **profile**.'),
+        _D('Every report names its scope, its exclusions, and its cannot-evaluate results.'),
+        _D('A base-conformant store may declare a profile the reporting tool did not evaluate; the report names that profile as unevaluated rather than implying whole-store coverage.'),
+        _D('An unqualified claim of "OPFiles conformant" or "AIQT conformant" is never emitted, by tooling or by prose: a conformance claim is a completeness claim over a declared set, and it enumerates that set, including which profiles were and were not evaluated.'),
+        'Until validation tooling ships, a conformance claim is self-asserted and MUST say so.',
+    ),
+    "16.1": (
+        _D('An implementation is a tool or tool suite offered to create, write, or validate OPF stores.'),
+        _D('A project that keeps its own store by hand, with its own checks over that store alone (section 1), is not an implementation under this section.'),
+        _D('The base defines two implementation conformance classes, upgrade-capable and fresh-only.'),
+        'A class changes which requirements bind an implementation only where this specification says so; a declared scope, exclusion, profile, or posture MUST NOT otherwise waive a base requirement.',
+        _D('Current-format requirements, the imported series, adoption, and the section 8.6 authority firewall included, bind both classes.'),
+        _D('An upgrade-capable implementation meets every section 9.2 requirement for each earlier base version and generation and grades legacy state under sections 8.1, 8.6, 11, and 14.1.'),
+        _D('The reference tooling is upgrade-capable.'),
+        _D('A fresh-only implementation supports exactly one base spec_version, one homes generation, and one worklog storage generation, initializes stores directly at them, and implements no section 9.2 upgrade and no legacy-state grading.'),
+        'An implementation MUST declare, in the documentation of each release and in every conformance report it emits, its release identity, its class, and its supported spec_version, homes generation, and worklog storage generation.',
+        'An implementation that declares no class MUST be treated as upgrade-capable, and every upgrade requirement binds it.',
+        'An unreadable, malformed, or contradictory declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation.',
+        'A fresh-only implementation MUST run an admission check in every command that resolves a store, at every posture, before any other grading and before any write, the claim of the single-writer lease (section 5.7) included.',
+        'The check MUST compare parsed versions, never strings, and MUST refuse:',
+        _D('- as unsupported-older-store, a store whose manifest declares a spec_version below the supported one, or whose base table is the retired [devprocess] (section 4.5), naming the declared version or table, the supported version, the store location, and the remedy: upgrade the store with an upgrade-capable implementation, then retry;'),
+        _D('- as unsupported-store-generation, a store whose homes or worklog storage generation differs from the declared one, naming each generation found and supported;'),
+        _D('- as unsupported-legacy-state, a store at the supported version that holds legacy state, naming each item and its path.'),
+        _D('Legacy state is this closed list: a clean-series record, active or archived, whose actor.kind is importer (section 8.6); a declared legacy_fragment type or an LF record (section 8.1); a partial or complete import_status in a store that holds no adoption receipt (sections 11 and 14.1); an evidence inventory in the legacy format opf.ingest.evidence-inventory/v1 (section 4.2); a .working/IMPORT-REPORT.md; and a legacy .working/imports/ directory (section 4.4).'),
+        _D('Extending the list is a specification change.'),
+        _D('A store declaring a spec_version above the supported one is refused under the section 9.2 ceiling.'),
+        'An input the check cannot read, parse, or enumerate MUST yield cannot-evaluate, never admission.',
+        'Each refusal MUST be a fail-closed INVALID finding, never VALID.',
+        'A fresh-only implementation MUST NOT grade the rest of a refused store, write, stage, or partially upgrade any file, rewrite a version declaration, fabricate provenance, or invoke another upgrader; the store and product trees, ignored files and the lease path included, MUST stay byte-identical.',
+        'A fresh-only implementation that provides an upgrade command MUST refuse an older store with the same finding and MUST NOT report a successful upgrade; it MAY report a no-op on a supported store only after full doctor VALID.',
+        'Admission MUST NOT substitute for any other applicable check.',
+        'For a store its admission check refuses, a report MUST give the base result as indeterminate, naming the class, the supported version and generations, and the finding; it MUST NOT give conformant_for_declared_scope, nor nonconformant on that refusal alone.',
+        'A claim of the fresh-only class MUST cite refusal evidence: for each finding above and each legacy-state item, a fixture that every store-resolving command refuses with the named finding, with both trees byte-identical.',
+        _D('Missing evidence makes the claim indeterminate, never a pass.'),
+        "A fresh-only claim MUST NOT imply upgrade compatibility or continuity from the implementation's own earlier releases; moving to a later base version requires a new declaration and new evidence.",
+    ),
     "17": (
         _D("The gates in this standard are strong where they are strong and say so where they are not: - The freeze gate proves a published summary's bytes changed only through recorded re-publication; it cannot prove the prose is accurate or complete."),
         _D('Human curation (section 7.3) is that control.'),
@@ -712,7 +767,10 @@ _CONTRACT = {
         _D('- The base discovery token opf is a single exact string carried in every adopter manifest.'),
         _D('A mistyped or altered token makes the store undiscoverable, which resolves to cannot-evaluate (fail-closed), never to a silent empty store.'),
         "The token is stable within a base-schema major line; a store-breaking rename MUST ship only with the tested opf upgrade migration (section 9.2), which rewrites the base table and token in place so no existing adopter's manifest is stranded.",
-        _D('The retired 1.0.0 token devprocess is recognized by opf upgrade alone, purely to carry a legacy store forward.'),
+        _D('The retired 1.0.0 token devprocess is recognized by opf upgrade, purely to carry a legacy store forward, and by a fresh-only implementation (section 16.1), purely to refuse that store by name.'),
+        _D('- A fresh-only implementation (section 16.1) proves tested admission and refusal behaviour, not authenticated history: a version declaration and the absence of listed legacy state cannot prove that a store was never upgraded or hand-rewritten, and the closed legacy-state list catches only what it lists.'),
+        _D('Its refusal leaves a store unchanged but offers no preservation, repair, or continuity; an adopter whose store holds legacy state, an upgraded store with pre-1.3.0 import history included, needs an upgrade-capable implementation for that store.'),
+        _D('Until validation tooling ships, a class claim is self-asserted (section 16).'),
     ),
 }
 

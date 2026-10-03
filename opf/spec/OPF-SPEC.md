@@ -8,7 +8,7 @@ the relocator `opf migrate`, the
 synchronizer `opf sync`, the schema-upgrader `opf upgrade`, the absorber `opf absorb`, and the
 record author `opf record`,
 ship in later releases).
-Date: 2026-09-27 (UTC).
+Date: 2026-10-03 (UTC).
 
 OPFiles is a neutral, self-contained operational-files standard published under the Apache
 License 2.0 (except vendored third-party material, which remains under its own terms). AIQT and AIQT Guardrails are trademarks (registration pending); AIQT is a brand,
@@ -95,11 +95,13 @@ Two roots organize every path in this standard:
 ### 4.2 Layout overview
 
 Base spec 1.3.0 defines adoption and the separate imported series on homes 1. The 1.3.0
-requirements in sections 4.2, 6.1, 8, 9.2, 11, 12, and 14 are a target contract; they do not
-claim that the reference tooling has activated adoption, imported-series validation, or the
-import writer.
-Activation MUST include the tested upgrade in section 9.2 and deterministic doctor coverage
-before a writer accepts the new format. Homes 2 is a separate, later activation.
+requirements in sections 4.2, 4.5, 6.1, 8, 9.1, 9.2, 11, 12, 14, and 16.1 are a target contract;
+they do not claim that the reference tooling has activated adoption, imported-series validation,
+or the import writer.
+Activation MUST include deterministic doctor coverage before a writer accepts the new format.
+For an upgrade-capable implementation (section 16.1), activation MUST also include the tested
+upgrade in section 9.2; a fresh-only implementation activates without it and MUST instead include
+the section 16.1 admission check and its refusal evidence. Homes 2 is a separate, later activation.
 
 The homes-2 contract below is for `spec_version = "2.0.0"` and `[opf].homes = 2`.
 The current reference tooling reserves these names and implements their homes-2 boundary checks. It still
@@ -340,6 +342,11 @@ and fails closed rather than trusting a stale target (section 4.3). Profiles dec
 `[profiles.<name>]` are enumerated after the base is validated; a profile a tool does not support
 is ignored for enforcement and recorded as unevaluated, never treated as a base-validation failure
 (section 9).
+
+A fresh-only implementation (section 16.1) MUST recognize a candidate `manifest.toml` whose base
+table is the retired `[devprocess]` only to refuse that store as `unsupported-older-store`; the
+recognition is not a discovery match. A recognized legacy candidate, and any other zero-match or
+ambiguous outcome, MUST NOT be treated as an absent store that permits initialization or adoption.
 
 ### 4.6 Casing convention and rationale
 
@@ -782,7 +789,9 @@ Notes on the roster:
 - Modules ship default-off; each is enabled by one manifest edit. `legacy_fragment` (LF) is
   deprecated for new stores as of 1.3.0, not removed: its taxonomy row and legacy validation remain
   for existing stores and evidence. New imports MUST use the imported series and verbatim `unparsed`
-  text (section 8.3), not LF quarantine. LF MUST NOT be scaffolded.
+  text (section 8.3), not LF quarantine. LF MUST NOT be scaffolded. A fresh-only implementation
+  (section 16.1) provides no legacy LF validation and MUST refuse a store that declares the
+  `legacy_fragment` type or holds an LF record.
 - Imported history uses the same enabled types in a separate series, not additional record types.
   Reserved namespaces remain reserved. Imported states describe history and confer no current
   authority (section 8.6).
@@ -1009,7 +1018,10 @@ receipt as legacy importer-authored, a maintainer-authored clean `maintainer_dec
 `corrects` to that item and records that its completion stands MUST satisfy the item's receipt
 obligation in place of the withdrawn receipt; `opf record create` authors such a decision, doctor
 and the upgrade MUST accept it, and a maintainer who instead judges the work unfinished MUST
-record a new clean backlog item linking `derives_from` back, never reopen the terminal `done`. An importer-authored decision MUST NOT be treated as the current effective resolution of a clean
+record a new clean backlog item linking `derives_from` back, never reopen the terminal `done`.
+That acceptance binds an upgrade-capable implementation (section 16.1); a fresh-only
+implementation never reaches it, because the withdrawn legacy receipt is legacy state that it MUST
+refuse under section 16.1. An importer-authored decision MUST NOT be treated as the current effective resolution of a clean
 `pending_decision` chain; resolving such a chain now MUST take a new clean decision linking back.
 Importer-authored blocks MUST NOT grant a current stop, and an importer-authored record MUST NOT
 discharge a required supersession. The firewall covers every state-bearing type: an importer-authored record MUST NOT be treated as
@@ -1389,6 +1401,11 @@ the reference verification floor, and its `x-aiqt` extension namespace. The `[pr
 namespace and these contract rules are reserved and documented; the profile-authoring interface is
 not yet a committed public contract for third-party authors.
 
+Implementation conformance classes (section 16.1) are defined by the base, not by profiles. A
+profile MAY require an upgrade-capable implementation, because that adds a requirement. A profile,
+a store manifest field, or a command-line request MUST NOT declare, grant, or relax an
+implementation's class.
+
 ### 9.2 Store schema upgrades
 
 The homes-generation upgrade targets `spec_version = "2.0.0"` with required integer `[opf].homes = 2`.
@@ -1398,8 +1415,13 @@ The migration MUST refuse a store resolved outside the product root until a mult
 exists. Unproven legacy `.archive/` entries MUST remain in place with a standing finding until
 dispositioned.
 
-A base-schema version bump MUST ship a tested, in-place store-schema upgrade (`opf upgrade`). The
-upgrade MUST be idempotent. A purely schema-level bump MUST be additive, using atomic replacement of
+A base-schema version bump MUST ship a tested, in-place store-schema upgrade (`opf upgrade`) in at
+least one published upgrade-capable implementation (section 16.1), the reference tooling, so every
+store below the new version keeps an upgrade path. Every requirement of this section on an upgrade,
+its deltas, preconditions, report, refusals, and remedies binds an upgrade-capable implementation;
+a fresh-only implementation implements none of them and MUST instead refuse under section 16.1.
+The version ceiling at the end of this section binds every implementation class. The upgrade MUST
+be idempotent. A purely schema-level bump MUST be additive, using atomic replacement of
 existing files, create-only writes for new index files, and regeneration of declared views through
 exclusively created temporary files followed by atomic rename. These writes are sequential, with
 recovery scope held in memory, not a durable transaction journal. A homes-generation bump
@@ -1595,6 +1617,11 @@ section 9.2 upgrade preserves that legacy status without fabricating an approval
 A partial or complete status that neither an adoption receipt with completion results nor
 preserved legacy import evidence substantiates MUST fail closed, as does a missing, unreadable
 or contradictory input. Elapsed time and a staging directory MUST NOT be taken as proof of status.
+A fresh-only implementation (section 16.1) MUST NOT use the preserved-legacy-evidence route: it
+substantiates `partial` and `complete` only through an adoption receipt with completion results,
+and it refuses a `partial` or `complete` status in a store that holds no adoption receipt as legacy
+state under section 16.1. The section 16.1 admission check belongs to neither layer above: it MUST
+run at every posture, and `off` and `warn` MUST NOT disable or soften it.
 From the recorded approval until its retirement is recorded, a path the approved plan enumerates
 as a frozen retire, move or migrate source (section 14.2) is bounded adoption state: while its
 live bytes still match its plan digest, containment MUST report it as `migration_incomplete`
@@ -1820,6 +1847,9 @@ for the reference tooling `.aiqt/import-archive/<run-id>/`, holding the run's ac
 its evidence inventory in the retained legacy format; substantiation MUST re-read that inventory
 and digest-match every file it enumerates, and a missing, unreadable or digest-mismatched
 item MUST leave the status unsubstantiated, failing closed under section 11.
+A fresh-only implementation (section 16.1) provides none of these legacy readers: it MUST refuse
+such a store under section 16.1, MUST NOT alter its recorded status, and MUST NOT substantiate a
+status from legacy run evidence.
 Old import and ingest orchestration MUST be retired by staged decoupling only after clean-start
 adoption ships. Required evidence MUST be re-read and digest-matched in its durable home before
 staging reclamation. Reclamation MUST be journaled and idempotent; an unreadable tree MUST hold the
@@ -1996,6 +2026,67 @@ conformance claim is a completeness claim over a declared set, and it enumerates
 which profiles were and were not evaluated. Until validation tooling ships, a conformance claim is
 self-asserted and MUST say so.
 
+### 16.1 Implementation conformance classes
+
+An implementation is a tool or tool suite offered to create, write, or validate OPF stores. A
+project that keeps its own store by hand, with its own checks over that store alone (section 1), is
+not an implementation under this section. The base defines two implementation conformance classes,
+`upgrade-capable` and `fresh-only`. A class changes which requirements bind an implementation only
+where this specification says so; a declared scope, exclusion, profile, or posture MUST NOT
+otherwise waive a base requirement. Current-format requirements, the imported series, adoption, and
+the section 8.6 authority firewall included, bind both classes.
+
+An upgrade-capable implementation meets every section 9.2 requirement for each earlier base version
+and generation and grades legacy state under sections 8.1, 8.6, 11, and 14.1. The reference tooling
+is upgrade-capable. A fresh-only implementation supports exactly one base `spec_version`, one homes
+generation, and one worklog storage generation, initializes stores directly at them, and implements
+no section 9.2 upgrade and no legacy-state grading.
+
+An implementation MUST declare, in the documentation of each release and in every conformance report
+it emits, its release identity, its class, and its supported `spec_version`, homes generation, and
+worklog storage generation. An implementation that declares no class MUST be treated as
+upgrade-capable, and every upgrade requirement binds it. An unreadable, malformed, or contradictory
+declaration MUST yield cannot-evaluate and MUST NOT authorize any store operation.
+
+A fresh-only implementation MUST run an admission check in every command that resolves a store, at
+every posture, before any other grading and before any write, the claim of the single-writer lease
+(section 5.7) included. The check MUST compare parsed versions, never strings, and MUST refuse:
+
+- as `unsupported-older-store`, a store whose manifest declares a `spec_version` below the supported
+  one, or whose base table is the retired `[devprocess]` (section 4.5), naming the declared version
+  or table, the supported version, the store location, and the remedy: upgrade the store with an
+  upgrade-capable implementation, then retry;
+- as `unsupported-store-generation`, a store whose homes or worklog storage generation differs from
+  the declared one, naming each generation found and supported;
+- as `unsupported-legacy-state`, a store at the supported version that holds legacy state, naming
+  each item and its path.
+
+Legacy state is this closed list: a clean-series record, active or archived, whose `actor.kind` is
+`importer` (section 8.6); a declared `legacy_fragment` type or an LF record (section 8.1); a
+`partial` or `complete` `import_status` in a store that holds no adoption receipt (sections 11 and
+14.1); an evidence inventory in the legacy format `opf.ingest.evidence-inventory/v1` (section 4.2);
+a `.working/IMPORT-REPORT.md`; and a legacy `.working/imports/` directory (section 4.4). Extending
+the list is a specification change.
+
+A store declaring a `spec_version` above the supported one is refused under the section 9.2 ceiling.
+An input the check cannot read, parse, or enumerate MUST yield cannot-evaluate, never admission.
+Each refusal MUST be a fail-closed INVALID finding, never VALID. A fresh-only implementation MUST
+NOT grade the rest of a refused store, write, stage, or partially upgrade any file, rewrite a
+version declaration, fabricate provenance, or invoke another upgrader; the store and product trees,
+ignored files and the lease path included, MUST stay byte-identical. A fresh-only implementation
+that provides an upgrade command MUST refuse an older store with the same finding and MUST NOT
+report a successful upgrade; it MAY report a no-op on a supported store only after full doctor
+VALID. Admission MUST NOT substitute for any other applicable check.
+
+For a store its admission check refuses, a report MUST give the base result as `indeterminate`,
+naming the class, the supported version and generations, and the finding; it MUST NOT give
+`conformant_for_declared_scope`, nor `nonconformant` on that refusal alone. A claim of the
+fresh-only class MUST cite refusal evidence: for each finding above and each legacy-state item, a
+fixture that every store-resolving command refuses with the named finding, with both trees
+byte-identical. Missing evidence makes the claim `indeterminate`, never a pass. A fresh-only claim
+MUST NOT imply upgrade compatibility or continuity from the implementation's own earlier releases;
+moving to a later base version requires a new declaration and new evidence.
+
 ## 17. Residual coverage disclosures
 
 The gates in this standard are strong where they are strong and say so where they are not:
@@ -2044,8 +2135,15 @@ The gates in this standard are strong where they are strong and say so where the
   (fail-closed), never to a silent empty store. The token is stable within a base-schema major line;
   a store-breaking rename MUST ship only with the tested `opf upgrade` migration (section 9.2),
   which rewrites the base table and token in place so no existing adopter's manifest is stranded.
-  The retired 1.0.0 token `devprocess` is recognized by `opf upgrade` alone, purely to carry a
-  legacy store forward.
+  The retired 1.0.0 token `devprocess` is recognized by `opf upgrade`, purely to carry a legacy store
+  forward, and by a fresh-only implementation (section 16.1), purely to refuse that store by name.
+- A fresh-only implementation (section 16.1) proves tested admission and refusal behaviour, not
+  authenticated history: a version declaration and the absence of listed legacy state cannot prove
+  that a store was never upgraded or hand-rewritten, and the closed legacy-state list catches only
+  what it lists. Its refusal leaves a store unchanged but offers no preservation, repair, or
+  continuity; an adopter whose store holds legacy state, an upgraded store with pre-1.3.0 import
+  history included, needs an upgrade-capable implementation for that store. Until validation tooling
+  ships, a class claim is self-asserted (section 16).
 
 ## Appendix A: record envelope example
 

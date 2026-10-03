@@ -1,6 +1,6 @@
 # OPFiles at a glance
 
-Date: 2026-09-07 (UTC). The two-minute version of the OPFiles standard; the full specification
+Date: 2026-10-03 (UTC). The two-minute version of the OPFiles standard; the full specification
 lives in OPF-SPEC.md beside this file.
 
 ## What it is
@@ -80,7 +80,9 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
 
 Scaffolding, validation, rendering, and migration tooling ships in later releases of the pack;
 until then the files are simple enough to keep by hand, and a conformance claim is self-asserted
-and says so.
+and says so. An implementation declares a conformance class: an upgrade-capable one carries older
+stores forward, and a fresh-only one supports one current format and refuses older or legacy stores
+by name (OPF-SPEC section 16.1).
 
 ---
 
