@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "5b2b6b4a8531d838ebe1b828f155039ff6af05e752f445830c3a217ecf48a65e"
+tree-sha256 = "0931a2308c4f857ef4a6c6af7f91a8b7e69299c69cddc1813c8e13ceee45c9c9"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3291,8 +3291,8 @@ sha256 = "5296158afe173262dfffddba006e7e64034f68a7061634f8bd3bd939ac555300"
 
 [[sources]]
 path = "tools/check_overclaim.py"
-bytes = 276537
-sha256 = "05310e163156e1e22d1eaa5f1993c4a148a7bdb09eb4fd62e1adc3c6c8c2707c"
+bytes = 278447
+sha256 = "12f7a755746e42c9d562e00dd15ff3d5614dd94daf3b995ab1af28039900bed1"
 
 [[sources]]
 path = "tools/check_portability.py"

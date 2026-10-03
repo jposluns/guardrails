@@ -3405,6 +3405,29 @@ def _page_bound_source_self_test():
                 if label == "title" and not has(fs, "is outside the body grammar (the title text is printable"):
                     failures.append("COMPLETENESS: a {} in the title must be flagged with the grammar message"
                                     .format(tag))
+        # (n4b) the other grammar refusals of a rule source are flagged with their OWN channel label, file,
+        # line and grammar message, not only the title cases above: a refused body line, a duplicate split,
+        # a split with no blank line above it, and a body with no title line (no line to name). MUTATION:
+        # labelling every BodyGrammarError "title" fails the three body cases; formatting the no-title
+        # finding with a line ("line None") fails the last case.
+        body = "A rule for the enforcement-register self-test corpus."
+        grammar_cases = [
+            ("body-refused", body, "> Refused body", "body source [rule-aa.md: line 11]: ",
+             "rule-aa.md: line 11: '> Refused body' is outside the body grammar (a prose line starts"),
+            ("body-dup-split", body, body + "\n\n## Detail\n\nOne.\n\n## Detail\n\nTwo.",
+             "body source [rule-aa.md: line 17]: ",
+             "rule-aa.md: more than one '## Detail' line (lines 13 and 17)"),
+            ("body-no-blank", body, body + "\n## Detail\n\nMore.", "body source [rule-aa.md: line 12]: ",
+             "rule-aa.md: line 12: the '## Detail' split needs a blank line directly above it"),
+            ("no-title", "# Title of ruleaa\n\n" + body + "\n", "", "title source [rule-aa.md]: ",
+             "rule-aa.md: the body has no title line ('# ' and its text)"),
+        ]
+        for name, needle, replacement, where, message in grammar_cases:
+            fs = inject_and_scan(name, ".aiqt/core/rules/rule-aa.md", needle, replacement)
+            if not has(fs, where + "refused by the rule-body grammar, fail-closed ("):
+                failures.append("COMPLETENESS: the {} grammar refusal must be flagged as {!r}".format(name, where))
+            if not has(fs, message):
+                failures.append("COMPLETENESS: the {} grammar refusal must carry the grammar message".format(name))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return failures
