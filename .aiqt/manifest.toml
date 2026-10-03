@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f2c06ea54003431dd2767989af3be594bf6573289b9896f8519398567efb1c5f"
+tree-sha256 = "1bf94e699a8429927bd60f5e8d181b2e4cf997d97a44bc262e7cf66714a9bc14"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3241,8 +3241,8 @@ sha256 = "6be34b5b3fe9f61750b0f006ee4dd01afeb4a45b7dc630ae6183e71d789e3e9e"
 
 [[sources]]
 path = "tools/check_instruction_budget.py"
-bytes = 64831
-sha256 = "3998e0743a8b308e0c2a407aeef8d8de7d2cb314154bab59186a6056409d3e29"
+bytes = 64834
+sha256 = "9a6dbab0c250d35536d41f745a27bf4b0cffe48fd65000b6c8e5b523e065474c"
 
 [[sources]]
 path = "tools/check_internal_names.py"

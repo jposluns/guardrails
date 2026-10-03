@@ -873,7 +873,7 @@ def self_test(report_path=None):
             check(check_id, _measured(measure, kept)["rules"], utf16_units(body))
         fenceblock = _tree(tmp / "fenceblock", outside="```\n", block="\n\n<!--" + "X" * 100 + "-->\n\n")
         check("count/block-comment-after-open-fence-kept", _measured(measure, fenceblock)["block"], 111)
-        bom = _tree(tmp / "bom", rules={"a.md": "﻿---\nkind: x\n---\nA\n"})
+        bom = _tree(tmp / "bom", rules={"a.md": "\ufeff---\nkind: x\n---\nA\n"})
         check("count/bom-before-frontmatter-removed", _measured(measure, bom)["rules"], 2)
         bmp = _tree(tmp / "bmp", rules={"a.md": "é"})
         check("count/bmp-character-one-unit", _measured(measure, bmp)["rules"], 1)
