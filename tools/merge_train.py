@@ -29,12 +29,17 @@ created fresh for the run (hooks disabled, no inherited local configuration, --n
 --no-recurse-submodules and --refmap= passed explicitly), never in the author's repository, so it
 cannot follow a symbolic remote-tracking ref, recurse on demand into a populated submodule with
 the submodule's own refspecs, run a repository hook, or write any ref, object, reflog or
-FETCH_HEAD the author can see. Every git call that READS the author's repository goes through one
-author-side funnel (_git_author): GIT_NO_LAZY_FETCH=1 is set after the GIT_ scrub, so a read that
-names a missing PROMISED object in a partial clone fails closed instead of launching a lazy fetch
-(which would execute a configured remote.<remote>.uploadpack and write pack files into the
-author's object store), and protocol.allow=never, core.fsmonitor=false and core.hooksPath are
-pinned off in option position. The tool's whole author-side write footprint, stated exactly: the
+FETCH_HEAD the author can see. Every git call the tool ITSELF runs against the author's repository
+goes through one author-side funnel (_git_author), with exactly two exceptions: the disclosed
+--shared clone that creates each private scratch checkout (see _scratch_checkout), and the
+alternate-ref `for-each-ref` child git itself spawns in the author's repository during the private
+fetches (see _ALTERNATE_FETCH_CONFIG; it inherits GIT_NO_LAZY_FETCH, reads the author's local
+configuration, and runs neither an fsmonitor command nor any hook). The funnel layers two
+defences: protocol.allow=never fails any transport closed, a lazy fetch included, and
+GIT_NO_LAZY_FETCH=1 (set after the GIT_ scrub) independently stops a read that names a missing
+PROMISED object in a partial clone from launching a lazy fetch (which would execute a configured
+remote.<remote>.uploadpack and write pack files into the author's object store);
+core.fsmonitor=false and core.hooksPath are pinned off in option position. The tool's whole author-side write footprint, stated exactly: the
 lock file and the retry marker, nothing else; no ref, no object content, no reflog, no FETCH_HEAD
 and no hook or configured-command execution in the author's repository, on a dry run or an apply
 run. One disclosed residual: an author-side object that already exists may have its MTIME
@@ -48,11 +53,13 @@ merge, conflict resolution, regeneration, check and commit happens in a PRIVATE 
 the run creates for that PR (a --shared clone of the repository, detached at the PR's remote head)
 and removes in a finally entered as soon as the directory exists, so a failure in the clone or in
 the scratch setup cannot leak it; a SIGTERM, SIGHUP or SIGQUIT during a live run is converted into that
-same cleanup (the in-flight git or generator child is terminated with its WHOLE process group,
-SIGTERM first so git removes its own lock files, then SIGKILL after a short grace, and reaped, and
-the group is then CONFIRMED empty: a grandchild that ignored the SIGTERM is SIGKILLed even when
-the direct child exited first; every
-cleanup finally runs with SIGTERM, SIGHUP and SIGQUIT blocked, so a second signal cannot abort a removal
+same cleanup, and a SIGINT unwinds through it as KeyboardInterrupt (the in-flight git or generator
+child is terminated with its WHOLE process group, SIGTERM first so git removes its own lock files,
+then SIGKILL after a short grace, and reaped, and the group is then probed: a grandchild that
+ignored the SIGTERM is SIGKILLed even when the direct child exited first, and a group that still
+has members when the bounded wait expires (unreaped zombies held for a subreaper, a member this
+user cannot signal) is REPORTED on stderr, never silently claimed gone; every
+cleanup finally runs with every signal in UNWIND_SIGNALS blocked, so a second signal cannot abort a removal
 half-way and is re-delivered when that cleanup ends; the scratch and the private base repository
 are removed, the lock is released) and the process then exits with the
 conventional killed-by-signal status (an inherited SIG_IGN disposition, as under nohup, is left
@@ -216,17 +223,24 @@ def _clean_env(extra=None):
 # How long a terminated child's process group is given to exit on SIGTERM before SIGKILL.
 TERM_GRACE = 5.0
 
+# Every signal the run unwinds on: SIGINT (Python's own KeyboardInterrupt) plus SIGTERM, SIGHUP
+# and SIGQUIT (converted into _Signalled by run_train). ONE constant, used by the launch mask in
+# _run_child, by _cleanup's mask, by the child-side mask restore and by the self-test's
+# launch-window and second-signal cases, so the set cannot drift apart per call site (QA round 6,
+# codex major 1: SIGINT was missing from the launch mask, so a KeyboardInterrupt at the launch
+# boundary could reach the launch-failure handler with no handle under cleanup and leak the
+# just-created session).
+UNWIND_SIGNALS = frozenset((signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT))
+
 
 def _cleanup(func):
-    """Run ONE cleanup step with SIGTERM, SIGHUP and SIGQUIT blocked. _Signalled is a BaseException,
-    so a
-    second signal arriving while a finally runs shutil.rmtree would otherwise abort the removal
-    (ignore_errors swallows OSError only, never an exception raised by the signal handler) and
-    leak the directory being removed. The previous mask is restored afterwards, so a signal taken
-    while blocked is delivered then: the run still dies by signal, only the cleanup itself is
-    atomic against it."""
-    mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGHUP,
-                                                     signal.SIGQUIT})
+    """Run ONE cleanup step with every signal in UNWIND_SIGNALS blocked. _Signalled and
+    KeyboardInterrupt are BaseExceptions, so a second signal arriving while a finally runs
+    shutil.rmtree would otherwise abort the removal (ignore_errors swallows OSError only, never
+    an exception raised by a signal handler) and leak the directory being removed. The previous
+    mask is restored afterwards, so a signal taken while blocked is delivered then: the run still
+    dies by signal, only the cleanup itself is atomic against it."""
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, UNWIND_SIGNALS)
     try:
         func()
     finally:
@@ -245,13 +259,17 @@ def _group_alive(pgid):
 def _end_child(proc, group):
     """Terminate a child and reap it: SIGTERM first (git removes its own *.lock files on SIGTERM,
     never on SIGKILL), a bounded grace, then SIGKILL for whatever ignored the SIGTERM. With group
-    True the child's WHOLE process group is signalled and then CONFIRMED gone (the child was
+    True the child's WHOLE process group is signalled and then probed (the child was
     started with start_new_session=True, so its pid names the group and every grandchild that
     stayed in it is included; a grandchild that itself calls setsid starts a new session, ESCAPES
     the group and cannot be ended here): the direct child exiting says nothing about a grandchild
     that ignored the SIGTERM, so after the direct child is reaped the group is probed, given the
     bounded grace to finish its own SIGTERM handling, SIGKILLed if anything remains, and probed
-    again within the same bound. That is the dying-run path and the regenerate-or-check TIMEOUT
+    again within the same bound. What that final probe CONFIRMS is only this: either the group
+    was gone within the bound, or a stderr line reports the process group that remains (its
+    members can be unreaped zombies, e.g. SIGKILLed descendants held for a subreaper that has not
+    reaped them yet, or setsid escapes and unsignallable members); the group being GONE on return
+    is NOT guaranteed. That is the dying-run path and the regenerate-or-check TIMEOUT
     path, where nothing the command spawned may keep running in a scratch directory the run is
     about to remove. With group False only the direct child is signalled: that is the push-TIMEOUT
     path ONLY (see _run_child), where the run itself continues and the in-flight receive-pack of a
@@ -282,6 +300,10 @@ def _end_child(proc, group):
             deadline = time.monotonic() + TERM_GRACE
             while _group_alive(proc.pid) and time.monotonic() < deadline:
                 time.sleep(0.05)
+        if _group_alive(proc.pid):
+            print("%s merge-train: process group %d still has members after SIGKILL; they may be "
+                  "unreaped zombies (held for a subreaper) or setsid escapes; leaving them behind"
+                  % (_now(), proc.pid), file=sys.stderr)
     for stream in (proc.stdout, proc.stderr):
         if stream is not None:
             stream.close()
@@ -291,24 +313,25 @@ def _run_child(argv, cwd=None, env=None, timeout=None, push=False):
     """The single child-process funnel under _git and _run_external: every child starts in its OWN
     session (start_new_session=True), so a timeout and ANY unwind while the child runs (the
     _Signalled conversion of SIGTERM, SIGHUP or SIGQUIT included) terminate the child through
-    _end_child, with signals blocked around that cleanup. SIGTERM, SIGHUP and SIGQUIT are BLOCKED
+    _end_child, with signals blocked around that cleanup. Every signal in UNWIND_SIGNALS (SIGINT
+    included: a KeyboardInterrupt here unwinds exactly like _Signalled) is BLOCKED
     across the launch itself, from just before the fork until the handle is covered by the cleanup
     try below, so a signal arriving in that window is held pending and then unwinds through the
     normal cleanup instead of leaking a just-created session; the mask is restored as the FIRST
     statement inside the protected region (never held across communicate, which would delay the
-    run's response to a signal by the child's whole runtime), and the child starts with the
-    caller's original mask, restored by a minimal preexec_fn that only resets the mask, so git and
-    the generators see the signals unblocked. An unwind ends the whole process group, and so does
+    run's response to a signal by the child's whole runtime), and the child starts with every
+    UNWIND_SIGNALS member unblocked (a minimal preexec_fn that only unblocks that set between
+    fork and exec), so git and the generators see the signals unblocked. An unwind ends the whole
+    process group, and so does
     a timeout, EXCEPT a timed-out push (push=True), which ends the direct child only: the
     in-flight receive-pack is exactly the indeterminate outcome the push-unknown marker reconciles
     on the retry (see _end_child). Residual: a group-wide SIGKILL from a supervisor cannot be
     handled and leaves children running in their own sessions. Returns a CompletedProcess; raises
     subprocess.TimeoutExpired on a timeout and OSError on a launch failure."""
-    mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGHUP,
-                                                     signal.SIGQUIT})
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, UNWIND_SIGNALS)
 
     def _child_mask():
-        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, UNWIND_SIGNALS)
 
     try:
         proc = subprocess.Popen(list(argv), cwd=cwd, env=env, stdout=subprocess.PIPE,
@@ -405,24 +428,34 @@ def _git_text(cwd, *args, **kw):
 _AUTHOR_GIT_CONFIG = ("-c", "protocol.allow=never", "-c", "core.fsmonitor=false",
                       "-c", "core.hooksPath=" + os.devnull)
 # What a FETCH from private storage whose object store includes the author's as an alternate can
-# carry (protocol.allow=never cannot: the fetch itself is a transport operation). Both pieces are
-# inherited by every git subprocess the fetch spawns, including the `git --git-dir=<author .git>
-# for-each-ref` alternate-ref read git runs IN the author's repository to seed negotiation: that
-# read can then neither lazy-fetch a missing promised object (GIT_NO_LAZY_FETCH is in its
-# environment) nor run an fsmonitor command or hook from the author's local configuration (the -c
-# pairs propagate to it through the environment git hands its own subprocesses).
+# carry (protocol.allow=never cannot: the fetch itself is a transport operation). Only the
+# ENVIRONMENT piece reaches the `git --git-dir=<author .git> for-each-ref` alternate-ref read git
+# runs IN the author's repository to seed negotiation: git scrubs GIT_CONFIG_PARAMETERS from the
+# environment of a child it points at another repository (local_repo_env), so the -c pairs below
+# do NOT reach that child, and it reads the author's LOCAL configuration; GIT_NO_LAZY_FETCH is
+# not scrubbed and does reach it, so that read cannot lazy-fetch a missing promised object.
+# Accepted residual: for-each-ref runs neither an fsmonitor command nor any hook, so the
+# author-local settings the -c pairs would pin off name nothing that child executes; the pairs
+# still harden the fetch process itself, which receives them normally in option position.
 _ALTERNATE_FETCH_ENV = dict(GIT_NO_LAZY_FETCH="1")
 _ALTERNATE_FETCH_CONFIG = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.devnull)
 
 
 def _git_author(cwd, *args, extra_env=None, timeout=GIT_TIMEOUT, ok=(0,)):
-    """The single author-side git funnel: every git call the tool runs against the author's
-    repository (rev-parse, worktree list, remote get-url, check-ref-format, symbolic-ref) goes
-    through here. On top of _git's pins it sets GIT_NO_LAZY_FETCH=1 AFTER _clean_env's GIT_ scrub,
-    so a read that names a missing PROMISED object in a partial clone fails closed instead of
-    launching a lazy fetch (which would execute a configured remote.<remote>.uploadpack and write
-    pack files into the author's object store), and pins protocol.allow=never, core.fsmonitor and
-    core.hooksPath off in option position. Author-side footprint of a call made here, stated
+    """The single author-side git funnel: every git call the tool itself runs against the
+    author's repository (rev-parse, worktree list, remote get-url, check-ref-format,
+    symbolic-ref) goes through here; the two calls that touch the author's repository WITHOUT it
+    are the disclosed --shared clone (_scratch_checkout) and the alternate-ref child git spawns
+    there during the private fetches (see _ALTERNATE_FETCH_CONFIG). On top of _git's pins it
+    layers two independent lazy-fetch defences: protocol.allow=never (option position) fails ANY
+    transport closed, including the lazy fetch that a read naming a missing PROMISED object in a
+    partial clone would launch (which would execute a configured remote.<remote>.uploadpack and
+    write pack files into the author's object store), and GIT_NO_LAZY_FETCH=1, set AFTER
+    _clean_env's GIT_ scrub, stops the same lazy fetch before any transport is attempted. Either
+    layer alone fails such a read closed, so no behavioural self-test can distinguish them; each
+    is pinned instead by the argv and environment the child process receives
+    (fetch/author-env-no-lazy-fetch). core.fsmonitor and core.hooksPath are pinned off in option
+    position. Author-side footprint of a call made here, stated
     exactly: no ref, no object content, no reflog, no FETCH_HEAD, no hook, no configured command
     and no object mtime change (the one disclosed mtime refresh comes from the scratch's object
     writes through the shared store, never from these reads; see _scratch_checkout)."""
@@ -750,6 +783,23 @@ def guard_commit_tree(wt, new, validated_tree):
                      "the committed tree is not the validated tree %s" % validated_tree)
 
 
+def guard_scratch_complete(scratch):
+    """Refuse scratch-incomplete when the detached checkout did not materialize every tracked
+    file: `git checkout` can EXIT 0 and still fail to read a blob the shared object store cannot
+    supply (QA round 6, observed on git 2.53.0: in a --shared clone of a blob:none partial clone
+    whose promised blob is absent, checkout prints "error: unable to read sha1 file", exits 0,
+    and leaves the path missing from the worktree), and regenerating and validating over that
+    incomplete tree would push content the PR never contained. The probe is plain `git status`
+    against the just-detached HEAD: any worktree difference immediately after a fresh checkout
+    means the checkout was incomplete."""
+    out = _git(scratch, "status", "--porcelain=v2", "-z", "--untracked-files=no")[1]
+    rows = [r.decode("utf-8", "replace") for r in out.split(b"\0") if r]
+    if rows:
+        raise Refuse("scratch-incomplete",
+                     "the scratch checkout did not materialize cleanly (a missing or unreadable "
+                     "object, e.g. a promised blob of a partial clone): %s" % "; ".join(rows[:5]))
+
+
 # Every guard is reached through this table, so --red-on-revert can replace each one in turn.
 GUARDS = dict([
     ("config-fail-closed", guard_config_fail_closed),
@@ -762,6 +812,7 @@ GUARDS = dict([
     ("fixpoint", guard_fixpoint),
     ("reconcile", guard_reconcile),
     ("scratch-setup", guard_scratch_setup),
+    ("scratch-complete", guard_scratch_complete),
     ("generated-confined", guard_generated_confined),
     ("pushed-bytes", guard_pushed_bytes),
     ("commit-parents", guard_commit_parents),
@@ -1062,7 +1113,8 @@ def _process_pr(ctx, apply):
         scratch = _scratch_checkout(ctx, scratch_root)
         # The scratch's alternates include the author's store, so this fetch carries the same
         # hardening as the base fetch: the alternate-ref read it spawns in the author's
-        # repository inherits GIT_NO_LAZY_FETCH and the pinned-off fsmonitor and hooks.
+        # repository inherits GIT_NO_LAZY_FETCH (the -c pairs are scrubbed from that child's
+        # environment and do not reach it; see _ALTERNATE_FETCH_CONFIG).
         _git(scratch, *_ALTERNATE_FETCH_CONFIG, "fetch", "--no-tags", "--no-recurse-submodules",
              "--", ctx["remote_url"], "refs/heads/" + ctx["branch"],
              extra_env=dict(_ALTERNATE_FETCH_ENV), timeout=ctx["net_timeout"])
@@ -1074,6 +1126,7 @@ def _process_pr(ctx, apply):
             return dict(result="would-merge", old_head=old, new_head=None,
                         reason="dry run: would merge %s (rerun with --apply)" % ctx["base_sha"])
         _git(scratch, "checkout", "--quiet", "--detach", old, timeout=ctx["cmd_timeout"])
+        _guard("scratch-complete")(scratch)
         return _merge_commit_push(ctx, scratch, old, ctx["base_sha"])
     finally:
         _cleanup(lambda: shutil.rmtree(scratch_root, ignore_errors=True))
@@ -1148,8 +1201,10 @@ def _base_fetch(root, run_dir, remote, base):
     read here goes through _git_author (GIT_NO_LAZY_FETCH, protocol.allow=never, fsmonitor and
     hooks off), so a missing promised object fails the read closed instead of lazy-fetching into
     the author's store; the private fetch itself carries _ALTERNATE_FETCH_ENV and
-    _ALTERNATE_FETCH_CONFIG, which the alternate-ref read git spawns IN the author's repository
-    inherits. Author-side footprint of this whole resolution: reads only; no ref, no object
+    _ALTERNATE_FETCH_CONFIG; of those, only the environment variable reaches the alternate-ref
+    read git spawns IN the author's repository (the -c pairs are scrubbed from that child's
+    environment; see _ALTERNATE_FETCH_CONFIG). Author-side footprint of this whole resolution:
+    reads only; no ref, no object
     content, no reflog, no FETCH_HEAD, no hook and no configured command there. Returns
     (base_repo, remote_url, base_sha)."""
     remote_url = _git_author_text(root, "remote", "get-url", remote)
@@ -1194,12 +1249,13 @@ def run_train(root, apply=False, only=None):
 
         previous = dict()
         try:
-            # SIGTERM, SIGHUP and SIGQUIT become _Signalled, so the per-PR finally removes the
-            # private scratch checkout and the interrupted subprocess call kills and reaps its
-            # child's whole process group; an inherited SIG_IGN disposition (nohup) is respected
-            # and left in place. A group-wide SIGKILL from a supervisor cannot be handled and
-            # leaves children running in their own sessions (see _run_child).
-            for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
+            # Every UNWIND_SIGNALS member except SIGINT becomes _Signalled (SIGINT already
+            # unwinds as KeyboardInterrupt under Python's default handler), so the per-PR finally
+            # removes the private scratch checkout and the interrupted subprocess call kills and
+            # reaps its child's whole process group; an inherited SIG_IGN disposition (nohup) is
+            # respected and left in place. A group-wide SIGKILL from a supervisor cannot be
+            # handled and leaves children running in their own sessions (see _run_child).
+            for signum in sorted(UNWIND_SIGNALS - {signal.SIGINT}):
                 if signal.getsignal(signum) != signal.SIG_IGN:
                     previous[signum] = signal.signal(signum, _to_exception)
             return _run_locked(Path(top), apply, only or set(), reports)
@@ -2915,6 +2971,45 @@ def case_basefetch(tmp):
            _gitdir_snapshot_diff(before_lazy, _gitdir_snapshot(fx3.main))),
           (0, "would-merge", False, []))
     check("fetch/private-invariants", _invariants(fx, fx2, fx3), [])
+    _lazy_fetch_env(tmp)
+
+
+def _lazy_fetch_env(tmp):
+    # QA round 6 (claude minor 3): protocol.allow=never ALONE already fails the author-side read
+    # of a missing promised object closed, so dropping GIT_NO_LAZY_FETCH from _git_author or
+    # emptying _ALTERNATE_FETCH_ENV changes no tool-level behaviour and cannot be made red by any
+    # behavioural case (see the _git_author docstring). Each layer is pinned here by what the
+    # child process actually RECEIVES instead: every author-side call (recognized by the
+    # protocol.allow=never pin in its argv) and both alternate-carrying fetches (the base fetch
+    # and the scratch PR fetch: "fetch" plus the -c pins, without protocol.allow=never) must
+    # carry GIT_NO_LAZY_FETCH=1 in the environment handed to the child.
+    fx = _fixture(tmp, "lazyenv")
+    _stale_pr(fx)
+    global _run_child
+    real_child = _run_child
+    seen = []
+
+    def recording_run(argv, cwd=None, env=None, **kwargs):
+        seen.append((list(argv), dict(env or dict())))
+        return real_child(argv, cwd=cwd, env=env, **kwargs)
+
+    _run_child = recording_run
+    try:
+        rc, reports, _fatal = fx.run()
+    finally:
+        _run_child = real_child
+    author = [(a, e) for a, e in seen if "protocol.allow=never" in a]
+    alternate = [(a, e) for a, e in seen
+                 if "fetch" in a and "core.fsmonitor=false" in a
+                 and "protocol.allow=never" not in a]
+    check("fetch/author-env-no-lazy-fetch",
+          (rc, _result(reports, 1), len(author) > 0,
+           [a for a, e in author if e.get("GIT_NO_LAZY_FETCH") != "1"]),
+          (0, "would-merge", True, []))
+    check("fetch/alternate-env-no-lazy-fetch",
+          (len(alternate), [a for a, e in alternate if e.get("GIT_NO_LAZY_FETCH") != "1"]),
+          (2, []))
+    check("fetch/lazy-env-invariants", _invariants(fx), [])
 
 
 def case_leak(tmp):
@@ -2967,6 +3062,35 @@ def case_leak(tmp):
     check("scratch/leak-invariants", _invariants(fx, fx2), [])
 
 
+def case_partial(tmp):
+    # QA round 6 (claude, seen but not then established; CONFIRMED here on git 2.53.0): the
+    # author's repository is a partial clone and a blob of the PR head is a missing PROMISED
+    # object. The --shared scratch clone shares that store, and `git checkout --detach` of the
+    # PR head EXITS 0 while printing "error: unable to read sha1 file", leaving the path absent
+    # from the scratch worktree: the corruption is silently swallowed at the point it happens.
+    # With the scratch-complete guard reverted, THIS fixture happens to die later and UNNAMED
+    # (the merge refuses to start over the missing worktree file; the run reports git-failed
+    # "the merge did not start" and never mentions the unreadable blob); nothing establishes
+    # that every later stage would catch every such tree, so the guard refuses by NAME at the
+    # corruption point: scratch-incomplete, nothing pushed, nothing changed anywhere.
+    fx = _fixture(tmp, "partial")
+    wt = _stale_pr(fx)
+    old = fx.remote_ref("feat/x")
+    blob = _git_text(fx.main, "rev-parse", old + ":src/b.txt")
+    for key, value in (("remote.origin.promisor", "true"),
+                       ("remote.origin.partialclonefilter", "blob:none")):
+        _git(fx.main, "config", key, value)
+    objects = _git_text(fx.main, "rev-parse", "--path-format=absolute", "--git-path", "objects")
+    os.remove(os.path.join(objects, blob[:2], blob[2:]))
+    made = len(SCRATCHES)
+    rc, reports, _fatal = fx.run(apply=True)
+    check("scratch/partial-clone-missing-blob-refused",
+          (rc, _result(reports, 1), fx.remote_ref("feat/x"), fx.pushes(), _has_marker(wt),
+           [p for p in SCRATCHES[made:] if os.path.exists(p)]),
+          (1, "scratch-incomplete", old, [], False, []))
+    check("scratch/partial-clone-invariants", _invariants(fx), [])
+
+
 def case_signal(tmp):
     # A real SIGTERM or SIGHUP mid-regenerate, against a REAL tool subprocess with a case-private
     # TMPDIR: the handler converts the signal into the normal cleanup (the regenerate child is
@@ -2988,15 +3112,20 @@ def case_signal(tmp):
         # The sleeping regenerate command spawns its OWN child (a grandchild of the tool), so the
         # case also pins the process-GROUP termination: round-4 M1 showed a plain kill of the
         # direct child leaves such a grandchild running in the scratch TMPDIR. The grandchild
-        # IGNORES SIGTERM (round-5: codex major 2, claude major 1), so the case also pins the
-        # post-exit group probe and SIGKILL: the direct child dies on the group SIGTERM, and the
-        # stubborn grandchild must still be gone when the tool exits.
+        # IGNORES SIGTERM (round-5: codex major 2, claude major 1), and the GRANDCHILD itself
+        # writes the readiness file, AFTER installing SIG_IGN (round-6: claude minor 1 - when the
+        # direct child wrote it, the signal could land before the grandchild was stubborn, so the
+        # post-exit group probe was exercised only on some runs). The grandchild takes the pid
+        # file and the direct child's pid as argv and avoids quote characters (os.open plus chr)
+        # because its code sits two -c levels deep inside a TOML basic string.
         sleeper = ('regenerate = [["%s", "-I", "-B", "tools/gen.py"], ["%s", "-c", "import os,'
-                   " subprocess, sys, time; gc = subprocess.Popen([sys.executable, '-c',"
-                   " 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN);"
-                   " time.sleep(300)']);"
-                   " open(os.environ['SIG_PID_FILE'],'w').write(str(os.getpid()) + ' ' +"
-                   ' str(gc.pid)); time.sleep(120)"]]') % (sys.executable, sys.executable)
+                   " subprocess, sys, time; subprocess.Popen([sys.executable, '-c',"
+                   " 'import os, signal, sys, time;"
+                   " signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+                   " fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT);"
+                   " os.write(fd, (sys.argv[2] + chr(32) + str(os.getpid())).encode());"
+                   " os.close(fd); time.sleep(300)', os.environ['SIG_PID_FILE'],"
+                   ' str(os.getpid())]); time.sleep(120)"]]') % (sys.executable, sys.executable)
         fx.write(fx.main, CONFIG_PATH, text.replace(plain, sleeper))
         _git(fx.main, "commit", "-q", "-am", "sleeping regenerate", extra_env=FIXTURE_IDENT)
         _git(fx.main, "push", "-q", "origin", "main")
@@ -3071,6 +3200,8 @@ def case_signal(tmp):
     _sigterm_during_push(tmp)
     _launch_window(tmp)
     _second_signal_during_cleanup(tmp)
+    _child_mask_restored()
+    _group_remnant_reported(tmp)
 
 
 def _sigterm_during_push(tmp):
@@ -3123,12 +3254,15 @@ def _sigterm_during_push(tmp):
 
 
 def _launch_window(tmp):
-    # QA round 5 (codex major 3, claude minor 5): a SIGTERM delivered between the fork and the
-    # registration of the child handle must not leak the just-created session. The launch runs
-    # with SIGTERM, SIGHUP and SIGQUIT blocked; the pending signal is delivered at the restore
-    # INSIDE the protected region and ends the child like any other unwind. Deterministic and
-    # in-process: Popen is patched to send this process a real SIGTERM right after the sleeping
-    # regenerate child is created, the exact window codex reproduced.
+    # QA round 5 (codex major 3, claude minor 5) and round 6 (codex major 1): a signal delivered
+    # between the fork and the registration of the child handle must not leak the just-created
+    # session. The launch runs with UNWIND_SIGNALS blocked; the pending signal is delivered at
+    # the restore INSIDE the protected region and ends the child like any other unwind. SIGTERM
+    # exercises the _Signalled conversion path and SIGINT the KeyboardInterrupt path (round 6:
+    # SIGINT was missing from the launch mask, reached the launch-failure handler with no handle
+    # under cleanup, and leaked the new session). Deterministic and in-process: Popen is patched
+    # to send this process the real signal right after the sleeping regenerate child is created,
+    # the exact window codex reproduced.
     fx = _fixture(tmp, "launchwin")
     _stale_pr(fx)
     text = _read_text(fx.main / CONFIG_PATH)
@@ -3139,84 +3273,175 @@ def _launch_window(tmp):
     fx.write(fx.main, CONFIG_PATH, text.replace(plain, sleeper))
     _git(fx.main, "commit", "-q", "-am", "sleeping regenerate", extra_env=FIXTURE_IDENT)
     _git(fx.main, "push", "-q", "origin", "main")
-    made = len(SCRATCHES)
-    real_popen = subprocess.Popen
-    state = dict(proc=None)
+    for signum, expected, check_id in (
+            (signal.SIGTERM, signal.SIGTERM, "signal/launch-window-covered"),
+            (signal.SIGINT, "keyboard-interrupt", "signal/launch-window-covered-sigint")):
+        made = len(SCRATCHES)
+        real_popen = subprocess.Popen
+        state = dict(proc=None)
 
-    def kicking_popen(argv, **kwargs):
-        proc = real_popen(argv, **kwargs)
-        if state["proc"] is None and marker in list(argv):
-            state["proc"] = proc
-            os.kill(os.getpid(), signal.SIGTERM)
-        return proc
+        def kicking_popen(argv, _signum=signum, _state=state, **kwargs):
+            proc = real_popen(argv, **kwargs)
+            if _state["proc"] is None and marker in list(argv):
+                _state["proc"] = proc
+                os.kill(os.getpid(), _signum)
+            return proc
 
-    subprocess.Popen = kicking_popen
-    outcome = None
-    try:
-        fx.run(apply=True)
-    except _Signalled as sig:
-        outcome = sig.signum
-    finally:
-        subprocess.Popen = real_popen
-    created = SCRATCHES[made:]
-    alive = state["proc"] is not None and state["proc"].poll() is None
-    if alive:
+        subprocess.Popen = kicking_popen
+        outcome = None
         try:
-            os.killpg(state["proc"].pid, signal.SIGKILL)
-        except OSError:
-            pass
-        state["proc"].wait()
-    check("signal/launch-window-covered",
-          (state["proc"] is not None, outcome, alive,
-           [p for p in created if os.path.exists(p)],
-           sorted(s.name for s in signal.pthread_sigmask(signal.SIG_BLOCK, set())
-                  if s in (signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT))),
-          (True, signal.SIGTERM, False, [], []))
+            fx.run(apply=True)
+        except _Signalled as sig:
+            outcome = sig.signum
+        except KeyboardInterrupt:
+            outcome = "keyboard-interrupt"
+        finally:
+            subprocess.Popen = real_popen
+        created = SCRATCHES[made:]
+        alive = state["proc"] is not None and state["proc"].poll() is None
+        if alive:
+            try:
+                os.killpg(state["proc"].pid, signal.SIGKILL)
+            except OSError:
+                pass
+            state["proc"].wait()
+        check(check_id,
+              (state["proc"] is not None, outcome, alive,
+               [p for p in created if os.path.exists(p)],
+               sorted(s.name for s in signal.pthread_sigmask(signal.SIG_BLOCK, set())
+                      if s in UNWIND_SIGNALS)),
+              (True, expected, False, [], []))
 
 
 def _second_signal_during_cleanup(tmp):
-    # QA round 4 (claude m1): a second SIGTERM arriving WHILE a cleanup finally runs its rmtree
-    # must not abort the removal and leak the directory: every cleanup runs with SIGTERM and
-    # SIGHUP blocked, and the blocked signal is delivered when the cleanup ends. In-process and
-    # deterministic: the first signal is simulated by a guard raising _Signalled at fixpoint, and
-    # a REAL second SIGTERM is sent to this process at the moment the per-PR cleanup's rmtree
-    # starts (the patched shutil.rmtree fires exactly once).
+    # QA round 4 (claude m1), extended in round 6 (claude minor 5) to EVERY signal in
+    # UNWIND_SIGNALS: a second signal arriving WHILE a cleanup finally runs its rmtree must not
+    # abort the removal and leak the directory: every cleanup runs with UNWIND_SIGNALS blocked,
+    # and the blocked signal is delivered when the cleanup ends (as _Signalled for SIGTERM,
+    # SIGHUP and SIGQUIT, as KeyboardInterrupt for SIGINT), so removing ANY one signal from
+    # _cleanup's mask goes red on that signal's leg. In-process and deterministic: the first
+    # signal is simulated by a guard raising _Signalled at fixpoint, and a REAL second signal is
+    # sent to this process at the moment the per-PR cleanup's rmtree starts (the patched
+    # shutil.rmtree fires exactly once per leg). The ids are for-loop literals (the execution
+    # gate resolves check ids statically); the invariants check below pins the covered set to
+    # UNWIND_SIGNALS, so a signal added to the constant without a leg here goes red.
     fx = _fixture(tmp, "sigmask")
     _stale_pr(fx)
-    made = len(SCRATCHES)
-    real_rmtree = shutil.rmtree
-    fired = dict(sent=False)
+    covered = []
+    for signum, check_id in (
+            (signal.SIGHUP, "signal/second-sighup-during-cleanup-no-leak"),
+            (signal.SIGINT, "signal/second-sigint-during-cleanup-no-leak"),
+            (signal.SIGQUIT, "signal/second-sigquit-during-cleanup-no-leak"),
+            (signal.SIGTERM, "signal/second-sigterm-during-cleanup-no-leak")):
+        covered.append(signum)
+        made = len(SCRATCHES)
+        real_rmtree = shutil.rmtree
+        fired = dict(sent=False)
 
-    def kicking_rmtree(path, **kwargs):
-        if not fired["sent"]:
-            fired["sent"] = True
-            os.kill(os.getpid(), signal.SIGTERM)
-        return real_rmtree(path, **kwargs)
+        def kicking_rmtree(path, _signum=signum, _fired=fired, **kwargs):
+            if not _fired["sent"]:
+                _fired["sent"] = True
+                os.kill(os.getpid(), _signum)
+            return real_rmtree(path, **kwargs)
 
-    def raise_signalled(*_args, **_kwargs):
-        raise _Signalled(signal.SIGTERM)
+        def raise_signalled(*_args, **_kwargs):
+            raise _Signalled(signal.SIGTERM)
 
-    saved = GUARDS["fixpoint"]
-    GUARDS["fixpoint"] = raise_signalled
-    shutil.rmtree = kicking_rmtree
-    outcome = None
+        saved = GUARDS["fixpoint"]
+        GUARDS["fixpoint"] = raise_signalled
+        shutil.rmtree = kicking_rmtree
+        outcome = None
+        try:
+            fx.run(apply=True)
+        except _Signalled as sig:
+            outcome = sig.signum
+        except KeyboardInterrupt:
+            outcome = "keyboard-interrupt"
+        finally:
+            shutil.rmtree = real_rmtree
+            GUARDS["fixpoint"] = saved
+        created = SCRATCHES[made:]
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        expected_outcome = ("keyboard-interrupt" if signum == signal.SIGINT else signum)
+        expected_disposition = (signal.default_int_handler if signum == signal.SIGINT
+                                else signal.SIG_DFL)
+        check(check_id,
+              (fired["sent"], outcome, [p for p in created if os.path.exists(p)],
+               signal.getsignal(signum),
+               sorted(s.name for s in mask if s in UNWIND_SIGNALS)),
+              (True, expected_outcome, [], expected_disposition, []))
+    check("signal/second-signal-cleanup-invariants",
+          (_invariants(fx), sorted(covered) == sorted(UNWIND_SIGNALS)), ([], True))
+
+
+def _child_mask_restored():
+    # QA round 6 (claude minor 2): the child-side mask restore pinned directly. The launch blocks
+    # UNWIND_SIGNALS in the parent, and without the preexec_fn the child would inherit that mask
+    # across exec (git clears the mask for ITS own children, so the tool-level signal cases stay
+    # green without this probe). The child reports which of the four unwind signals are blocked
+    # at exec; the set is written out longhand here, independent of UNWIND_SIGNALS, so a drifted
+    # constant cannot blind the probe.
+    code = ("import signal; print(','.join(sorted(s.name for s in "
+            "signal.pthread_sigmask(signal.SIG_BLOCK, set()) if s in (signal.SIGINT, "
+            "signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT))))")
+    proc = _run_child([sys.executable, "-I", "-B", "-c", code])
+    check("signal/child-mask-restored",
+          (proc.returncode, proc.stdout.decode("utf-8", "replace").strip()), (0, ""))
+
+
+def _group_remnant_reported(tmp):
+    # QA round 6 (codex minor 2): the final bounded probe in _end_child can expire with the group
+    # still populated; the honest contract is REPORT, never a silent return. Reproduced with
+    # codex's shape: this process becomes a Linux child subreaper, the direct child dies on the
+    # group SIGTERM, the grandchild ignores SIGTERM, is SIGKILLed by the post-exit probe, and is
+    # then retained as an unreaped ZOMBIE of this process (the subreaper), so the group is still
+    # non-empty when the last bound expires and _end_child must say so on stderr. TERM_GRACE is
+    # shortened for the case; the zombie is reaped and the subreaper flag cleared afterwards.
+    import contextlib
+    import ctypes
+    import io
+    libc = ctypes.CDLL(None, use_errno=True)
+    pr_set_child_subreaper = 36
+    if libc.prctl(pr_set_child_subreaper, 1, 0, 0, 0) != 0:
+        # Fail closed and loud: the suite targets Linux, where this cannot fail; the missing
+        # check id then fails the execution-set reconciliation with this exception recorded.
+        raise OSError("prctl(PR_SET_CHILD_SUBREAPER) failed: errno %d" % ctypes.get_errno())
+    global TERM_GRACE
+    saved_grace = TERM_GRACE
+    ready = Path(tmp) / "remnant-grandchild-pid"
+    grand = ('import os, signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); '
+             'open(sys.argv[1], "w").write(str(os.getpid())); time.sleep(300)')
+    child = ("import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', %r, "
+             "sys.argv[1]]); time.sleep(300)" % grand)
+    gc_pid, outcome, reported = None, None, ""
     try:
-        fx.run(apply=True)
-    except _Signalled as sig:
-        outcome = sig.signum
-    except KeyboardInterrupt:
-        outcome = "keyboard-interrupt"
+        TERM_GRACE = 0.5
+        proc = subprocess.Popen([sys.executable, "-I", "-B", "-c", child, str(ready)],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and not ready.exists():
+            time.sleep(0.05)
+        if ready.exists():
+            gc_pid = int(ready.read_text(encoding="utf-8"))
+        sink = io.StringIO()
+        with contextlib.redirect_stderr(sink):
+            _end_child(proc, group=True)
+        reported = sink.getvalue()
+        outcome = (proc.returncode, _group_alive(proc.pid))
     finally:
-        shutil.rmtree = real_rmtree
-        GUARDS["fixpoint"] = saved
-    created = SCRATCHES[made:]
-    mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
-    check("signal/second-signal-during-cleanup-no-leak",
-          (fired["sent"], outcome, [p for p in created if os.path.exists(p)],
-           signal.getsignal(signal.SIGTERM),
-           sorted(s.name for s in mask if s in (signal.SIGTERM, signal.SIGHUP))),
-          (True, signal.SIGTERM, [], signal.SIG_DFL, []))
-    check("signal/second-signal-cleanup-invariants", _invariants(fx), [])
+        TERM_GRACE = saved_grace
+        if gc_pid is not None:
+            try:
+                os.waitpid(gc_pid, 0)
+            except OSError:
+                pass
+        libc.prctl(pr_set_child_subreaper, 0, 0, 0, 0)
+    check("signal/group-remnant-reported",
+          (gc_pid is not None, outcome,
+           ("process group %d still has members" % proc.pid) in reported,
+           "zombies" in reported, _group_alive(proc.pid)),
+          (True, (-signal.SIGTERM, True), True, True, False))
 
 
 def case_crlf(tmp):
@@ -3328,7 +3553,7 @@ CASES = dict([
     ("filter", case_filter), ("eol", case_eol), ("lock-held", case_lock_held),
     ("fetch-failure", case_fetch_failure), ("state-mismatch", case_state_mismatch),
     ("cli", case_cli), ("refmap", case_refmap), ("basefetch", case_basefetch),
-    ("leak", case_leak), ("signal", case_signal),
+    ("leak", case_leak), ("partial", case_partial), ("signal", case_signal),
     ("crlf", case_crlf), ("latepush", case_latepush), ("rename", case_rename),
 ])
 
@@ -3355,6 +3580,7 @@ REVERTS = dict([
     ("fixpoint", (_noop, "regen")),
     ("reconcile", (_noop, "push-unknown")),
     ("scratch-setup", (_noop, "eol")),
+    ("scratch-complete", (_noop, "partial")),
     ("generated-confined", (_noop, "symlink")),
     ("pushed-bytes", (_noop, "filter")),
     ("commit-parents", (_noop, "tamper")),
