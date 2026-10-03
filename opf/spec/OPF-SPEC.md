@@ -1646,7 +1646,8 @@ or contradictory input. Elapsed time and a staging directory MUST NOT be taken a
 A fresh-only implementation (section 16.1) MUST NOT use the preserved-legacy-evidence route: it
 substantiates `partial` and `complete` only through an adoption receipt with completion results,
 and it refuses a `partial` or `complete` status in a store that holds no adoption receipt as legacy
-state under section 16.1. The section 16.1 admission check belongs to neither layer above: it MUST
+state under section 16.1, which yields cannot-evaluate instead where it cannot establish whether
+the store holds one. The section 16.1 admission check belongs to neither layer above: it MUST
 run at every posture, and `off` and `warn` MUST NOT disable or soften it.
 From the recorded approval until its retirement is recorded, a path the approved plan enumerates
 as a frozen retire, move or migrate source (section 14.2) is bounded adoption state: while its
@@ -2091,18 +2092,18 @@ every posture, before any other grading and before any write, the claim of the s
 performs, over the state that reconciliation found, and a fresh-only implementation's `opf sync`
 MUST NOT bring in, by a fast-forward, a state that the check, run first over the fetched target
 state, refuses or cannot evaluate, nor send, by a push of pending local commits (section 5.7), a
-state that the check, run first over the local state it would push, refuses or cannot evaluate. Once
-a command that writes has claimed the lease, and before any other write, it MUST confirm that every
-directory listing, existence-probe result, and candidate the check read is unchanged apart from that
-claim's own writes: the `lease.toml` that section 5.7 has it take in the machine store and, where
-the concurrent-operation module is enabled, the `session_lease` record that section 5.7 has it
-record for that lease, with each directory entry, file, index or registry row, and ledger entry that
-the implementation's own writer adds in recording that one record. It MUST confirm that the
-`lease.toml` and any such `session_lease` record carry its own claim, and MUST compare everything
-else the check read with what it read; where anything else differs, or either does not carry its own
-claim, it MUST stop as cannot-evaluate, make no other write, and release the lease (section 5.7), so
-the lease path ends as it was before the claim. The check MUST compare parsed versions, never
-strings, and MUST refuse:
+state that the check, run first over the local state it would push, refuses or cannot evaluate. A
+command that writes MUST, after admission, take the `lease.toml` that section 5.7 has it take in the
+machine store and make it observable at the sync target where the store has one (section 5.7) before
+any other write, the `session_lease` record that section 5.7 has it record for that lease where the
+concurrent-operation module is enabled included. Once that `lease.toml` is taken and observable, and
+before any other write, that `session_lease` record included, it MUST confirm that the `lease.toml`
+carries its own claim and that every directory listing, existence-probe result, and candidate the
+check read is unchanged, apart from that `lease.toml` and its directory entry, from what the check
+read. Where anything else differs, or the `lease.toml` does not carry its own claim, it MUST stop as
+cannot-evaluate, write no `session_lease` record and no other file, and release the lease (section
+5.7), so the lease path ends as it was before the claim. The check MUST compare parsed versions,
+never strings, and MUST refuse:
 
 - as `unsupported-older-store`, a store whose manifest declares a `spec_version` below the supported
   one, or whose base table is the retired `[devprocess]` (section 4.5), naming the declared version
@@ -2154,35 +2155,45 @@ imported worklog `worklog.imported.toml` (sections 6.2 and 8.3), each `<type>.in
 index, worklog ledger, and record file under its record archive `archive/<YYYY>/` (section 12); as
 candidate inventories, each `inventory.toml` and `inventory-<phase>.toml` at the root of a run
 folder `.working/staging/<kind>/<run-id>/` or `.working/imported/<kind>/<run-id>/`; and, in each run
-folder `.working/imported/adoption/<run-id>/` (section 14.2), each file at an adoption receipt path
-of the implementation's own section 14 adoption writer, which alone decides whether the store holds
-an adoption receipt. Where discovery finds no store manifest, as over a zero-match `.working/`
-(section 4.5), the `import_status` item and the declared `legacy_fragment` type item do not apply
-and no file is a candidate record or a candidate adoption receipt; the check still parses each
-candidate inventory present and matches both path-defined items, and an unreadable, malformed, or
-contradictory candidate that is present, a candidate `manifest.toml` that discovery reads (section
-4.5) included, MUST yield cannot-evaluate, never admission.
+folder `.working/imported/adoption/<run-id>/` (section 14.2), as candidate adoption receipts, each
+file at an adoption receipt path of the implementation's own section 14 adoption writer. Where
+discovery finds no store manifest, as over a zero-match `.working/` (section 4.5), the
+`import_status` item and the declared `legacy_fragment` type item do not apply and no file is a
+candidate record or a candidate adoption receipt; the check still parses each candidate inventory
+present and matches both path-defined items, and an unreadable, malformed, or contradictory
+candidate that is present, a candidate `manifest.toml` that discovery reads (section 4.5) included,
+MUST yield cannot-evaluate, never admission.
 
 The check MUST classify each candidate it reads by the rules that follow, whether or not discovery
 finds a store manifest, and MUST yield cannot-evaluate, never admission, for each candidate those
 rules class as unreadable, malformed, or contradictory. A candidate is unreadable where the check
-cannot read its bytes, and malformed where those bytes do not parse as TOML or, for a candidate
-adoption receipt, do not parse in the receipt format of the implementation's own section 14 adoption
-writer, since this specification fixes no adoption receipt path or format. A candidate
-`manifest.toml` whose `[opf]` table declares `standard = "opf"` is a discovery match (section 4.5),
-and that match is contradictory where the file also carries a `[devprocess]` table, where its
-`spec_version` is absent or does not parse as a version, where a present `[opf].homes` or
-`[opf].worklog` value is not a TOML integer, or where a present `import_status` is not `none`,
-`partial`, or `complete`. A candidate `manifest.toml` that carries an `[opf]` table whose `standard`
-is absent or any other value is contradictory, a mistyped or altered discovery token (section 17)
-included; one that carries a `[devprocess]` table and no `[opf]` table is a recognized legacy
-candidate (section 4.5); and one that carries neither table is foreign content, neither a match nor
-a contradiction, that a section 14 first adoption dispositions. Any other candidate is contradictory
-where a value that decides a listed item, a record's `actor.kind` or `type` or an inventory's
-`format`, is absent where its envelope or format requires it, or is present and not a string. A file
-under `.working/imported/adoption/` at no adoption receipt path of that writer is not a candidate
-and decides nothing, an adoption receipt that another implementation's writer placed at another path
-included, a gap section 17 discloses.
+cannot read its bytes. A candidate adoption receipt is malformed where its bytes do not parse in the
+receipt format of the implementation's own section 14 adoption writer, since this specification
+fixes no adoption receipt path or format; every other candidate is malformed where its bytes do not
+parse as TOML. A candidate `manifest.toml` whose `[opf]` table declares `standard = "opf"` is a
+discovery match (section 4.5), and that match is contradictory where the file also carries a
+`[devprocess]` table, where its `spec_version` is absent or does not parse as a version, where a
+present `[opf].homes` or `[opf].worklog` value is not a TOML integer, or where a present
+`import_status` is not `none`, `partial`, or `complete`. A candidate `manifest.toml` that carries an
+`[opf]` table whose `standard` is absent or any other value is contradictory, a mistyped or altered
+discovery token (section 17) included; one that carries a `[devprocess]` table and no `[opf]` table
+is a recognized legacy candidate (section 4.5); and one that carries neither table is foreign
+content, neither a match nor a contradiction, that a section 14 first adoption dispositions. Any
+other candidate is contradictory where a value that decides a listed item, a record's `actor.kind`
+or `type` or an inventory's `format`, is absent where its envelope or format requires it, or is
+present and not a string.
+
+Section 14.2 places adoption evidence under `.working/imported/adoption/<run-id>/`, and the check
+MUST decide from that area alone whether a store holds an adoption receipt. A candidate adoption
+receipt that is neither unreadable nor malformed establishes that the store holds one, and a store
+whose `.working/imported/adoption/` is absent or holds no file holds none. Where that area holds a
+file but no candidate adoption receipt, as where another implementation's writer placed its receipt
+at another path, the check cannot establish whether the store holds an adoption receipt, and for a
+`partial` or `complete` `import_status` it MUST yield cannot-evaluate, never
+`unsupported-legacy-state` and never admission. A file there at no adoption receipt path of the
+implementation's own writer is not a candidate: the check parses it for no item, and it bears only
+on that decision. An adoption receipt kept outside `.working/imported/adoption/`, which section 14.2
+does not permit, decides nothing, a gap section 17 discloses.
 
 Where a store meets more than one refusal above, the section 9.2 ceiling included, the check MUST
 report every finding it meets, and that store's refusal fixture asserts each of them. An input the
@@ -2207,11 +2218,14 @@ clean-series item's fixtures MUST include five separate fixtures that each seed 
 importer-authored clean record, one an entry in the active `worklog.toml` ledger, one an entry in an
 archived worklog ledger, one an active typed record in its `<type>.index.toml`, one an active typed
 record in a per-record file under a `<type>/` directory (section 9), and one an archived typed
-record, and the `import_status` item's fixtures MUST include one that holds no adoption receipt but
-holds another file under `.working/imported/adoption/<run-id>/`. Missing evidence makes the claim
-`indeterminate`, never a pass. A fresh-only claim MUST NOT imply upgrade compatibility or continuity
-from the implementation's own earlier releases; moving to a later base version requires a new
-declaration and new evidence.
+record, and the `import_status` item's fixtures MUST include one whose `.working/imported/adoption/`
+holds no file, refused with that item's finding, and one whose
+`.working/imported/adoption/<run-id>/` holds a file at no adoption receipt path of the
+implementation's own writer and no candidate adoption receipt, which every store-resolving command
+MUST report as cannot-evaluate, never as `unsupported-legacy-state` and never as admission, with
+both trees byte-identical. Missing evidence makes the claim `indeterminate`, never a pass. A
+fresh-only claim MUST NOT imply upgrade compatibility or continuity from the implementation's own
+earlier releases; moving to a later base version requires a new declaration and new evidence.
 
 ## 17. Residual coverage disclosures
 
@@ -2276,12 +2290,23 @@ The gates in this standard are strong where they are strong and say so where the
   an `[unmanaged]` entry that section 14.2 forbids is a cannot-evaluate input, never a reason to
   leave a path unsearched. Admission recognizes only the adoption receipts of the implementation's
   own section 14 adoption writer, so where another implementation's writer placed a store's adoption
-  receipt at another path, the store holds no adoption receipt for that check, and its `partial` or
-  `complete` `import_status` is refused as `unsupported-legacy-state` even where a current-format
-  adoption set that status. Its refusal leaves a store unchanged but offers no preservation, repair,
-  or continuity; an adopter whose store holds legacy state, an upgraded store with pre-1.3.0 import
-  history included, needs an upgrade-capable implementation for that store. Until validation tooling
-  ships, a class claim is self-asserted (section 16).
+  receipt under `.working/imported/adoption/` at another path or in another format, and that area
+  holds no adoption receipt of the implementation's own writer, the check cannot establish whether
+  that store holds an adoption receipt, and a `partial` or `complete` `import_status` there is
+  cannot-evaluate: never refused as legacy, but not admitted either, even where a current-format
+  adoption set that status. An adoption receipt kept outside `.working/imported/adoption/`, which
+  section 14.2 does not permit, decides nothing, so where that area holds no file, its store's
+  `partial` or `complete` `import_status` is refused as `unsupported-legacy-state`. Its refusal
+  leaves a store unchanged but offers no preservation, repair, or continuity; an adopter whose store
+  holds legacy state, an upgraded store with pre-1.3.0 import history included, needs an
+  upgrade-capable implementation for that store. A command that writes rechecks admission once its
+  `lease.toml` is taken and observable and before it writes any record; a stop there releases the
+  lease and writes no record, a `session_lease` record included, so the store's tree ends as it was,
+  but where the store has a sync target, that target's history can keep the lease's claim and
+  release, and where the concurrent-operation module is enabled no `session_lease` record of that
+  lease remains. A change made after the recheck by anything that does not take the lease, such as a
+  hand edit or a branch switch, is outside admission. Until validation tooling ships, a class claim
+  is self-asserted (section 16).
 
 ## Appendix A: record envelope example
 
