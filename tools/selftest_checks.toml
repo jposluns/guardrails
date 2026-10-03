@@ -642,6 +642,7 @@ expected-check-ids = [
   "fetch/private-apply-gitdir-unchanged",
   "fetch/private-author-hook-uploadpack-never-run",
   "fetch/private-submodule-not-recursed",
+  "fetch/private-no-lazy-fetch",
   "fetch/private-invariants",
   # ---------- the default dry run ----------
   "dry/would-merge",
@@ -753,6 +754,7 @@ expected-check-ids = [
   "push/moved-during-fetch-refused",
   "push/rewound-invariants",
   "push/timeout-observed-delivered",
+  "timeout/regenerate-group-ended",
   "push/timeout-invariants",
   "push/inflight-timeout-push-unknown",
   "push/inflight-rerun-already-pushed",
@@ -803,6 +805,9 @@ expected-check-ids = [
   "scratch/leak-invariants",
   "signal/sigterm-cleans-up",
   "signal/sighup-cleans-up",
+  "signal/sigquit-cleans-up",
+  "signal/sigterm-during-push-no-stale-locks",
+  "signal/launch-window-covered",
   "signal/second-signal-during-cleanup-no-leak",
   "signal/second-signal-cleanup-invariants",
   # ---------- CLI ----------

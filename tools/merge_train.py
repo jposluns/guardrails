@@ -29,23 +29,35 @@ created fresh for the run (hooks disabled, no inherited local configuration, --n
 --no-recurse-submodules and --refmap= passed explicitly), never in the author's repository, so it
 cannot follow a symbolic remote-tracking ref, recurse on demand into a populated submodule with
 the submodule's own refspecs, run a repository hook, or write any ref, object, reflog or
-FETCH_HEAD the author can see. The tool's whole author-side write footprint, stated exactly: the
-lock file and the retry marker, nothing else; no ref, no object, no reflog, no FETCH_HEAD and no
-hook or configured-command execution in the author's repository, on a dry run or an apply run.
+FETCH_HEAD the author can see. Every git call that READS the author's repository goes through one
+author-side funnel (_git_author): GIT_NO_LAZY_FETCH=1 is set after the GIT_ scrub, so a read that
+names a missing PROMISED object in a partial clone fails closed instead of launching a lazy fetch
+(which would execute a configured remote.<remote>.uploadpack and write pack files into the
+author's object store), and protocol.allow=never, core.fsmonitor=false and core.hooksPath are
+pinned off in option position. The tool's whole author-side write footprint, stated exactly: the
+lock file and the retry marker, nothing else; no ref, no object content, no reflog, no FETCH_HEAD
+and no hook or configured-command execution in the author's repository, on a dry run or an apply
+run. One disclosed residual: an author-side object that already exists may have its MTIME
+refreshed (git freshens an existing object instead of rewriting it when the private scratch
+writes a byte-identical one through the shared object store), which resets that object's prune
+clock and changes no content.
 
 The tool NEVER mutates the author's working tree, index, HEAD or any local branch: that capability
 was removed, not guarded (decision D-390-PRIVATE-WORKTREE). Per open PR, in PR-number order, every
 merge, conflict resolution, regeneration, check and commit happens in a PRIVATE scratch checkout
 the run creates for that PR (a --shared clone of the repository, detached at the PR's remote head)
 and removes in a finally entered as soon as the directory exists, so a failure in the clone or in
-the scratch setup cannot leak it; a SIGTERM or SIGHUP during a live run is converted into that same
-cleanup (the in-flight git or generator child is terminated with its WHOLE process group, SIGTERM
-first so git removes its own lock files, then SIGKILL after a short grace, and reaped; every
-cleanup finally runs with SIGTERM and SIGHUP blocked, so a second signal cannot abort a removal
+the scratch setup cannot leak it; a SIGTERM, SIGHUP or SIGQUIT during a live run is converted into that
+same cleanup (the in-flight git or generator child is terminated with its WHOLE process group,
+SIGTERM first so git removes its own lock files, then SIGKILL after a short grace, and reaped, and
+the group is then CONFIRMED empty: a grandchild that ignored the SIGTERM is SIGKILLed even when
+the direct child exited first; every
+cleanup finally runs with SIGTERM, SIGHUP and SIGQUIT blocked, so a second signal cannot abort a removal
 half-way and is re-delivered when that cleanup ends; the scratch and the private base repository
 are removed, the lock is released) and the process then exits with the
 conventional killed-by-signal status (an inherited SIG_IGN disposition, as under nohup, is left
-alone); checkout filters, text/eol/autocrlf conversion, ident expansion, the
+alone; a group-wide SIGKILL from a supervisor, such as timeout -k or kill -9 on the group, cannot
+be handled and leaves children running in their own sessions); checkout filters, text/eol/autocrlf conversion, ident expansion, the
 working-tree encoding, hooks (core.hooksPath pinned to the null device) and fsmonitor are disabled
 there for every git call. The author's worktree is only READ: the run locates the worktree that has
 the PR branch checked out and re-confirms, against a fresh gh view, that it still names the same
@@ -166,11 +178,11 @@ class FailClosed(Exception):
 
 
 class _Signalled(BaseException):
-    """A SIGTERM or SIGHUP during a live run, converted into an exception so the run unwinds
+    """A SIGTERM, SIGHUP or SIGQUIT during a live run, converted into an exception so the run unwinds
     through its own finallys: the in-flight git or generator child has its whole process group
     terminated (SIGTERM, a bounded grace, then SIGKILL) and is reaped, the private scratch
-    checkout and the private base repository are removed (each removal running with SIGTERM and
-    SIGHUP blocked, so a second signal cannot interrupt it), the lock is released. main() then
+    checkout and the private base repository are removed (each removal running with SIGTERM, SIGHUP
+    and SIGQUIT blocked, so a second signal cannot interrupt it), the lock is released. main() then
     re-raises the signal under the default disposition, so the process exits with the
     conventional killed-by-signal status."""
 
@@ -206,29 +218,45 @@ TERM_GRACE = 5.0
 
 
 def _cleanup(func):
-    """Run ONE cleanup step with SIGTERM and SIGHUP blocked. _Signalled is a BaseException, so a
+    """Run ONE cleanup step with SIGTERM, SIGHUP and SIGQUIT blocked. _Signalled is a BaseException,
+    so a
     second signal arriving while a finally runs shutil.rmtree would otherwise abort the removal
     (ignore_errors swallows OSError only, never an exception raised by the signal handler) and
     leak the directory being removed. The previous mask is restored afterwards, so a signal taken
     while blocked is delivered then: the run still dies by signal, only the cleanup itself is
     atomic against it."""
-    mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGHUP})
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGHUP,
+                                                     signal.SIGQUIT})
     try:
         func()
     finally:
         signal.pthread_sigmask(signal.SIG_SETMASK, mask)
 
 
+def _group_alive(pgid):
+    """Whether the process group still has any member (a not-yet-reaped member counts briefly)."""
+    try:
+        os.killpg(pgid, 0)
+    except OSError:
+        return False
+    return True
+
+
 def _end_child(proc, group):
     """Terminate a child and reap it: SIGTERM first (git removes its own *.lock files on SIGTERM,
     never on SIGKILL), a bounded grace, then SIGKILL for whatever ignored the SIGTERM. With group
-    True the child's WHOLE process group is signalled (the child was started with
-    start_new_session=True, so its pid names the group and every grandchild it spawned is
-    included): that is the dying-run path, where nothing the run spawned may outlive it. With
-    group False only the direct child is signalled: that is the TIMEOUT path, where the run itself
-    continues and a grandchild may legitimately outlive the command (the worked example is a
-    timed-out push to a local-path remote, whose in-flight receive-pack may still land the push;
-    the push-unknown marker exists exactly to classify that on the retry)."""
+    True the child's WHOLE process group is signalled and then CONFIRMED gone (the child was
+    started with start_new_session=True, so its pid names the group and every grandchild that
+    stayed in it is included; a grandchild that itself calls setsid starts a new session, ESCAPES
+    the group and cannot be ended here): the direct child exiting says nothing about a grandchild
+    that ignored the SIGTERM, so after the direct child is reaped the group is probed, given the
+    bounded grace to finish its own SIGTERM handling, SIGKILLed if anything remains, and probed
+    again within the same bound. That is the dying-run path and the regenerate-or-check TIMEOUT
+    path, where nothing the command spawned may keep running in a scratch directory the run is
+    about to remove. With group False only the direct child is signalled: that is the push-TIMEOUT
+    path ONLY (see _run_child), where the run itself continues and the in-flight receive-pack of a
+    timed-out push to a local-path remote may legitimately still land the push; the push-unknown
+    marker exists exactly to classify that on the retry."""
     for signum in (signal.SIGTERM, signal.SIGKILL):
         try:
             if group:
@@ -242,27 +270,59 @@ def _end_child(proc, group):
             break
         except subprocess.TimeoutExpired:
             continue
+    if group:
+        deadline = time.monotonic() + TERM_GRACE
+        while _group_alive(proc.pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if _group_alive(proc.pid):
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            deadline = time.monotonic() + TERM_GRACE
+            while _group_alive(proc.pid) and time.monotonic() < deadline:
+                time.sleep(0.05)
     for stream in (proc.stdout, proc.stderr):
         if stream is not None:
             stream.close()
 
 
-def _run_child(argv, cwd=None, env=None, timeout=None):
+def _run_child(argv, cwd=None, env=None, timeout=None, push=False):
     """The single child-process funnel under _git and _run_external: every child starts in its OWN
     session (start_new_session=True), so a timeout and ANY unwind while the child runs (the
-    _Signalled conversion of SIGTERM or SIGHUP included) terminate the child through _end_child,
-    with signals blocked around that cleanup: an unwind ends the whole process group, so no
-    grandchild keeps running in a scratch directory the run is about to remove, while a timeout
-    ends the direct child only (see _end_child). Returns a CompletedProcess; raises
+    _Signalled conversion of SIGTERM, SIGHUP or SIGQUIT included) terminate the child through
+    _end_child, with signals blocked around that cleanup. SIGTERM, SIGHUP and SIGQUIT are BLOCKED
+    across the launch itself, from just before the fork until the handle is covered by the cleanup
+    try below, so a signal arriving in that window is held pending and then unwinds through the
+    normal cleanup instead of leaking a just-created session; the mask is restored as the FIRST
+    statement inside the protected region (never held across communicate, which would delay the
+    run's response to a signal by the child's whole runtime), and the child starts with the
+    caller's original mask, restored by a minimal preexec_fn that only resets the mask, so git and
+    the generators see the signals unblocked. An unwind ends the whole process group, and so does
+    a timeout, EXCEPT a timed-out push (push=True), which ends the direct child only: the
+    in-flight receive-pack is exactly the indeterminate outcome the push-unknown marker reconciles
+    on the retry (see _end_child). Residual: a group-wide SIGKILL from a supervisor cannot be
+    handled and leaves children running in their own sessions. Returns a CompletedProcess; raises
     subprocess.TimeoutExpired on a timeout and OSError on a launch failure."""
-    proc = subprocess.Popen(list(argv), cwd=cwd, env=env, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-                            start_new_session=True)
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGHUP,
+                                                     signal.SIGQUIT})
+
+    def _child_mask():
+        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+
     try:
+        proc = subprocess.Popen(list(argv), cwd=cwd, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                                start_new_session=True, preexec_fn=_child_mask)
+    except BaseException:
+        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        raise
+    try:
+        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
         out, err = proc.communicate(timeout=timeout)
     except BaseException as exc:
         timed_out = isinstance(exc, subprocess.TimeoutExpired)
-        _cleanup(lambda: _end_child(proc, group=not timed_out))
+        _cleanup(lambda: _end_child(proc, group=not (timed_out and push)))
         if timed_out:
             raise subprocess.TimeoutExpired(list(argv), timeout)
         raise
@@ -312,7 +372,7 @@ def _forbidden(args):
     return False
 
 
-def _git(cwd, *args, extra_env=None, timeout=GIT_TIMEOUT, ok=(0,)):
+def _git(cwd, *args, extra_env=None, timeout=GIT_TIMEOUT, ok=(0,), push=False):
     """The single pinned git funnel: auto-maintenance pinned off in option position, scrubbed GIT_*,
     a timeout. Returns (returncode, stdout bytes, stderr text); raises Refuse("git-failed") on a
     timeout and on an exit code outside ok when ok is not None. The audit records every attempted
@@ -323,7 +383,8 @@ def _git(cwd, *args, extra_env=None, timeout=GIT_TIMEOUT, ok=(0,)):
     argv = ["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"]
     argv += list(args)
     try:
-        proc = _run_child(argv, cwd=str(cwd), env=_clean_env(extra_env), timeout=timeout)
+        proc = _run_child(argv, cwd=str(cwd), env=_clean_env(extra_env), timeout=timeout,
+                          push=push)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise Refuse("git-failed", "git %s: %s" % (" ".join(args[:2]), exc))
     if ok is not None and proc.returncode not in ok:
@@ -335,6 +396,43 @@ def _git(cwd, *args, extra_env=None, timeout=GIT_TIMEOUT, ok=(0,)):
 
 def _git_text(cwd, *args, **kw):
     return _git(cwd, *args, **kw)[1].decode("utf-8", "replace").strip()
+
+
+# The author-side read hardening (see _git_author). protocol.allow=never is safe here because no
+# author-side call is a transport operation (git refuses even a local-path clone under it, so the
+# two --shared clones FROM the author's store stay outside this funnel, at the --shared trust tier
+# the threat model already discloses).
+_AUTHOR_GIT_CONFIG = ("-c", "protocol.allow=never", "-c", "core.fsmonitor=false",
+                      "-c", "core.hooksPath=" + os.devnull)
+# What a FETCH from private storage whose object store includes the author's as an alternate can
+# carry (protocol.allow=never cannot: the fetch itself is a transport operation). Both pieces are
+# inherited by every git subprocess the fetch spawns, including the `git --git-dir=<author .git>
+# for-each-ref` alternate-ref read git runs IN the author's repository to seed negotiation: that
+# read can then neither lazy-fetch a missing promised object (GIT_NO_LAZY_FETCH is in its
+# environment) nor run an fsmonitor command or hook from the author's local configuration (the -c
+# pairs propagate to it through the environment git hands its own subprocesses).
+_ALTERNATE_FETCH_ENV = dict(GIT_NO_LAZY_FETCH="1")
+_ALTERNATE_FETCH_CONFIG = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.devnull)
+
+
+def _git_author(cwd, *args, extra_env=None, timeout=GIT_TIMEOUT, ok=(0,)):
+    """The single author-side git funnel: every git call the tool runs against the author's
+    repository (rev-parse, worktree list, remote get-url, check-ref-format, symbolic-ref) goes
+    through here. On top of _git's pins it sets GIT_NO_LAZY_FETCH=1 AFTER _clean_env's GIT_ scrub,
+    so a read that names a missing PROMISED object in a partial clone fails closed instead of
+    launching a lazy fetch (which would execute a configured remote.<remote>.uploadpack and write
+    pack files into the author's object store), and pins protocol.allow=never, core.fsmonitor and
+    core.hooksPath off in option position. Author-side footprint of a call made here, stated
+    exactly: no ref, no object content, no reflog, no FETCH_HEAD, no hook, no configured command
+    and no object mtime change (the one disclosed mtime refresh comes from the scratch's object
+    writes through the shared store, never from these reads; see _scratch_checkout)."""
+    env = dict(GIT_NO_LAZY_FETCH="1")
+    env.update(extra_env or dict())
+    return _git(cwd, *(_AUTHOR_GIT_CONFIG + args), extra_env=env, timeout=timeout, ok=ok)
+
+
+def _git_author_text(cwd, *args, **kw):
+    return _git_author(cwd, *args, **kw)[1].decode("utf-8", "replace").strip()
 
 
 def _run_external(argv, cwd, timeout, extra_env=None):
@@ -435,14 +533,14 @@ def guard_branch_name(root, branch):
     with a named status instead of crashing later)."""
     if not isinstance(branch, str) or not REF_NAME.match(branch) or ".." in branch:
         raise Refuse("bad-branch-name", "unsupported PR head branch name %r" % (branch,))
-    if _git(root, "check-ref-format", "--branch", branch, ok=None)[0] != 0:
+    if _git_author(root, "check-ref-format", "--branch", branch, ok=None)[0] != 0:
         raise Refuse("bad-branch-name", "git check-ref-format refuses %r" % (branch,))
 
 
 def guard_branch_match(wt, branch, gh_view):
     """Refuse branch-mismatch unless the worktree's symbolic ref, the listed head branch and gh's
     fresh view all name the same branch of an open PR."""
-    code, out, _err = _git(wt, "symbolic-ref", "--quiet", "--short", "HEAD", ok=None)
+    code, out, _err = _git_author(wt, "symbolic-ref", "--quiet", "--short", "HEAD", ok=None)
     if code != 0:
         raise Refuse("branch-mismatch", "worktree HEAD is detached")
     current = out.decode("utf-8", "replace").strip()
@@ -727,7 +825,7 @@ def _remote_head(ctx):
     Returns a SHA, "" when absent, None when unreadable for ANY reason, a timeout included; the
     caller treats None as indeterminate, never as a cue to change anything."""
     try:
-        url = _git_text(ctx["root"], "remote", "get-url", ctx["remote"])
+        url = _git_author_text(ctx["root"], "remote", "get-url", ctx["remote"])
         code, out, _err = _git(ctx["base_repo"], "ls-remote", "--", url,
                                "refs/heads/" + ctx["branch"], ok=None,
                                timeout=ctx["net_timeout"])
@@ -782,7 +880,10 @@ def _scratch_checkout(ctx, scratch_root):
     scratch = os.path.join(scratch_root, "co")
     _git(ctx["root"], "clone", "--quiet", "--shared", "--no-checkout", str(ctx["root"]), scratch)
     # The base tip's objects were fetched into the run's PRIVATE base repository, never into the
-    # author's object store, so the scratch attaches that store as a second read-only alternate.
+    # author's object store, so the scratch attaches that store as a second alternate. Disclosed
+    # footprint of writing objects in a checkout whose alternates include the author's store: an
+    # object the author already stores byte-identically is FRESHENED instead of rewritten (its
+    # mtime is refreshed in the author's objects/, its content never changes).
     scratch_git = _git_text(scratch, "rev-parse", "--path-format=absolute", "--git-dir")
     with open(os.path.join(scratch_git, "objects", "info", "alternates"), "a",
               encoding="utf-8") as handle:
@@ -858,9 +959,12 @@ def _push_and_observe(ctx, scratch, old, new):
     branch = ctx["branch"]
     indeterminate = False
     try:
+        # push=True: a TIMED-OUT push ends the direct child only, because its in-flight
+        # receive-pack may still land the push; that outcome is exactly what the marker
+        # reconciles on the retry (see _run_child and _end_child).
         _git(scratch, "push", "--porcelain", "--no-follow-tags",
              *_guard("push-lease")(branch, old), "--", ctx["remote_url"],
-             "%s:refs/heads/%s" % (new, branch), ok=None, timeout=ctx["net_timeout"])
+             "%s:refs/heads/%s" % (new, branch), ok=None, timeout=ctx["net_timeout"], push=True)
     except Refuse as exc:
         _guard("push-indeterminate")(exc)
         indeterminate = True
@@ -899,7 +1003,7 @@ def load_config(root, base_sha):
 def _worktrees(root):
     """[dict(path, branch)] from git worktree list --porcelain; a detached worktree has branch None."""
     rows, row = [], None
-    for line in _git_text(root, "worktree", "list", "--porcelain").splitlines() + [""]:
+    for line in _git_author_text(root, "worktree", "list", "--porcelain").splitlines() + [""]:
         if not line:
             if row:
                 rows.append(row)
@@ -956,8 +1060,12 @@ def _process_pr(ctx, apply):
     SCRATCHES.append(scratch_root)
     try:
         scratch = _scratch_checkout(ctx, scratch_root)
-        _git(scratch, "fetch", "--no-tags", "--no-recurse-submodules", "--", ctx["remote_url"],
-             "refs/heads/" + ctx["branch"], timeout=ctx["net_timeout"])
+        # The scratch's alternates include the author's store, so this fetch carries the same
+        # hardening as the base fetch: the alternate-ref read it spawns in the author's
+        # repository inherits GIT_NO_LAZY_FETCH and the pinned-off fsmonitor and hooks.
+        _git(scratch, *_ALTERNATE_FETCH_CONFIG, "fetch", "--no-tags", "--no-recurse-submodules",
+             "--", ctx["remote_url"], "refs/heads/" + ctx["branch"],
+             extra_env=dict(_ALTERNATE_FETCH_ENV), timeout=ctx["net_timeout"])
         if _git_text(scratch, "rev-parse", "FETCH_HEAD^0") != old:
             raise Refuse("pr-head-moved", "the remote head moved during the fetch")
         if _git(scratch, "merge-base", "--is-ancestor", ctx["base_sha"], old, ok=None)[0] == 0:
@@ -1036,26 +1144,33 @@ def _base_fetch(root, run_dir, remote, base):
     scratch checkouts already use, and seeded as negotiation refs so the fetch stays incremental),
     and the fetch passes --no-tags, --no-recurse-submodules and --refmap= explicitly, BY URL
     (never by remote name, so no author-local transport or uploadpack setting applies), into
-    refs/merge-train/base, a ref that cannot be symbolic in a fresh repository. Author-side
-    footprint of this whole resolution: reads only. Returns (base_repo, remote_url, base_sha)."""
-    remote_url = _git_text(root, "remote", "get-url", remote)
+    refs/merge-train/base, a ref that cannot be symbolic in a fresh repository. Every author-side
+    read here goes through _git_author (GIT_NO_LAZY_FETCH, protocol.allow=never, fsmonitor and
+    hooks off), so a missing promised object fails the read closed instead of lazy-fetching into
+    the author's store; the private fetch itself carries _ALTERNATE_FETCH_ENV and
+    _ALTERNATE_FETCH_CONFIG, which the alternate-ref read git spawns IN the author's repository
+    inherits. Author-side footprint of this whole resolution: reads only; no ref, no object
+    content, no reflog, no FETCH_HEAD, no hook and no configured command there. Returns
+    (base_repo, remote_url, base_sha)."""
+    remote_url = _git_author_text(root, "remote", "get-url", remote)
     base_repo = os.path.join(run_dir, "base.git")
     _git(run_dir, "init", "-q", "--bare", base_repo)
     _git(base_repo, "config", "core.hooksPath", os.devnull)
-    author_objects = _git_text(root, "rev-parse", "--path-format=absolute", "--git-path",
-                               "objects")
+    author_objects = _git_author_text(root, "rev-parse", "--path-format=absolute", "--git-path",
+                                      "objects")
     with open(os.path.join(base_repo, "objects", "info", "alternates"), "w",
               encoding="utf-8") as handle:
         handle.write(author_objects + "\n")
     for index, have in enumerate(("refs/remotes/%s/%s" % (remote, base),
                                   "refs/heads/%s" % base)):
-        code, out, _err = _git(root, "rev-parse", "--verify", "--quiet", have + "^{commit}",
-                               ok=None)
+        code, out, _err = _git_author(root, "rev-parse", "--verify", "--quiet",
+                                      have + "^{commit}", ok=None)
         if code == 0:
             _git(base_repo, "update-ref", "refs/merge-train/have-%d" % index,
                  out.decode("utf-8", "replace").strip())
-    _git(base_repo, "fetch", "--no-tags", "--no-recurse-submodules", "--refmap=", "--",
-         remote_url, "+refs/heads/%s:refs/merge-train/base" % base, timeout=GIT_TIMEOUT)
+    _git(base_repo, *_ALTERNATE_FETCH_CONFIG, "fetch", "--no-tags", "--no-recurse-submodules",
+         "--refmap=", "--", remote_url, "+refs/heads/%s:refs/merge-train/base" % base,
+         extra_env=dict(_ALTERNATE_FETCH_ENV), timeout=GIT_TIMEOUT)
     base_sha = _git_text(base_repo, "rev-parse", "--verify", "refs/merge-train/base^0")
     return base_repo, remote_url, base_sha
 
@@ -1064,8 +1179,8 @@ def run_train(root, apply=False, only=None):
     """The whole run under the global lock. Returns (exit code, reports, fatal message or None)."""
     reports = []
     try:
-        top = _git_text(root, "rev-parse", "--show-toplevel")
-        common = _git_text(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        top = _git_author_text(root, "rev-parse", "--show-toplevel")
+        common = _git_author_text(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
     except Refuse as exc:
         return 2, reports, "not a git repository: %s" % exc.reason
     with open(os.path.join(common, LOCK_NAME), "a+") as lock:
@@ -1079,10 +1194,12 @@ def run_train(root, apply=False, only=None):
 
         previous = dict()
         try:
-            # SIGTERM and SIGHUP become _Signalled, so the per-PR finally removes the private
-            # scratch checkout and the interrupted subprocess call kills and reaps its child; an
-            # inherited SIG_IGN disposition (nohup) is respected and left in place.
-            for signum in (signal.SIGTERM, signal.SIGHUP):
+            # SIGTERM, SIGHUP and SIGQUIT become _Signalled, so the per-PR finally removes the
+            # private scratch checkout and the interrupted subprocess call kills and reaps its
+            # child's whole process group; an inherited SIG_IGN disposition (nohup) is respected
+            # and left in place. A group-wide SIGKILL from a supervisor cannot be handled and
+            # leaves children running in their own sessions (see _run_child).
+            for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
                 if signal.getsignal(signum) != signal.SIG_IGN:
                     previous[signum] = signal.signal(signum, _to_exception)
             return _run_locked(Path(top), apply, only or set(), reports)
@@ -1095,8 +1212,9 @@ def _run_locked(root, apply, only, reports):
     # The config lives on the base tip, so v1 resolves the conventional origin/main once, pins M,
     # and requires the config to name that same remote and base. The base fetch runs in the run's
     # PRIVATE base repository (see _base_fetch), never in the author's repository: the author's
-    # repository receives NO ref, object, reflog, FETCH_HEAD or hook execution from this run; its
-    # only author-side writes anywhere in the tool are the lock file and the retry marker.
+    # repository receives NO ref, object content, reflog, FETCH_HEAD or hook execution from this
+    # run; its only author-side writes anywhere in the tool are the lock file, the retry marker
+    # and the disclosed mtime refresh of an already-present object (see the module docstring).
     remote, base = "origin", "main"
     run_dir = tempfile.mkdtemp(prefix="merge-train-base-")
     SCRATCHES.append(run_dir)
@@ -1166,7 +1284,8 @@ def _run_locked_with_base(root, run_dir, remote, base, apply, only, reports):
                        remote=remote, remote_url=remote_url, base=base, base_sha=base_sha, cfg=cfg,
                        base_repo=base_repo,
                        generated=generated, cmd_timeout=cmd_timeout, net_timeout=net_timeout,
-                       git_dir=_git_text(wt, "rev-parse", "--path-format=absolute", "--git-dir"))
+                       git_dir=_git_author_text(wt, "rev-parse", "--path-format=absolute",
+                                                "--git-dir"))
             report.update(_process_pr(ctx, apply))
         except Refuse as refusal:
             report["result"], report["reason"] = refusal.status, refusal.reason
@@ -2288,7 +2407,50 @@ def case_timeout(tmp):
     check("push/timeout-observed-delivered",
           (rc, _result(reports, 1), new != old, _git_text(wt, "rev-parse", "HEAD") == old,
            _has_marker(wt)), (0, "pushed", True, True, False))
-    check("push/timeout-invariants", _invariants(fx), [])
+    # QA round 5 (claude minor 6): a plain command timeout (regenerate here, and check commands
+    # are the same path) ends the WHOLE process group, not only the direct child: a grandchild of
+    # the timed-out regenerate must be gone when the run reports the refusal. Only a timed-out
+    # PUSH keeps the direct-child-only behaviour (see _run_child); that path is exercised above.
+    fx2 = _fixture(tmp, "timeout-regen")
+    _stale_pr(fx2)
+    pid_file = Path(tmp) / "timeout-regen-pids"
+    text = _read_text(fx2.main / CONFIG_PATH)
+    plain = 'regenerate = [["%s", "-I", "-B", "tools/gen.py"]]' % sys.executable
+    sleeper = ('regenerate = [["%s", "-I", "-B", "tools/gen.py"], ["%s", "-c", "import os,'
+               " subprocess, sys, time; gc = subprocess.Popen([sys.executable, '-c',"
+               " 'import time; time.sleep(300)']);"
+               " open(os.environ['TIMEOUT_PID_FILE'],'w').write(str(os.getpid()) + ' ' +"
+               ' str(gc.pid)); time.sleep(300)"]]') % (sys.executable, sys.executable)
+    text = text.replace(plain, sleeper).replace("command_timeout_seconds = 60",
+                                                "command_timeout_seconds = 3")
+    fx2.write(fx2.main, CONFIG_PATH, text)
+    _git(fx2.main, "commit", "-q", "-am", "sleeping regenerate", extra_env=FIXTURE_IDENT)
+    _git(fx2.main, "push", "-q", "origin", "main")
+    os.environ["TIMEOUT_PID_FILE"] = str(pid_file)
+    try:
+        rc2, reports2, _fatal = fx2.run(apply=True)
+    finally:
+        os.environ.pop("TIMEOUT_PID_FILE", None)
+    tokens = _read_text(pid_file).split()
+    dead = []
+    for pid_text in tokens:
+        for _ in range(100):
+            try:
+                os.kill(int(pid_text), 0)
+            except OSError:
+                dead.append(True)
+                break
+            time.sleep(0.1)
+        else:
+            dead.append(False)
+            try:
+                os.kill(int(pid_text), signal.SIGKILL)
+            except OSError:
+                pass
+    check("timeout/regenerate-group-ended",
+          (rc2, _result(reports2, 1), len(tokens), dead),
+          (1, "regenerate-failed", 2, [True, True]))
+    check("push/timeout-invariants", _invariants(fx, fx2), [])
 
 
 def case_symlink(tmp):
@@ -2594,10 +2756,11 @@ def case_refmap(tmp):
 
 def _gitdir_snapshot(repo):
     """Every ref with its target, the packed-refs and FETCH_HEAD bytes (None when absent), every
-    reflog file's bytes, and the loose-plus-packed object file count of a repository's common git
-    dir: the self-test's proof that a run leaves the author's .git untouched apart from the lock
-    file (not covered here by construction) and the transient --apply marker (removed before the
-    run returns)."""
+    reflog file's bytes, every object file's content digest and every object file's mtime of a
+    repository's common git dir: the self-test's proof that a run leaves the author's .git
+    untouched apart from the lock file (not covered here by construction), the transient --apply
+    marker (removed before the run returns) and the ONE disclosed object-store footprint, a
+    refreshed mtime on an object byte-identical before and after (see _gitdir_snapshot_diff)."""
     git_dir = _git_text(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
     refs = _git_text(repo, "for-each-ref", "--format=%(refname) %(objectname)")
     files = dict()
@@ -2609,14 +2772,31 @@ def _gitdir_snapshot(repo):
         for name in filenames:
             path = os.path.join(dirpath, name)
             logs[os.path.relpath(path, git_dir)] = _read_text(path)
-    objects = 0
-    for _dirpath, _dirnames, filenames in os.walk(os.path.join(git_dir, "objects")):
-        objects += len(filenames)
-    return dict(refs=refs, files=files, logs=logs, objects=objects)
+    objects, mtimes = dict(), dict()
+    obj_root = os.path.join(git_dir, "objects")
+    for dirpath, _dirnames, filenames in os.walk(obj_root):
+        for name in filenames:
+            path = os.path.join(dirpath, name)
+            rel = os.path.relpath(path, obj_root)
+            with open(path, "rb") as handle:
+                objects[rel] = hashlib.sha256(handle.read()).hexdigest()
+            mtimes[rel] = os.stat(path).st_mtime_ns
+    return dict(refs=refs, files=files, logs=logs, objects=objects, mtimes=mtimes)
 
 
 def _gitdir_snapshot_diff(before, after):
-    return [k for k in sorted(before) if before[k] != after[k]]
+    """The snapshot keys whose state changed, with the ONE disclosed footprint excluded: an mtime
+    change on an object file whose bytes are identical on both sides is git FRESHENING an existing
+    object (the module docstring's disclosed residual) and is allowed; an mtime change on any
+    other object file, and every ref, file, reflog or object-content change, is reported."""
+    diffs = [k for k in sorted(before) if k != "mtimes" and before[k] != after[k]]
+    freshened_ok = set(p for p in before["objects"]
+                       if before["objects"][p] == after["objects"].get(p))
+    moved = [p for p in set(before["mtimes"]) | set(after["mtimes"])
+             if before["mtimes"].get(p) != after["mtimes"].get(p) and p not in freshened_ok]
+    if moved:
+        diffs.append("mtimes")
+    return diffs
 
 
 def case_basefetch(tmp):
@@ -2654,6 +2834,11 @@ def case_basefetch(tmp):
           (0, "would-merge", unique, "refs/heads/author-saved"))
     check("fetch/private-dry-run-gitdir-unchanged",
           _gitdir_snapshot_diff(before, _gitdir_snapshot(fx.main)), [])
+    # QA round 5 (codex minor 4, claude minor 7): the apply snapshot must be sensitive on its own,
+    # not shielded by the dry run having already absorbed an author-side fetch: the remote base
+    # advances to a FOREIGN commit the author's repository does not have, so a reverted
+    # author-side fetch writes new objects there during the apply and this check alone goes red.
+    fx.foreign_commit(fx.remote_refs()["refs/heads/main"], "refs/heads/main")
     before_apply = _gitdir_snapshot(fx.main)
     rc2, reports2, _fatal = fx.run(apply=True)
     check("fetch/private-apply-gitdir-unchanged",
@@ -2700,7 +2885,36 @@ def case_basefetch(tmp):
     rc3, _reports, _fatal = fx2.run()
     check("fetch/private-submodule-not-recursed",
           (rc3, _git_text(sub, "rev-parse", "refs/heads/saved")), (0, sub_unique))
-    check("fetch/private-invariants", _invariants(fx, fx2), [])
+    # codex round-5 major 1: the author's repository is a PARTIAL clone and the commit named by
+    # its remote-tracking ref is a missing PROMISED object (it exists only on the remote). The
+    # author-side rev-parse that seeds negotiation must fail closed under GIT_NO_LAZY_FETCH,
+    # never launch a lazy fetch, which would execute the configured remote.origin.uploadpack and
+    # write pack files into the author's object store. The run itself still succeeds: the private
+    # base fetch gets the commit from the remote without the seed.
+    fx3 = _fixture(tmp, "basefetch-lazy")
+    _stale_pr(fx3)
+    up3_fired = Path(tmp) / "basefetch-lazy-uploadpack-fired"
+    up3 = Path(tmp) / "basefetch-lazy-uploadpack"
+    up3.write_text('#!/bin/sh\n: > \'%s\'\nexec git upload-pack "$@"\n' % up3_fired,
+                   encoding="utf-8")
+    up3.chmod(0o755)
+    for key, value in (("remote.origin.promisor", "true"),
+                       ("remote.origin.partialclonefilter", "blob:none"),
+                       ("remote.origin.uploadpack", str(up3))):
+        _git(fx3.main, "config", key, value)
+    foreign = fx3.foreign_commit(fx3.remote_refs()["refs/heads/main"], "refs/heads/main")
+    # The tracking ref names the foreign commit the author's store does not have: written as a
+    # loose ref file, because update-ref would itself refuse (or lazily fetch) the missing object.
+    ref_path = fx3.main / ".git" / "refs" / "remotes" / "origin" / "main"
+    ref_path.parent.mkdir(parents=True, exist_ok=True)
+    ref_path.write_text(foreign + "\n", encoding="utf-8")
+    before_lazy = _gitdir_snapshot(fx3.main)
+    rc4, reports4, _fatal = fx3.run()
+    check("fetch/private-no-lazy-fetch",
+          (rc4, _result(reports4, 1), up3_fired.exists(),
+           _gitdir_snapshot_diff(before_lazy, _gitdir_snapshot(fx3.main))),
+          (0, "would-merge", False, []))
+    check("fetch/private-invariants", _invariants(fx, fx2, fx3), [])
 
 
 def case_leak(tmp):
@@ -2760,7 +2974,8 @@ def case_signal(tmp):
     # the conventional killed-by-signal status. The tool runs as a subprocess, so the fixture
     # invariant recorder does not apply here; the remote is asserted directly.
     for signum, check_id in ((signal.SIGTERM, "signal/sigterm-cleans-up"),
-                             (signal.SIGHUP, "signal/sighup-cleans-up")):
+                             (signal.SIGHUP, "signal/sighup-cleans-up"),
+                             (signal.SIGQUIT, "signal/sigquit-cleans-up")):
         name = "sig%d" % signum
         fx = _fixture(tmp, name)
         wt = _stale_pr(fx)
@@ -2772,10 +2987,14 @@ def case_signal(tmp):
         plain = 'regenerate = [["%s", "-I", "-B", "tools/gen.py"]]' % sys.executable
         # The sleeping regenerate command spawns its OWN child (a grandchild of the tool), so the
         # case also pins the process-GROUP termination: round-4 M1 showed a plain kill of the
-        # direct child leaves such a grandchild running in the scratch TMPDIR.
+        # direct child leaves such a grandchild running in the scratch TMPDIR. The grandchild
+        # IGNORES SIGTERM (round-5: codex major 2, claude major 1), so the case also pins the
+        # post-exit group probe and SIGKILL: the direct child dies on the group SIGTERM, and the
+        # stubborn grandchild must still be gone when the tool exits.
         sleeper = ('regenerate = [["%s", "-I", "-B", "tools/gen.py"], ["%s", "-c", "import os,'
                    " subprocess, sys, time; gc = subprocess.Popen([sys.executable, '-c',"
-                   " 'import time; time.sleep(300)']);"
+                   " 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+                   " time.sleep(300)']);"
                    " open(os.environ['SIG_PID_FILE'],'w').write(str(os.getpid()) + ' ' +"
                    ' str(gc.pid)); time.sleep(120)"]]') % (sys.executable, sys.executable)
         fx.write(fx.main, CONFIG_PATH, text.replace(plain, sleeper))
@@ -2849,7 +3068,110 @@ def case_signal(tmp):
               (started, rc, sleeper_dead, leftovers, stale_locks, lock_free, _has_marker(wt),
                fx.remote_ref("feat/x"), _snapshot_diff(before, _snapshot(wt))),
               (True, -signum, True, [], [], True, False, old, []))
+    _sigterm_during_push(tmp)
+    _launch_window(tmp)
     _second_signal_during_cleanup(tmp)
+
+
+def _sigterm_during_push(tmp):
+    # QA round 5 (claude minor 7, codex minor 4): the SIGTERM-first contract exercised against a
+    # REAL git operation that HOLDS LOCK FILES when the signal lands. The remote's
+    # reference-transaction hook parks the push at "prepared", the moment receive-pack holds the
+    # ref lock(s) for the update, so the SIGTERM arrives while git push, git receive-pack and the
+    # hook are all alive in the child's process group: git's lockfile handler runs on SIGTERM
+    # (a plain unlink, async-signal-safe) and removes them, so no stale *.lock may remain in the
+    # push-target repository or the author's. A SIGKILL-only mutant leaves the ref locks behind
+    # and goes red here. NOT asserted: the receive-pack quarantine (objects/tmp_objdir-*), which
+    # git itself deliberately leaves behind on ANY signalled death (its removal is not
+    # async-signal-safe), SIGTERM and SIGKILL alike. The marker is expected to REMAIN: the push's
+    # outcome is unknown, which is exactly what the retry reconciles.
+    fx = _fixture(tmp, "sigpush")
+    wt = _stale_pr(fx)
+    old = fx.remote_ref("feat/x")
+    started_file = fx.base / "push-started"
+    hook = fx.remote / "hooks" / "reference-transaction"
+    hook.write_text('#!/bin/sh\ncat > /dev/null\nif [ "$1" = prepared ]; then : > \'%s\';'
+                    " sleep 60; fi\nexit 0\n" % started_file, encoding="utf-8")
+    hook.chmod(0o755)
+    env = dict(os.environ)
+    env.update(FAKE_GH_STATE=str(fx.state), PATH=str(fx.bin) + os.pathsep + fx.path)
+    proc = subprocess.Popen([sys.executable, "-I", "-B", str(Path(__file__).resolve()),
+                             "--repo", str(fx.main), "--apply"], cwd=str(fx.base), env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    deadline = time.time() + 120
+    while time.time() < deadline and proc.poll() is None and not started_file.exists():
+        time.sleep(0.1)
+    started = started_file.exists()
+    proc.send_signal(signal.SIGTERM)
+    try:
+        rc = proc.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        rc = proc.wait()
+    proc.stdout.close()
+    proc.stderr.close()
+    stale = []
+    common = _git_text(fx.main, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    for walk_root in (common, str(fx.remote)):
+        for dirpath, _dirnames, filenames in os.walk(walk_root):
+            for fname in filenames:
+                if fname.endswith(".lock") and fname != LOCK_NAME:
+                    stale.append(os.path.relpath(os.path.join(dirpath, fname), walk_root))
+    check("signal/sigterm-during-push-no-stale-locks",
+          (started, rc, sorted(stale), fx.remote_ref("feat/x"), _has_marker(wt)),
+          (True, -signal.SIGTERM, [], old, True))
+
+
+def _launch_window(tmp):
+    # QA round 5 (codex major 3, claude minor 5): a SIGTERM delivered between the fork and the
+    # registration of the child handle must not leak the just-created session. The launch runs
+    # with SIGTERM, SIGHUP and SIGQUIT blocked; the pending signal is delivered at the restore
+    # INSIDE the protected region and ends the child like any other unwind. Deterministic and
+    # in-process: Popen is patched to send this process a real SIGTERM right after the sleeping
+    # regenerate child is created, the exact window codex reproduced.
+    fx = _fixture(tmp, "launchwin")
+    _stale_pr(fx)
+    text = _read_text(fx.main / CONFIG_PATH)
+    plain = 'regenerate = [["%s", "-I", "-B", "tools/gen.py"]]' % sys.executable
+    marker = "import time; time.sleep(120)"
+    sleeper = ('regenerate = [["%s", "-I", "-B", "tools/gen.py"], ["%s", "-c", "%s"]]'
+               % (sys.executable, sys.executable, marker))
+    fx.write(fx.main, CONFIG_PATH, text.replace(plain, sleeper))
+    _git(fx.main, "commit", "-q", "-am", "sleeping regenerate", extra_env=FIXTURE_IDENT)
+    _git(fx.main, "push", "-q", "origin", "main")
+    made = len(SCRATCHES)
+    real_popen = subprocess.Popen
+    state = dict(proc=None)
+
+    def kicking_popen(argv, **kwargs):
+        proc = real_popen(argv, **kwargs)
+        if state["proc"] is None and marker in list(argv):
+            state["proc"] = proc
+            os.kill(os.getpid(), signal.SIGTERM)
+        return proc
+
+    subprocess.Popen = kicking_popen
+    outcome = None
+    try:
+        fx.run(apply=True)
+    except _Signalled as sig:
+        outcome = sig.signum
+    finally:
+        subprocess.Popen = real_popen
+    created = SCRATCHES[made:]
+    alive = state["proc"] is not None and state["proc"].poll() is None
+    if alive:
+        try:
+            os.killpg(state["proc"].pid, signal.SIGKILL)
+        except OSError:
+            pass
+        state["proc"].wait()
+    check("signal/launch-window-covered",
+          (state["proc"] is not None, outcome, alive,
+           [p for p in created if os.path.exists(p)],
+           sorted(s.name for s in signal.pthread_sigmask(signal.SIG_BLOCK, set())
+                  if s in (signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT))),
+          (True, signal.SIGTERM, False, [], []))
 
 
 def _second_signal_during_cleanup(tmp):
