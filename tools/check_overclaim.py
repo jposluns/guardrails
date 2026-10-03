@@ -3407,9 +3407,11 @@ def _page_bound_source_self_test():
                                     .format(tag))
         # (n4b) the other grammar refusals of a rule source are flagged with their OWN channel label, file,
         # line and grammar message, not only the title cases above: a refused body line, a duplicate split,
-        # a split with no blank line above it, and a body with no title line (no line to name). MUTATION:
-        # labelling every BodyGrammarError "title" fails the three body cases; formatting the no-title
-        # finding with a line ("line None") fails the last case.
+        # a split with no blank line above it, a body with no title line (no line to name), and a line that
+        # reads as Detail but is not the split line, in the body and in the title. MUTATION: labelling
+        # every BodyGrammarError "title" fails the four body cases; formatting the no-title finding with a
+        # line ("line None") fails the no-title case; forcing the reads-as-Detail raise's channel to
+        # "title" fails body-reads-detail, and forcing it to "body" fails title-reads-detail.
         body = "A rule for the enforcement-register self-test corpus."
         grammar_cases = [
             ("body-refused", body, "> Refused body", "body source [rule-aa.md: line 11]: ",
@@ -3421,6 +3423,10 @@ def _page_bound_source_self_test():
              "rule-aa.md: line 12: the '## Detail' split needs a blank line directly above it"),
             ("no-title", "# Title of ruleaa\n\n" + body + "\n", "", "title source [rule-aa.md]: ",
              "rule-aa.md: the body has no title line ('# ' and its text)"),
+            ("body-reads-detail", body, body + "\n\n**Details**", "body source [rule-aa.md: line 13]: ",
+             "rule-aa.md: line 13: '**Details**' reads as Detail but is not the split line '## Detail'"),
+            ("title-reads-detail", "# Title of ruleaa", "# Details", "title source [rule-aa.md: line 9]: ",
+             "rule-aa.md: line 9: '# Details' reads as Detail but is not the split line '## Detail'"),
         ]
         for name, needle, replacement, where, message in grammar_cases:
             fs = inject_and_scan(name, ".aiqt/core/rules/rule-aa.md", needle, replacement)
