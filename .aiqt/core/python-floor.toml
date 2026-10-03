@@ -1,0 +1,23 @@
+# .aiqt/core/python-floor.toml
+#
+# The SINGLE SOURCE for the Python floor of the pack's executable tooling (PYTHON-FLOOR): the oldest
+# Python minor version every shipped entrypoint supports. Hand-authored SOURCE; tools/check_python_floor.py
+# reads it and checks that every other statement of the floor (the CI and template interpreter pins, each
+# entrypoint's refusal guard and, once switched on, the declarations) agrees with it.
+#
+# python-floor        "MAJOR.MINOR". The gate asserts it names the decided floor, so a change here is a
+#                     reviewed change to that gate too, never a silent edit.
+# guarded-surfaces    the repo-relative entrypoints that carry the canonical refusal guard, sorted and
+#                     unique. Each is checked statically (the guard leads the file) and dynamically (run
+#                     in a child with a patched sys.version_info below the floor, it refuses with the exact
+#                     message and exit code). It starts EMPTY and grows unit by unit.
+# completeness-check  false until every shipped entrypoint is listed above; true then makes an unlisted
+#                     shipped entrypoint a finding.
+# documentation-check false until the declarations land; true then requires each declaration file to state
+#                     the floor.
+
+format-version = 1
+python-floor = "3.14"
+guarded-surfaces = []
+completeness-check = false
+documentation-check = false

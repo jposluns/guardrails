@@ -19,6 +19,7 @@
 .aiqt/core/order.toml text eol=lf
 .aiqt/core/ownership.toml text eol=lf
 .aiqt/core/profiles/worker-pack.md text eol=lf
+.aiqt/core/python-floor.toml text eol=lf
 .aiqt/core/references.toml text eol=lf
 .aiqt/core/releases.toml text eol=lf
 .aiqt/core/renderers.toml text eol=lf
@@ -662,6 +663,7 @@ tools/check_no_dashes.py text eol=lf
 tools/check_opf_standalone_closure.py text eol=lf
 tools/check_overclaim.py text eol=lf
 tools/check_portability.py text eol=lf
+tools/check_python_floor.py text eol=lf
 tools/check_python_launcher_isolation.py text eol=lf
 tools/check_record_drift.py text eol=lf
 tools/check_record_sections.py text eol=lf
