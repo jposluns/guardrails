@@ -86,8 +86,8 @@ sidebar-active = "teams"
     </ul>
     <p style="margin-top:1rem">Three of these lead to the two ideas we are considering, below:
       the shared record to the web console, and central deployment and admin controls to
-      enterprise management. The other two, technical enforcement and commercial support, are
-      not offered today; AIQT is an open project, not a commercial product with a support desk.</p>
+      enterprise management. The other two, technical enforcement and commercial support, are not
+      among them.</p>
   </div>
 </section>
 

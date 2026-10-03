@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "064227bf57daec8a35204eb0a280756a3bcae87a9146da7039d78d4855a56054"
+tree-sha256 = "75f10831b9a80d3bda0bb8fee02aab68d8ed7c7a1632825d58b0833270e474e2"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2406,8 +2406,8 @@ sha256 = "2107eb0ae021c8abc849693590810af430326747ee0a8d4978b8bbe92714899a"
 
 [[sources]]
 path = "docs/teams.md"
-bytes = 10098
-sha256 = "fb953a14989b8657ac0d1bed971cce443d28533be16f91aaf33f55fb980348ba"
+bytes = 10024
+sha256 = "2818866d1bd23a906f4b6f7350dd6d97cbb4791b20626854c77b2e1e40f1b348"
 
 [[sources]]
 path = "opf/enforcement/ci/github-actions.yml"
@@ -3106,13 +3106,13 @@ sha256 = "3a7c8983ab9fca0e04dc69f88afef82b0ff9e533dc150c86f250aae2c3a4d3d3"
 
 [[sources]]
 path = "site/teams.html"
-bytes = 13961
-sha256 = "1ea64dc1629d587e344a736fb4913f0b9530f8ee045b645df440541a96955aa5"
+bytes = 13887
+sha256 = "b92f3ad68ff7fc20fa7c9f8100b1692575471961fdbd833dd114a806c36a23e5"
 
 [[sources]]
 path = "site/tech-details.html"
-bytes = 22839
-sha256 = "20dd6485a5c4ff062edca1801608f22301ed1710482d7646f536ff8ab59457ec"
+bytes = 22934
+sha256 = "140095a07363448badf8012dba0021888c62156ded5a5c702fa393b41c0f66b7"
 
 [[sources]]
 path = "site/theme.js"
