@@ -21,7 +21,7 @@ sidebar-active = "evidence"
     <p class="eyebrow">The release</p>
     <h2>AIQT 1.0.5</h2>
     <ul class="clean">
-      <li><b style="color:var(--ink)">Version:</b> 1.0.5, the chat-assistant Skill.</li>
+      <li><b style="color:var(--ink)">Version:</b> 1.0.5, the chat-assistant Skill. The chat skill now served from the install page is 1.0.6 under the Apache License 2.0.</li>
       <li><b style="color:var(--ink)">The artefact:</b> the packaged skill zip, plus a
         portable instruction file, both on the <a href="/install">install page</a>.</li>
       <li><b style="color:var(--ink)">Built from:</b> <span class="evidence-label">the exact source tag or commit: pending</span></li>
