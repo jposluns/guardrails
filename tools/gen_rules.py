@@ -78,7 +78,8 @@ RULE SOURCE FORMAT (the two-layer split; this step parses and validates it, and 
   refused, although YAML reads it as a line break. The pack's own corpus (gen_rules, check_clauses)
   keeps LF only and no comment line.
   ADOPTER NOTE: an adopter rule file that passed the placement gate before this typed grammar may now be
-  refused. The refusal names the file and quotes the line or value. The newly refused shapes are:
+  refused. Any frontmatter outside the FRONTMATTER grammar above is refused, and the refusal names the
+  file and quotes the line or value. The commonest examples (the list is not complete) are:
     - a quoted tier (`tier: "10"`): write it bare (`tier: 10`);
     - a bare slug or corpus-id that starts with a digit (`slug: 1-team`, `corpus-id: 1teamr`): quote it
       (`slug: "1-team"`); a corpus-id of digits only with no leading zero is still accepted bare;
@@ -89,8 +90,14 @@ RULE SOURCE FORMAT (the two-layer split; this step parses and validates it, and 
     - a tab outside a comment (after a key's colon, in a value, or before a `#`): use spaces;
     - spaces before a key, including a whole frontmatter block indented alike (YAML reads that as a
       mapping), or no space after a key's colon (`slug:team-review`): write each `key: value` at column 0;
-    - a hidden or format character (such as U+200B, U+00AD or U+FEFF) anywhere in the frontmatter,
-      including in a comment line: delete it;
+    - a hidden or format character (such as U+200B, U+00AD or U+FEFF) other than ZWNJ and ZWJ (U+200C,
+      U+200D), which the grammar allows, anywhere in the frontmatter, including in a comment line:
+      delete it;
+    - a non-ASCII space (U+00A0, U+3000 or any other Unicode space separator) anywhere in a line or
+      alone on a line, except after a comment's `#` and between the words of a detail-trigger or
+      detail-reason value: use an ASCII space or delete it;
+    - non-ASCII digits in a number (`tier: 10` written in Arabic-Indic digits U+0661 U+0660 or in
+      fullwidth digits U+FF11 U+FF10): write ASCII digits;
     - a mapping id outside the id grammar (`A_1`, `"A.5/1"`), or a bare float id that does not print back
       as itself (`6.70`, `6.0`, `0.00001`): quote a float id (`["6.70"]`) and reword any other id.
   In a renderer that does not read frontmatter, the opening `---` is a thematic break and the frontmatter
@@ -737,6 +744,14 @@ _ADOPTER_MODE_REVERTS = (
 # skipped as a comment). (fixed text, reverted text)
 _ADOPTER_DROP_KEY = ('comment = raw.lstrip(" ").startswith("#")',
                      'comment = raw.lstrip(" ").startswith(("#", "facet") if adopter else "#")')
+# Red on revert for the PyYAML value comparison, which ADOPTER MODE and the strict read share: the read
+# made to alter one value and keep every key (the slug gets a suffix), in each mode alone.
+# (fixed text, reverted text)
+_FM_VALUE = '_value(key, val.strip(" "))'
+_ADOPTER_ALTER_VALUE = ("fm[key] = " + _FM_VALUE,
+                        "fm[key] = {} + '-x' if adopter and key == 'slug' else {}".format(_FM_VALUE, _FM_VALUE))
+_STRICT_ALTER_VALUE = ("fm[key] = " + _FM_VALUE,
+                       "fm[key] = {} + '-x' if not adopter and key == 'slug' else {}".format(_FM_VALUE, _FM_VALUE))
 
 
 def _yaml_compare(name, mine, theirs, failures):
@@ -1786,7 +1801,8 @@ def self_test_main():
         if agreement is not None:
             failures.extend("YAML agreement: " + f for f in agreement[0][:20])
         # The accepted adopter-mode cases read alike to PyYAML in ADOPTER MODE, and the comparison goes red
-        # when ADOPTER MODE is made to drop a key (here, by skipping the facet line as a comment).
+        # when ADOPTER MODE is made to drop a key (here, by skipping the facet line as a comment) or to
+        # alter a value (the slug); the strict comparison goes red when the strict read alters a value.
         adopter_accepted = [adopter_paths[c[0]] for c in _ADOPTER_MODE_CASES]
         adopter_agreement = _yaml_adopter_agreement(adopter_accepted)
         if adopter_agreement is not None:
@@ -1801,6 +1817,28 @@ def self_test_main():
                     failures.append("revert adopter-yaml-drop-key: with ADOPTER MODE dropping the facet key, "
                                     "the PyYAML comparison expected a key difference for each of the {} "
                                     "adopter-mode case(s), got {!r}".format(len(adopter_accepted), dropped))
+            try:
+                mutant = _load_reverted(revert_base, "adopter-yaml-alter-value", *_ADOPTER_ALTER_VALUE)
+            except AssertionError as exc:
+                failures.append(str(exc))
+            else:
+                altered = mutant._yaml_adopter_agreement(adopter_accepted)
+                if len([f for f in altered if ": slug: " in f and f.endswith(" to YAML")]) != len(adopter_accepted):
+                    failures.append("revert adopter-yaml-alter-value: with ADOPTER MODE altering the slug value, "
+                                    "the PyYAML comparison expected a value difference for each of the {} "
+                                    "adopter-mode case(s), got {!r}".format(len(adopter_accepted), altered))
+        if agreement is not None:
+            try:
+                mutant = _load_reverted(revert_base, "strict-yaml-alter-value", *_STRICT_ALTER_VALUE)
+            except AssertionError as exc:
+                failures.append(str(exc))
+            else:
+                (tmp / "strict-value").mkdir()
+                altered = mutant._yaml_agreement(repo_root(), tmp / "strict-value")
+                if len([f for f in altered[0] if ": slug: " in f and f.endswith(" to YAML")]) != sum(altered[1:3]):
+                    failures.append("revert strict-yaml-alter-value: with the strict read altering the slug value, "
+                                    "the PyYAML comparison expected a value difference for each of the {} live "
+                                    "and fuzzed source(s), got {!r}".format(sum(altered[1:3]), altered[0][:5]))
 
         for label, old, new, case in _PARSE_REVERTS:
             source = _detail_case_root(revert_base / label, case) / ".aiqt" / "core" / "rules" / \
@@ -1839,7 +1877,8 @@ def self_test_main():
               "PyYAML agreement NOT RUN (PyYAML is not importable)" if agreement is None else
               "PyYAML safe_load reads the same keys and values for {} live source(s), {} fuzzed "
               "frontmatter(s) ({} disclosed bare float id(s)) and {} adopter-mode case(s) read in ADOPTER "
-              "MODE (red when ADOPTER MODE drops a key)".format(*agreement[1:], len(_ADOPTER_MODE_CASES))))
+              "MODE (red when either read alters a value and when ADOPTER MODE drops a key)".format(
+                  *agreement[1:], len(_ADOPTER_MODE_CASES))))
     return 0
 
 
