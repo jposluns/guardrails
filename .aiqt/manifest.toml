@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "0c2c08605a01bbf92b05c87cba115d4c664679974b10b7cbefc0e025459cd187"
+tree-sha256 = "fa142eca2a12805de432864278f9ff9e1162906c359044ea851819a6c8bd4be8"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -122,7 +122,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 2952
-sha256 = "42397bccf0b75e95f3ef712b70b747fd4387754f9caef7af6d565bb74c450c05"
+sha256 = "819a1394aa8c2879fbf34fa60095d58445887e339bd702365c8a1ecc8ea264c3"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -2326,8 +2326,8 @@ sha256 = "68c58a0a2af9e5c5b36fc21b24745ba134e2ef09fd1761ff340c99cba57ae3b8"
 
 [[sources]]
 path = "RELEASING.md"
-bytes = 7729
-sha256 = "bb91509efef3803c2085fef7bf3719479338fb433f059f1a8a889b72808c1b13"
+bytes = 7917
+sha256 = "d0ed2794153198d39cbef79c4ef058e5354520647a084ad4573a2f70922e9cc8"
 
 [[sources]]
 path = "ROADMAP.md"
@@ -3516,8 +3516,8 @@ sha256 = "99c16ff5708470fb2580288d592513d1206c4284976fa7b61307758a38c39bcd"
 
 [[sources]]
 path = "tools/gen_skill.py"
-bytes = 86960
-sha256 = "eec80eeb64b207856dc2ea903277ab0e25b1f7c7f9f58202705363f4ebbc9569"
+bytes = 105133
+sha256 = "1acc2d0455e70680a9326b90ccff603abc7220fa86a406c272906128ee195939"
 
 [[sources]]
 path = "tools/gen_worker_pack.py"

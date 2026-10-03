@@ -25,15 +25,22 @@ aiqt-skill.zip, the current aiqt-skill-<version>.zip), the generated aiqt/ direc
 outputs of the two sibling owners, read from each owner's own table (gen_mappings.GENSRC_OUTPUTS:
 mappings.csv and mappings.json; check_sized_instructions.SIZED: the three sized condensations). Any OTHER
 entry, whatever its name, case or type (a stale versioned zip, a backup, a case or separator variant, a
-symlink, directory or special file), fails closed, naming the entry for the maintainer to remove with git rm
-(a normal run exits 2 before writing anything; --check exits 1). The generator never deletes a file
-ANYWHERE: an orphan in the reserved site/downloads/aiqt/ tree is likewise named for git rm (normal run
-exit 2, --check exit 1), never unlinked. Every output is read and written relative to directory
-descriptors: each parent component is opened with O_DIRECTORY|O_NOFOLLOW from the repository root down, the
-temporary file is created O_EXCL|O_NOFOLLOW at that descriptor, fsynced, and renamed over the target with
-os.replace anchored to the same descriptor, so a symlink at any component, or a parent directory swapped
-mid-run, cannot redirect a read or write outside the repository (each operation binds to the held
-descriptor, not to a re-resolved path).
+symlink, directory or special file), fails closed, naming the entry for the maintainer to remove (git rm
+if tracked, rm if untracked: an interrupted run's leftover temporary file is untracked). A normal run exits 2
+before writing anything; --check exits 1. The generator never deletes a file ANYWHERE: an orphan in the
+reserved site/downloads/aiqt/ tree is likewise named for removal (normal run exit 2 before writing anything,
+--check exit 1), never unlinked. Every output is read and written relative to directory descriptors: the
+repository root is opened ONCE per run and every walk starts from that one descriptor; each parent component
+is opened with O_DIRECTORY|O_NOFOLLOW from it, the temporary file is created O_EXCL|O_NOFOLLOW at the
+parent's descriptor, fsynced, and renamed over the target with os.replace anchored to the same descriptor.
+
+Threat model (D-399-STATIC-THREAT-MODEL): the generator defends against hostile STATIC tree state, anything a
+hostile commit can plant (a symlink at any component, a hard link, a FIFO or device, a wrong type, an orphan,
+an unknown entry), and fails closed on it: such an entry is refused or named, never read through, written
+through or deleted. It does NOT claim defence against a CONCURRENT writer racing the run inside the
+checkout: whoever can write the checkout during the run can rewrite this generator itself. Disclosed
+residual: a held descriptor pins a directory's inode, not its ancestry, so a directory renamed out of the
+repository mid-run, or a file moved onto this run's temporary name during the run, is out of scope.
 
   gen_skill.py            regenerate every output
   gen_skill.py --check    fail (exit 1) on drift; exit 2 on a malformed source or an unknown corpus-id
@@ -97,7 +104,12 @@ ATTRIBUTION_SOURCE_URL = "https://github.com/jposluns/guardrails"
 # that forgets the evidence page is caught as drift. The page itself stays hand-authored (gen_site renders
 # it to site/evidence.html); this gate verifies, it never writes there.
 EVIDENCE_PARTS = ("docs", "evidence.md")
-_EVIDENCE_SKILL_SENTENCE = re.compile(r"served from the install page is (\d+\.\d+\.\d+)")
+# The sentence is matched across any whitespace run (a wrapped line renders as one sentence) and its version
+# token is captured whole (every version character up to the first non-version one, a sentence-final dot
+# excluded), so '1.0.6.9' or '1.0.6-rc1' is captured as itself and never passes as '1.0.6'. HTML comments
+# are stripped first: only a rendered occurrence counts, and the page must carry exactly one.
+_EVIDENCE_SKILL_SENTENCE = re.compile(r"served\s+from\s+the\s+install\s+page\s+is\s+([0-9A-Za-z.+-]*[0-9A-Za-z+-])")
+_HTML_COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.S)
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
 # only, it does not affect what this generator produces.
@@ -453,100 +465,93 @@ def versioned_zips(downloads_dir):
                   if is_versioned_zip(fn) and _is_regular(os.path.join(downloads_dir, fn)))
 
 
-def latest_only_problems(downloads_dir, current_versioned, require_current):
-    """Latest-only plus ALLOW-LIST (D-SKILL-LATEST-ONLY) scan of the top level of downloads_dir, by lstat,
-    never following a link. The only entries permitted are this generator's declared outputs (the
-    instructions file, the alias aiqt-skill.zip, and current_versioned), each a regular file, the sibling
-    owners' declared top-level outputs (_sibling_downloads_outputs, read from their own tables), and the
-    reserved aiqt/ directory, which must be a real directory by lstat (anything else at that name raises
-    OSError: fail-closed exit 2 in both modes, since every generated read and write runs under it). Every
-    OTHER entry, whatever its name, type or case, is a problem, never skipped and never deleted: a stale
-    versioned zip, an undeclared name (a backup, a case or separator variant, an unrelated file), or a
-    symlink, directory or special file. require_current adds a missing current versioned zip as a problem
-    (--check; a normal run writes it). Returns a list of messages, empty when clean; an unreadable dir
-    raises OSError (exit 2)."""
+def _remove_hint(rel_posix):
+    """The removal instruction for a refused entry. git rm works only on a tracked path; an untracked entry
+    (an interrupted run's leftover temporary file, a .DS_Store) needs a plain rm, so both are named."""
+    return "remove it with git rm {0} if tracked, or rm {0} if untracked".format(rel_posix)
+
+
+def latest_only_problems(root_fd, current_versioned, require_current):
+    """Latest-only plus ALLOW-LIST (D-SKILL-LATEST-ONLY) scan of the top level of site/downloads, opened from
+    the run's root descriptor by _open_dir_fd and judged by lstat relative to it, never following a link. The
+    only entries permitted are this generator's declared outputs (the instructions file, the alias
+    aiqt-skill.zip, and current_versioned), each a regular file, the sibling owners' declared top-level
+    outputs (_sibling_downloads_outputs, read from their own tables), and the reserved aiqt/ directory, which
+    must be a real directory by lstat (anything else at that name raises OSError: fail-closed exit 2 in both
+    modes, since every generated read and write runs under it). Every OTHER entry, whatever its name, type or
+    case, is a problem, never skipped and never deleted: a stale versioned zip, an undeclared name (a backup,
+    a leftover temporary file, a case or separator variant, an unrelated file), or a symlink, directory or
+    special file. require_current adds a missing current versioned zip as a problem (--check; a normal run
+    writes it). Returns a list of messages, empty when clean; an unreadable dir raises OSError (exit 2)."""
     problems = []
-    if dir_present(downloads_dir):
-        alias = ZIP_PARTS[-1]
-        reserved_name = RESERVED_PARTS[-1]
-        allowed = {INSTRUCTIONS_PARTS[-1], alias, current_versioned}
-        allowed.update(_sibling_downloads_outputs())
-        for fn in sorted(os.listdir(downloads_dir)):
-            full = os.path.join(downloads_dir, fn)
-            if fn == reserved_name:
+    dl_rel = "/".join(ZIP_PARTS[:-1])
+    dfd = _open_dir_fd(root_fd, ZIP_PARTS[:-1], dl_rel)
+    current_present = False
+    if dfd is not None:
+        try:
+            alias = ZIP_PARTS[-1]
+            reserved_name = RESERVED_PARTS[-1]
+            allowed = {INSTRUCTIONS_PARTS[-1], alias, current_versioned}
+            allowed.update(_sibling_downloads_outputs())
+            for fn in sorted(os.listdir(dfd)):
+                rel = "{}/{}".format(dl_rel, fn)
                 try:
-                    st = os.lstat(full)
+                    st = os.lstat(fn, dir_fd=dfd)
                 except FileNotFoundError:  # vanished between listdir and lstat: nothing there to judge
                     continue
-                if not stat.S_ISDIR(st.st_mode):
-                    raise OSError("refusing site/downloads/{}: it is a symlink or not a directory, so the "
-                                  "generated tree under it is not written or read through (remove it with "
-                                  "git rm and rerun)".format(fn))
-                continue
-            regular = _is_regular(full)
-            if regular is None:  # vanished between listdir and lstat: nothing there to judge
-                continue
-            if not regular:
-                problems.append("{} is a symlink, directory or special file, not a regular file (refused; "
-                                "remove it with git rm site/downloads/{})".format(fn, fn))
-            elif fn in allowed:
-                continue
-            elif is_versioned_zip(fn):
-                problems.append("{} is a stale versioned zip; only {} is served (remove it with git rm "
-                                "site/downloads/{})".format(fn, current_versioned, fn))
-            else:
-                problems.append("{} is not an allowed entry; only the declared outputs ({}) and the "
-                                "generated {}/ directory may sit here (remove it with git rm "
-                                "site/downloads/{})".format(fn, ", ".join(sorted(allowed)),
-                                                            reserved_name, fn))
-    if require_current and _is_regular(os.path.join(str(downloads_dir), current_versioned)) is None:
+                if fn == reserved_name:
+                    if not stat.S_ISDIR(st.st_mode):
+                        raise OSError("refusing {}: it is a symlink or not a directory, so the generated tree "
+                                      "under it is not written or read through ({}, and rerun)".format(
+                                          rel, _remove_hint(rel)))
+                    continue
+                if not stat.S_ISREG(st.st_mode):
+                    problems.append("{} is a symlink, directory or special file, not a regular file (refused; "
+                                    "{})".format(fn, _remove_hint(rel)))
+                elif fn in allowed:
+                    current_present = current_present or fn == current_versioned
+                    continue
+                elif is_versioned_zip(fn):
+                    problems.append("{} is a stale versioned zip; only {} is served ({})".format(
+                        fn, current_versioned, _remove_hint(rel)))
+                else:
+                    problems.append("{} is not an allowed entry; only the declared outputs ({}) and the "
+                                    "generated {}/ directory may sit here ({})".format(
+                                        fn, ", ".join(sorted(allowed)), reserved_name, _remove_hint(rel)))
+                if fn == current_versioned:
+                    current_present = True  # present but refused above: named there, not as missing
+        finally:
+            os.close(dfd)
+    if require_current and not current_present:
         problems.append("the current versioned zip {} is missing (found 0; run tools/gen_skill.py)".format(
             current_versioned))
     return problems
 
 
-def _refuse_link_path(root, path, want_dir=False):
-    """Fail closed (OSError) if path, or any directory between root and path, is a symlink or not the
-    expected kind (a directory for a parent, a regular file for the target, or a directory when want_dir),
-    checked by lstat. Absent components are fine (a normal run creates them as real directories). This is a
-    path-based REPORTING guard for the read-only orphan walk (which never deletes or writes); enforcement
-    for every output read and write is the descriptor walk in _open_dir_fd, which has no check-to-use
-    gap."""
-    rel = Path(path).relative_to(root)
-    cur = Path(root)
-    for i, part in enumerate(rel.parts):
-        cur = cur / part
-        try:
-            st = os.lstat(cur)
-        except FileNotFoundError:
-            return
-        last = i == len(rel.parts) - 1 and not want_dir
-        if not (stat.S_ISREG(st.st_mode) if last else stat.S_ISDIR(st.st_mode)):
-            raise OSError("refusing {}: {} is a symlink or not a {}, so it is not written or read through "
-                          "(remove it with git rm and rerun)".format(
-                              rel.as_posix(), cur.relative_to(root).as_posix(),
-                              "regular file" if last else "directory"))
-
-
 def _refusal(rel_posix, comp_posix, kind):
     """The shared fail-closed refusal for a component that is a symlink or not the expected kind."""
     return OSError("refusing {}: {} is a symlink or not a {}, so it is not written or read through "
-                   "(remove it with git rm and rerun)".format(rel_posix, comp_posix, kind))
+                   "({}, and rerun)".format(rel_posix, comp_posix, kind, _remove_hint(comp_posix)))
 
 
-def _open_dir_fd(root, rel_parts, target_rel, create=False):
-    """Open the directory root/<rel_parts> and return its file descriptor, walking ONE COMPONENT AT A TIME
-    with os.open(O_RDONLY | O_DIRECTORY | O_NOFOLLOW, dir_fd=<previous component's fd>). Every component is
-    bound at open time: a symlink or non-directory anywhere on the walk is refused by the kernel
-    (ELOOP/ENOTDIR, surfaced as the shared refusal OSError), and once a component's descriptor is held, a
-    concurrent rename or symlink swap of that component cannot redirect later operations, because they run
-    relative to the descriptor, not a re-resolved path. The repository root itself is opened by path once,
-    without O_NOFOLLOW (a checkout legitimately reachable through a symlinked ancestor, e.g. /var/tmp, is
-    the trusted anchor). With create=True an absent component is created (os.mkdir with dir_fd, then
-    reopened with O_NOFOLLOW, so a swap between mkdir and open is still refused); with create=False an
-    absent component returns None. The caller must os.close the returned fd. target_rel is the output's
-    repo-relative posix path, used only in the refusal message."""
-    fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+def _open_root(root):
+    """Open the repository root ONCE per run; every walk below starts from this one descriptor, never from a
+    re-resolved root path. The root is opened without O_NOFOLLOW: a checkout legitimately reachable through
+    a symlinked ancestor (e.g. /var/tmp) is the trusted anchor. The caller must os.close it."""
+    return os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
+
+
+def _open_dir_fd(root_fd, rel_parts, target_rel, create=False):
+    """Open the directory <root>/<rel_parts> and return a NEW file descriptor for it, walking from the run's
+    root descriptor root_fd (see _open_root) ONE COMPONENT AT A TIME with
+    os.open(O_RDONLY | O_DIRECTORY | O_NOFOLLOW, dir_fd=<previous component's fd>). A symlink or
+    non-directory anywhere on the walk is refused by the kernel (ELOOP/ENOTDIR, surfaced as the shared
+    refusal OSError), so static tree state planted by a commit is never walked through. With create=True an
+    absent component is created (os.mkdir with dir_fd, then reopened with O_NOFOLLOW, so a link found at the
+    name on reopen is refused); with create=False an absent component returns None. root_fd stays open and
+    owned by the caller; the caller must os.close the returned fd. target_rel is the output's repo-relative
+    posix path, used only in the refusal message."""
+    fd = os.dup(root_fd)
     try:
         for i, part in enumerate(rel_parts):
             comp = "/".join(rel_parts[:i + 1])
@@ -559,7 +564,7 @@ def _open_dir_fd(root, rel_parts, target_rel, create=False):
                 try:
                     os.mkdir(part, dir_fd=fd)
                 except FileExistsError:
-                    pass  # raced into existence; the O_NOFOLLOW reopen below still refuses a link
+                    pass  # already there; the O_NOFOLLOW reopen below still refuses a link
                 try:
                     nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
                 except OSError as exc:
@@ -578,14 +583,15 @@ def _open_dir_fd(root, rel_parts, target_rel, create=False):
         raise
 
 
-def _read_output(root, path, binary):
-    """The current content of a generated output, or None when absent. Descriptor-anchored: the parent is
-    opened by _open_dir_fd and the target with O_NOFOLLOW relative to it, then fstat-verified a regular
-    file, so a symlink or non-regular file at the path, or a symlink anywhere on the parent walk, is
-    refused with OSError (exit 2), never read through (O_NONBLOCK keeps a FIFO at the name from blocking
-    the open; it is then refused by the fstat check)."""
+def _read_output(root_fd, root, path, binary):
+    """The current content of a generated output (or another file the gate reads, such as the evidence
+    page), or None when absent. Descriptor-anchored: the parent is opened by _open_dir_fd from the run's root
+    descriptor and the target with O_NOFOLLOW relative to it, then fstat-verified a regular file, so a symlink
+    or non-regular file at the path, or a symlink anywhere on the parent walk, is refused with OSError (exit
+    2), never read through (O_NONBLOCK keeps a FIFO at the name from blocking the open; it is then refused by
+    the fstat check)."""
     rel = Path(path).relative_to(root)
-    parent_fd = _open_dir_fd(root, rel.parts[:-1], rel.as_posix())
+    parent_fd = _open_dir_fd(root_fd, rel.parts[:-1], rel.as_posix())
     if parent_fd is None:
         return None
     try:
@@ -606,19 +612,29 @@ def _read_output(root, path, binary):
     return data if binary else data.decode("utf-8")
 
 
-def _write_output(root, path, content):
+def _temp_name(name):
+    """The temporary name beside output `name` (the self-test patches this to force a collision)."""
+    return ".{}.{}.tmp".format(name, os.urandom(4).hex())
+
+
+def _write_output(root_fd, root, path, content):
     """Write a generated output anchored to its parent directory's descriptor, never a re-resolved path:
-    _open_dir_fd walks (and with create, makes) every parent component under O_NOFOLLOW; a symlink or
-    non-regular file already at the target name is refused (lstat relative to the held descriptor); the
-    temporary file is created with O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW at that descriptor, written, flushed
-    and fsynced; then os.replace(src_dir_fd=..., dst_dir_fd=...) renames it over the target within the SAME
-    held directory, so a parent swapped between any two steps cannot redirect the write outside the
-    repository (a rename replaces the directory entry and never writes through a link; the narrow residual,
-    a regular file swapped for a symlink at the final name after the lstat, loses only that symlink entry
-    to the rename and still writes nothing outside). The mode follows the umask like a fresh write; text is
-    encoded UTF-8 with newlines untouched, byte-identical to the previous writer on POSIX."""
+    _open_dir_fd walks (and with create, makes) every parent component from the run's root descriptor under
+    O_NOFOLLOW; a symlink or non-regular file already at the target name is refused (lstat relative to the
+    held descriptor); the temporary file is created with O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW at that
+    descriptor (an existing file at the temporary name is never opened, truncated or reused: another name is
+    tried), written, flushed and fsynced; then os.replace(src_dir_fd=..., dst_dir_fd=...) renames it over the
+    target within the SAME held directory, replacing the directory entry rather than writing through it (a
+    hard-linked output keeps its other name's bytes). Under the static threat model (module docstring) this
+    means a link, hard link or special file planted in the tree is never written through and nothing outside
+    the repository is written. Disclosed residual, out of scope by that model: the held descriptor pins the
+    directory's inode, not its ancestry, so a CONCURRENT writer that renames the directory out of the
+    repository mid-run, swaps the final name for a symlink after the lstat (the rename then replaces that
+    symlink entry), or moves another file onto this run's temporary name before the cleanup unlink below,
+    is not defended against. The mode follows the umask like a fresh write; text is encoded UTF-8 with
+    newlines untouched, byte-identical to the previous writer on POSIX."""
     rel = Path(path).relative_to(root)
-    parent_fd = _open_dir_fd(root, rel.parts[:-1], rel.as_posix(), create=True)
+    parent_fd = _open_dir_fd(root_fd, rel.parts[:-1], rel.as_posix(), create=True)
     try:
         name = rel.parts[-1]
         try:
@@ -629,8 +645,8 @@ def _write_output(root, path, content):
             raise _refusal(rel.as_posix(), rel.as_posix(), "regular file")
         data = content if isinstance(content, bytes) else content.encode("utf-8")
         tfd = None
-        for _ in range(64):  # O_EXCL retry on a (user-planted) name collision; never reuses a file
-            tmp = ".{}.{}.tmp".format(name, os.urandom(4).hex())
+        for _ in range(64):  # O_EXCL retry on a name collision; never opens an existing file
+            tmp = _temp_name(name)
             try:
                 tfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666,
                               dir_fd=parent_fd)
@@ -647,7 +663,7 @@ def _write_output(root, path, content):
             os.replace(tmp, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         except BaseException:
             try:
-                os.unlink(tmp, dir_fd=parent_fd)  # this run's own temporary file only, never a user file
+                os.unlink(tmp, dir_fd=parent_fd)  # the temporary name this run created (static model)
             except OSError:
                 pass
             raise
@@ -815,8 +831,11 @@ def build_outputs(root):
 def run_gen(root, check):
     """Reconcile every output under root. Exit 0 in sync, 1 on drift (check mode), 2 on a malformed
     source, an unknown corpus-id, or a read/write failure. Mirrors gen_cursor.main()'s fail-closed shape:
-    dir_present (not is_dir) so an unreadable .aiqt/ parent fails closed, os.walk(onerror=raise) (not
-    rglob) for the orphan scan so an unreadable output dir fails closed instead of concealing an orphan."""
+    dir_present (not is_dir) so an unreadable .aiqt/ parent fails closed, and a walk whose errors raise so an
+    unreadable output dir fails closed instead of concealing an orphan. The repository root is opened ONCE
+    (_open_root) and that one descriptor anchors every scan, read and write of the run. Both scans (the
+    allow-list and the reserved-tree orphan scan) run BEFORE any write, so a normal run that refuses writes
+    nothing."""
     corpus_dir = root.joinpath(*CORPUS_PARTS)
     reserved_dir = root.joinpath(*RESERVED_PARTS)
     drift = []
@@ -825,7 +844,7 @@ def run_gen(root, check):
         raise exc
     try:
         # An absent corpus is a transition state (desired empty): the scan below then names every surviving
-        # output as an orphan for git rm, never concealed and never deleted. A PRESENT corpus with a
+        # output as an orphan for removal, never concealed and never deleted. A PRESENT corpus with a
         # missing/unreadable skill source is malformed (the
         # OSError from parse_source propagates here as exit 2), which is the correct fail-closed outcome.
         if dir_present(corpus_dir):
@@ -835,17 +854,18 @@ def run_gen(root, check):
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc))
         return 2
+    root_fd = None
     try:
+        root_fd = _open_root(root)
         # Latest-only plus allow-list (D-SKILL-LATEST-ONLY), run FIRST, before any write: exactly one
         # version-numbered skill zip is served, named for the skill meta version (build_outputs has already
         # asserted ZIP_VERSIONED_PARTS spells it), beside the alias, and the ONLY other top-level entries
         # permitted are the declared sibling outputs and the reserved aiqt/ directory. The generator never
-        # deletes here: an undeclared entry, whatever its name, type or case, is named for
-        # the maintainer to git rm. On --check that (or a missing current copy) is drift (exit 1); a normal
-        # run fails closed (exit 2) before touching any output. An extra entry is not an output, so the byte
-        # comparison below never sees it: this scan is the only detection for it.
-        downloads_dir = root.joinpath(*ZIP_PARTS[:-1])
-        problems = latest_only_problems(downloads_dir, ZIP_VERSIONED_PARTS[-1], check and bool(binary))
+        # deletes here: an undeclared entry, whatever its name, type or case, is named for the maintainer to
+        # remove (git rm if tracked, rm if untracked). On --check that (or a missing current copy) is drift
+        # (exit 1); a normal run fails closed (exit 2) before touching any output. An extra entry is not an
+        # output, so the byte comparison below never sees it: this scan is the only detection for it.
+        problems = latest_only_problems(root_fd, ZIP_VERSIONED_PARTS[-1], check and bool(binary))
         if problems:
             msg = ("latest-only: expected exactly one versioned skill zip under site/downloads, {} (the "
                    "declared skill version), beside {} and the other declared outputs: {}".format(
@@ -856,66 +876,66 @@ def run_gen(root, check):
             # --check reports this alone (exit 1) before reading any output, so a link at an output name
             # is named here rather than surfacing as the read refusal below.
             print("drift: " + msg)
-            print("remove each named entry with git rm, then run tools/gen_skill.py")
+            print("remove each named entry (git rm if tracked, rm if untracked), then run tools/gen_skill.py")
             return 1
-        for path, content in standalone:
-            current = _read_output(root, path, False)
-            if current != content:
-                drift.append(path.relative_to(root).as_posix())
-                if not check:
-                    _write_output(root, path, content)
-        # Named binary outputs (the download zip) reconcile on bytes, so a stale or hand-swapped archive
-        # is caught by the same drift gate as the text surfaces.
-        for path, content in binary:
-            current = _read_output(root, path, True)
-            if current != content:
-                drift.append(path.relative_to(root).as_posix())
-                if not check:
-                    _write_output(root, path, content)
-        for name, content in sorted(reserved_map.items()):
-            target = reserved_dir / name
-            current = _read_output(root, target, False)
-            if current != content:
-                drift.append((reserved_dir / name).relative_to(root).as_posix())
-                if not check:
-                    _write_output(root, target, content)
-        # Orphan scan over the reserved subtree ONLY (it is 100% generated). An entry with no backing
-        # output (a stale SKILL.md, a leftover references/ directory or file, ANY subdirectory or symlink:
-        # the generated tree is flat) is an orphan. The generator NEVER deletes it: a normal run fails
-        # closed (exit 2) and --check reports drift (exit 1), each naming the entry and the git rm to run.
-        # The reserved dir itself (and every parent) must be a real directory by lstat: os.walk follows a
-        # symlinked top, so a link here would make the scan name entries living outside the repository
-        # (the scan only reads names; every read and write above is descriptor-anchored).
-        _refuse_link_path(root, reserved_dir, want_dir=True)
+        # Orphan scan over the reserved subtree ONLY (it is 100% generated), also BEFORE any write. An entry
+        # with no backing output (a stale SKILL.md, a leftover temporary file, a references/ directory or
+        # file, ANY subdirectory or symlink: the generated tree is flat) is an orphan. The generator NEVER
+        # deletes it: a normal run fails closed (exit 2, having written nothing) and --check reports drift
+        # (exit 1), each naming the entry and how to remove it. The reserved dir is opened from the root
+        # descriptor with O_NOFOLLOW on every component (a symlinked reserved dir or parent is refused, exit
+        # 2), and os.fwalk lists it relative to that descriptor without following a link.
         orphans = []
-        if dir_present(reserved_dir):
-            for dirpath, dirs, filenames in os.walk(reserved_dir, onerror=_raise):
-                for fn in sorted(dirs) + sorted(filenames):
-                    rel = (Path(dirpath) / fn).relative_to(reserved_dir).as_posix()
-                    if rel not in reserved_map:
-                        orp = (reserved_dir / rel).relative_to(root).as_posix()
-                        orphans.append("orphan {} (not a generated output; remove it with git rm {})".format(
-                            orp, orp))
+        rfd = _open_dir_fd(root_fd, RESERVED_PARTS, "/".join(RESERVED_PARTS))
+        if rfd is not None:
+            try:
+                for dirpath, dirs, filenames, _dfd in os.fwalk(".", onerror=_raise, dir_fd=rfd):
+                    for fn in sorted(dirs) + sorted(filenames):
+                        rel = os.path.normpath(os.path.join(dirpath, fn)).replace(os.sep, "/")
+                        if rel not in reserved_map:
+                            orp = (reserved_dir / rel).relative_to(root).as_posix()
+                            orphans.append("orphan {} (not a generated output; {})".format(
+                                orp, _remove_hint(orp)))
+            finally:
+                os.close(rfd)
         if orphans:
             if not check:
                 print("error: the generator never deletes a file; " + "; ".join(orphans))
                 return 2
             drift.extend(orphans)
-        # Evidence currency (--check only; the page is hand-authored, so a normal run cannot fix it): the
-        # docs/evidence.md install-page sentence must name the declared skill version. Skipped when the
-        # page is absent (fixture trees) or there is no build (absent-corpus transition); an unreadable or
-        # non-UTF-8 page fails closed through the arm below.
+        for path, content in standalone:
+            current = _read_output(root_fd, root, path, False)
+            if current != content:
+                drift.append(path.relative_to(root).as_posix())
+                if not check:
+                    _write_output(root_fd, root, path, content)
+        # Named binary outputs (the download zip) reconcile on bytes, so a stale or hand-swapped archive
+        # is caught by the same drift gate as the text surfaces.
+        for path, content in binary:
+            current = _read_output(root_fd, root, path, True)
+            if current != content:
+                drift.append(path.relative_to(root).as_posix())
+                if not check:
+                    _write_output(root_fd, root, path, content)
+        for name, content in sorted(reserved_map.items()):
+            target = reserved_dir / name
+            current = _read_output(root_fd, root, target, False)
+            if current != content:
+                drift.append((reserved_dir / name).relative_to(root).as_posix())
+                if not check:
+                    _write_output(root_fd, root, target, content)
+        # Evidence currency (--check only; the page is hand-authored, so a normal run cannot fix it):
+        # docs/evidence.md must carry EXACTLY ONE rendered (outside an HTML comment) install-page sentence,
+        # and its whole version token must equal the declared skill version. A missing page is drift, named;
+        # the self-test fixtures carry the page explicitly (_write_fixture), so nothing is skipped for them.
+        # Not run when there is no build (absent-corpus transition: no declared version to compare). The page
+        # is read through the same descriptor-anchored reader (a link, FIFO or non-UTF-8 page fails closed,
+        # exit 2).
         evidence_problem = None
         if check and binary:
-            ev = root.joinpath(*EVIDENCE_PARTS)
-            if os.path.lexists(ev):
-                m = _EVIDENCE_SKILL_SENTENCE.search(ev.read_text(encoding="utf-8"))
-                want = zip_versioned_version()
-                if m is None or m.group(1) != want:
-                    evidence_problem = ("docs/evidence.md must say the chat skill 'served from the install "
-                                        "page is {}' (the declared skill version), found {}; edit "
-                                        "docs/evidence.md".format(
-                                            want, "'...is {}'".format(m.group(1)) if m else "no such sentence"))
+            want = zip_versioned_version()
+            text = _read_output(root_fd, root, root.joinpath(*EVIDENCE_PARTS), False)
+            evidence_problem = evidence_sentence_problem(text, want)
     except (OSError, UnicodeError) as exc:
         # UnicodeError (UnicodeDecodeError) covers the generated-TARGET reads above (the standalone text
         # output and the reserved-subtree targets): a non-UTF-8 target decodes as UTF-8 there, so a
@@ -924,6 +944,9 @@ def run_gen(root, check):
         # reconciles on bytes (read_bytes), so it is untouched by this widening.
         print("error: {}".format(exc))
         return 2
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
     if check and (drift or evidence_problem):
         if drift:
             print("drift: " + "; ".join(drift))
@@ -932,6 +955,22 @@ def run_gen(root, check):
             print("drift: " + evidence_problem)
         return 1
     return 0
+
+
+def evidence_sentence_problem(text, want):
+    """None when the evidence page text (None when the page is absent) carries exactly one rendered
+    install-page sentence whose whole version token equals want; otherwise the drift message naming
+    docs/evidence.md and what was found."""
+    rule = ("docs/evidence.md must carry exactly one rendered sentence saying the chat skill is 'served from "
+            "the install page is {}' (the declared skill version)".format(want))
+    if text is None:
+        return "{}, but the page is missing; restore docs/evidence.md".format(rule)
+    found = _EVIDENCE_SKILL_SENTENCE.findall(_HTML_COMMENT.sub("", text))
+    if len(found) == 1 and found[0] == want:
+        return None
+    return "{}, found {}; edit docs/evidence.md".format(
+        rule, "no such sentence" if not found else "{} ({})".format(
+            len(found), ", ".join("'...is {}'".format(v) for v in found)))
 
 
 def main():
@@ -957,8 +996,12 @@ def main():
 #      PARENT directory (exit 2, the outside file unchanged), and a parent directory swapped at the write
 #      boundary (both reviews' race reproduction) still cannot redirect a write outside the tree: the held
 #      descriptor pins the real directory,
-#   9. an orphan in the reserved tree is named for git rm and never deleted; a hard-linked output is never
-#      written through; a stale or missing evidence install-page sentence is --check drift.
+#   9. an orphan in the reserved tree is named for removal and never deleted, before any write; a
+#      hard-linked output is never written through; the evidence page must carry exactly one rendered
+#      install-page sentence with the whole declared version (a missing page is drift),
+#  10. the temporary file is created O_EXCL (a collision is retried), the reopen after mkdir is O_NOFOLLOW,
+#      a read never blocks on a FIFO (O_NONBLOCK), an untracked leftover is named with git rm and rm, and
+#      the root is opened once per run (a root path swapped after that open is never followed).
 
 _APEX = """---
 corpus-id: prjint1
@@ -1088,11 +1131,18 @@ def _write_fixture(root, skill_src_text):
     # fixture therefore ships one so regeneration succeeds.
     (root / "LICENSE").write_text("Apache License 2.0\n\n(self-test fixture licence text)\n",
                                   encoding="utf-8")
+    # --check requires the evidence page (a missing page is drift), so a well-formed fixture carries it
+    # explicitly, naming the declared skill version once.
+    evidence = root.joinpath(*EVIDENCE_PARTS)
+    evidence.parent.mkdir(parents=True, exist_ok=True)
+    evidence.write_text("The chat skill now served from the install page is {}, under the Apache License "
+                        "2.0.\n".format(zip_versioned_version()), encoding="utf-8")
 
 
 def self_test_main():
     import io
     import shutil
+    import signal
     import tempfile
     from contextlib import redirect_stdout
 
@@ -1371,11 +1421,14 @@ def self_test_main():
                                 "the outside file unchanged (check={}), got {}\n{}".format(
                                     want, chk, code, out))
         # The writer itself refuses a link (not only the read before it), and leaves no temporary file.
+        wl_fd = _open_root(wl)
         try:
-            _write_output(wl, instr, "overwrite attempt\n")
+            _write_output(wl_fd, wl, instr, "overwrite attempt\n")
             failures.append("_write_output must refuse a symlinked target (OSError)")
         except OSError:
             pass
+        finally:
+            os.close(wl_fd)
         if victim.read_bytes() != b"precious user data" or not instr.is_symlink():
             failures.append("_write_output wrote through a symlink to a file outside the tree")
         instr.unlink()
@@ -1482,16 +1535,18 @@ def self_test_main():
         instr_r.write_text("stale local edit\n", encoding="utf-8")
         real_walk = _open_dir_fd
 
-        def _swapping_walk(root_, rel_parts, target_rel, create=False):
-            fd = real_walk(root_, rel_parts, target_rel, create=create)
+        def _swapping_walk(root_fd_, rel_parts, target_rel, create=False):
+            fd = real_walk(root_fd_, rel_parts, target_rel, create=create)
             _swap_once()
             return fd
 
+        race_fd = _open_root(race)
         globals()["_open_dir_fd"] = _swapping_walk
         try:
-            _write_output(race, instr_r, "generated replacement\n")
+            _write_output(race_fd, race, instr_r, "generated replacement\n")
         finally:
             globals()["_open_dir_fd"] = real_walk
+            os.close(race_fd)
         moved = Path(str(rdl) + ".real") if swap_state["done"] else rdl
         if rvictim.read_bytes() != b"precious outside":
             failures.append("the descriptor-boundary parent swap reached the outside victim")
@@ -1499,6 +1554,74 @@ def self_test_main():
             failures.append("a write with the parent swapped after the descriptor walk must land in the "
                             "pinned real directory, not follow the new path")
         if swap_state["done"]:
+            os.unlink(str(rdl))
+            os.rename(str(moved), str(rdl))
+
+        # 12c. The same swap fired at the WRITE BOUNDARY itself, whatever call reaches it first: os.open with
+        #      O_CREAT, os.replace/os.rename, builtins.open or io.open in a writing mode, or tempfile.mkstemp.
+        #      The shipped writer creates its temporary file at the held parent descriptor, so the write lands
+        #      in the pinned real directory and the outside victim is unchanged. Red for a path-based writer
+        #      of ANY shape (a lstat check then an O_EXCL temporary file by full path and os.replace by path,
+        #      Path.write_text, mkstemp), which resolves the swapped path after the swap and writes outside.
+        #      This pins descriptor anchoring as a property of the writer; it is not a claim of defence
+        #      against a concurrent writer (module docstring, threat model).
+        import builtins
+        b_state = dict(done=False)
+        real_os_open, real_replace, real_rename = os.open, os.replace, os.rename
+        real_bopen, real_ioopen, real_mkstemp2 = builtins.open, io.open, tempfile.mkstemp
+
+        def _swap_boundary():
+            if not b_state["done"]:
+                b_state["done"] = True
+                real_rename(str(rdl), str(rdl) + ".real")
+                os.symlink(str(rout), str(rdl))
+
+        def _b_os_open(path_, flags, *a, **k):
+            if flags & os.O_CREAT:
+                _swap_boundary()
+            return real_os_open(path_, flags, *a, **k)
+
+        def _b_replace(*a, **k):
+            _swap_boundary()
+            return real_replace(*a, **k)
+
+        def _b_rename(*a, **k):
+            _swap_boundary()
+            return real_rename(*a, **k)
+
+        def _b_fopen(real):
+            def _f(file, mode="r", *a, **k):
+                if any(c in mode for c in "wax+"):
+                    _swap_boundary()
+                return real(file, mode, *a, **k)
+            return _f
+
+        def _b_mkstemp(*a, **k):
+            _swap_boundary()
+            return real_mkstemp2(*a, **k)
+
+        instr_r.write_text("stale local edit\n", encoding="utf-8")
+        race_fd = _open_root(race)
+        os.open, os.replace, os.rename = _b_os_open, _b_replace, _b_rename
+        builtins.open, io.open, tempfile.mkstemp = _b_fopen(real_bopen), _b_fopen(real_ioopen), _b_mkstemp
+        try:
+            _write_output(race_fd, race, instr_r, "boundary replacement\n")
+        except OSError as exc:
+            failures.append("the write-boundary swap made the writer fail: {}".format(exc))
+        finally:
+            os.open, os.replace, os.rename = real_os_open, real_replace, real_rename
+            builtins.open, io.open, tempfile.mkstemp = real_bopen, real_ioopen, real_mkstemp2
+            os.close(race_fd)
+        moved = Path(str(rdl) + ".real") if b_state["done"] else rdl
+        if rvictim.read_bytes() != b"precious outside":
+            failures.append("the write-boundary parent swap reached the outside victim: the writer resolved "
+                            "a path at its write boundary")
+        if (moved / INSTRUCTIONS_PARTS[-1]).read_text(encoding="utf-8") != "boundary replacement\n":
+            failures.append("a write with the parent swapped at the write boundary must land in the pinned "
+                            "real directory")
+        if not b_state["done"]:
+            failures.append("the write-boundary swap never fired: the writer created no file")
+        else:
             os.unlink(str(rdl))
             os.rename(str(moved), str(rdl))
 
@@ -1531,8 +1654,7 @@ def self_test_main():
         evid.mkdir()
         _write_fixture(evid, good_src)
         capture(evid, False)
-        ev_md = evid / "docs" / "evidence.md"
-        ev_md.parent.mkdir()
+        ev_md = evid.joinpath(*EVIDENCE_PARTS)
         ev_md.write_text("The chat skill now served from the install page is 0.0.1, under the Apache "
                          "License 2.0.\n", encoding="utf-8")
         code, out = capture(evid, True)
@@ -1544,12 +1666,207 @@ def self_test_main():
         if code != 1 or "docs/evidence.md" not in out:
             failures.append("a missing evidence sentence expected --check exit 1, got {}\n{}".format(
                 code, out))
-        ev_md.write_text("The chat skill now served from the install page is {}, under the Apache "
-                         "License 2.0.\n".format(zip_versioned_version()), encoding="utf-8")
+        ver = zip_versioned_version()
+        cur_line = "The chat skill now served from the install page is {}, under the Apache License 2.0.\n"
+        # Exactly one RENDERED occurrence, whole version token: each of these is drift (exit 1) naming the
+        # page. Red if the gate reads only the first match, drops the version's end boundary, counts a
+        # sentence inside an HTML comment, or skips a missing page.
+        bad_pages = (
+            ("a second conflicting sentence", cur_line.format(ver) + cur_line.format("0.0.1")),
+            ("a second sentence wrapped across lines", cur_line.format(ver)
+             + "It was\nserved from the install\npage is 0.0.1 before.\n"),
+            ("a trailing version component", cur_line.format(ver + ".9")),
+            ("a pre-release suffix", cur_line.format(ver + "-rc1")),
+            ("a sentence only inside an HTML comment", "<!-- " + cur_line.format(ver) + " -->\n"),
+            ("a sentence only inside an unclosed HTML comment", "<!-- " + cur_line.format(ver)),
+        )
+        for label, text in bad_pages:
+            ev_md.write_text(text, encoding="utf-8")
+            code, out = capture(evid, True)
+            if code != 1 or "docs/evidence.md" not in out:
+                failures.append("{} on the evidence page expected --check exit 1 naming docs/evidence.md, "
+                                "got {}\n{}".format(label, code, out))
+        ev_md.unlink()
         code, out = capture(evid, True)
-        if code != 0:
-            failures.append("a current evidence skill version expected --check exit 0, got {}\n{}".format(
+        if code != 1 or "docs/evidence.md" not in out or "missing" not in out:
+            failures.append("a missing evidence page expected --check exit 1 naming it missing, got {}\n{}".format(
                 code, out))
+        # Clean: exactly one rendered current sentence (a stale one inside a comment is not rendered, and a
+        # sentence-final dot is not part of the version).
+        for text in (cur_line.format(ver),
+                     "<!-- " + cur_line.format("0.0.1") + " -->\n" + cur_line.format(ver),
+                     "The chat skill now served from the install page is {}.\n".format(ver)):
+            ev_md.write_text(text, encoding="utf-8")
+            code, out = capture(evid, True)
+            if code != 0:
+                failures.append("a current evidence sentence expected --check exit 0, got {} for {!r}\n{}".format(
+                    code, text, out))
+
+        # 15. O_EXCL on the temporary file: the name source is patched to return the name of an existing
+        #     user file first. The writer must leave that file byte for byte and still write the output under
+        #     a fresh name. Red if O_EXCL is dropped (the existing file is opened, overwritten and renamed
+        #     over the output).
+        coll = tmp / "collision"
+        coll.mkdir()
+        _write_fixture(coll, good_src)
+        capture(coll, False)
+        instr_c = coll.joinpath(*INSTRUCTIONS_PARTS)
+        planted_name = ".{}.c0111de5.tmp".format(INSTRUCTIONS_PARTS[-1])
+        planted = instr_c.parent / planted_name
+        planted.write_bytes(b"USER OWNED COLLISION")
+        real_temp_name = _temp_name
+        names = [planted_name]
+
+        def _colliding_name(name):
+            return names.pop(0) if names else real_temp_name(name)
+
+        coll_fd = _open_root(coll)
+        globals()["_temp_name"] = _colliding_name
+        try:
+            _write_output(coll_fd, coll, instr_c, "GENERATED\n")
+        except OSError as exc:
+            failures.append("a temporary-name collision must be retried, not fail: {}".format(exc))
+        finally:
+            globals()["_temp_name"] = real_temp_name
+            os.close(coll_fd)
+        if not planted.exists() or planted.read_bytes() != b"USER OWNED COLLISION":
+            failures.append("an existing file at the temporary name was opened or replaced (O_EXCL missing)")
+        if instr_c.read_text(encoding="utf-8") != "GENERATED\n":
+            failures.append("after a temporary-name collision the output must still be written")
+
+        # 16. O_NOFOLLOW on the reopen after mkdir: os.mkdir is patched so the directory it creates is
+        #     replaced by a symlink to an outside directory before the writer reopens it. The writer must
+        #     refuse (OSError) with the outside file unchanged. Red if the post-mkdir reopen follows links.
+        mk = tmp / "mkdirswap"
+        mk.mkdir()
+        _write_fixture(mk, good_src)
+        capture(mk, False)
+        shutil.rmtree(mk.joinpath(*RESERVED_PARTS))
+        mk_out = tmp / "outside-mkdir"
+        mk_out.mkdir()
+        mk_victim = mk_out / "SKILL.md"
+        mk_victim.write_bytes(b"PRECIOUS")
+        real_mkdir = os.mkdir
+
+        def _swapping_mkdir(path_, mode=0o777, *, dir_fd=None):
+            real_mkdir(path_, mode, dir_fd=dir_fd)
+            if os.path.basename(str(path_)) == RESERVED_PARTS[-1]:
+                os.rmdir(path_, dir_fd=dir_fd)
+                os.symlink(str(mk_out), path_, dir_fd=dir_fd)
+
+        mk_fd = _open_root(mk)
+        os.mkdir = _swapping_mkdir
+        try:
+            _write_output(mk_fd, mk, mk.joinpath(*RESERVED_PARTS) / "SKILL.md", "GENERATED\n")
+            failures.append("a symlink found at a just-created directory must be refused (OSError)")
+        except OSError:
+            pass
+        finally:
+            os.mkdir = real_mkdir
+            os.close(mk_fd)
+        if mk_victim.read_bytes() != b"PRECIOUS" or len(os.listdir(str(mk_out))) != 1:
+            failures.append("the post-mkdir reopen followed a symlink and wrote outside the tree")
+
+        # 17. O_NONBLOCK on every read: a FIFO at a reserved output name must be refused at once (exit 2 in
+        #     both modes, the FIFO kept), never block the run. Bounded by a 10 s alarm; red if the read opens
+        #     without O_NONBLOCK (the open blocks until the alarm fires).
+        if hasattr(os, "mkfifo") and hasattr(signal, "SIGALRM"):
+            ff = tmp / "fifo"
+            ff.mkdir()
+            _write_fixture(ff, good_src)
+            capture(ff, False)
+            fifo = ff.joinpath(*RESERVED_PARTS) / "SKILL.md"
+            fifo.unlink()
+            os.mkfifo(str(fifo))
+
+            class _Blocked(Exception):
+                pass
+
+            def _on_alarm(signum, frame):
+                raise _Blocked()
+
+            prev = signal.signal(signal.SIGALRM, _on_alarm)
+            try:
+                for chk in (True, False):
+                    signal.alarm(10)
+                    try:
+                        code, out = capture(ff, chk)
+                    except _Blocked:
+                        code, out = "blocked", "(the read of a FIFO blocked until the alarm)"
+                    finally:
+                        signal.alarm(0)
+                    if code != 2 or "regular file" not in out or not stat.S_ISFIFO(os.lstat(str(fifo)).st_mode):
+                        failures.append("a FIFO at a reserved output expected exit 2 at once with the FIFO "
+                                        "kept (check={}), got {}\n{}".format(chk, code, out))
+            finally:
+                signal.signal(signal.SIGALRM, prev)
+
+        # 18. An untracked leftover (an interrupted run's temporary file) is named with BOTH removal commands:
+        #     git rm fails on an untracked path. Pinned at the top level and in the reserved tree.
+        left = tmp / "leftover"
+        left.mkdir()
+        _write_fixture(left, good_src)
+        capture(left, False)
+        for parts in (ZIP_PARTS[:-1], RESERVED_PARTS):
+            lf = left.joinpath(*parts) / ".{}.9ec4344a.tmp".format(INSTRUCTIONS_PARTS[-1])
+            lf.write_bytes(b"partial")
+            lrel = lf.relative_to(left).as_posix()
+            code, out = capture(left, False)
+            if code != 2 or "rm {} if untracked".format(lrel) not in out or "git rm {}".format(lrel) not in out:
+                failures.append("an untracked leftover {} expected exit 2 naming 'git rm ... if tracked, or rm "
+                                "... if untracked', got {}\n{}".format(lrel, code, out))
+            lf.unlink()
+
+        # 19. Both scans run BEFORE any write: an orphan in the reserved tree makes a normal run exit 2 with a
+        #     drifted output left exactly as it was. Red if the orphan scan runs after the write loops.
+        ob = tmp / "orphanfirst"
+        ob.mkdir()
+        _write_fixture(ob, good_src)
+        capture(ob, False)
+        (ob.joinpath(*RESERVED_PARTS) / ".SKILL.md.deadbeef.tmp").write_bytes(b"orphan")
+        instr_o = ob.joinpath(*INSTRUCTIONS_PARTS)
+        instr_o.write_text("local edit\n", encoding="utf-8")
+        code, out = capture(ob, False)
+        if code != 2 or "orphan" not in out or instr_o.read_text(encoding="utf-8") != "local edit\n":
+            failures.append("an orphan in the reserved tree expected a normal run to exit 2 having written "
+                            "nothing, got {} (output unchanged={})\n{}".format(
+                                code, instr_o.read_text(encoding="utf-8") == "local edit\n", out))
+
+        # 20. The repository root is opened ONCE per run and every walk starts from that descriptor: the
+        #     fixture's root path is swapped for a symlink to an outside look-alike tree right after the run
+        #     opens it, and the regenerated output still lands in the real tree with the outside victim
+        #     unchanged. Red if a walk reopens the root by path.
+        rp = tmp / "rootpin"
+        rp.mkdir()
+        _write_fixture(rp, good_src)
+        capture(rp, False)
+        rp_out = tmp / "outside-root"
+        shutil.copytree(str(rp), str(rp_out))
+        rp_victim = rp_out.joinpath(*INSTRUCTIONS_PARTS)
+        rp_victim.write_bytes(b"precious outside")
+        rp.joinpath(*INSTRUCTIONS_PARTS).write_text("local edit\n", encoding="utf-8")
+        real_open_root = _open_root
+        rp_state = dict(done=False)
+
+        def _swapping_open_root(root_):
+            fd = real_open_root(root_)
+            if not rp_state["done"]:
+                rp_state["done"] = True
+                os.rename(str(rp), str(rp) + ".real")
+                os.symlink(str(rp_out), str(rp))
+            return fd
+
+        globals()["_open_root"] = _swapping_open_root
+        try:
+            code, out = capture(rp, False)
+        finally:
+            globals()["_open_root"] = real_open_root
+        rp_real = Path(str(rp) + ".real") if rp_state["done"] else rp
+        if rp_victim.read_bytes() != b"precious outside":
+            failures.append("a walk reopened the root by path and wrote the outside tree\n{}".format(out))
+        if code != 0 or rp_real.joinpath(*INSTRUCTIONS_PARTS).read_text(encoding="utf-8") == "local edit\n":
+            failures.append("with the root pinned once, the regen expected exit 0 writing the real tree, got "
+                            "{}\n{}".format(code, out))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1562,12 +1879,17 @@ def self_test_main():
           "corpus-id, an invalid-UTF-8 target, and a version/zip-literal mismatch each fail closed (exit 2); "
           "a drifted SKILL.md is caught (exit 1); nothing is ever deleted: an orphan reserved entry and a "
           "stale versioned zip plus fourteen other undeclared top-level entries (the allow-list) are kept "
-          "and named for git rm (normal run exit 2 writing nothing, --check exit 1); the scan refuses by "
+          "and named for removal, git rm if tracked or rm if untracked (normal run exit 2 writing nothing, "
+          "--check exit 1); the scan refuses by "
           "lstat a directory, a symlink and a symlinked current zip and names a missing current zip; a "
           "symlinked output, reserved directory or PARENT directory is refused with the outside file "
           "unchanged (exit 2); a parent swapped at the write boundary (the raced swap) and a hard-linked "
           "output are never written through (the descriptor pins the directory; the rename replaces the "
-          "entry); a stale evidence install-page sentence is --check drift; a facet-misplaced rule fails "
+          "entry), including a swap at the write boundary itself; a temporary-name collision is retried "
+          "(O_EXCL), a link at a just-created directory is refused (O_NOFOLLOW) and a FIFO output is refused "
+          "without blocking (O_NONBLOCK), and the root is opened once per run; the evidence page must carry exactly one rendered install-page "
+          "sentence naming the whole declared version (a second sentence, a longer version, a suffix, a "
+          "commented-only sentence and a missing page are --check drift); a facet-misplaced rule fails "
           "closed (exit 2).")
     return 0
 

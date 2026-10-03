@@ -44,7 +44,9 @@ signed; the independently published digest is the authenticated reference.
        tracked binary artefact).
      - e. `docs/evidence.md`: the install-page sentence ("The chat skill now served from the install page
        is <version>, ...") must name the new skill version; `gen_skill.py --check` verifies that sentence
-       against the declared skill version and reports a stale or missing one as drift.
+       against the declared skill version and reports a stale, duplicated or missing one (or a missing
+       page) as drift. After editing it, regenerate the site with `python3 tools/gen_site.py` (otherwise
+       `gen_site.py --check` reports `drift: site/evidence.html`).
    Then run `python3 tools/gen_skill.py`. The generator never deletes a file: this first run refuses
    (exit 2) and names the stale prior-version `aiqt-skill-<old>.zip`. Remove it yourself with
    `git rm site/downloads/aiqt-skill-<old>.zip`, then rerun `python3 tools/gen_skill.py`, which repacks
