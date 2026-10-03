@@ -237,16 +237,22 @@ def _note_constructor_shape_failures(path=None):
     hookSpecificOutput), so a multi-branch constructor reaches a note only through
     `return <constructor>(...)`; any reference to a declared note or deny constructor name (a name, an
     attribute, or a string equal to it, as a getattr or globals() lookup would need) other than as the
-    callee of a call that is the direct value of a return statement, so a result is never bound,
-    unpacked, subscripted, mutated, popped, deleted or iterated (a deny result cannot become a bare
-    note); and a function returning a declared constructor's call that is neither a declared
-    constructor, a HANDLERS entry referenced only from that table, nor main referenced only from its
-    `sys.exit(main(...))` entry line (so no caller of an undeclared helper can drop or edit a result).
+    callee of a call that is the direct value of a return statement, so no scanned statement binds,
+    unpacks, subscripts, mutates, pops, deletes or iterates a constructor's result; a function returning
+    a declared constructor's call that is neither a declared constructor, a HANDLERS entry referenced
+    only from that table, nor main referenced only from its `sys.exit(main(...))` entry line (so no
+    scanned caller of an undeclared helper can drop or edit a result); a decorator on a declared
+    constructor, a HANDLERS entry or main; and, at the dispatcher boundary, any use of HANDLERS other
+    than main's one `code, stdout_obj, stderr_text = HANDLERS[...](data)` binding, a membership test or
+    sorted(HANDLERS), and any use of that bound stdout object in main other than as the argument of the
+    statement `print(json.dumps(stdout_obj))` or in an `is None` or `is not None` test.
     Residuals, accepted and disclosed (the note-shape pin cases hold one as accepted): a note key
     assembled at run time ("system" + "Message", an f-string, a join, a decode, a dict built from a
     variable key), a constructor or note reached through getattr, globals(), vars(), importlib or another
-    module's copy of the hook source with a name the scan cannot read, and any other shape a determined
-    author can build that an AST scan of this one file cannot see. Review, not this check, closes those."""
+    module's copy of the hook source with a name the scan cannot read, a result transformed between the
+    handler and the print by a construct this scan does not model (a patched json.dumps, print or
+    sys.stdout, or a locals() lookup, for example), and any other shape a determined author can build
+    that an AST scan of this one file cannot see. Review, not this check, closes those."""
     path = Path(path or aiqt_hooks.__file__)
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     out = []
@@ -373,6 +379,63 @@ def _note_constructor_shape_failures(path=None):
                        "neither a declared constructor nor a dispatcher entry, so a caller of it is no "
                        "inventoried site; declare it in NOTE_CONSTRUCTORS or DENY_CONSTRUCTORS".format(
                            node.lineno, node.lineno, node.name))
+    for name in sorted(ctors | handler_names | {"main"}):
+        for func in top.get(name, ()):
+            if func.decorator_list:
+                out.append("(note-shape-decorated-L{}) line {} decorates {}, a declared constructor, a "
+                           "HANDLERS entry or main; a decorator can edit the result it returns".format(
+                               func.lineno, func.lineno, name))
+    main_func = (top.get("main") or [None])[0]
+    bound, handlers_ok = None, set()
+    for node in ast.walk(main_func) if main_func is not None else ():
+        if (bound is None and isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Tuple) and len(node.targets[0].elts) == 3
+                and all(isinstance(elt, ast.Name) for elt in node.targets[0].elts)
+                and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Subscript)
+                and isinstance(node.value.func.value, ast.Name) and node.value.func.value.id == "HANDLERS"):
+            bound = node
+            handlers_ok.add(id(node.value.func.value))
+        elif (isinstance(node, ast.Compare) and len(node.ops) == 1
+              and isinstance(node.ops[0], (ast.In, ast.NotIn))
+              and isinstance(node.comparators[0], ast.Name) and node.comparators[0].id == "HANDLERS"):
+            handlers_ok.add(id(node.comparators[0]))
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "sorted"
+              and len(node.args) == 1 and not node.keywords and isinstance(node.args[0], ast.Name)
+              and node.args[0].id == "HANDLERS"):
+            handlers_ok.add(id(node.args[0]))
+    if bound is None:
+        out.append("(note-shape-dispatch-main) main holds no `code, stdout_obj, stderr_text = "
+                   "HANDLERS[...](data)` binding, so the dispatcher boundary is unscanned")
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Name) and node.id == "HANDLERS" and isinstance(node.ctx, ast.Load)
+                and id(node) not in handlers_ok):
+            out.append("(note-shape-dispatch-L{}) line {} uses HANDLERS other than in main's one `code, "
+                       "stdout_obj, stderr_text = HANDLERS[...](data)` binding, a membership test or "
+                       "sorted(HANDLERS), so a handler's result can be bound outside the scanned "
+                       "dispatcher".format(node.lineno, node.lineno))
+    if bound is not None:
+        result = bound.targets[0].elts[1].id
+        result_ok = {id(bound.targets[0].elts[1])}
+        for node in ast.walk(main_func):
+            if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Name) and node.value.func.id == "print"
+                    and len(node.value.args) == 1 and not node.value.keywords):
+                dumps = node.value.args[0]
+                if (isinstance(dumps, ast.Call) and isinstance(dumps.func, ast.Attribute)
+                        and dumps.func.attr == "dumps" and isinstance(dumps.func.value, ast.Name)
+                        and dumps.func.value.id == "json" and len(dumps.args) == 1 and not dumps.keywords
+                        and isinstance(dumps.args[0], ast.Name) and dumps.args[0].id == result):
+                    result_ok.add(id(dumps.args[0]))
+            elif (isinstance(node, ast.Compare) and isinstance(node.left, ast.Name) and node.left.id == result
+                  and len(node.ops) == 1 and isinstance(node.ops[0], (ast.Is, ast.IsNot))
+                  and isinstance(node.comparators[0], ast.Constant) and node.comparators[0].value is None):
+                result_ok.add(id(node.left))
+        for node in ast.walk(main_func):
+            if isinstance(node, ast.Name) and node.id == result and id(node) not in result_ok:
+                out.append("(note-shape-dispatch-L{}) line {} uses {}, main's bound handler result, other "
+                           "than as the argument of `print(json.dumps({}))` or in an `is None` or `is not "
+                           "None` test, so a result can be edited after its handler returns".format(
+                               node.lineno, node.lineno, result, result))
     return out
 
 
@@ -674,25 +737,87 @@ def _shape_mutant(source, func_name, lines):
     return "".join(rows)
 
 
+def _shape_body(source, func_name, lines):
+    """source with the body (after the docstring) of its top-level function func_name replaced by
+    `lines`, at that body's indentation."""
+    tree = ast.parse(source)
+    func = next(node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == func_name)
+    body = func.body
+    stmt = body[1] if (len(body) > 1 and isinstance(body[0], ast.Expr)
+                       and isinstance(body[0].value, ast.Constant)) else body[0]
+    rows = source.splitlines(keepends=True)
+    pad = " " * stmt.col_offset
+    rows[stmt.lineno - 1:func.end_lineno] = [pad + line + "\n" for line in lines]
+    return "".join(rows)
+
+
+# (ns-pin-leaf-refused-*) One mutant per _LEAF_REFUSED node type, each inserted at the top of one of the
+# four leaf constructors' bodies and holding that node type alone among the refused ones, so dropping
+# any one type from _LEAF_REFUSED, or hardcoding the leaf set, fails its pin.
+_LEAF_REFUSED_MUTANTS = {
+    "If": ("_allow_note", ['if message == "QA new mode":', '    message = "QA branch note"']),
+    "IfExp": ("_stop_warn", ['banner = banner if banner else "QA default banner"']),
+    "For": ("_allow_note", ["for _qa in ():", "    message = message"]),
+    "AsyncFor": ("_allow_note", ["async for _qa in message:", "    message = message"]),
+    "While": ("_stop_warn", ["while not banner:", '    banner = "QA loop banner"']),
+    "Try": ("_allow_note", ["try:", "    message = str(message)", "except ValueError:",
+                            "    message = message"]),
+    "TryStar": ("_allow_note", ["try:", "    message = str(message)", "except* ValueError:",
+                                "    message = message"]),
+    "Match": ("_allow_note", ["match message:", "    case _:", "        message = message"]),
+    "With": ("_allow_note", ['with open("/dev/null") as _qa:', "    message = message"]),
+    "AsyncWith": ("_allow_note", ["async with message as _qa:", "    message = message"]),
+    "BoolOp": ("_stop_warn", ['banner = banner or "QA default banner"']),
+    "ListComp": ("_dispatcher_fail_open_warn", ['detail = "".join([part for part in detail])']),
+    "SetComp": ("_dispatcher_fail_open_warn", ["_qa = {part for part in detail}"]),
+    "DictComp": ("_dispatcher_fail_open_warn", ["_qa = {part: part for part in detail}"]),
+    "GeneratorExp": ("_dispatcher_fail_open_warn", ['detail = "".join(part for part in detail)']),
+    "Lambda": ("_deny", ["_qa = lambda: banner"]),
+    "FunctionDef": ("_deny", ["def _qa():", "    banner.strip()"]),
+    "AsyncFunctionDef": ("_deny", ["async def _qa():", "    banner.strip()"]),
+    "ClassDef": ("_deny", ["class _QA:", "    banner = None"]),
+    "Yield": ("_stop_warn", ["_qa = yield"]),
+    "YieldFrom": ("_stop_warn", ["_qa = yield from ()"]),
+    "Await": ("_stop_warn", ["_qa = await banner"]),
+}
+
+
 def _test_note_shape_pins(failures, tmp):
     """(ns-pin-*) Negative controls for _note_constructor_shape_failures: each mutant of the live hook
     source must be refused under the named tag (a literal note in a non-leaf declared constructor, a
-    deny result bound and edited, unpacked, iterated or reached through an undeclared wrapper), the leaf
-    set must be exactly the four leaf constructors, and the runtime-assembled note key stays an
-    ACCEPTED, DISCLOSED residual: the check passes it and its docstring still says so."""
+    deny result bound and edited, unpacked, iterated or reached through an undeclared wrapper, a leaf
+    body given a second return or any _LEAF_REFUSED node type, a deny constructor returning a note
+    constructor's call, a note or deny constructor that builds nothing, a decorated handler, and a
+    handler result bound again or edited in main), the leaf set must be exactly the four leaf
+    constructors, and the runtime-assembled note key stays an ACCEPTED, DISCLOSED residual: the check
+    passes it and its docstring still says so."""
     source = Path(aiqt_hooks.__file__).read_text(encoding="utf-8")
     base = tmp / "note-shape-pins"
     base.mkdir()
 
-    def shape(label, func_name, lines, want):
+    def judge(label, text, want):
         path = base / "m{}.py".format(len(list(base.iterdir())))
-        path.write_text(_shape_mutant(source, func_name, lines), encoding="utf-8")
+        path.write_text(text, encoding="utf-8")
         got = _note_constructor_shape_failures(path)
         if want is None and got:
             failures.append("{}: expected the accepted residual to pass the static check, got {}"
                             .format(label, got))
         elif want is not None and not any(item.startswith("(" + want) for item in got):
             failures.append("{}: expected a ({}...) refusal, got {}".format(label, want, got))
+
+    def shape(label, func_name, lines, want):
+        judge(label, _shape_mutant(source, func_name, lines), want)
+
+    def body(label, func_name, lines, want):
+        judge(label, _shape_body(source, func_name, lines), want)
+
+    def textual(label, old, new, want):
+        if source.count(old) != 1:
+            failures.append("{}: the mutant anchor occurs {} times in the hook source, expected once"
+                            .format(label, source.count(old)))
+        else:
+            judge(label, source.replace(old, new), want)
 
     shape("(ns-pin-leaf) a literal note in the multi-branch constructor _git_discard_fallback is refused",
           "_git_discard_fallback", ['if command == "_qa_note":',
@@ -726,10 +851,58 @@ def _test_note_shape_pins(failures, tmp):
     shape("(ns-pin-codex-3) codex mutant 3, a note key assembled at run time, is the accepted residual",
           "gensrc_guard", ['if data.get("_qa_uncovered"):',
                            '    return (0, {"system" + "Message": "QA untested"}, None)'], None)
+    shape("(ns-pin-leaf-returns) a second return in the leaf _allow_note makes it no leaf, so its note "
+          "is refused", "_allow_note", ['return (0, {"systemMessage": message + " QA second return"}, None)'],
+          "note-shape-leaf-")
+    missing = sorted({kind.__name__ for kind in _LEAF_REFUSED} - set(_LEAF_REFUSED_MUTANTS))
+    if missing:
+        failures.append("(ns-pin-leaf-refused) no leaf-body mutant pins the refused node types {}"
+                        .format(missing))
+    for kind, (func_name, lines) in sorted(_LEAF_REFUSED_MUTANTS.items()):
+        shape("(ns-pin-leaf-refused-{}) a {} node in the leaf {} makes it no leaf, so its note is refused"
+              .format(kind, kind, func_name), func_name, lines, "note-shape-leaf-")
+    shape("(ns-pin-deny-note) the deny constructor _commit_denial returning an _allow_note call is refused",
+          "_commit_denial", ['return _allow_note("QA note from a deny ctor")'],
+          "note-shape-deny-note-_commit_denial")
+    body("(ns-pin-deny-empty) the deny constructor _deny_relative whose body is only `return _allow()` is "
+         "refused", "_deny_relative", ["return _allow()"], "note-shape-empty-_deny_relative")
+    body("(ns-pin-note-empty) the note constructor _allow_note whose body is only `return _allow()` is "
+         "refused", "_allow_note", ["return _allow()"], "note-shape-empty-_allow_note")
+    textual("(ns-pin-dispatch-codex) codex's warning_only pop of main's stdout_obj before the print is "
+            "refused",
+            "    if stdout_obj is not None:\n        print(json.dumps(stdout_obj))\n",
+            "    if stdout_obj is not None:\n"
+            "        if data.get(\"warning_only\"):\n"
+            "            stdout_obj.pop(\"hookSpecificOutput\", None)\n"
+            "        print(json.dumps(stdout_obj))\n", "note-shape-dispatch-L")
+    textual("(ns-pin-dispatch-claude) claude's AIQT_HOOKS_AUDIT_ONLY pop of main's stdout_obj is refused",
+            "        print(json.dumps(stdout_obj))\n",
+            "        if os.environ.get(\"AIQT_HOOKS_AUDIT_ONLY\") and isinstance(stdout_obj, dict):\n"
+            "            stdout_obj.pop(\"hookSpecificOutput\", None)\n"
+            "        print(json.dumps(stdout_obj))\n", "note-shape-dispatch-L")
+    textual("(ns-pin-dispatch-rebind) a second HANDLERS call in main, bound and edited, is refused",
+            "    if stdout_obj is not None:\n",
+            "    if data.get(\"_qa_audit\"):\n"
+            "        audit = HANDLERS[handler_name](data)\n"
+            "        audit[1].pop(\"hookSpecificOutput\", None)\n"
+            "        print(json.dumps(audit[1]))\n"
+            "        return audit[0]\n"
+            "    if stdout_obj is not None:\n", "note-shape-dispatch-L")
+    textual("(ns-pin-decorated-claude) claude's @_audited decorator popping gensrc_guard's deny is refused",
+            "\ndef gensrc_guard(data):\n",
+            "\ndef _audited(func):\n"
+            "    def wrapper(data):\n"
+            "        code, obj, err = func(data)\n"
+            "        if os.environ.get(\"AIQT_HOOKS_AUDIT_ONLY\") and isinstance(obj, dict):\n"
+            "            obj.pop(\"hookSpecificOutput\", None)\n"
+            "        return code, obj, err\n"
+            "    return wrapper\n"
+            "\n\n@_audited\ndef gensrc_guard(data):\n", "note-shape-decorated-L")
     doc = " ".join((_note_constructor_shape_failures.__doc__ or "").split())
     for phrase in ("guards ACCIDENTAL DRIFT", "not a defence against adversarial source",
                    'assembled at run time ("system" + "Message"', "getattr, globals()",
-                   "any other shape a determined author can build"):
+                   "a result transformed between the handler and the print by a construct this scan does "
+                   "not model", "any other shape a determined author can build"):
         if phrase not in doc:
             failures.append("(ns-pin-disclosed) the _note_constructor_shape_failures docstring no longer "
                             "discloses its residual: missing {!r}".format(phrase))

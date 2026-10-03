@@ -201,10 +201,14 @@ FAIL_OPEN_EVENTS = STOP_EVENTS + ("SessionStart", "TeammateIdle", "UserPromptSub
 # constructor reaches a result only by returning another constructor's call. Every use of a declared
 # name is the callee of a call that is the direct value of a `return` statement (no assignment,
 # unpacking, subscript, alias, attribute, conditional expression, lambda, comprehension or argument),
-# so a result is never edited into another shape and each note site is one `return <constructor>(...)`
-# position that the hooks self-test inventories and requires to execute (tools/selftest_aiqt_hooks.py,
-# _note_constructor_shape_failures). That static check guards accidental drift, not adversarial source:
-# a note key assembled at run time, or a lookup through getattr or globals(), is outside it.
+# no declared constructor, HANDLERS entry or main carries a decorator, and main binds a handler's result
+# once and uses its stdout object only in `print(json.dumps(...))` and `is None` tests. So no statement
+# that check scans edits a result into another shape, and each note site is one
+# `return <constructor>(...)` position that the hooks self-test inventories and requires to execute
+# (tools/selftest_aiqt_hooks.py, _note_constructor_shape_failures). That static check guards accidental
+# drift, not adversarial source: a note key assembled at run time, a lookup through getattr or
+# globals(), or a result transformed between the handler and the print by a construct the check does
+# not model (a patched json.dumps, print or sys.stdout, for example) is outside it.
 NOTE_CONSTRUCTORS = (
     "_allow_note", "_stop_warn", "_dispatcher_fail_open_warn", "_diff_source_fallback",
     "_discard_recovery_result", "_expbnd_breadth_ask", "_expbnd_fallback", "_expbnd_target_ask",
