@@ -636,6 +636,13 @@ expected-check-ids = [
   # ---------- the base fetch writes no ref the author owns ----------
   "fetch/refmap-keeps-local-branches",
   "fetch/refmap-invariants",
+  # ---------- the base fetch runs in the run's PRIVATE bare repository, never the author's ----------
+  "fetch/private-symref-keeps-local-branch",
+  "fetch/private-dry-run-gitdir-unchanged",
+  "fetch/private-apply-gitdir-unchanged",
+  "fetch/private-author-hook-uploadpack-never-run",
+  "fetch/private-submodule-not-recursed",
+  "fetch/private-invariants",
   # ---------- the default dry run ----------
   "dry/would-merge",
   "dry/changes-nothing",
@@ -796,6 +803,8 @@ expected-check-ids = [
   "scratch/leak-invariants",
   "signal/sigterm-cleans-up",
   "signal/sighup-cleans-up",
+  "signal/second-signal-during-cleanup-no-leak",
+  "signal/second-signal-cleanup-invariants",
   # ---------- CLI ----------
   "cli/bad-argument-exit2",
   "cli/bare-is-self-test",
