@@ -186,7 +186,7 @@ removed or replaced after the evaluation opened it) or pruned after 7 idle days,
 and the Stop FAILS OPEN at once as for an unusable counter,
 never restarting the count at 0; that closes the round-25 residual in which such a deletion, or a transcript
 reset or a synthetic user-role entry resetting the counter, let every corrective Stop block. Each warning is delivered to the user as a top-level {"systemMessage": ...} on stdout (the
-hooks reference's common JSON output field), ONE line of at most 100 characters (see MESSAGES); its detail
+hooks reference's common JSON output field), ONE line (see MESSAGES); its detail
 (the true UTC, elapsed, and the first violation in full) goes to ONE different diagnostic line on stderr, which
 on exit 0 reaches only the host's debug log, so stderr is diagnostic logging, not a user-visible channel.
 
@@ -227,25 +227,24 @@ carrying agent_id (a subagent's stop). The worker skip writes one warning line t
 stdout, so worker output is not distorted, and on exit 0 stderr reaches only the host's debug log, so the
 skip is logged, not shown); that line is at most 100 characters.
 
-MESSAGES (round 33; round 34). Every message is ONE line. The block reason starts with BLOCK_PREFIX
-unchanged (the recovery marker that block_cycles counts), then its CORE, never dropped: the FIRST violation in
-report order (the final message first, in line order with its elapsed footer last, then earlier messages oldest
-first), whether it is a timestamp, a status stamp, or an elapsed footer, as its literal verbatim in a code span
-and its compact offset (+Nm: N minutes AHEAD of the true value; -Nm: N minutes BEHIND), and for a footer also
-the true elapsed, as in `Session elapsed 09:00` +333m, true 03:27. A literal so long that the core and the
-count below would pass 100 characters is shortened in the MIDDLE inside the code span (its start and end kept
-around one U+2026 ellipsis, never below MIN_LIT characters), so the rejected text stays identifiable. Then
-extras in this order, each added only when the line still fits within 100 characters (an extra that does not
-fit is skipped and the later, shorter ones are still tried): "; +K more" (the other unresolved violations;
-the core leaves room for it, so a block with several violations always says how many remain), the remedy
-"; run `date`, `date -u`" (or "; run `date -u`" when only that fits), and "; UTC now ...". Every
-systemMessage (capped allow, fail-open allow, busy) is one line of at most 100 characters; a capped or
-fail-open allow counts the unresolved claims and names the first the same way, its literal shortened in the
-middle as needed, and leaves the claim out only when even a MIN_LIT literal would not fit. stderr gets at most
-ONE diagnostic line of at most 160 characters (the kind, the claim count, the true UTC, elapsed, and the
-first violation in full, cut at the cap), never a copy of the systemMessage. The true local time, the
-violations after the first, and the full remedy text are no longer sent: the remedy's `date` reads the local
-time (convert a local-zone stamp from it), the count says how many violations remain, and the full remedy
+MESSAGES (round 33; round 34; round 35). Every message is ONE physical line: no newline and no carriage
+return. The block reason's CORE is never shortened and never dropped: BLOCK_PREFIX unchanged (the recovery
+marker that block_cycles counts), then the FIRST violation in report order (the final message first, in line
+order with its elapsed footer last, then earlier messages oldest first), whether it is a timestamp, a status
+stamp, or an elapsed footer, as its literal VERBATIM and WHOLE in a code span (never cut, no ellipsis), and
+its compact offset (+Nm: N minutes AHEAD of the true value; -Nm: N minutes BEHIND), and for a footer also the
+true elapsed, as in `Session elapsed 09:00` +333m, true 03:27; then "; +K more" (the other unresolved
+violations) whenever K > 0. Then extras in this order, each added only while the whole line stays within a
+soft cap of MSG_CAP (200) characters (an extra that does not fit is SKIPPED, never cut, and the later,
+shorter ones are still tried): the remedy "; run `date`, `date -u`" (or "; run `date -u`" when only that
+fits); when a violation is a time AHEAD of the clock, the future-fact hint "; a genuine future time: put it
+in a `code span` or after 'due'" (or a shorter form); and "; UTC now ...". A core longer than the soft cap
+is sent whole, with no extras. Every systemMessage is one line: a capped or fail-open allow counts the
+unresolved claims and names the first the same way, its literal whole; the busy note is fixed text. stderr
+gets at most ONE diagnostic line (the kind, the claim count, the true UTC, elapsed, and the first violation
+in full, never cut), never a copy of the systemMessage. The true local time, the violations after the
+first, and the full remedy text are not sent: the remedy's `date` reads the local time (convert a
+local-zone stamp from it), the count says how many violations remain, and the full remedy
 lives here. Every date-time with an explicit
 zone in prose must not be ahead of when it was written; a [bracketed] stamp that starts the first status line
 must also be recent (an unbracketed leading date is history); the LAST elapsed footer outside code and quotes
@@ -382,13 +381,13 @@ MAX_PENDING = 8
 MAX_REPORTED = 20
 BLOCK_PREFIX = "Clock-truth check (stamp-truth-stop hook) failed"
 FEEDBACK_PREFIX = "Stop hook feedback"
-MSG_CAP = 100  # characters in the one-line block reason and in every systemMessage (see MESSAGES)
-DIAG_CAP = 160  # characters in the one stderr diagnostic line (see MESSAGES)
-MIN_LIT = 9  # characters below which a rejected literal is never shortened in a message (see MESSAGES)
-ELLIPSIS = "\u2026"  # marks the middle of a shortened literal (see MESSAGES)
+MSG_CAP = 200  # soft cap: the block reason's extras are added only while its line stays within it; the core
+# (prefix, the first claim whole, "; +K more") is never shortened to meet it (see MESSAGES)
 # the block reason's remedy: re-read both clocks (`date` gives the local time for a local-zone stamp), or only
 # the UTC one where that is all that fits (see MESSAGES)
 REMEDY = ("; run `date`, `date -u`", "; run `date -u`")
+# the block reason's hint when a violation is a time AHEAD of the clock: how a genuine future fact passes
+HINT = ("; a genuine future time: put it in a `code span` or after 'due'", "; future time: `code span` or after 'due'")
 BLOCK_CAP = 3  # consecutive prior block cycles after which a stop_hook_active Stop allows with a warning
 CAP_SCAN_BYTES = 8 << 20
 CAP_SCAN_RECORDS = 512
@@ -1889,16 +1888,15 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
 
     def diagnose(kind):
         if diag is not None:
-            diag.append(_clip(f"stamp-truth-stop diag: {kind}, {total} claim(s), UTC now {utc}, elapsed "
-                              f"{el or 'unknown'}; first: {bad[0]}", DIAG_CAP))
+            diag.append(_one_line(f"stamp-truth-stop diag: {kind}, {total} claim(s), UTC now {utc}, elapsed "
+                                  f"{el or 'unknown'}; first: {bad[0]}"))
 
     if cap == "open":
         # round 24: the hook's own consecutive-block counter is unusable (no usable recovery state, or a block
         # that could not be recorded in it), so a loop cannot be ruled out: fail OPEN, loudly, whatever the
         # transcript count says
         if notes is not None:
-            notes.append(_claim_line(f"stamp-truth-stop: block count unknown; ALLOWED, {total} UNRESOLVED", claim,
-                                     MSG_CAP, keep=False))
+            notes.append(_claim_line(f"stamp-truth-stop: block count unknown; ALLOWED, {total} UNRESOLVED", claim))
         diagnose("fail-open allow")
         return None
     if cap == "cap":
@@ -1906,16 +1904,17 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None):
         # loudly, instead of blocking a fourth consecutive time
         if notes is not None:
             notes.append(_claim_line(f"stamp-truth-stop: block cap hit ({BLOCK_CAP}); ALLOWED, {total} UNRESOLVED",
-                                     claim, MSG_CAP, keep=False))
+                                     claim))
         diagnose("capped allow")
         return None
     diagnose("block")
-    # round 34: ONE line; the never-cut core (BLOCK_PREFIX, the first violation's literal in a code span, its
-    # compact offset) leaves room for the unresolved count, then the remedy and UTC now each where they fit
+    # round 35: ONE line; the never-shortened core (BLOCK_PREFIX, the first violation's literal whole in a code
+    # span, its compact offset, the unresolved count), then the remedy, the future-fact hint and UTC now, each
+    # only while the line stays within the soft cap
     more = f"; +{total - 1} more" if total > 1 else ""
-    if claim is None:
-        return _fit(BLOCK_PREFIX, [more, REMEDY, f"; UTC now {utc}"], MSG_CAP)
-    return _fit(_claim_line(BLOCK_PREFIX, claim, MSG_CAP - len(more)), [more, REMEDY, f"; UTC now {utc}"], MSG_CAP)
+    ahead = any(not v.startswith('"') and " min AHEAD" in v for v in bad)
+    return _fit(_claim_line(BLOCK_PREFIX, claim) + more, [REMEDY, HINT if ahead else "", f"; UTC now {utc}"],
+                MSG_CAP)
 
 
 def _first_claim(bad):
@@ -1944,39 +1943,29 @@ def _short_off(text):
     return text
 
 
-def _claim_line(head, claim, cap, keep=True):
-    """`head`, then the claim as ": `literal` offset", within `cap` characters. A literal too long for that is
-    shortened in the MIDDLE inside the code span (its start and end kept around one ELLIPSIS), never below
-    MIN_LIT characters. With `keep` (the block reason) the claim is never dropped, so the line passes `cap` only
-    when even a MIN_LIT literal does not fit, which no real claim reaches; without it (an allow's warning) the
-    claim is left out instead. No claim: `head` alone."""
+def _claim_line(head, claim):
+    """`head`, then the claim as ": `literal` offset", the literal WHOLE and verbatim (round 35: never shortened,
+    whatever the length), on one line. No claim: `head` alone."""
     if claim is None:
-        return head
+        return _one_line(head)
     lit, off = claim
-    room = cap - len(head) - len(off) - 5  # ": `", "` "
-    if len(lit) > room and room < MIN_LIT and not keep:
-        return head
-    room = max(room, MIN_LIT)
-    if len(lit) > room:  # a literal of at most MIN_LIT characters is shown whole, never padded with an ELLIPSIS
-        tail = (room - 1) // 2
-        lit = lit[:room - 1 - tail] + ELLIPSIS + lit[len(lit) - tail:]
-    return f"{head}: `{lit}` {off}"
+    return _one_line(f"{head}: `{lit}` {off}")
 
 
-def _clip(text, cap):
-    """`text` on one line, cut to at most `cap` characters."""
-    text = " ".join(str(text).splitlines())
-    return text if len(text) <= cap else text[:cap - 3] + "..."
+def _one_line(text):
+    """`text` on one physical line, never cut: each line break (newline, carriage return, or any other
+    str.splitlines boundary) becomes one space."""
+    return " ".join(str(text).splitlines())
 
 
 def _fit(core, extras, cap):
     """One line: `core` kept WHOLE (even past `cap`), then each of `extras` in priority order when the line still
     stays within `cap` characters with it; an extra that does not fit is SKIPPED and the later, possibly shorter,
     ones are still tried. An extra given as a tuple adds the first of its alternatives that fits, if any."""
-    line = " ".join(core.splitlines())
+    line = _one_line(core)
     for x in extras:
         for alt in (x if isinstance(x, tuple) else (x,)):
-            alt = " ".join(alt.splitlines())
+            alt = _one_line(alt)
             if len(line) + len(alt) <= cap:
                 line += alt
                 break
@@ -2808,7 +2797,9 @@ def _self_test():
             self.assertNotIn("\n", obj["systemMessage"])
             self.assertLessEqual(len(obj["systemMessage"]), MSG_CAP)
             self.assertEqual(len(err.splitlines()), 1, err)
-            self.assertLessEqual(len(err.rstrip("\n")), DIAG_CAP)
+            self.assertNotIn("\r", err)  # round 35: one line, never cut: the first violation ends it whole
+            self.assertRegex(err, r"; first: timestamp \S+ in your final message: \d+ min AHEAD of when it was "
+                                  r"written \(\S+Z\)\n$")
             self.assertIn("diag: capped allow", err)
             self.assertNotIn(obj["systemMessage"], err)
 
@@ -4590,8 +4581,7 @@ def _self_test():
         # -- round 32 (codex gpt-6-astra high QA of round 31) --
         def test_r33_messages_one_line_within_cap(self):
             # round 33: ONE stdout line per Stop; the reason keeps BLOCK_PREFIX and the first violation verbatim in
-            # a code span (round 34: shortened in the middle only past MSG_CAP), then extras that fit; stderr gets
-            # ONE different line
+            # a code span (round 35: whole, never shortened), then extras that fit; stderr gets ONE different line
             for lit in ("2099-01-01T00:00Z", "2099-01-01 00:00:00 UTC", "2099-01-01T00:00:00.123456789+05:30"):
                 old_err, sys.stderr = sys.stderr, io.StringIO()
                 try:
@@ -4601,20 +4591,21 @@ def _self_test():
                     sys.stderr = old_err
                 self.assertEqual((rc, len(out.splitlines())), (0, 1), out)
                 r = json.loads(out)["reason"]
-                self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `{lit[:9]}"), r)
-                self.assertTrue(f"{BLOCK_PREFIX}: `{lit}` +" in r or ELLIPSIS in r, r)
+                self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `{lit}` +"), r)
+                self.assertNotIn("\u2026", r)
                 self.assertIn("; +1 more", r)
                 self.assertNotIn("\n", r)
                 self.assertLessEqual(len(r), MSG_CAP)
                 self.assertEqual(len(err.splitlines()), 1, err)
-                self.assertLessEqual(len(err.rstrip("\n")), DIAG_CAP)
+                self.assertIn(f"; first: timestamp {lit} in your final message: ", err)  # round 35: never cut
+                self.assertRegex(err, r" min AHEAD of when it was written \(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\)\n$")
                 self.assertIn("diag: block, 2 claim(s)", err)
                 self.assertNotIn(r, err)
             # a footer-only block echoes the footer, its compact offset, and the true elapsed
             self.assertTrue(self.final("x\nSession elapsed 09:00").startswith(
                 f"{BLOCK_PREFIX}: `Session elapsed 09:00` +333m, true 03:27"))
             # _fit keeps the core whole past the cap
-            self.assertEqual(_fit("x" * 120, [" a"], MSG_CAP), "x" * 120)
+            self.assertEqual(_fit("x" * (MSG_CAP + 20), [" a"], MSG_CAP), "x" * (MSG_CAP + 20))
             self.assertEqual(_fit("a\nb", ["\nc"], 10), "a b c")
             # _first_claim: the FIRST violation in report order, a footer included; else None
             foot = '"(session: 9h 0m)" (last elapsed footer in x): true elapsed when written was 02:05 (415 min AHEAD)'
@@ -4632,7 +4623,7 @@ def _self_test():
             self.assertIn("1 UNRESOLVED: `2099-01-01T00:00Z` +", notes[0])  # round 34: names the claim
             self.assertIn("diag: fail-open allow", diag[0])
             self.assertIn("2099-01-01T00:00Z", diag[0])
-            self.assertLessEqual(len(diag[0]), DIAG_CAP)
+            self.assertNotIn("\r", diag[0])
             self.assertNotIn(notes[0], diag[0])
 
         # -- round 34 (codex gpt-6-astra and claude-opus-5-5 QA of round 33) --
@@ -4679,7 +4670,7 @@ def _self_test():
             # the count is reserved even beside the longest literal, and counts violations past MAX_REPORTED
             r = self.final(" ".join(f"2099-01-{d:02d}T00:00:00.123456789+05:30" for d in range(1, 26)))
             self.assertIn("; +24 more", r)
-            self.assertIn(ELLIPSIS, r)
+            self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `2099-01-01T00:00:00.123456789+05:30` +"), r)  # round 35
             self.assertLessEqual(len(r), MSG_CAP)
 
         def test_r34_footer_block_keeps_true_elapsed(self):
@@ -4690,28 +4681,25 @@ def _self_test():
                 self.assertIn("` +280m, true 03:27", r, repr(txt))
                 self.assertLessEqual(len(r), MSG_CAP)
             self.assertIn("` -147m, true 03:27", self.final("x\nSession elapsed 01:00"))
-            # a footer too long for the core is shortened in the MIDDLE inside the code span, never cut off
+            # round 35: a long footer is echoed WHOLE in the code span, never shortened
             r = self.final("x\nSession -_-_-_-elapsed :_:_:_:9999:00")
-            self.assertIn("` +599733m, true 03:27", r)
+            self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `Session -_-_-_-elapsed :_:_:_:9999:00` +599733m, true "
+                                         "03:27"), r)
             self.assertLessEqual(len(r), MSG_CAP)
-            lit = r.split("`")[1]
-            self.assertIn(ELLIPSIS, lit)
-            self.assertTrue(lit.startswith("Session -") and lit.endswith(":9999:00"), lit)
-            # the helper: shortened to fit; with keep the claim is never dropped; without it, dropped past MIN_LIT
-            line = _claim_line("H" * 60, ("a" * 50, "+5m"), MSG_CAP)
-            self.assertEqual(len(line), MSG_CAP)
-            self.assertIn("aaaa" + ELLIPSIS + "aaaa", line)
-            self.assertEqual(_claim_line("H" * 95, ("a" * 50, "+5m"), MSG_CAP, keep=False), "H" * 95)
-            self.assertIn("`aaaa" + ELLIPSIS + "aaaa` +5m", _claim_line("H" * 95, ("a" * 50, "+5m"), MSG_CAP))
-            self.assertIn(": `abcde` +5m", _claim_line("H" * 95, ("abcde", "+5m"), MSG_CAP))
+            # the helper: the literal whole at any length, on one line; no claim, the head alone
+            self.assertEqual(_claim_line("H" * 95, ("a" * 150, "+5m")), "H" * 95 + ": `" + "a" * 150 + "` +5m")
+            self.assertEqual(_claim_line("H" * 95, None), "H" * 95)
+            self.assertEqual(_claim_line("a\nb", ("c", "+5m")), "a b: `c` +5m")
 
         def test_r34_fit_reaches_shorter_later_extra(self):
             # codex major 2 / claude minor 2: _fit stopped at the first extra that did not fit
             self.assertEqual(_fit("ab", [" c", "y" * 200, " d"], 10), "ab c d")
             self.assertEqual(_fit("ab", [("y" * 20, " z"), " d"], 10), "ab z d")
             self.assertEqual(_fit("ab", [("y" * 20, "w" * 20)], 10), "ab")
-            # claude minor 4: a block with room names both clocks (`date` gives the local time)
-            self.assertTrue(self.final("[2026-09-23T20:00Z] x").endswith("` +135m; run `date`, `date -u`"))
+            # claude minor 4: a block with room names both clocks (`date` gives the local time); round 35: then the
+            # future-fact hint and UTC now, all within the soft cap
+            self.assertEqual(self.final("[2026-09-23T20:00Z] x"), f"{BLOCK_PREFIX}: `2026-09-23T20:00Z` +135m; run "
+                             f"`date`, `date -u`{HINT[0]}; UTC now 2026-09-23T17:45:00Z")
             # every block through main() is one stdout line within the cap, with one stderr line
             for txt in ("[2099-01-01T00:00Z] x", "[2099-01-01 00:00:00 UTC] x", "2099-01-01T00:00Z 2099-01-02T00:00Z"):
                 old_err, sys.stderr = sys.stderr, io.StringIO()
@@ -4724,6 +4712,96 @@ def _self_test():
                 r = json.loads(out)["reason"]
                 self.assertTrue(r.startswith(BLOCK_PREFIX + ": `"), r)
                 self.assertLessEqual(len(r), MSG_CAP)
+
+        # -- round 35 (codex gpt-6-astra and claude-opus-5-5 QA round 2 of round 34) --
+        def test_r35_long_timestamp_whole_with_count(self):
+            # codex major 1 / claude minor 3: a long, supported literal was cut in the middle to fit 100 characters
+            lit = "2099-01-01T00:00:00.123456789+05:30"
+            r = self.final(f"[{lit}] x\n2099-02-01T00:00Z y")
+            self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `{lit}` +38011725m; +1 more"), r)
+            self.assertNotIn("\u2026", r)
+            self.assertEqual(self.diag[0].split("; first: ", 1)[1], self.report[0])  # claude minor 4: never cut
+            # a core past the soft cap is still sent whole, with no extras
+            self.assertEqual(_fit("x" * 250, [REMEDY, HINT], MSG_CAP), "x" * 250)
+
+        def test_r35_extreme_elapsed_keeps_count_and_claim(self):
+            # codex minor 2 / claude minor 2: a year-0001 lease start pushed the count out of the reason and the
+            # claim out of the fail-open note
+            lease = os.path.join(self.tmp, "lease.md")
+            with open(lease, "w") as f:
+                f.write("Active-session: qa-00010101T000000Z\n")
+            start = lease_start(lease)
+            self.assertEqual(start, datetime.datetime(1, 1, 1, tzinfo=UTC))
+            self.write([self.user("go"), self.asst("2099-01-01T00:00Z")])
+            claim = "`Session elapsed 00:00` -1065429705m, true 17757161:45"
+            r = evaluate({"transcript_path": self.tr, "hook_event_name": "Stop", "stop_hook_active": False,
+                          "last_assistant_message": "Session elapsed 00:00"}, self.now, start, self.sdir)
+            self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: {claim}; +1 more"), r)
+            notes = []
+            self.assertIsNone(evaluate({"stop_hook_active": True, "last_assistant_message": "Session elapsed 00:00"},
+                                       self.now, start, os.path.join(self.tmp, "fresh"), notes))
+            self.assertEqual(notes, [f"stamp-truth-stop: block count unknown; ALLOWED, 1 UNRESOLVED: {claim}"])
+
+        def test_r35_two_violations_carry_remedy(self):
+            # claude major 1: with two violations even the remedy did not fit in 100 characters
+            r = self.final("2099-01-01T00:00Z 2099-01-02T00:00Z")
+            self.assertIn("`2099-01-01T00:00Z` +38012055m; +1 more; run `date`, `date -u`", r)
+            self.assertLessEqual(len(r), MSG_CAP)
+            old_err, sys.stderr = sys.stderr, io.StringIO()
+            try:
+                rc, out = run_main(json.dumps(dict(last_assistant_message="2099-01-01T00:00Z 2099-01-02T00:00Z")))
+            finally:
+                sys.stderr = old_err
+            self.assertEqual(rc, 0)
+            self.assertIn("; +1 more; run `date`, `date -u`", json.loads(out)["reason"])
+
+        def test_r35_future_time_carries_hint(self):
+            # claude major 1: the reason no longer said how a genuine future fact passes
+            r = self.final("The eclipse occurs 2027-08-02T18:00:00Z.")
+            self.assertEqual(r, f"{BLOCK_PREFIX}: `2027-08-02T18:00:00Z` +450735m; run `date`, `date -u`; a genuine "
+                                "future time: put it in a `code span` or after 'due'; UTC now 2026-09-23T17:45:00Z")
+            # the hint is only for a time AHEAD: not for a footer, nor for a stamp BEHIND
+            self.assertNotIn(HINT[1][2:12], self.final("x\nSession elapsed 09:00"))
+            self.assertNotIn(HINT[1][2:12], self.final("[2026-09-23T10:00Z] x") or "")
+            # the hint is skipped, never cut, when it does not fit; the shorter form is tried first
+            self.assertEqual(_fit("x" * 150, [HINT], MSG_CAP), "x" * 150 + HINT[1])
+            self.assertEqual(_fit("x" * 170, [HINT], MSG_CAP), "x" * 170)
+
+        def test_r35_every_message_one_line_never_cut(self):
+            # the requirement: no multi-line hook text; the first rejected timestamp and the diagnostic whole
+            texts = ("[2099-01-01T00:00:00.123456789+05:30] a\r\nb\u2028c 2099-02-01T00:00Z",
+                     "x\nSession elapsed 09:00", "x\rSession elapsed: 08:07\r",
+                     " ".join(f"2099-01-{d:02d}T00:00:00.123456789+05:30" for d in range(1, 26)),
+                     "[2026-09-23 13:45:00 UTC] fine\n\nThe launch is 2099-01-01T00:00Z.")
+            for txt in texts:
+                msgs = []
+                for active in (False, True):
+                    notes, report, diag = [], [], []
+                    sdir = tempfile.mkdtemp(dir=self.tmp)
+                    r = evaluate({"stop_hook_active": active, "last_assistant_message": txt}, self.now, self.start,
+                                 sdir, notes, report=report, diag=diag)
+                    msgs += [m for m in [r] + notes + diag if m]
+                    self.assertEqual(len(diag), 1, txt)
+                    self.assertEqual(diag[0].split("; first: ", 1)[1], " ".join(report[0].splitlines()), txt)
+                    lit = _first_claim(report)[0]
+                    for m in [r] + notes:
+                        if m:
+                            self.assertIn(f": `{lit}` ", m)
+                self.assertEqual(len(msgs), 4, (txt, msgs))
+                for m in msgs:
+                    self.assertNotIn("\n", m)
+                    self.assertNotIn("\r", m)
+                    self.assertEqual(len(m.splitlines()), 1, m)
+                if "2099" not in txt:
+                    continue  # main() reads no lease here, so a footer alone is not checked through it
+                old_err, sys.stderr = sys.stderr, io.StringIO()
+                try:
+                    rc, out = run_main(json.dumps(dict(last_assistant_message=txt)))
+                    err = sys.stderr.getvalue()
+                finally:
+                    sys.stderr = old_err
+                self.assertEqual((rc, len(out.splitlines()), len(err.splitlines())), (0, 1, 1), (out, err))
+                self.assertEqual(len(json.loads(out)["reason"].splitlines()), 1)
 
         def test_r32_fifo_at_prune_cursor_never_hangs(self):
             # finding (codex HIGH): a FIFO planted at prune-cursor blocked round 31's write-only open forever, so
