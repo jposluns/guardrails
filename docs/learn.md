@@ -1,9 +1,9 @@
 +++
 title = "Learn more about AIQT"
-description = "Go deeper on AIQT: see it in action, how it works, where it is going, and the evidence behind it."
+description = "Go deeper on AIQT: the standard itself, AIQT in action, how it works, where it is going, and the evidence behind it."
 canonical = "https://aiqt.ai/learn"
 og-title = "Learn more about AIQT"
-og-description = "Go deeper on AIQT: see it in action, how it works, where it is going, and the evidence behind it."
+og-description = "Go deeper on AIQT: the standard itself, AIQT in action, how it works, where it is going, and the evidence behind it."
 og-url = "https://aiqt.ai/learn"
 sidebar-active = "learn"
 +++
@@ -11,8 +11,9 @@ sidebar-active = "learn"
 <div class="wrap pagehead">
   <p class="eyebrow">Learn more</p>
   <h1>Everything behind AIQT.</h1>
-  <p class="lead">The audience pages tell you what AIQT does. These four go deeper: what it looks
-    like in practice, how it works, where it is heading, and the evidence behind the claims.</p>
+  <p class="lead">The audience pages tell you what AIQT does. These five go deeper: the standard
+    itself, what it looks like in practice, how it works, where it is heading, and the evidence
+    behind the claims.</p>
 </div>
 
 <section id="learn-cards">

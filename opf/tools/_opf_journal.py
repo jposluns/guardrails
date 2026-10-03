@@ -1,6 +1,5 @@
-"""Capability-bound store journal API. Its first writer, the MIG-PR5 ingest promotion coordinator
-(publication attempts and the ingest writer lock), retired with the import engine; other writers keep
-their legacy homes.
+"""Capability-bound store journal API. Its first writer, the MIG-PR5 ingest promotion coordinator,
+retired with the import engine; other writers keep their legacy homes.
 
 Homes-2 store writers must use this API for journal frames and terminal projections. Paths derive from
 kind and run identity; callers cannot choose a destination. Recovery opens existing state
@@ -262,42 +261,3 @@ def check_attempt_frames(frames, kind, run_id, attempt):
                 and isinstance(header.get("operation_id"), str) and header["operation_id"]):
             raise _journal.JournalError("attempt journal identity does not match {}".format(txn))
     return intent
-
-
-def _writer_lock_root(cap, kind):
-    return Path(cap.store_root) / _opf_store.journal_root(kind)
-
-
-def acquire_writer_lock(cap, kind):
-    """Take the kind's _journal writer lock beneath the held capability (lock order: capability, then
-    journal). An existing lock refuses: breaking a stale one is recovery's step, not this call's."""
-    rel = _opf_store.journal_root(kind)
-    if not isinstance(cap, _opf_oplock.OpCapability):
-        raise _journal.JournalError("the journal writer lock requires a held OpCapability")
-    try:
-        _opf_init_substrate._require_live_capability(cap)
-    except _opf_init_substrate.InitSubstrateError as exc:
-        raise _journal.JournalError(str(exc))
-    try:
-        root_fd = _opf_store._open_root_fd(cap.store_root)
-    except (OSError, _opf_store.StoreError) as exc:
-        raise _journal.JournalError("cannot open store journal: {}".format(exc))
-    try:
-        _journal.ensure_journal_dirs(root_fd, rel)
-    finally:
-        _journal._close_fd_quietly(root_fd)
-    _journal.acquire_lock(_writer_lock_root(cap, kind), session_id=cap.holder)
-
-
-def writer_lock_held(cap, kind):
-    """Whether this process owns the kind's _journal writer lock while the capability is live."""
-    try:
-        _opf_init_substrate._require_live_capability(cap)
-        owner = _journal.read_lock_owner(_writer_lock_root(cap, kind))
-    except (_opf_init_substrate.InitSubstrateError, _journal.JournalError):
-        return False
-    return owner is not None and _journal._owner_is_current(owner)
-
-
-def release_writer_lock(cap, kind):
-    _journal.release_lock(_writer_lock_root(cap, kind))
