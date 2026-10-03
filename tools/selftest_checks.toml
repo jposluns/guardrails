@@ -753,4 +753,15 @@ expected-check-ids = [
   "revert/conditional-file-imports-red",
   "revert/comment-join-red",
   "revert/flow-quoted-comma-red",
+  # ---------- round 5: .claude/CLAUDE.md, file headers, an @ inside a word, imported scopes ----------
+  "exit/comment-split-after-space-2",
+  "exit/comment-email-0",
+  "revert/comment-email-red",
+  "count/dot-claude-claude-md-counted",
+  "revert/dot-claude-claude-md-red",
+  "count/loaded-file-header-counted",
+  "revert/loaded-file-header-red",
+  "exit/imported-file-scope-grammar-2",
+  "revert/imported-file-scope-grammar-red",
+  "doc/budget-source-pack-description",
 ]

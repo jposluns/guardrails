@@ -32,19 +32,24 @@ The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
 ## Keep the always loaded instructions small
 
 Claude Code reads some files into every session before you type anything: for this pack, the rule files
-under `.claude/rules/` and the AIQT block in `CLAUDE.md`. A shipped gate measures that text and fails if
-the pack's share grows.
+under `.claude/rules/` and the AIQT block in `CLAUDE.md`, plus `.claude/CLAUDE.md` if you have one. A shipped
+gate measures that text, with the header line Claude Code writes before each file, and fails if the pack's
+share grows.
 
 Keep everything Claude Code loads at the start of a session under 120,000 characters in total. Claude Code's
 own limit depends on the model; 120,000 is the lowest value it uses, so treat it as a conservative floor,
 not a fixed limit. The gate prints two totals: PACK, the pack's own share, and SESSION, which adds the
-rest of your `CLAUDE.md` and its imports. Compare SESSION, not PACK, plus your own files under
-`~/.claude/`, such as `~/.claude/CLAUDE.md` and any rules there, against the floor when you check your setup.
+rest of your `CLAUDE.md` and its imports. Both count `.claude/CLAUDE.md` and its imports, and a header for
+each loaded file with its path relative to the repository root (not the absolute part, which depends on
+where the repository sits). Compare SESSION, not PACK, plus your own files under `~/.claude/`, such as
+`~/.claude/CLAUDE.md` and any rules there, against the floor when you check your setup; Claude Code's own
+limit counts file contents only, so the headers make SESSION read a little high.
 The gate reads only an enumerated grammar and exits 2, naming the file and line, on anything outside it: a
 control, format, or Unicode whitespace character other than tab and a line ending; frontmatter that is not
 plain ASCII keys and one-line string values; an `@` import that is not plain ASCII, holds a `..`, or passes
-through a symlink; an import target it cannot read; and an HTML comment on the same line as an `@`, since
-Claude Code removes the comment and can join an import path across it. Within that grammar it counts every
+through a symlink; an import target it cannot read; and an HTML comment on the same line as an `@` that
+starts an import, since Claude Code removes the comment and can join an import path across it. An `@`
+inside a word, such as an email address in a comment, is fine. Within that grammar it counts every
 HTML comment except a whole line comment with blank lines around it. It follows each `@` it reads as
 possibly naming a file, even one in a code span, and the imports of a rule file scoped with `paths:`,
 which Claude Code loads in every session. Either total can be higher than what Claude Code loads. The gate

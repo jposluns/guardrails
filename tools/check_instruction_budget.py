@@ -2,7 +2,8 @@
 """Instruction-budget gate: hold what Claude Code loads unconditionally to a committed ratchet.
 
 Claude Code reads every `.claude/rules/**/*.md` file that carries no `paths:` scope, the project CLAUDE.md,
-and every file either of them imports, into every session before the first prompt. That text is paid for
+`.claude/CLAUDE.md` when it exists, and every file any of them imports, into every session before the first
+prompt, each behind a header line naming the file. That text is paid for
 in every session, so this gate measures it and fails when the pack's share grows. The loading rules below
 are taken from the loader of the Claude Code build pinned in the budget source.
 
@@ -61,9 +62,12 @@ character in the Basic Multilingual Plane is one unit, an astral character such 
       holding `<!--` that does not end in a newline counts one unit more: the loader then rebuilds it from
       its Markdown lexer's tokens, which can add a final newline (a blockquote closing the file).
       The loader removes a comment before it looks for imports, so a comment can join an import path
-      across it (`@docs/big<!---->.md` loads docs/big.md). A measured file in which `<!--` or `-->`
-      shares a line with an `@`, or in which `<!--` follows an `@` with only whitespace between them,
-      exits 2 naming the line; the gate refuses the construct rather than model the join.
+      across it (`@docs/big<!---->.md` loads docs/big.md). The loader reads an `@` as an import only at the
+      start of the text or after whitespace. A measured file holding an `@` that begins an import token (at
+      the start of a line, after whitespace, or right after a comment closer `-->`) on a line that also
+      holds `<!--` or `-->`, or followed by `<!--` with only whitespace between them, exits 2 naming the
+      line; the gate refuses the construct rather than model the join. An `@` inside a word, such as the
+      one in an email address (`<!-- owner: ops@example.com -->`), begins no import and is not refused.
   IMPORTS. Every `@` in a rule file, in the managed block, in an imported file, and, for SESSION, in the
       whole CLAUDE.md is an import candidate. That includes a conditional rule file: the loader reads every
       rule file with its whole import tree in every session and then drops only the entries that carry their
@@ -84,7 +88,10 @@ character in the Basic Multilingual Plane is one unit, an astral character such 
       names no file under exact case but one file matches it case-insensitively, that file is the import
       (the loader on a case-insensitive file system reads it); two such matches exit 2. Each target is
       counted once, recursively through imported files to any depth (a cycle ends), held to the grammar,
-      its frontmatter and comments removed as for a counted rule file. Only a genuinely absent path (the
+      its frontmatter and comments removed as for a counted rule file. An imported file's frontmatter is
+      held to the FRONTMATTER grammar and its `paths:` value to the SCOPE grammar (a typed value, nested
+      or unbalanced braces, or an escape exits 2), but a scope does not make an import conditional: the
+      target is counted whatever its scope. Only a genuinely absent path (the
       file system reports that it does not exist) adds 0 and does not fail: a mention such as @alice, or
       an email address such as name@example.com. A path that holds only dot components names a directory
       and adds 0. A candidate the gate cannot settle exits 2 with a message that calls it ambiguous or
@@ -94,15 +101,31 @@ character in the Basic Multilingual Plane is one unit, an astral character such 
   MANAGED BLOCK. The pack-managed RULES-INDEX block of CLAUDE.md (the markers tools/gen_claude.py
       writes), comments removed as COMMENTS states with the scan run over the whole CLAUDE.md (so a fence
       opened before the block keeps the block's comments counted), plus its imports.
+  .claude/CLAUDE.md. The loader reads `.claude/CLAUDE.md` beside CLAUDE.md in every session. When it exists
+      it is measured wherever it is, under the same grammar as CLAUDE.md (CHARACTERS, COMMENTS, IMPORTS),
+      whole, with comments removed as COMMENTS states, and counted with its imports into both totals; its
+      imports resolve from its real directory. It sits in the pack's own `.claude/` directory and the gate
+      cannot tell who wrote it, so it counts into PACK as well as SESSION, and its banned imports are
+      findings. A path there the gate cannot read, a directory or a broken symlink included, exits 2.
+  HEADERS. The loader writes `Contents of <path> (project instructions, checked into the codebase):`
+      and a blank line before each file it loads, and joins the files with a blank line. Each loaded file
+      (an unconditional rule file, CLAUDE.md, `.claude/CLAUDE.md`, and every import target; not a
+      conditional rule file, whose own body is not loaded) counts a modelled header: that fixed text, the
+      type suffix the pinned loader writes for a project file, the colon, the blank-line separators, and the
+      file's path RELATIVE to the repository root (as the gate names it). The loader writes the absolute
+      path; the machine-specific root prefix before the relative path is not counted, so the figure is the
+      same on every machine. The headers are counted into both totals and printed as their own part.
 
 Two totals are reported separately:
 
-  PACK     the rule files and their imports plus the managed block and its imports. This is the part the
-           pack controls, and the only total the gate enforces.
-  SESSION  the rule files plus the whole CLAUDE.md plus every file either imports. Reported, not
-           enforced: the bytes outside the managed block belong to the adopter.
+  PACK     the rule files and their imports, the managed block and its imports, and `.claude/CLAUDE.md`
+           and its imports, plus the HEADERS of every file loaded for them and of CLAUDE.md. This is the
+           part the pack controls, and the only total the gate enforces.
+  SESSION  the rule files plus the whole CLAUDE.md plus `.claude/CLAUDE.md` plus every file any of them
+           imports, plus the HEADERS of all of them. Reported, not enforced: the bytes outside the managed
+           block belong to the adopter.
 
-A rule file or the managed block importing RULES-INDEX.md or AGENTS.md is a finding (exit 1) whatever the
+A rule file, `.claude/CLAUDE.md`, or the managed block importing RULES-INDEX.md or AGENTS.md is a finding (exit 1) whatever the
 total: a candidate any of whose tested paths, or any of whose targets, has either as its final path
 component in any case, whether a file exists there or not. The same import in the adopter's text outside
 the block is not.
@@ -125,19 +148,22 @@ KNOWN OVER-COUNTS, by design (each can make PACK or SESSION higher than what the
     one candidate that name two files both count.
   - A rule file reached under two names counts twice, and the unit added for a text holding `<!--` with
     no final newline counts whether or not the loader's rebuild adds it.
+  - Each loaded file's header counts a joining blank line, though the loader writes one fewer than the
+    files it joins, and the loader trims each file's content, which the gate does not.
 
 DISCLOSED RESIDUAL. This gate measures the repository's own files; it does not run Claude Code. Its
 loader model comes from reading the pinned build's source, and the grammar bounds the input it vouches
 for; it is not a proof that the loader agrees on every input inside the grammar. It does not measure
 user-level files (~/.claude/CLAUDE.md and ~/.claude/rules/), which load in every session too; an
 AGENTS.md or other file loaded through the instructionFiles setting rather than an `@` import; CLAUDE.md
-files in other directories, or CLAUDE.local.md; skills, hooks, tool definitions, or the system prompt; or
-loading by a Claude Code version other than the one pinned in the budget source. The loader also writes a
-header line before each file it loads (`Contents of <absolute path> (project instructions, checked into
-the codebase):` or similar, its length depending on where the repository sits); the gate counts file
-contents only, so that header, roughly a hundred units or more for each loaded file, is not in either
-total. The loader's own 120,000-character check sums file contents only, so the header does not bear on
-that floor. The count is UTF-16 code units, not tokens, so it tracks size, not model cost.
+files in other directories (above the repository root or below it), or CLAUDE.local.md; skills, hooks,
+tool definitions, or the system prompt; or loading by a Claude Code version other than the one pinned in
+the budget source. Of each loaded file's header (`Contents of <absolute path> (project instructions,
+checked into the codebase):`, HEADERS) it counts the fixed text and the path relative to the repository
+root, but not the machine-specific absolute root prefix the loader writes before that path, so the header
+is undercounted by that prefix's length for every loaded file. The loader's own 120,000-character check
+sums file contents only, so both totals, which include the headers, read a little high against that
+floor. The count is UTF-16 code units, not tokens, so it tracks size, not model cost.
 
 Usage:
   check_instruction_budget.py                          measure and enforce; print both totals
@@ -173,6 +199,11 @@ import gen_rules  # noqa: E402  its validated frontmatter value parsers, never a
 
 RULES_REL = ".claude/rules"
 CLAUDE_REL = "CLAUDE.md"
+# The loader reads this beside CLAUDE.md in every session (HEADERS and `.claude/CLAUDE.md` in the docstring).
+DOT_CLAUDE_REL = ".claude/CLAUDE.md"
+# The fixed text of the header the loader writes before each loaded file, `Contents of <path>` plus the type
+# suffix it writes for a project file, a colon, and a blank line, and the blank line that joins the files.
+HEADER_FIXED = "Contents of " + " (project instructions, checked into the codebase)" + ":\n\n" + "\n\n"
 BUDGET_REL = ".aiqt/core/instruction-budget.toml"
 BUDGET_KEYS = {"ratchet", "ceiling", "claude-code-version", "binary-sha256"}
 # Importing either from the managed block loads the rule index or a second full copy of the corpus on top
@@ -239,6 +270,12 @@ class GateError(Exception):
 def utf16_units(text):
     """The length of `text` in UTF-16 code units: one per BMP character, two per astral character."""
     return len(text.encode("utf-16-le")) // 2
+
+
+def header_units(rel):
+    """The units of the modelled header before a loaded file: HEADER_FIXED plus `rel`, its path relative
+    to the repository root. The machine-specific absolute root prefix the loader writes is not counted."""
+    return utf16_units(HEADER_FIXED) + utf16_units(rel)
 
 
 def comment_spans(text):
@@ -321,21 +358,36 @@ def _check_characters(text, where):
                                 where, text.count("\n", 0, idx) + 1, ord(ch)))
 
 
+def _import_start(text, pos):
+    """True when the `@` at `pos` begins an import token: at the start of `text` or a line, after
+    whitespace, or right after a comment closer `-->` (with the comment removed, what came before it may be
+    whitespace). The loader reads an `@` as an import only at the start of the text or after whitespace, so
+    an `@` inside a word, such as the one in an email address, begins none."""
+    return pos == 0 or text[pos - 1] in " \t\r\n" or text[pos - 3:pos] == "-->"
+
+
 def _check_comment_joins(text, where):
     """GateError naming the file and line of the first `@` an HTML comment could join to an import path:
-    a line holding an `@` and also `<!--` or `-->`, or an `@` followed by `<!--` with only whitespace
-    between them. The loader removes comments before it looks for imports, so `@docs/big<!---->.md`
-    loads docs/big.md; the gate refuses the construct rather than model the join."""
-    for number, line in enumerate(text.split("\n"), 1):
-        if "@" in line and ("<!--" in line or "-->" in line):
-            raise GateError("{}:{}: an HTML comment opener or closer shares a line with an `@`; the loader "
-                            "removes the comment and may join an import path across it; outside the "
-                            "enumerated grammar, cannot evaluate".format(where, number))
-    joined = COMMENT_AFTER_AT_RE.search(text)
-    if joined:
-        raise GateError("{}:{}: an HTML comment follows an `@` with only whitespace between them; the loader "
-                        "removes the comment and may join an import path across it; outside the enumerated "
-                        "grammar, cannot evaluate".format(where, text.count("\n", 0, joined.start()) + 1))
+    an `@` that begins an import token (_import_start) on a line that also holds `<!--` or `-->`, or
+    followed by `<!--` with only whitespace between them. The loader removes comments before it looks for
+    imports, so `@docs/big<!---->.md` loads docs/big.md; the gate refuses the construct rather than model
+    the join. An `@` inside a word (`<!-- owner: ops@example.com -->`) is not refused."""
+    pos = text.find("@")
+    while pos >= 0:
+        if _import_start(text, pos):
+            number = text.count("\n", 0, pos) + 1
+            end = text.find("\n", pos)
+            line = text[text.rfind("\n", 0, pos) + 1:len(text) if end < 0 else end]
+            if "<!--" in line or "-->" in line:
+                raise GateError("{}:{}: an HTML comment opener or closer shares a line with an `@` that "
+                                "begins an import; the loader removes the comment and may join an import "
+                                "path across it; outside the enumerated grammar, cannot evaluate".format(
+                                    where, number))
+            if COMMENT_AFTER_AT_RE.match(text, pos):
+                raise GateError("{}:{}: an HTML comment follows an `@` with only whitespace between them; the "
+                                "loader removes the comment and may join an import path across it; outside "
+                                "the enumerated grammar, cannot evaluate".format(where, number))
+        pos = text.find("@", pos + 1)
 
 
 def _check_ascii(text, where, first_line, what):
@@ -607,13 +659,22 @@ def rule_files(root):
     return found
 
 
+def _imported_scope(fm, where):
+    """GateError when an imported file's frontmatter `fm` carries a `paths:` scope outside the SCOPE grammar
+    (path_globs, normalize_globs). A scope does not make an import conditional; the target is counted."""
+    globs = path_globs(fm, where)
+    if globs is not None:
+        normalize_globs(globs, where)
+
+
 def measure_rules(root):
-    """(counted units, counted file count, conditional file count, import origins) over the rule tree,
-    the origins one (body, real directory, where, first body line) per rule file, for follow_imports. A
+    """(counted units, counted file count, conditional file count, import origins, header units) over the
+    rule tree, the origins one (body, real directory, where, first body line) per rule file, for
+    follow_imports, and the header units the modelled header of each counted file (header_units). A
     conditional file's body is not counted, but it is an origin: the loader reads every rule file with its
     whole import tree in every session and drops only the entries that carry their own scope, so the
     imports of a conditional file load in every session."""
-    total = counted = conditional = 0
+    total = counted = conditional = headers = 0
     origins = []
     for path in rule_files(root):
         where = path.relative_to(root).as_posix()
@@ -629,9 +690,10 @@ def measure_rules(root):
                 origins.append(origin)  # its body is not counted; its imports load in every session
                 continue
         total += counted_units(body)
+        headers += header_units(where)
         counted += 1
         origins.append(origin)
-    return total, counted, conditional, origins
+    return total, counted, conditional, origins, headers
 
 
 def managed_block(text):
@@ -753,9 +815,11 @@ def resolve_candidate(path, base, where, token):
 
 
 def follow_imports(root, origins, findings):
-    """{resolved path: units} for every file reachable through `@` import candidates from `origins`, a
-    list of (text, the real directory it sits in, where, the line `text` starts on), each counted once
-    with frontmatter and comments removed as for a rule file. Each run must be printable ASCII
+    """{resolved path: (units, header units)} for every file reachable through `@` import candidates from
+    `origins`, a list of (text, the real directory it sits in, where, the line `text` starts on), each
+    counted once with frontmatter and comments removed as for a rule file, its frontmatter held to the
+    grammar and its `paths:` scope to the SCOPE grammar (_imported_scope), and its modelled header counted
+    from its path relative to the repository root (header_units). Each run must be printable ASCII
     (_check_ascii), and every path candidate_paths gives that names a file is followed; a comment next to
     an `@` was refused before (_check_comment_joins). This is the gate's model of the pinned loader, not a
     proof that the loader loads no other file. A candidate whose tested paths
@@ -800,16 +864,36 @@ def follow_imports(root, origins, findings):
                 _check_comment_joins(text, rel)
                 front, body, front_line = split_frontmatter(text, rel)
                 if front is not None:
-                    parse_frontmatter(front, rel, front_line)
-                seen[target] = counted_units(body)
+                    _imported_scope(parse_frontmatter(front, rel, front_line), rel)
+                seen[target] = (counted_units(body), header_units(rel))
                 pending.append((body, os.path.dirname(target), rel, _body_line(text, body)))
     return seen
 
 
+def _dot_claude(root, real_root):
+    """[(text, real directory, where, 1)] for `.claude/CLAUDE.md`, held to the grammar as CLAUDE.md is, or
+    [] when it is genuinely absent. Any other failure to look at or read it (a directory, a broken symlink,
+    a permission error) is GateError, never read as absent."""
+    path = root / DOT_CLAUDE_REL
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise GateError("cannot read {} ({}); cannot evaluate".format(DOT_CLAUDE_REL, exc))
+    text = read_text(path, DOT_CLAUDE_REL)
+    _check_characters(text, DOT_CLAUDE_REL)
+    _check_comment_joins(text, DOT_CLAUDE_REL)
+    base = os.path.dirname(os.path.realpath(path))
+    if not _inside(base, real_root):
+        raise GateError("{} resolves outside the repository; cannot evaluate".format(DOT_CLAUDE_REL))
+    return [(text, base, DOT_CLAUDE_REL, 1)]
+
+
 def measure(root):
-    """Both totals and their parts. Banned imports reached from the rule files and the managed block are
-    returned as findings; every cannot-evaluate condition raises GateError."""
-    rules, counted, conditional, origins = measure_rules(root)
+    """Both totals and their parts. Banned imports reached from the rule files, `.claude/CLAUDE.md`, and
+    the managed block are returned as findings; every cannot-evaluate condition raises GateError."""
+    rules, counted, conditional, origins, rule_headers = measure_rules(root)
     claude = read_text(root / CLAUDE_REL, CLAUDE_REL)
     _check_characters(claude, CLAUDE_REL)
     _check_comment_joins(claude, CLAUDE_REL)
@@ -822,19 +906,30 @@ def measure(root):
     claude_base = os.path.dirname(os.path.realpath(root / CLAUDE_REL))
     if not _inside(claude_base, real_root):
         raise GateError("{} resolves outside the repository; cannot evaluate".format(CLAUDE_REL))
+    # The loader reads .claude/CLAUDE.md beside CLAUDE.md; it is counted whole, with its imports, into both.
+    dot = _dot_claude(root, real_root)
+    dot_units = sum(counted_units(text) for text, _, _, _ in dot)
+    # Every loaded file carries a header: the rule files counted, CLAUDE.md, .claude/CLAUDE.md, each import.
+    file_headers = rule_headers + header_units(CLAUDE_REL) + sum(header_units(where) for _, _, where, _ in dot)
     # Claude Code follows imports in rule files as in CLAUDE.md, so theirs count into both totals.
-    pack_imports = sum(follow_imports(
-        root, origins + [(block, claude_base, CLAUDE_REL, claude.count("\n", 0, start) + 1)], findings).values())
+    pack_seen = follow_imports(
+        root, origins + dot + [(block, claude_base, CLAUDE_REL, claude.count("\n", 0, start) + 1)], findings)
     # The adopter owns the bytes outside the block, so a banned import there is not the pack's finding:
-    # only the rule files' and the managed block's findings fail the gate.
-    session_imports = sum(follow_imports(root, origins + [(claude, claude_base, CLAUDE_REL, 1)], []).values())
+    # only the rule files', .claude/CLAUDE.md's, and the managed block's findings fail the gate.
+    session_seen = follow_imports(root, origins + dot + [(claude, claude_base, CLAUDE_REL, 1)], [])
+    pack_imports = sum(units for units, _ in pack_seen.values())
+    session_imports = sum(units for units, _ in session_seen.values())
+    pack_headers = file_headers + sum(header for _, header in pack_seen.values())
+    session_headers = file_headers + sum(header for _, header in session_seen.values())
     # The block's comments are placed in the whole CLAUDE.md, so a fence opened before the block counts.
     spans = comment_spans(claude)
     block_units = utf16_units(block) - sum(utf16_units(claude[s:e]) for s, e in spans if start <= s and e <= end)
     claude_units = counted_units(claude)
     return dict(rules=rules, rule_files=counted, conditional_files=conditional, block=block_units,
-                pack_imports=pack_imports, claude=claude_units, session_imports=session_imports,
-                pack=rules + block_units + pack_imports, session=rules + claude_units + session_imports,
+                dot_claude=dot_units, pack_imports=pack_imports, claude=claude_units,
+                session_imports=session_imports, pack_headers=pack_headers, session_headers=session_headers,
+                pack=rules + block_units + dot_units + pack_imports + pack_headers,
+                session=rules + claude_units + dot_units + session_imports + session_headers,
                 findings=findings)
 
 
@@ -871,10 +966,13 @@ def run(root):
         print("error: {}; fail-closed".format(exc), file=sys.stderr)
         return 2
     ratchet = budget["ratchet"]
-    print("PACK: {} UTF-16 code units ({} unconditional rule files {}, managed block {}, "
-          "its imports {})".format(m["pack"], m["rule_files"], m["rules"], m["block"], m["pack_imports"]))
-    print("SESSION: {} UTF-16 code units (rule files {}, whole CLAUDE.md {}, its imports {})"
-          .format(m["session"], m["rules"], m["claude"], m["session_imports"]))
+    print("PACK: {} UTF-16 code units ({} unconditional rule files {}, managed block {}, {} {}, "
+          "their imports {}, file headers {})".format(m["pack"], m["rule_files"], m["rules"], m["block"],
+                                                      DOT_CLAUDE_REL, m["dot_claude"], m["pack_imports"],
+                                                      m["pack_headers"]))
+    print("SESSION: {} UTF-16 code units (rule files {}, whole CLAUDE.md {}, {} {}, their imports {}, "
+          "file headers {})".format(m["session"], m["rules"], m["claude"], DOT_CLAUDE_REL, m["dot_claude"],
+                                    m["session_imports"], m["session_headers"]))
     print("conditional rule files not counted: {}".format(m["conditional_files"]))
     print("ratchet {}; ceiling {} (the target, reported, not enforced); loading modelled on Claude "
           "Code {} (binary sha256 {})".format(ratchet, budget["ceiling"], budget["claude-code-version"],
@@ -897,7 +995,7 @@ def run(root):
 
 
 # SELF-TEST: production code ends here; the red-on-revert mutations below target only the text above.
-# Fixture trees only, never the live corpus. Every case asserts its exact count or exit code through the
+# Fixture trees only, never the live corpus (one check reads the budget source's comment text). Every case asserts its exact count or exit code through the
 # instrumented check() choke point, and the executed id set is reconciled against tools/selftest_checks.toml
 # (suite instruction-budget-selftest), both in-run and by tools/check_selftest_execution.py. The
 # revert/ cases put the frontmatter removal, the ratchet comparison, the prefix scan, the scope normalizer,
@@ -945,6 +1043,12 @@ def _tree(root, rules=None, block="", outside="", extra=None, ratchet=10 ** 6):
     (root / BUDGET_REL).parent.mkdir(parents=True, exist_ok=True)
     (root / BUDGET_REL).write_bytes(_budget_text(ratchet).encode("utf-8"))
     return root
+
+
+def _hdr(*rels):
+    """The modelled header units of the loaded files `rels`, spelled out independently of header_units."""
+    return sum(len("Contents of " + rel + " (project instructions, checked into the codebase):\n\n\n\n")
+               for rel in rels)
 
 
 def _quiet(fn, *args):
@@ -1166,7 +1270,7 @@ def self_test(report_path=None):
         m = _measured(measure, condimp)
         check("scope/conditional-file-import-counted",
               (m["rules"], m["rule_files"], m["conditional_files"], m["pack_imports"], m["pack"]),
-              (0, 0, 1, 1000, 1000))
+              (0, 0, 1, 1000, 1000 + _hdr("CLAUDE.md", ".claude/rules/big.txt")))
         condchain = _tree(tmp / "cond-chain", rules={"c.md": "---\npaths: src/**\n---\n@a.txt\n",
                                                      "a.txt": "@b.txt\n", "b.txt": "X" * 1000})
         m = _measured(measure, condchain)
@@ -1188,12 +1292,14 @@ def self_test(report_path=None):
         # adds the bytes outside the block.
         imp = _tree(tmp / "import", block="\n@docs/extra.md\n", extra={"docs/extra.md": "Imported\n"})
         m = _measured(measure, imp)
-        check("import/managed-block-import-followed", (m["block"], m["pack_imports"], m["pack"]), (16, 9, 25))
+        check("import/managed-block-import-followed", (m["block"], m["pack_imports"], m["pack"]),
+              (16, 9, 25 + _hdr("CLAUDE.md", "docs/extra.md")))
         ruleimp = _tree(tmp / "ruleimp", rules={"a.md": "@big.txt\n"},
                         extra={".claude/rules/big.txt": "---\ncorpus-id: x\n---\n" + "X" * 100})
         m = _measured(measure, ruleimp)
+        ruleimp_hdr = _hdr(".claude/rules/a.md", "CLAUDE.md", ".claude/rules/big.txt")
         check("import/rule-file-import-counted", (m["rules"], m["pack_imports"], m["pack"], m["session"]),
-              (9, 100, 109, 172))
+              (9, 100, 109 + ruleimp_hdr, 172 + ruleimp_hdr))
         # Every `@` is a candidate whatever Markdown surrounds it: delimiters after the path, a tag or a
         # link around it, a comment or a code span holding it, and backticks paired across blocks.
         big = {".claude/rules/big.txt": "X" * 1000}
@@ -1229,10 +1335,39 @@ def self_test(report_path=None):
                 ("exit/comment-split-conditional-rule-2", "conditional",
                  dict(rules={"c.md": "---\npaths: src/**\n---\n@big<!---->.txt\n", "big.txt": "X" * 1000})),
                 ("exit/comment-after-at-across-lines-2", "lines",
-                 dict(rules={"a.md": "@\n<!-- a -->big.txt\n", "big.txt": "X" * 1000}))):
+                 dict(rules={"a.md": "@\n<!-- a -->big.txt\n", "big.txt": "X" * 1000})),
+                ("exit/comment-split-after-space-2", "space",
+                 dict(rules={"a.md": "See @big<!---->.txt\n", "big.txt": "X" * 1000}))):
             joined.append(_tree(tmp / ("join-" + case), **parts))
             code, err = _stderr_of(run, joined[-1])
             check(check_id, (code, "HTML comment" in err), (2, True))
+        # An `@` inside a word begins no import (the loader reads one only at the start or after whitespace),
+        # so an email address inside an HTML comment is not refused, in a rule file or in CLAUDE.md.
+        owner = "<!-- owner: ops@example.com -->\n\n"
+        email_comment = _tree(tmp / "email-comment", rules={"a.md": owner + "A\n"}, outside=owner)
+        check("exit/comment-email-0", _quiet(run, email_comment), 0)
+        # .claude/CLAUDE.md loads beside CLAUDE.md: counted whole, with its imports, into both totals.
+        dotclaude = _tree(tmp / "dot-claude", rules={"a.md": "A\n"},
+                          extra={".claude/CLAUDE.md": "X" * 50000 + "\n@big.txt\n", ".claude/big.txt": "Y" * 1000})
+        m = _measured(measure, dotclaude)
+        dot_hdr = _hdr(".claude/rules/a.md", "CLAUDE.md", ".claude/CLAUDE.md", ".claude/big.txt")
+        check("count/dot-claude-claude-md-counted",
+              (m["dot_claude"], m["pack_imports"], m["session_imports"], m["pack_headers"], m["pack"],
+               m["session"] - m["claude"]),
+              (50010, 1000, 1000, dot_hdr, 2 + 50010 + 1000 + dot_hdr, 2 + 50010 + 1000 + dot_hdr))
+        # Each loaded file counts a modelled header: the fixed text and its path relative to the root.
+        headed = _tree(tmp / "headed", rules={"a.md": "A\n", "c.md": "---\npaths: src/**\n---\nC\n"})
+        m = _measured(measure, headed)
+        check("count/loaded-file-header-counted", (m["pack_headers"], m["session_headers"], m["pack"]),
+              (_hdr(".claude/rules/a.md", "CLAUDE.md"), _hdr(".claude/rules/a.md", "CLAUDE.md"),
+               2 + _hdr(".claude/rules/a.md", "CLAUDE.md")))
+        # An imported file's frontmatter scope is held to the SCOPE grammar, as a rule file's is.
+        scoped = []
+        for case, scope in (("empty", "paths:"), ("nested", 'paths: "{a,{b,c}}"'),
+                            ("unbalanced", 'paths: "src/{a,b"')):
+            scoped.append(_tree(tmp / ("imported-scope-" + case), block="\n@x.txt\n",
+                                extra={"x.txt": "---\n" + scope + "\n---\n" + "X" * 1000}))
+        check("exit/imported-file-scope-grammar-2", [_quiet(run, r) for r in scoped], [2, 2, 2])
         prefixes = _tree(tmp / "prefixes", rules={"a.md": "@x.txt_b.txt\n"},
                          extra={".claude/rules/x.txt_b.txt": "X" * 10, ".claude/rules/x.txt": "Y" * 7})
         check("import/every-prefix-naming-a-file-counted", _measured(measure, prefixes)["pack_imports"], 17)
@@ -1351,12 +1486,14 @@ def self_test(report_path=None):
 
         session = _tree(tmp / "session", rules={"a.md": "abc\n"}, block="Block", outside="Hello\n")
         m = _measured(measure, session)
-        check("totals/session-adds-outside-block", (m["pack"], m["session"]), (9, 78))
+        session_hdr = _hdr(".claude/rules/a.md", "CLAUDE.md")
+        check("totals/session-adds-outside-block", (m["pack"], m["session"]), (9 + session_hdr, 78 + session_hdr))
 
-        # Exit codes: at the ratchet passes; one unit over fails; a banned import fails.
-        at = _tree(tmp / "at", rules={"a.md": "x" * 10}, ratchet=10)
+        # Exit codes: at the ratchet passes; one unit over fails; a banned import fails. PACK is the ten
+        # characters plus the headers of the rule file and CLAUDE.md.
+        at = _tree(tmp / "at", rules={"a.md": "x" * 10}, ratchet=10 + session_hdr)
         check("exit/at-ratchet-0", _quiet(run, at), 0)
-        over = _tree(tmp / "over", rules={"a.md": "x" * 10}, ratchet=9)
+        over = _tree(tmp / "over", rules={"a.md": "x" * 10}, ratchet=9 + session_hdr)
         check("exit/one-over-ratchet-1", _quiet(run, over), 1)
         index = _tree(tmp / "index", block="\n@.claude/RULES-INDEX.md\n",
                       extra={".claude/RULES-INDEX.md": "x\n"})
@@ -1394,9 +1531,21 @@ def self_test(report_path=None):
                                      "ambiguous", "case-insensitively", "`..` component", "real directory",
                                      "PermissionError", "never read as missing", "path filter",
                                      "a banned name there exits 1", "not a proof", "its own body is not counted",
-                                     "shares a line with an `@`", "Contents of") if phrase not in doc]
+                                     "begins an import token", "Contents of", ".claude/CLAUDE.md",
+                                     "RELATIVE to the repository root", "root prefix", "inside a word",
+                                     "SCOPE grammar") if phrase not in doc]
               + [phrase for phrase in ("never missed", "never under", "OVER-COUNT BY CONSTRUCTION", "not dropped")
                  if phrase in doc], [])
+
+        # The budget source's own comment describes PACK as the gate counts it (it is read for its comment
+        # text only; no count is taken from the live corpus).
+        budget_doc = (Path(__file__).resolve().parents[1] / BUDGET_REL).read_text(encoding="utf-8")
+        budget_doc = " ".join(line.lstrip("# ") for line in budget_doc.split("\n") if line.startswith("#"))
+        check("doc/budget-source-pack-description",
+              [phrase for phrase in (".claude/CLAUDE.md", "conditional", "header", "relative to the repository",
+                                     "whole-line HTML comment") if phrase not in budget_doc]
+              + [phrase for phrase in ("after frontmatter and HTML comments are removed",) if phrase in budget_doc],
+              [])
 
         # Red on revert: each fix put back in a mutant copy of the production code must turn its case red.
         unstripped = _mutant(tmp, "return front, text[m.end():], ", "return front, text, ")
@@ -1464,7 +1613,20 @@ def self_test(report_path=None):
               ([1000, 1007], [0, 0]))
         no_join = _off(tmp, "_check_comment_joins")
         check("revert/comment-join-red",
-              ([_quiet(run, r) for r in joined], [_quiet(no_join.run, r) for r in joined]), ([2] * 7, [0] * 7))
+              ([_quiet(run, r) for r in joined], [_quiet(no_join.run, r) for r in joined]), ([2] * 8, [0] * 8))
+        check("revert/comment-email-red",
+              (_quiet(run, email_comment), _quiet(_off(tmp, "_import_start").run, email_comment)), (0, 2))
+        no_dot = _mutant(tmp, "    dot = _dot_claude(root, real_root)\n", "    dot = []\n")
+        check("revert/dot-claude-claude-md-red",
+              (_measured(measure, dotclaude)["pack"], _measured(no_dot.measure, dotclaude)["pack"]),
+              (2 + 50010 + 1000 + dot_hdr, 2 + _hdr(".claude/rules/a.md", "CLAUDE.md")))
+        no_header = _mutant(tmp, "    return utf16_units(HEADER_FIXED) + utf16_units(rel)\n", "    return 0\n")
+        check("revert/loaded-file-header-red",
+              (_measured(measure, headed)["pack"], _measured(no_header.measure, headed)["pack"]),
+              (2 + _hdr(".claude/rules/a.md", "CLAUDE.md"), 2))
+        check("revert/imported-file-scope-grammar-red",
+              ([_quiet(run, r) for r in scoped], [_quiet(_off(tmp, "_imported_scope").run, r) for r in scoped]),
+              ([2, 2, 2], [0, 0, 0]))
         flows = [tmp / ("flow-" + case) for case in ("comma", "brace", "comma-src")]
         comma_split = _mutant(tmp, "_flow_split(inner)] if inner", 'inner.split(",")] if inner')
         check("revert/flow-quoted-comma-red",
@@ -1502,7 +1664,10 @@ def self_test(report_path=None):
           "symlinks exit 2, cycles ending, SESSION over PACK, the ratchet boundary, unreadable, invalid "
           "UTF-8, malformed frontmatter, budget, and markers exit 2, the docstring stating the model, and "
           "every red-on-revert flip turning red, a conditional rule file's imports counted to any depth, an "
-          "HTML comment beside an @ exit 2, and quoted commas in a flow list read); execution set "
+          "HTML comment beside an @ that begins an import exit 2 and an email address in a comment pass, "
+          "quoted commas in a flow list read, .claude/CLAUDE.md and its imports counted, a modelled header "
+          "counted per loaded file, an imported file's scope held to the grammar, and the budget source "
+          "describing PACK); execution set "
           "reconciled against tools/selftest_checks.toml".format(len(EXECUTED)))
     return 0
 

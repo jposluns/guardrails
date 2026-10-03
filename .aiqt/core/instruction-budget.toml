@@ -1,15 +1,24 @@
 # .aiqt/core/instruction-budget.toml: the instruction-budget ratchet, read by tools/check_instruction_budget.py.
 #
-# PACK is what the pack makes Claude Code load in every session: every unconditional .claude/rules/**/*.md
-# file plus the RULES-INDEX managed block of CLAUDE.md and its @imports, counted in UTF-16 code units after
-# frontmatter and HTML comments are removed. The gate fails when PACK exceeds `ratchet`.
+# PACK is what the pack makes Claude Code load in every session, counted in UTF-16 code units: every
+# unconditional .claude/rules/**/*.md file with its frontmatter removed; the imports of every rule file, a
+# conditional (paths:-scoped) one included, though a conditional file's own body is not counted; the
+# RULES-INDEX managed block of CLAUDE.md and its imports; .claude/CLAUDE.md and its imports when it exists;
+# and a modelled header for each loaded file (the loader's "Contents of <path> (project instructions,
+# checked into the codebase):" line and blank-line separators, with the path relative to the repository
+# root, so the machine-specific absolute prefix is not counted). Only a whole-line HTML comment between
+# blank lines outside fenced code is removed; every other comment is counted. tools/check_instruction_budget.py
+# states the full grammar. The gate fails when PACK exceeds `ratchet`.
 #
-#   ratchet              the PACK figure enforced today, set to the figure measured when the gate landed.
-#                        Lower it as the pack shrinks; raise it only with a reviewed reason.
+#   ratchet              the PACK figure enforced today. Lower it as the pack shrinks; raise it only with a
+#                        reviewed reason.
+#                        Raised 112222 -> 128358 when the counting rule changed, not the content: the gate
+#                        began counting the modelled header of each of the 134 loaded files (16136 units;
+#                        rule files 111862 and managed block 360 unchanged; no .claude/CLAUDE.md).
 #   ceiling              the target PACK figure; reported, not enforced.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 112222
+ratchet = 128358
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
