@@ -134,7 +134,6 @@ Adopter experience: capability and guidance for organizations adopting the pack.
 | --- | --- | --- | --- |
 | OPF-ESTATE-RETIRE | Partly done | Retire the old OPF import and ingest code, keeping the readers that existing import evidence needs (M, L) | `[public]` `[tooling]` |
 | OPF-ESTATE-RETIRE-ALLOC | In progress (#393) | Delete the unused OPF allocation module and its self-test (M, S) | `[public]` `[tooling]` |
-| OPF-ESTATE-RETIRE-LF | In progress (#394) | New OPF stores no longer get the ID counter of a deprecated record type that only the old import code used; stores that already have that counter stay valid (M, S) | `[public]` `[tooling]` |
 | PACK-HOOKS-PROMOTE | Not started | Promote the .preview/ hooks into the pack's hook set (M, L) | `[public]` `[adopter]` |
 | DEV-1 | Planned | Development assistant, planned for the 1.2.0 release: a skill that installs the pack into a project, with a setup wizard, a doctor command that checks the install, and the instruction file each coding assistant expects (H, L) | `[public]` `[adopter]` |
 | DEV-2 | Planned | A skill that adopting projects can use to review work for quality (M, M) | `[public]` `[adopter]` |
